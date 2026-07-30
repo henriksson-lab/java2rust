@@ -8830,16 +8830,29 @@ impl ExternalApiFacadeSupport {
                         if self.has_method_signature(&builder, method, *arg_count) {
                             continue;
                         }
-                        let return_type =
-                            self.external_builder_build_return_type(facts, &builder, *arg_count);
-                        self.add_method(
-                            builder.clone(),
-                            external_facade_instance_method(
-                                method,
-                                *arg_count,
-                                return_type.as_deref().unwrap_or("Box<dyn std::any::Any>"),
-                            ),
-                        );
+                        if let Some(return_type) =
+                            self.external_builder_build_return_type(facts, &builder, *arg_count)
+                        {
+                            self.add_method(
+                                builder.clone(),
+                                external_facade_instance_method(method, *arg_count, &return_type),
+                            );
+                        } else {
+                            let return_rust = external_facade_unmodelled_result_type(
+                                &builder, method, *arg_count,
+                            );
+                            self.add_opaque_type(return_rust.clone());
+                            self.add_method(
+                                builder.clone(),
+                                external_facade_builder_unmodelled_getter(
+                                    &builder,
+                                    method,
+                                    method,
+                                    *arg_count,
+                                    &return_rust,
+                                ),
+                            );
+                        }
                     } else if is_external_facade_builder_fluent_method(method) {
                         if self.has_method_signature(&builder, method, *arg_count) {
                             continue;

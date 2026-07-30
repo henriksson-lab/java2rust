@@ -26267,6 +26267,56 @@ class UseExternalBuilderMissingReturnFact {
 }
 
 #[test]
+fn external_builder_build_without_inferable_product_uses_named_unmodelled_result_shim() {
+    let source = r#"
+class UseWeakExternalBuilderMissingReturnFact {
+    Object make(TBuilder builder) {
+        return builder.build();
+    }
+}
+"#;
+    let mut facts = FactSet::default();
+    facts.hierarchy_overrides.push(HierarchyOverride {
+        type_name: "TBuilder".to_string(),
+        strategy: HierarchyStrategy::ErasedObject,
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "build".to_string(),
+        receiver_type: Some("TBuilder".to_string()),
+        arg_count: Some(0),
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: None,
+        return_nullability: NullabilityState::Unknown,
+        thrown: Vec::new(),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+
+    let translation = translate_source_with_facts(source, &facts);
+
+    assert!(
+        translation.rust.contains("pub struct TBuilderBuildResult"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains(
+            "pub fn build(&self) -> TBuilderBuildResult { unimplemented!(\"TBuilder.build is not modelled\") }"
+        ),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("pub fn build(&self) -> Box<dyn std::any::Any>"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn external_builder_getter_without_return_fact_uses_named_unmodelled_result_shim() {
     let source = r#"
 class UseExternalBuilderGetterMissingReturnFact {

@@ -311,6 +311,13 @@ rendering the expression and comparing text. Focused coverage:
 Remaining cleanup targets are map-get display/null projection paths and the
 legacy raw `Some(...)` unwrapping bridge.
 
+2026-07-30 weak builder build fallback cleanup: external builder `build()`
+surfaces with no modeled return type now use a named unmodelled result shim when
+the inferred product name is too weak to trust, e.g. `TBuilderBuildResult`
+instead of `Box<dyn std::any::Any>`. This keeps missing external builder
+returns typed and loud while preserving the rule that generic-looking product
+names such as `T`/`R` are not accepted as real facade products.
+
 2026-07-30 VCF source-hierarchy note: the ignored
 `source_hierarchy_instanceof_repair_keeps_supertype_slot_adapted` fixture still
 fails because source-super loop variables are represented as concrete
