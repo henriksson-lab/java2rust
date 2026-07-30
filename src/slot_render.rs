@@ -526,6 +526,7 @@ pub fn native_java_rust_type_policy_with_effective_facts(
         facts.object_representation_override_strategy_for(ty),
         Some(HierarchyStrategy::ErasedObject)
     ) && !external_final_facade_should_keep_named_type(ty, facts)
+        && crate::stdlib::java_collection_kind_for_type(ty).is_none()
     {
         return NativeJavaRustTypePolicy::Direct {
             ty: erased_object_rust_type(),

@@ -6703,6 +6703,9 @@ fn signature_object_representation_fact_constraints_with_effective_facts(
     java_ty: &JavaType,
     facts: &EffectiveFacts<'_>,
 ) -> Vec<SignatureConstraint> {
+    if crate::stdlib::java_collection_kind_for_type(java_ty).is_some() {
+        return Vec::new();
+    }
     let Some(override_fact) = signature_object_representation_override_fact_for(java_ty, facts)
     else {
         return Vec::new();
@@ -6862,6 +6865,15 @@ pub fn signature_slot_dispatch_requirement_policy_with_effective_facts(
     source_dispatch: DispatchShape,
     facts: &EffectiveFacts<'_>,
 ) -> SignatureSlotDispatchRequirementPolicy {
+    if crate::stdlib::java_collection_kind_for_type(java_ty).is_some() {
+        return SignatureSlotDispatchRequirementPolicy {
+            java_ty: java_ty.clone(),
+            role,
+            source_dispatch,
+            requirements: Vec::new(),
+            constraints: Vec::new(),
+        };
+    }
     let requirements = java_type_name_for_signature_dispatch(java_ty)
         .map(|type_name| facts.dispatch_requirements_for(type_name))
         .unwrap_or_default();

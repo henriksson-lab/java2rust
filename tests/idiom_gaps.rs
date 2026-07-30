@@ -11585,14 +11585,24 @@ class Reader {
 
     assert!(
         translation.rust.contains(
-            "pub fn run(&self, futures: std::collections::HashMap<String, Future>) -> Result<std::collections::HashMap<String, Reader>, JavaException>"
+            "pub fn run(&self, futures: &std::collections::HashMap<String, Future<Reader>>) -> Result<std::collections::HashMap<String, Reader>, JavaException>"
         ) && translation
             .rust
             .contains("Err(e) if e.is_instance(&[\"ExecutionException\"])")
             && translation.rust.contains("return Err(JavaException::with_cause(\"UserException\"")
+            && translation.rust.contains("readers.insert(name.clone(), reader);")
             && translation.rust.contains("return Ok(readers);"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "foreach_lambda_throw_wraps_enclosing_method_in_result",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 

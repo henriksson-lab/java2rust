@@ -31602,6 +31602,7 @@ fn stdlib_owns_known_jdk_content_method_facts() {
     assert!(is_content_read_method("length"));
     assert!(is_content_read_method("isEmpty"));
     assert!(is_content_read_method("trim"));
+    assert!(is_content_read_method("forEach"));
     assert!(is_borrowed_string_view_method("trim", 0));
     assert!(!is_borrowed_string_view_method("trim", 1));
     assert!(is_owned_string_result_method("toLowerCase", 0));

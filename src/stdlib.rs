@@ -47,6 +47,8 @@ pub fn is_content_read_method(name: &str) -> bool {
             | "replaceAll"
             | "replace_all"
             | "split"
+            | "forEach"
+            | "for_each"
     )
 }
 

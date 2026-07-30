@@ -9600,16 +9600,20 @@ fn lower_iterable_for_each_stmt(
     env: &ShapeEnv,
     ctx: LowerCtx,
 ) -> Option<RustStmt> {
-    let element_shape =
-        infer_stream_source_element_shape_with_facts(receiver, env.type_env(), ctx.facts)
-            .unwrap_or_else(|| {
-                fallback_local_shape_from_declared_type(&JavaType::Unknown(
-                    "forEach item".to_string(),
-                ))
-            });
     let mut loop_env = env.clone();
-    for param_name in param_names {
-        loop_env.insert_local_shape(param_name.clone(), element_shape.clone());
+    let param_shapes = map_for_each_lambda_param_shapes(receiver, param_names.len(), env)
+        .unwrap_or_else(|| {
+            let element_shape =
+                infer_stream_source_element_shape_with_facts(receiver, env.type_env(), ctx.facts)
+                    .unwrap_or_else(|| {
+                        fallback_local_shape_from_declared_type(&JavaType::Unknown(
+                            "forEach item".to_string(),
+                        ))
+                    });
+            vec![element_shape; param_names.len()]
+        });
+    for (param_name, shape) in param_names.iter().zip(param_shapes) {
+        loop_env.insert_local_shape(param_name.clone(), shape);
     }
     let loop_body = match body {
         LambdaBody::Expr(expr) if param_names.len() == 1 => vec![expr_stmt(
@@ -9645,6 +9649,22 @@ fn lower_iterable_for_each_stmt(
         &loop_body,
         None,
     ))
+}
+
+fn map_for_each_lambda_param_shapes(
+    receiver: &Expr,
+    param_count: usize,
+    env: &ShapeEnv,
+) -> Option<Vec<RustSlotShape>> {
+    if param_count != 2 {
+        return None;
+    }
+    let receiver_ty = crate::types::infer_expr_type(receiver, env.type_env());
+    let (key_ty, value_ty) = crate::stdlib::java_map_type_args(&receiver_ty)?;
+    Some(vec![
+        borrowed_sequence_element_shape(key_ty.clone()),
+        borrowed_sequence_element_shape(value_ty.clone()),
+    ])
 }
 
 fn lower_enhanced_for_stmt(

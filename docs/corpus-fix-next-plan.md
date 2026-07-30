@@ -6960,6 +6960,18 @@ This does not close the open VCF cluster: non-sealed/open source hierarchies
 still need an explicit erased/dyn/source-carrier plan before concrete
 `instanceof` can be translated soundly.
 
+2026-07-31 Map.forEach lambda checkpoint: `Map.forEach((k, v) -> ...)`
+now keeps JDK collection slots native even when external facade representation
+facts mark the collection owner as erased, treats `forEach` as a read-only
+content traversal for usage/signature purposes, and gives two-parameter map
+lambda bodies borrowed key/value shapes. The focused future/get/catch fixture
+now emits `&HashMap<String, Future<Reader>>`, clones the borrowed key for
+`put`, preserves checked-exception wrapping, and cargo-checks the generated
+module. Focused verification passed:
+`foreach_lambda_throw_wraps_enclosing_method_in_result`,
+`stdlib_owns_known_jdk_content_method_facts`, `cargo fmt --check`,
+`cargo check --quiet`, and `git diff --check`.
+
 ## 2026-07-30 Facade Correctness Note
 
 `StringBuilder`/`StringBuffer` now emit stateful JDK facade support instead of
