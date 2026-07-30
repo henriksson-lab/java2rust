@@ -5481,6 +5481,37 @@ class HasContext implements ContextProvider {
 }
 
 #[test]
+fn source_interface_trait_impl_unwraps_nullable_implementation_return() {
+    let translation = translate_source(
+        r#"
+interface IdSource {
+    String getID();
+}
+
+class HeaderLine implements IdSource {
+    String id;
+
+    String getID() {
+        return id;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("fn get_i_d(&self) -> String;")
+            && translation
+                .rust
+                .contains("pub fn get_i_d(&self) -> Option<String>")
+            && translation.rust.contains(
+                "fn get_i_d(&self) -> String { HeaderLine::get_i_d(self).expect(\"Java null receiver\") }"
+            ),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn nested_interface_type_names_are_valid_rust_identifiers() {
     let translation = translate_source(
         r#"

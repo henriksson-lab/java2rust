@@ -287,6 +287,24 @@ do not use it as a corpus baseline. Next VCF batch should target:
   `VCFStandardHeaderLinesStandards::<T> { ... }` instead of a value expression
   parsed as chained comparison.
 
+2026-07-30 source interface forwarding return adaptation: regular source
+interface forwarding impls now share the optional-to-declared return adaptation
+used by class-bound trait impls. If the trait method contract returns a
+non-optional declared Java type but the concrete implementation signature
+returns `Option<Declared>`, the forwarding impl unwraps at the trait boundary.
+Focused coverage:
+`source_interface_trait_impl_unwraps_nullable_implementation_return`. Reduced
+VCF subset
+`.tmp/corpus-rerun-20260730-vcf-standard-bound-after-interface-return-adapt`
+now emits
+`VCFCompoundHeaderLine::get_i_d(self).expect("Java null receiver")` for both
+`VCFIDHeaderLine` and `VCFCompoundHeaderLineBound` forwarding impls and dropped
+from 64 to 61 generated-Rust errors. Remaining leading errors in that subset:
+31 mismatched types, 4 missing `mapping` constructor locals, 3 stale
+`.as_deref()` calls on `String`, 3 possibly-uninitialized `number`, 3 type
+annotations needed, enum `.as_ref()` misuse, enum `Default` support, concrete
+`instanceof`, `super(...)`, and `T: Clone` propagation.
+
 Attempted VCF refresh:
 `.tmp/corpus-rerun-20260730-htsjdk-vcf-current-refresh` stalled during
 `batch_parse_global_emit_start` before per-file statuses or generated source

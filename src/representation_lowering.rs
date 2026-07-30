@@ -855,6 +855,7 @@ fn trait_impl_method(
 ) -> String {
     let trait_return_shape =
         trait_method_return_shape_plan(interface, interface_method, program, signatures);
+    let trait_return_shape_for_body = trait_return_shape.clone();
     let signature = trait_method_signature_with_receiver_and_return_shape(
         interface,
         interface_method,
@@ -928,6 +929,14 @@ fn trait_impl_method(
     };
     let implementing_owner_name = rust_name_for_java_named_type(&implementing_owner.name);
     let call = format!("{implementing_owner_name}::{rust_name}({receiver_arg})");
+    let call = adapt_trait_impl_forwarded_return(
+        call,
+        trait_return_shape_for_body
+            .as_ref()
+            .or(interface_signature.return_shape.as_ref()),
+        &implementation_signature.return_shape,
+        interface_exceptions,
+    );
     let body = if interface_exceptions.wrap_returns_in_result
         || signatures
             .required_method_signature(interface, interface_method)
@@ -939,6 +948,31 @@ fn trait_impl_method(
         format!("{call};")
     };
     format!("{} {{ {body} }}", signature.trim_end_matches(';'))
+}
+
+fn adapt_trait_impl_forwarded_return(
+    call: String,
+    trait_return_shape: Option<&RustSlotShape>,
+    implementation_return_shape: &Option<RustSlotShape>,
+    interface_exceptions: MethodExceptionPlan,
+) -> String {
+    if interface_exceptions.wrap_returns_in_result {
+        return call;
+    }
+    let Some(trait_shape) = trait_return_shape else {
+        return call;
+    };
+    if trait_shape.optional_element_type().is_some() {
+        return call;
+    }
+    if let Some(implementation_shape) = implementation_return_shape
+        && implementation_shape
+            .optional_element_type()
+            .is_some_and(|element_ty| element_ty == trait_shape.java_ty)
+    {
+        return format!("{call}.expect(\"Java null receiver\")");
+    }
+    call
 }
 
 fn trait_impl_forwarding_receiver_arg(
