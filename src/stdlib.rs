@@ -4468,6 +4468,301 @@ impl URL {
     }
 }
 
+pub trait JavaAppendValue {
+    fn into_java_append_string(self) -> String;
+}
+
+macro_rules! impl_java_append_value_display {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl JavaAppendValue for $ty {
+                fn into_java_append_string(self) -> String {
+                    self.to_string()
+                }
+            }
+        )*
+    };
+}
+
+impl_java_append_value_display!(
+    bool, char, i8, i16, i32, i64, isize, u8, u16, u32, u64, usize, f32, f64, String, &String, &str
+);
+
+impl JavaAppendValue for Vec<char> {
+    fn into_java_append_string(self) -> String {
+        self.into_iter().collect()
+    }
+}
+
+impl JavaAppendValue for &Vec<char> {
+    fn into_java_append_string(self) -> String {
+        self.iter().copied().collect()
+    }
+}
+
+impl JavaAppendValue for &[char] {
+    fn into_java_append_string(self) -> String {
+        self.iter().copied().collect()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct StringBuilder {
+    value: std::rc::Rc<std::cell::RefCell<String>>,
+}
+
+impl StringBuilder {
+    pub fn new() -> StringBuilder {
+        StringBuilder::default()
+    }
+
+    pub fn new_0() -> StringBuilder {
+        StringBuilder::default()
+    }
+
+    pub fn new_1<T: JavaStringBufferInitialValue>(value: T) -> StringBuilder {
+        StringBuilder { value: std::rc::Rc::new(std::cell::RefCell::new(value.into_java_string_buffer_initial_value())) }
+    }
+
+    pub fn append<T: JavaAppendValue>(&self, value: T) -> Self {
+        self.value.borrow_mut().push_str(&value.into_java_append_string());
+        self.clone()
+    }
+
+    pub fn to_string(&self) -> String {
+        self.value.borrow().clone()
+    }
+
+    pub fn length(&self) -> i32 {
+        self.value.borrow().chars().count() as i32
+    }
+
+    pub fn char_at(&self, index: i32) -> char {
+        self.value.borrow().chars().nth(index as usize).expect("StringBuilder index out of bounds")
+    }
+
+    pub fn set_length(&self, new_len: i32) {
+        java_string_buffer_set_length(&mut self.value.borrow_mut(), new_len);
+    }
+
+    pub fn delete<T0: Into<i32>, T1: Into<i32>>(&self, start: T0, end: T1) -> Self {
+        java_string_buffer_delete(&mut self.value.borrow_mut(), start.into(), end.into());
+        self.clone()
+    }
+
+    pub fn insert<T0: Into<i32>, T1: JavaAppendValue>(&self, offset: T0, value: T1) -> Self {
+        java_string_buffer_insert(&mut self.value.borrow_mut(), offset.into(), value.into_java_append_string());
+        self.clone()
+    }
+}
+
+impl std::fmt::Display for StringBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.value.borrow())
+    }
+}
+
+impl std::hash::Hash for StringBuilder {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&*self.value.borrow(), state);
+    }
+}
+
+impl JavaAppendValue for StringBuilder {
+    fn into_java_append_string(self) -> String {
+        self.value.borrow().clone()
+    }
+}
+
+impl JavaAppendValue for &StringBuilder {
+    fn into_java_append_string(self) -> String {
+        self.value.borrow().clone()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct StringBuffer {
+    value: std::rc::Rc<std::cell::RefCell<String>>,
+}
+
+impl StringBuffer {
+    pub fn new() -> StringBuffer {
+        StringBuffer::default()
+    }
+
+    pub fn new_0() -> StringBuffer {
+        StringBuffer::default()
+    }
+
+    pub fn new_1<T: JavaStringBufferInitialValue>(value: T) -> StringBuffer {
+        StringBuffer { value: std::rc::Rc::new(std::cell::RefCell::new(value.into_java_string_buffer_initial_value())) }
+    }
+
+    pub fn append<T: JavaAppendValue>(&self, value: T) -> Self {
+        self.value.borrow_mut().push_str(&value.into_java_append_string());
+        self.clone()
+    }
+
+    pub fn to_string(&self) -> String {
+        self.value.borrow().clone()
+    }
+
+    pub fn length(&self) -> i32 {
+        self.value.borrow().chars().count() as i32
+    }
+
+    pub fn char_at(&self, index: i32) -> char {
+        self.value.borrow().chars().nth(index as usize).expect("StringBuffer index out of bounds")
+    }
+
+    pub fn set_length(&self, new_len: i32) {
+        java_string_buffer_set_length(&mut self.value.borrow_mut(), new_len);
+    }
+
+    pub fn delete<T0: Into<i32>, T1: Into<i32>>(&self, start: T0, end: T1) -> Self {
+        java_string_buffer_delete(&mut self.value.borrow_mut(), start.into(), end.into());
+        self.clone()
+    }
+
+    pub fn insert<T0: Into<i32>, T1: JavaAppendValue>(&self, offset: T0, value: T1) -> Self {
+        java_string_buffer_insert(&mut self.value.borrow_mut(), offset.into(), value.into_java_append_string());
+        self.clone()
+    }
+}
+
+impl std::fmt::Display for StringBuffer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.value.borrow())
+    }
+}
+
+impl std::hash::Hash for StringBuffer {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&*self.value.borrow(), state);
+    }
+}
+
+impl JavaAppendValue for StringBuffer {
+    fn into_java_append_string(self) -> String {
+        self.value.borrow().clone()
+    }
+}
+
+impl JavaAppendValue for &StringBuffer {
+    fn into_java_append_string(self) -> String {
+        self.value.borrow().clone()
+    }
+}
+
+pub trait JavaStringBufferInitialValue {
+    fn into_java_string_buffer_initial_value(self) -> String;
+}
+
+impl JavaStringBufferInitialValue for String {
+    fn into_java_string_buffer_initial_value(self) -> String {
+        self
+    }
+}
+
+impl JavaStringBufferInitialValue for &String {
+    fn into_java_string_buffer_initial_value(self) -> String {
+        self.clone()
+    }
+}
+
+impl JavaStringBufferInitialValue for &str {
+    fn into_java_string_buffer_initial_value(self) -> String {
+        self.to_string()
+    }
+}
+
+impl JavaStringBufferInitialValue for StringBuilder {
+    fn into_java_string_buffer_initial_value(self) -> String {
+        self.value.borrow().clone()
+    }
+}
+
+impl JavaStringBufferInitialValue for &StringBuilder {
+    fn into_java_string_buffer_initial_value(self) -> String {
+        self.value.borrow().clone()
+    }
+}
+
+impl JavaStringBufferInitialValue for StringBuffer {
+    fn into_java_string_buffer_initial_value(self) -> String {
+        self.value.borrow().clone()
+    }
+}
+
+impl JavaStringBufferInitialValue for &StringBuffer {
+    fn into_java_string_buffer_initial_value(self) -> String {
+        self.value.borrow().clone()
+    }
+}
+
+macro_rules! impl_java_string_buffer_capacity_initial_value {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl JavaStringBufferInitialValue for $ty {
+                fn into_java_string_buffer_initial_value(self) -> String {
+                    String::with_capacity(self.max(0) as usize)
+                }
+            }
+        )*
+    };
+}
+
+impl_java_string_buffer_capacity_initial_value!(i8, i16, i32, i64, isize);
+
+macro_rules! impl_java_string_buffer_unsigned_capacity_initial_value {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl JavaStringBufferInitialValue for $ty {
+                fn into_java_string_buffer_initial_value(self) -> String {
+                    String::with_capacity(self as usize)
+                }
+            }
+        )*
+    };
+}
+
+impl_java_string_buffer_unsigned_capacity_initial_value!(u8, u16, u32, u64, usize);
+
+fn java_string_buffer_byte_index(value: &str, char_index: i32) -> usize {
+    if char_index <= 0 {
+        return 0;
+    }
+    value
+        .char_indices()
+        .nth(char_index as usize)
+        .map(|(index, _)| index)
+        .unwrap_or(value.len())
+}
+
+fn java_string_buffer_set_length(value: &mut String, new_len: i32) {
+    let new_len = new_len.max(0) as usize;
+    let current_len = value.chars().count();
+    if new_len < current_len {
+        let byte_index = java_string_buffer_byte_index(value, new_len as i32);
+        value.truncate(byte_index);
+    } else {
+        value.extend(std::iter::repeat('\0').take(new_len - current_len));
+    }
+}
+
+fn java_string_buffer_delete(value: &mut String, start: i32, end: i32) {
+    let start = java_string_buffer_byte_index(value, start.max(0));
+    let end = java_string_buffer_byte_index(value, end.max(0));
+    if start < end {
+        value.replace_range(start..end, "");
+    }
+}
+
+fn java_string_buffer_insert(value: &mut String, offset: i32, inserted: String) {
+    let offset = java_string_buffer_byte_index(value, offset.max(0));
+    value.insert_str(offset, &inserted);
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct URLConnection;
 
@@ -13065,6 +13360,8 @@ fn is_builtin_external_facade_type(name: &str) -> bool {
             | "Map"
             | "Set"
             | "Stream"
+            | "StringBuffer"
+            | "StringBuilder"
             | "Class"
             | "JavaClass"
             | "File"
@@ -13103,7 +13400,10 @@ fn is_builtin_external_facade_type(name: &str) -> bool {
 fn is_allowed_builtin_external_from_impl(from: &str, to: &str) -> bool {
     matches!(
         (from, to),
-        ("InputStream", "JavaIoInputStream") | ("JavaIoInputStream", "InputStream")
+        ("InputStream", "JavaIoInputStream")
+            | ("JavaIoInputStream", "InputStream")
+            | ("StringBuilder", "Appendable")
+            | ("StringBuffer", "Appendable")
     ) || (to == "InputStream"
         && matches!(
             from,
@@ -14627,6 +14927,8 @@ pub fn program_uses_java_platform_facades(program: &Program) -> bool {
                 | "AttributesName"
                 | "Enumeration"
                 | "Iterator"
+                | "StringBuffer"
+                | "StringBuilder"
                 | "AtomicInteger"
                 | "ClassLoader"
                 | "BufferedImage"
@@ -14653,6 +14955,8 @@ pub fn program_uses_java_platform_facades(program: &Program) -> bool {
                 | "java.util.jar.Attributes.Name"
                 | "java.util.Enumeration"
                 | "java.util.Iterator"
+                | "java.lang.StringBuffer"
+                | "java.lang.StringBuilder"
                 | "java.util.concurrent.atomic.AtomicInteger"
                 | "java.lang.ClassLoader"
                 | "java.awt.image.BufferedImage"
@@ -14971,6 +15275,8 @@ pub fn is_java_platform_facade_type_name(name: &str) -> bool {
             | "AttributesName"
             | "Enumeration"
             | "Iterator"
+            | "StringBuffer"
+            | "StringBuilder"
             | "AtomicInteger"
             | "ClassLoader"
             | "Serializable"

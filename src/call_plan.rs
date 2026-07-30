@@ -3599,11 +3599,21 @@ fn constructor_rust_name(
     let Some(type_name) = java_type_name(owner_ty) else {
         return "new".to_string();
     };
+    if java_mutable_string_buffer_constructor_uses_arity_name(type_name) {
+        return format!("new_{arg_count}");
+    }
     if external_constructor_needs_arity_name(type_name, facts) {
         format!("new_{arg_count}")
     } else {
         "new".to_string()
     }
+}
+
+fn java_mutable_string_buffer_constructor_uses_arity_name(type_name: &str) -> bool {
+    matches!(
+        crate::stdlib::canonical_external_receiver_type_key(type_name).as_str(),
+        "StringBuilder" | "StringBuffer"
+    )
 }
 
 pub fn unresolved_constructor_rust_name_for_facts(

@@ -56,6 +56,18 @@ struct GeneratedCrateModule {
 }
 
 fn cargo_check_generated_modules(crate_name: &str, modules: Vec<GeneratedCrateModule>) {
+    cargo_verify_generated_modules(crate_name, modules, "check");
+}
+
+fn cargo_test_generated_modules(crate_name: &str, modules: Vec<GeneratedCrateModule>) {
+    cargo_verify_generated_modules(crate_name, modules, "test");
+}
+
+fn cargo_verify_generated_modules(
+    crate_name: &str,
+    modules: Vec<GeneratedCrateModule>,
+    cargo_command: &str,
+) {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -79,7 +91,7 @@ fn cargo_check_generated_modules(crate_name: &str, modules: Vec<GeneratedCrateMo
     }
     fs::write(src_dir.join("lib.rs"), lib_rs).unwrap();
     let output = Command::new("cargo")
-        .arg("check")
+        .arg(cargo_command)
         .arg("--tests")
         .arg("--quiet")
         .current_dir(&crate_dir)
@@ -87,7 +99,7 @@ fn cargo_check_generated_modules(crate_name: &str, modules: Vec<GeneratedCrateMo
         .unwrap();
     assert!(
         output.status.success(),
-        "generated crate check failed for {crate_name}\nstdout:\n{}\nstderr:\n{}",
+        "generated crate {cargo_command} failed for {crate_name}\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -13724,10 +13736,10 @@ class AppendableFluentChain {
             "pub fn write(out: &mut Appendable, value: String) -> Result<Appendable, JavaException>"
         ) && (translation
             .rust
-            .contains("Self::write(&mut StringBuilder::new(16).into(), value)")
+            .contains("Self::write(&mut StringBuilder::new_1(16).into(), value)")
             || translation
                 .rust
-                .contains("Self::write(StringBuilder::new(16).into(), value)"))
+                .contains("Self::write(StringBuilder::new_1(16).into(), value)"))
             && translation
                 .rust
                 .contains(".append(\"a\".to_string())?.append(value)?.append('\\n')?")
@@ -13762,9 +13774,18 @@ class DirectStringBuilderAppend {
     assert!(
         translation
             .rust
-            .contains("let mut sb: StringBuilder = StringBuilder::new();")
+            .contains("let mut sb: StringBuilder = StringBuilder::new_0();")
             && translation.rust.contains("sb.append(value);")
             && translation.rust.contains("sb.append(&\"!\".to_string());")
+            && translation.rust.contains(
+                "pub struct StringBuilder {\n    value: std::rc::Rc<std::cell::RefCell<String>>,"
+            )
+            && translation
+                .rust
+                .contains("pub fn append<T: JavaAppendValue>(&self, value: T) -> Self")
+            && translation
+                .rust
+                .contains("self.value.borrow_mut().push_str(&value.into_java_append_string());")
             && !translation.rust.contains("sb.append(Some(")
             && !translation
                 .rust
@@ -13774,6 +13795,21 @@ class DirectStringBuilderAppend {
                 .contains("pub fn append<T0>(&self, _arg0: T0) -> ()"),
         "{}",
         translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "direct_string_builder_append_runtime",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[test]
+fn generated_string_builder_appends_at_runtime() {
+    let owner = DirectStringBuilderAppend {};
+    assert_eq!(owner.build("ok"), "ok!");
+}
+"#,
+        }],
     );
 }
 
@@ -13815,7 +13851,7 @@ class InnerOuterFieldCapture {
             && translation.rust.contains("self.__outer.borrow().sb")
             && translation
                 .rust
-                .contains("pub fn append<T0>(&self, _arg0: T0) -> Self")
+                .contains("pub fn append<T: JavaAppendValue>(&self, value: T) -> Self")
             && !translation.rust.contains("if value > limit")
             && !translation.rust.contains("value = limit;")
             && !translation.rust.contains("\n        sb.append"),
@@ -13919,7 +13955,7 @@ class AppendWideJavaValues {
     assert!(
         translation
             .rust
-            .contains("pub fn append<T0>(&self, _arg0: T0) -> Self")
+            .contains("pub fn append<T: JavaAppendValue>(&self, value: T) -> Self")
             && translation.rust.contains("buffer.append(letters")
             && translation
                 .rust
@@ -20941,10 +20977,10 @@ class CaughtCheckedRethrownAsKnownUnchecked {
                 .contains("pub fn write(out: &mut Appendable, value: String) -> Result<Appendable, JavaException>")
             && !translation
                 .rust
-                .contains("Self::write(StringBuilder::new(16).into(), value)?")
+                .contains("Self::write(StringBuilder::new_1(16).into(), value)?")
             && !translation
                 .rust
-                .contains("Self::write(&mut StringBuilder::new(16).into(), value)?"),
+                .contains("Self::write(&mut StringBuilder::new_1(16).into(), value)?"),
         "{}",
         translation.rust
     );

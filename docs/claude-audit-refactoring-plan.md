@@ -67,6 +67,10 @@ Landed in this batch:
   expression selectors, labels, and arm values are traversed by type, usage,
   resolution, semantic-analysis, signature, facade-support, and stream-support
   visitors instead of becoming raw Java or disappearing from analysis.
+- `StringBuilder`/`StringBuffer` now use stateful JDK facade support backed by
+  shared buffer storage instead of unit structs with default-returning
+  `append`/`toString`/`length` stubs. Constructor lowering uses explicit arity
+  names (`new_0`, `new_1`) for these overloaded Java constructors.
 - Focused corpus summaries now emit all planned measurement keys:
   `parse_failures`, unsupported statement/member/expression counts,
   `unmodelled_types`, `unmodelled_call_sites`, and `noop_facade_methods`.
@@ -331,6 +335,13 @@ the fixes do not become more isolated rules.
 
 ## Audit Mapping
 
+Completion checklist for any audit marked `fixed locally`:
+
+- Move the corresponding issue file from `claude_audits/` to
+  `/home/mahogny/github/claude/new_java2rust/claude_audits/done`.
+- Keep the move in the same verified checkpoint as the implementation.
+- Note the move in the plan row and, when committing, in the commit summary.
+
 | Audit | Status | Plan owner |
 |---|---:|---|
 | `0001` loop back edges invisible | open | Binding/CFG |
@@ -348,7 +359,7 @@ the fixes do not become more isolated rules.
 | `0013` nested downcast names | fixed locally | Moved to `claude_audits/done` |
 | `0014` labelled statements deleted | fixed locally | Moved to `claude_audits/done`; CFG liveness still needs labelled edges |
 | `0015` static initializer blocks dropped | partial | Loud diagnostic now; full class-init later |
-| `0016` no-op JDK facades | open | Core facade coverage |
+| `0016` no-op JDK facades | partial | `StringBuilder`/`StringBuffer` are stateful; `Arrays`, `Pattern`, `FastMath`, and broader facade fallibility still open |
 | `0017` generic bounds dropped | open | Typed type parsing and generics |
 | `0018` compile metric blind spots | partial | Parse gate and coverage counters |
 | `0019` raw Java expression fallback | fixed locally | Moved to `claude_audits/done`; simple switch expressions now lower to Rust `match` |

@@ -6775,6 +6775,20 @@ duplicate `From<T> for Box<dyn Any>` support. The next reduced-VCF target should
 either implement concrete source-hierarchy runtime checks/downcasts directly, or
 pair any erased-object fallback with the required emitted source method facade.
 
+## 2026-07-30 Facade Correctness Note
+
+`StringBuilder`/`StringBuffer` now emit stateful JDK facade support instead of
+unit structs with default-returning methods. Constructor lowering uses explicit
+arity names for these overloaded constructors, so generated calls should use
+`StringBuilder::new_0()`/`StringBuffer::new_0()` for no-arg construction and
+`new_1(...)` for capacity or initial-value construction. Focused
+StringBuilder/StringBuffer/Appendable shape tests pass, including a generated
+runtime assertion for `"ok!"`.
+
+Audit `0016` remains partial, not fixed: `Arrays`, `Pattern`, `FastMath`, and a
+separate checked-exception fallibility leak around caught `Appendable.append`
+paths still need follow-up work.
+
 ## Rerun Protocol
 
 After each fix:
