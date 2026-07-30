@@ -338,6 +338,12 @@ the same information. Same-arity overload ambiguity still falls back to generic
 shim parameters, because Rust cannot overload a single constructor name by
 argument type.
 
+Stream member-access follow-up: shaped stream lambda field access now attempts
+the shared `MemberAccessPlan`/`access_lowering` path before stream-local
+fallback rendering. Block lambda local declarations are added to a scoped
+`ShapeEnv`, so later expressions such as `pieces.length` can use the same typed
+member-access plan as ordinary expression lowering.
+
 2026-07-30 VCF source-hierarchy note: the ignored
 `source_hierarchy_instanceof_repair_keeps_supertype_slot_adapted` fixture still
 fails because source-super loop variables are represented as concrete

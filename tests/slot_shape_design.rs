@@ -36017,6 +36017,24 @@ fn stream_lambda_lowers_split_length_and_integer_parse_in_nullable_map() {
                 .to_string()
         )
     );
+    let mut stream_env = ShapeEnv::new();
+    stream_env.insert_local_shape(
+        "values",
+        RustSlotShape::conservative(list_java_type(JavaType::String)),
+    );
+    let lowered_with_context = render_stream_plan_with_context(
+        &plan,
+        RustExpr::Var("values".to_string()),
+        StreamRenderContext::new(&stream_env),
+    )
+    .unwrap();
+    assert_eq!(
+        lowered_with_context.expr,
+        RustExpr::Raw(
+            "values.iter().map(|value| { let pieces = java_string_split(&value, \",\".to_string(), 0); if (pieces.len() as i32) != 3 { None } else { Some(pieces[1 as usize].parse::<i32>().unwrap()) } }).filter_map(|item| item).collect::<Vec<_>>()"
+                .to_string()
+        )
+    );
     let mut env = ShapeEnv::new();
     env.insert_local_shape(
         "vid_map_p_b",
@@ -36041,6 +36059,29 @@ fn stream_lambda_lowers_split_length_and_integer_parse_in_nullable_map() {
             StreamLambdaValue::BorrowedItem,
         ),
         Some("Constants::DELIMITER".to_string())
+    );
+    assert_eq!(
+        emit_stream_lambda_body_with_context(
+            &parse_expr("constants.DELIMITER"),
+            "partition",
+            StreamLambdaValue::BorrowedItem,
+            StreamRenderContext::new(&env),
+        ),
+        Some("Constants::DELIMITER".to_string())
+    );
+    let stream_lowering_source = include_str!("../src/stream_lowering.rs");
+    let field_access_branch = stream_lowering_source
+        .split("Expr::FieldAccess(receiver, field) =>")
+        .nth(1)
+        .and_then(|tail| tail.split("Expr::ArrayAccess(array, index)").next())
+        .expect("stream lambda field access branch should be present");
+    assert!(
+        field_access_branch.contains("emit_stream_lambda_member_access_through_plan"),
+        "{field_access_branch}"
+    );
+    assert!(
+        stream_lowering_source.contains("crate::access_lowering::lower_field_access_with_facts"),
+        "stream member access should render through shared access lowering"
     );
 }
 
