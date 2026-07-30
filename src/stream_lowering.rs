@@ -330,6 +330,13 @@ fn emit_stream_lambda_body_with_locals_prec(
         Expr::Raw(raw) => (render_stream_raw_expr(raw), 12),
         Expr::Var(name) if name == param => (render_stream_lambda_value_expr(value, param), 12),
         Expr::Var(name) => (ctx.render_bare_name(name, locals), 12),
+        Expr::Binary {
+            op: BinaryOp::UShr, ..
+        } => (
+            "compile_error!(\"unsupported Java unsigned right shift in stream lambda\")"
+                .to_string(),
+            12,
+        ),
         Expr::Binary { op, left, right } => {
             let prec = stream_binary_precedence(*op);
             (
@@ -2482,7 +2489,7 @@ fn stream_binary_precedence(op: BinaryOp) -> u8 {
         BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
             7
         }
-        BinaryOp::Shl | BinaryOp::Shr => 8,
+        BinaryOp::Shl | BinaryOp::Shr | BinaryOp::UShr => 8,
         BinaryOp::Add | BinaryOp::Sub => 9,
         BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => 10,
     }

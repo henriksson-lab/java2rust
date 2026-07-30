@@ -471,6 +471,16 @@ fn has_non_package_declaration(root: tree_sitter::Node) -> bool {
     })
 }
 
+fn unsupported_member_for_node(node: tree_sitter::Node) -> Option<Member> {
+    if matches!(node.kind(), "line_comment" | "block_comment") {
+        return None;
+    }
+    Some(Member::Unsupported {
+        reason: format!("unsupported member node: {}", node.kind()),
+        span: span(node),
+    })
+}
+
 fn parse_class_decl(
     node: tree_sitter::Node,
     source: &str,
@@ -527,7 +537,11 @@ fn parse_class_decl(
                         diagnostics,
                     )));
                 }
-                _ => {}
+                _ => {
+                    if let Some(member) = unsupported_member_for_node(child) {
+                        members.push(member);
+                    }
+                }
             }
         }
     }
@@ -588,7 +602,11 @@ fn parse_interface_decl(
                         diagnostics,
                     )));
                 }
-                _ => {}
+                _ => {
+                    if let Some(member) = unsupported_member_for_node(child) {
+                        members.push(member);
+                    }
+                }
             }
         }
     }
@@ -720,7 +738,11 @@ fn parse_record_decl(
                         diagnostics,
                     )));
                 }
-                _ => {}
+                _ => {
+                    if let Some(member) = unsupported_member_for_node(child) {
+                        members.push(member);
+                    }
+                }
             }
         }
     }
@@ -856,7 +878,11 @@ fn parse_enum_member_node(
                 parse_enum_member_node(child, enum_name, source, diagnostics, members);
             }
         }
-        _ => {}
+        _ => {
+            if let Some(member) = unsupported_member_for_node(node) {
+                members.push(member);
+            }
+        }
     }
 }
 
@@ -916,7 +942,11 @@ fn parse_annotation_type_decl(
                         diagnostics,
                     )));
                 }
-                _ => {}
+                _ => {
+                    if let Some(member) = unsupported_member_for_node(child) {
+                        members.push(member);
+                    }
+                }
             }
         }
     }
@@ -1469,19 +1499,7 @@ fn parse_expr_statement(node: tree_sitter::Node, source: &str) -> Stmt {
             .child_by_field_name("operator")
             .map(|n| text(n, source));
         if let (Some(target), Some(value)) = (target, value) {
-            let value = match op {
-                Some("+=") => Expr::Binary {
-                    op: BinaryOp::Add,
-                    left: Box::new(target.clone()),
-                    right: Box::new(value),
-                },
-                Some("-=") => Expr::Binary {
-                    op: BinaryOp::Sub,
-                    left: Box::new(target.clone()),
-                    right: Box::new(value),
-                },
-                _ => value,
-            };
+            let value = compound_assignment_value(op, target.clone(), value);
             return Stmt::Assign { target, value };
         }
     }
@@ -2054,7 +2072,11 @@ fn parse_anonymous_class_body(node: tree_sitter::Node, source: &str) -> Vec<Memb
                     &mut diagnostics,
                 )));
             }
-            _ => {}
+            _ => {
+                if let Some(member) = unsupported_member_for_node(child) {
+                    members.push(member);
+                }
+            }
         }
     }
     members
@@ -2540,7 +2562,8 @@ fn compound_assignment_value(op: Option<&str>, target: Expr, value: Expr) -> Exp
         Some("|=") => BinaryOp::BitOr,
         Some("^=") => BinaryOp::BitXor,
         Some("<<=") => BinaryOp::Shl,
-        Some(">>=") | Some(">>>=") => BinaryOp::Shr,
+        Some(">>=") => BinaryOp::Shr,
+        Some(">>>=") => BinaryOp::UShr,
         _ => return value,
     };
     Expr::Binary {
@@ -2561,7 +2584,8 @@ fn parse_binary_op(src: &str) -> Option<BinaryOp> {
         "|" => BinaryOp::BitOr,
         "^" => BinaryOp::BitXor,
         "<<" => BinaryOp::Shl,
-        ">>" | ">>>" => BinaryOp::Shr,
+        ">>" => BinaryOp::Shr,
+        ">>>" => BinaryOp::UShr,
         "==" => BinaryOp::Eq,
         "!=" => BinaryOp::Ne,
         "<" => BinaryOp::Lt,

@@ -4308,6 +4308,57 @@ class JavaShiftPromotion {
 }
 
 #[test]
+fn java_unsigned_right_shift_lowers_with_unsigned_carrier_casts() {
+    let translation = translate_source(
+        r#"
+class JavaUnsignedRightShift {
+    int unsignedInt(int value) {
+        return value >>> 8;
+    }
+
+    int arithmeticInt(int value) {
+        return value >> 8;
+    }
+
+    long unsignedLong(long value) {
+        return value >>> 8;
+    }
+
+    int compound(int value) {
+        value >>>= 8;
+        return value;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("return ((value as u32) >> 8) as i32;")
+            && translation.rust.contains("return value >> 8;")
+            && translation
+                .rust
+                .contains("return ((value as u64) >> 8) as i64;")
+            && translation
+                .rust
+                .contains("value = ((value as u32) >> 8) as i32;")
+            && !translation.rust.contains("value = 8;"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "java_unsigned_right_shift",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn optional_array_element_participates_in_numeric_promotion() {
     let translation = translate_source(
         r#"
@@ -22921,6 +22972,35 @@ class NestedStaticOuterOwner {
             rust: translation.rust,
             tests: "",
         }],
+    );
+}
+
+#[test]
+fn static_initializer_block_reports_unsupported_member_diagnostic() {
+    let translation = translate_source(
+        r#"
+class StaticInitializerUnsupportedDiagnostic {
+    static int value = 0;
+
+    static {
+        value = 3;
+    }
+
+    static int read() {
+        return value;
+    }
+}
+"#,
+    );
+
+    assert!(translation.diagnostics.has_code("unsupported_member"));
+    assert!(
+        translation
+            .diagnostics
+            .iter()
+            .any(|message| message.message.contains("static_initializer")),
+        "{:?}",
+        translation.diagnostics
     );
 }
 

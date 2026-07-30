@@ -458,6 +458,33 @@ fn parses_gatk_empty_statement_without_raw_fallback() {
     assert!(fallbacks.is_empty(), "{fallbacks:?}");
 }
 
+#[test]
+fn static_initializer_block_surfaces_as_unsupported_member() {
+    let parsed = parse_java_source(
+        r#"
+class StaticInitializerUnsupportedMember {
+    static int value = 0;
+
+    static {
+        value = 3;
+    }
+
+    int read() {
+        return value;
+    }
+}
+"#,
+    );
+    let fallbacks = collect_program_fallbacks(&parsed.program);
+
+    assert!(
+        fallbacks
+            .iter()
+            .any(|fallback| fallback.contains("static_initializer")),
+        "{fallbacks:?}"
+    );
+}
+
 fn method_body<'a>(
     ty: &'a new_java2rust::java_ir::TypeDecl,
     rust_name: &str,

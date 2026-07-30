@@ -364,6 +364,7 @@ pub enum BinaryOp {
     BitXor,
     Shl,
     Shr,
+    UShr,
     Eq,
     Ne,
     Lt,

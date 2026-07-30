@@ -69,6 +69,7 @@ pub fn binary_op_to_rust(op: BinaryOp) -> &'static str {
         BinaryOp::BitXor => "^",
         BinaryOp::Shl => "<<",
         BinaryOp::Shr => ">>",
+        BinaryOp::UShr => ">>>",
         BinaryOp::Eq => "==",
         BinaryOp::Ne => "!=",
         BinaryOp::Lt => "<",
@@ -97,6 +98,7 @@ pub fn plan_numeric_binary_promotion(
             | BinaryOp::BitXor
             | BinaryOp::Shl
             | BinaryOp::Shr
+            | BinaryOp::UShr
             | BinaryOp::Eq
             | BinaryOp::Ne
             | BinaryOp::Lt
@@ -114,7 +116,7 @@ pub fn plan_numeric_binary_promotion(
     {
         return None;
     }
-    if matches!(op, BinaryOp::Shl | BinaryOp::Shr) {
+    if matches!(op, BinaryOp::Shl | BinaryOp::Shr | BinaryOp::UShr) {
         let promoted_left = shift_left_promoted_primitive(*left);
         let promoted_right = shift_right_promoted_primitive(*right);
         return Some(NumericBinaryPromotionPlan {
@@ -137,11 +139,30 @@ pub fn lower_numeric_binary_expr(
     right: RustExpr,
     plan: NumericBinaryPromotionPlan,
 ) -> RustExpr {
+    if op == BinaryOp::UShr {
+        return lower_unsigned_right_shift_expr(left, right, plan);
+    }
     crate::expr_render::binary_expr(
         op,
         apply_coercions(left, &plan.left),
         apply_coercions(right, &plan.right),
     )
+}
+
+pub fn lower_unsigned_right_shift_expr(
+    left: RustExpr,
+    right: RustExpr,
+    plan: NumericBinaryPromotionPlan,
+) -> RustExpr {
+    let (unsigned_ty, signed_ty) = match plan.promoted {
+        PrimitiveType::Long => ("u64", "i64"),
+        _ => ("u32", "i32"),
+    };
+    let left = crate::emit::emit_expr(&apply_coercions(left, &plan.left));
+    let right = crate::emit::emit_expr(&apply_coercions(right, &plan.right));
+    RustExpr::Raw(format!(
+        "(({left} as {unsigned_ty}) >> {right}) as {signed_ty}"
+    ))
 }
 
 fn promoted_numeric_primitive(

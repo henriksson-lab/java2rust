@@ -531,6 +531,75 @@ class BitwiseExpressions {
     ));
 }
 
+#[test]
+fn parses_unsigned_right_shift_distinct_from_arithmetic_shift() {
+    let parsed = parse_java_source(
+        r#"
+class UnsignedRightShiftParsing {
+    int arithmetic(int value) {
+        return value >> 8;
+    }
+
+    int unsigned(int value) {
+        return value >>> 8;
+    }
+
+    int compound(int value) {
+        value >>>= 8;
+        return value;
+    }
+}
+"#,
+    );
+    assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+
+    let methods = parsed.program.types[0]
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            Member::Method(method) => Some(method),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let arithmetic = methods
+        .iter()
+        .find(|method| method.name == "arithmetic")
+        .unwrap();
+    let unsigned = methods
+        .iter()
+        .find(|method| method.name == "unsigned")
+        .unwrap();
+    let compound = methods
+        .iter()
+        .find(|method| method.name == "compound")
+        .unwrap();
+
+    assert!(matches!(
+        &arithmetic.body.as_ref().unwrap().statements[0],
+        Stmt::Return(Some(Expr::Binary {
+            op: BinaryOp::Shr,
+            ..
+        }))
+    ));
+    assert!(matches!(
+        &unsigned.body.as_ref().unwrap().statements[0],
+        Stmt::Return(Some(Expr::Binary {
+            op: BinaryOp::UShr,
+            ..
+        }))
+    ));
+    assert!(matches!(
+        &compound.body.as_ref().unwrap().statements[0],
+        Stmt::Assign {
+            value: Expr::Binary {
+                op: BinaryOp::UShr,
+                ..
+            },
+            ..
+        }
+    ));
+}
+
 fn program_has_unary(program: &new_java2rust::java_ir::Program, op: UnaryOp) -> bool {
     program.types.iter().any(|ty| {
         ty.members.iter().any(|member| match member {

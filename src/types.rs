@@ -700,7 +700,9 @@ fn infer_binary_type(op: BinaryOp, left: &Expr, right: &Expr, env: &TypeEnv) -> 
         BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => {
             integral_binary_type(&infer_expr_type(left, env), &infer_expr_type(right, env))
         }
-        BinaryOp::Shl | BinaryOp::Shr => shift_binary_type(&infer_expr_type(left, env)),
+        BinaryOp::Shl | BinaryOp::Shr | BinaryOp::UShr => {
+            shift_binary_type(&infer_expr_type(left, env))
+        }
         _ => numeric_binary_type(&infer_expr_type(left, env), &infer_expr_type(right, env)),
     }
 }

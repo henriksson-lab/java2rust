@@ -34,6 +34,12 @@ pub fn indexed_expr(array: RustExpr, index: RustExpr) -> RustExpr {
 }
 
 pub fn binary_expr(op: BinaryOp, left: RustExpr, right: RustExpr) -> RustExpr {
+    if op == BinaryOp::UShr {
+        return RustExpr::Raw(
+            "compile_error!(\"unsupported Java unsigned right shift without numeric type context\")"
+                .to_string(),
+        );
+    }
     RustExpr::Binary {
         op: binary_op_to_rust(op).to_string(),
         left: Box::new(left),
