@@ -2204,7 +2204,7 @@ fn collect_method_effect_facts(program: &Program, usage: &UsageFacts, facts: &mu
 }
 
 fn propagate_source_call_thrown_effects(program: &Program, facts: &mut FactSet) {
-    let graph = usage::build_call_graph(program);
+    let graph = usage::build_call_graph_with_facts(program, facts);
     let mut changed = true;
     while changed {
         changed = false;
@@ -2229,7 +2229,7 @@ fn propagate_source_call_thrown_effects(program: &Program, facts: &mut FactSet) 
                 .method_effect_for(callee_type, callee_method)
                 .map(|effect| effect.thrown.clone())
                 .unwrap_or_default();
-            if callee_thrown.is_empty() {
+            if !facts.thrown_types_include_checked_exception(&callee_thrown) {
                 continue;
             }
             if push_method_thrown_effects(facts, caller_type, caller_method, &callee_thrown) {

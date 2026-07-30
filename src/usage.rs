@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::facts::{FacadeSlot, FactSet, TrivialAccessorKind};
+use crate::facts::{ExceptionKind, FacadeSlot, FactSet, TrivialAccessorKind};
 use crate::java_ir::{
     Block, ConstructorInvocationKind, Expr, JavaType, LambdaBody, Member, Modifier, Program,
     ResolvedCall, ResolvedConstructor, Stmt, SwitchLabel, TypeDecl,
@@ -68,6 +68,7 @@ pub enum CallGraphEdgeKind {
     AnonymousClassConstructor,
     AnonymousClassMethod,
     LambdaBody,
+    HandledExceptionBoundary,
     UnresolvedExternalMethodCall,
     UnresolvedExternalConstructorCall,
 }
@@ -286,9 +287,13 @@ fn propagate_self_mutability_through_self_calls(facts: &mut UsageFacts) {
 }
 
 pub fn build_call_graph(program: &Program) -> CallGraph {
+    build_call_graph_with_facts(program, &FactSet::default())
+}
+
+pub fn build_call_graph_with_facts(program: &Program, facts: &FactSet) -> CallGraph {
     let mut graph = CallGraph::default();
     for ty in &program.types {
-        build_type_call_graph(ty, &mut graph);
+        build_type_call_graph(ty, &mut graph, facts);
     }
     graph
 }
@@ -386,7 +391,7 @@ fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts, semantic_facts: &Fa
     }
 }
 
-fn build_type_call_graph(ty: &TypeDecl, graph: &mut CallGraph) {
+fn build_type_call_graph(ty: &TypeDecl, graph: &mut CallGraph, facts: &FactSet) {
     let internal_methods = all_method_names(ty);
     for member in &ty.members {
         match member {
@@ -402,7 +407,7 @@ fn build_type_call_graph(ty: &TypeDecl, graph: &mut CallGraph) {
                         internal_methods.clone(),
                         caller,
                     );
-                    collect_call_graph_edges_from_block(body, graph, &mut context);
+                    collect_call_graph_edges_from_block(body, graph, &mut context, facts);
                 }
             }
             Member::Constructor(ctor) => {
@@ -417,10 +422,10 @@ fn build_type_call_graph(ty: &TypeDecl, graph: &mut CallGraph) {
                         internal_methods.clone(),
                         caller,
                     );
-                    collect_call_graph_edges_from_block(body, graph, &mut context);
+                    collect_call_graph_edges_from_block(body, graph, &mut context, facts);
                 }
             }
-            Member::Type(nested) => build_type_call_graph(nested, graph),
+            Member::Type(nested) => build_type_call_graph(nested, graph, facts),
             _ => {}
         }
     }
@@ -433,6 +438,7 @@ struct CallGraphBuildContext {
     current_callable: CallableKey,
     next_lambda_ordinal: usize,
     next_anonymous_ordinal: usize,
+    handled_catch_types: Vec<JavaType>,
 }
 
 impl CallGraphBuildContext {
@@ -447,6 +453,7 @@ impl CallGraphBuildContext {
             current_callable,
             next_lambda_ordinal: 0,
             next_anonymous_ordinal: 0,
+            handled_catch_types: Vec::new(),
         }
     }
 
@@ -457,7 +464,24 @@ impl CallGraphBuildContext {
             current_callable,
             next_lambda_ordinal: 0,
             next_anonymous_ordinal: 0,
+            handled_catch_types: Vec::new(),
         }
+    }
+
+    fn with_handled_exception_boundary(&self, catches: &[crate::java_ir::CatchClause]) -> Self {
+        let mut context = self.clone();
+        for catch in catches {
+            for catch_ty in &catch.types {
+                if !context.handled_catch_types.contains(catch_ty) {
+                    context.handled_catch_types.push(catch_ty.clone());
+                }
+            }
+        }
+        context
+    }
+
+    fn in_handled_exception_boundary(&self) -> bool {
+        !self.handled_catch_types.is_empty()
     }
 
     fn next_lambda(&mut self) -> CallableKey {
@@ -494,9 +518,10 @@ fn collect_call_graph_edges_from_block(
     block: &Block,
     graph: &mut CallGraph,
     context: &mut CallGraphBuildContext,
+    facts: &FactSet,
 ) {
     for stmt in &block.statements {
-        collect_call_graph_edges_from_stmt(stmt, graph, context);
+        collect_call_graph_edges_from_stmt(stmt, graph, context, facts);
     }
 }
 
@@ -504,19 +529,20 @@ fn collect_call_graph_edges_from_stmt(
     stmt: &Stmt,
     graph: &mut CallGraph,
     context: &mut CallGraphBuildContext,
+    facts: &FactSet,
 ) {
     match stmt {
         Stmt::VarDecl { initializer, .. } => {
             if let Some(initializer) = initializer {
-                collect_call_graph_edges_from_expr(initializer, graph, context);
+                collect_call_graph_edges_from_expr(initializer, graph, context, facts);
             }
         }
         Stmt::Assign { target, value } => {
-            collect_call_graph_edges_from_expr(target, graph, context);
-            collect_call_graph_edges_from_expr(value, graph, context);
+            collect_call_graph_edges_from_expr(target, graph, context, facts);
+            collect_call_graph_edges_from_expr(value, graph, context, facts);
         }
         Stmt::Expr(expr) | Stmt::Return(Some(expr)) | Stmt::Throw(expr) => {
-            collect_call_graph_edges_from_expr(expr, graph, context);
+            collect_call_graph_edges_from_expr(expr, graph, context, facts);
         }
         Stmt::Return(None) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => {}
         Stmt::If {
@@ -524,10 +550,10 @@ fn collect_call_graph_edges_from_stmt(
             then_block,
             else_block,
         } => {
-            collect_call_graph_edges_from_expr(condition, graph, context);
-            collect_call_graph_edges_from_block(then_block, graph, context);
+            collect_call_graph_edges_from_expr(condition, graph, context, facts);
+            collect_call_graph_edges_from_block(then_block, graph, context, facts);
             if let Some(else_block) = else_block {
-                collect_call_graph_edges_from_block(else_block, graph, context);
+                collect_call_graph_edges_from_block(else_block, graph, context, facts);
             }
         }
         Stmt::While {
@@ -536,8 +562,8 @@ fn collect_call_graph_edges_from_stmt(
         | Stmt::DoWhile {
             condition, body, ..
         } => {
-            collect_call_graph_edges_from_expr(condition, graph, context);
-            collect_call_graph_edges_from_block(body, graph, context);
+            collect_call_graph_edges_from_expr(condition, graph, context, facts);
+            collect_call_graph_edges_from_block(body, graph, context, facts);
         }
         Stmt::For {
             init,
@@ -547,25 +573,25 @@ fn collect_call_graph_edges_from_stmt(
             ..
         } => {
             for stmt in init {
-                collect_call_graph_edges_from_stmt(stmt, graph, context);
+                collect_call_graph_edges_from_stmt(stmt, graph, context, facts);
             }
             if let Some(condition) = condition {
-                collect_call_graph_edges_from_expr(condition, graph, context);
+                collect_call_graph_edges_from_expr(condition, graph, context, facts);
             }
             for expr in update {
-                collect_call_graph_edges_from_expr(expr, graph, context);
+                collect_call_graph_edges_from_expr(expr, graph, context, facts);
             }
-            collect_call_graph_edges_from_block(body, graph, context);
+            collect_call_graph_edges_from_block(body, graph, context, facts);
         }
         Stmt::EnhancedFor { iterable, body, .. } => {
-            collect_call_graph_edges_from_expr(iterable, graph, context);
-            collect_call_graph_edges_from_block(body, graph, context);
+            collect_call_graph_edges_from_expr(iterable, graph, context, facts);
+            collect_call_graph_edges_from_block(body, graph, context, facts);
         }
         Stmt::Switch { selector, cases } => {
-            collect_call_graph_edges_from_expr(selector, graph, context);
+            collect_call_graph_edges_from_expr(selector, graph, context, facts);
             for case in cases {
                 for stmt in &case.statements {
-                    collect_call_graph_edges_from_stmt(stmt, graph, context);
+                    collect_call_graph_edges_from_stmt(stmt, graph, context, facts);
                 }
             }
         }
@@ -576,14 +602,19 @@ fn collect_call_graph_edges_from_stmt(
             finally_block,
         } => {
             for resource in resources {
-                collect_call_graph_edges_from_stmt(resource, graph, context);
+                collect_call_graph_edges_from_stmt(resource, graph, context, facts);
             }
-            collect_call_graph_edges_from_block(body, graph, context);
+            if catch_clauses_do_not_rethrow_checked_exceptions(catches, facts) {
+                let mut try_context = context.with_handled_exception_boundary(catches);
+                collect_call_graph_edges_from_block(body, graph, &mut try_context, facts);
+            } else {
+                collect_call_graph_edges_from_block(body, graph, context, facts);
+            }
             for catch in catches {
-                collect_call_graph_edges_from_block(&catch.body, graph, context);
+                collect_call_graph_edges_from_block(&catch.body, graph, context, facts);
             }
             if let Some(finally_block) = finally_block {
-                collect_call_graph_edges_from_block(finally_block, graph, context);
+                collect_call_graph_edges_from_block(finally_block, graph, context, facts);
             }
         }
         Stmt::ConstructorInvocation {
@@ -613,14 +644,14 @@ fn collect_call_graph_edges_from_stmt(
                     CallGraphEdgeKind::ConstructorDelegationSuper,
                 ),
             };
-            add_call_graph_edge(graph, &context.current_callable, callee, edge_kind);
+            add_call_graph_edge(graph, context, callee, edge_kind, facts);
             for arg in args {
-                collect_call_graph_edges_from_expr(arg, graph, context);
+                collect_call_graph_edges_from_expr(arg, graph, context, facts);
             }
         }
-        Stmt::LocalType(ty) => build_type_call_graph(ty, graph),
+        Stmt::LocalType(ty) => build_type_call_graph(ty, graph, facts),
         Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
-            collect_call_graph_edges_from_block(block, graph, context)
+            collect_call_graph_edges_from_block(block, graph, context, facts)
         }
     }
 }
@@ -629,6 +660,7 @@ fn collect_call_graph_edges_from_expr(
     expr: &Expr,
     graph: &mut CallGraph,
     context: &mut CallGraphBuildContext,
+    facts: &FactSet,
 ) {
     match expr {
         Expr::Call {
@@ -639,12 +671,12 @@ fn collect_call_graph_edges_from_expr(
         } => {
             let (callee, edge_kind) =
                 call_graph_method_target(receiver.as_deref(), name, args.len(), resolved, context);
-            add_call_graph_edge(graph, &context.current_callable, callee, edge_kind);
+            add_call_graph_edge(graph, context, callee, edge_kind, facts);
             if let Some(receiver) = receiver {
-                collect_call_graph_edges_from_expr(receiver, graph, context);
+                collect_call_graph_edges_from_expr(receiver, graph, context, facts);
             }
             for arg in args {
-                collect_call_graph_edges_from_expr(arg, graph, context);
+                collect_call_graph_edges_from_expr(arg, graph, context, facts);
             }
         }
         Expr::New {
@@ -667,9 +699,9 @@ fn collect_call_graph_edges_from_expr(
             } else {
                 CallGraphEdgeKind::UnresolvedExternalConstructorCall
             };
-            add_call_graph_edge(graph, &context.current_callable, callee, edge_kind);
+            add_call_graph_edge(graph, context, callee, edge_kind, facts);
             for arg in args {
-                collect_call_graph_edges_from_expr(arg, graph, context);
+                collect_call_graph_edges_from_expr(arg, graph, context, facts);
             }
             if let Some(body) = body {
                 for member in body {
@@ -677,13 +709,14 @@ fn collect_call_graph_edges_from_expr(
                         let anonymous = context.next_anonymous_method(method.name.clone());
                         add_call_graph_edge(
                             graph,
-                            &context.current_callable,
+                            context,
                             anonymous.clone(),
                             CallGraphEdgeKind::AnonymousClassMethod,
+                            facts,
                         );
                         if let Some(body) = &method.body {
                             let mut child = context.child_for(anonymous);
-                            collect_call_graph_edges_from_block(body, graph, &mut child);
+                            collect_call_graph_edges_from_block(body, graph, &mut child, facts);
                         }
                     }
                 }
@@ -693,33 +726,34 @@ fn collect_call_graph_edges_from_expr(
             let lambda = context.next_lambda();
             add_call_graph_edge(
                 graph,
-                &context.current_callable,
+                context,
                 lambda.clone(),
                 CallGraphEdgeKind::LambdaBody,
+                facts,
             );
             let mut child = context.child_for(lambda);
             match body {
                 LambdaBody::Expr(expr) => {
-                    collect_call_graph_edges_from_expr(expr, graph, &mut child)
+                    collect_call_graph_edges_from_expr(expr, graph, &mut child, facts)
                 }
                 LambdaBody::Block(block) => {
-                    collect_call_graph_edges_from_block(block, graph, &mut child)
+                    collect_call_graph_edges_from_block(block, graph, &mut child, facts)
                 }
             }
         }
         Expr::FieldAccess(receiver, _) | Expr::Unary { expr: receiver, .. } => {
-            collect_call_graph_edges_from_expr(receiver, graph, context);
+            collect_call_graph_edges_from_expr(receiver, graph, context, facts);
         }
         Expr::Binary { left, right, .. } => {
-            collect_call_graph_edges_from_expr(left, graph, context);
-            collect_call_graph_edges_from_expr(right, graph, context);
+            collect_call_graph_edges_from_expr(left, graph, context, facts);
+            collect_call_graph_edges_from_expr(right, graph, context, facts);
         }
         Expr::Cast { expr, .. } | Expr::InstanceOf { expr, .. } => {
-            collect_call_graph_edges_from_expr(expr, graph, context);
+            collect_call_graph_edges_from_expr(expr, graph, context, facts);
         }
         Expr::ArrayAccess(array, index) => {
-            collect_call_graph_edges_from_expr(array, graph, context);
-            collect_call_graph_edges_from_expr(index, graph, context);
+            collect_call_graph_edges_from_expr(array, graph, context, facts);
+            collect_call_graph_edges_from_expr(index, graph, context, facts);
         }
         Expr::ArrayCreation {
             dimensions,
@@ -727,17 +761,17 @@ fn collect_call_graph_edges_from_expr(
             ..
         } => {
             for expr in dimensions {
-                collect_call_graph_edges_from_expr(expr, graph, context);
+                collect_call_graph_edges_from_expr(expr, graph, context, facts);
             }
             if let Some(initializer) = initializer {
                 for expr in initializer {
-                    collect_call_graph_edges_from_expr(expr, graph, context);
+                    collect_call_graph_edges_from_expr(expr, graph, context, facts);
                 }
             }
         }
         Expr::ArrayInitializer(dimensions) => {
             for expr in dimensions {
-                collect_call_graph_edges_from_expr(expr, graph, context);
+                collect_call_graph_edges_from_expr(expr, graph, context, facts);
             }
         }
         Expr::Ternary {
@@ -745,19 +779,19 @@ fn collect_call_graph_edges_from_expr(
             then_expr,
             else_expr,
         } => {
-            collect_call_graph_edges_from_expr(condition, graph, context);
-            collect_call_graph_edges_from_expr(then_expr, graph, context);
-            collect_call_graph_edges_from_expr(else_expr, graph, context);
+            collect_call_graph_edges_from_expr(condition, graph, context, facts);
+            collect_call_graph_edges_from_expr(then_expr, graph, context, facts);
+            collect_call_graph_edges_from_expr(else_expr, graph, context, facts);
         }
         Expr::Switch { selector, cases } => {
-            collect_call_graph_edges_from_expr(selector, graph, context);
+            collect_call_graph_edges_from_expr(selector, graph, context, facts);
             for case in cases {
                 for label in &case.labels {
                     if let SwitchLabel::Expr(expr) = label {
-                        collect_call_graph_edges_from_expr(expr, graph, context);
+                        collect_call_graph_edges_from_expr(expr, graph, context, facts);
                     }
                 }
-                collect_call_graph_edges_from_expr(&case.value, graph, context);
+                collect_call_graph_edges_from_expr(&case.value, graph, context, facts);
             }
         }
         Expr::Literal(_)
@@ -810,10 +844,26 @@ fn call_graph_method_target(
 
 fn add_call_graph_edge(
     graph: &mut CallGraph,
-    caller: &CallableKey,
+    context: &CallGraphBuildContext,
     callee: CallableKey,
     kind: CallGraphEdgeKind,
+    facts: &FactSet,
 ) {
+    let caller = &context.current_callable;
+    let kind = if context.in_handled_exception_boundary()
+        && matches!(
+            kind,
+            CallGraphEdgeKind::DirectMethodCall
+                | CallGraphEdgeKind::ConstructorCall
+                | CallGraphEdgeKind::UnresolvedExternalMethodCall
+                | CallGraphEdgeKind::UnresolvedExternalConstructorCall
+        )
+        && callable_checked_exceptions_are_caught(&callee, &context.handled_catch_types, facts)
+    {
+        CallGraphEdgeKind::HandledExceptionBoundary
+    } else {
+        kind
+    };
     graph.nodes.insert(caller.clone());
     graph.nodes.insert(callee.clone());
     let edge = CallGraphEdge {
@@ -823,6 +873,162 @@ fn add_call_graph_edge(
     };
     if !graph.edges.contains(&edge) {
         graph.edges.push(edge);
+    }
+}
+
+fn catch_clauses_do_not_rethrow_checked_exceptions(
+    catches: &[crate::java_ir::CatchClause],
+    facts: &FactSet,
+) -> bool {
+    !catches.is_empty()
+        && catches
+            .iter()
+            .all(|catch| block_does_not_rethrow_checked_exception(&catch.body, facts))
+}
+
+fn callable_checked_exceptions_are_caught(
+    callee: &CallableKey,
+    catch_types: &[JavaType],
+    facts: &FactSet,
+) -> bool {
+    let checked = callable_checked_exception_types(callee, facts);
+    !checked.is_empty()
+        && checked
+            .iter()
+            .all(|thrown| exception_caught_by_any(thrown, catch_types, facts))
+}
+
+fn callable_checked_exception_types(callee: &CallableKey, facts: &FactSet) -> Vec<JavaType> {
+    let thrown = match callee {
+        CallableKey::Method {
+            type_name,
+            method_name,
+        }
+        | CallableKey::Constructor {
+            type_name,
+            rust_name: method_name,
+        } => facts
+            .method_effect_for(type_name, method_name)
+            .map(|effect| effect.thrown.clone())
+            .unwrap_or_default(),
+        CallableKey::ExternalMethod {
+            receiver_type,
+            method_name,
+            arg_count,
+        } => facts
+            .external_api_effect_facts
+            .iter()
+            .filter(|fact| {
+                fact.method_name == *method_name
+                    && fact.arg_count == Some(*arg_count)
+                    && fact.receiver_type.as_ref() == receiver_type.as_ref()
+            })
+            .flat_map(|fact| fact.thrown.clone())
+            .collect(),
+        CallableKey::ExternalConstructor { .. }
+        | CallableKey::Lambda { .. }
+        | CallableKey::AnonymousMethod { .. } => Vec::new(),
+    };
+    thrown
+        .into_iter()
+        .filter(|ty| {
+            java_type_name_for_usage(ty).is_some_and(|name| {
+                facts.exception_kind_for(name) != Some(ExceptionKind::Unchecked)
+            })
+        })
+        .collect()
+}
+
+fn exception_caught_by_any(thrown: &JavaType, catch_types: &[JavaType], facts: &FactSet) -> bool {
+    catch_types
+        .iter()
+        .any(|catch_ty| exception_assignable_to_catch(thrown, catch_ty, facts))
+}
+
+fn exception_assignable_to_catch(thrown: &JavaType, catch_ty: &JavaType, facts: &FactSet) -> bool {
+    let (Some(thrown_name), Some(catch_name)) = (
+        java_type_name_for_usage(thrown),
+        java_type_name_for_usage(catch_ty),
+    ) else {
+        return false;
+    };
+    if crate::facts::external_type_name_matches(thrown_name, catch_name)
+        || matches!(
+            catch_name,
+            "Exception" | "java.lang.Exception" | "Throwable" | "java.lang.Throwable"
+        )
+    {
+        return true;
+    }
+    facts
+        .hierarchy_lookup_index()
+        .hierarchy_subtype_policy(facts, thrown, catch_ty)
+        .reaches
+}
+
+fn block_does_not_rethrow_checked_exception(block: &Block, facts: &FactSet) -> bool {
+    !block
+        .statements
+        .iter()
+        .any(|stmt| stmt_rethrows_checked_exception(stmt, facts))
+}
+
+fn stmt_rethrows_checked_exception(stmt: &Stmt, facts: &FactSet) -> bool {
+    match stmt {
+        Stmt::Throw(expr) => thrown_expr_is_checked_exception(expr, facts),
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            !block_does_not_rethrow_checked_exception(block, facts)
+        }
+        Stmt::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            !block_does_not_rethrow_checked_exception(then_block, facts)
+                || else_block
+                    .as_ref()
+                    .is_some_and(|block| !block_does_not_rethrow_checked_exception(block, facts))
+        }
+        Stmt::Try {
+            body,
+            catches,
+            finally_block,
+            ..
+        } => {
+            !block_does_not_rethrow_checked_exception(body, facts)
+                || catches
+                    .iter()
+                    .any(|catch| !block_does_not_rethrow_checked_exception(&catch.body, facts))
+                || finally_block
+                    .as_ref()
+                    .is_some_and(|block| !block_does_not_rethrow_checked_exception(block, facts))
+        }
+        _ => false,
+    }
+}
+
+fn thrown_expr_is_checked_exception(expr: &Expr, facts: &FactSet) -> bool {
+    let Some(type_name) = thrown_expr_type_name(expr) else {
+        return true;
+    };
+    facts.exception_kind_for(&type_name) != Some(ExceptionKind::Unchecked)
+}
+
+fn thrown_expr_type_name(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::New { ty, .. } | Expr::Cast { ty, .. } => Some(java_type_call_graph_name(ty)),
+        Expr::Var(name) => Some(name.clone()),
+        _ => None,
+    }
+}
+
+fn java_type_name_for_usage(java_ty: &JavaType) -> Option<&str> {
+    match java_ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(name),
+        JavaType::String => Some("String"),
+        JavaType::Primitive(_) | JavaType::Void | JavaType::Array(_) | JavaType::Wildcard(_) => {
+            None
+        }
     }
 }
 

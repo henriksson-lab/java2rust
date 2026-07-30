@@ -6785,9 +6785,10 @@ arity names for these overloaded constructors, so generated calls should use
 StringBuilder/StringBuffer/Appendable shape tests pass, including a generated
 runtime assertion for `"ok!"`.
 
-Audit `0016` remains partial, not fixed: `Arrays`, `Pattern`, `FastMath`, and a
-separate checked-exception fallibility leak around caught `Appendable.append`
-paths still need follow-up work.
+Audit `0016` remains partial, not fixed: `Arrays`, `Pattern`, and `FastMath`
+still need follow-up work. The separate checked-exception fallibility leak
+around caught `Appendable.append` paths is fixed by catch-aware call-graph
+propagation and checked-only fallibility seeds.
 
 ## Rerun Protocol
 

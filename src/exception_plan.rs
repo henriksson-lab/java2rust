@@ -267,6 +267,9 @@ pub fn plan_program_fallibility(call_graph: &CallGraph, facts: &FactSet) -> Prog
         solve_iterations += 1;
         let mut changed = false;
         for edge in &call_graph.edges {
+            if edge.kind == crate::usage::CallGraphEdgeKind::HandledExceptionBoundary {
+                continue;
+            }
             let callee_returns_result = callables
                 .get(&edge.callee)
                 .is_some_and(|fallibility| fallibility.returns_result);
@@ -301,7 +304,7 @@ fn seed_callable_fallibility(key: &CallableKey, facts: &FactSet) -> CallableFall
             rust_name: method_name,
         } => facts
             .method_effect_for(type_name, method_name)
-            .is_some_and(|fact| !fact.thrown.is_empty())
+            .is_some_and(|fact| facts.thrown_types_include_checked_exception(&fact.thrown))
             .then_some(FallibilityReason::MethodThrowFact),
         CallableKey::ExternalMethod {
             receiver_type,
@@ -311,7 +314,7 @@ fn seed_callable_fallibility(key: &CallableKey, facts: &FactSet) -> CallableFall
             .external_api_effect_facts
             .iter()
             .any(|fact| {
-                !fact.thrown.is_empty()
+                facts.thrown_types_include_checked_exception(&fact.thrown)
                     && fact.method_name == *method_name
                     && fact.arg_count == Some(*arg_count)
                     && fact.receiver_type.as_ref() == receiver_type.as_ref()

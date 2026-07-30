@@ -331,7 +331,7 @@ pub fn lower_program_with_semantic_plans_and_support_context(
         ),
         &mut diagnostics,
     );
-    let call_graph = crate::usage::build_call_graph(support_local_type_program);
+    let call_graph = crate::usage::build_call_graph_with_facts(support_local_type_program, facts);
     let fallibility = plan_program_fallibility(&call_graph, facts);
     let exceptions =
         plan_program_exceptions_with_fallibility(support_local_type_program, facts, &fallibility);

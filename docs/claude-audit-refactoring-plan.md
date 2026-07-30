@@ -160,6 +160,12 @@ Landed in this batch:
   `UsageFacts::source_method_usage`, backed by `JavaCallableKey`, for concrete
   method declarations. This prevents same-name overloads from sharing
   name-keyed usage facts while broader compatibility maps are still present.
+- Fallibility planning now seeds only from escaping checked exception facts and
+  skips call-graph propagation across checked exceptions caught by an
+  assignable non-rethrowing catch. The call graph carries a handled-boundary
+  edge kind for these cases, so caught `Appendable.append` `IOException` paths
+  do not force `Result` signatures when the catch rethrows only known unchecked
+  exceptions.
 
 1. Add a `CallableAnalysis` shell.
    - Introduce `src/callable_analysis.rs`.
