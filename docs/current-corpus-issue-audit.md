@@ -1435,10 +1435,19 @@ generic impl headers. Focused coverage passed:
 `cargo test shared_support_merger --test idiom_sweep_script --quiet`,
 `cargo test focused_package_shared_support_stripper --test idiom_sweep_script
 --quiet`, `cargo fmt --check`, `cargo check --quiet`, `git diff --check`, and
-release rebuild. The attempted full rerun at
-`.tmp/corpus-rerun-20260730-htsjdk-vcf-after-generic-impl-assembly` was
-interrupted before crate assembly and is not a baseline; keep the previous
-complete VCF count until a full rerun completes.
+release rebuild.
+
+Release-backed HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260730-htsjdk-vcf-after-generic-impl-assembly-complete`
+translates all `32/32` files, keeps `invalid_pattern_files=20`, and has `347`
+generated Rust errors. The assembled `VCFStandardHeaderLines.rs` preserves
+`impl<T> VCFStandardHeaderLinesStandards<T>` with `repair`, `add_to_header`,
+`add`, `get`, and `new`, removing the previous missing-method rows for those
+methods. The count rises from the previous complete `328` baseline because the
+restored method bodies expose real generic-bound/source-hierarchy gaps:
+`T`/`&T` need the `VCFIDHeaderLine`/`VCFCompoundHeaderLine` method surface
+(`get_i_d`, `get_count_type`, `is_fixed_count`, `get_count`, `get_type`,
+`get_description`) and clone bounds.
 
 ## Next Batch
 

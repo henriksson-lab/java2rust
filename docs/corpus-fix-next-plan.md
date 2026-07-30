@@ -505,15 +505,19 @@ Focused coverage passed:
 `cargo fmt --check`, `cargo check --quiet`, `git diff --check`, and
 `cargo build --release --quiet --bin new-java2rust`.
 
-The attempted full VCF rerun at
-`.tmp/corpus-rerun-20260730-htsjdk-vcf-after-generic-impl-assembly` was
-interrupted before crate assembly and `cargo check`, so it is not a new corpus
-baseline. Its event log reached global signature solving and most emission
-events, including `VCFStandardHeaderLines.java`, but no assembled
-`00030_VCFStandardHeaderLines.rs` was finalized. Keep the previous complete
-VCF baseline,
-`.tmp/corpus-rerun-20260730-htsjdk-vcf-after-source-generics-cleanup`, as the
-current corpus count until the next complete rerun.
+Release-backed HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260730-htsjdk-vcf-after-generic-impl-assembly-complete`
+translated all `32/32` files, kept `invalid_pattern_files=20`, and has `347`
+generated Rust errors. The assembled
+`generated-crate/src/generated/00030_VCFStandardHeaderLines.rs` now preserves
+`impl<T> VCFStandardHeaderLinesStandards<T>` with `repair`, `add_to_header`,
+`add`, `get`, and `new`; the previous missing-method rows for those methods are
+gone. The error count increases from the previous complete `328` baseline
+because the restored method bodies now expose real source-bound generic
+dispatch gaps: `T`/`&T` need the `VCFIDHeaderLine`/`VCFCompoundHeaderLine`
+method surface (`get_i_d`, `get_count_type`, `is_fixed_count`, `get_count`,
+`get_type`, `get_description`) and clone bounds. Treat these as the next VCF
+source-hierarchy/generic-bound task, not as an assembly regression.
 
 2026-07-29 optional clone recovery and parse projection cleanup: clone recovery
 now checks borrowed target slots, including optional targets whose element slot
