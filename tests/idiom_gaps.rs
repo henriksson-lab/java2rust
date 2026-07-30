@@ -7924,6 +7924,45 @@ class Box<T extends HeaderLine> {
 }
 
 #[test]
+fn type_param_bound_enum_return_equality_uses_bound_return_shape() {
+    let source = r#"
+class BoundEnumReturnEquality {
+    enum CountType {
+        INTEGER,
+        A
+    }
+
+    static class Line {
+        CountType getCountType() {
+            return CountType.INTEGER;
+        }
+    }
+
+    static class Standards<T extends Line> {
+        boolean bad(T line, T standard) {
+            return line.getCountType() != standard.getCountType();
+        }
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("line.get_count_type() != standard.get_count_type()")
+            && !translation.rust.contains("get_count_type().as_ref()"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn nested_generic_source_alias_preserves_type_params() {
     let source = r#"
 class Outer {
@@ -16094,6 +16133,34 @@ class EmittedEnumFacadeSupportSuppression {
             && !translation
                 .rust
                 .contains("impl Eq for EmittedEnumFacadeSupportSuppressionLineType"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn source_java_enum_emits_default_for_support_placeholders() {
+    let translation = translate_source(
+        r#"
+class EnumDefaultSupport {
+    enum LineType {
+        Header,
+        Body
+    }
+
+    LineType fallback() {
+        return LineType.Body;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "impl Default for EnumDefaultSupportLineType {\n    fn default() -> Self { Self::Header }\n}"
+        ) && translation
+            .rust
+            .contains("return EnumDefaultSupportLineType::Body;"),
         "{}",
         translation.rust
     );

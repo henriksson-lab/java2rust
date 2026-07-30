@@ -6459,6 +6459,48 @@ seven previously exposed failures passed its section in the full run:
 `negated_java_equals_uses_inequality_projection`, and
 `typed_set_add_source_constructor_keeps_concrete_element_slot`.
 
+## 2026-07-30 VCF Bound Surface Follow-Up
+
+Reduced VCF authority set:
+`.tmp/vcf-standard-bound-primary` with 9 `htsjdk.variant.vcf` files.
+
+Landed in this follow-up:
+
+- Source Java enum lowering now emits `impl Default` for non-empty emitted
+  enums, choosing the first declared Java constant as the deterministic support
+  placeholder. This matches generated facade/support code that already uses
+  `Default::default()` when synthesizing unimplemented return values.
+- Equality operand shaping now reuses source method return projections before
+  generic expression-shape fallback. This lets `T extends SourceClass` bound
+  method calls returning concrete enums compare as direct enum values instead of
+  treating the call result as an optional carrier and appending `.as_ref()`.
+
+Focused verification passed:
+`cargo test source_java_enum_emits_default_for_support_placeholders --test idiom_gaps --quiet`,
+`cargo test type_param_bound_enum_return_equality_uses_bound_return_shape --test idiom_gaps --quiet`,
+`cargo test optional_type_param_bound_call_display_uses_bound_return_shape --test idiom_gaps --quiet`,
+`cargo fmt --check`,
+`cargo check --quiet`,
+`git diff --check`, and
+`cargo build --release --quiet --bin new-java2rust`.
+
+Reduced VCF reruns:
+
+- `.tmp/corpus-rerun-20260730-vcf-standard-bound-after-enum-default`:
+  9 files, 60.722s, 53 generated-Rust errors. The previous two enum `Default`
+  trait-bound errors disappeared.
+- `.tmp/corpus-rerun-20260730-vcf-standard-bound-after-bound-enum-equality`:
+  9 files, 60.034s, 49 generated-Rust errors. The four enum `.as_ref()` method
+  errors disappeared. The generated `repair` comparison now renders direct
+  enum comparisons for `get_count_type()` and `get_type()`.
+
+Remaining top reduced-VCF clusters after this follow-up:
+31 mismatched types, 4 missing `mapping`, 3 possibly-uninitialized `number`, 3
+type annotations needed, 2 unsupported concrete `instanceof`, 2 unsupported
+`super(...)` inheritance constructor calls, and single missing facade/source
+surface gaps for `set_v_c_f_header_version`, `is_at_least_as_recent_as`, and
+`VCFHeader::HEADER_INDICATOR`.
+
 ## Rerun Protocol
 
 After each fix:

@@ -4709,6 +4709,17 @@ fn source_java_enum_field_accessor_shape_for_expr(
     }
 }
 
+fn equality_operand_shape(
+    expr: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    shape_ctx: ExprShapeContext,
+) -> RustSlotShape {
+    source_java_enum_field_accessor_shape_for_expr(expr, env, ctx)
+        .or_else(|| source_method_return_shape_for_call(expr, env, ctx))
+        .unwrap_or_else(|| infer_expr_shape_with_context(expr, env, shape_ctx))
+}
+
 fn source_java_enum_payload_field_shape(ty: &TypeDecl, field_name: &str) -> Option<RustSlotShape> {
     if ty.kind != TypeKind::Enum {
         return None;
@@ -9483,14 +9494,8 @@ fn lower_binary_expr(
             representations: Some(ctx.representations),
             facts: Some(ctx.facts),
         };
-        let left_shape = source_java_enum_field_accessor_shape_for_expr(left, env, ctx)
-            .unwrap_or_else(|| {
-                crate::expr_shape::infer_expr_shape_with_context(left, env, shape_ctx)
-            });
-        let right_shape = source_java_enum_field_accessor_shape_for_expr(right, env, ctx)
-            .unwrap_or_else(|| {
-                crate::expr_shape::infer_expr_shape_with_context(right, env, shape_ctx)
-            });
+        let left_shape = equality_operand_shape(left, env, ctx, shape_ctx);
+        let right_shape = equality_operand_shape(right, env, ctx, shape_ctx);
         if let Some(expr) =
             lower_current_type_get_class_comparison(op, left, right, env, ctx, refinements)
         {
@@ -16118,10 +16123,8 @@ fn lower_java_equality_call_expr_for_op(
         representations: Some(ctx.representations),
         facts: Some(ctx.facts),
     };
-    let left_shape = source_java_enum_field_accessor_shape_for_expr(left, env, ctx)
-        .unwrap_or_else(|| crate::expr_shape::infer_expr_shape_with_context(left, env, shape_ctx));
-    let right_shape = source_java_enum_field_accessor_shape_for_expr(right, env, ctx)
-        .unwrap_or_else(|| crate::expr_shape::infer_expr_shape_with_context(right, env, shape_ctx));
+    let left_shape = equality_operand_shape(left, env, ctx, shape_ctx);
+    let right_shape = equality_operand_shape(right, env, ctx, shape_ctx);
     let plan = if use_fact_aware_plan {
         plan_equality_comparison_with_facts(&left_shape, &right_shape, ctx.facts)
     } else {
