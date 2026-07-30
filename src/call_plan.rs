@@ -4014,12 +4014,26 @@ pub fn resolved_call_arg_shapes(
 
 fn resolved_call_boundary_arg_shape(call: &ResolvedCall, index: usize) -> RustSlotShape {
     let java_ty = call
-        .arg_coercions
-        .iter()
-        .find(|coercion| coercion.arg_index == index)
-        .map(|coercion| coercion.target.clone())
+        .arg_target_types
+        .get(index)
+        .cloned()
+        .or_else(|| {
+            call.arg_coercions
+                .iter()
+                .find(|coercion| coercion.arg_index == index)
+                .map(|coercion| coercion.target.clone())
+        })
         .unwrap_or_else(|| JavaType::Unknown(format!("{}:arg{index}", call.rust_name)));
     RustSlotShape::for_storage(java_ty)
+}
+
+pub fn resolved_call_arg_target_type(call: &ResolvedCall, index: usize) -> Option<&JavaType> {
+    call.arg_target_types.get(index).or_else(|| {
+        call.arg_coercions
+            .iter()
+            .find(|coercion| coercion.arg_index == index)
+            .map(|coercion| &coercion.target)
+    })
 }
 
 pub fn plan_call_arguments(
@@ -4834,6 +4848,16 @@ pub fn external_constructor_arg_shapes(
             ) {
                 saw_fact = true;
                 argument_shape_from_external_effect(effect, Some(ty), &effective_facts)
+            } else if let Some(effect) =
+                crate::external_packs::external_api_argument_effect_for_receiver_with_arity(
+                    Some(receiver_name),
+                    rust_name,
+                    Some(arg_count),
+                    index,
+                )
+            {
+                saw_fact = true;
+                argument_shape_from_external_effect(&effect, Some(ty), &effective_facts)
             } else {
                 RustSlotShape::conservative(JavaType::Unknown(format!("{rust_name}:arg{index}")))
             }
@@ -4893,6 +4917,16 @@ pub fn external_constructor_arg_shapes_with_args(
             ) {
                 saw_fact = true;
                 argument_shape_from_external_effect(effect, Some(ty), &effective_facts)
+            } else if let Some(effect) =
+                crate::external_packs::external_api_argument_effect_for_receiver_with_arity(
+                    Some(receiver_name),
+                    rust_name,
+                    Some(arg_count),
+                    index,
+                )
+            {
+                saw_fact = true;
+                argument_shape_from_external_effect(&effect, Some(ty), &effective_facts)
             } else {
                 RustSlotShape::conservative(JavaType::Unknown(format!("{rust_name}:arg{index}")))
             }

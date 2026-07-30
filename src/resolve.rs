@@ -2774,6 +2774,53 @@ fn resolve_expr_calls(
                     }),
                     Err(message) => diagnostics.error("resolve_call_ambiguous", message),
                 }
+            } else if let Some(receiver_ty) = receiver
+                .as_deref()
+                .and_then(|receiver| source_static_type_receiver(receiver, symbols))
+            {
+                let receiver_methods = symbols
+                    .methods_for_hierarchy(&receiver_ty)
+                    .into_iter()
+                    .filter(|method| method.is_static)
+                    .collect::<Vec<_>>();
+                match resolve_same_class_call(
+                    name,
+                    &arg_types,
+                    &receiver_methods,
+                    symbols,
+                    external_facts,
+                    None,
+                ) {
+                    Ok(Some(selection)) => {
+                        resolve_target_typed_lambda_args(
+                            args,
+                            &selection.params,
+                            current_type,
+                            symbols,
+                            methods,
+                            env,
+                            diagnostics,
+                            facts,
+                            external_facts,
+                            enclosing_member,
+                        );
+                        *resolved = Some(selection.call);
+                    }
+                    Ok(None) => facts.unresolved_target_facts.push(UnresolvedTargetFact {
+                        enclosing_type: current_type.to_string(),
+                        enclosing_member: enclosing_member.map(str::to_string),
+                        kind: UnresolvedTargetKind::MethodCall,
+                        target_name: name.clone(),
+                        receiver_type: Some(JavaType::Named {
+                            name: receiver_ty,
+                            args: Vec::new(),
+                        }),
+                        arg_types,
+                        is_anonymous_class: false,
+                        provenance: FactProvenance::ParsedSource,
+                    }),
+                    Err(message) => diagnostics.error("resolve_call_ambiguous", message),
+                }
             } else if let Some((receiver_ty, receiver_actual_ty)) = receiver
                 .as_deref()
                 .and_then(|receiver| source_receiver_type(receiver, current_type, symbols, env))
@@ -3749,6 +3796,11 @@ fn source_enum_synthetic_call(
         rust_name: crate::parser::to_snake_case(name),
         kind: CallKind::Static,
         return_type,
+        arg_target_types: if name == "valueOf" && arg_count == 1 {
+            vec![JavaType::String]
+        } else {
+            Vec::new()
+        },
         arg_coercions: Vec::new(),
     })
 }
@@ -3773,6 +3825,17 @@ fn source_receiver_type(
         return Some((symbols.source_type_name(bound_name).to_string(), bound));
     }
     source_receiver_type_from_actual(receiver_actual_ty, symbols)
+}
+
+fn source_static_type_receiver(receiver: &Expr, symbols: &ProgramSymbols) -> Option<String> {
+    let Expr::Var(name) = receiver else {
+        return None;
+    };
+    let source_name = symbols.source_type_name(name);
+    symbols
+        .methods_by_type
+        .contains_key(source_name)
+        .then(|| source_name.to_string())
 }
 
 fn source_receiver_type_from_actual(
@@ -4485,6 +4548,7 @@ fn resolve_same_class_call(
                 CallKind::Instance
             },
             return_type: substitute_method_type_variables(&selected.return_type, &substitutions),
+            arg_target_types: param_types,
             arg_coercions,
         },
         params: substituted_params,

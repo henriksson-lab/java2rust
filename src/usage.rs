@@ -2075,7 +2075,9 @@ fn analyze_expr_with_context(
                 result_returned,
             );
         }
-        Expr::New { args, resolved, .. } => {
+        Expr::New {
+            ty, args, resolved, ..
+        } => {
             for (arg_index, arg) in args.iter().enumerate() {
                 record_call_arg_use(
                     facts,
@@ -2085,7 +2087,7 @@ fn analyze_expr_with_context(
                     semantic_facts,
                     arg,
                     "new",
-                    None,
+                    Some(ty.clone()),
                     arg_index,
                     constructor_argument_boundary_policy(resolved.as_ref(), arg_index),
                 );

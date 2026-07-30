@@ -47,6 +47,10 @@ fix, regression/focused verification, audit-status update, and the corresponding
 `/home/mahogny/github/claude/new_java2rust/claude_audits/done` before it is
 committed. If any of those pieces is missing, keep the audit open.
 
+Operational reminder: when an audit issue is done, move the issue file into
+`/home/mahogny/github/claude/new_java2rust/claude_audits/done` immediately;
+do not leave completed audit notes in the active `claude_audits/` directory.
+
 ## Next Batch: Measurement And Unsupported Safety
 
 Goal: unmodelled behavior must be visible as a diagnostic, parseable Rust, or a

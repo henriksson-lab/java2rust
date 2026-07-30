@@ -24219,6 +24219,13 @@ const BROAD_HELLBENDER_UTILS_TYPE_CAPABILITIES: &[ExternalPackTypeCapability] = 
 
 const BROAD_HELLBENDER_UTILS_ARGUMENT_EFFECTS: &[ExternalPackArgumentEffect] = &[
     readonly_borrowed_argument(
+        "org.broadinstitute.hellbender.engine.GATKPath",
+        "new",
+        0,
+        "String",
+    ),
+    readonly_borrowed_argument("GATKPath", "new", 0, "String"),
+    readonly_borrowed_argument(
         "org.broadinstitute.hellbender.utils.Utils",
         "validate",
         0,

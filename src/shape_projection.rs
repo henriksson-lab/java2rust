@@ -132,6 +132,7 @@ pub fn string_list_value_shape() -> RustSlotShape {
 }
 
 pub fn apply_borrowed_string_content_projection(shape: &mut RustSlotShape) {
+    apply_required_dispatch(shape, DispatchShape::Concrete);
     apply_required_ownership(shape, OwnershipShape::SharedBorrow);
     apply_required_view(shape, ViewShape::Str);
 }

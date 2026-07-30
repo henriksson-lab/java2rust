@@ -329,6 +329,7 @@ pub struct ResolvedCall {
     pub rust_name: String,
     pub kind: CallKind,
     pub return_type: JavaType,
+    pub arg_target_types: Vec<JavaType>,
     pub arg_coercions: Vec<JavaCoercionEvidence>,
 }
 

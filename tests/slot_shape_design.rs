@@ -3408,6 +3408,39 @@ fn callable_analysis_shell_reaches_lowering_context() {
 }
 
 #[test]
+fn typed_external_argument_effects_preserve_concrete_source_parameter_shape() {
+    let signature_source = include_str!("../src/signature.rs");
+    let helper = signature_source
+        .split("fn external_argument_effect_constraints_for_binding")
+        .nth(1)
+        .and_then(|tail| tail.split("fn external_ffi_handover_for_call_arg").next())
+        .expect("external argument effect binding helper should be present");
+
+    assert!(helper.contains("java_types_have_same_signature_boundary_identity"));
+    assert!(helper.contains("SignatureConstraint::RequiredDispatch(DispatchShape::Concrete)"));
+    assert!(helper.contains("SignatureConstraint::RequiredView(ViewShape::Native)"));
+    assert!(helper.contains("!is_declared_java_object_type"));
+}
+
+#[test]
+fn resolved_unknown_source_calls_can_propagate_signature_constraints() {
+    let signature_source = include_str!("../src/signature.rs");
+    let propagation = signature_source
+        .split("fn propagate_call_site_constraints")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn propagate_constructor_call_site_constraints")
+                .next()
+        })
+        .expect("method call-site propagation should be present");
+
+    assert!(propagation.contains("let Some(resolved) = &call_site.resolved"));
+    assert!(propagation.contains("constraints.methods.get(&callee_key)"));
+    assert!(propagation.contains("resolved_source_call_propagates_signature_constraints"));
+    assert!(propagation.contains("CallArgumentBoundary::Unknown"));
+}
+
+#[test]
 fn callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating() {
     let lower_source = include_str!("../src/lower.rs");
     let signature_source = include_str!("../src/signature.rs");
@@ -8589,6 +8622,7 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
         rust_name: "make".to_string(),
         return_type: JavaType::Primitive(PrimitiveType::Int),
         kind: new_java2rust::java_ir::CallKind::Static,
+        arg_target_types: Vec::new(),
         arg_coercions: Vec::new(),
     };
     assert!(matches!(
@@ -8614,6 +8648,7 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
         rust_name: "get_protobuf_vid_mapping_from_json_file".to_string(),
         return_type: JavaType::Unknown("GenomicsDBVidMapProto.VidMappingPB".to_string()),
         kind: new_java2rust::java_ir::CallKind::Static,
+        arg_target_types: Vec::new(),
         arg_coercions: Vec::new(),
     };
     assert!(matches!(
@@ -8648,6 +8683,7 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
         rust_name: "read_name".to_string(),
         return_type: JavaType::String,
         kind: new_java2rust::java_ir::CallKind::Instance,
+        arg_target_types: Vec::new(),
         arg_coercions: Vec::new(),
     };
     let target = plan_call_target(Some(&receiver), "readName", Some(&resolved_instance));
@@ -8707,6 +8743,7 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
         rust_name: "println".to_string(),
         kind: CallKind::Instance,
         return_type: JavaType::Void,
+        arg_target_types: Vec::new(),
         arg_coercions: Vec::new(),
     };
     let resolved_println_target = plan_call_target_with_facts_and_arity(
@@ -9487,6 +9524,7 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
         rust_name: "equals".to_string(),
         kind: new_java2rust::java_ir::CallKind::Instance,
         return_type: JavaType::Primitive(PrimitiveType::Boolean),
+        arg_target_types: Vec::new(),
         arg_coercions: Vec::new(),
     };
     let value_receiver = Expr::Var("left".to_string());
@@ -10214,6 +10252,7 @@ class Uses {
         rust_name: echo.rust_name.clone().unwrap(),
         return_type: JavaType::String,
         kind: new_java2rust::java_ir::CallKind::Instance,
+        arg_target_types: Vec::new(),
         arg_coercions: Vec::new(),
     };
     let constructor = new_java2rust::java_ir::ResolvedConstructor {
@@ -12995,6 +13034,7 @@ fn call_plan_owns_trivial_accessor_call_selection_before_lowering() {
         rust_name: "get_value".to_string(),
         return_type: JavaType::Primitive(PrimitiveType::Int),
         kind: new_java2rust::java_ir::CallKind::Instance,
+        arg_target_types: Vec::new(),
         arg_coercions: Vec::new(),
     };
     let resolved_setter = new_java2rust::java_ir::ResolvedCall {
@@ -13002,6 +13042,7 @@ fn call_plan_owns_trivial_accessor_call_selection_before_lowering() {
         rust_name: "set_value".to_string(),
         return_type: JavaType::Void,
         kind: new_java2rust::java_ir::CallKind::Instance,
+        arg_target_types: Vec::new(),
         arg_coercions: Vec::new(),
     };
     let mut facts = FactSet::default();
@@ -27909,6 +27950,7 @@ fn exception_lowering_policy_owns_result_support_ok_and_err_shapes() {
         rust_name: "read".to_string(),
         kind: new_java2rust::java_ir::CallKind::Instance,
         return_type: JavaType::Void,
+        arg_target_types: Vec::new(),
         arg_coercions: Vec::new(),
     };
     let mut call_facts = FactSet::default();
@@ -27942,6 +27984,7 @@ fn exception_lowering_policy_owns_result_support_ok_and_err_shapes() {
             name: "Header".to_string(),
             args: Vec::new(),
         },
+        arg_target_types: Vec::new(),
         arg_coercions: Vec::new(),
     };
     call_facts.method_effect_facts.push(MethodEffectFact {

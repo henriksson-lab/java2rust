@@ -10073,20 +10073,20 @@ fn lower_expr_with_refinements(
                 ctx,
             )
             .or_else(|| {
-                source_context_static_method_fallback_signature(
-                    receiver.as_deref(),
-                    name,
-                    args,
-                    env,
-                    ctx,
-                )
-            })
-            .or_else(|| {
                 source_context_resolved_static_method_fallback_signature(
                     receiver.as_deref(),
                     name,
                     args,
                     resolved.as_ref(),
+                    env,
+                    ctx,
+                )
+            })
+            .or_else(|| {
+                source_context_static_method_fallback_signature(
+                    receiver.as_deref(),
+                    name,
+                    args,
                     env,
                     ctx,
                 )
@@ -10217,14 +10217,15 @@ fn lower_expr_with_refinements(
                 ctx,
                 fallback_signature.as_ref(),
             );
-            let arg_plan = emitted_call_target_signature_arg_plan(
-                &target,
-                receiver.as_deref(),
-                args,
-                env,
-                ctx,
-            )
-            .unwrap_or(arg_plan);
+            let arg_plan = if context_fallback_signature
+                .as_ref()
+                .is_some_and(|signature| signature.arg_shapes_are_authoritative)
+            {
+                arg_plan
+            } else {
+                emitted_call_target_signature_arg_plan(&target, receiver.as_deref(), args, env, ctx)
+                    .unwrap_or(arg_plan)
+            };
             let arg_plan = apply_static_value_of_string_name_arg_slot(
                 arg_plan,
                 receiver.as_deref(),
@@ -13033,7 +13034,10 @@ fn source_context_borrowed_param_shape(
     if matches!(java_ty, JavaType::String) {
         shape = apply_signature_constraints(
             shape,
-            &[SignatureConstraint::RequiredView(ViewShape::Str)],
+            &[
+                SignatureConstraint::RequiredDispatch(DispatchShape::Concrete),
+                SignatureConstraint::RequiredView(ViewShape::Str),
+            ],
         );
     }
     shape
@@ -18466,6 +18470,26 @@ fn lower_expr_for_slot_with_refinements(
     {
         return expr;
     }
+    if let Some(constructor_expr) =
+        lower_source_constructor_expr_for_concrete_slot(expr, env, &slot, ctx)
+    {
+        return constructor_expr;
+    }
+    if let Some(constructor_expr) =
+        lower_external_crate_constructor_expr_for_slot(expr, env, &slot, ctx, refinements)
+    {
+        return constructor_expr;
+    }
+    if let Some(constructor_expr) =
+        lower_external_constructor_expr_for_concrete_slot(expr, env, &slot, ctx, refinements)
+    {
+        return constructor_expr;
+    }
+    if let Some(expr) =
+        lower_erased_object_cast_for_concrete_slot(expr, env, &slot, ctx, refinements)
+    {
+        return expr;
+    }
     if let Some(expr) = lower_erased_object_cast_for_erased_slot(expr, env, &slot, ctx, refinements)
     {
         return expr;
@@ -18623,21 +18647,6 @@ fn lower_expr_for_slot_with_refinements(
         } else {
             lowered
         };
-    }
-    if let Some(constructor_expr) =
-        lower_source_constructor_expr_for_concrete_slot(expr, env, &slot, ctx)
-    {
-        return constructor_expr;
-    }
-    if let Some(constructor_expr) =
-        lower_external_crate_constructor_expr_for_slot(expr, env, &slot, ctx, refinements)
-    {
-        return constructor_expr;
-    }
-    if let Some(constructor_expr) =
-        lower_external_constructor_expr_for_concrete_slot(expr, env, &slot, ctx, refinements)
-    {
-        return constructor_expr;
     }
     if let Expr::Lambda { params, body } = expr
         && let Some(return_shape) = callback_result_shape_from_functional_slot(&slot, ctx)
@@ -20174,6 +20183,52 @@ fn lower_erased_object_cast_for_erased_slot(
     if !java_type_is_erased_object_name(ty)
         || !(slot_targets_erased_object_type(slot) || matches!(slot, Slot::Value))
     {
+        return None;
+    }
+    Some(lower_expr_for_slot_with_refinements(
+        inner,
+        env,
+        slot.clone(),
+        ctx,
+        refinements,
+    ))
+}
+
+fn lower_erased_object_cast_for_concrete_slot(
+    expr: &Expr,
+    env: &ShapeEnv,
+    slot: &Slot,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    let Expr::Cast { ty, expr: inner } = expr else {
+        return None;
+    };
+    if !java_type_is_erased_object_name(ty) {
+        return None;
+    }
+    let target = slot_target_shape(slot)?;
+    if matches!(target.dispatch, DispatchShape::ErasedObject)
+        || matches!(target.view, ViewShape::ErasedObjectView)
+    {
+        return None;
+    }
+    let target_ty = target
+        .optional_element_type()
+        .unwrap_or_else(|| target.java_ty.clone());
+    let inner_shape = infer_expr_shape_with_context(
+        inner,
+        env,
+        ExprShapeContext {
+            signatures: Some(ctx.signatures),
+            representations: Some(ctx.representations),
+            facts: Some(ctx.facts),
+        },
+    );
+    let inner_ty = inner_shape
+        .optional_element_type()
+        .unwrap_or_else(|| inner_shape.java_ty.clone());
+    if !same_concrete_java_type(&target_ty, &inner_ty) {
         return None;
     }
     Some(lower_expr_for_slot_with_refinements(
@@ -22506,6 +22561,8 @@ fn source_context_static_method_fallback_signature(
         if matching_methods.is_empty() {
             continue;
         }
+        let declared_method = unique_method_matching_known_arg_types(&matching_methods, &arg_types)
+            .or_else(|| (matching_methods.len() == 1).then_some(matching_methods[0]));
         if static_context_owner_is_emitted(&owner, ctx) {
             let isolated_program = Program {
                 package: ctx.support_local_type_program.package.clone(),
@@ -22573,14 +22630,16 @@ fn source_context_static_method_fallback_signature(
         {
             return Some(ContextFallbackMethodSignature {
                 rust_name,
-                arg_shapes: non_emitted_static_context_arg_shapes_from_signature(signature),
+                arg_shapes: declared_method
+                    .map(|method| non_emitted_static_context_arg_shapes_for_method(method, ctx))
+                    .unwrap_or_else(|| {
+                        non_emitted_static_context_arg_shapes_from_signature(signature)
+                    }),
                 receiver: signature.receiver,
                 arg_shapes_are_authoritative: true,
             });
         }
-        let Some(method) = unique_method_matching_known_arg_types(&matching_methods, &arg_types)
-            .or_else(|| (matching_methods.len() == 1).then_some(matching_methods[0]))
-        else {
+        let Some(method) = declared_method else {
             continue;
         };
         let rust_name = method
@@ -22589,11 +22648,7 @@ fn source_context_static_method_fallback_signature(
             .unwrap_or_else(|| crate::parser::to_snake_case(&method.name));
         return Some(ContextFallbackMethodSignature {
             rust_name: rust_name.clone(),
-            arg_shapes: ctx
-                .signatures
-                .method_signature_by_rust_name(&owner, &rust_name)
-                .map(non_emitted_static_context_arg_shapes_from_signature)
-                .unwrap_or_else(|| non_emitted_static_context_arg_shapes_for_method(method, ctx)),
+            arg_shapes: non_emitted_static_context_arg_shapes_for_method(method, ctx),
             receiver: ctx
                 .signatures
                 .method_signature_by_rust_name(&owner, &rust_name)
@@ -22613,14 +22668,16 @@ fn source_context_resolved_static_method_fallback_signature(
     env: &ShapeEnv,
     ctx: LowerCtx,
 ) -> Option<ContextFallbackMethodSignature> {
-    if receiver.is_some() {
-        return None;
-    }
     let resolved = resolved?;
     if resolved.kind != CallKind::Static {
         return None;
     }
     let owner = &resolved.declaring_type;
+    if let Some(receiver) = receiver
+        && !explicit_static_receiver_matches_resolved_owner(receiver, owner, env, ctx)
+    {
+        return None;
+    }
     let ty = find_context_type_by_key(ctx.program, owner)
         .or_else(|| find_context_type_by_key(ctx.support_local_type_program, owner))
         .or_else(|| find_context_type_by_key(ctx.source_summary_type_program, owner))?;
@@ -22692,7 +22749,11 @@ fn source_context_resolved_static_method_fallback_signature(
                     .map(|param| param.shape.clone())
                     .collect()
             } else {
-                non_emitted_static_context_arg_shapes_from_signature(signature)
+                resolved_source_method
+                    .map(|method| non_emitted_static_context_arg_shapes_for_method(method, ctx))
+                    .unwrap_or_else(|| {
+                        non_emitted_static_context_arg_shapes_from_signature(signature)
+                    })
             },
             receiver: signature.receiver,
             arg_shapes_are_authoritative: true,
@@ -22707,6 +22768,28 @@ fn source_context_resolved_static_method_fallback_signature(
         });
     }
     None
+}
+
+fn explicit_static_receiver_matches_resolved_owner(
+    receiver: &Expr,
+    owner: &str,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> bool {
+    let Expr::Var(receiver_name) = receiver else {
+        return false;
+    };
+    if env.local_type(receiver_name).is_some() || env.field_type(receiver_name).is_some() {
+        return false;
+    }
+    env.type_env()
+        .static_type_alias(receiver_name)
+        .is_some_and(|alias| context_type_key_matches(alias, owner))
+        || context_type_key_matches(receiver_name, owner)
+        || find_context_type_by_key(ctx.program, receiver_name)
+            .or_else(|| find_context_type_by_key(ctx.support_local_type_program, receiver_name))
+            .or_else(|| find_context_type_by_key(ctx.source_summary_type_program, receiver_name))
+            .is_some_and(|ty| context_type_key_matches(&ty.name, owner))
 }
 
 fn non_emitted_static_context_fallback_signature_for_method(
@@ -22762,8 +22845,25 @@ fn non_emitted_static_context_arg_shape(
         && source_context_reference_param_should_borrow(java_ty, is_varargs)
     {
         shape = source_context_borrowed_param_shape(shape, java_ty);
+        if !matches!(java_ty, JavaType::String) && !context_param_is_declared_java_object(java_ty) {
+            shape = apply_signature_constraints(
+                shape,
+                &[
+                    SignatureConstraint::RequiredDispatch(DispatchShape::Concrete),
+                    SignatureConstraint::RequiredView(ViewShape::Native),
+                ],
+            );
+        }
     }
     shape
+}
+
+fn context_param_is_declared_java_object(java_ty: &JavaType) -> bool {
+    matches!(
+        java_ty,
+        JavaType::Named { name, .. } | JavaType::Unknown(name)
+            if name == "Object" || name == "java.lang.Object"
+    )
 }
 
 fn source_context_current_static_method_fallback_signature(

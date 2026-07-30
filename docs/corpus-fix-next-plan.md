@@ -52,6 +52,12 @@ complete, and mention the move in the checkpoint notes or commit summary. Leave
 partial, exploratory, or inspiration-only audit files in `claude_audits/` until
 the mapped issue is fully closed.
 
+2026-07-31 reminder: audit issue files are not just notes. When a follow-up
+finishes one of them, the same patch/commit should move that exact file from
+`claude_audits/` into
+`/home/mahogny/github/claude/new_java2rust/claude_audits/done`; otherwise the
+audit remains open.
+
 2026-07-30 constant-fact checkpoint: external field facts can now carry explicit
 Rust constant values from manifests via `value=...`, and built-in HTSJDK/VCF/SAM
 packs provide values for the corpus-visible integer, boolean, and double
@@ -169,6 +175,14 @@ Known remaining clusters from the same full boundary run:
   planning runs. Fix this in signature/source-summary type resolution so known
   external facade parameter types stay concrete or borrowed, rather than with
   call-site-only normalization.
+- 2026-07-31 typed external argument constraint checkpoint: typed external
+  argument effect facts now preserve concrete/native dispatch for matching
+  non-`Object` source parameters while still applying borrowed or mutable-borrow
+  ownership. Resolved source calls whose callee signature is present now also
+  propagate callee parameter constraints even when the original call boundary
+  was labelled unknown, so the `FallbackStaticMutBorrowArgument` pattern can
+  carry an external mutating API fact through a source static helper instead of
+  leaving the caller parameter as erased object.
 - Source/interface compatibility: fallible trait implementation signatures,
   async template super/interface satisfaction, source enum constant slot
   projection, and swing/component facade upcasts remain separate clusters.

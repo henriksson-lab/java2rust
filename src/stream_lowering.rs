@@ -1,4 +1,4 @@
-use crate::call_plan::native_java_instance_receiver_type_hint;
+use crate::call_plan::{native_java_instance_receiver_type_hint, resolved_call_arg_target_type};
 use crate::coercion::{
     BorrowProjectionUse, IndexToUsizeProjection, LoweredExpr, SequenceIterationProjection,
     StreamLambdaParamProjection, apply_borrowed_string_view_projection, apply_clone_projection,
@@ -2305,14 +2305,9 @@ fn emit_stream_lambda_call_args_for_resolved(
                     })
                     .or_else(|| {
                         resolved
-                            .and_then(|resolved| {
-                                resolved
-                                    .arg_coercions
-                                    .iter()
-                                    .find(|coercion| coercion.arg_index == index)
-                            })
-                            .map(|coercion| {
-                                let slot = storage_shape_for_java_type(coercion.target.clone());
+                            .and_then(|resolved| resolved_call_arg_target_type(resolved, index))
+                            .map(|target| {
+                                let slot = storage_shape_for_java_type(target.clone());
                                 adapt_stream_lambda_arg_for_slot(
                                     arg,
                                     rendered.clone(),

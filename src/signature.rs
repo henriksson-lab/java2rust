@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use crate::call_plan::resolved_call_arg_target_type;
 use crate::effective_facts::EffectiveFacts;
 use crate::fact_saturation::{FiniteSaturationPolicy, SaturationStep};
 use crate::facts::{
@@ -1975,6 +1976,20 @@ fn add_call_argument_dependency_edges(
             },
             SignatureDependencyEdgeKind::UnknownBoundary,
         );
+        if let Some(callee_param) = callee_param
+            && resolved_source_call_propagates_signature_constraints(boundary)
+        {
+            add_signature_dependency_edge(
+                graph,
+                SignatureDependencyNode::CallArg {
+                    caller: caller.clone(),
+                    call_index,
+                    arg_index,
+                },
+                callee_param,
+                kind,
+            );
+        }
     } else if let Some(callee_param) = callee_param {
         add_signature_dependency_edge(graph, call_arg, callee_param, kind);
     }
@@ -2694,9 +2709,6 @@ fn propagate_call_site_constraints(
             continue;
         }
         for call_site in &method_usage.call_sites {
-            if call_site.boundary != CallArgumentBoundary::InternalSameType {
-                continue;
-            }
             let Some(resolved) = &call_site.resolved else {
                 continue;
             };
@@ -2704,48 +2716,92 @@ fn propagate_call_site_constraints(
                 type_name: resolved.declaring_type.clone(),
                 rust_name: resolved.rust_name.clone(),
             };
-            let Some(callee_constraints) = constraints.methods.get(&callee_key) else {
+            if !resolved_source_call_propagates_signature_constraints(call_site.boundary) {
                 continue;
-            };
-            if call_site.result_returned {
-                for constraint in &callee_constraints.return_constraints {
-                    if signature_shape_constraint_propagation_policy().allows(constraint) {
-                        pending.push((
-                            caller_key.clone(),
-                            String::new(),
-                            PendingSignatureConstraint::Return(constraint.clone()),
-                        ));
+            }
+            let callee_constraints = constraints.methods.get(&callee_key);
+            if let Some(callee_constraints) = callee_constraints {
+                if call_site.result_returned {
+                    for constraint in &callee_constraints.return_constraints {
+                        if signature_shape_constraint_propagation_policy().allows(constraint) {
+                            pending.push((
+                                caller_key.clone(),
+                                String::new(),
+                                PendingSignatureConstraint::Return(constraint.clone()),
+                            ));
+                        }
                     }
                 }
-            }
-            for binding in method_usage.bindings.values() {
-                for usage in &binding.uses {
-                    let BindingUse::PassedToCall {
-                        name,
-                        arg_index,
-                        boundary,
-                        ..
-                    } = usage
-                    else {
-                        continue;
-                    };
-                    if name != &call_site.name
-                        || *boundary != call_site.boundary
-                        || *arg_index >= callee_constraints.params.len()
-                    {
-                        continue;
+                for binding in method_usage.bindings.values() {
+                    for usage in &binding.uses {
+                        let BindingUse::PassedToCall {
+                            name,
+                            arg_index,
+                            boundary,
+                            ..
+                        } = usage
+                        else {
+                            continue;
+                        };
+                        if name != &call_site.name || *boundary != call_site.boundary {
+                            continue;
+                        }
+                        if *arg_index < callee_constraints.params.len() {
+                            for constraint in propagated_callee_param_constraints_for_binding(
+                                &callee_constraints.params[*arg_index],
+                                &binding.java_ty,
+                            ) {
+                                if signature_shape_constraint_propagation_policy()
+                                    .allows(constraint)
+                                    || matches!(constraint, SignatureConstraint::MutableBinding)
+                                {
+                                    pending.push((
+                                        caller_key.clone(),
+                                        binding.name.clone(),
+                                        PendingSignatureConstraint::Binding(constraint.clone()),
+                                    ));
+                                }
+                            }
+                        }
+                        for constraint in resolved_source_summary_arg_constraints(
+                            &call_site.resolved,
+                            *arg_index,
+                            &binding.java_ty,
+                        ) {
+                            if signature_shape_constraint_propagation_policy().allows(&constraint) {
+                                pending.push((
+                                    caller_key.clone(),
+                                    binding.name.clone(),
+                                    PendingSignatureConstraint::Binding(constraint),
+                                ));
+                            }
+                        }
                     }
-                    for constraint in propagated_callee_param_constraints_for_binding(
-                        &callee_constraints.params[*arg_index],
-                        &binding.java_ty,
-                    ) {
-                        if signature_shape_constraint_propagation_policy().allows(constraint)
-                            || matches!(constraint, SignatureConstraint::MutableBinding)
-                        {
+                }
+            } else {
+                for binding in method_usage.bindings.values() {
+                    for usage in &binding.uses {
+                        let BindingUse::PassedToCall {
+                            name,
+                            arg_index,
+                            boundary,
+                            ..
+                        } = usage
+                        else {
+                            continue;
+                        };
+                        if name != &call_site.name || *boundary != call_site.boundary {
+                            continue;
+                        }
+                        for constraint in resolved_source_summary_arg_constraints(
+                            &call_site.resolved,
+                            *arg_index,
+                            &binding.java_ty,
+                        ) {
                             pending.push((
                                 caller_key.clone(),
                                 binding.name.clone(),
-                                PendingSignatureConstraint::Binding(constraint.clone()),
+                                PendingSignatureConstraint::Binding(constraint),
                             ));
                         }
                     }
@@ -2773,6 +2829,44 @@ fn propagate_call_site_constraints(
     changed
 }
 
+fn resolved_source_call_propagates_signature_constraints(boundary: CallArgumentBoundary) -> bool {
+    matches!(
+        boundary,
+        CallArgumentBoundary::InternalSameType | CallArgumentBoundary::Unknown
+    )
+}
+
+fn resolved_source_summary_arg_constraints(
+    resolved: &Option<crate::java_ir::ResolvedCall>,
+    arg_index: usize,
+    binding_java_ty: &JavaType,
+) -> Vec<SignatureConstraint> {
+    let Some(target_ty) = resolved
+        .as_ref()
+        .and_then(|resolved| resolved_call_arg_target_type(resolved, arg_index))
+    else {
+        return Vec::new();
+    };
+    if !java_types_have_same_signature_boundary_identity(target_ty, binding_java_ty)
+        || is_declared_java_object_type(target_ty)
+        || matches!(target_ty, JavaType::Primitive(_) | JavaType::Void)
+    {
+        return Vec::new();
+    }
+    if matches!(target_ty, JavaType::String) {
+        return vec![
+            SignatureConstraint::RequiredOwnership(OwnershipShape::SharedBorrow),
+            SignatureConstraint::RequiredDispatch(DispatchShape::Concrete),
+            SignatureConstraint::RequiredView(ViewShape::Str),
+        ];
+    }
+    vec![
+        SignatureConstraint::RequiredOwnership(OwnershipShape::SharedBorrow),
+        SignatureConstraint::RequiredDispatch(DispatchShape::Concrete),
+        SignatureConstraint::RequiredView(ViewShape::Native),
+    ]
+}
+
 fn propagate_constructor_call_site_constraints(
     constraints: &mut SignatureConstraintState,
     usage: &UsageFacts,
@@ -2791,9 +2885,6 @@ fn propagate_constructor_call_site_constraints(
             continue;
         }
         for call_site in &constructor_usage.call_sites {
-            if call_site.boundary != CallArgumentBoundary::InternalSameType {
-                continue;
-            }
             let Some(resolved) = &call_site.resolved else {
                 continue;
             };
@@ -2804,6 +2895,9 @@ fn propagate_constructor_call_site_constraints(
             let Some(callee_constraints) = constraints.methods.get(&callee_key) else {
                 continue;
             };
+            if !resolved_source_call_propagates_signature_constraints(call_site.boundary) {
+                continue;
+            }
             for binding in constructor_usage.bindings.values() {
                 for usage in &binding.uses {
                     let BindingUse::PassedToCall {
@@ -2879,6 +2973,9 @@ fn propagate_resolved_source_mutable_argument_binding_constraints(
             let Some(callee_constraints) = constraints.methods.get(&callee_key) else {
                 continue;
             };
+            if !resolved_source_call_propagates_signature_constraints(call_site.boundary) {
+                continue;
+            }
             for binding in method_usage.bindings.values() {
                 for usage in &binding.uses {
                     let BindingUse::PassedToCall {
@@ -3151,9 +3248,6 @@ fn propagate_call_argument_constraints_to_callees(
             continue;
         }
         for call_site in &method_usage.call_sites {
-            if call_site.boundary != CallArgumentBoundary::InternalSameType {
-                continue;
-            }
             let Some(resolved) = &call_site.resolved else {
                 continue;
             };
@@ -3164,6 +3258,9 @@ fn propagate_call_argument_constraints_to_callees(
             let Some(callee_constraints) = constraints.methods.get(&callee_key) else {
                 continue;
             };
+            if !resolved_source_call_propagates_signature_constraints(call_site.boundary) {
+                continue;
+            }
             for binding in method_usage.bindings.values() {
                 for usage in &binding.uses {
                     let BindingUse::PassedToCall {
@@ -3238,9 +3335,6 @@ fn propagate_constructor_call_argument_constraints_to_callees(
             continue;
         }
         for call_site in &constructor_usage.call_sites {
-            if call_site.boundary != CallArgumentBoundary::InternalSameType {
-                continue;
-            }
             let Some(resolved) = &call_site.resolved else {
                 continue;
             };
@@ -3251,6 +3345,9 @@ fn propagate_constructor_call_argument_constraints_to_callees(
             let Some(callee_constraints) = constraints.methods.get(&callee_key) else {
                 continue;
             };
+            if !resolved_source_call_propagates_signature_constraints(call_site.boundary) {
+                continue;
+            }
             for binding in constructor_usage.bindings.values() {
                 for usage in &binding.uses {
                     let BindingUse::PassedToCall {
@@ -10391,7 +10488,21 @@ fn external_argument_effect_constraints_for_binding(
             external_parameter_nullability_policy(effect.parameter_nullability),
         )];
     }
-    external_argument_effect_constraints(effect)
+    let mut constraints = external_argument_effect_constraints(effect);
+    if effect.parameter_type.as_ref().is_some_and(|parameter_ty| {
+        java_types_have_same_signature_boundary_identity(parameter_ty, binding_java_ty)
+            && !is_declared_java_object_type(parameter_ty)
+            && !matches!(parameter_ty, JavaType::String)
+    }) {
+        push_unique_signature_constraints(
+            &mut constraints,
+            &[
+                SignatureConstraint::RequiredDispatch(DispatchShape::Concrete),
+                SignatureConstraint::RequiredView(ViewShape::Native),
+            ],
+        );
+    }
+    constraints
 }
 
 fn external_ffi_handover_for_call_arg<'a>(
@@ -10439,6 +10550,9 @@ pub fn external_argument_effect_constraints(
         ExternalArgumentAliasPolicy::Borrowed if java_ty == JavaType::String => {
             constraints.push(SignatureConstraint::RequiredOwnership(
                 OwnershipShape::SharedBorrow,
+            ));
+            constraints.push(SignatureConstraint::RequiredDispatch(
+                DispatchShape::Concrete,
             ));
             constraints.push(SignatureConstraint::RequiredView(ViewShape::Str));
         }
