@@ -537,6 +537,25 @@ class SwitchExpressionUnsupported {
     );
 }
 
+#[test]
+fn parser_required_child_fallbacks_do_not_emit_plausible_raw_placeholders() {
+    let parser_source = std::fs::read_to_string("src/parser.rs").unwrap();
+    for placeholder in [
+        "Expr::Raw(\"true\".to_string())",
+        "Expr::Raw(\"0\".to_string())",
+        "Expr::Raw(\"()\".to_string())",
+        "Expr::Raw(\"array\".to_string())",
+        "Expr::Raw(\"/* missing iterable */\".to_string())",
+        "Expr::Raw(\"/* missing switch selector */\".to_string())",
+        "Expr::Raw(\"/* missing instanceof lhs */\".to_string())",
+    ] {
+        assert!(
+            !parser_source.contains(placeholder),
+            "parser should use Expr::Unsupported for {placeholder}"
+        );
+    }
+}
+
 fn method_body<'a>(
     ty: &'a new_java2rust::java_ir::TypeDecl,
     rust_name: &str,

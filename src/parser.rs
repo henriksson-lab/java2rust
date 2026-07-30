@@ -1719,7 +1719,7 @@ fn parse_if_node(node: tree_sitter::Node, source: &str, diagnostics: &mut Diagno
         condition: node
             .child_by_field_name("condition")
             .map(|condition| parse_condition_node(condition, source))
-            .unwrap_or_else(|| Expr::Raw("true".to_string())),
+            .unwrap_or_else(|| unsupported_expr_node(node, "if_statement without condition")),
         then_block: node
             .child_by_field_name("consequence")
             .map(|stmt| statement_as_block(stmt, source, diagnostics))
@@ -1739,7 +1739,7 @@ fn parse_while_node(
         condition: node
             .child_by_field_name("condition")
             .map(|condition| parse_condition_node(condition, source))
-            .unwrap_or_else(|| Expr::Raw("true".to_string())),
+            .unwrap_or_else(|| unsupported_expr_node(node, "while_statement without condition")),
         body: node
             .child_by_field_name("body")
             .map(|stmt| statement_as_block(stmt, source, diagnostics))
@@ -1761,7 +1761,7 @@ fn parse_do_while_node(
         condition: node
             .child_by_field_name("condition")
             .map(|condition| parse_condition_node(condition, source))
-            .unwrap_or_else(|| Expr::Raw("true".to_string())),
+            .unwrap_or_else(|| unsupported_expr_node(node, "do_statement without condition")),
         label: None,
     }
 }
@@ -1821,7 +1821,9 @@ fn parse_enhanced_for_node(
         iterable: node
             .child_by_field_name("value")
             .map(|node| parse_expr_node(node, source))
-            .unwrap_or_else(|| Expr::Raw("/* missing iterable */".to_string())),
+            .unwrap_or_else(|| {
+                unsupported_expr_node(node, "enhanced_for_statement without iterable")
+            }),
         body: node
             .child_by_field_name("body")
             .map(|stmt| statement_as_block(stmt, source, diagnostics))
