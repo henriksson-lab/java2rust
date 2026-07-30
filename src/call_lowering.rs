@@ -175,6 +175,14 @@ fn apply_super_boundary_call(return_type: &JavaType, propagates_result: bool) ->
     match (return_type, propagates_result) {
         (JavaType::Void, true) => RustExpr::Raw("Ok(())".to_string()),
         (JavaType::Void, false) => RustExpr::Raw("()".to_string()),
+        (JavaType::Primitive(PrimitiveType::Boolean), _) => RustExpr::Literal("false".to_string()),
+        (JavaType::Primitive(PrimitiveType::Char), _) => RustExpr::Literal("'\\0'".to_string()),
+        (JavaType::Primitive(PrimitiveType::Byte), _)
+        | (JavaType::Primitive(PrimitiveType::Short), _)
+        | (JavaType::Primitive(PrimitiveType::Int), _) => RustExpr::Literal("0".to_string()),
+        (JavaType::Primitive(PrimitiveType::Long), _) => RustExpr::Literal("0i64".to_string()),
+        (JavaType::Primitive(PrimitiveType::Float), _) => RustExpr::Literal("0.0f32".to_string()),
+        (JavaType::Primitive(PrimitiveType::Double), _) => RustExpr::Literal("0.0f64".to_string()),
         _ => RustExpr::Raw("Default::default()".to_string()),
     }
 }

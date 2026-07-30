@@ -10211,6 +10211,49 @@ mod generated_tests {
 }
 
 #[test]
+fn negated_boolean_super_boundary_call_uses_typed_default() {
+    let caller = r#"
+class NegatedSuperEqualsCaller extends SummaryEqualsBase {
+    boolean same(Object o) {
+        if (!super.equals(o)) {
+            return false;
+        }
+        return true;
+    }
+}
+"#;
+    let summary = r#"
+class SummaryEqualsBase {
+    public boolean equals(Object o) {
+        return true;
+    }
+}
+"#;
+    let translation = translate_source_with_context_summary_sources(
+        caller,
+        &[summary.to_string()],
+        &FactSet::default(),
+    );
+
+    assert!(
+        translation.rust.contains("if !false {")
+            && !translation.rust.contains("!Default::default()")
+            && !translation.rust.contains("super."),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "negated_super_equals_boundary",
+        vec![GeneratedCrateModule {
+            name: "negated_super_equals_boundary",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn summary_context_translation_resolves_sibling_symbols_without_lowering_bodies() {
     let caller = r#"
 class SummaryContextCaller {
@@ -16501,6 +16544,65 @@ class FallbackSwitchTrailingBreakIsUnitTyped {
             && !translation.rust.contains("break 'java_switch;"),
         "{}",
         translation.rust
+    );
+}
+
+#[test]
+fn switch_assignment_with_default_fallthrough_lowers_to_match_assignment() {
+    let translation = translate_source(
+        r#"
+class SwitchAssignmentWithDefaultFallthrough {
+    enum CountType {
+        A,
+        R,
+        INTEGER
+    }
+
+    int encode(CountType countType, int count) {
+        int number;
+        switch (countType) {
+            case A:
+                number = 1;
+                break;
+            case R:
+                number = 2;
+                break;
+            case INTEGER:
+            default:
+                number = count;
+        }
+        return number;
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation.rust.contains("number = match count_type {")
+            && translation
+                .rust
+                .contains("SwitchAssignmentWithDefaultFallthroughCountType::A => 1")
+            && translation
+                .rust
+                .contains("SwitchAssignmentWithDefaultFallthroughCountType::INTEGER => count")
+            && translation.rust.contains("_ => count")
+            && !translation.rust.contains("__java_switch_matched"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "switch_assignment_with_default_fallthrough",
+        vec![GeneratedCrateModule {
+            name: "switch_assignment_with_default_fallthrough",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 

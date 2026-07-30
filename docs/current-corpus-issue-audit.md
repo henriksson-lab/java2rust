@@ -1449,6 +1449,19 @@ restored method bodies expose real generic-bound/source-hierarchy gaps:
 (`get_i_d`, `get_count_type`, `is_fixed_count`, `get_count`, `get_type`,
 `get_description`) and clone bounds.
 
+Reduced HTSJDK VCF follow-up:
+`.tmp/corpus-rerun-20260730-vcf-standard-bound-after-typed-super-defaults`
+translates the 9-file `.tmp/vcf-standard-bound-primary` subset and reduces
+generated Rust errors from the previous `17` to `11`. Switches whose arms assign
+one local with a default now lower to a `match` assignment, closing the three
+possibly-uninitialized `number` rows in the header-line `to_string_encoding`
+methods. Super-boundary fallback calls now render typed primitive defaults,
+closing the three `type annotations needed` rows from negated
+`super.equals(o)` calls. Remaining reduced-subset buckets are 5 mismatched
+types, 2 unsupported concrete `instanceof`, 2 unsupported `super(...)`
+inheritance constructor calls, and one `VCFHeader: Default` facade-support
+bound.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from

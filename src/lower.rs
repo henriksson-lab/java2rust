@@ -4575,7 +4575,9 @@ fn lower_stmt(
             refinements,
         )),
         Stmt::Switch { selector, cases } => {
-            if let Some(plan) = plan_simple_return_switch(selector, cases) {
+            if let Some(raw) = lower_switch_assignment(selector, cases, env, ctx) {
+                out.push(raw_stmt(raw));
+            } else if let Some(plan) = plan_simple_return_switch(selector, cases) {
                 out.push(raw_stmt(lower_simple_return_switch(
                     &plan,
                     env,
@@ -6154,6 +6156,158 @@ fn lower_switch(
         cases,
         fallback_switch_all_paths_return_or_throw(plan.cases),
     )
+}
+
+struct SwitchAssignmentPlan<'a> {
+    target: &'a Expr,
+    arms: Vec<SwitchAssignmentArm<'a>>,
+    default_value: &'a Expr,
+}
+
+struct SwitchAssignmentArm<'a> {
+    labels: Vec<SwitchCaseLabelPlan>,
+    value: &'a Expr,
+}
+
+fn lower_switch_assignment(
+    selector: &Expr,
+    cases: &[SwitchCase],
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<String> {
+    let assignment = plan_switch_assignment(cases)?;
+    let selector_ty = crate::types::infer_expr_type(selector, env.type_env());
+    let selector_shape = infer_expr_shape_with_context(
+        selector,
+        env,
+        ExprShapeContext {
+            signatures: Some(ctx.signatures),
+            representations: Some(ctx.representations),
+            facts: Some(ctx.facts),
+        },
+    );
+    let selector = lower_switch_match_selector(selector, env, ctx, &selector_ty);
+    let shape_ctx = ExprShapeContext {
+        signatures: Some(ctx.signatures),
+        representations: Some(ctx.representations),
+        facts: Some(ctx.facts),
+    };
+    let assignment_slot =
+        target_assignment_slot_with_current_type(assignment.target, env, ctx, shape_ctx);
+    let target = lower_expr(assignment.target, env, ctx);
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "{} = match {} {{\n",
+        crate::emit::emit_expr(&target),
+        crate::emit::emit_expr(&selector)
+    ));
+    for arm in assignment.arms {
+        let patterns = arm
+            .labels
+            .iter()
+            .filter_map(|label| {
+                switch_match_pattern(label, env, ctx, &selector_ty, &selector_shape)
+            })
+            .collect::<Vec<_>>();
+        if patterns.is_empty() {
+            continue;
+        }
+        let value = lower_switch_assignment_value(arm.value, env, assignment_slot.clone(), ctx);
+        out.push_str(&format!(
+            "    {} => {},\n",
+            patterns.join(" | "),
+            crate::emit::emit_expr(&value)
+        ));
+    }
+    let default_value =
+        lower_switch_assignment_value(assignment.default_value, env, assignment_slot, ctx);
+    out.push_str(&format!(
+        "    _ => {},\n",
+        crate::emit::emit_expr(&default_value)
+    ));
+    out.push_str("};");
+    Some(out)
+}
+
+fn lower_switch_assignment_value(
+    value: &Expr,
+    env: &ShapeEnv,
+    assignment_slot: Slot,
+    ctx: LowerCtx,
+) -> RustExpr {
+    let lowered = lower_expr_for_slot(value, env, assignment_slot.clone(), ctx);
+    let lowered = adapt_reused_owned_value_for_slot(lowered, value, &assignment_slot, env, ctx);
+    wrap_optional_assignment_value_if_needed(value, env, assignment_slot, lowered, ctx)
+}
+
+fn plan_switch_assignment(cases: &[SwitchCase]) -> Option<SwitchAssignmentPlan<'_>> {
+    if cases.is_empty() {
+        return None;
+    }
+
+    let mut target = None;
+    let mut arms = Vec::new();
+    let mut default_value = None;
+    let mut pending_labels = Vec::new();
+
+    for (index, case) in cases.iter().enumerate() {
+        pending_labels.extend(plan_switch_case(case).labels);
+        if case.statements.is_empty() {
+            continue;
+        }
+        let is_last_case = index + 1 == cases.len();
+        let (case_target, value) = switch_case_single_assignment(&case.statements, is_last_case)?;
+        if target
+            .as_ref()
+            .is_some_and(|existing| *existing != case_target)
+        {
+            return None;
+        }
+        target.get_or_insert(case_target);
+
+        let has_default = pending_labels
+            .iter()
+            .any(|label| matches!(label, SwitchCaseLabelPlan::Default));
+        let labels = pending_labels
+            .drain(..)
+            .filter(|label| !matches!(label, SwitchCaseLabelPlan::Default))
+            .collect::<Vec<_>>();
+        if has_default {
+            if default_value.replace(value).is_some() {
+                return None;
+            }
+            if !labels.is_empty() {
+                arms.push(SwitchAssignmentArm { labels, value });
+            }
+        } else {
+            if labels.is_empty() {
+                return None;
+            }
+            arms.push(SwitchAssignmentArm { labels, value });
+        }
+    }
+
+    if !pending_labels.is_empty() {
+        return None;
+    }
+
+    Some(SwitchAssignmentPlan {
+        target: target?,
+        arms,
+        default_value: default_value?,
+    })
+}
+
+fn switch_case_single_assignment(
+    statements: &[Stmt],
+    is_last_case: bool,
+) -> Option<(&Expr, &Expr)> {
+    match statements {
+        [Stmt::Assign { target, value }, Stmt::Break(None)] => Some((target, value)),
+        [Stmt::Assign { target, value }] if is_last_case => Some((target, value)),
+        _ => None,
+    }
 }
 
 fn fallback_switch_all_paths_return_or_throw(cases: &[SwitchCase]) -> bool {

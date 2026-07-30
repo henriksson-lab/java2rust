@@ -6586,17 +6586,39 @@ Reduced VCF reruns:
   checkout: it reports `external_field_provenance_uses_builtin_model_for_known_field_types`
   and `lowers_package_private_trivial_accessor_calls_as_field_access`, which
   should be triaged separately.
+- `.tmp/corpus-rerun-20260730-vcf-standard-bound-after-switch-assignment`:
+  9 files, 30.431s, 14 generated-Rust errors. Java switches whose executable
+  arms assign the same target and include a default arm now lower to a Rust
+  `match` assignment while still reusing the normal assignment slot-conversion
+  path. The three possibly-uninitialized `number` rows in
+  `VCFCompoundHeaderLine`, `VCFFormatHeaderLine`, and `VCFInfoHeaderLine`
+  disappeared; generated `to_string_encoding` methods now emit
+  `number = match self.count_type { ... }`.
+- `.tmp/corpus-rerun-20260730-vcf-standard-bound-after-typed-super-defaults`:
+  9 files, 30.139s, 11 generated-Rust errors. Super-boundary fallback calls now
+  render typed primitive placeholders when the resolved Java return type is
+  primitive, so negated boolean super calls lower as `!false` instead of
+  ambiguous `!Default::default()`. The three `type annotations needed` rows
+  from `!super.equals(o)` in the VCF header-line `equals` methods disappeared.
+  Focused verification passed:
+  `switch_assignment_with_default_fallthrough_lowers_to_match_assignment`,
+  `negated_boolean_super_boundary_call_uses_typed_default`,
+  `source_summary_super_calls_lower_to_boundary_defaults_not_raw_super_receiver`,
+  `cargo test switch --test idiom_gaps --quiet`, `cargo fmt --check`,
+  `cargo check --quiet`, `git diff --check`, and
+  `cargo build --release --quiet --bin new-java2rust`.
 
 Remaining top reduced-VCF clusters after this follow-up:
-5 mismatched types, 3 possibly-uninitialized `number`, 3 type annotations
-needed, 2 unsupported concrete `instanceof`, 2 unsupported `super(...)`
-inheritance constructor calls, and one `VCFHeader: Default` bound from erased
-return adaptation. The old missing-super-local `mapping` bucket,
-`v_c_f_header_line_translator` static-owner bucket, and same-arity source-super
-overload bucket are closed; the nested unchecked exception/result-shell bucket
-is also closed. The next reduced-VCF target should tackle concrete `instanceof`,
-unsupported source-super shapes that still require inheritance lowering, or the
-`number` definite-assignment gap.
+5 mismatched types, 2 unsupported concrete `instanceof`, 2 unsupported
+`super(...)` inheritance constructor calls, and one `VCFHeader: Default` bound
+from erased return adaptation. The old missing-super-local `mapping` bucket,
+`v_c_f_header_line_translator` static-owner bucket, same-arity source-super
+overload bucket, nested unchecked exception/result-shell bucket, switch
+definite-assignment bucket, and negated super-call type-inference bucket are
+closed. The next reduced-VCF target should tackle concrete `instanceof`,
+unsupported source-super shapes that still require inheritance lowering,
+generic/source hierarchy slot adaptation in `VCFStandardHeaderLines`, or the
+`VCFHeader: Default` facade-support gap.
 
 ## Rerun Protocol
 
