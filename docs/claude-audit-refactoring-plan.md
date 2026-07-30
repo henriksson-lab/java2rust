@@ -156,6 +156,9 @@ Landed in this batch:
 - Local integral `++`/`--` update expressions now use primitive-aware wrapping
   projections, including the Java char/u16 wraparound path, instead of Rust
   `+= 1`/`-= 1` in debug builds.
+- One-dimensional array compound assignments with side-effecting indices now
+  hoist the Java index once, save the old element value before evaluating the
+  RHS, and reuse the shared numeric binary/narrowing planners for writeback.
 
 1. Add a generated-Rust parse gate to focused corpus scripts.
    - Report parse failures separately from type-check errors.
@@ -444,6 +447,8 @@ Completion checklist for any audit marked `fixed locally`:
 - Note the move in the plan row and, when committing, in the commit summary.
 - Do not move partial or exploratory audit files.
 - Treat the audit as still open if its file remains outside `claude_audits/done`.
+- Do not mark an audit row as fully done unless the issue file has also been
+  moved to `claude_audits/done`.
 
 | Audit | Status | Plan owner |
 |---|---:|---|
@@ -472,7 +477,7 @@ Completion checklist for any audit marked `fixed locally`:
 | `0023` inner-class outer capture | open | Object reference representation |
 | `0024` numeric limit constants stubbed to zero | fixed locally | Moved to `claude_audits/done`; JDK wrapper/Math/GZIP/Font values fixed and unknown primitive constants now fail loudly |
 | `0025` interface default methods discarded | partial | Ordinary interface methods with parsed bodies now emit Rust trait default bodies, and implementors without overrides inherit them instead of getting missing-implementation panics; `Iface.super`, conflicting defaults, and private/static interface members remain open |
-| `0026` assignment evaluation order | partial | Simple statement-form and expression-form one-dimensional array assignments with side-effecting indices now hoist the index before RHS evaluation/readback; compound assignments, side-effecting receivers, and matrix/index-place generalization remain open |
+| `0026` assignment evaluation order | partial | Simple and compound statement/expression one-dimensional array assignments with side-effecting indices now hoist the index before RHS evaluation/readback, and compound paths save the old element before RHS evaluation; side-effecting receivers and matrix/index-place generalization remain open |
 | `0027` compound assignment narrowing | fixed locally | Moved to `claude_audits/done`; narrow primitive compound assignment casts back through the shared assignment-value hook |
 | `0028` reference equality | partial | Binary `String ==`/`!=` now emits `AUDIT(java-string-identity)` and lowering diagnostics report `java_string_identity`/`java_reference_identity_equality`; full object reference identity still waits on object representation |
 | `0029` static field mutation invalid Rust | fixed locally | Moved to `claude_audits/done`; static `++`/`--` now route through storage setters for current and qualified source statics |

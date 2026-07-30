@@ -8262,6 +8262,62 @@ mod generated_tests {
 }
 
 #[test]
+fn compound_array_assignment_with_side_effecting_index_preserves_java_order() {
+    let translation = translate_source(
+        r#"
+class CompoundAssignmentOrderArrayIndex {
+    int stmt(int[] a) {
+        int k = 0;
+        a[k++] += k;
+        return a[0];
+    }
+
+    int expr(int[] a) {
+        int k = 0;
+        return (a[k++] += k);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("let __java_assignment_index = { let __java_old_value = k; k = (k).wrapping_add(1); __java_old_value } as usize;")
+            && translation.rust.contains("let __java_assignment_old = a[__java_assignment_index];")
+            && translation
+                .rust
+                .contains("a[__java_assignment_index] = (__java_assignment_old).wrapping_add(k);")
+            && !translation.rust.contains("a[{ let __java_old_value = k;"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "compound_assignment_order_array_index",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn compound_array_assignment_index_runs_once() {
+        let fixture = CompoundAssignmentOrderArrayIndex {};
+        let mut values = vec![10, 20];
+        assert_eq!(fixture.stmt(&mut values), 11);
+        assert_eq!(values, vec![11, 20]);
+        values = vec![10, 20];
+        assert_eq!(fixture.expr(&mut values), 11);
+        assert_eq!(values, vec![11, 20]);
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
 fn chained_array_assignment_expression_returns_assigned_value() {
     let translation = translate_source(
         r#"

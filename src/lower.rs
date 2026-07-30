@@ -10946,6 +10946,28 @@ fn lower_ordered_array_index_assignment_value_expr(
         lower_write_sequence_receiver(array, env, ctx, refinements),
         temp_index.clone(),
     );
+    if let Some((old_value_stmt, assigned_value)) = lower_ordered_array_compound_assignment_value(
+        target,
+        value,
+        lowered_target.clone(),
+        env,
+        ctx,
+        refinements,
+        &assignment_slot,
+    ) {
+        let assigned_readback = indexed_expr(
+            lower_read_sequence_receiver(array, env, ctx, refinements),
+            temp_index,
+        );
+        return Some(RustExpr::Raw(format!(
+            "{{ let __java_assignment_index = {}; {}; {} = {}; {} }}",
+            emit::emit_expr(&lowered_index),
+            old_value_stmt,
+            emit::emit_expr(&lowered_target),
+            emit::emit_expr(&assigned_value),
+            emit::emit_expr(&assigned_readback),
+        )));
+    }
     let lowered_value =
         lower_assignment_value_for_slot(target, value, env, &assignment_slot, ctx, refinements);
     let lowered_value =
@@ -10985,6 +11007,23 @@ fn lower_ordered_array_index_assignment_stmt(
         lower_write_sequence_receiver(array, env, ctx, refinements),
         RustExpr::Raw("__java_assignment_index".to_string()),
     );
+    if let Some((old_value_stmt, assigned_value)) = lower_ordered_array_compound_assignment_value(
+        target,
+        value,
+        lowered_target.clone(),
+        env,
+        ctx,
+        refinements,
+        &assignment_slot,
+    ) {
+        return Some(RustStmt::Raw(format!(
+            "{{\n    let __java_assignment_index = {};\n    {};\n    {} = {};\n}}",
+            emit::emit_expr(&lowered_index),
+            old_value_stmt,
+            emit::emit_expr(&lowered_target),
+            emit::emit_expr(&assigned_value),
+        )));
+    }
     let lowered_value =
         lower_assignment_value_for_slot(target, value, env, &assignment_slot, ctx, refinements);
     let lowered_value =
@@ -10997,6 +11036,50 @@ fn lower_ordered_array_index_assignment_stmt(
         emit::emit_expr(&lowered_target),
         emit::emit_expr(&assigned_value),
     )))
+}
+
+fn lower_ordered_array_compound_assignment_value(
+    target: &Expr,
+    value: &Expr,
+    lowered_target: RustExpr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+    assignment_slot: &Slot,
+) -> Option<(String, RustExpr)> {
+    let (op, rhs) = compound_assignment_parts(target, value)?;
+    let target_shape = slot_target_shape(assignment_slot)?;
+    let JavaType::Primitive(target_primitive) = target_shape.java_ty else {
+        return None;
+    };
+    if !crate::types::is_numeric_primitive_type(target_primitive) {
+        return None;
+    }
+    let old_value = RustExpr::Raw("__java_assignment_old".to_string());
+    let rhs_ty = numeric_operand_java_type(rhs, env, ctx);
+    let plan = plan_numeric_binary_promotion(op, &JavaType::Primitive(target_primitive), &rhs_ty)?;
+    let rhs_value = lower_numeric_binary_operand(rhs, env, ctx, refinements);
+    let mut assigned_value = lower_numeric_binary_expr(op, old_value, rhs_value, plan);
+    if compound_assignment_target_needs_implicit_narrowing(target_primitive) {
+        assigned_value = primitive_narrowing_projection(assigned_value, target_primitive);
+    }
+    Some((
+        format!(
+            "let __java_assignment_old = {}",
+            emit::emit_expr(&lowered_target)
+        ),
+        assigned_value,
+    ))
+}
+
+fn compound_assignment_parts<'a>(target: &Expr, value: &'a Expr) -> Option<(BinaryOp, &'a Expr)> {
+    let Expr::Binary { op, left, right } = value else {
+        return None;
+    };
+    if !compound_assignment_arithmetic_op(*op) || left.as_ref() != target {
+        return None;
+    }
+    Some((*op, right))
 }
 
 fn array_assignment_receiver_is_simple(expr: &Expr) -> bool {
