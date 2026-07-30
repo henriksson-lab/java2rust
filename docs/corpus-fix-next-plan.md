@@ -292,8 +292,24 @@ rewrite or element lowering slot for this path. Focused coverage:
 `optional_present_construction_policy_records_indexed_borrow_source`,
 `optional_present_construction_policy_lives_in_conversion_plan`, and
 `optional_ternary`. Remaining cleanup targets are non-optional literals into
-optional borrowed args, the `normalize_owned_string_optional_argument`
-rendered-string postprocess, and map-get display/null projection paths.
+optional borrowed args and map-get display/null projection paths.
+
+2026-07-30 optional argument rendering cleanup: non-optional arguments flowing
+into optional target slots now lower the element through
+`OptionalPresentConstructionPlan` before clone recovery and `Some(...)`
+construction. The old `normalize_owned_string_optional_argument` rendered-string
+postprocess is gone. `adapt_optional_assignment_value_for_target` also preserves
+`None` through a structured `RustExpr::Var("None")` predicate instead of
+rendering the expression and comparing text. Focused coverage:
+`optional_assignment_adapter_preserves_structured_none_without_rendering`,
+`optional_assignment_rewrap_uses_optional_construction_plan`,
+`optional_present_construction_policy_lives_in_conversion_plan`,
+`source_static_call_uses_signature_shapes_for_nullable_args`,
+`reused_optional_borrowed_source_argument_wraps_by_reference`,
+`indexed_string_array_into_optional_borrowed_string_arg_borrows_element`, and
+`non_null_ternary_into_optional_borrowed_arg_wraps_planned_borrow`.
+Remaining cleanup targets are map-get display/null projection paths and the
+legacy raw `Some(...)` unwrapping bridge.
 
 2026-07-30 VCF source-hierarchy note: the ignored
 `source_hierarchy_instanceof_repair_keeps_supertype_slot_adapted` fixture still

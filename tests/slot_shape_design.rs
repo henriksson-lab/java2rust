@@ -14710,6 +14710,8 @@ fn optional_assignment_rewrap_uses_optional_construction_plan() {
     assert!(conversion_lowering_source.contains("unwrap_rendered_some_expr"));
     assert!(!source.contains("SlotConversionPlan::OptionalConstruction"));
     assert!(conversion_lowering_source.contains("SlotConversionPlan::OptionalConstruction"));
+    assert!(conversion_lowering_source.contains("fn rust_expr_is_none_value"));
+    assert!(!conversion_lowering_source.contains("emit_expr(&lowered_value) == \"None\""));
     assert!(!wrapper.contains("format!(\"Some({})\""), "{wrapper}");
 }
 
@@ -14730,6 +14732,7 @@ fn optional_present_construction_policy_lives_in_conversion_plan() {
     assert!(!helper.contains("optional_slot_construction_plan_for_actual"));
     assert!(!helper.contains("actual_element_shape.ownership = OwnershipShape::SharedBorrow"));
     assert!(!helper.contains("actual_element_shape = RustSlotShape::conservative"));
+    assert!(!lower_source.contains("fn normalize_owned_string_optional_argument"));
     assert!(conversion_source.contains("pub enum OptionalPresentConstructionSource"));
     assert!(conversion_source.contains("pub struct OptionalPresentConstructionPlan"));
 }

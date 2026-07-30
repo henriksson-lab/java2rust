@@ -14,7 +14,8 @@ use new_java2rust::coercion::{
     rust_expr_is_constructed_optional_value, rust_primitive_type_name_policy,
 };
 use new_java2rust::conversion_lowering::{
-    apply_lowered_slot_expr_conversion, apply_slot_expr_conversion,
+    adapt_optional_assignment_value_for_target, apply_lowered_slot_expr_conversion,
+    apply_slot_expr_conversion,
 };
 use new_java2rust::conversion_plan::{
     AssignmentValuePlan, BorrowedDynToOwnedBoxedDynRecoveryPolicy, BorrowedElementAdapterPolicy,
@@ -2287,6 +2288,33 @@ fn optional_present_construction_policy_records_indexed_borrow_source() {
     assert_eq!(
         plain.construction.element_shape.ownership,
         OwnershipShape::Owned
+    );
+}
+
+#[test]
+fn optional_assignment_adapter_preserves_structured_none_without_rendering() {
+    let facts = FactSet::default();
+    let actual = RustSlotShape::conservative(JavaType::String);
+    let target = RustSlotShape::conservative(optional_java_type(JavaType::String));
+    let conversion_plan = SlotExprConversionPlan {
+        actual: actual.clone(),
+        slot: Slot::Assignment(target.clone()),
+        conversion: SlotConversionPlan::OptionalConstruction(
+            optional_slot_construction_plan_for_actual(&actual, &target, &facts),
+        ),
+    };
+    let preconverted =
+        preconverted_optional_slot_construction_plan(&target, JavaType::String, &facts);
+
+    assert_eq!(
+        adapt_optional_assignment_value_for_target(
+            RustExpr::Var("None".to_string()),
+            actual,
+            conversion_plan,
+            preconverted,
+            false,
+        ),
+        RustExpr::Var("None".to_string())
     );
 }
 

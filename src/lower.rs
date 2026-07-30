@@ -16306,42 +16306,32 @@ fn lower_non_optional_argument_for_optional_target(
     if shape_is_erased_object_boundary(target_shape) {
         return None;
     }
-    let element_target =
-        optional_element_slot_shape_with_facts(target_shape, target_element_ty.clone(), ctx.facts);
-    let lowered = lower_expr_with_refinements(arg, env, ctx, &ExprRefinements::default());
+    let plan = optional_present_construction_plan_for_actual(
+        actual_shape,
+        target_shape,
+        target_element_ty.clone(),
+        OptionalPresentConstructionSource::Plain,
+        ctx.facts,
+    );
+    let lowered = lower_expr_for_slot(arg, env, plan.element_lowering_slot.clone(), ctx);
     let clone_recovery = if target_element_ty == JavaType::String
         && actual_shape.ownership == OwnershipShape::SharedBorrow
     {
         CloneRecoveryDecision::NoRecovery
     } else {
-        clone_recovery_decision_for_argument(arg, &element_target, Some(actual_shape), env, ctx)
+        clone_recovery_decision_for_argument(
+            arg,
+            &plan.construction.element_shape,
+            Some(actual_shape),
+            env,
+            ctx,
+        )
     };
     let recovered = apply_clone_recovery_decision(lowered, clone_recovery);
-    let wrapped =
-        planned_optional_value_for_target(recovered, actual_shape.clone(), target_shape, ctx.facts);
-    Some(normalize_owned_string_optional_argument(
-        wrapped,
-        target_shape,
+    Some(construct_optional_value_for_target(
+        recovered,
+        plan.construction,
     ))
-}
-
-fn normalize_owned_string_optional_argument(
-    expr: RustExpr,
-    target_shape: &RustSlotShape,
-) -> RustExpr {
-    if target_shape.ownership != OwnershipShape::Owned
-        || target_shape.optional_element_type() != Some(JavaType::String)
-    {
-        return expr;
-    }
-    let rendered = emit::emit_expr(&expr);
-    let Some(inner) = rendered
-        .strip_prefix("Some(")
-        .and_then(|inner| inner.strip_suffix(".as_str())"))
-    else {
-        return expr;
-    };
-    RustExpr::Raw(format!("Some({inner})"))
 }
 
 fn lower_optional_argument_for_borrowed_target(
