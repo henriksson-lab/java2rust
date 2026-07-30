@@ -21543,19 +21543,22 @@ fn source_context_static_method_fallback_signature(
                 arg_shapes_are_authoritative: true,
             });
         }
-        let rust_name = matching_methods[0]
+        let Some(method) = unique_method_matching_known_arg_types(&matching_methods, &arg_types)
+            .or_else(|| (matching_methods.len() == 1).then_some(matching_methods[0]))
+        else {
+            continue;
+        };
+        let rust_name = method
             .rust_name
             .clone()
-            .unwrap_or_else(|| crate::parser::to_snake_case(&matching_methods[0].name));
+            .unwrap_or_else(|| crate::parser::to_snake_case(&method.name));
         return Some(ContextFallbackMethodSignature {
             rust_name: rust_name.clone(),
             arg_shapes: ctx
                 .signatures
                 .method_signature_by_rust_name(&owner, &rust_name)
                 .map(non_emitted_static_context_arg_shapes_from_signature)
-                .unwrap_or_else(|| {
-                    non_emitted_static_context_arg_shapes_for_method(matching_methods[0], ctx)
-                }),
+                .unwrap_or_else(|| non_emitted_static_context_arg_shapes_for_method(method, ctx)),
             receiver: ctx
                 .signatures
                 .method_signature_by_rust_name(&owner, &rust_name)
