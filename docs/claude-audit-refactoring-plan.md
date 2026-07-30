@@ -245,6 +245,10 @@ Landed in this batch:
   trait methods are emitted with `where Self: Sized` so existing boxed dyn-trait
   support remains object-safe, and identity-style method type-param returns no
   longer borrow from owned parameters.
+- Method and constructor function shells now receive emitted source-bound
+  context when lowered, so type parameters with resolvable in-crate source
+  interface/class bounds emit Rust bounds such as `fn new<N: Named>(...)`
+  without introducing missing trait names from analysis-only context sources.
 
 1. Add a `CallableAnalysis` shell.
    - Introduce `src/callable_analysis.rs`.
@@ -453,7 +457,7 @@ Completion checklist for any audit marked `fixed locally`:
 | `0014` labelled statements deleted | fixed locally | Moved to `claude_audits/done`; CFG liveness still needs labelled edges |
 | `0015` static initializer blocks dropped | partial | Loud diagnostic now; full class-init later |
 | `0016` no-op JDK facades | partial | `StringBuilder`/`StringBuffer` and literal `Pattern`/`Matcher` paths are stateful; `Arrays.copyOf/copyOfRange/toString/fill/sort` and common `Math` calls lower natively without dead `Math` fallback support; Apache `FastMath` uses a javalibs owner alias to the Math planner; remaining Arrays helpers and broader facade fallibility still open |
-| `0017` generic bounds dropped | partial | Method/constructor type parameters now emit as structured Rust function generics, ordinary source method bounds that resolve to source interfaces/classes emit Rust bounds, and raw trait signatures preserve method generics/bounds with object-safe `where Self: Sized`; constructor-bound support context, multi-bounds, external/JDK bound projection, and full typed type parsing remain open |
+| `0017` generic bounds dropped | partial | Method/constructor type parameters now emit as structured Rust function generics, ordinary source method/constructor bounds that resolve to emitted source interfaces/classes emit Rust bounds, analysis-only context bounds are suppressed to avoid missing Rust traits, and raw trait signatures preserve method generics/bounds with object-safe `where Self: Sized`; multi-bounds, external/JDK bound projection, and full typed type parsing remain open |
 | `0018` compile metric blind spots | partial | Parse gate and coverage counters |
 | `0019` raw Java expression fallback | fixed locally | Moved to `claude_audits/done`; simple switch expressions now lower to Rust `match` |
 | `0020` text block processing | fixed locally | Moved to `claude_audits/done` |

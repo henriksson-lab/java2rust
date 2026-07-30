@@ -98,9 +98,9 @@ fn rust_impl_params_for_source_type(ty: &TypeDecl, support_program: &Program) ->
             let mut bounds = Vec::new();
             if let Some(Some(JavaType::Named { name: bound, .. })) = ty.type_param_bounds.get(index)
             {
-                if source_type_bound_is_trait_like(bound, support_program) {
+                if source_type_bound_is_trait_like(bound, &[support_program]) {
                     bounds.push(rust_name_for_java_named_type(bound));
-                } else if source_type_bound_is_class_like(bound, support_program) {
+                } else if source_type_bound_is_class_like(bound, &[support_program]) {
                     bounds
                         .push(crate::representation_lowering::source_class_bound_trait_name(bound));
                 }
@@ -219,13 +219,22 @@ fn java_type_contains_type_param(ty: &JavaType, type_param: &str) -> bool {
     }
 }
 
-fn source_type_bound_is_trait_like(bound: &str, support_program: &Program) -> bool {
-    find_type_decl_by_name_or_rust_name(support_program, bound)
+fn source_type_bound_decl<'a>(
+    bound: &str,
+    support_programs: &[&'a Program],
+) -> Option<&'a TypeDecl> {
+    support_programs
+        .iter()
+        .find_map(|program| find_type_decl_by_name_or_rust_name(program, bound))
+}
+
+fn source_type_bound_is_trait_like(bound: &str, support_programs: &[&Program]) -> bool {
+    source_type_bound_decl(bound, support_programs)
         .is_some_and(|ty| matches!(ty.kind, crate::java_ir::TypeKind::Interface))
 }
 
-fn source_type_bound_is_class_like(bound: &str, support_program: &Program) -> bool {
-    find_type_decl_by_name_or_rust_name(support_program, bound)
+fn source_type_bound_is_class_like(bound: &str, support_programs: &[&Program]) -> bool {
+    source_type_bound_decl(bound, support_programs)
         .is_some_and(|ty| matches!(ty.kind, crate::java_ir::TypeKind::Class))
 }
 
@@ -249,13 +258,49 @@ pub fn constructor_function_shell_with_facts(
     body: Vec<RustStmt>,
     facts: &FactSet,
 ) -> RustFunction {
+    constructor_function_shell_with_facts_and_support_context(
+        ty,
+        ctor,
+        signatures,
+        body,
+        facts,
+        &Program::default(),
+    )
+}
+
+pub fn constructor_function_shell_with_facts_and_support_context(
+    ty: &TypeDecl,
+    ctor: &ConstructorDecl,
+    signatures: &SignaturePlan,
+    body: Vec<RustStmt>,
+    facts: &FactSet,
+    support_program: &Program,
+) -> RustFunction {
+    constructor_function_shell_with_facts_and_support_contexts(
+        ty,
+        ctor,
+        signatures,
+        body,
+        facts,
+        &[support_program],
+    )
+}
+
+pub fn constructor_function_shell_with_facts_and_support_contexts(
+    ty: &TypeDecl,
+    ctor: &ConstructorDecl,
+    signatures: &SignaturePlan,
+    body: Vec<RustStmt>,
+    facts: &FactSet,
+    support_programs: &[&Program],
+) -> RustFunction {
     RustFunction {
         name: ctor.rust_name.clone().unwrap_or_else(|| "new".to_string()),
-        type_params: function_type_params_with_optional_lifetime(
+        type_params: function_type_params_with_optional_lifetime_and_support_contexts(
             &ctor.type_params,
             &ctor.type_param_bounds,
             false,
-            &Program::default(),
+            support_programs,
         ),
         params: constructor_params(ty, ctor, signatures, facts),
         return_type: Some(constructor_return_type(ty, ctor, signatures)),
@@ -272,11 +317,11 @@ pub fn constructor_return_body(ty: &TypeDecl, fields: Vec<(String, RustExpr)>) -
     }))]
 }
 
-fn function_type_params_with_optional_lifetime(
+fn function_type_params_with_optional_lifetime_and_support_contexts(
     type_params: &[String],
     type_param_bounds: &[Option<JavaType>],
     needs_lifetime: bool,
-    support_program: &Program,
+    support_programs: &[&Program],
 ) -> Vec<String> {
     let mut params = Vec::new();
     if needs_lifetime {
@@ -286,9 +331,9 @@ fn function_type_params_with_optional_lifetime(
         let Some(Some(JavaType::Named { name: bound, .. })) = type_param_bounds.get(index) else {
             return name.clone();
         };
-        if source_type_bound_is_trait_like(bound, support_program) {
+        if source_type_bound_is_trait_like(bound, support_programs) {
             format!("{name}: {}", rust_name_for_java_named_type(bound))
-        } else if source_type_bound_is_class_like(bound, support_program) {
+        } else if source_type_bound_is_class_like(bound, support_programs) {
             format!(
                 "{name}: {}",
                 crate::representation_lowering::source_class_bound_trait_name(bound)
@@ -462,6 +507,26 @@ pub fn method_function_shell_with_facts_exception_plan_and_support_context(
     exceptions: MethodExceptionPlan,
     support_program: &Program,
 ) -> RustFunction {
+    method_function_shell_with_facts_exception_plan_and_support_contexts(
+        ty,
+        method,
+        signatures,
+        body,
+        facts,
+        exceptions,
+        &[support_program],
+    )
+}
+
+pub fn method_function_shell_with_facts_exception_plan_and_support_contexts(
+    ty: &TypeDecl,
+    method: &MethodDecl,
+    signatures: &SignaturePlan,
+    body: Vec<RustStmt>,
+    facts: &FactSet,
+    exceptions: MethodExceptionPlan,
+    support_programs: &[&Program],
+) -> RustFunction {
     let needs_lifetime =
         static_method_needs_borrowed_return_lifetime(ty, method, signatures, facts);
     let name = method
@@ -470,11 +535,11 @@ pub fn method_function_shell_with_facts_exception_plan_and_support_context(
         .unwrap_or_else(|| crate::parser::to_snake_case(&method.name));
     RustFunction {
         name,
-        type_params: function_type_params_with_optional_lifetime(
+        type_params: function_type_params_with_optional_lifetime_and_support_contexts(
             &method.type_params,
             &method.type_param_bounds,
             needs_lifetime,
-            support_program,
+            support_programs,
         ),
         params: method_params_with_optional_lifetime(ty, method, signatures, facts, needs_lifetime),
         return_type: method_return_type_with_optional_lifetime(

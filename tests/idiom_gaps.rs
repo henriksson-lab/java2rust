@@ -8771,6 +8771,179 @@ class Holder<N extends Base> {
 }
 
 #[test]
+fn source_generic_constructor_preserves_type_param_bounds() {
+    let translation = translate_source(
+        r#"
+interface Named {
+    String name();
+}
+
+class GenericConstructor {
+    private String name;
+
+    <N extends Named> GenericConstructor(N value) {
+        this.name = value.name();
+    }
+
+    String name() {
+        return name;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn new<N: Named>(value: N) -> GenericConstructor")
+            && translation.rust.contains("name: value.name()")
+            && !translation
+                .rust
+                .contains("pub fn new<N>(value: N) -> GenericConstructor"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_generic_constructor_bounds",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn context_source_generic_constructor_preserves_type_param_bounds() {
+    let support = r#"
+interface ContextNamed {
+    String name();
+}
+"#;
+    let source = r#"
+class ContextGenericConstructor {
+    private String name;
+
+    <N extends ContextNamed> ContextGenericConstructor(N value) {
+        this.name = value.name();
+    }
+
+    String name() {
+        return name;
+    }
+}
+"#;
+    let translation = translate_source_with_context_sources_and_summary_sources(
+        source,
+        &[support.to_string()],
+        &[],
+        true,
+        &FactSet::default(),
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn new<N: ContextNamed>(value: N) -> ContextGenericConstructor")
+            && translation.rust.contains("name: value.name()")
+            && !translation
+                .rust
+                .contains("pub fn new<N>(value: N) -> ContextGenericConstructor"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "context_source_generic_constructor_bounds",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: format!(
+                "pub trait ContextNamed {{ fn name(&self) -> String; }}\n{}",
+                translation.rust
+            ),
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn non_emitted_context_generic_constructor_does_not_emit_missing_bound() {
+    let support = r#"
+interface ContextOnlyNamed {
+    String name();
+}
+"#;
+    let source = r#"
+class ContextOnlyGenericConstructor {
+    private String name;
+
+    <N extends ContextOnlyNamed> ContextOnlyGenericConstructor(N value) {
+        this.name = value.name();
+    }
+}
+"#;
+    let translation =
+        translate_source_with_context_sources(source, &[support.to_string()], &FactSet::default());
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn new<N>(value: N) -> ContextOnlyGenericConstructor")
+            && !translation.rust.contains("N: ContextOnlyNamed"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn context_source_generic_method_preserves_type_param_bounds() {
+    let support = r#"
+interface ContextMethodNamed {
+    String name();
+}
+"#;
+    let source = r#"
+class ContextGenericMethod {
+    <N extends ContextMethodNamed> String encode(N value) {
+        return value.name();
+    }
+}
+"#;
+    let translation = translate_source_with_context_sources_and_summary_sources(
+        source,
+        &[support.to_string()],
+        &[],
+        true,
+        &FactSet::default(),
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn encode<N: ContextMethodNamed>(&self, value: N) -> String")
+            && translation.rust.contains("value.name()")
+            && !translation
+                .rust
+                .contains("pub fn encode<N>(&self, value: N) -> String"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "context_source_generic_method_bounds",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: format!(
+                "pub trait ContextMethodNamed {{ fn name(&self) -> String; }}\n{}",
+                translation.rust
+            ),
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn generic_source_map_storage_return_adds_clone_bound() {
     let source = r#"
 import java.util.HashMap;
