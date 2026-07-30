@@ -264,6 +264,9 @@ Landed in this batch:
   the legacy text parser. Parser tests pin annotated generic arguments, scoped
   generic names, generic type-parameter bounds, and the current primary-bound
   behavior for Java multi-bounds.
+- Borrowed method receiver parenthesizing and redundant shared-borrow collapse
+  now prefer typed `RustExpr::Unary` shapes and keep rendered-string checks only
+  as compatibility fallbacks for legacy `RustExpr::Raw` carriers.
 
 1. Add a `CallableAnalysis` shell.
    - Introduce `src/callable_analysis.rs`.
@@ -447,6 +450,9 @@ the fixes do not become more isolated rules.
 
 Completion checklist for any audit marked `fixed locally`:
 
+- Fresh-context reminder: an audit is not closed by code alone. Its issue file
+  must be moved to the `done` directory below as part of the same completed
+  checkpoint.
 - Move the corresponding issue file from `claude_audits/` to
   `/home/mahogny/github/claude/new_java2rust/claude_audits/done`.
 - Keep the move in the same verified checkpoint as the implementation.

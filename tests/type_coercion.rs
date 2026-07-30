@@ -6,10 +6,11 @@ use new_java2rust::coercion::{
     apply_java_display_plan, apply_literal_slot_plan, apply_lowered_expr_to_slot,
     apply_lowered_expr_to_slot_with_facts, apply_shape_coercion_plan, apply_slot_conversion_plan,
     apply_syntax_coercion_plan, borrowed_element_recovery_fallback_message_policy,
-    borrowed_string_view_projection, dispatch_coercion_fallback_message_policy,
-    instanceof_fallback_message_policy, java_integral_literal_char, literal_slot_plan,
-    normalize_map_key_borrow_projection, ownership_coercion_fallback_message_policy, plan_coercion,
-    plan_coercion_with_facts, plan_shape_coercion, plan_shape_coercion_with_facts,
+    borrowed_string_view_projection, collapse_redundant_shared_borrow_projection,
+    dispatch_coercion_fallback_message_policy, instanceof_fallback_message_policy,
+    java_integral_literal_char, literal_slot_plan, normalize_map_key_borrow_projection,
+    ownership_coercion_fallback_message_policy, parenthesize_borrowed_method_receiver,
+    plan_coercion, plan_coercion_with_facts, plan_shape_coercion, plan_shape_coercion_with_facts,
     render_index_to_usize_projection, render_instanceof_check,
     rust_expr_is_constructed_optional_value, rust_primitive_type_name_policy,
 };
@@ -1129,6 +1130,23 @@ fn syntax_slot_coercion_policy_owns_index_condition_and_concat_segments() {
         "(*value) as usize"
     );
     assert_eq!(
+        collapse_redundant_shared_borrow_projection(
+            RustExpr::Unary {
+                op: "&".to_string(),
+                expr: Box::new(RustExpr::Var("key".to_string())),
+            },
+            "key",
+        ),
+        RustExpr::Var("key".to_string())
+    );
+    assert_eq!(
+        parenthesize_borrowed_method_receiver(RustExpr::Unary {
+            op: "&".to_string(),
+            expr: Box::new(RustExpr::Var("reader".to_string())),
+        }),
+        RustExpr::Raw("(&reader)".to_string())
+    );
+    assert_eq!(
         apply_coercions(
             RustExpr::Raw("value >> 12".to_string()),
             &[Coercion::WidenPrimitive {
@@ -1136,7 +1154,10 @@ fn syntax_slot_coercion_policy_owns_index_condition_and_concat_segments() {
                 to: PrimitiveType::Double,
             }],
         ),
-        RustExpr::Raw("(value >> 12) as f64".to_string())
+        RustExpr::Cast {
+            expr: Box::new(RustExpr::Raw("value >> 12".to_string())),
+            ty: "f64".to_string(),
+        }
     );
     assert_eq!(
         syntax_coercion_plan_with_facts(&external_id, &Slot::StringConcatSegment, &facts),

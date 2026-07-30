@@ -893,11 +893,18 @@ fn rendered_expr_is_get_option_projection(rendered: &str) -> bool {
 }
 
 pub fn parenthesize_borrowed_method_receiver(receiver: RustExpr) -> RustExpr {
-    let rendered = emit::emit_expr(&receiver);
-    if rendered.starts_with('&') && !(rendered.starts_with("(&") && rendered.ends_with(')')) {
-        RustExpr::Raw(format!("({rendered})"))
-    } else {
-        receiver
+    match receiver {
+        RustExpr::Unary { op, expr } if op == "&" || op == "&mut " => RustExpr::Raw(format!(
+            "({})",
+            emit::emit_expr(&RustExpr::Unary { op, expr })
+        )),
+        RustExpr::Raw(rendered)
+            if rendered.starts_with('&')
+                && !(rendered.starts_with("(&") && rendered.ends_with(')')) =>
+        {
+            RustExpr::Raw(format!("({rendered})"))
+        }
+        other => other,
     }
 }
 
@@ -1386,11 +1393,16 @@ fn slot_target_shape(slot: &Slot) -> Option<&RustSlotShape> {
 }
 
 pub fn collapse_redundant_shared_borrow_projection(expr: RustExpr, base: &str) -> RustExpr {
-    let rendered = emit::emit_expr(&expr);
-    if rendered == format!("&{base}") {
-        RustExpr::Var(base.to_string())
-    } else {
-        expr
+    match expr {
+        RustExpr::Unary { op, expr }
+            if op == "&" && matches!(expr.as_ref(), RustExpr::Var(name) if name == base) =>
+        {
+            RustExpr::Var(base.to_string())
+        }
+        RustExpr::Raw(rendered) if rendered == format!("&{base}") => {
+            RustExpr::Var(base.to_string())
+        }
+        other => other,
     }
 }
 
