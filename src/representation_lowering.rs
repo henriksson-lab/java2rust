@@ -815,16 +815,19 @@ fn trait_impl_for_type(
         .members
         .iter()
         .filter_map(|member| match member {
-            Member::Method(interface_method) => Some(trait_impl_method(
-                ty,
-                interface,
-                interface_method,
-                program,
-                trait_method_receiver_plan(interface, interface_method, program, signatures),
-                signatures,
-                facts,
-                trait_method_exception_plan(interface, interface_method, program, exceptions),
-            )),
+            Member::Method(interface_method) => {
+                let method = trait_impl_method(
+                    ty,
+                    interface,
+                    interface_method,
+                    program,
+                    trait_method_receiver_plan(interface, interface_method, program, signatures),
+                    signatures,
+                    facts,
+                    trait_method_exception_plan(interface, interface_method, program, exceptions),
+                );
+                (!method.is_empty()).then_some(method)
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -836,7 +839,7 @@ fn trait_impl_for_type(
     ))
 }
 
-fn trait_object_support_method_signatures(trait_name: &str) -> Vec<String> {
+pub(crate) fn trait_object_support_method_signatures(trait_name: &str) -> Vec<String> {
     vec![
         "    fn as_any(&self) -> &dyn std::any::Any;".to_string(),
         format!("    fn clone_box(&self) -> Box<dyn {trait_name}>;"),
@@ -852,13 +855,13 @@ fn trait_object_support_impl_methods(trait_name: &str) -> Vec<String> {
     ]
 }
 
-fn boxed_dyn_trait_clone_impl(trait_name: &str) -> String {
+pub(crate) fn boxed_dyn_trait_clone_impl(trait_name: &str) -> String {
     format!(
         "impl Clone for Box<dyn {trait_name}> {{\n    fn clone(&self) -> Self {{ self.clone_box() }}\n}}"
     )
 }
 
-fn dyn_trait_anonymous_impl(trait_name: &str) -> String {
+pub(crate) fn dyn_trait_anonymous_impl(trait_name: &str) -> String {
     format!(
         "impl dyn {trait_name} {{\n    pub fn anonymous() -> Box<dyn {trait_name}> {{ panic!(\"java2rust: anonymous class body for {trait_name} requires object lowering\") }}\n}}"
     )
@@ -888,6 +891,9 @@ fn trait_impl_method(
     );
     let candidates = implementing_method_candidates_in_hierarchy(ty, interface_method, program);
     if candidates.is_empty() {
+        if interface_method.body.is_some() {
+            return String::new();
+        }
         if let Some(body) = external_template_method_trait_impl_body(ty, interface_method) {
             return format!("{} {{ {body} }}", signature.trim_end_matches(';'));
         }
@@ -1198,7 +1204,7 @@ fn trait_method_signature_with_receiver(
     )
 }
 
-fn trait_method_signature_with_receiver_and_return_shape(
+pub(crate) fn trait_method_signature_with_receiver_and_return_shape(
     ty: &TypeDecl,
     method: &MethodDecl,
     signatures: &SignaturePlan,
@@ -1239,7 +1245,7 @@ fn trait_method_signature_with_receiver_and_return_shape(
     format!("    fn {rust_name}({}){return_type};", params.join(", "))
 }
 
-fn trait_method_return_shape_plan(
+pub(crate) fn trait_method_return_shape_plan(
     interface: &TypeDecl,
     interface_method: &MethodDecl,
     program: &Program,
@@ -1290,7 +1296,7 @@ fn trait_return_shape_should_widen_to_implementation(
         && interface_shape.java_ty == implementation_shape.java_ty
 }
 
-fn trait_method_receiver_plan(
+pub(crate) fn trait_method_receiver_plan(
     interface: &TypeDecl,
     interface_method: &MethodDecl,
     program: &Program,
@@ -1328,7 +1334,7 @@ fn trait_method_receiver_plan(
     Some(receiver)
 }
 
-fn trait_method_exception_plan(
+pub(crate) fn trait_method_exception_plan(
     interface: &TypeDecl,
     interface_method: &MethodDecl,
     program: &Program,

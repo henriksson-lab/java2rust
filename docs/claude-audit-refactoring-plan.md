@@ -444,7 +444,7 @@ Completion checklist for any audit marked `fixed locally`:
 | `0022` source-text type reparsing | open | Typed type parser |
 | `0023` inner-class outer capture | open | Object reference representation |
 | `0024` numeric limit constants stubbed to zero | fixed locally | Moved to `claude_audits/done`; JDK wrapper/Math/GZIP/Font values fixed and unknown primitive constants now fail loudly |
-| `0025` interface default methods discarded | open | Interface/default method representation |
+| `0025` interface default methods discarded | partial | Ordinary interface methods with parsed bodies now emit Rust trait default bodies, and implementors without overrides inherit them instead of getting missing-implementation panics; `Iface.super`, conflicting defaults, and private/static interface members remain open |
 | `0026` assignment evaluation order | partial | Simple statement-form array assignments with side-effecting indices now hoist the index before RHS evaluation; compound assignments, expression-form assignments, and side-effecting receivers remain open |
 | `0027` compound assignment narrowing | fixed locally | Moved to `claude_audits/done`; narrow primitive compound assignment casts back through the shared assignment-value hook |
 | `0028` reference equality | partial | Binary `String ==`/`!=` now emits `AUDIT(java-string-identity)` and lowering diagnostics report `java_string_identity`/`java_reference_identity_equality`; full object reference identity still waits on object representation |

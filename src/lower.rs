@@ -202,9 +202,13 @@ use crate::unsupported::{
 use crate::{
     representation::RepresentationPlan,
     representation_lowering::{
+        boxed_dyn_trait_clone_impl, dyn_trait_anonymous_impl,
         raw_type_item_for_program_with_facts_and_exceptions,
         source_class_bound_trait_impl_emissions_for_type, source_class_bound_trait_item_for_type,
-        trait_impl_emissions_for_type_with_facts_and_exceptions,
+        trait_impl_emissions_for_type_with_facts_and_exceptions, trait_method_exception_plan,
+        trait_method_receiver_plan, trait_method_return_shape_plan,
+        trait_method_signature_with_receiver_and_return_shape,
+        trait_object_support_method_signatures,
     },
     types,
     usage::{BindingUse, BindingUseFacts, UsageConstructorKey, UsageFacts, UsageMethodKey},
@@ -802,6 +806,11 @@ fn lower_type(
         }
     }
 
+    if let Some(item) = raw_interface_trait_item_with_default_methods(ty, program, ctx) {
+        file.items.push(raw_item(item));
+        return;
+    }
+
     if let Some(item) = raw_type_item_for_program_with_facts_and_exceptions(
         ctx.representations,
         ctx.support_local_type_program,
@@ -916,6 +925,102 @@ fn lower_type(
     for item in source_external_supertype_conversion_impls_for_type(ty, ctx) {
         file.items.push(raw_item(item));
     }
+}
+
+fn raw_interface_trait_item_with_default_methods(
+    ty: &TypeDecl,
+    program: &Program,
+    ctx: LowerCtx,
+) -> Option<String> {
+    if ty.kind != TypeKind::Interface
+        || !ty
+            .members
+            .iter()
+            .any(|member| matches!(member, Member::Method(method) if method.body.is_some()))
+    {
+        return None;
+    }
+    let trait_name =
+        ctx.representations
+            .type_representation(&ty.name)
+            .and_then(|representation| match &representation.representation {
+                crate::representation::ObjectRepresentation::DynTrait { trait_name } => Some(
+                    crate::slot_render::rust_name_for_java_named_type(trait_name),
+                ),
+                _ => None,
+            })?;
+    let mut methods = ty
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            Member::Method(method) if method.body.is_some() => Some(
+                interface_default_trait_method_item(ty, method, program, ctx),
+            ),
+            Member::Method(method) => Some(trait_method_signature_with_receiver_and_return_shape(
+                ty,
+                method,
+                ctx.signatures,
+                ctx.facts,
+                trait_method_exception_plan(ty, method, program, ctx.exceptions),
+                trait_method_receiver_plan(ty, method, program, ctx.signatures),
+                trait_method_return_shape_plan(ty, method, program, ctx.signatures),
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    methods.extend(trait_object_support_method_signatures(&trait_name));
+    Some(format!(
+        "pub trait {trait_name} {{\n{}\n}}\n\n{}\n\n{}",
+        methods.join("\n"),
+        dyn_trait_anonymous_impl(&trait_name),
+        boxed_dyn_trait_clone_impl(&trait_name)
+    ))
+}
+
+fn interface_default_trait_method_item(
+    ty: &TypeDecl,
+    method: &MethodDecl,
+    program: &Program,
+    ctx: LowerCtx,
+) -> String {
+    let signature = trait_method_signature_with_receiver_and_return_shape(
+        ty,
+        method,
+        ctx.signatures,
+        ctx.facts,
+        trait_method_exception_plan(ty, method, program, ctx.exceptions),
+        trait_method_receiver_plan(ty, method, program, ctx.signatures),
+        trait_method_return_shape_plan(ty, method, program, ctx.signatures),
+    );
+    let method_signature = ctx.signatures.required_method_signature(ty, method);
+    let method_ctx = LowerCtx {
+        current_type: Some(&ty.name),
+        current_method: Some(&method.name),
+        current_constructor: None,
+        current_receiver: Some(method_signature.receiver),
+        current_return_shape: method_signature.return_shape.as_ref(),
+        current_local_shapes: method_signature.locals.as_slice(),
+        ..ctx
+    };
+    let mut env = shape_env_for_method(ty, method, method_signature, method_ctx.signatures);
+    seed_imported_static_type_aliases(&mut env, program);
+    seed_imported_static_type_aliases(&mut env, method_ctx.support_local_type_program);
+    seed_imported_static_type_aliases(&mut env, method_ctx.source_summary_type_program);
+    seed_context_static_type_aliases(&mut env, method_ctx);
+    let wrap_returns_in_ok = method_ctx
+        .callable_analysis
+        .method_exception_plan(ty, method)
+        .wrap_returns_in_result;
+    let body = method
+        .body
+        .as_ref()
+        .map(|body| lower_block(body, &mut env, wrap_returns_in_ok, method_ctx))
+        .unwrap_or_default();
+    format!(
+        "{} {{\n{}    }}",
+        signature.trim_end_matches(';'),
+        emit::emit_statements(&body, 2)
+    )
 }
 
 fn static_storage_items_for_type(ty: &TypeDecl, ctx: LowerCtx) -> Vec<String> {
@@ -1446,6 +1551,9 @@ fn abstract_interface_method_stubs(ty: &TypeDecl, ctx: LowerCtx) -> Vec<RustFunc
                 let Member::Method(interface_method) = member else {
                     return None;
                 };
+                if interface_method.body.is_some() {
+                    return None;
+                }
                 if lower_implementing_method_candidates(ty, interface_method)
                     .into_iter()
                     .any(|candidate| candidate.body.is_some())

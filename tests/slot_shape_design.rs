@@ -27469,6 +27469,7 @@ fn exception_lowering_policy_owns_result_support_ok_and_err_shapes() {
                 name: "RuntimeException".to_string(),
                 args: Vec::new(),
             },
+            binding: None,
         }),
         then_expr: Box::new(Expr::Cast {
             ty: JavaType::Named {

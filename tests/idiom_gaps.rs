@@ -14005,6 +14005,74 @@ abstract class AbstractModule implements Module {
 }
 
 #[test]
+fn interface_default_method_body_is_emitted_and_inherited() {
+    let translation = translate_source(
+        r#"
+interface Greeter {
+    String name();
+    default String greet() {
+        return "hi " + name();
+    }
+}
+
+class DefaultGreeter implements Greeter {
+    public String name() {
+        return "default";
+    }
+
+    public String run() {
+        return greet();
+    }
+}
+
+class OverrideGreeter implements Greeter {
+    public String name() {
+        return "override";
+    }
+
+    public String greet() {
+        return "yo";
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "fn greet(&self) -> String {\n        return format!(\"hi {}\", self.name());\n    }"
+        ) && !translation.rust.contains(
+            "panic!(\"missing Java interface method implementation: DefaultGreeter.greet\")"
+        ) && translation
+            .rust
+            .contains("fn greet(&self) -> String { OverrideGreeter::greet(self) }"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "interface_default_method_body",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn defaults_are_inherited_and_overrides_win() {
+        let inherited = DefaultGreeter {};
+        let overridden = OverrideGreeter {};
+        assert_eq!(Greeter::greet(&inherited), "hi default");
+        assert_eq!(Greeter::greet(&overridden), "yo");
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
 fn abstract_class_methods_with_nonvoid_returns_emit_diverging_placeholders() {
     let translation = translate_source(
         r#"
