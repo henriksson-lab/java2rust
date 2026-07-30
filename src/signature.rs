@@ -6570,6 +6570,11 @@ fn signature_object_representation_override_fact_for<'a>(
             override_fact.provenance == FactProvenance::ExternalLibraryPack
                 && override_fact.type_name.contains('.')
                 && override_fact.type_name == type_name
+                && !external_erased_override_conflicts_with_parsed_source(
+                    override_fact,
+                    type_name,
+                    facts,
+                )
         })
         .max_by_key(|override_fact| {
             signature_hierarchy_strategy_specificity_rank(&override_fact.strategy)
@@ -6583,6 +6588,13 @@ fn signature_object_representation_override_fact_for<'a>(
                 signature_hierarchy_override_type_name_matches(&override_fact.type_name, type_name)
             })
             .filter(|override_fact| {
+                !external_erased_override_conflicts_with_parsed_source(
+                    override_fact,
+                    type_name,
+                    facts,
+                )
+            })
+            .filter(|override_fact| {
                 !matches!(override_fact.strategy, HierarchyStrategy::ErasedObject)
                     || type_name.contains('.')
             })
@@ -6593,6 +6605,16 @@ fn signature_object_representation_override_fact_for<'a>(
                 )
             })
     })
+}
+
+fn external_erased_override_conflicts_with_parsed_source(
+    override_fact: &HierarchyOverride,
+    query_type_name: &str,
+    facts: &EffectiveFacts<'_>,
+) -> bool {
+    override_fact.provenance == FactProvenance::ExternalLibraryPack
+        && matches!(override_fact.strategy, HierarchyStrategy::ErasedObject)
+        && facts.has_parsed_source_type_capability_for_name(query_type_name)
 }
 
 fn signature_hierarchy_override_type_name_matches(
@@ -11796,6 +11818,7 @@ fn java_return_type_can_borrow_as_object(java_ty: &JavaType, facts: &FactSet) ->
         JavaType::Wildcard(_) => return false,
     }
     !matches!(conservative_ownership(java_ty), OwnershipShape::CopyValue)
+        && !facts.is_copy_type(java_ty)
 }
 
 fn method_returns_local_initialized_from_call(method: &MethodDecl) -> bool {
@@ -12379,7 +12402,11 @@ fn constrained_return_shape(
         },
         facts,
     )?;
-    if source_method_return_should_borrow_object(ty, method, facts) {
+    if source_java_enum_storage_is_copy(representations, return_type) {
+        apply_required_ownership(&mut shape, OwnershipShape::Owned);
+        apply_required_dispatch(&mut shape, DispatchShape::Concrete);
+        apply_required_view(&mut shape, ViewShape::Native);
+    } else if source_method_return_should_borrow_object(ty, method, facts) {
         apply_required_ownership(&mut shape, OwnershipShape::SharedBorrow);
     }
     Some(shape)

@@ -14707,6 +14707,50 @@ public class FastqConstants {
 }
 
 #[test]
+fn source_vcf_enum_return_is_not_erased_by_builtin_external_pack() {
+    let enum_source = r#"
+package htsjdk.variant.vcf;
+
+public enum VCFHeaderLineType {
+    Integer,
+    String
+}
+"#;
+    let getter_source = r#"
+package htsjdk.variant.vcf;
+
+public class VCFSourceEnumGetter {
+    private VCFHeaderLineType type;
+
+    public VCFHeaderLineType getType() {
+        return type;
+    }
+}
+"#;
+    let translation = translate_source_with_context_sources_and_summary_sources(
+        getter_source,
+        &[enum_source.to_string(), getter_source.to_string()],
+        &[],
+        true,
+        &FactSet::default(),
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn get_type(&self) -> VCFHeaderLineType")
+            && !translation
+                .rust
+                .contains("pub fn get_type(&self) -> Option<Box<dyn std::any::Any>>")
+            && !translation
+                .rust
+                .contains("Box::new(value.clone()) as Box<dyn std::any::Any>"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn static_external_call_to_optional_executor_slot_uses_external_return_shape() {
     let translation = translate_source(
         r#"

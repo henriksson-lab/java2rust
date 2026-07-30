@@ -268,6 +268,16 @@ impl<'a> EffectiveFacts<'a> {
             })
     }
 
+    pub fn has_parsed_source_type_capability_for_name(&self, type_name: &str) -> bool {
+        self.facts
+            .type_capability_overrides
+            .iter()
+            .any(|capability| {
+                capability.provenance == FactProvenance::ParsedSource
+                    && type_name_matches(&capability.type_name, type_name)
+            })
+    }
+
     pub fn object_representation_override_strategy_for(
         &self,
         java_ty: &JavaType,
@@ -477,10 +487,9 @@ fn external_simple_erased_override_conflicts_with_parsed_source(
 ) -> bool {
     override_fact.provenance == FactProvenance::ExternalLibraryPack
         && matches!(override_fact.strategy, HierarchyStrategy::ErasedObject)
-        && !override_fact.type_name.contains('.')
         && facts.type_capability_overrides.iter().any(|capability| {
             capability.provenance == FactProvenance::ParsedSource
-                && capability.type_name == query_type_name
+                && type_name_matches(&capability.type_name, query_type_name)
         })
 }
 

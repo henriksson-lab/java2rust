@@ -6493,9 +6493,16 @@ Reduced VCF reruns:
   9 files, 60.034s, 49 generated-Rust errors. The four enum `.as_ref()` method
   errors disappeared. The generated `repair` comparison now renders direct
   enum comparisons for `get_count_type()` and `get_type()`.
+- `.tmp/corpus-rerun-20260730-vcf-standard-bound-after-source-enum-return-owned`:
+  9 files, 60.363s, 43 generated-Rust errors. Parsed source type capabilities
+  now beat external-pack erased-object overrides even when the external fact is
+  fully qualified and the parsed source fact is simple-name scoped. Source Java
+  enum return shapes are forced back to owned/native after signature solving,
+  so `VCFCompoundHeaderLine::get_type()` and `get_count_type()` return typed
+  optional enum carriers instead of erased objects or borrowed enum references.
 
 Remaining top reduced-VCF clusters after this follow-up:
-31 mismatched types, 4 missing `mapping`, 3 possibly-uninitialized `number`, 3
+25 mismatched types, 4 missing `mapping`, 3 possibly-uninitialized `number`, 3
 type annotations needed, 2 unsupported concrete `instanceof`, 2 unsupported
 `super(...)` inheritance constructor calls, and single missing facade/source
 surface gaps for `set_v_c_f_header_version`, `is_at_least_as_recent_as`, and
