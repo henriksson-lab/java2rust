@@ -8082,6 +8082,38 @@ class PlainReturnFallibleHelper {
 }
 
 #[test]
+fn nested_unchecked_exception_throw_does_not_force_result_return_shell() {
+    let translation = translate_source(
+        r#"
+import htsjdk.tribble.TribbleException;
+import java.util.Map;
+
+class NestedUncheckedReturnShell {
+    public String render() {
+        return encode(null);
+    }
+
+    static String encode(Map<String, ? extends Object> values) {
+        if (values == null) {
+            throw new TribbleException.InternalCodecException("bad");
+        }
+        return "map";
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("pub fn render(&self) -> String")
+            && translation.rust.contains("pub fn encode")
+            && !translation.rust.contains("pub fn render(&self) -> Result")
+            && !translation.rust.contains("Result<String, JavaException>"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn constructor_deferred_field_recovers_casted_fallible_helper_without_question_mark() {
     let translation = translate_source(
         r#"

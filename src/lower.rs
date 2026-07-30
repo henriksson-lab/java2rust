@@ -19514,6 +19514,16 @@ fn slot_expr_needs_result_propagation(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx
     else {
         return false;
     };
+    if source_method_call_returns_result_with_exception_plan(
+        receiver.as_deref(),
+        name,
+        args.len(),
+        resolved.as_ref(),
+        env,
+        ctx,
+    ) {
+        return true;
+    }
     if external_call_lowered_type_with_lower_context(
         receiver.as_deref(),
         name,
@@ -19593,6 +19603,66 @@ fn slot_expr_needs_result_propagation_from_shape_env(
         name,
         arg_count,
     )
+}
+
+fn source_method_call_returns_result_with_exception_plan(
+    receiver: Option<&Expr>,
+    name: &str,
+    arg_count: usize,
+    resolved: Option<&ResolvedCall>,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> bool {
+    if let Some(resolved) = resolved
+        && source_method_named_returns_result_with_exception_plan(
+            &resolved.declaring_type,
+            &resolved.rust_name,
+            arg_count,
+            ctx,
+        )
+    {
+        return true;
+    }
+    if matches!(receiver, Some(receiver) if is_this_receiver_expr(receiver))
+        && let Some(current_type) = ctx.current_type
+        && source_method_named_returns_result_with_exception_plan(
+            current_type,
+            name,
+            arg_count,
+            ctx,
+        )
+    {
+        return true;
+    }
+    if let Some(receiver_name) = receiver.and_then(|receiver| {
+        receiver_shape_java_type(receiver, env)
+            .and_then(|ty| concrete_java_type_name(ty).map(str::to_string))
+    }) && source_method_named_returns_result_with_exception_plan(
+        &receiver_name,
+        name,
+        arg_count,
+        ctx,
+    ) {
+        return true;
+    }
+    false
+}
+
+fn source_method_named_returns_result_with_exception_plan(
+    type_name: &str,
+    method_name: &str,
+    arg_count: usize,
+    ctx: LowerCtx,
+) -> bool {
+    let Some(ty) = find_context_type_decl_by_erased_name(ctx, type_name) else {
+        return false;
+    };
+    let Some(method) = find_declared_method_by_name_and_arity(ty, method_name, arg_count) else {
+        return false;
+    };
+    ctx.exceptions
+        .method_plan(ty, method)
+        .wrap_returns_in_result
 }
 
 fn receiver_shape_java_type<'a>(receiver: &Expr, env: &'a ShapeEnv) -> Option<&'a JavaType> {

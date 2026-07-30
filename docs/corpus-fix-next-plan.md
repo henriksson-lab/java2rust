@@ -6564,16 +6564,39 @@ Reduced VCF reruns:
   `nested_interface_implementor_forwarding_uses_flattened_rust_type_name`.
   Treat the full idiom target as not clean until those failures are separately
   triaged.
+- `.tmp/corpus-rerun-20260730-vcf-standard-bound-after-unchecked-nested-exception`:
+  9 files, 30.207s, 17 generated-Rust errors. Exception-kind lookup now treats
+  imported nested exception spellings such as
+  `TribbleException.InternalCodecException` as aliases for pack facts such as
+  `htsjdk.tribble.TribbleException.InternalCodecException` and
+  `InternalCodecException`, but only for exception-kind classification. This
+  keeps unchecked nested exceptions from forcing `Result` return shells. The VCF
+  `VCFCompoundHeaderLine`/format/info `to_string_encoding` methods now return
+  plain `String`, and the two `to_string()` returning
+  `Result<String, JavaException>` mismatches disappeared.
+  Verification passed: focused idiom
+  `nested_unchecked_exception_throw_does_not_force_result_return_shell`, nearby
+  idiom `plain_returning_method_recovers_fallible_helper_call_without_question_mark`,
+  focused semantic exception tests
+  `records_checked_and_unchecked_exception_kinds` and
+  `records_declared_throws_as_method_effect_fact`, `cargo fmt --check`,
+  `cargo check --quiet`, `git diff --check`, and
+  `cargo build --release --quiet --bin new-java2rust`. The broad
+  `cargo test --test semantic_facts --quiet` target is not clean in the current
+  checkout: it reports `external_field_provenance_uses_builtin_model_for_known_field_types`
+  and `lowers_package_private_trivial_accessor_calls_as_field_access`, which
+  should be triaged separately.
 
 Remaining top reduced-VCF clusters after this follow-up:
-7 mismatched types, 3 possibly-uninitialized `number`, 3 type annotations
+5 mismatched types, 3 possibly-uninitialized `number`, 3 type annotations
 needed, 2 unsupported concrete `instanceof`, 2 unsupported `super(...)`
 inheritance constructor calls, and one `VCFHeader: Default` bound from erased
 return adaptation. The old missing-super-local `mapping` bucket,
 `v_c_f_header_line_translator` static-owner bucket, and same-arity source-super
-overload bucket are closed. The next reduced-VCF target should tackle concrete
-`instanceof`, unsupported source-super shapes that still require inheritance
-lowering, or the `number` definite-assignment gap.
+overload bucket are closed; the nested unchecked exception/result-shell bucket
+is also closed. The next reduced-VCF target should tackle concrete `instanceof`,
+unsupported source-super shapes that still require inheritance lowering, or the
+`number` definite-assignment gap.
 
 ## Rerun Protocol
 

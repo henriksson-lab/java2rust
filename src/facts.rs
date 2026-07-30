@@ -2662,14 +2662,14 @@ impl FactSet {
             .iter()
             .rev()
             .find(|fact| {
-                external_type_name_matches(&fact.type_name, type_name)
+                exception_type_name_matches(&fact.type_name, type_name)
                     && fact.kind != ExceptionKind::Unknown
             })
             .or_else(|| {
                 self.exception_facts
                     .iter()
                     .rev()
-                    .find(|fact| external_type_name_matches(&fact.type_name, type_name))
+                    .find(|fact| exception_type_name_matches(&fact.type_name, type_name))
             })
             .map(|fact| fact.kind)
     }
@@ -3126,6 +3126,45 @@ fn external_type_name_aliases(type_name: &str) -> Vec<String> {
     aliases.sort();
     aliases.dedup();
     aliases
+}
+
+fn exception_type_name_matches(fact_type_name: &str, query_type_name: &str) -> bool {
+    if external_type_name_matches(fact_type_name, query_type_name) {
+        return true;
+    }
+    let fact_aliases = nested_type_suffix_aliases(fact_type_name);
+    let query_aliases = nested_type_suffix_aliases(query_type_name);
+    fact_aliases.iter().any(|fact_alias| {
+        query_aliases
+            .iter()
+            .any(|query_alias| query_alias == fact_alias)
+            || external_type_name_matches(fact_alias, query_type_name)
+    }) || query_aliases
+        .iter()
+        .any(|query_alias| external_type_name_matches(fact_type_name, query_alias))
+}
+
+fn nested_type_suffix_aliases(type_name: &str) -> Vec<String> {
+    let segments = type_name.split('.').collect::<Vec<_>>();
+    let Some(first_type_segment) = segments
+        .iter()
+        .position(|segment| segment.chars().next().is_some_and(char::is_uppercase))
+    else {
+        return Vec::new();
+    };
+    if first_type_segment + 1 >= segments.len() {
+        return Vec::new();
+    }
+    let suffix = segments[first_type_segment..].join(".");
+    let simple = segments.last().copied().unwrap_or(&suffix);
+    vec![
+        suffix.clone(),
+        crate::stdlib::canonical_external_receiver_type_key(&suffix),
+        crate::parser::to_snake_case(&suffix),
+        simple.to_string(),
+        crate::stdlib::canonical_external_receiver_type_key(simple),
+        crate::parser::to_snake_case(simple),
+    ]
 }
 
 fn package_qualified_simple_alias(type_name: &str) -> Option<&str> {
