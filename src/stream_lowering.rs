@@ -1008,14 +1008,24 @@ fn render_stream_terminal(
             out.push_str(&format!(".fold({identity}, |{left}, {right}| {body})"));
         }
         StreamTerminal::Collect(crate::stdlib::JavaCollectionKind::List) => {
-            if item_is_borrowed {
+            if item_is_borrowed
+                && !stream_collect_terminal_preserves_borrowed_items(
+                    &plan.actual,
+                    crate::stdlib::JavaCollectionKind::List,
+                )
+            {
                 out.push_str(".cloned().collect::<Vec<_>>()");
             } else {
                 out.push_str(".collect::<Vec<_>>()");
             }
         }
         StreamTerminal::Collect(crate::stdlib::JavaCollectionKind::Set) => {
-            if item_is_borrowed {
+            if item_is_borrowed
+                && !stream_collect_terminal_preserves_borrowed_items(
+                    &plan.actual,
+                    crate::stdlib::JavaCollectionKind::Set,
+                )
+            {
                 out.push_str(".cloned().collect::<std::collections::HashSet<_>>()");
             } else {
                 out.push_str(".collect::<std::collections::HashSet<_>>()");
@@ -1090,6 +1100,22 @@ fn render_stream_join_item_display(item_shape: &RustSlotShape) -> &'static str {
     } else {
         "item.to_string()"
     }
+}
+
+fn stream_collect_terminal_preserves_borrowed_items(
+    actual: &LoweredType,
+    kind: crate::stdlib::JavaCollectionKind,
+) -> bool {
+    matches!(
+        (kind, actual),
+        (
+            crate::stdlib::JavaCollectionKind::List,
+            LoweredType::VecElementBorrow { .. }
+        ) | (
+            crate::stdlib::JavaCollectionKind::Set,
+            LoweredType::SetElementBorrow { .. }
+        )
+    )
 }
 
 fn render_stream_join_delimiter(

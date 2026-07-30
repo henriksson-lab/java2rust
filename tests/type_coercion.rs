@@ -4877,6 +4877,44 @@ fn coercion_uses_element_shape_for_borrowed_vec_string_view() {
 }
 
 #[test]
+fn coercion_fuses_borrowed_collection_clone_recovery_into_terminal_collect() {
+    let mut element_shape = RustSlotShape::conservative(JavaType::String);
+    element_shape.ownership = OwnershipShape::SharedBorrow;
+
+    let vec_expr = apply_lowered_expr_to_slot(
+        LoweredExpr {
+            expr: RustExpr::Raw("values.iter().collect::<Vec<_>>()".to_string()),
+            actual: LoweredType::vec_element_borrow(element_shape.clone()),
+        },
+        &Slot::Return(RustSlotShape::conservative(list_java_type(
+            JavaType::String,
+        ))),
+    );
+    assert_eq!(
+        vec_expr,
+        RustExpr::Raw("values.iter().cloned().collect::<Vec<_>>()".to_string())
+    );
+
+    let set_expr = apply_lowered_expr_to_slot(
+        LoweredExpr {
+            expr: RustExpr::Raw(
+                "groups.iter().flat_map(|item| item.iter()).collect::<std::collections::HashSet<_>>()"
+                    .to_string(),
+            ),
+            actual: LoweredType::set_element_borrow(element_shape),
+        },
+        &Slot::Return(RustSlotShape::conservative(set_java_type(JavaType::String))),
+    );
+    assert_eq!(
+        set_expr,
+        RustExpr::Raw(
+            "groups.iter().flat_map(|item| item.iter()).cloned().collect::<std::collections::HashSet<_>>()"
+                .to_string()
+        )
+    );
+}
+
+#[test]
 fn coercion_rejects_non_cloneable_borrowed_vec_elements() {
     let external_handle = JavaType::Named {
         name: "ExternalHandle".to_string(),

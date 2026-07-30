@@ -243,14 +243,27 @@ display semantics for optional stream items, emitting
 instead of calling `to_string()` on `Option<T>`. Focused coverage:
 `stream_joining_nullable_string_items_use_java_display_projection`.
 
-Residual stream-design check:
-`cargo test stream --test slot_shape_design --quiet` still fails two existing
-expectation rows around collection output cloning:
+Historical residual stream-design check:
+after the nullable joining display fix, `cargo test stream --test
+slot_shape_design --quiet` still failed two existing expectation rows around
+collection output cloning:
 `stream_plan_refines_non_null_filter_elements` and
-`stream_plan_owns_flat_map_lambda_collection_stream_shape` currently render
-`.cloned().collect::<...>()` where the tests expect borrowed collection. Treat
-that as a separate stream ownership-policy cleanup, not as evidence against the
-nullable joining display fix.
+`stream_plan_owns_flat_map_lambda_collection_stream_shape` rendered
+`.cloned().collect::<...>()` where the tests expected borrowed collection.
+
+2026-07-30 stream collect ownership cleanup: terminal `Collectors.toList` and
+`Collectors.toSet` rendering now preserves borrowed iterator items when the
+planned terminal actual type is `VecElementBorrow`/`SetElementBorrow`, instead
+of cloning only because the current iterator item is borrowed. Owned recovery
+remains in the shared slot-conversion path; clone recovery for borrowed
+collections now fuses into a trailing terminal `collect` when possible, avoiding
+an intermediate borrowed collection followed by a second owned collection.
+Focused coverage:
+`stream_plan_refines_non_null_filter_elements`,
+`stream_plan_owns_flat_map_lambda_collection_stream_shape`,
+`coercion_fuses_borrowed_collection_clone_recovery_into_terminal_collect`,
+`documents_method_reference_flat_map_gap`, and
+`cargo test stream --test slot_shape_design --quiet`.
 
 2026-07-30 HTSJDK receiverless overload delegation facts: the samtools-util
 external pack now models `SeekablePathStream(Path, Function)` and publishes

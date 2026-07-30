@@ -3853,6 +3853,12 @@ fn apply_borrowed_vec_clone_adapter(expr: RustExpr, policy: &CloneRecoveryPolicy
     if rendered.ends_with(".cloned().collect::<Vec<_>>()") {
         return expr;
     }
+    if let Some(iterator) = rendered.strip_suffix(".collect::<Vec<_>>()") {
+        return RustExpr::Raw(format!(
+            "{iterator}.cloned(){}.collect::<Vec<_>>()",
+            render_clone_recovery_policy(policy)
+        ));
+    }
     RustExpr::Raw(format!(
         "{rendered}.into_iter().cloned(){}.collect::<Vec<_>>()",
         render_clone_recovery_policy(policy)
@@ -3863,6 +3869,12 @@ fn apply_borrowed_set_clone_adapter(expr: RustExpr, policy: &CloneRecoveryPolicy
     let rendered = emit::emit_expr(&expr);
     if rendered.ends_with(".cloned().collect::<std::collections::HashSet<_>>()") {
         return expr;
+    }
+    if let Some(iterator) = rendered.strip_suffix(".collect::<std::collections::HashSet<_>>()") {
+        return RustExpr::Raw(format!(
+            "{iterator}.cloned(){}.collect::<std::collections::HashSet<_>>()",
+            render_clone_recovery_policy(policy)
+        ));
     }
     RustExpr::Raw(format!(
         "{rendered}.into_iter().cloned(){}.collect::<std::collections::HashSet<_>>()",
