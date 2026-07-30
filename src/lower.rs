@@ -79,7 +79,7 @@ use crate::control_flow_lowering::{TailRecursiveLoopRender, render_tail_recursiv
 use crate::conversion_lowering::{
     adapt_optional_assignment_value_for_target as render_adapt_optional_assignment_value_for_target,
     apply_cast_conversion, apply_instanceof, apply_lowered_slot_expr_conversion,
-    apply_slot_expr_conversion, construct_optional_value_for_target,
+    apply_reused_optional_unwrap, apply_slot_expr_conversion, construct_optional_value_for_target,
 };
 use crate::conversion_plan::{
     CloneRecoveryPolicy, DispatchCoercionPolicy, LoweredType, ReturnValuePlan, Slot,
@@ -90,7 +90,7 @@ use crate::conversion_plan::{
     plan_cast_conversion_from_actual, plan_instanceof, plan_lowered_slot_conversion,
     plan_slot_conversion, preconverted_optional_slot_construction_plan,
     receiver_method_autoref_satisfies_facade_slot, receiver_method_autoref_satisfies_optional_slot,
-    return_value_plan,
+    return_value_plan, reused_optional_unwrap_plan_for_slot,
 };
 use crate::diagnostics::DiagnosticBag;
 use crate::emit;
@@ -20548,29 +20548,14 @@ fn lower_reused_optional_unwrap_for_slot(
         OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
     ) {
         let lowered = lower_expr_with_refinements(expr, env, ctx, refinements);
-        if target.ownership == OwnershipShape::SharedBorrow
-            && actual.ownership == OwnershipShape::SharedBorrow
-            && actual.view == target.view
-        {
-            let actual = optional_element_borrow_lowered_type_with_facts(
-                actual.clone(),
-                element_shape.java_ty,
-                Some(OwnershipShape::SharedBorrow),
-                ctx.facts,
-            )?;
-            let rendered = emit::emit_expr(&lowered);
-            let expr = RustExpr::Raw(format!("{rendered}.expect(\"Java null receiver\")"));
-            let lowered = crate::coercion::LoweredExpr { expr, actual };
-            let plan = plan_lowered_slot_conversion(&lowered.actual, slot.clone(), ctx.facts);
-            return Some(apply_lowered_slot_expr_conversion(lowered, &plan));
-        }
-        let lowered = optional_element_borrow_lowered_expr_with_facts(
-            lowered,
+        let unwrap_plan = reused_optional_unwrap_plan_for_slot(
             actual,
             element_shape.java_ty,
-            target.ownership.clone(),
+            slot,
+            false,
             ctx.facts,
         )?;
+        let lowered = apply_reused_optional_unwrap(lowered, &unwrap_plan);
         let plan = plan_lowered_slot_conversion(&lowered.actual, slot.clone(), ctx.facts);
         return Some(apply_lowered_slot_expr_conversion(lowered, &plan));
     }
@@ -20595,12 +20580,14 @@ fn lower_reused_optional_unwrap_for_slot(
             &plan,
         ));
     }
-    let lowered = reused_optional_unwrap_lowered_expr(
-        lowered,
+    let unwrap_plan = reused_optional_unwrap_plan_for_slot(
         actual,
         element_shape.java_ty,
+        slot,
         matches!(slot, Slot::Return(_)),
+        ctx.facts,
     )?;
+    let lowered = apply_reused_optional_unwrap(lowered, &unwrap_plan);
     let plan = plan_lowered_slot_conversion(&lowered.actual, slot.clone(), ctx.facts);
     let converted = apply_lowered_slot_expr_conversion(lowered, &plan);
     Some(apply_source_type_param_optional_unwrap_result_upcast(
@@ -20636,42 +20623,6 @@ fn apply_source_type_param_optional_unwrap_result_upcast(
         return converted;
     }
     into_projection(converted)
-}
-
-fn reused_optional_unwrap_lowered_expr(
-    option_expr: RustExpr,
-    option_shape: &RustSlotShape,
-    element_ty: JavaType,
-    move_owned_carrier: bool,
-) -> Option<crate::coercion::LoweredExpr> {
-    if option_shape.ownership == OwnershipShape::SharedBorrow {
-        let actual = optional_element_borrow_lowered_type(
-            option_shape.clone(),
-            element_ty,
-            Some(OwnershipShape::SharedBorrow),
-        )?;
-        return Some(crate::coercion::LoweredExpr {
-            expr: option_expr,
-            actual,
-        });
-    }
-    if move_owned_carrier && option_shape.ownership == OwnershipShape::Owned {
-        let actual = optional_element_borrow_lowered_type(
-            option_shape.clone(),
-            element_ty,
-            Some(OwnershipShape::Owned),
-        )?;
-        return Some(crate::coercion::LoweredExpr {
-            expr: option_expr,
-            actual,
-        });
-    }
-    optional_element_borrow_lowered_expr(
-        option_expr,
-        option_shape,
-        element_ty,
-        OwnershipShape::SharedBorrow,
-    )
 }
 
 fn lower_reused_optional_display_for_slot(

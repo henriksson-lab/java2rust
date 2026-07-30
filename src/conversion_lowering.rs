@@ -1,7 +1,8 @@
 use crate::coercion::{LoweredExpr, apply_slot_conversion_plan};
 use crate::conversion_plan::{
     CastConversionPlan, InstanceOfPlan, JavaCastSemanticsPolicy, LoweredSlotExprConversionPlan,
-    LoweredType, OptionalSlotConstructionPlan, Slot, SlotConversionPlan, SlotExprConversionPlan,
+    LoweredType, OptionalSlotConstructionPlan, ReusedOptionalUnwrapPlan,
+    ReusedOptionalUnwrapProjection, Slot, SlotConversionPlan, SlotExprConversionPlan,
 };
 use crate::java_ir::PrimitiveType;
 use crate::rust_ir::RustExpr;
@@ -45,6 +46,30 @@ pub fn apply_lowered_slot_expr_conversion(
     plan: &LoweredSlotExprConversionPlan,
 ) -> RustExpr {
     apply_slot_conversion_plan(lowered.expr, &plan.conversion)
+}
+
+pub fn apply_reused_optional_unwrap(
+    option_expr: RustExpr,
+    plan: &ReusedOptionalUnwrapPlan,
+) -> LoweredExpr {
+    let expr = match plan.projection {
+        ReusedOptionalUnwrapProjection::KeepCarrier => option_expr,
+        ReusedOptionalUnwrapProjection::ExpectBorrowedCarrier => {
+            crate::coercion::unwrap_java_null_receiver_projection(option_expr)
+        }
+        ReusedOptionalUnwrapProjection::BorrowElement { ownership } => {
+            crate::coercion::project_optional_element_borrow_carrier(option_expr, ownership)
+                .unwrap_or_else(|| {
+                    RustExpr::Raw(
+                        "compile_error!(\"unsupported optional element projection\")".to_string(),
+                    )
+                })
+        }
+    };
+    LoweredExpr {
+        expr,
+        actual: plan.actual.clone(),
+    }
 }
 
 pub fn construct_optional_value_for_target(

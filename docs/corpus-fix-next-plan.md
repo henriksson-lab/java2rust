@@ -203,6 +203,17 @@ cleanup targets are reused optional unwrap decisions and ternary optional
 construction planning, which still contain local branch/nullability decisions in
 `lower.rs`.
 
+2026-07-30 reused optional unwrap cleanup: the reused optional unwrap path now
+plans unwrap/projection shape through `ReusedOptionalUnwrapPlan` in
+`conversion_plan` and renders it through `conversion_lowering` before applying
+the ordinary lowered slot conversion. `lower.rs` still decides when the reused
+optional unwrap path applies, but it no longer emits the `.expect(...)` or
+optional element-borrow projection spelling locally for that path. Remaining
+optional cleanup targets are non-optional literals into optional borrowed args,
+the `normalize_owned_string_optional_argument` rendered-string postprocess,
+ternary optional construction branch planning, and map-get display/null
+projection paths.
+
 Next opaque-shim candidate from the parallel audit: replace weak external API
 fallback surfaces in `ExternalApiFacadeSupport::add_used_external_api_facts` and
 builder support generation with named opaque per-type shim methods. Missing

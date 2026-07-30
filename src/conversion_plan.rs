@@ -2876,6 +2876,108 @@ impl LoweredSlotExprConversionPlan {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReusedOptionalUnwrapProjection {
+    KeepCarrier,
+    ExpectBorrowedCarrier,
+    BorrowElement { ownership: OwnershipShape },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReusedOptionalUnwrapPlan {
+    pub actual: LoweredType,
+    pub projection: ReusedOptionalUnwrapProjection,
+}
+
+pub fn reused_optional_unwrap_plan_for_slot(
+    option_shape: &RustSlotShape,
+    element_ty: JavaType,
+    slot: &Slot,
+    move_owned_carrier: bool,
+    facts: &FactSet,
+) -> Option<ReusedOptionalUnwrapPlan> {
+    let target = slot_target_shape(slot)?;
+    if matches!(
+        target.ownership,
+        OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+    ) {
+        if target.ownership == OwnershipShape::SharedBorrow
+            && option_shape.ownership == OwnershipShape::SharedBorrow
+            && option_shape.view == target.view
+        {
+            let actual = LoweredType::optional_element_borrow_from_option_shape(
+                option_shape.clone(),
+                element_ty,
+                Some(OwnershipShape::SharedBorrow),
+                facts,
+            )?;
+            return Some(ReusedOptionalUnwrapPlan {
+                actual,
+                projection: ReusedOptionalUnwrapProjection::ExpectBorrowedCarrier,
+            });
+        }
+        let actual = LoweredType::optional_element_borrow_from_option_shape(
+            option_shape.clone(),
+            element_ty,
+            Some(target.ownership.clone()),
+            facts,
+        )?;
+        return Some(ReusedOptionalUnwrapPlan {
+            actual,
+            projection: ReusedOptionalUnwrapProjection::BorrowElement {
+                ownership: target.ownership.clone(),
+            },
+        });
+    }
+    if option_shape.ownership == OwnershipShape::SharedBorrow {
+        let actual = LoweredType::optional_element_borrow_from_option_shape(
+            option_shape.clone(),
+            element_ty,
+            Some(OwnershipShape::SharedBorrow),
+            facts,
+        )?;
+        return Some(ReusedOptionalUnwrapPlan {
+            actual,
+            projection: ReusedOptionalUnwrapProjection::KeepCarrier,
+        });
+    }
+    if move_owned_carrier && option_shape.ownership == OwnershipShape::Owned {
+        let actual = LoweredType::optional_element_borrow_from_option_shape(
+            option_shape.clone(),
+            element_ty,
+            Some(OwnershipShape::Owned),
+            facts,
+        )?;
+        return Some(ReusedOptionalUnwrapPlan {
+            actual,
+            projection: ReusedOptionalUnwrapProjection::KeepCarrier,
+        });
+    }
+    let actual = LoweredType::optional_element_borrow_from_option_shape(
+        option_shape.clone(),
+        element_ty,
+        Some(OwnershipShape::SharedBorrow),
+        facts,
+    )?;
+    Some(ReusedOptionalUnwrapPlan {
+        actual,
+        projection: ReusedOptionalUnwrapProjection::BorrowElement {
+            ownership: OwnershipShape::SharedBorrow,
+        },
+    })
+}
+
+fn slot_target_shape(slot: &Slot) -> Option<&RustSlotShape> {
+    match slot {
+        Slot::Assignment(shape) | Slot::Return(shape) | Slot::Argument(shape) => Some(shape),
+        Slot::Value
+        | Slot::Condition
+        | Slot::Index
+        | Slot::StringConcatSegment
+        | Slot::DisplaySegment => None,
+    }
+}
+
 pub fn receiver_method_autoref_satisfies_facade_slot(
     receiver_abi: crate::facts::ReceiverAbi,
     plan: &LoweredSlotExprConversionPlan,

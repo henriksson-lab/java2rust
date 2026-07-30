@@ -206,6 +206,10 @@ Landed in this batch:
 - Inherited external getter facts without return types now use the same named
   unmodelled result shim policy instead of silently generating `()` inherited
   support methods.
+- Reused optional unwrap projection now goes through a named
+  `ReusedOptionalUnwrapPlan` and `conversion_lowering` renderer before slot
+  conversion, so `lower.rs` no longer chooses the `.expect(...)`/element-borrow
+  spelling locally for this path.
 
 1. Expand rust signature facts.
    - Prefer function signature facts over tailored call rules whenever the same

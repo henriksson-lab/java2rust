@@ -14606,17 +14606,26 @@ fn optional_element_borrow_carrier_construction_is_centralized() {
     assert!(source.contains("apply_optional_field_borrowed_carrier_to_slot"));
     assert!(source.contains("source_field_getter_lowered_type"));
     assert!(source.contains("optional_borrow_slot_lowered_type"));
-    assert!(source.contains("fn reused_optional_unwrap_lowered_expr"));
+    assert!(!source.contains("fn reused_optional_unwrap_lowered_expr"));
+    assert!(source.contains("reused_optional_unwrap_plan_for_slot"));
+    assert!(conversion_source.contains("pub struct ReusedOptionalUnwrapPlan"));
+    assert!(conversion_source.contains("pub fn reused_optional_unwrap_plan_for_slot"));
     assert!(
         source.contains("plan_lowered_slot_conversion(&lowered.actual, slot.clone(), ctx.facts)")
     );
     let reused_optional_unwrap_helper = source
         .split("fn lower_reused_optional_unwrap_for_slot")
         .nth(1)
-        .and_then(|tail| tail.split("fn reused_optional_unwrap_lowered_expr").next())
+        .and_then(|tail| {
+            tail.split("fn apply_source_type_param_optional_unwrap_result_upcast")
+                .next()
+        })
         .expect("reused optional unwrap helper should be present");
+    assert!(reused_optional_unwrap_helper.contains("apply_reused_optional_unwrap"));
     assert!(!reused_optional_unwrap_helper.contains(".as_ref().unwrap().clone()"));
     assert!(!reused_optional_unwrap_helper.contains(".map(|value| (**value).clone())"));
+    assert!(!reused_optional_unwrap_helper.contains(".expect(\"Java null receiver\")"));
+    assert!(!reused_optional_unwrap_helper.contains("project_optional_element_borrow_carrier"));
     let borrowed_receiver_field_helper = source
         .split("fn lower_borrowed_receiver_field_owned_recovery_for_slot")
         .nth(1)
