@@ -105,7 +105,13 @@ arithmetic now lowers through wrapping Rust methods for `+`, `-`, `*`, `/`, and
 `%`, and all Java shift operators use wrapping/masked shift counts. This fixes
 debug/release overflow drift and Java shift-distance masking for binary
 expressions. Remaining arithmetic semantics work: catchable
-`ArithmeticException` for divide/remainder-by-zero and wrapping `++`/`--`.
+`ArithmeticException` for divide/remainder-by-zero.
+
+2026-07-30 local-update semantics checkpoint: local Java integral `++`/`--`
+now lower through primitive-aware wrapping projections, including char/u16
+wraparound. The remaining arithmetic semantics gap is making integer
+divide/remainder-by-zero catchable as Java `ArithmeticException` instead of a
+plain Rust panic.
 
 ## 2026-07-28 Batch Status: Borrow Drift Narrowing
 

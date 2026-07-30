@@ -147,8 +147,10 @@ Landed in this batch:
   wrapping operations for Java `int`/`long` promoted operands, and `>>>` uses a
   wrapping unsigned carrier shift. This removes debug/release drift for binary
   overflow and masks shift distances. Divide-by-zero still surfaces as a Rust
-  panic rather than a catchable `ArithmeticException`, and `++`/`--` wrapping is
-  still pending.
+  panic rather than a catchable `ArithmeticException`.
+- Local integral `++`/`--` update expressions now use primitive-aware wrapping
+  projections, including the Java char/u16 wraparound path, instead of Rust
+  `+= 1`/`-= 1` in debug builds.
 
 1. Add a generated-Rust parse gate to focused corpus scripts.
    - Report parse failures separately from type-check errors.
@@ -420,7 +422,7 @@ Completion checklist for any audit marked `fixed locally`:
 |---|---:|---|
 | `0001` loop back edges invisible | open | Binding/CFG |
 | `0002` object aliasing/clones | open | Clone discipline, then object representation |
-| `0003` integer arithmetic semantics | partial | Binary int/long overflow and shift-distance masking fixed; divide-by-zero exception integration and update-expression wrapping remain |
+| `0003` integer arithmetic semantics | partial | Binary int/long overflow, shift-distance masking, and local integral update wrapping fixed; divide-by-zero exception integration remains |
 | `0004` string concat absorbs arithmetic | fixed locally | Moved to `claude_audits/done`; Rust IR shape tags prevent recurrence |
 | `0005` unsigned right shift | fixed locally | Moved to `claude_audits/done`; arithmetic slice should add shift-distance masking |
 | `0006` move analysis fragmented | open | CallableAnalysis, BindingId, CFG |

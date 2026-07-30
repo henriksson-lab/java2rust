@@ -4849,6 +4849,68 @@ mod generated_tests {
 }
 
 #[test]
+fn java_local_update_expressions_wrap_for_integral_primitives() {
+    let translation = translate_source(
+        r#"
+class JavaLocalUpdateSemantics {
+    int preIncInt(int value) {
+        int next = ++value;
+        return next;
+    }
+
+    int postDecByte() {
+        byte value = -128;
+        byte old = value--;
+        return old + value;
+    }
+
+    int preDecChar() {
+        char value = '\0';
+        --value;
+        return value;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("value = (value).wrapping_add(1);")
+            && translation
+                .rust
+                .contains("value = (value).wrapping_sub(1);")
+            && translation.rust.contains("char::from_u32")
+            && !translation.rust.contains("value += 1")
+            && !translation.rust.contains("value -= 1"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "java_local_update_semantics",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn local_updates_match_java_wrapping_edges() {
+        let fixture = JavaLocalUpdateSemantics {};
+        assert_eq!(fixture.pre_inc_int(i32::MAX), i32::MIN);
+        assert_eq!(fixture.post_dec_byte(), -1);
+        assert_eq!(fixture.pre_dec_char(), 65535);
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
 fn optional_array_element_participates_in_numeric_promotion() {
     let translation = translate_source(
         r#"

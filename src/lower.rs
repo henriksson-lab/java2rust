@@ -47,9 +47,10 @@ use crate::coercion::{
     exception_self_as_supertype_facade_boundary_projection,
     explicit_java_facade_cast_placeholder_projection, force_shared_borrow_projection,
     function_call_projection, into_projection, iterator_next_expect_projection,
-    java_integral_literal_char, java_update_expression_projection, len_i32_projection,
-    literal_slot_plan, logical_not_projection, map_get_expect_projection,
-    map_get_mut_expect_projection, map_get_projection, normalize_map_key_borrow_projection,
+    java_integral_literal_char, java_primitive_update_expression_projection,
+    java_update_expression_projection, len_i32_projection, literal_slot_plan,
+    logical_not_projection, map_get_expect_projection, map_get_mut_expect_projection,
+    map_get_projection, normalize_map_key_borrow_projection,
     normalize_reused_clone_for_borrowed_argument, optional_copied_expect_projection,
     outer_this_field_projection, owned_map_keys_set_projection, owner_associated_path_projection,
     parenthesize_borrowed_method_receiver, print_macro_projection,
@@ -11566,7 +11567,7 @@ fn lower_local_update_value_expr(
     ) {
         return None;
     }
-    let Expr::Var(_) = expr else {
+    let Expr::Var(name) = expr else {
         return None;
     };
     let target_expr = lower_expr(expr, env, ctx);
@@ -11575,6 +11576,16 @@ fn lower_local_update_value_expr(
         UnaryOp::PreDec | UnaryOp::PostDec => "-=",
         _ => return None,
     };
+    if let Some(JavaType::Primitive(primitive)) = env.type_env().local_type(name)
+        && let Some(expr) = java_primitive_update_expression_projection(
+            target_expr.clone(),
+            matches!(op, UnaryOp::PreInc | UnaryOp::PostInc),
+            *primitive,
+            matches!(op, UnaryOp::PreInc | UnaryOp::PreDec),
+        )
+    {
+        return Some(expr);
+    }
     Some(match op {
         UnaryOp::PreInc | UnaryOp::PreDec => {
             java_update_expression_projection(target_expr, update_op, true)

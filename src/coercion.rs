@@ -3397,6 +3397,44 @@ pub fn java_update_expression_projection(
     }
 }
 
+pub fn java_primitive_update_expression_projection(
+    target: RustExpr,
+    increment: bool,
+    primitive: PrimitiveType,
+    prefix: bool,
+) -> Option<RustExpr> {
+    let target = emit::emit_expr(&target);
+    let value = java_primitive_update_value_projection(&target, increment, primitive)?;
+    if prefix {
+        Some(RustExpr::Raw(format!("{{ {target} = {value}; {target} }}")))
+    } else {
+        Some(RustExpr::Raw(format!(
+            "{{ let __java_old_value = {target}; {target} = {value}; __java_old_value }}"
+        )))
+    }
+}
+
+fn java_primitive_update_value_projection(
+    target: &str,
+    increment: bool,
+    primitive: PrimitiveType,
+) -> Option<String> {
+    let method = if increment {
+        "wrapping_add"
+    } else {
+        "wrapping_sub"
+    };
+    match primitive {
+        PrimitiveType::Byte | PrimitiveType::Short | PrimitiveType::Int | PrimitiveType::Long => {
+            Some(format!("({target}).{method}(1)"))
+        }
+        PrimitiveType::Char => Some(format!(
+            "char::from_u32(((((({target}) as u32) as i32).{method}(1)) as u32) & 0xffff).unwrap_or('\\0')"
+        )),
+        PrimitiveType::Float | PrimitiveType::Double | PrimitiveType::Boolean => None,
+    }
+}
+
 pub fn exception_self_as_supertype_facade_boundary_projection() -> RustExpr {
     RustExpr::Raw(
         "Default::default()/* TODO(translation): Java exception self-as-supertype facade boundary */"
