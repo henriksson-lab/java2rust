@@ -6276,6 +6276,20 @@ Focused verification passed:
 `git diff --check`, and
 `cargo build --release --quiet --bin new-java2rust`.
 
+Post-fix boundary rerun:
+`cargo test --test idiom_gaps --quiet` was rerun after the collection
+lookup/storage fix and interrupted after 1502.61s at the quiet tail. It is
+still not a full-suite green claim because the test harness did not print the
+final summary. During the visible run no failures were printed, and each of the
+seven previously exposed failures passed its section in the full run:
+`documents_map_put_get_java_api_gap`,
+`integer_parse_int_unwraps_sequence_get_argument`,
+`map_get_keyset_loop_does_not_double_borrow_key`,
+`map_put_else_branch_reused_key_clones_before_later_block_read`,
+`map_put_else_branch_reassigned_key_clones_before_later_block_read`,
+`negated_java_equals_uses_inequality_projection`, and
+`typed_set_add_source_constructor_keeps_concrete_element_slot`.
+
 ## Rerun Protocol
 
 After each fix:
