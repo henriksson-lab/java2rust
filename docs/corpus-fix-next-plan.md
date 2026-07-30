@@ -228,8 +228,15 @@ support. Focused coverage:
 `external_getter_without_return_fact_uses_named_unmodelled_result_shim`,
 `external_new_builder_without_return_fact_uses_named_builder_shim`, and
 `erased_object_facade_includes_modeled_void_methods`. Remaining work is to
-apply the same explicit unmodelled/fact-backed split to imported static
-fallbacks, inherited support surfaces, and generic getter fallbacks.
+apply the same explicit unmodelled/fact-backed split to inherited support
+surfaces and generic getter fallbacks.
+
+Imported-static missing-return step: imported static getter facts with no
+return type now also emit named opaque result shims and loud unmodelled bodies,
+instead of falling through to generic `R: Default` methods. Focused coverage:
+`imported_static_getter_without_return_fact_uses_named_unmodelled_result_shim`.
+Remaining work in this cluster is inherited support surfaces and generic getter
+fallbacks.
 
 2026-07-29 PrintStream overload cleanup: JDK `PrintStream.print/println`
 arity-1 calls now have explicit platform API facts, resolved external instance

@@ -7395,6 +7395,11 @@ impl ExternalApiFacadeSupport {
                 {
                     self.add_java_type(&return_type);
                 }
+                if let Some(return_rust) =
+                    imported_static_unmodelled_result_type(facts, &owner_key, method, *arg_count)
+                {
+                    self.add_opaque_type(return_rust);
+                }
                 let method_body = external_facade_imported_static_method_with_facts(
                     facts, &owner_key, method, *arg_count,
                 );
@@ -11807,6 +11812,19 @@ fn external_facade_imported_static_method_with_facts(
                 "()",
             );
         }
+        if let Some(return_type) =
+            imported_static_unmodelled_result_type(facts, owner_key, name, arg_count)
+        {
+            return external_facade_unmodelled_method_with_facts(
+                facts,
+                owner_key,
+                &effect.method_name,
+                name,
+                arg_count,
+                &return_type,
+                true,
+            );
+        }
     }
     if let Some(return_type) = known_imported_static_method_return_type(owner_key, name, arg_count)
     {
@@ -11828,6 +11846,36 @@ fn external_facade_imported_static_method_with_facts(
         );
     }
     external_facade_imported_static_method(name, arg_count)
+}
+
+fn imported_static_unmodelled_result_type(
+    facts: &FactSet,
+    owner_key: &str,
+    name: &str,
+    arg_count: usize,
+) -> Option<String> {
+    let effect = facts
+        .external_api_effect_for_receiver_with_arity(Some(owner_key), name, Some(arg_count))
+        .cloned()
+        .or_else(|| {
+            crate::external_packs::external_api_effect_for_receiver_with_arity(
+                Some(owner_key),
+                name,
+                Some(arg_count),
+            )
+        })?;
+    if effect.return_type.is_some()
+        || effect.provenance == FactProvenance::ConservativeFallback
+        || !external_api_role_returns_value(effect.role)
+    {
+        return None;
+    }
+    let owner_rust = rust_name_for_java_named_type(owner_key);
+    Some(external_facade_unmodelled_result_type(
+        &owner_rust,
+        name,
+        arg_count,
+    ))
 }
 
 fn known_imported_static_method_return_type(

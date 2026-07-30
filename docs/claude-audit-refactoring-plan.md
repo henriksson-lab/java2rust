@@ -199,6 +199,8 @@ Landed in this batch:
   result shims with `unimplemented!("Receiver.method is not modelled")` bodies
   instead of silently lowering as `()` or broadening the erased-object facade.
   Void-like side-effect/mutator facts still emit `()` surfaces.
+- Imported static getter facts with missing return types now use the same named
+  unmodelled result shim path instead of generic `R: Default` fallback methods.
 
 1. Expand rust signature facts.
    - Prefer function signature facts over tailored call rules whenever the same

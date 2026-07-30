@@ -26205,6 +26205,73 @@ class UseExternalNewBuilderMissingReturnFact {
 }
 
 #[test]
+fn imported_static_getter_without_return_fact_uses_named_unmodelled_result_shim() {
+    let source = r#"
+import static external.lib.StaticUtility.fetchRecord;
+
+class UseImportedStaticMissingReturnFact {
+    Object read() {
+        return fetchRecord("sample");
+    }
+}
+"#;
+    let mut facts = FactSet::default();
+    facts.hierarchy_overrides.push(HierarchyOverride {
+        type_name: "external.lib.StaticUtility".to_string(),
+        strategy: HierarchyStrategy::ErasedObject,
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "fetchRecord".to_string(),
+        receiver_type: Some("external.lib.StaticUtility".to_string()),
+        arg_count: Some(1),
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: None,
+        return_nullability: NullabilityState::Unknown,
+        thrown: Vec::new(),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts
+        .external_api_argument_effect_facts
+        .push(ExternalApiArgumentEffectFact {
+            receiver_type: Some("external.lib.StaticUtility".to_string()),
+            method_name: "fetchRecord".to_string(),
+            arg_count: Some(1),
+            parameter_index: 0,
+            parameter_type: Some(JavaType::String),
+            parameter_nullability: NullabilityState::DefinitelyNonNull,
+            argument_mutability: ReceiverMutabilityFact::ReadOnly,
+            alias_policy: ExternalArgumentAliasPolicy::Borrowed,
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+
+    let translation = translate_source_with_facts(source, &facts);
+
+    assert!(
+        translation
+            .rust
+            .contains("pub struct ExternalLibStaticUtilityFetchRecord1Result"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains(
+            "pub fn fetchRecord(_arg0: &str) -> ExternalLibStaticUtilityFetchRecord1Result { unimplemented!(\"external.lib.StaticUtility.fetchRecord is not modelled\") }"
+        ) || translation.rust.contains(
+            "pub fn fetch_record(_arg0: &str) -> ExternalLibStaticUtilityFetchRecord1Result { unimplemented!(\"external.lib.StaticUtility.fetchRecord is not modelled\") }"
+        ),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("R: Default"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn erased_object_facade_includes_modeled_void_methods() {
     let source = r#"
 class ErasedVoidFacadeUse {
