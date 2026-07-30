@@ -1,5 +1,6 @@
 use crate::exception_plan::ProgramExceptionPlan;
-use crate::signature::SignaturePlan;
+use crate::java_signature::JavaCallableKey;
+use crate::signature::{MethodSignaturePlan, SignaturePlan};
 use crate::usage::{CallGraph, MethodUsageFacts, UsageConstructorKey, UsageFacts, UsageMethodKey};
 
 #[derive(Debug, Clone, Copy)]
@@ -31,6 +32,17 @@ impl<'a> CallableAnalysis<'a> {
 
     pub fn method_usage_by_rust_name(&self, key: &UsageMethodKey) -> Option<&'a MethodUsageFacts> {
         self.usage.methods_by_rust_name.get(key)
+    }
+
+    pub fn method_usage_by_java_key(&self, key: &JavaCallableKey) -> Option<&'a MethodUsageFacts> {
+        self.usage.methods_by_java_key.get(key)
+    }
+
+    pub fn method_signature_by_java_key(
+        &self,
+        key: &JavaCallableKey,
+    ) -> Option<&'a MethodSignaturePlan> {
+        self.signatures.method_signature_by_java_key(key)
     }
 
     pub fn constructor_usage(&self, key: &UsageConstructorKey) -> Option<&'a MethodUsageFacts> {

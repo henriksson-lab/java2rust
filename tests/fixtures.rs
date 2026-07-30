@@ -375,6 +375,64 @@ fn translates_methods_with_overload_suffixes() {
 }
 
 #[test]
+fn inherited_overload_does_not_replace_child_override_body() {
+    let translation = translate_source(
+        r#"
+class Base {
+    int f(int a, int b) {
+        return a + b + 100;
+    }
+}
+
+class Child extends Base {
+    int f(int a) {
+        return a * 10;
+    }
+
+    int run() {
+        return f(2) + f(2, 3);
+    }
+}
+"#,
+    );
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("pub fn f(&self, a: i32) -> i32"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("return a * 10;"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn f_int_int(&self, a: i32, b: i32) -> i32"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("return (a + b) + 100;"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("self.f(2) + self.f_int_int(2, 3)"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn translates_constructor_delegation_to_resolved_constructor_calls() {
     let translation = translate_source(&fixture("03-methods/ConstructorOverloads.java"));
     assert!(

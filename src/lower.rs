@@ -4222,17 +4222,15 @@ fn lower_inherited_method(
     inherited: crate::inherited_members::InheritedInstanceMethodRef<'_>,
     ctx: LowerCtx,
 ) -> RustFunction {
-    if inherited.method.body.is_none() {
-        lower_method(program, inherited.declaring_ty, inherited.method, ctx)
-    } else {
-        lower_method_with_exception_owner(
-            program,
-            emitted_ty,
-            inherited.method,
-            inherited.declaring_ty,
-            ctx,
-        )
-    }
+    let mut emitted_method = inherited.method.clone();
+    emitted_method.rust_name = Some(inherited.rust_name.clone());
+    lower_method_with_exception_owner(
+        program,
+        emitted_ty,
+        &emitted_method,
+        inherited.declaring_ty,
+        ctx,
+    )
 }
 
 fn bodyless_source_summary_method_body(

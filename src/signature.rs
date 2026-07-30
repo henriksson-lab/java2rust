@@ -13,6 +13,7 @@ use crate::java_ir::{
     BinaryOp, Block, ConstructorDecl, Expr, FieldDecl, JavaType, LambdaBody, Literal, MethodDecl,
     Modifier, Param, Program, Stmt, TypeDecl, TypeKind, UnaryOp,
 };
+use crate::java_signature::JavaCallableKey;
 use crate::lattice::{
     dispatch_shape_lattice_rank, join_ranked_lattice, ownership_lattice_rank,
     storage_nullability_lattice_rank, view_lattice_rank,
@@ -44,6 +45,7 @@ pub type SolvedSlotShape = RustSlotShape;
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SignaturePlan {
     methods: HashMap<MethodKey, MethodSignaturePlan>,
+    methods_by_java_key: HashMap<JavaCallableKey, MethodSignaturePlan>,
     constructors: HashMap<ConstructorKey, ConstructorSignaturePlan>,
     fields: HashMap<FieldKey, RustSlotShape>,
     solve_iterations: usize,
@@ -5161,6 +5163,13 @@ impl SignaturePlan {
         })
     }
 
+    pub fn method_signature_by_java_key(
+        &self,
+        key: &JavaCallableKey,
+    ) -> Option<&MethodSignaturePlan> {
+        self.methods_by_java_key.get(key)
+    }
+
     pub fn method_signature_by_base_name_and_arity(
         &self,
         type_name: &str,
@@ -5767,54 +5776,50 @@ fn collect_type_signatures(
                     rust_name: method_rust_name(method),
                 };
                 let method_constraints = constraints.methods.get(&method_key);
-                plan.methods.insert(
-                    method_key,
-                    MethodSignaturePlan {
-                        params: method
-                            .params
-                            .iter()
-                            .enumerate()
-                            .map(|(index, param)| {
-                                let constraints = method_constraints
-                                    .and_then(|constraints| constraints.params.get(index))
-                                    .cloned()
-                                    .unwrap_or_default();
-                                constrained_param_plan(param, representations, &constraints, facts)
-                            })
-                            .collect(),
-                        return_shape: {
+                let signature = MethodSignaturePlan {
+                    params: method
+                        .params
+                        .iter()
+                        .enumerate()
+                        .map(|(index, param)| {
                             let constraints = method_constraints
-                                .map(|constraints| constraints.return_constraints.clone())
+                                .and_then(|constraints| constraints.params.get(index))
+                                .cloned()
                                 .unwrap_or_default();
-                            constrained_return_shape(
-                                ty,
-                                method,
+                            constrained_param_plan(param, representations, &constraints, facts)
+                        })
+                        .collect(),
+                    return_shape: {
+                        let constraints = method_constraints
+                            .map(|constraints| constraints.return_constraints.clone())
+                            .unwrap_or_default();
+                        constrained_return_shape(ty, method, representations, &constraints, facts)
+                    },
+                    locals: method
+                        .body
+                        .as_ref()
+                        .map(|body| {
+                            collect_local_plans_from_constraints(
+                                body,
                                 representations,
-                                &constraints,
+                                method_constraints
+                                    .map(|constraints| constraints.locals.as_slice())
+                                    .unwrap_or(&[]),
                                 facts,
                             )
-                        },
-                        locals: method
-                            .body
-                            .as_ref()
-                            .map(|body| {
-                                collect_local_plans_from_constraints(
-                                    body,
-                                    representations,
-                                    method_constraints
-                                        .map(|constraints| constraints.locals.as_slice())
-                                        .unwrap_or(&[]),
-                                    facts,
-                                )
-                            })
-                            .unwrap_or_default(),
-                        receiver: constrained_receiver_plan(
-                            method_constraints
-                                .map(|constraints| constraints.receiver.as_slice())
-                                .unwrap_or(&[]),
-                        ),
-                    },
+                        })
+                        .unwrap_or_default(),
+                    receiver: constrained_receiver_plan(
+                        method_constraints
+                            .map(|constraints| constraints.receiver.as_slice())
+                            .unwrap_or(&[]),
+                    ),
+                };
+                plan.methods_by_java_key.insert(
+                    JavaCallableKey::source_method(ty.name.clone(), method),
+                    signature.clone(),
                 );
+                plan.methods.insert(method_key, signature);
             }
             crate::java_ir::Member::Constructor(ctor) => {
                 let constructor_key = ConstructorKey {
@@ -5952,11 +5957,15 @@ fn collect_type_signatures(
     {
         let method_key = MethodKey {
             type_name: ty.name.clone(),
-            rust_name: method_rust_name(inherited.method),
+            rust_name: inherited.rust_name.clone(),
         };
-        plan.methods.entry(method_key).or_insert_with(|| {
-            inherited_source_method_signature(inherited, representations, constraints, facts)
-        });
+        let java_key = JavaCallableKey::source_method(ty.name.clone(), inherited.method);
+        let signature =
+            inherited_source_method_signature(inherited, representations, constraints, facts);
+        plan.methods.entry(method_key).or_insert(signature.clone());
+        plan.methods_by_java_key
+            .entry(java_key)
+            .or_insert(signature);
     }
 }
 

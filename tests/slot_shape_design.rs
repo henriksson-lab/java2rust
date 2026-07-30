@@ -3337,7 +3337,10 @@ fn callable_analysis_shell_reaches_lowering_context() {
     assert!(analysis_source.contains("pub signatures: &'a SignaturePlan"));
     assert!(analysis_source.contains("pub exceptions: &'a ProgramExceptionPlan"));
     assert!(analysis_source.contains("pub fn method_usage("));
+    assert!(analysis_source.contains("pub fn method_usage_by_java_key("));
+    assert!(analysis_source.contains("pub fn method_signature_by_java_key("));
     assert!(analysis_source.contains("pub fn constructor_usage("));
+    assert!(analysis_source.contains("JavaCallableKey"));
     assert!(lower_source.contains("callable_analysis: &'a CallableAnalysis<'a>"));
     assert!(
         lower_source.contains("let call_graph = crate::usage::build_call_graph")
@@ -3353,10 +3356,16 @@ fn callable_analysis_shell_reaches_lowering_context() {
 #[test]
 fn callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating() {
     let lower_source = include_str!("../src/lower.rs");
+    let signature_source = include_str!("../src/signature.rs");
+    let usage_source = include_str!("../src/usage.rs");
 
     assert!(lower_source.contains("usage: &'a UsageFacts"));
     assert!(lower_source.contains("signatures: &'a SignaturePlan"));
     assert!(lower_source.contains("exceptions: &'a ProgramExceptionPlan"));
+    assert!(signature_source.contains("methods_by_java_key: HashMap<JavaCallableKey"));
+    assert!(signature_source.contains("JavaCallableKey::source_method"));
+    assert!(usage_source.contains("pub methods_by_java_key: HashMap<JavaCallableKey"));
+    assert!(usage_source.contains("JavaCallableKey::source_method"));
     assert!(
         lower_source.contains("CallableAnalysis::new(usage, &call_graph, signatures, &exceptions)")
     );

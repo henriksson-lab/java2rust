@@ -5,12 +5,14 @@ use crate::java_ir::{
     Block, ConstructorInvocationKind, Expr, JavaType, LambdaBody, Member, Modifier, Program,
     ResolvedCall, ResolvedConstructor, Stmt, TypeDecl,
 };
+use crate::java_signature::JavaCallableKey;
 use crate::stdlib::is_content_read_method;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UsageFacts {
     pub methods: HashMap<UsageMethodKey, MethodUsageFacts>,
     pub methods_by_rust_name: HashMap<UsageMethodKey, MethodUsageFacts>,
+    pub methods_by_java_key: HashMap<JavaCallableKey, MethodUsageFacts>,
     pub constructors: HashMap<UsageConstructorKey, MethodUsageFacts>,
 }
 
@@ -228,7 +230,7 @@ pub fn analyze_usage_with_facts(program: &Program, semantic_facts: &FactSet) -> 
 
 fn propagate_self_mutability_through_self_calls(facts: &mut UsageFacts) {
     loop {
-        let mutating_methods = facts
+        let mut mutating_methods = facts
             .methods
             .iter()
             .chain(facts.methods_by_rust_name.iter())
@@ -238,11 +240,17 @@ fn propagate_self_mutability_through_self_calls(facts: &mut UsageFacts) {
                     .then(|| (key.type_name.clone(), key.method_name.clone()))
             })
             .collect::<HashSet<_>>();
+        mutating_methods.extend(facts.methods_by_java_key.iter().filter_map(|(key, usage)| {
+            usage
+                .mutates_self
+                .then(|| (key.owner.clone(), key.java_name.clone()))
+        }));
         let mut changed = false;
         for usage in facts
             .methods
             .values_mut()
             .chain(facts.methods_by_rust_name.values_mut())
+            .chain(facts.methods_by_java_key.values_mut())
         {
             if usage.mutates_self {
                 continue;
@@ -328,6 +336,10 @@ fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts, semantic_facts: &Fa
                         .unwrap_or_else(|| crate::parser::to_snake_case(&method.name)),
                 };
                 facts.methods.insert(rust_key, method_facts.clone());
+                facts.methods_by_java_key.insert(
+                    JavaCallableKey::source_method(ty.name.clone(), method),
+                    method_facts.clone(),
+                );
                 facts.methods.insert(java_key, method_facts);
             }
             Member::Constructor(ctor) => {

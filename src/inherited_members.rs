@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 
 use crate::facts::{ExternalApiEffectFact, ExternalFieldKind, FactSet, NullabilityState};
-use crate::java_ir::{FieldDecl, JavaType, Member, Modifier, Program, TypeDecl};
+use crate::java_ir::{FieldDecl, JavaType, Member, MethodDecl, Modifier, Program, TypeDecl};
+use crate::java_signature::{JavaCallableSlotKey, source_method_overload_rust_name};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExternalInheritedInstanceField {
@@ -40,11 +41,12 @@ pub struct InheritedInstanceFieldRef<'a> {
     pub field: &'a FieldDecl,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct InheritedInstanceMethodRef<'a> {
     pub declaring_type: &'a str,
     pub declaring_ty: &'a TypeDecl,
     pub method: &'a crate::java_ir::MethodDecl,
+    pub rust_name: String,
 }
 
 pub fn inherited_instance_fields_for_type(
@@ -65,7 +67,8 @@ pub fn inherited_instance_method_refs_for_type<'a>(
     support_program: &'a Program,
 ) -> Vec<InheritedInstanceMethodRef<'a>> {
     let mut methods = Vec::new();
-    let mut seen_methods = direct_instance_method_signatures(ty);
+    let mut seen_methods = direct_instance_method_slots(ty);
+    let direct_method_rust_names = direct_instance_method_rust_names(ty);
     let mut current = ty.extends.as_deref();
     let mut visited_types = HashSet::new();
 
@@ -84,13 +87,15 @@ pub fn inherited_instance_method_refs_for_type<'a>(
             if !is_inheritable_instance_method(method) {
                 continue;
             }
-            let rust_name = crate::parser::to_snake_case(&method.name);
-            let signature = (rust_name, method.params.len());
+            let signature = JavaCallableSlotKey::source_method(method);
             if seen_methods.insert(signature) {
+                let rust_name =
+                    inherited_method_rust_name_for_child(method, &direct_method_rust_names);
                 methods.push(InheritedInstanceMethodRef {
                     declaring_type: &super_ty.name,
                     declaring_ty: super_ty,
                     method,
+                    rust_name,
                 });
             }
         }
@@ -287,17 +292,45 @@ fn direct_instance_field_names(ty: &TypeDecl) -> HashSet<String> {
         .collect()
 }
 
-fn direct_instance_method_signatures(ty: &TypeDecl) -> HashSet<(String, usize)> {
+fn direct_instance_method_slots(ty: &TypeDecl) -> HashSet<JavaCallableSlotKey> {
     ty.members
         .iter()
         .filter_map(|member| match member {
-            Member::Method(method) if !is_static_method(method) => Some((
-                crate::parser::to_snake_case(&method.name),
-                method.params.len(),
-            )),
+            Member::Method(method) if !is_static_method(method) => {
+                Some(JavaCallableSlotKey::source_method(method))
+            }
             _ => None,
         })
         .collect()
+}
+
+fn direct_instance_method_rust_names(ty: &TypeDecl) -> HashSet<String> {
+    ty.members
+        .iter()
+        .filter_map(|member| match member {
+            Member::Method(method) if !is_static_method(method) => Some(
+                method
+                    .rust_name
+                    .clone()
+                    .unwrap_or_else(|| crate::parser::to_snake_case(&method.name)),
+            ),
+            _ => None,
+        })
+        .collect()
+}
+
+fn inherited_method_rust_name_for_child(
+    method: &MethodDecl,
+    direct_method_rust_names: &HashSet<String>,
+) -> String {
+    let inherited_name = method
+        .rust_name
+        .clone()
+        .unwrap_or_else(|| crate::parser::to_snake_case(&method.name));
+    if !direct_method_rust_names.contains(&inherited_name) {
+        return inherited_name;
+    }
+    source_method_overload_rust_name(method)
 }
 
 fn direct_static_final_field_names(ty: &TypeDecl) -> HashSet<String> {
@@ -383,6 +416,78 @@ fn is_static_field(field: &FieldDecl) -> bool {
 
 fn is_static_method(method: &crate::java_ir::MethodDecl) -> bool {
     method.modifiers.contains(&Modifier::Static)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diagnostics::Span;
+    use crate::java_ir::{Block, MethodDecl, PrimitiveType, TypeKind};
+
+    fn method(name: &str, params: Vec<JavaType>, rust_name: &str) -> Member {
+        Member::Method(MethodDecl {
+            name: name.to_string(),
+            rust_name: Some(rust_name.to_string()),
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            return_type: JavaType::Primitive(PrimitiveType::Int),
+            throws: Vec::new(),
+            params: params
+                .into_iter()
+                .enumerate()
+                .map(|(index, ty)| crate::java_ir::Param {
+                    name: format!("arg{index}"),
+                    ty,
+                    is_varargs: false,
+                })
+                .collect(),
+            modifiers: Vec::new(),
+            body: Some(Block {
+                statements: Vec::new(),
+            }),
+            span: Span::default(),
+        })
+    }
+
+    fn class(name: &str, extends: Option<&str>, members: Vec<Member>) -> TypeDecl {
+        TypeDecl {
+            kind: TypeKind::Class,
+            name: name.to_string(),
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            modifiers: Vec::new(),
+            extends: extends.map(str::to_string),
+            implements: Vec::new(),
+            permits: Vec::new(),
+            members,
+            span: Span::default(),
+        }
+    }
+
+    #[test]
+    fn inherited_methods_use_java_signature_slots_not_rust_name() {
+        let int_ty = JavaType::Primitive(PrimitiveType::Int);
+        let program = Program {
+            package: None,
+            imports: Vec::new(),
+            types: vec![
+                class(
+                    "Base",
+                    None,
+                    vec![method("f", vec![int_ty.clone(), int_ty.clone()], "f")],
+                ),
+                class("Child", Some("Base"), vec![method("f", vec![int_ty], "f")]),
+            ],
+        };
+        let child = find_type_decl(&program, "Child").unwrap();
+
+        let inherited = inherited_instance_method_refs_for_type(child, &program);
+
+        assert_eq!(inherited.len(), 1);
+        assert_eq!(inherited[0].method.name, "f");
+        assert_eq!(inherited[0].method.params.len(), 2);
+        assert_eq!(inherited[0].rust_name, "f_int_int");
+    }
 }
 
 fn is_inheritable_instance_method(method: &crate::java_ir::MethodDecl) -> bool {
