@@ -55,6 +55,8 @@ Landed in this batch:
   `scripts/focused-parse-failures.sh`, with fast helper coverage and an
   end-to-end focused-package wrapper test proving parse failures increment
   `parse_failures` and set `cargo_type_errors_valid=0`.
+- Unknown named block statements are surfaced as `Stmt::Unsupported`; focused
+  parser probes cover both `assert_statement` and `yield_statement`.
 
 1. Add a generated-Rust parse gate to focused corpus scripts.
    - Report parse failures separately from type-check errors.

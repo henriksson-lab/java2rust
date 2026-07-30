@@ -507,6 +507,27 @@ class AssertStatementUnsupported {
 }
 
 #[test]
+fn yield_statement_surfaces_as_unsupported_statement() {
+    let parsed = parse_java_source(
+        r#"
+class YieldStatementUnsupported {
+    int run(int value) {
+        yield value;
+    }
+}
+"#,
+    );
+    let fallbacks = collect_program_fallbacks(&parsed.program);
+
+    assert!(
+        fallbacks
+            .iter()
+            .any(|fallback| fallback.contains("yield_statement")),
+        "{fallbacks:?}"
+    );
+}
+
+#[test]
 fn switch_expression_surfaces_as_unsupported_expression_not_raw_java() {
     let parsed = parse_java_source(
         r#"
