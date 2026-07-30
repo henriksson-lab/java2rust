@@ -9039,6 +9039,112 @@ mod generated_tests {
 }
 
 #[test]
+fn chained_optional_external_receiver_getter_is_unwrapped_before_call() {
+    let source = r#"
+import htsjdk.samtools.SAMSequenceDictionary;
+import htsjdk.variant.vcf.VCFHeader;
+
+class ChainedOptionalExternalReceiverGetterUse {
+    VCFHeader maybeHeader() {
+        return null;
+    }
+
+    SAMSequenceDictionary dictionary() {
+        return maybeHeader().getSequenceDictionary();
+    }
+}
+"#;
+    let pack_facts = new_java2rust::external_packs::htsjdk_vcf_pack_facts();
+    let mut facts = FactSet::default();
+    facts.external_api_effect_facts.push(
+        pack_facts
+            .external_api_effect_for_receiver(Some("VCFHeader"), "getSequenceDictionary")
+            .expect("VCFHeader.getSequenceDictionary should be pack-owned")
+            .clone(),
+    );
+    let translation = translate_source_with_facts(source, &facts);
+
+    assert!(
+        translation
+            .rust
+            .contains("self.maybe_header().as_ref().unwrap().get_sequence_dictionary()")
+            && !translation
+                .rust
+                .contains("self.maybe_header().get_sequence_dictionary()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "chained_optional_external_receiver_getter",
+        vec![GeneratedCrateModule {
+            name: "chained_optional_external_receiver_getter",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn typechecks_chained_optional_receiver_getter() {
+        let fixture = ChainedOptionalExternalReceiverGetterUse {};
+        let _: SAMSequenceDictionary = fixture.dictionary();
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn sibling_optional_source_return_receiver_getter_is_unwrapped_before_call() {
+    let source = r#"
+import htsjdk.samtools.SAMSequenceDictionary;
+
+class SiblingOptionalSourceReturnReceiverGetterUse {
+    SAMSequenceDictionary dictionary(SourceHeaderReader reader) {
+        return reader.getFileHeader().getSequenceDictionary();
+    }
+}
+"#;
+    let sibling = r#"
+import htsjdk.variant.vcf.VCFHeader;
+
+class SourceHeaderReader {
+    VCFHeader header;
+
+    VCFHeader getHeader() {
+        return header;
+    }
+
+    VCFHeader getFileHeader() {
+        return getHeader();
+    }
+}
+"#;
+    let pack_facts = new_java2rust::external_packs::htsjdk_vcf_pack_facts();
+    let mut facts = FactSet::default();
+    facts.external_api_effect_facts.push(
+        pack_facts
+            .external_api_effect_for_receiver(Some("VCFHeader"), "getSequenceDictionary")
+            .expect("VCFHeader.getSequenceDictionary should be pack-owned")
+            .clone(),
+    );
+    let translation = translate_source_with_context_sources(source, &[sibling.to_string()], &facts);
+
+    assert!(
+        translation
+            .rust
+            .contains("reader.get_file_header().as_ref().unwrap().get_sequence_dictionary()")
+            && !translation
+                .rust
+                .contains("reader.get_file_header().get_sequence_dictionary()"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn constructor_initialized_local_receiver_does_not_get_optional_adapter() {
     let translation = translate_source(
         r#"
@@ -18155,6 +18261,36 @@ class NegatedJavaEqualsProjection {
             rust: translation.rust,
             tests: "",
         }],
+    );
+}
+
+#[test]
+fn stream_filter_negated_java_equals_parenthesizes_binary_projection() {
+    let translation = translate_source(
+        r#"
+import java.util.Set;
+import java.util.stream.Collectors;
+
+class StreamFilterNegatedJavaEqualsProjection {
+    enum Version {
+        V1, V2
+    }
+
+    String versions(Set<Version> versions) {
+        return versions.stream()
+                .filter(hv -> !hv.equals(Version.V1))
+                .map(Version::name)
+                .collect(Collectors.joining(" "));
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(".filter(|hv| !(")
+            && !translation.rust.contains(".filter(|hv| !hv =="),
+        "{}",
+        translation.rust
     );
 }
 

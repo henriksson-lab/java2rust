@@ -245,6 +245,13 @@ fn emit_stream_lambda_shared_native_call(
     };
     let precedence = match target {
         crate::call_plan::CallTargetPlan::NativeJavaStatic {
+            method: crate::call_plan::NativeJavaStaticMethod::ObjectsEquals,
+        }
+        | crate::call_plan::CallTargetPlan::NativeJavaInstance {
+            method: crate::call_plan::NativeJavaInstanceMethod::Equals,
+            ..
+        } => stream_binary_precedence(BinaryOp::Eq),
+        crate::call_plan::CallTargetPlan::NativeJavaStatic {
             method: crate::call_plan::NativeJavaStaticMethod::MathToIntExact,
         }
         | crate::call_plan::CallTargetPlan::NativeJavaInstance {

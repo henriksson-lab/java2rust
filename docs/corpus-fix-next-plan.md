@@ -218,6 +218,23 @@ plus the adjacent PrintStream overload tests. A VCF batch rerun was started at
 interrupted before crate assembly/compile summaries completed, so do not treat
 that directory as a corpus-quality baseline.
 
+2026-07-30 stream lambda equality precedence: stream lambda native-call
+rendering now reports equality-call projections with binary equality precedence
+instead of method-call precedence. This keeps `filter(hv -> !hv.equals(...))`
+from lowering to invalid `!hv == ...` Rust while still routing the inner call
+through the shared native call plan. Focused coverage:
+`stream_filter_negated_java_equals_parenthesizes_binary_projection` and the
+adjacent non-stream negated-equals regression. Additional optional receiver
+coverage now proves direct and sibling-source nullable receiver chains lower
+through `.as_ref().unwrap()` before external getter calls.
+
+Attempted VCF refresh:
+`.tmp/corpus-rerun-20260730-htsjdk-vcf-current-refresh` stalled during
+`batch_parse_global_emit_start` before per-file statuses or generated source
+files were written and was killed. Do not use that directory as a corpus-quality
+baseline; continue from the last complete VCF baseline until a clean rerun
+finishes.
+
 2026-07-29 raw collection runtime target slice: `Object instanceof List` now
 uses the same erased JDK collection carrier as raw `List` type rendering:
 `Vec<Box<dyn std::any::Any>>`. This removes the phantom `List` runtime target
