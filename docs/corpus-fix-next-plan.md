@@ -6938,6 +6938,16 @@ duplicate `From<T> for Box<dyn Any>` support. The next reduced-VCF target should
 either implement concrete source-hierarchy runtime checks/downcasts directly, or
 pair any erased-object fallback with the required emitted source method facade.
 
+2026-07-31 pattern-binding scope checkpoint: Java `instanceof` pattern variables
+now cover the audit `0021` source-level cases for positive blocks, negated
+terminating guards, and left-pattern `&&` chains over erased-object checks.
+Focused verification passed with `cargo test instanceof_pattern_variable --test
+idiom_gaps --quiet` and `cargo test instanceof --test parser_tree_sitter
+--quiet`. The ignored reduced-VCF probe
+`source_hierarchy_instanceof_repair_keeps_supertype_slot_adapted` still fails:
+its blocker is concrete source-hierarchy runtime `instanceof` and repair-call
+slot adaptation, not parser pattern binding.
+
 2026-07-30 sealed source-hierarchy checkpoint: proven closed source class
 hierarchies with enhanced-for `instanceof` now feed usage-derived dispatch
 requirements into representation planning and type rendering. Assigned

@@ -2906,6 +2906,77 @@ class InstanceofPatternVariableBasic {
 }
 
 #[test]
+fn instanceof_pattern_variable_negated_guard_binds_after_return() {
+    let translation = translate_source(
+        r#"
+class InstanceofPatternVariableNegatedGuard {
+    int run(Object o) {
+        if (!(o instanceof String s)) {
+            return -1;
+        }
+        return s.length();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let s = o.downcast_ref::<String>().expect(\"invalid Java cast\");")
+            && translation.rust.contains("return s.len() as i32;")
+            && !translation.rust.contains("s.length()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "instanceof_pattern_variable_negated_guard",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn instanceof_pattern_variable_and_chain_binds_rhs_and_then_block() {
+    let translation = translate_source(
+        r#"
+class InstanceofPatternVariableAndChain {
+    int run(Object o) {
+        if (o instanceof String s && s.length() > 2) {
+            return s.length();
+        }
+        return 0;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("if let Some(s) = o.downcast_ref::<String>()")
+            && translation.rust.contains("if (s.len() as i32) > 2")
+            && translation.rust.contains("return s.len() as i32;")
+            && !translation.rust.contains("s.length()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "instanceof_pattern_variable_and_chain",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn erased_object_raw_list_instanceof_uses_vec_erasure_runtime_target() {
     let translation = translate_source(
         r#"

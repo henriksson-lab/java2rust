@@ -4978,6 +4978,23 @@ fn lower_stmt(
                     })
                     .unwrap_or_default(),
             ));
+            if let Some(binding) = pattern_binding_refinement_from_early_return_guard(
+                condition,
+                then_block,
+                else_block.as_ref(),
+                ctx,
+            ) {
+                out.push(pattern_binding_refinement_stmt(
+                    &binding,
+                    env,
+                    ctx,
+                    refinements,
+                ));
+                env.insert_local_shape(
+                    binding.binding_name.to_string(),
+                    instanceof_pattern_binding_shape(&binding.ty),
+                );
+            }
             refine_local_shapes_from_branch_assignments(then_block, else_block.as_ref(), env, ctx);
         }
         Stmt::While {
@@ -5793,17 +5810,56 @@ fn exact_type_refinement_from_early_return_guard(
     else {
         return None;
     };
-    if else_block.is_some() || !block_returns_boolean_literal(then_block, false) {
+    if else_block.is_some() || !block_returns_or_throws(then_block) {
         return None;
     }
     exact_type_refinement_from_rejected_class_condition(condition, ctx)
 }
 
-fn block_returns_boolean_literal(block: &Block, value: bool) -> bool {
-    matches!(
-        block.statements.as_slice(),
-        [Stmt::Return(Some(Expr::Literal(Literal::Bool(actual))))] if *actual == value
-    )
+#[derive(Clone)]
+struct PatternBindingRefinement<'a> {
+    binding_name: &'a str,
+    source_expr: &'a Expr,
+    ty: JavaType,
+}
+
+fn pattern_binding_refinement_from_early_return_guard<'a>(
+    condition: &'a Expr,
+    then_block: &Block,
+    else_block: Option<&Block>,
+    ctx: LowerCtx,
+) -> Option<PatternBindingRefinement<'a>> {
+    if else_block.is_some() {
+        return None;
+    }
+    if !block_returns_or_throws(then_block) {
+        return None;
+    }
+    pattern_binding_refinement_from_rejected_condition(condition, ctx)
+}
+
+fn pattern_binding_refinement_stmt(
+    binding: &PatternBindingRefinement<'_>,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> RustStmt {
+    let lowered_source = lower_expr_with_refinements(binding.source_expr, env, ctx, refinements);
+    let rust_name = crate::parser::to_snake_case(binding.binding_name);
+    let rust_type = pattern_binding_rust_type_name(&binding.ty);
+    RustStmt::Raw(format!(
+        "let {rust_name} = {}.downcast_ref::<{rust_type}>().expect(\"invalid Java cast\");",
+        emit::emit_expr(&lowered_source)
+    ))
+}
+
+fn pattern_binding_rust_type_name(ty: &JavaType) -> String {
+    if ty == &JavaType::String {
+        return "String".to_string();
+    }
+    concrete_java_type_name(ty)
+        .map(crate::slot_render::rust_name_for_java_named_type)
+        .unwrap_or_else(|| "dyn std::any::Any".to_string())
 }
 
 fn exact_type_refinement_from_rejected_class_condition(
@@ -5870,6 +5926,74 @@ fn exact_type_refinement_from_rejected_instanceof_condition(
     }
 }
 
+fn pattern_binding_refinement_from_rejected_condition<'a>(
+    condition: &'a Expr,
+    _ctx: LowerCtx,
+) -> Option<PatternBindingRefinement<'a>> {
+    let (local_name, ty, binding_name) = rejected_instanceof_condition_parts(condition)?;
+    let source_expr = rejected_instanceof_source_expr(condition)?;
+    let Expr::Var(source_name) = source_expr else {
+        return None;
+    };
+    if source_name != &local_name {
+        return None;
+    }
+    Some(PatternBindingRefinement {
+        binding_name,
+        source_expr,
+        ty,
+    })
+}
+
+fn rejected_instanceof_condition_parts(condition: &Expr) -> Option<(String, JavaType, &str)> {
+    match condition {
+        Expr::Unary {
+            op: UnaryOp::Not,
+            expr,
+        } => exact_type_refinement_from_instanceof_pattern_expr(expr),
+        Expr::Binary { op, left, right } if matches!(op, BinaryOp::Eq | BinaryOp::Ne) => {
+            let left_refinement = exact_type_refinement_from_instanceof_pattern_expr(left);
+            let right_refinement = exact_type_refinement_from_instanceof_pattern_expr(right);
+            let bool_value = bool_literal_expr(left).or_else(|| bool_literal_expr(right))?;
+            match (op, bool_value, left_refinement.or(right_refinement)) {
+                (BinaryOp::Eq, false, Some(refinement))
+                | (BinaryOp::Ne, true, Some(refinement)) => Some(refinement),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn rejected_instanceof_source_expr(condition: &Expr) -> Option<&Expr> {
+    match condition {
+        Expr::Unary {
+            op: UnaryOp::Not,
+            expr,
+        } => instanceof_pattern_source_expr(expr),
+        Expr::Binary { op, left, right } if matches!(op, BinaryOp::Eq | BinaryOp::Ne) => {
+            if bool_literal_expr(left).is_some() {
+                instanceof_pattern_source_expr(right)
+            } else if bool_literal_expr(right).is_some() {
+                instanceof_pattern_source_expr(left)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn exact_type_refinement_from_instanceof_expr(expr: &Expr) -> Option<(String, JavaType)> {
+    let Expr::InstanceOf { expr, ty, .. } = expr else {
+        return None;
+    };
+    let Expr::Var(local_name) = expr.as_ref() else {
+        return None;
+    };
+    Some((local_name.clone(), ty.clone()))
+}
+
 fn lower_instanceof_pattern_if_stmt(
     condition: &Expr,
     then_block: &Block,
@@ -5881,6 +6005,72 @@ fn lower_instanceof_pattern_if_stmt(
     then_refinements: &ExprRefinements,
     else_refinements: &ExprRefinements,
 ) -> Option<RustStmt> {
+    if let Expr::Binary {
+        op: BinaryOp::And,
+        left,
+        right,
+    } = condition
+        && let Expr::InstanceOf {
+            expr,
+            ty,
+            binding: Some(binding),
+        } = left.as_ref()
+    {
+        let plan = plan_instanceof(
+            expr,
+            ty,
+            env,
+            ExprShapeContext {
+                signatures: Some(then_ctx.signatures),
+                representations: Some(then_ctx.representations),
+                facts: Some(then_ctx.facts),
+            },
+        );
+        let InstanceOfCheck::ErasedObjectType { target_type } = plan.check else {
+            return None;
+        };
+        let lowered_source = lower_expr_with_refinements(expr, env, then_ctx, then_refinements);
+        let mut pattern_env = env.clone();
+        pattern_env.insert_local_shape(binding.clone(), instanceof_pattern_binding_shape(ty));
+        let right_condition = lower_expr_for_slot(right, &pattern_env, condition_slot(), then_ctx);
+        let then_body = lower_block_with_refinements(
+            then_block,
+            &mut pattern_env,
+            wrap_returns_in_ok,
+            then_ctx,
+            then_refinements,
+        );
+        let else_body = else_block
+            .map(|block| {
+                lower_block_with_refinements(
+                    block,
+                    &mut env.clone(),
+                    wrap_returns_in_ok,
+                    else_ctx,
+                    else_refinements,
+                )
+            })
+            .unwrap_or_default();
+        let else_rendered = if else_body.is_empty() {
+            String::new()
+        } else {
+            format!(" else {{\n{}}}", emit::emit_statements(&else_body, 1))
+        };
+        return Some(RustStmt::Raw(format!(
+            "if let Some({}) = {}.downcast_ref::<{}>() {{\n    if {} {{\n{}}}{}\n}}{}",
+            crate::parser::to_snake_case(binding),
+            emit::emit_expr(&lowered_source),
+            target_type,
+            emit::emit_expr(&right_condition),
+            emit::emit_statements(&then_body, 2),
+            else_rendered,
+            if else_body.is_empty() {
+                String::new()
+            } else {
+                format!(" else {{\n{}}}", emit::emit_statements(&else_body, 1))
+            }
+        )));
+    }
     let Expr::InstanceOf {
         expr,
         ty,
@@ -5945,14 +6135,33 @@ fn instanceof_pattern_binding_shape(ty: &JavaType) -> RustSlotShape {
     }
 }
 
-fn exact_type_refinement_from_instanceof_expr(expr: &Expr) -> Option<(String, JavaType)> {
-    let Expr::InstanceOf { expr, ty, .. } = expr else {
+fn exact_type_refinement_from_instanceof_pattern_expr(
+    expr: &Expr,
+) -> Option<(String, JavaType, &str)> {
+    let Expr::InstanceOf {
+        expr: source,
+        ty,
+        binding: Some(binding),
+    } = expr
+    else {
         return None;
     };
-    let Expr::Var(local_name) = expr.as_ref() else {
+    let Expr::Var(local_name) = source.as_ref() else {
         return None;
     };
-    Some((local_name.clone(), ty.clone()))
+    Some((local_name.clone(), ty.clone(), binding.as_str()))
+}
+
+fn instanceof_pattern_source_expr(expr: &Expr) -> Option<&Expr> {
+    let Expr::InstanceOf {
+        expr,
+        binding: Some(_),
+        ..
+    } = expr
+    else {
+        return None;
+    };
+    Some(expr)
 }
 
 fn bool_literal_expr(expr: &Expr) -> Option<bool> {
