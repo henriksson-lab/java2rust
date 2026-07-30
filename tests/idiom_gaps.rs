@@ -3855,10 +3855,11 @@ class CastedFactoryResultIntoConcreteOptionalSlot {
     assert!(
         translation
             .rust
-            .contains("connection = Some(url.open_connection()?);")
+            .contains("connection = Some(url.open_connection()?.into());")
             && translation
                 .rust
-                .contains("pub fn open_connection<T: Default>(&self) -> Result<T, JavaException>")
+                .contains("pub fn open_connection(&self) -> Result<URLConnection, JavaException>")
+            && !translation.rust.contains("open_connection<T: Default>")
             && !translation.rust.contains("downcast::<JarURLConnection>")
             && !translation.rust.contains("invalid Java cast"),
         "{}",
@@ -10157,7 +10158,8 @@ class JdkFacadeSignatureUse {
                 .contains("pub fn has_more_elements(&self) -> Result<bool, JavaException>")
             && translation
                 .rust
-                .contains("pub fn next_element<T: Default>(&self) -> Result<T, JavaException>")
+                .contains("pub fn next_element(&self) -> Result<ZipEntry, JavaException>")
+            && !translation.rust.contains("next_element<T: Default>")
             && translation
                 .rust
                 .contains("pub fn is_directory(&self) -> Result<bool, JavaException>")

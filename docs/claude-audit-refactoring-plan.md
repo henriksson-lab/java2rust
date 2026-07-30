@@ -210,6 +210,12 @@ Landed in this batch:
 - Inherited external getter facts without return types now use the same named
   unmodelled result shim policy instead of silently generating `()` inherited
   support methods.
+- JDK platform facade support now uses typed returns for `URL::open_connection`,
+  `Enumeration::next_element`, and AWT `Graphics` getter methods that were
+  previously generic `T/R: Default` shims. Casted external call assignment also
+  preserves the source call shape when a fact-backed `Into` adapter exists for
+  the optional element target, so optional construction can apply the shared
+  conversion plan.
 - Reused optional unwrap projection now goes through a named
   `ReusedOptionalUnwrapPlan` and `conversion_lowering` renderer before slot
   conversion, so `lower.rs` no longer chooses the `.expect(...)`/element-borrow

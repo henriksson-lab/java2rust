@@ -4463,8 +4463,8 @@ impl URL {
         self.value.clone()
     }
 
-    pub fn open_connection<T: Default>(&self) -> Result<T, JavaException> {
-        Ok(T::default())
+    pub fn open_connection(&self) -> Result<URLConnection, JavaException> {
+        Ok(URLConnection)
     }
 }
 
@@ -4473,6 +4473,12 @@ pub struct URLConnection;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct JarURLConnection;
+
+impl From<URLConnection> for JarURLConnection {
+    fn from(_value: URLConnection) -> Self {
+        Default::default()
+    }
+}
 
 impl JarURLConnection {
     pub fn get_jar_file(&self) -> Result<JarFile, JavaException> {
@@ -4497,12 +4503,29 @@ impl JarFile {
 pub struct JarEntry;
 
 impl JarEntry {
-    pub fn is_directory(&self) -> bool {
-        false
+    pub fn is_directory(&self) -> Result<bool, JavaException> {
+        Ok(false)
     }
 
-    pub fn get_name(&self) -> String {
-        String::new()
+    pub fn get_name(&self) -> Result<String, JavaException> {
+        Ok(String::new())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct ZipEntry;
+
+impl ZipEntry {
+    pub fn new() -> ZipEntry {
+        ZipEntry
+    }
+
+    pub fn is_directory(&self) -> Result<bool, JavaException> {
+        Ok(false)
+    }
+
+    pub fn get_name(&self) -> Result<String, JavaException> {
+        Ok(String::new())
     }
 }
 
@@ -4543,8 +4566,8 @@ impl Enumeration {
         Ok(false)
     }
 
-    pub fn next_element<T: Default>(&self) -> Result<T, JavaException> {
-        Ok(T::default())
+    pub fn next_element(&self) -> Result<ZipEntry, JavaException> {
+        Ok(ZipEntry)
     }
 }
 
@@ -4665,19 +4688,28 @@ pub struct Graphics2D;
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct JavaAwtGraphics;
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct Shape;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct Rectangle;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct FontMetrics;
+
 impl Graphics {
     pub fn dispose(&self) {}
     pub fn draw_image<T0, T1, T2, T3>(&self, _image: T0, _x: T1, _y: T2, _observer: T3) -> bool {
         true
     }
-    pub fn get_clip<R: Default>(&self) -> R {
-        Default::default()
+    pub fn get_clip(&self) -> Shape {
+        Shape
     }
-    pub fn get_clip_bounds<R: Default>(&self) -> R {
-        Default::default()
+    pub fn get_clip_bounds(&self) -> Rectangle {
+        Rectangle
     }
-    pub fn get_font_metrics<R: Default, T0>(&self, _font: T0) -> R {
-        Default::default()
+    pub fn get_font_metrics<T0>(&self, _font: T0) -> FontMetrics {
+        FontMetrics
     }
 }
 
@@ -12981,6 +13013,7 @@ fn is_builtin_external_facade_type(name: &str) -> bool {
             | "JarURLConnection"
             | "JarFile"
             | "JarEntry"
+            | "ZipEntry"
             | "Manifest"
             | "Attributes"
             | "AttributesName"
@@ -14497,6 +14530,7 @@ pub fn program_uses_java_platform_facades(program: &Program) -> bool {
                 | "JarURLConnection"
                 | "JarFile"
                 | "JarEntry"
+                | "ZipEntry"
                 | "Manifest"
                 | "Attributes"
                 | "AttributesName"
@@ -14522,6 +14556,7 @@ pub fn program_uses_java_platform_facades(program: &Program) -> bool {
                 | "java.net.JarURLConnection"
                 | "java.util.jar.JarFile"
                 | "java.util.jar.JarEntry"
+                | "java.util.zip.ZipEntry"
                 | "java.util.jar.Manifest"
                 | "java.util.jar.Attributes"
                 | "java.util.jar.Attributes.Name"
@@ -14828,6 +14863,7 @@ pub fn is_java_platform_facade_type_name(name: &str) -> bool {
             | "JarURLConnection"
             | "JarFile"
             | "JarEntry"
+            | "ZipEntry"
             | "Manifest"
             | "Attributes"
             | "AttributesName"

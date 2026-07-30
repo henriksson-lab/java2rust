@@ -31081,6 +31081,18 @@ fn java_platform_conversion_adapters() -> Vec<ExternalConversionAdapterFact> {
             kind: ExternalConversionAdapterKind::Into,
             provenance: FactProvenance::BuiltinExternalModel,
         },
+        ExternalConversionAdapterFact {
+            from_type: "URLConnection".to_string(),
+            to_type: "JarURLConnection".to_string(),
+            kind: ExternalConversionAdapterKind::Into,
+            provenance: FactProvenance::BuiltinExternalModel,
+        },
+        ExternalConversionAdapterFact {
+            from_type: "java.net.URLConnection".to_string(),
+            to_type: "java.net.JarURLConnection".to_string(),
+            kind: ExternalConversionAdapterKind::Into,
+            provenance: FactProvenance::BuiltinExternalModel,
+        },
     ]);
     adapters.extend(
         [

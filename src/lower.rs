@@ -19394,8 +19394,36 @@ fn target_typed_call_cast_actual_shape(
         if external_call_shape_already_matches_cast_slot(&call_shape, target_ty, slot_target) {
             return call_shape;
         }
+        let adapter_target_ty = slot_target
+            .optional_element_type()
+            .unwrap_or_else(|| slot_target.java_ty.clone());
+        if external_conversion_adapter_available_for_java_types(
+            &call_shape.java_ty,
+            &adapter_target_ty,
+            ctx.facts,
+        ) {
+            return call_shape;
+        }
     }
     fallback_local_shape_from_declared_type(target_ty)
+}
+
+fn external_conversion_adapter_available_for_java_types(
+    actual: &JavaType,
+    target: &JavaType,
+    facts: &FactSet,
+) -> bool {
+    let (Some(actual_name), Some(target_name)) = (
+        concrete_java_type_name(actual),
+        concrete_java_type_name(target),
+    ) else {
+        return false;
+    };
+    facts
+        .external_conversion_adapter_for(actual_name, target_name)
+        .is_some()
+        || crate::external_packs::external_conversion_adapter_for(actual_name, target_name)
+            .is_some()
 }
 
 fn external_call_shape_already_matches_cast_slot(

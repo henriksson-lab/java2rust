@@ -44,6 +44,12 @@ unrelated user or generated files out of the commit.
 prefer committing each verified shared-policy slice before taking the next
 larger batched risk.
 
+Claude audit tracking: when an issue from `claude_audits/` is genuinely done,
+move that issue file to
+`/home/mahogny/github/claude/new_java2rust/claude_audits/done` in the same
+checkpoint. Only move it after the implementation and focused verification are
+complete, and mention the move in the checkpoint notes or commit summary.
+
 ## 2026-07-28 Batch Status: Borrow Drift Narrowing
 
 Latest full boundary before this slice:
@@ -263,6 +269,16 @@ Focused coverage:
 `inherited_external_getter_without_return_fact_uses_named_unmodelled_result_shim`.
 Remaining work in this cluster is any non-builder generic fallback surfaces
 found by the next corpus rerun.
+
+JDK facade typed-return step: platform support for `URL::open_connection`,
+`Enumeration::next_element`, and AWT `Graphics` getter methods now uses
+concrete Java facade return types instead of generic `T/R: Default` methods.
+Casted external call lowering also keeps the actual call result shape when a
+fact-backed `Into` adapter reaches the optional slot element type, so
+`Option<JarURLConnection>` construction can be rendered through the shared slot
+conversion plan. Focused coverage:
+`casted_factory_result_into_concrete_optional_slot_uses_slot_shape` and
+`jdk_facade_signature_facts_type_io_zip_xml_awt_and_base64_calls`.
 
 2026-07-29 PrintStream overload cleanup: JDK `PrintStream.print/println`
 arity-1 calls now have explicit platform API facts, resolved external instance
