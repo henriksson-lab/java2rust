@@ -283,6 +283,26 @@ the `normalize_owned_string_optional_argument` rendered-string postprocess,
 ternary optional construction branch planning, and map-get display/null
 projection paths.
 
+2026-07-30 optional-present construction policy checkpoint:
+`OptionalPresentConstructionPlan` now owns the local decisions for present
+values flowing into optional slots, including indexed-borrow source handling
+and non-null ternary branch element slots. `lower.rs` still chooses when a
+nullable/ternary branch applies, but it no longer decides the element ownership
+rewrite or element lowering slot for this path. Focused coverage:
+`optional_present_construction_policy_records_indexed_borrow_source`,
+`optional_present_construction_policy_lives_in_conversion_plan`, and
+`optional_ternary`. Remaining cleanup targets are non-optional literals into
+optional borrowed args, the `normalize_owned_string_optional_argument`
+rendered-string postprocess, and map-get display/null projection paths.
+
+2026-07-30 VCF source-hierarchy note: the ignored
+`source_hierarchy_instanceof_repair_keeps_supertype_slot_adapted` fixture still
+fails because source-super loop variables are represented as concrete
+`HeaderLine` values, so a Java runtime `FormatLine`/`InfoLine` subtype can no
+longer exist at the `instanceof` check. Do not patch this with a
+concrete/concrete string or hierarchy guess; route it through the object
+representation/source hierarchy work that can preserve runtime subtype state.
+
 Next opaque-shim candidate from the parallel audit: replace weak external API
 fallback surfaces in `ExternalApiFacadeSupport::add_used_external_api_facts` and
 builder support generation with named opaque per-type shim methods. Missing

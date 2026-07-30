@@ -26,10 +26,11 @@ use new_java2rust::conversion_plan::{
     DynCloneBoxAdapterRequirement, InstanceOfCheck, InstanceOfFallbackPolicy,
     InstanceOfTargetPolicy, InvalidCastPolicy, JavaCastSemanticsPolicy, JavaTypeConversionKind,
     LoweredSlotExprConversionPlan, LoweredType, OptionalElementTargetMatchPolicy,
-    OptionalShapeCoercionPolicy, OwnershipCoercionFallbackPolicy, OwnershipCoercionPolicy,
-    PrimitiveRankPolicy, PrimitiveWideningPolicy, ReturnValuePlan, RuntimeTypeTargetPolicy,
-    RustNominalTypeNamePolicy, ShapeCoercionPlan, Slot, SlotConversionPlan, SlotExprConversionPlan,
-    SyntaxCoercionPlan, SyntaxSlotCoercionPolicy, VecElementTargetMatchPolicy, ViewCoercionPolicy,
+    OptionalPresentConstructionSource, OptionalShapeCoercionPolicy,
+    OwnershipCoercionFallbackPolicy, OwnershipCoercionPolicy, PrimitiveRankPolicy,
+    PrimitiveWideningPolicy, ReturnValuePlan, RuntimeTypeTargetPolicy, RustNominalTypeNamePolicy,
+    ShapeCoercionPlan, Slot, SlotConversionPlan, SlotExprConversionPlan, SyntaxCoercionPlan,
+    SyntaxSlotCoercionPolicy, VecElementTargetMatchPolicy, ViewCoercionPolicy,
     actual_shape_for_slot_expr, argument_slot, assignment_slot, assignment_slot_for_target,
     assignment_value_plan_for_shape, assignment_value_plan_for_target,
     borrowed_element_adapter_policy, borrowed_element_recovery_policy,
@@ -44,17 +45,17 @@ use new_java2rust::conversion_plan::{
     hierarchy_instanceof_policy, index_slot, instanceof_target_policy, java_cast_semantics_policy,
     java_cast_type_conversion_plan, java_type_conversion_plan_from_evidence,
     lowered_slot_conversion_plan, lowered_slot_conversion_plan_with_facts,
-    optional_element_target_match_policy, optional_shape_coercion_policy,
-    optional_shape_coercion_policy_with_facts, optional_slot_construction_plan,
-    optional_slot_construction_plan_for_actual, ownership_coercion_policy,
-    ownership_coercion_policy_with_effective_facts, plan_instanceof_check,
-    plan_instanceof_check_with_facts, plan_lowered_slot_conversion, plan_slot_conversion,
-    preconverted_optional_slot_construction_plan, primitive_rank_policy, primitive_widening_policy,
-    return_slot, return_value_plan, runtime_type_target_policy, rust_nominal_type_name_policy,
-    shape_coercion_plan, shape_coercion_plan_with_facts, slot_conversion_plan,
-    slot_conversion_plan_with_facts, syntax_coercion_plan, syntax_coercion_plan_with_facts,
-    syntax_slot_coercion_policy, vec_element_target_match_policy, view_coercion_policy,
-    view_coercion_policy_with_effective_facts,
+    optional_element_target_match_policy, optional_present_construction_plan_for_actual,
+    optional_shape_coercion_policy, optional_shape_coercion_policy_with_facts,
+    optional_slot_construction_plan, optional_slot_construction_plan_for_actual,
+    ownership_coercion_policy, ownership_coercion_policy_with_effective_facts,
+    plan_instanceof_check, plan_instanceof_check_with_facts, plan_lowered_slot_conversion,
+    plan_slot_conversion, preconverted_optional_slot_construction_plan, primitive_rank_policy,
+    primitive_widening_policy, return_slot, return_value_plan, runtime_type_target_policy,
+    rust_nominal_type_name_policy, shape_coercion_plan, shape_coercion_plan_with_facts,
+    slot_conversion_plan, slot_conversion_plan_with_facts, syntax_coercion_plan,
+    syntax_coercion_plan_with_facts, syntax_slot_coercion_policy, vec_element_target_match_policy,
+    view_coercion_policy, view_coercion_policy_with_effective_facts,
 };
 use new_java2rust::diagnostics::Severity;
 use new_java2rust::effective_facts::{
@@ -2242,6 +2243,51 @@ fn optional_shape_coercion_policy_records_structural_element_coercions() {
         }
     );
     assert_eq!(unwrap_policy.coercions(), vec![Coercion::UnwrapOption]);
+}
+
+#[test]
+fn optional_present_construction_policy_records_indexed_borrow_source() {
+    let facts = FactSet::default();
+    let mut target = RustSlotShape::conservative(JavaType::Named {
+        name: "Optional".to_string(),
+        args: vec![JavaType::String],
+    });
+    target.ownership = OwnershipShape::Owned;
+
+    let mut actual_indexed = RustSlotShape::conservative(JavaType::String);
+    actual_indexed.ownership = OwnershipShape::SharedBorrow;
+    let indexed = optional_present_construction_plan_for_actual(
+        &actual_indexed,
+        &target,
+        JavaType::String,
+        OptionalPresentConstructionSource::IndexedBorrowProjection,
+        &facts,
+    );
+    assert_eq!(indexed.element_lowering_slot, Slot::Value);
+    assert_eq!(
+        indexed.construction.element_shape.ownership,
+        OwnershipShape::Owned
+    );
+    assert_eq!(
+        indexed.construction.element_plan.coercions(),
+        vec![Coercion::Identity]
+    );
+
+    let plain = optional_present_construction_plan_for_actual(
+        &actual_indexed,
+        &target,
+        JavaType::String,
+        OptionalPresentConstructionSource::Plain,
+        &facts,
+    );
+    assert_eq!(
+        plain.element_lowering_slot,
+        Slot::Assignment(plain.construction.element_shape.clone())
+    );
+    assert_eq!(
+        plain.construction.element_shape.ownership,
+        OwnershipShape::Owned
+    );
 }
 
 #[test]

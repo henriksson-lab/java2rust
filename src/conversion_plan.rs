@@ -623,6 +623,19 @@ pub struct OptionalSlotConstructionPlan {
     pub wrapper_ownership: OwnershipShape,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptionalPresentConstructionSource {
+    Plain,
+    IndexedBorrowProjection,
+    TernaryBranches { any_indexed_borrow_projection: bool },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OptionalPresentConstructionPlan {
+    pub construction: OptionalSlotConstructionPlan,
+    pub element_lowering_slot: Slot,
+}
+
 pub fn optional_slot_construction_plan(
     target: &RustSlotShape,
     element_ty: JavaType,
@@ -664,6 +677,59 @@ pub fn optional_slot_construction_plan_for_actual(
 ) -> OptionalSlotConstructionPlan {
     optional_slot_construction_plan_with_actual_element(actual_element_shape, target, facts)
         .expect("target must be an optional slot")
+}
+
+pub fn optional_present_construction_plan_for_actual(
+    actual_element_shape: &RustSlotShape,
+    target: &RustSlotShape,
+    element_ty: JavaType,
+    source: OptionalPresentConstructionSource,
+    facts: &FactSet,
+) -> OptionalPresentConstructionPlan {
+    let target_element_shape =
+        optional_element_slot_shape_with_facts(target, element_ty.clone(), facts);
+    let mut actual_element_shape = actual_element_shape.clone();
+    let indexed_borrow_projection = match source {
+        OptionalPresentConstructionSource::Plain => false,
+        OptionalPresentConstructionSource::IndexedBorrowProjection => {
+            actual_element_shape.ownership == OwnershipShape::SharedBorrow
+        }
+        OptionalPresentConstructionSource::TernaryBranches {
+            any_indexed_borrow_projection,
+        } => {
+            if any_indexed_borrow_projection {
+                actual_element_shape.ownership = OwnershipShape::SharedBorrow;
+            }
+            false
+        }
+    };
+    if matches!(actual_element_shape.java_ty, JavaType::Unknown(_))
+        || actual_element_shape.optional_element_type().is_some()
+    {
+        actual_element_shape = target_element_shape.clone();
+    }
+    if indexed_borrow_projection {
+        actual_element_shape = RustSlotShape::conservative(actual_element_shape.java_ty.clone());
+    } else if !matches!(
+        source,
+        OptionalPresentConstructionSource::TernaryBranches { .. }
+    ) && matches!(
+        target_element_shape.ownership,
+        OwnershipShape::Owned | OwnershipShape::CopyValue
+    ) {
+        actual_element_shape = target_element_shape;
+    }
+    let construction =
+        optional_slot_construction_plan_for_actual(&actual_element_shape, target, facts);
+    let element_lowering_slot = if indexed_borrow_projection {
+        Slot::Value
+    } else {
+        Slot::Assignment(construction.element_shape.clone())
+    };
+    OptionalPresentConstructionPlan {
+        construction,
+        element_lowering_slot,
+    }
 }
 
 pub fn preconverted_optional_slot_construction_plan(

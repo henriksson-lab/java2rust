@@ -14714,6 +14714,27 @@ fn optional_assignment_rewrap_uses_optional_construction_plan() {
 }
 
 #[test]
+fn optional_present_construction_policy_lives_in_conversion_plan() {
+    let lower_source = fs::read_to_string("src/lower.rs").unwrap();
+    let conversion_source = fs::read_to_string("src/conversion_plan.rs").unwrap();
+    let helper = lower_source
+        .split("fn lower_present_expr_for_optional_target")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn ternary_condition_non_null_branch_expr")
+                .next()
+        })
+        .expect("optional present helper should be present");
+
+    assert!(helper.contains("optional_present_construction_plan_for_actual"));
+    assert!(!helper.contains("optional_slot_construction_plan_for_actual"));
+    assert!(!helper.contains("actual_element_shape.ownership = OwnershipShape::SharedBorrow"));
+    assert!(!helper.contains("actual_element_shape = RustSlotShape::conservative"));
+    assert!(conversion_source.contains("pub enum OptionalPresentConstructionSource"));
+    assert!(conversion_source.contains("pub struct OptionalPresentConstructionPlan"));
+}
+
+#[test]
 fn optional_element_borrow_carrier_construction_is_centralized() {
     let source = fs::read_to_string("src/lower.rs").unwrap();
     let coercion_source = fs::read_to_string("src/coercion.rs").unwrap();

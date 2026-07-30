@@ -84,11 +84,13 @@ use crate::conversion_lowering::{
     apply_reused_optional_unwrap, apply_slot_expr_conversion, construct_optional_value_for_target,
 };
 use crate::conversion_plan::{
-    CloneRecoveryPolicy, DispatchCoercionPolicy, InstanceOfCheck, LoweredType, ReturnValuePlan,
-    Slot, SlotConversionPlan, actual_shape_for_slot_expr, actual_shape_for_slot_expr_with_slot,
-    argument_slot, assignment_statement_plan_for_target, assignment_value_plan_for_shape,
+    CloneRecoveryPolicy, DispatchCoercionPolicy, InstanceOfCheck, LoweredType,
+    OptionalPresentConstructionSource, ReturnValuePlan, Slot, SlotConversionPlan,
+    actual_shape_for_slot_expr, actual_shape_for_slot_expr_with_slot, argument_slot,
+    assignment_statement_plan_for_target, assignment_value_plan_for_shape,
     assignment_value_plan_for_target, borrowed_element_target_matches_element, condition_slot,
-    index_slot, optional_element_slot_shape_with_facts, optional_slot_construction_plan_for_actual,
+    index_slot, optional_element_slot_shape_with_facts,
+    optional_present_construction_plan_for_actual, optional_slot_construction_plan_for_actual,
     plan_cast_conversion_from_actual, plan_instanceof, plan_lowered_slot_conversion,
     plan_slot_conversion, preconverted_optional_slot_construction_plan,
     receiver_method_autoref_satisfies_facade_slot, receiver_method_autoref_satisfies_optional_slot,
@@ -24764,16 +24766,24 @@ fn lower_present_expr_for_optional_target(
         && !expr_type_is_optional(else_expr, env)
     {
         let (then_refinements, else_refinements) = branch_refinements(condition, refinements);
-        let mut actual_element_shape =
+        let actual_element_shape =
             crate::conversion_plan::optional_element_slot_shape(target, element_ty.clone());
-        if matches!(then_expr.as_ref(), Expr::ArrayAccess(_, _))
-            || matches!(else_expr.as_ref(), Expr::ArrayAccess(_, _))
-        {
-            actual_element_shape.ownership = OwnershipShape::SharedBorrow;
-        }
-        let construction =
-            optional_slot_construction_plan_for_actual(&actual_element_shape, target, ctx.facts);
-        let branch_slot = Slot::Assignment(construction.element_shape.clone());
+        let plan = optional_present_construction_plan_for_actual(
+            &actual_element_shape,
+            target,
+            element_ty.clone(),
+            OptionalPresentConstructionSource::TernaryBranches {
+                any_indexed_borrow_projection: matches!(
+                    then_expr.as_ref(),
+                    Expr::ArrayAccess(_, _)
+                ) || matches!(
+                    else_expr.as_ref(),
+                    Expr::ArrayAccess(_, _)
+                ),
+            },
+            ctx.facts,
+        );
+        let branch_slot = plan.element_lowering_slot.clone();
         let branch_value = ternary_expr(
             lower_expr_for_slot(condition, env, condition_slot(), ctx),
             lower_expr_for_slot_with_refinements(
@@ -24793,12 +24803,12 @@ fn lower_present_expr_for_optional_target(
         );
         return planned_optional_value_for_target(
             branch_value,
-            construction.element_shape,
+            plan.construction.element_shape,
             target,
             ctx.facts,
         );
     }
-    let mut actual_element_shape = actual_shape_for_slot_expr(
+    let actual_element_shape = actual_shape_for_slot_expr(
         expr,
         env,
         ExprShapeContext {
@@ -24807,37 +24817,28 @@ fn lower_present_expr_for_optional_target(
             facts: Some(ctx.facts),
         },
     );
-    if matches!(actual_element_shape.java_ty, JavaType::Unknown(_))
-        || actual_element_shape.optional_element_type().is_some()
-    {
-        actual_element_shape =
-            crate::conversion_plan::optional_element_slot_shape(target, element_ty.clone());
-    }
     let actual_is_indexed_borrow_projection = matches!(expr, Expr::ArrayAccess(_, _))
         && actual_element_shape.ownership == OwnershipShape::SharedBorrow;
-    let target_element_shape =
-        crate::conversion_plan::optional_element_slot_shape(target, element_ty.clone());
-    if !actual_is_indexed_borrow_projection
-        && matches!(
-            target_element_shape.ownership,
-            OwnershipShape::Owned | OwnershipShape::CopyValue
-        )
-    {
-        actual_element_shape = target_element_shape;
-    }
-    if actual_is_indexed_borrow_projection {
-        actual_element_shape = RustSlotShape::conservative(actual_element_shape.java_ty.clone());
-    }
-    let construction =
-        optional_slot_construction_plan_for_actual(&actual_element_shape, target, ctx.facts);
-    let element_lowering_slot = if actual_is_indexed_borrow_projection {
-        Slot::Value
+    let source = if actual_is_indexed_borrow_projection {
+        OptionalPresentConstructionSource::IndexedBorrowProjection
     } else {
-        Slot::Assignment(construction.element_shape.clone())
+        OptionalPresentConstructionSource::Plain
     };
-    let lowered_expr =
-        lower_expr_for_slot_with_refinements(expr, env, element_lowering_slot, ctx, refinements);
-    construct_optional_value_for_target(lowered_expr, construction)
+    let plan = optional_present_construction_plan_for_actual(
+        &actual_element_shape,
+        target,
+        element_ty,
+        source,
+        ctx.facts,
+    );
+    let lowered_expr = lower_expr_for_slot_with_refinements(
+        expr,
+        env,
+        plan.element_lowering_slot,
+        ctx,
+        refinements,
+    );
+    construct_optional_value_for_target(lowered_expr, plan.construction)
 }
 
 fn ternary_condition_non_null_branch_expr(condition: &Expr) -> Option<(&Expr, bool)> {
