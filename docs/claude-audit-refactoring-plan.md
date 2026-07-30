@@ -277,7 +277,7 @@ the fixes do not become more isolated rules.
 | `0009` overload identity collapse | open | Java callable signature identity |
 | `0010` fallibility disagrees | open | Callable fallibility plan |
 | `0011` dyn Any fallback cascades | open | Opaque external shims |
-| `0012` invalid unsupported diagnostics | fixed for named audit modules | Broader source audit still useful |
+| `0012` invalid unsupported diagnostics | fixed locally | Moved to `claude_audits/done` |
 | `0013` nested downcast names | open | Type-name normalization |
 | `0014` labelled statements deleted | fixed locally | CFG liveness still needs labelled edges |
 | `0015` static initializer blocks dropped | partial | Loud diagnostic now; full class-init later |
