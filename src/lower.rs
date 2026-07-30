@@ -104,8 +104,8 @@ use crate::exception_lowering::{
 };
 use crate::exception_plan::{
     ProgramExceptionPlan, ThrowExprPlan, TryBlockCompletion, TryStmtPlan, catch_match_class_names,
-    plan_block_exception_completion, plan_program_exceptions, plan_program_fallibility,
-    plan_throw_expr, plan_try_stmt, try_resource_names,
+    plan_block_exception_completion, plan_program_exceptions_with_fallibility,
+    plan_program_fallibility, plan_throw_expr, plan_try_stmt, try_resource_names,
 };
 use crate::expr_render::{
     binary_expr, indexed_expr, literal_expr, named_constructor_expr, raw_expr, super_expr,
@@ -334,7 +334,8 @@ pub fn lower_program_with_semantic_plans_and_support_context(
     );
     let call_graph = crate::usage::build_call_graph(support_local_type_program);
     let fallibility = plan_program_fallibility(&call_graph, facts);
-    let exceptions = plan_program_exceptions(support_local_type_program, facts);
+    let exceptions =
+        plan_program_exceptions_with_fallibility(support_local_type_program, facts, &fallibility);
     let callable_analysis =
         CallableAnalysis::new(usage, &call_graph, signatures, &exceptions, &fallibility);
     let ctx = LowerCtx {
@@ -20445,9 +20446,16 @@ fn source_method_named_returns_result_with_exception_plan(
     let Some(method) = find_declared_method_by_name_and_arity(ty, method_name, arg_count) else {
         return false;
     };
-    ctx.exceptions
-        .method_plan(ty, method)
-        .wrap_returns_in_result
+    let rust_name = method_effective_rust_name(method);
+    let callable_key = crate::usage::CallableKey::Method {
+        type_name: ty.name.clone(),
+        method_name: rust_name,
+    };
+    ctx.callable_analysis.callable_returns_result(&callable_key)
+        || ctx
+            .exceptions
+            .method_plan(ty, method)
+            .wrap_returns_in_result
 }
 
 fn receiver_shape_java_type<'a>(receiver: &Expr, env: &'a ShapeEnv) -> Option<&'a JavaType> {

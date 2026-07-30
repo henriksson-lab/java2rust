@@ -21570,6 +21570,107 @@ class FallibleCalls {
 }
 
 #[test]
+fn program_exception_plan_uses_callable_fallibility_fixpoint() {
+    let parsed = parse_java_source(
+        r#"
+class FallibleCalls {
+    int entry(int x) { return leaf(x); }
+    int leaf(int x) { return x; }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let graph = new_java2rust::usage::build_call_graph(&resolved.program);
+    let mut facts = FactSet::default();
+    facts.method_effect_facts.push(MethodEffectFact {
+        method: FactMethodKey {
+            type_name: "FallibleCalls".to_string(),
+            method_name: "leaf".to_string(),
+        },
+        receiver_mutability: ReceiverMutabilityFact::Unknown,
+        return_nullability: NullabilityState::Unknown,
+        thrown: vec![JavaType::Unknown("IllegalStateException".to_string())],
+        provenance: FactProvenance::ParsedSource,
+    });
+    let fallibility = plan_program_fallibility(&graph, &facts);
+    let exceptions = new_java2rust::exception_plan::plan_program_exceptions_with_fallibility(
+        &resolved.program,
+        &facts,
+        &fallibility,
+    );
+    let ty = &resolved.program.types[0];
+    let entry = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "entry" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let leaf = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "leaf" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+
+    assert!(exceptions.method_plan(ty, entry).wrap_returns_in_result);
+    assert!(exceptions.method_plan(ty, leaf).wrap_returns_in_result);
+}
+
+#[test]
+fn lowering_uses_callable_fallibility_for_source_call_result_propagation() {
+    let mut facts = FactSet::default();
+    facts.method_effect_facts.push(MethodEffectFact {
+        method: FactMethodKey {
+            type_name: "FallibleCalls".to_string(),
+            method_name: "leaf".to_string(),
+        },
+        receiver_mutability: ReceiverMutabilityFact::Unknown,
+        return_nullability: NullabilityState::Unknown,
+        thrown: vec![JavaType::Unknown("IllegalStateException".to_string())],
+        provenance: FactProvenance::UserOverride,
+    });
+    let translation = translate_source_with_facts(
+        r#"
+class FallibleCalls {
+    int entry(int x) { return leaf(x); }
+    int leaf(int x) { return x; }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn entry(&self, x: i32) -> Result<i32, JavaException>"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("return Ok(self.leaf(x)?);"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn leaf(&self, x: i32) -> Result<i32, JavaException>"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn call_graph_records_constructor_delegation_edges() {
     let parsed = parse_java_source(
         r#"
@@ -30192,15 +30293,16 @@ class SpecificProblem extends BaseProblem {}
     assert!(exception_plan_source.contains("pub fn plan_java_exception_support"));
     assert!(exception_plan_source.contains("pub fn plan_method_exceptions"));
     assert!(exception_plan_source.contains("pub fn plan_program_exceptions"));
+    assert!(exception_plan_source.contains("pub fn plan_program_exceptions_with_fallibility"));
     assert!(exception_plan_source.contains("pub enum TryStmtPlan"));
     assert!(exception_plan_source.contains("pub fn plan_try_stmt"));
     assert!(exception_plan_source.contains("pub fn catch_match_class_names"));
     assert!(exception_lowering_source.contains("pub struct CatchRenderArm"));
     assert!(exception_lowering_source.contains("pub fn try_catch_stmt"));
+    assert!(lower_source.contains("let fallibility = plan_program_fallibility"));
     assert!(
-        lower_source.contains(
-            "let exceptions = plan_program_exceptions(support_local_type_program, facts)"
-        )
+        lower_source
+            .contains("plan_program_exceptions_with_fallibility(support_local_type_program")
     );
     assert!(lower_source.contains("exceptions.support.emit_support_item"));
     assert!(lower_source.contains("method_ctx.exceptions.method_plan"));

@@ -20,6 +20,32 @@ on shared identities, analysis facts, and typed fallback surfaces.
 - It is acceptable to take a temporary error-count hit when a change makes
   unsupported or semantically unsafe behavior explicit.
 
+## Audit-To-Refactor Map
+
+| audits | refactor theme | priority | note |
+|---|---|---:|---|
+| `0012`, `0013`, `0018`, `0019` | Parse-safe unsupported output and parse/type metric split | 0 | Bad diagnostics or raw Java syntax can hide every later error in a file. |
+| `0014`, `0015` | Silent-drop prohibition for statements and members | 0 | Missing Java constructs must lower to diagnostics, never disappear. |
+| `0009` | Java callable identity before Rust names | 1 | Partially done for inherited source methods; external facts/constructors remain. |
+| `0010` | One fallibility fixpoint for signatures and `?` | 1 | Skeleton exists; current slice routes exception wrapping through the fixpoint. |
+| `0011`, `0016` | Typed facade fallback and no-op facade accounting | 2 | Prevent `Box<dyn Any>` cascades and distinguish intentional no-op facades from missing models. |
+| `0007`, `0008` | Shape-tagged lowering and shared analysis access | 2 | Stop rendered-string inspection and local rediscovery of semantic facts. |
+| corpus optional-carrier gaps | Central `SlotConversionPlan` authority | 2 | Most repeated borrow/optional mismatch class in the active corpora. |
+| `0006`, `0001`, `0002`, `0023` | Binding identity, CFG liveness, clone/reference discipline | 3 | Larger machinery; do after callable/fallibility proves the shared-analysis path. |
+| `0003`, `0004`, `0005`, `0020`, `0021`, `0017`, `0022` | Java semantic completeness slices | 3 | Some are already fixed or isolated; keep them behind explicit semantic policies. |
+
+## Execution Shape
+
+Work in large, compatible batches. Each batch should land with focused tests and
+one checkpoint commit if it compiles. For migrations away from legacy rules,
+compute the old and new answer side by side for at least one focused corpus run
+and store divergences as the next work queue.
+
+Do not change algorithms in a way that blocks future global semantic analysis.
+Acceptable changes: indices, stable keys, facts, analysis handles, compatibility
+maps, and explicit unsupported markers. Avoid adding local rules whose inputs
+are rendered Rust strings, simple Java names, or ad-hoc arity matches.
+
 ## Batch 1: Close The Measurement And Safety Loop
 
 Status: partially done. Unsupported expressions/statements, summary counters,
@@ -113,8 +139,11 @@ maps. Many consumers still rely on emitted Rust names.
 
 Status: skeleton exists. `ProgramFallibilityPlan` is built over the existing
 call graph, seeded from current method/external method throw facts, propagated
-to a fixpoint, and exposed through `CallableAnalysis`. `?` insertion and
-`Result` signatures still use legacy decisions.
+to a fixpoint, and exposed through `CallableAnalysis`. The current checkout also
+routes `ProgramExceptionPlan` through the fallibility fixpoint so source method
+`Result` wrapping and source-call `?` insertion can agree for propagated thrown
+facts. Remaining work is to remove legacy fallibility decisions, add invariants,
+and broaden seeds.
 
 1. Add `CallableFallibilityPlan`.
    - Initial skeleton is done under `ProgramFallibilityPlan`.
@@ -129,8 +158,10 @@ to a fixpoint, and exposed through `CallableAnalysis`. `?` insertion and
      reason; initially this may conservatively mark the caller fallible.
 
 2. Route both signature planning and call lowering through the plan.
-   - Touch `src/exception_plan.rs`, `src/signature.rs`, `src/lower.rs`, and
+   - In progress for `src/exception_plan.rs`, `src/lower.rs`, and
      `src/callable_analysis.rs`.
+   - Next touch points: `src/signature.rs`, `src/call_lowering.rs`, and any
+     direct `wrap_returns_in_result` or `returns_result` recomputation sites.
    - Keep `MethodExceptionPlan { wrap_returns_in_result }` as the compatibility
      wrapper while consumers migrate.
    - During migration, compute old and new answers side by side and log
@@ -245,13 +276,17 @@ analysis path.
 
 ## Parallel Work Split
 
-- Worker A: parse-safe diagnostics, parse gate, and value-level silent-wrong
-  probes.
-- Worker B: Java callable identity and inherited overload regression.
-- Worker C: fallibility plan skeleton and `?`/`Result` invariant.
-- Worker D: opaque external shims and JDK no-op facade accounting.
-- Worker E: slot conversion shape tags and string-inspection drift guard.
-- Worker F: BindingId/CFG design spike with divergence logging only.
+- Worker A: parse gate, coverage counters, and value-level silent-wrong probes.
+- Worker B: remaining Java callable identity consumers: constructors, external
+  facts, source-summary matching, and ambiguous arity fallback removal.
+- Worker C: fallibility invariant, legacy decision removal, catch boundary
+  handling, and divergence report.
+- Worker D: opaque external shims, no-op facade accounting, and `javalibs`
+  manifest-backed facade body kinds.
+- Worker E: slot conversion shape tags, optional-carrier adapter expansion, and
+  string-inspection drift guard.
+- Worker F: BindingId/CFG design spike with no lowering behavior change except
+  divergence logging.
 
 Integrate in batch order. At each checkpoint run:
 
@@ -259,6 +294,24 @@ Integrate in batch order. At each checkpoint run:
 - `cargo check --quiet`
 - focused tests for touched audit files
 - `git diff --check`
+
+## Immediate Next Checkpoints
+
+1. Commit the current fallibility routing slice after its focused tests pass.
+   This closes the first usable version of audits `0010` and `0008`: lowering
+   has one shared fallibility answer available through `CallableAnalysis`.
+2. Add the `?` invariant and legacy-vs-fixpoint divergence logging. This makes
+   remaining fallibility drift actionable instead of surfacing as Rust type
+   errors.
+3. Finish callable-key migration for external facts and constructors. This
+   directly supports the original stable-callable-key goal and prevents future
+   javalibs facts from matching by simple name or accidental arity.
+4. Land parse/unsupported gates before the next broad corpus comparison. This
+   prevents silent drops and parse failures from making an error count look
+   better than the translation really is.
+5. Start facade fallback/body-kind work only after the measurement counters are
+   in place, so intentional Hadoop/Spark/GCS no-ops are not confused with
+   unmodelled libraries.
 
 At batch boundaries, rerun focused corpuses and update the ranked remaining
 error causes rather than only raw rustc message counts.

@@ -231,7 +231,22 @@ pub fn plan_method_exceptions(
 pub fn plan_program_exceptions(program: &Program, facts: &FactSet) -> ProgramExceptionPlan {
     let mut methods = BTreeMap::new();
     for ty in &program.types {
-        collect_method_exception_plans_for_type(ty, facts, &mut methods);
+        collect_method_exception_plans_for_type(ty, facts, None, &mut methods);
+    }
+    ProgramExceptionPlan {
+        support: plan_java_exception_support(program, facts),
+        methods,
+    }
+}
+
+pub fn plan_program_exceptions_with_fallibility(
+    program: &Program,
+    facts: &FactSet,
+    fallibility: &ProgramFallibilityPlan,
+) -> ProgramExceptionPlan {
+    let mut methods = BTreeMap::new();
+    for ty in &program.types {
+        collect_method_exception_plans_for_type(ty, facts, Some(fallibility), &mut methods);
     }
     ProgramExceptionPlan {
         support: plan_java_exception_support(program, facts),
@@ -516,17 +531,28 @@ pub fn plan_block_exception_completion(block: &Block) -> TryBlockCompletion {
 fn collect_method_exception_plans_for_type(
     ty: &TypeDecl,
     facts: &FactSet,
+    fallibility: Option<&ProgramFallibilityPlan>,
     methods: &mut BTreeMap<(String, String), MethodExceptionPlan>,
 ) {
     for member in &ty.members {
         match member {
             Member::Method(method) => {
-                methods.insert(
-                    method_exception_key(ty, method),
-                    plan_method_exceptions(ty, method, facts),
-                );
+                let mut plan = plan_method_exceptions(ty, method, facts);
+                if let Some(fallibility) = fallibility {
+                    let key = CallableKey::Method {
+                        type_name: ty.name.clone(),
+                        method_name: method
+                            .rust_name
+                            .clone()
+                            .unwrap_or_else(|| crate::parser::to_snake_case(&method.name)),
+                    };
+                    plan.wrap_returns_in_result |= fallibility.returns_result(&key);
+                }
+                methods.insert(method_exception_key(ty, method), plan);
             }
-            Member::Type(nested) => collect_method_exception_plans_for_type(nested, facts, methods),
+            Member::Type(nested) => {
+                collect_method_exception_plans_for_type(nested, facts, fallibility, methods)
+            }
             _ => {}
         }
     }
