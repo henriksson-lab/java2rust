@@ -1429,7 +1429,7 @@ pub fn normalize_map_key_borrow_projection(
         actual
     } else {
         local_name
-            .filter(|name| emit::emit_expr(&expr) == *name)
+            .filter(|name| rust_expr_is_local_name(&expr, name))
             .and(actual)
     };
     ensure_borrow_projection(
@@ -1438,6 +1438,14 @@ pub fn normalize_map_key_borrow_projection(
         None,
         BorrowProjectionUse::MapKey,
     )
+}
+
+fn rust_expr_is_local_name(expr: &RustExpr, name: &str) -> bool {
+    match expr {
+        RustExpr::Var(var) => var == name,
+        RustExpr::Raw(raw) => raw == name,
+        _ => false,
+    }
 }
 
 pub fn render_index_to_usize_projection(

@@ -858,6 +858,17 @@ fn map_key_borrow_projection_is_centralized_and_idempotent() {
     shared.ownership = OwnershipShape::SharedBorrow;
     assert_eq!(
         normalize_map_key_borrow_projection(
+            RustExpr::Unary {
+                op: "&".to_string(),
+                expr: Box::new(RustExpr::Var("key".to_string())),
+            },
+            Some("key"),
+            Some(&shared)
+        ),
+        RustExpr::Var("key".to_string())
+    );
+    assert_eq!(
+        normalize_map_key_borrow_projection(
             RustExpr::Raw("&key".to_string()),
             Some("key"),
             Some(&shared)
