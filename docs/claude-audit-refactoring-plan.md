@@ -108,6 +108,11 @@ Landed in this batch:
   expression planning has them. Floating `max/min` and `round` lower through
   Java-semantics helpers; integer `abs` preserves Java overflow behavior with
   `wrapping_abs`.
+- `Math.round` now uses the JDK edge-safe floor/difference rule for double and
+  float inputs, so values just below `.5` no longer round up accidentally.
+- `Math.floorDiv` and `Math.floorMod` now carry overload shape and lower to
+  i32/i64 helpers as appropriate, with Java-compatible `MIN_VALUE / -1`
+  behavior instead of Rust debug overflow.
 - Apache Commons `FastMath` ownership is modelled as a `javalibs` native static
   owner alias to the existing JDK `Math` planner, so package-specific knowledge
   stays out of `stdlib.rs` while call sites reuse the same math projections.
@@ -399,7 +404,7 @@ Completion checklist for any audit marked `fixed locally`:
 | `0029` static field mutation invalid Rust | open | Static storage model |
 | `0030` Java statics are thread-local | open | Static storage model |
 | `0031` stubbed constant census | open | Facade constant coverage |
-| `0032` java.lang.Math mistranslated | partial | Round path existed; constants improved; overload/semantics audit remains |
+| `0032` java.lang.Math mistranslated | partial | Round edge semantics and i32/i64 floorDiv/floorMod improved; broader overload/constant audit remains |
 
 ## Parallel Work Split
 

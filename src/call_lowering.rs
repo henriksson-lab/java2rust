@@ -472,7 +472,7 @@ fn apply_native_java_static_method(
             };
             primitive_number_value_projection(arg, PrimitiveType::Int)
         }
-        NativeJavaStaticMethod::MathFloorDiv => {
+        NativeJavaStaticMethod::MathFloorDiv { primitive } => {
             let mut args = args.into_iter();
             let Some(left) = args.next() else {
                 return compile_error_call("Math.floorDiv requires two arguments");
@@ -480,9 +480,9 @@ fn apply_native_java_static_method(
             let Some(right) = args.next() else {
                 return compile_error_call("Math.floorDiv requires two arguments");
             };
-            math_floor_div_projection(left, right)
+            math_floor_div_projection(left, right, primitive)
         }
-        NativeJavaStaticMethod::MathFloorMod => {
+        NativeJavaStaticMethod::MathFloorMod { primitive } => {
             let mut args = args.into_iter();
             let Some(left) = args.next() else {
                 return compile_error_call("Math.floorMod requires two arguments");
@@ -490,7 +490,7 @@ fn apply_native_java_static_method(
             let Some(right) = args.next() else {
                 return compile_error_call("Math.floorMod requires two arguments");
             };
-            math_floor_mod_projection(left, right)
+            math_floor_mod_projection(left, right, primitive)
         }
         NativeJavaStaticMethod::IntegerParseInt => {
             let Some(arg) = args.into_iter().next() else {

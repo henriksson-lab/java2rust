@@ -439,8 +439,8 @@ pub enum NativeJavaStaticMethod {
     MathRound { source: PrimitiveType },
     MathAbs { source: PrimitiveType },
     MathToIntExact,
-    MathFloorDiv,
-    MathFloorMod,
+    MathFloorDiv { primitive: PrimitiveType },
+    MathFloorMod { primitive: PrimitiveType },
     IntegerParseInt,
     FloatParseFloat,
     DoubleParseDouble,
@@ -522,8 +522,8 @@ pub fn native_java_call_lowered_type(target: &CallTargetPlan<'_>) -> Option<Lowe
                     source: PrimitiveType::Float,
                 }
                 | NativeJavaStaticMethod::MathToIntExact
-                | NativeJavaStaticMethod::MathFloorDiv
-                | NativeJavaStaticMethod::MathFloorMod,
+                | NativeJavaStaticMethod::MathFloorDiv { .. }
+                | NativeJavaStaticMethod::MathFloorMod { .. },
         }
         | CallTargetPlan::NativeJavaInstance {
             method:
@@ -3330,8 +3330,12 @@ fn plan_native_java_static_call<'a>(
             source: math_unary_overload_primitive(args, types, PrimitiveType::Int),
         },
         ("Math", "toIntExact" | "to_int_exact") => NativeJavaStaticMethod::MathToIntExact,
-        ("Math", "floorDiv" | "floor_div") => NativeJavaStaticMethod::MathFloorDiv,
-        ("Math", "floorMod" | "floor_mod") => NativeJavaStaticMethod::MathFloorMod,
+        ("Math", "floorDiv" | "floor_div") => NativeJavaStaticMethod::MathFloorDiv {
+            primitive: math_binary_overload_primitive(args, types),
+        },
+        ("Math", "floorMod" | "floor_mod") => NativeJavaStaticMethod::MathFloorMod {
+            primitive: math_binary_overload_primitive(args, types),
+        },
         ("Integer", "parseInt" | "parse_int") => NativeJavaStaticMethod::IntegerParseInt,
         ("Float", "parseFloat" | "parse_float") => NativeJavaStaticMethod::FloatParseFloat,
         ("Double", "parseDouble" | "parse_double") => NativeJavaStaticMethod::DoubleParseDouble,

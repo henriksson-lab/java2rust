@@ -5469,6 +5469,9 @@ impl JavaPathArg for &File {
 }
 
 pub fn java_math_floor_div_i32(left: i32, right: i32) -> i32 {
+    if left == i32::MIN && right == -1 {
+        return i32::MIN;
+    }
     let quotient = left / right;
     let remainder = left % right;
     if remainder != 0 && ((left < 0) != (right < 0)) {
@@ -5479,7 +5482,30 @@ pub fn java_math_floor_div_i32(left: i32, right: i32) -> i32 {
 }
 
 pub fn java_math_floor_mod_i32(left: i32, right: i32) -> i32 {
+    if left == i32::MIN && right == -1 {
+        return 0;
+    }
     left - java_math_floor_div_i32(left, right) * right
+}
+
+pub fn java_math_floor_div_i64(left: i64, right: i64) -> i64 {
+    if left == i64::MIN && right == -1 {
+        return i64::MIN;
+    }
+    let quotient = left / right;
+    let remainder = left % right;
+    if remainder != 0 && ((left < 0) != (right < 0)) {
+        quotient - 1
+    } else {
+        quotient
+    }
+}
+
+pub fn java_math_floor_mod_i64(left: i64, right: i64) -> i64 {
+    if left == i64::MIN && right == -1 {
+        return 0;
+    }
+    left - java_math_floor_div_i64(left, right) * right
 }
 
 pub fn java_math_round_f32(value: f32) -> i32 {
@@ -5490,7 +5516,12 @@ pub fn java_math_round_f32(value: f32) -> i32 {
     } else if value <= i32::MIN as f32 {
         i32::MIN
     } else {
-        (value + 0.5).floor() as i32
+        let floor = value.floor();
+        if value - floor >= 0.5 {
+            floor as i32 + 1
+        } else {
+            floor as i32
+        }
     }
 }
 
@@ -5502,7 +5533,12 @@ pub fn java_math_round_f64(value: f64) -> i64 {
     } else if value <= i64::MIN as f64 {
         i64::MIN
     } else {
-        (value + 0.5).floor() as i64
+        let floor = value.floor();
+        if value - floor >= 0.5 {
+            floor as i64 + 1
+        } else {
+            floor as i64
+        }
     }
 }
 

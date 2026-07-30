@@ -1932,17 +1932,33 @@ pub fn math_abs_projection(arg: RustExpr, source: PrimitiveType) -> RustExpr {
     }
 }
 
-pub fn math_floor_div_projection(left: RustExpr, right: RustExpr) -> RustExpr {
+pub fn math_floor_div_projection(
+    left: RustExpr,
+    right: RustExpr,
+    primitive: PrimitiveType,
+) -> RustExpr {
+    let helper = match primitive {
+        PrimitiveType::Long => "java_math_floor_div_i64",
+        _ => "java_math_floor_div_i32",
+    };
     RustExpr::Raw(format!(
-        "java_math_floor_div_i32({}, {})",
+        "{helper}({}, {})",
         emit::emit_expr(&left),
         emit::emit_expr(&right)
     ))
 }
 
-pub fn math_floor_mod_projection(left: RustExpr, right: RustExpr) -> RustExpr {
+pub fn math_floor_mod_projection(
+    left: RustExpr,
+    right: RustExpr,
+    primitive: PrimitiveType,
+) -> RustExpr {
+    let helper = match primitive {
+        PrimitiveType::Long => "java_math_floor_mod_i64",
+        _ => "java_math_floor_mod_i32",
+    };
     RustExpr::Raw(format!(
-        "java_math_floor_mod_i32({}, {})",
+        "{helper}({}, {})",
         emit::emit_expr(&left),
         emit::emit_expr(&right)
     ))

@@ -6791,7 +6791,10 @@ follow-up work, and broader facade fallibility remains open.
 whole/range `Arrays.fill(...)` now lower through native projections with
 Java-style default padding/formatting/mutation. Apache Commons `FastMath` is
 modelled in `javalibs` as a native static owner alias to the existing JDK
-`Math` planner, keeping package-specific ownership outside `stdlib.rs`. Literal
+`Math` planner, keeping package-specific ownership outside `stdlib.rs`.
+`Math.round(...)` now uses the JDK edge-safe floor/difference rule, and
+`Math.floorDiv(...)`/`Math.floorMod(...)` select i32/i64 helpers with
+`MIN_VALUE / -1` behavior handled explicitly. Literal
 `Pattern.compile(...)` static-final paths now preserve the pattern text and use
 lightweight stateful `Pattern`/`Matcher` facades for `matcher(...)`,
 `matches()`, and `group(...)`. The separate checked-exception fallibility leak
