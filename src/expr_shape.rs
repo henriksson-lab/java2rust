@@ -756,7 +756,7 @@ fn static_storage_field_access_shape(
             signatures
                 .field_shape(&owner, field)
                 .or_else(|| signatures.field_shape(&owner, &crate::parser::to_snake_case(field)))
-                .cloned()
+                .map(field_access_shape_from_signature_shape)
         })
 }
 

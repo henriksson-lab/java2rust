@@ -1495,6 +1495,22 @@ the constructor return to `Result<..., JavaException>`. This closes the
 reduced-subset buckets are 4 mismatched types, 2 unsupported concrete
 `instanceof`, and 1 unsupported `super(...)` inheritance constructor call.
 
+Reduced HTSJDK VCF enum-valueOf/constructor-local follow-up:
+`.tmp/corpus-rerun-20260730-vcf-standard-bound-after-enum-valueof-slot-hook`
+translates the same 9-file subset and reduces generated Rust errors from `8`
+to `7`. Typed external VCF string constants plus shared trailing-constructor
+shape learning remove the optional string comparison/parse drift around
+`numberStr`, and slot-aware Java enum `valueOf` lowering now coerces
+`Map<String,String>.get("Type")` through
+`.expect("Java null receiver").as_str()` before calling
+`VCFHeaderLineType::value_of(...)`. Remaining reduced-subset buckets are 4
+mismatched types and 2 unsupported concrete `instanceof` rows in
+`VCFStandardHeaderLines.repairStandardHeaderLines`. A tested broad
+ConcreteStruct-to-ErasedObject fallback for runtime casts is not yet viable
+without matching erased-object method facade emission; it regressed the focused
+subset to 9 generated-Rust errors by exposing missing source method traits and
+duplicate `From<T> for Box<dyn Any>` support.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from

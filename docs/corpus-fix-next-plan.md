@@ -6642,18 +6642,40 @@ Reduced VCF reruns:
   `type_param_bound_source_supertype_assignment_uses_into_bound`, `cargo
   fmt --check`, `cargo check --quiet`, `git diff --check`, and `cargo build
   --release --quiet --bin new-java2rust`.
+- `.tmp/corpus-rerun-20260730-vcf-standard-bound-after-enum-valueof-slot-hook`:
+  9 files, 31.338s, 7 generated-Rust errors. Constructor trailing statements
+  now keep a shared local shape environment for recovered source-super bodies,
+  typed VCF external field facts model the standard string constants, optional
+  `Map<String,String>.get(...)` values feeding Java enum `valueOf` lower through
+  the borrowed string argument slot even when the call is lowered for an
+  optional assignment slot, and child constructor locals used by nested
+  inherited-field assignments are lowered before field recovery. This closes the
+  `Option<&String>: AsRef<str>` row in `VCFCompoundHeaderLine`; the generated
+  call now renders
+  `VCFHeaderLineType::value_of(mapping.get("Type").expect("Java null receiver").as_str())`.
+  Focused verification passed:
+  `optional_map_string_get_flows_into_source_enum_value_of_inside_try_assignment`,
+  `optional_map_string_get_flows_into_top_level_source_enum_value_of`,
+  `optional_map_string_get`, `source_super_constructor_with_child_locals_and_nested_field_assignment_lowers`,
+  `cargo fmt --check`, `cargo check --quiet`, and
+  `cargo build --release --quiet --bin new-java2rust`.
 
 Remaining top reduced-VCF clusters after this follow-up:
-4 mismatched types, 2 unsupported concrete `instanceof`, 1 unsupported
-`super(...)` inheritance constructor calls. The old missing-super-local `mapping` bucket,
+4 mismatched types and 2 unsupported concrete `instanceof` rows, all centered on
+`VCFStandardHeaderLines.repairStandardHeaderLines` source hierarchy runtime
+case-splitting and repair-call slot adaptation. The old missing-super-local `mapping` bucket,
 `v_c_f_header_line_translator` static-owner bucket, same-arity source-super
 overload bucket, nested unchecked exception/result-shell bucket, switch
 definite-assignment bucket, and negated super-call type-inference bucket are
 closed. The `VCFHeader: Default` facade-support bucket and the optional generic
-source-supertype insertion bucket are also closed. The next reduced-VCF target
-should tackle concrete `instanceof`, unsupported source-super shapes that still
-require inheritance lowering, or the remaining generic/source hierarchy slot
-adaptation rows in `VCFStandardHeaderLines`.
+source-supertype insertion bucket are also closed. The optional enum `valueOf`
+borrow bucket is closed as well. A broad source-hierarchy fallback from
+`ConcreteStruct` to `ErasedObject` for `NeedsInstanceof`/`NeedsDowncast` was
+audited with a parallel worker but is not ready to land: it removes the wrong
+diagnostic shape while exposing missing erased-object method/trait emission and
+duplicate `From<T> for Box<dyn Any>` support. The next reduced-VCF target should
+either implement concrete source-hierarchy runtime checks/downcasts directly, or
+pair any erased-object fallback with the required emitted source method facade.
 
 ## Rerun Protocol
 

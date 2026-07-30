@@ -255,6 +255,9 @@ pub(crate) fn delegated_constructor_trailing_stmts_for_lowering(
             Stmt::If { .. } if constructor_trailing_stmt_is_supported(stmt) => {
                 Some(DelegatedConstructorTrailingStmt::Statement { stmt })
             }
+            Stmt::VarDecl { .. } | Stmt::Try { .. } | Stmt::Block(_) => {
+                Some(DelegatedConstructorTrailingStmt::Statement { stmt })
+            }
             _ => None,
         })
         .collect()
@@ -271,127 +274,7 @@ fn constructor_trailing_expr_stmt_is_supported(expr: &Expr) -> bool {
 }
 
 fn constructor_trailing_stmt_is_supported(stmt: &Stmt) -> bool {
-    matches!(stmt, Stmt::If { .. }) && !stmt_reads_this_or_super(stmt)
-}
-
-fn block_reads_this_or_super(block: &Block) -> bool {
-    block.statements.iter().any(stmt_reads_this_or_super)
-}
-
-fn stmt_reads_this_or_super(stmt: &Stmt) -> bool {
-    match stmt {
-        Stmt::VarDecl { initializer, .. } | Stmt::Return(initializer) => {
-            initializer.as_ref().is_some_and(expr_reads_this_or_super)
-        }
-        Stmt::Assign { target, value } => {
-            expr_reads_this_or_super(target) || expr_reads_this_or_super(value)
-        }
-        Stmt::Expr(expr) | Stmt::Throw(expr) => expr_reads_this_or_super(expr),
-        Stmt::If {
-            condition,
-            then_block,
-            else_block,
-        } => {
-            expr_reads_this_or_super(condition)
-                || block_reads_this_or_super(then_block)
-                || else_block.as_ref().is_some_and(block_reads_this_or_super)
-        }
-        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
-            expr_reads_this_or_super(condition) || block_reads_this_or_super(body)
-        }
-        Stmt::For {
-            init,
-            condition,
-            update,
-            body,
-            ..
-        } => {
-            init.iter().any(stmt_reads_this_or_super)
-                || condition.as_ref().is_some_and(expr_reads_this_or_super)
-                || update.iter().any(expr_reads_this_or_super)
-                || block_reads_this_or_super(body)
-        }
-        Stmt::EnhancedFor { iterable, body, .. } => {
-            expr_reads_this_or_super(iterable) || block_reads_this_or_super(body)
-        }
-        Stmt::Switch { selector, cases } => {
-            expr_reads_this_or_super(selector)
-                || cases
-                    .iter()
-                    .any(|case| case.statements.iter().any(stmt_reads_this_or_super))
-        }
-        Stmt::Try {
-            resources,
-            body,
-            catches,
-            finally_block,
-        } => {
-            resources.iter().any(stmt_reads_this_or_super)
-                || block_reads_this_or_super(body)
-                || catches
-                    .iter()
-                    .any(|catch| block_reads_this_or_super(&catch.body))
-                || finally_block
-                    .as_ref()
-                    .is_some_and(block_reads_this_or_super)
-        }
-        Stmt::Block(block) => block_reads_this_or_super(block),
-        Stmt::LocalType(_)
-        | Stmt::ConstructorInvocation { .. }
-        | Stmt::Break(_)
-        | Stmt::Continue(_)
-        | Stmt::Unsupported(_) => false,
-    }
-}
-
-fn expr_reads_this_or_super(expr: &Expr) -> bool {
-    match expr {
-        Expr::This | Expr::Super => true,
-        Expr::FieldAccess(receiver, _) | Expr::Unary { expr: receiver, .. } => {
-            expr_reads_this_or_super(receiver)
-        }
-        Expr::ArrayAccess(array, index) => {
-            expr_reads_this_or_super(array) || expr_reads_this_or_super(index)
-        }
-        Expr::ArrayCreation {
-            dimensions,
-            initializer,
-            ..
-        } => {
-            dimensions.iter().any(expr_reads_this_or_super)
-                || initializer
-                    .as_ref()
-                    .is_some_and(|values| values.iter().any(expr_reads_this_or_super))
-        }
-        Expr::ArrayInitializer(values) => values.iter().any(expr_reads_this_or_super),
-        Expr::Binary { left, right, .. } => {
-            expr_reads_this_or_super(left) || expr_reads_this_or_super(right)
-        }
-        Expr::Ternary {
-            condition,
-            then_expr,
-            else_expr,
-        } => {
-            expr_reads_this_or_super(condition)
-                || expr_reads_this_or_super(then_expr)
-                || expr_reads_this_or_super(else_expr)
-        }
-        Expr::Call { receiver, args, .. } => {
-            receiver.as_deref().is_some_and(expr_reads_this_or_super)
-                || args.iter().any(expr_reads_this_or_super)
-        }
-        Expr::New { args, .. } => args.iter().any(expr_reads_this_or_super),
-        Expr::Cast { expr, .. } | Expr::InstanceOf { expr, .. } => expr_reads_this_or_super(expr),
-        Expr::Lambda { body, .. } => match body {
-            crate::java_ir::LambdaBody::Expr(expr) => expr_reads_this_or_super(expr),
-            crate::java_ir::LambdaBody::Block(block) => block_reads_this_or_super(block),
-        },
-        Expr::Literal(_)
-        | Expr::Var(_)
-        | Expr::MethodReference { .. }
-        | Expr::ClassLiteral(_)
-        | Expr::Raw(_) => false,
-    }
+    matches!(stmt, Stmt::If { .. })
 }
 
 pub fn plan_constructor_field_values<'a>(

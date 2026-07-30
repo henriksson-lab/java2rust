@@ -1822,7 +1822,7 @@ fn lower_constructor(
         return function;
     }
     if let Some(body) = &ctor.body
-        && let Some((fields, prefix, trailing, returns_result)) =
+        && let Some((fields, prefix, trailing, render_env, returns_result)) =
             implicit_source_super_constructor_with_trailing_fields(ty, body, &env, constructor_ctx)
     {
         let mut function = constructor_function_shell_with_facts(
@@ -1834,7 +1834,7 @@ fn lower_constructor(
                 with_outer_this_capture_field(ty, fields, constructor_ctx),
                 prefix,
                 &trailing,
-                &env,
+                &render_env,
                 constructor_ctx,
                 returns_result,
             ),
@@ -2257,15 +2257,13 @@ fn constructor_field_plans_with_trailing_body_ordered(
             lowered,
         ));
     }
-    for stmt in trailing {
-        body.push(lower_delegated_constructor_trailing_stmt(
-            ty,
-            stmt,
-            env,
-            ctx,
-            returns_result,
-        ));
-    }
+    body.extend(lower_delegated_constructor_trailing_stmts(
+        ty,
+        trailing,
+        env,
+        ctx,
+        returns_result,
+    ));
     let returned = RustExpr::Var("__java_self".to_string());
     body.push(RustStmt::Return(Some(if returns_result {
         function_call_projection(RustExpr::Raw("Ok".to_string()), vec![returned])
@@ -2766,7 +2764,7 @@ fn lower_delegating_constructor(
         }
         ConstructorDelegationPlan::Unsupported(kind) => {
             if kind == crate::unsupported::UnsupportedConstructorLowering::SuperRequiresInheritanceLowering
-                && let Some((fields, prefix, trailing, returns_result)) =
+                && let Some((fields, prefix, trailing, render_env, returns_result)) =
                     source_super_constructor_with_trailing_fields(ty, body, env, ctx)
             {
                 let mut function = constructor_function_shell_with_facts(
@@ -2778,7 +2776,7 @@ fn lower_delegating_constructor(
                         fields,
                         prefix,
                         &trailing,
-                        env,
+                        &render_env,
                         ctx,
                         returns_result,
                     ),
@@ -2811,6 +2809,7 @@ fn source_super_constructor_with_trailing_fields<'a>(
     Vec<(String, RustExpr)>,
     Vec<RustStmt>,
     Vec<DelegatedConstructorTrailingStmt<'a>>,
+    ShapeEnv,
     bool,
 )> {
     let Stmt::ConstructorInvocation {
@@ -2848,6 +2847,7 @@ fn source_super_constructor_fields_and_trailing<'a>(
     Vec<(String, RustExpr)>,
     Vec<RustStmt>,
     Vec<DelegatedConstructorTrailingStmt<'a>>,
+    ShapeEnv,
     bool,
 )> {
     let superclass = ty.extends.as_deref()?;
@@ -2871,6 +2871,10 @@ fn source_super_constructor_fields_and_trailing<'a>(
         .collect::<Vec<_>>();
     let (super_prefix, super_env) =
         source_super_constructor_local_prefix(super_body, &super_bindings, env, ctx);
+    let (child_prefix, child_env, child_prefix_len) =
+        source_super_constructor_child_local_prefix(body, &super_env, ctx)?;
+    let mut prefix = super_prefix;
+    prefix.extend(child_prefix);
 
     let inherited_field_names = crate::inherited_members::inherited_instance_fields_for_type(
         ty,
@@ -2957,7 +2961,7 @@ fn source_super_constructor_fields_and_trailing<'a>(
         } else if let Some(value) = match &plan {
             ConstructorFieldValuePlan::Assigned { value, .. }
             | ConstructorFieldValuePlan::FieldInitializer { value, .. }
-                if constructor_expr_needs_self_temporary(value, env, ctx) =>
+                if constructor_expr_needs_self_temporary(value, &child_env, ctx) =>
             {
                 Some(*value)
             }
@@ -2965,7 +2969,7 @@ fn source_super_constructor_fields_and_trailing<'a>(
         } {
             let (field_name, shape) = constructor_field_name_and_shape(&plan);
             fields.push(
-                constructor_self_temporary_seed_field_value(&ty.name, &plan, env, ctx)
+                constructor_self_temporary_seed_field_value(&ty.name, &plan, &child_env, ctx)
                     .unwrap_or_else(|| {
                         let shape = final_constructor_field_shape(&ty.name, field_name, shape, ctx);
                         constructor_default_field_value_with_facts(
@@ -2985,7 +2989,7 @@ fn source_super_constructor_fields_and_trailing<'a>(
             fields.push(lower_constructor_field_value_plan_with_future_reads(
                 &ty.name,
                 plan,
-                env,
+                &child_env,
                 ctx,
                 &trailing_read_names,
             ));
@@ -2998,6 +3002,7 @@ fn source_super_constructor_fields_and_trailing<'a>(
     );
     let mut trailing_instance_calls = trailing
         .into_iter()
+        .skip(child_prefix_len)
         .filter(|stmt| {
             matches!(
                 stmt,
@@ -3012,8 +3017,9 @@ fn source_super_constructor_fields_and_trailing<'a>(
         delegated_constructor_trailing_can_throw(&trailing_instance_calls, env, ctx);
     Some((
         fields,
-        super_prefix,
+        prefix,
         trailing_instance_calls,
+        child_env,
         returns_result,
     ))
 }
@@ -3080,6 +3086,47 @@ fn source_super_constructor_local_prefix(
         );
     }
     (lowered, local_env)
+}
+
+fn source_super_constructor_child_local_prefix(
+    body: &Block,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<(Vec<RustStmt>, ShapeEnv, usize)> {
+    let statements = if matches!(
+        body.statements.first(),
+        Some(Stmt::ConstructorInvocation { .. })
+    ) {
+        &body.statements[1..]
+    } else {
+        body.statements.as_slice()
+    };
+    let local_names = constructor_body_local_decl_names(body);
+    let Some(first_local_dependent_assignment) = statements
+        .iter()
+        .position(|stmt| constructor_field_assignment_reads_local(stmt, &local_names))
+    else {
+        return Some((Vec::new(), env.clone(), 0));
+    };
+    if !statements[..first_local_dependent_assignment]
+        .iter()
+        .all(source_super_constructor_prefix_stmt_is_supported)
+    {
+        return None;
+    }
+    let mut local_env = env.clone();
+    let mut lowered = Vec::new();
+    for stmt in &statements[..first_local_dependent_assignment] {
+        lower_stmt(
+            stmt,
+            &mut local_env,
+            false,
+            ctx,
+            &ExprRefinements::default(),
+            &mut lowered,
+        );
+    }
+    Some((lowered, local_env, first_local_dependent_assignment))
 }
 
 fn constructor_field_assignment_reads_local(stmt: &Stmt, local_names: &HashSet<String>) -> bool {
@@ -3256,7 +3303,7 @@ fn nested_implicit_source_super_field_values(
         return None;
     }
     implicit_source_super_constructor_with_trailing_fields(ty, body, env, ctx)
-        .map(|(fields, _, _, _)| fields)
+        .map(|(fields, _, _, _, _)| fields)
 }
 
 fn delegated_source_constructor_body<'a>(
@@ -3323,6 +3370,7 @@ fn implicit_source_super_constructor_with_trailing_fields<'a>(
     Vec<(String, RustExpr)>,
     Vec<RustStmt>,
     Vec<DelegatedConstructorTrailingStmt<'a>>,
+    ShapeEnv,
     bool,
 )> {
     if matches!(
@@ -3658,15 +3706,13 @@ fn delegated_constructor_with_trailing_body(
             ),
         )),
     }];
-    for stmt in trailing {
-        body.push(lower_delegated_constructor_trailing_stmt(
-            ty,
-            stmt,
-            env,
-            ctx,
-            returns_result,
-        ));
-    }
+    body.extend(lower_delegated_constructor_trailing_stmts(
+        ty,
+        trailing,
+        env,
+        ctx,
+        returns_result,
+    ));
     let returned = RustExpr::Var("__java_self".to_string());
     body.push(RustStmt::Return(Some(if returns_result {
         function_call_projection(RustExpr::Raw("Ok".to_string()), vec![returned])
@@ -3696,15 +3742,13 @@ fn super_no_arg_constructor_with_trailing_body(
             fields,
         }),
     });
-    for stmt in trailing {
-        body.push(lower_delegated_constructor_trailing_stmt(
-            ty,
-            stmt,
-            env,
-            ctx,
-            returns_result,
-        ));
-    }
+    body.extend(lower_delegated_constructor_trailing_stmts(
+        ty,
+        trailing,
+        env,
+        ctx,
+        returns_result,
+    ));
     let returned = RustExpr::Var("__java_self".to_string());
     body.push(RustStmt::Return(Some(if returns_result {
         function_call_projection(RustExpr::Raw("Ok".to_string()), vec![returned])
@@ -3751,6 +3795,7 @@ fn delegated_constructor_trailing_side_effects<'a>(
             matches!(
                 stmt,
                 DelegatedConstructorTrailingStmt::InstanceCall { .. }
+                    | DelegatedConstructorTrailingStmt::Statement { .. }
                     | DelegatedConstructorTrailingStmt::ExprStatement { .. }
             )
         })
@@ -3801,18 +3846,72 @@ fn delegated_constructor_trailing_stmt_can_throw(
     }
 }
 
+fn lower_delegated_constructor_trailing_stmts(
+    ty: &TypeDecl,
+    trailing: &[DelegatedConstructorTrailingStmt<'_>],
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    returns_result: bool,
+) -> Vec<RustStmt> {
+    let mut local_env = env.clone();
+    let mut body = Vec::new();
+    for stmt in trailing {
+        body.extend(lower_delegated_constructor_trailing_stmt(
+            ty,
+            stmt,
+            &local_env,
+            ctx,
+            returns_result,
+        ));
+        learn_delegated_constructor_trailing_stmt_shapes(stmt, &mut local_env, ctx);
+    }
+    body
+}
+
+fn learn_delegated_constructor_trailing_stmt_shapes(
+    stmt: &DelegatedConstructorTrailingStmt<'_>,
+    env: &mut ShapeEnv,
+    ctx: LowerCtx,
+) {
+    let DelegatedConstructorTrailingStmt::Statement { stmt } = stmt else {
+        return;
+    };
+    if let Stmt::VarDecl {
+        ty,
+        name,
+        initializer,
+    } = stmt
+    {
+        let mut local_plan = if let Some(local_plan) =
+            env.next_local_plan_for_declared_type(ctx.current_local_shapes, name, ty)
+        {
+            local_plan.clone()
+        } else {
+            conservative_lambda_local_plan(name, ty, initializer.as_ref(), env, ctx)
+        };
+        local_plan = refine_local_plan_from_initializer(local_plan, initializer.as_ref(), env, ctx);
+        local_plan = own_uninitialized_optional_borrowed_local(local_plan, name, initializer, ctx);
+        env.insert_local_shape(name.clone(), local_plan.shape);
+        return;
+    }
+    learn_stmt_shapes(stmt, env, ctx.current_local_shapes, ctx.signatures);
+}
+
 fn lower_delegated_constructor_trailing_stmt(
     ty: &TypeDecl,
     stmt: &DelegatedConstructorTrailingStmt<'_>,
     env: &ShapeEnv,
     ctx: LowerCtx,
     returns_result: bool,
-) -> RustStmt {
+) -> Vec<RustStmt> {
     match stmt {
         DelegatedConstructorTrailingStmt::FieldAssignment { field_name, value } => {
             let shape = ctx.signatures.required_field_shape(&ty.name, field_name);
             let lowered = lower_self_dependent_constructor_field_value(value, &shape, env, ctx);
-            assignment_stmt(constructor_self_field_projection(field_name), lowered)
+            vec![assignment_stmt(
+                constructor_self_field_projection(field_name),
+                lowered,
+            )]
         }
         DelegatedConstructorTrailingStmt::InstanceCall { resolved, args } => {
             let receiver = Expr::This;
@@ -3846,19 +3945,19 @@ fn lower_delegated_constructor_trailing_stmt(
             {
                 lowered = propagate_result_projection(lowered);
             }
-            expr_stmt(lowered)
+            vec![expr_stmt(lowered)]
         }
         DelegatedConstructorTrailingStmt::ExprStatement { expr } => {
             if let Some(stmt) =
                 lower_inherited_context_trailing_expr_stmt(expr, env, ctx, returns_result)
             {
-                return stmt;
+                return vec![stmt];
             }
             let mut lowered = replace_self_receiver(lower_expr(expr, env, ctx), "__java_self");
             if returns_result && slot_expr_needs_result_propagation(expr, env, ctx) {
                 lowered = propagate_result_projection(lowered);
             }
-            expr_stmt(lowered)
+            vec![expr_stmt(lowered)]
         }
         DelegatedConstructorTrailingStmt::Statement { stmt } => {
             lower_delegated_constructor_trailing_plain_stmt(stmt, env, ctx, returns_result)
@@ -3871,7 +3970,7 @@ fn lower_delegated_constructor_trailing_plain_stmt(
     env: &ShapeEnv,
     ctx: LowerCtx,
     returns_result: bool,
-) -> RustStmt {
+) -> Vec<RustStmt> {
     let mut local_env = env.clone();
     let mut lowered = Vec::new();
     lower_stmt(
@@ -3882,9 +3981,65 @@ fn lower_delegated_constructor_trailing_plain_stmt(
         &ExprRefinements::default(),
         &mut lowered,
     );
-    lowered.into_iter().next().unwrap_or_else(|| {
-        RustStmt::Raw("/* unsupported delegated constructor trailing statement */".to_string())
-    })
+    lowered
+        .into_iter()
+        .map(|stmt| replace_self_receiver_in_stmt(stmt, "__java_self"))
+        .collect()
+}
+
+fn replace_self_receiver_in_stmt(stmt: RustStmt, replacement: &str) -> RustStmt {
+    match stmt {
+        RustStmt::Let {
+            mutable,
+            name,
+            ty,
+            value,
+        } => RustStmt::Let {
+            mutable,
+            name,
+            ty,
+            value: value.map(|expr| replace_self_receiver(expr, replacement)),
+        },
+        RustStmt::Assign { target, value } => RustStmt::Assign {
+            target: replace_self_receiver(target, replacement),
+            value: replace_self_receiver(value, replacement),
+        },
+        RustStmt::Expr(expr) => RustStmt::Expr(replace_self_receiver(expr, replacement)),
+        RustStmt::Return(expr) => {
+            RustStmt::Return(expr.map(|expr| replace_self_receiver(expr, replacement)))
+        }
+        RustStmt::If {
+            condition,
+            then_body,
+            else_body,
+        } => RustStmt::If {
+            condition: replace_self_receiver(condition, replacement),
+            then_body: then_body
+                .into_iter()
+                .map(|stmt| replace_self_receiver_in_stmt(stmt, replacement))
+                .collect(),
+            else_body: else_body
+                .into_iter()
+                .map(|stmt| replace_self_receiver_in_stmt(stmt, replacement))
+                .collect(),
+        },
+        RustStmt::While { condition, body } => RustStmt::While {
+            condition: replace_self_receiver(condition, replacement),
+            body: body
+                .into_iter()
+                .map(|stmt| replace_self_receiver_in_stmt(stmt, replacement))
+                .collect(),
+        },
+        RustStmt::Loop { label, body } => RustStmt::Loop {
+            label,
+            body: body
+                .into_iter()
+                .map(|stmt| replace_self_receiver_in_stmt(stmt, replacement))
+                .collect(),
+        },
+        RustStmt::Raw(text) => RustStmt::Raw(text.replace("self.", &format!("{replacement}."))),
+        RustStmt::Break(_) | RustStmt::Continue(_) => stmt,
+    }
 }
 
 fn lower_inherited_context_trailing_expr_stmt(
@@ -9210,6 +9365,16 @@ fn lower_expr_with_refinements(
             ) {
                 return expr;
             }
+            if let Some(expr) = lower_static_value_of_string_name_call(
+                receiver.as_deref(),
+                name,
+                args,
+                env,
+                ctx,
+                refinements,
+            ) {
+                return expr;
+            }
             if let Some(expr) = lower_arrays_as_list_single_object_array_call(
                 receiver.as_deref(),
                 name,
@@ -9397,6 +9562,16 @@ fn lower_expr_with_refinements(
                 ctx,
             )
             .unwrap_or(arg_plan);
+            let arg_plan = apply_static_value_of_string_name_arg_slot(
+                arg_plan,
+                receiver.as_deref(),
+                name,
+                args,
+                env,
+                ctx,
+            );
+            let arg_plan =
+                apply_static_value_of_target_string_arg_slot(arg_plan, &target, args, env, ctx);
             let lowered_args = lower_args_for_call_target_with_temporaries(
                 &target,
                 receiver.as_deref(),
@@ -10286,7 +10461,8 @@ fn lower_source_java_enum_type_api_call(
     refinements: &ExprRefinements,
 ) -> Option<RustExpr> {
     let receiver = receiver?;
-    let owner = source_type_name_from_expr(receiver, env, ctx)?;
+    let owner = source_java_enum_static_owner_from_expr(receiver, env, ctx)
+        .or_else(|| source_type_name_from_expr(receiver, env, ctx))?;
     if !matches_source_java_enum_type(&owner, ctx) {
         return None;
     }
@@ -10308,6 +10484,122 @@ fn lower_source_java_enum_type_api_call(
         }
         _ => None,
     }
+}
+
+fn source_java_enum_static_owner_from_expr(
+    expr: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<String> {
+    match expr {
+        Expr::Var(name) => env
+            .type_env()
+            .static_type_alias(name)
+            .map(str::to_string)
+            .or_else(|| context_source_enum_type_name_by_key(name, ctx))
+            .or_else(|| current_type_nested_enum_name_by_alias(name, ctx)),
+        Expr::FieldAccess(receiver, field) => {
+            let owner = source_java_enum_static_owner_from_expr(receiver, env, ctx)
+                .or_else(|| source_type_name_from_expr(receiver, env, ctx))?;
+            let owner_ty = find_context_type_by_key(ctx.program, &owner)
+                .or_else(|| find_context_type_by_key(ctx.support_local_type_program, &owner))
+                .or_else(|| find_context_type_by_key(ctx.source_summary_type_program, &owner))?;
+            nested_type_decl_by_receiver_alias(owner_ty, field).map(|nested| nested.name.clone())
+        }
+        _ => None,
+    }
+}
+
+fn context_source_enum_type_name_by_key(name: &str, ctx: LowerCtx) -> Option<String> {
+    find_context_type_by_key(ctx.program, name)
+        .or_else(|| find_context_type_by_key(ctx.support_local_type_program, name))
+        .or_else(|| find_context_type_by_key(ctx.source_summary_type_program, name))
+        .filter(|ty| ty.kind == TypeKind::Enum)
+        .map(|ty| ty.name.clone())
+}
+
+fn current_type_nested_enum_name_by_alias(name: &str, ctx: LowerCtx) -> Option<String> {
+    let current_type = ctx.current_type?;
+    let owner_ty = find_context_type_by_key(ctx.program, current_type)
+        .or_else(|| find_context_type_by_key(ctx.support_local_type_program, current_type))
+        .or_else(|| find_context_type_by_key(ctx.source_summary_type_program, current_type))?;
+    nested_type_decl_by_receiver_alias(owner_ty, name)
+        .filter(|ty| ty.kind == TypeKind::Enum)
+        .map(|ty| ty.name.clone())
+}
+
+fn lower_static_value_of_string_name_call(
+    receiver: Option<&Expr>,
+    name: &str,
+    args: &[Expr],
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    if !matches!(name, "valueOf" | "value_of") || args.len() != 1 {
+        return None;
+    }
+    let owner = receiver.and_then(static_value_of_owner_name)?;
+    let simple_owner = owner.rsplit(['.', '$']).next().unwrap_or(owner.as_str());
+    if matches!(simple_owner, "String")
+        || crate::stdlib::boxed_primitive_type(simple_owner).is_some()
+    {
+        return None;
+    }
+    if !expr_shape_is_string_or_optional_string(&args[0], env, ctx) {
+        return None;
+    }
+    let arg = lower_expr_for_slot_with_refinements(
+        &args[0],
+        env,
+        argument_slot(borrowed_string_content_shape()),
+        ctx,
+        refinements,
+    );
+    let rust_owner = crate::slot_render::rust_name_for_java_named_type(&owner);
+    Some(function_call_projection(
+        owner_associated_path_projection(&rust_owner, "value_of"),
+        vec![arg],
+    ))
+}
+
+fn lower_source_java_enum_value_of_expr_for_slot(
+    expr: &Expr,
+    env: &ShapeEnv,
+    slot: &Slot,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    let Expr::Call {
+        receiver,
+        name,
+        args,
+        ..
+    } = expr
+    else {
+        return None;
+    };
+    let enum_expr = lower_source_java_enum_type_api_call(
+        receiver.as_deref(),
+        name,
+        args,
+        env,
+        ctx,
+        refinements,
+    )?;
+    let actual = actual_shape_for_slot_expr_with_slot(
+        expr,
+        env,
+        ExprShapeContext {
+            signatures: Some(ctx.signatures),
+            representations: Some(ctx.representations),
+            facts: Some(ctx.facts),
+        },
+        slot,
+    );
+    Some(apply_expr_to_slot_via_plan(
+        enum_expr, actual, slot, ctx.facts,
+    ))
 }
 
 fn lower_arrays_as_list_single_object_array_call(
@@ -11968,6 +12260,89 @@ fn lower_args_for_call_target_with_temporaries(
         };
     }
     introduce_same_call_later_read_temporaries(args, shapes.as_slice(), rust_args)
+}
+
+fn apply_static_value_of_string_name_arg_slot(
+    plan: ArgumentLoweringPlan,
+    receiver: Option<&Expr>,
+    name: &str,
+    args: &[Expr],
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> ArgumentLoweringPlan {
+    if !matches!(name, "valueOf" | "value_of") || args.len() != 1 {
+        return plan;
+    }
+    let Some(owner) = receiver.and_then(static_value_of_owner_name) else {
+        return plan;
+    };
+    let simple_owner = owner.rsplit(['.', '$']).next().unwrap_or(owner.as_str());
+    if matches!(simple_owner, "String")
+        || crate::stdlib::boxed_primitive_type(simple_owner).is_some()
+    {
+        return plan;
+    }
+    if !expr_shape_is_string_or_optional_string(&args[0], env, ctx) {
+        return plan;
+    }
+    ArgumentLoweringPlan::Slotted(vec![argument_slot(borrowed_string_content_shape())])
+}
+
+fn apply_static_value_of_target_string_arg_slot(
+    plan: ArgumentLoweringPlan,
+    target: &CallTargetPlan<'_>,
+    args: &[Expr],
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> ArgumentLoweringPlan {
+    let CallTargetPlan::StaticOwner { owner, rust_name } = target else {
+        return plan;
+    };
+    if !matches!(rust_name.as_str(), "valueOf" | "value_of") || args.len() != 1 {
+        return plan;
+    }
+    let simple_owner = owner
+        .rsplit(['.', '$', ':'])
+        .next()
+        .unwrap_or(owner.as_str());
+    if matches!(simple_owner, "String")
+        || crate::stdlib::boxed_primitive_type(simple_owner).is_some()
+    {
+        return plan;
+    }
+    if !expr_shape_is_string_or_optional_string(&args[0], env, ctx) {
+        return plan;
+    }
+    ArgumentLoweringPlan::Slotted(vec![argument_slot(borrowed_string_content_shape())])
+}
+
+fn expr_shape_is_string_or_optional_string(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> bool {
+    let shape = infer_expr_shape_with_context(
+        expr,
+        env,
+        ExprShapeContext {
+            signatures: Some(ctx.signatures),
+            representations: Some(ctx.representations),
+            facts: Some(ctx.facts),
+        },
+    );
+    java_type_is_string_type(&shape.java_ty)
+        || shape
+            .optional_element_type()
+            .is_some_and(|ty| java_type_is_string_type(&ty))
+}
+
+fn static_value_of_owner_name(receiver: &Expr) -> Option<String> {
+    match receiver {
+        Expr::Var(name) => Some(name.clone()),
+        Expr::FieldAccess(receiver, field) => {
+            let mut owner = static_value_of_owner_name(receiver)?;
+            owner.push('.');
+            owner.push_str(field);
+            Some(owner)
+        }
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16651,14 +17026,14 @@ fn lower_java_equality_call_expr_for_op(
         CallExprPlan::Target(target) => target,
         CallExprPlan::TrivialAccessorGetter { .. } => return None,
     };
-    let (left, right, use_fact_aware_plan) = match target {
+    let (left, right) = match target {
         CallTargetPlan::NativeJavaInstance {
             receiver,
             method: crate::call_plan::NativeJavaInstanceMethod::Equals,
-        } if args.len() == 1 => (receiver, &args[0], false),
+        } if args.len() == 1 => (receiver, &args[0]),
         CallTargetPlan::NativeJavaStatic {
             method: crate::call_plan::NativeJavaStaticMethod::ObjectsEquals,
-        } if args.len() == 2 => (&args[0], &args[1], true),
+        } if args.len() == 2 => (&args[0], &args[1]),
         _ => return None,
     };
     let shape_ctx = ExprShapeContext {
@@ -16668,11 +17043,7 @@ fn lower_java_equality_call_expr_for_op(
     };
     let left_shape = equality_operand_shape(left, env, ctx, shape_ctx);
     let right_shape = equality_operand_shape(right, env, ctx, shape_ctx);
-    let plan = if use_fact_aware_plan {
-        plan_equality_comparison_with_facts(&left_shape, &right_shape, ctx.facts)
-    } else {
-        plan_equality_comparison(&left_shape, &right_shape)
-    };
+    let plan = plan_equality_comparison_with_facts(&left_shape, &right_shape, ctx.facts);
     Some(lower_equality_comparison_expr_for_op(
         op,
         plan,
@@ -17026,6 +17397,11 @@ fn lower_expr_for_slot_with_refinements(
     {
         let plan = plan_lowered_slot_conversion(&object_to_string_expr.actual, slot, ctx.facts);
         return apply_lowered_slot_expr_conversion(object_to_string_expr, &plan);
+    }
+    if let Some(enum_value_of_expr) =
+        lower_source_java_enum_value_of_expr_for_slot(expr, env, &slot, ctx, refinements)
+    {
+        return enum_value_of_expr;
     }
     if let Some(source_call_expr) =
         lower_source_receiver_call_expr_for_slot(expr, env, &slot, ctx, refinements)

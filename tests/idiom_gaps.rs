@@ -8076,6 +8076,65 @@ class Standards<T extends CompoundLine> {
 }
 
 #[test]
+#[ignore = "tracks remaining VCF source hierarchy instanceof/downcast repair slot gap"]
+fn source_hierarchy_instanceof_repair_keeps_supertype_slot_adapted() {
+    let source = r#"
+class HeaderLine {
+    String id;
+}
+
+class FormatLine extends HeaderLine {
+}
+
+class InfoLine extends HeaderLine {
+}
+
+class Standards<T extends HeaderLine> {
+    T repair(T line) {
+        return line;
+    }
+}
+
+class StandardLineRepair {
+    Standards<FormatLine> formats;
+    Standards<InfoLine> infos;
+
+    void repairAll(java.util.Set<HeaderLine> lines) {
+        for (HeaderLine line : lines) {
+            if (line instanceof FormatLine) {
+                line = formats.repair((FormatLine) line);
+            } else if (line instanceof InfoLine) {
+                line = infos.repair((InfoLine) line);
+            }
+        }
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        !translation
+            .rust
+            .contains("unsupported Java instanceof shape: actual=Concrete, target=Concrete")
+            && !translation.rust.contains("repair(Some(line))")
+            && !translation.rust.contains("repair(line)")
+            && !translation.rust.contains("line = formats")
+            && !translation.rust.contains("line = infos"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_hierarchy_instanceof_repair",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn nested_generic_source_alias_preserves_type_params() {
     let source = r#"
 class Outer {
@@ -10746,6 +10805,256 @@ class CheckedBase {
             rust: translation.rust,
             tests: "",
         }],
+    );
+}
+
+#[test]
+fn source_super_constructor_with_child_locals_and_nested_field_assignment_lowers() {
+    let subclass = r#"
+class ParsedChild extends ParsedBase {
+    private String name;
+    private String source;
+
+    ParsedChild(String line, boolean modern) {
+        super("KEY", "");
+        String parsed = line.trim();
+        name = parsed;
+        if (modern) {
+            this.source = parsed;
+        }
+    }
+}
+"#;
+    let superclass = r#"
+class ParsedBase {
+    private final String key;
+    private final String value;
+
+    ParsedBase(String key, String value) {
+        this.key = key;
+        this.value = value;
+    }
+}
+"#;
+
+    let translation = translate_source_with_context_sources(
+        subclass,
+        &[superclass.to_string()],
+        &FactSet::default(),
+    );
+
+    let parsed_pos = translation.rust.find("let parsed").unwrap_or_else(|| {
+        panic!(
+            "child constructor local should be emitted before self construction:\n{}",
+            translation.rust
+        )
+    });
+    let self_pos = translation
+        .rust
+        .find("let mut __java_self = ParsedChild")
+        .unwrap_or_else(|| {
+            panic!(
+                "child self temporary should be emitted:\n{}",
+                translation.rust
+            )
+        });
+    assert!(
+        parsed_pos < self_pos
+            && translation.rust.contains("key: \"KEY\".to_string()")
+            && translation.rust.contains("value: \"\".to_string()")
+            && translation.rust.contains("name: Some(parsed.clone()")
+            && translation.rust.contains("__java_self.source = parsed")
+            && !translation
+                .rust
+                .contains("super(...) requires inheritance lowering")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_super_constructor_with_child_locals",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn optional_map_string_get_flows_into_string_value_contexts() {
+    let source = r#"
+import java.util.Map;
+
+class OptionalMapStringValueUse {
+    enum Kind { Text, Number }
+
+    static final String NUMBER = "Number";
+
+    int parse(Map<String, String> mapping) {
+        String numberStr = mapping.get("Number");
+        if (numberStr == NUMBER) {
+            return 0;
+        }
+        return Integer.parseInt(numberStr);
+    }
+
+    Kind kind(Map<String, String> mapping) {
+        return Kind.valueOf(mapping.get("Type"));
+    }
+}
+"#;
+
+    let translation = translate_source(source);
+
+    assert!(
+        translation
+            .rust
+            .contains("number_str.as_ref().map(|value| value.as_str()) == Some(Self::NUMBER)")
+            && translation
+                .rust
+                .contains("number_str.as_ref().expect(\"Java null receiver\").as_str().parse::<i32>().unwrap()")
+            && translation
+                .rust
+                .contains("OptionalMapStringValueUseKind::value_of(mapping.get(\"Type\").expect(\"Java null receiver\").as_str())")
+            && !translation.rust.contains("Option<&String>: AsRef<str>")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "optional_map_string_get_value_contexts",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn optional_map_string_get_compares_to_cross_class_static_string_constant() {
+    let use_source = r#"
+import java.util.Map;
+
+class OptionalCrossClassStaticStringUse {
+    int parse(Map<String, String> mapping) {
+        String numberStr = mapping.get("Number");
+        if (numberStr == CrossConstants.NUMBER) {
+            return 0;
+        }
+        return Integer.parseInt(numberStr);
+    }
+}
+"#;
+    let constants_source = r#"
+class CrossConstants {
+    public static final String NUMBER = "Number";
+}
+"#;
+
+    let translation = translate_source_with_context_sources(
+        use_source,
+        &[constants_source.to_string()],
+        &FactSet::default(),
+    );
+
+    assert!(
+        translation.rust.contains(
+            "number_str.as_ref().map(|value| value.as_str()) == Some(CrossConstants::NUMBER)"
+        ) && translation.rust.contains(
+            "number_str.as_ref().expect(\"Java null receiver\").as_str().parse::<i32>().unwrap()"
+        ) && !translation
+            .rust
+            .contains("number_str == CrossConstants::NUMBER")
+            && !translation.rust.contains("number_str.parse"),
+        "{}",
+        translation.rust
+    );
+
+    // This assertion checks primary-file rendering. Context sources are not emitted
+    // by this helper, so a cargo check here would fail on the absent constants type.
+}
+
+#[test]
+fn optional_map_string_get_flows_into_source_enum_value_of_inside_try_assignment() {
+    let source = r#"
+import java.util.Map;
+
+class OptionalMapStringEnumTryUse {
+    enum Kind { Text, Number }
+    private Kind kind;
+
+    void read(Map<String, String> mapping) {
+        try {
+            kind = Kind.valueOf(mapping.get("Type"));
+        } catch (Exception e) {
+            throw new IllegalArgumentException(mapping.get("Type"));
+        }
+    }
+}
+"#;
+
+    let translation = translate_source(source);
+
+    assert!(
+        translation
+            .rust
+            .contains("OptionalMapStringEnumTryUseKind::value_of(mapping.get(\"Type\").expect(\"Java null receiver\").as_str())")
+            && !translation.rust.contains("value_of(mapping.get(\"Type\"))")
+            && !translation.rust.contains("Option<&String>: AsRef<str>"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "optional_map_string_enum_try_assignment",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn optional_map_string_get_flows_into_top_level_source_enum_value_of() {
+    let use_source = r#"
+import java.util.Map;
+
+class OptionalTopLevelEnumValueOfUse {
+    private TopLevelKind kind;
+
+    void read(Map<String, String> mapping) {
+        try {
+            kind = TopLevelKind.valueOf(mapping.get("Type"));
+        } catch (Exception e) {
+            throw new IllegalArgumentException(mapping.get("Type"));
+        }
+    }
+}
+"#;
+    let enum_source = r#"
+enum TopLevelKind { Text, Number }
+"#;
+
+    let translation = translate_source_with_context_sources(
+        use_source,
+        &[enum_source.to_string()],
+        &FactSet::default(),
+    );
+
+    assert!(
+        translation.rust.contains(
+            "TopLevelKind::value_of(mapping.get(\"Type\").expect(\"Java null receiver\").as_str())"
+        ) && !translation
+            .rust
+            .contains("TopLevelKind::value_of(mapping.get(\"Type\"))")
+            && !translation.rust.contains("Option<&String>: AsRef<str>"),
+        "{}",
+        translation.rust
     );
 }
 
