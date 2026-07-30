@@ -4015,6 +4015,15 @@ fn unsupported_lowering_policy_owns_compile_error_placeholders() {
         )
     );
     assert_eq!(
+        unsupported_expression_expr(UnsupportedExpressionLowering::ParserUnsupported(
+            "unsupported expression node: weird_\"quoted\"_\\_node".to_string()
+        )),
+        RustExpr::Raw(
+            "compile_error!(\"unsupported Java expression: unsupported expression node: weird_\\\"quoted\\\"_\\\\_node\")"
+                .to_string()
+        )
+    );
+    assert_eq!(
         plan_unsupported_expression(&parse_expr("String::valueOf")),
         Some(UnsupportedExpressionLowering::MethodReference)
     );

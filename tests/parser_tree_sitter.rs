@@ -1301,6 +1301,7 @@ fn collect_stmt_fallbacks(stmt: &Stmt, out: &mut Vec<String>) {
 fn collect_expr_fallbacks(expr: &Expr, out: &mut Vec<String>) {
     match expr {
         Expr::Raw(raw) => out.push(format!("expr raw: {raw}")),
+        Expr::Unsupported { reason, .. } => out.push(format!("expr unsupported: {reason}")),
         Expr::FieldAccess(receiver, _) => collect_expr_fallbacks(receiver, out),
         Expr::ArrayAccess(array, index) => {
             collect_expr_fallbacks(array, out);

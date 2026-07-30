@@ -1518,7 +1518,7 @@ fn parse_switch_node(
     let selector = node
         .child_by_field_name("condition")
         .map(|condition| parse_condition_node(condition, source))
-        .unwrap_or_else(|| Expr::Raw("/* missing switch selector */".to_string()));
+        .unwrap_or_else(|| unsupported_expr_node(node, "switch without selector"));
     let cases = node
         .child_by_field_name("body")
         .map(|body| parse_switch_block(body, source, diagnostics))
@@ -1861,7 +1861,7 @@ fn parse_condition_node(node: tree_sitter::Node, source: &str) -> Expr {
     if node.kind() == "parenthesized_expression" {
         first_named_non_comment_child(node)
             .map(|child| parse_expr_node(child, source))
-            .unwrap_or_else(|| Expr::Raw(text(node, source).to_string()))
+            .unwrap_or_else(|| unsupported_expr_node(node, "empty parenthesized condition"))
     } else {
         parse_expr_node(node, source)
     }
@@ -1871,7 +1871,7 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
     match node.kind() {
         "parenthesized_expression" => first_named_non_comment_child(node)
             .map(|child| parse_expr_node(child, source))
-            .unwrap_or_else(|| Expr::Raw(text(node, source).to_string())),
+            .unwrap_or_else(|| unsupported_expr_node(node, "empty parenthesized expression")),
         "identifier" => Expr::Var(to_snake_case(text(node, source))),
         "this" => Expr::This,
         "super" => Expr::Super,
@@ -1914,11 +1914,11 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
             let array = children
                 .next()
                 .map(|node| parse_expr_node(node, source))
-                .unwrap_or_else(|| Expr::Raw("array".to_string()));
+                .unwrap_or_else(|| unsupported_expr_node(node, "array_access without array"));
             let index = children
                 .next()
                 .map(|node| parse_expr_node(node, source))
-                .unwrap_or_else(|| Expr::Raw("0".to_string()));
+                .unwrap_or_else(|| unsupported_expr_node(node, "array_access without index"));
             Expr::ArrayAccess(Box::new(array), Box::new(index))
         }
         "array_creation_expression" => parse_array_creation_expr(node, source),
@@ -1966,7 +1966,9 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
         "update_expression" => {
             let expr = first_named_child(node)
                 .map(|node| parse_expr_node(node, source))
-                .unwrap_or_else(|| Expr::Raw(text(node, source).to_string()));
+                .unwrap_or_else(|| {
+                    unsupported_expr_node(node, "update_expression without operand")
+                });
             let raw = text(node, source);
             let op = if raw.trim_start().starts_with("++") {
                 UnaryOp::PreInc
@@ -1985,7 +1987,7 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
         "unary_expression" => {
             let expr = first_named_child(node)
                 .map(|node| parse_expr_node(node, source))
-                .unwrap_or_else(|| Expr::Raw(text(node, source).to_string()));
+                .unwrap_or_else(|| unsupported_expr_node(node, "unary_expression without operand"));
             let raw = text(node, source).trim_start();
             let op = if raw.starts_with('!') {
                 UnaryOp::Not
@@ -2006,15 +2008,21 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
             let condition = children
                 .next()
                 .map(|node| parse_expr_node(node, source))
-                .unwrap_or_else(|| Expr::Raw("true".to_string()));
+                .unwrap_or_else(|| {
+                    unsupported_expr_node(node, "ternary_expression without condition")
+                });
             let then_expr = children
                 .next()
                 .map(|node| parse_expr_node(node, source))
-                .unwrap_or_else(|| Expr::Raw("()".to_string()));
+                .unwrap_or_else(|| {
+                    unsupported_expr_node(node, "ternary_expression without then branch")
+                });
             let else_expr = children
                 .next()
                 .map(|node| parse_expr_node(node, source))
-                .unwrap_or_else(|| Expr::Raw("()".to_string()));
+                .unwrap_or_else(|| {
+                    unsupported_expr_node(node, "ternary_expression without else branch")
+                });
             Expr::Ternary {
                 condition: Box::new(condition),
                 then_expr: Box::new(then_expr),
@@ -2065,7 +2073,9 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
             expr: Box::new(
                 node.child_by_field_name("left")
                     .map(|left| parse_expr_node(left, source))
-                    .unwrap_or_else(|| Expr::Raw("/* missing instanceof lhs */".to_string())),
+                    .unwrap_or_else(|| {
+                        unsupported_expr_node(node, "instanceof_expression without left operand")
+                    }),
             ),
             ty: node
                 .child_by_field_name("right")
@@ -2214,7 +2224,12 @@ fn parse_lambda_node(node: tree_sitter::Node, source: &str) -> Expr {
                 LambdaBody::Expr(Box::new(parse_expr_node(body, source)))
             }
         })
-        .unwrap_or_else(|| LambdaBody::Expr(Box::new(Expr::Raw(text(node, source).to_string()))));
+        .unwrap_or_else(|| {
+            LambdaBody::Expr(Box::new(unsupported_expr_node(
+                node,
+                "lambda_expression without body",
+            )))
+        });
     Expr::Lambda { params, body }
 }
 
