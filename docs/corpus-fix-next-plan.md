@@ -6631,9 +6631,20 @@ Reduced VCF reruns:
   scripts/translate-focused-package.sh`, `cargo fmt --check`, `cargo check
   --quiet`, `git diff --check`, and `cargo build --release --quiet --bin
   new-java2rust`.
+- `.tmp/corpus-rerun-20260730-vcf-standard-bound-after-trailing-super-throw`:
+  9 files, 29.851s, 8 generated-Rust errors. Source-super constructor recovery
+  now accepts self-independent trailing `if` statements after `super(...)` and
+  promotes the recovered constructor shell to `Result<..., JavaException>` when
+  that trailing guard can throw. This closes the
+  `VCFFormatHeaderLine(String,int,...)` unsupported-super row while preserving
+  inherited-field flattening. Focused verification passed:
+  `source_super_constructor_with_trailing_throw_guard_lowers`,
+  `type_param_bound_source_supertype_assignment_uses_into_bound`, `cargo
+  fmt --check`, `cargo check --quiet`, `git diff --check`, and `cargo build
+  --release --quiet --bin new-java2rust`.
 
 Remaining top reduced-VCF clusters after this follow-up:
-4 mismatched types, 2 unsupported concrete `instanceof`, 2 unsupported
+4 mismatched types, 2 unsupported concrete `instanceof`, 1 unsupported
 `super(...)` inheritance constructor calls. The old missing-super-local `mapping` bucket,
 `v_c_f_header_line_translator` static-owner bucket, same-arity source-super
 overload bucket, nested unchecked exception/result-shell bucket, switch

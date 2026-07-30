@@ -2323,6 +2323,7 @@ fn sort_deferred_constructor_field_assignments_by_body_order(
             .copied()
             .unwrap_or(usize::MAX),
         DelegatedConstructorTrailingStmt::InstanceCall { .. }
+        | DelegatedConstructorTrailingStmt::Statement { .. }
         | DelegatedConstructorTrailingStmt::ExprStatement { .. } => usize::MAX,
     });
 }
@@ -2699,6 +2700,7 @@ fn lower_delegating_constructor(
                         matches!(
                             stmt,
                             DelegatedConstructorTrailingStmt::InstanceCall { .. }
+                                | DelegatedConstructorTrailingStmt::Statement { .. }
                                 | DelegatedConstructorTrailingStmt::ExprStatement { .. }
                         )
                     })
@@ -2767,7 +2769,7 @@ fn lower_delegating_constructor(
                 && let Some((fields, prefix, trailing, returns_result)) =
                     source_super_constructor_with_trailing_fields(ty, body, env, ctx)
             {
-                return Some(constructor_function_shell_with_facts(
+                let mut function = constructor_function_shell_with_facts(
                     ty,
                     ctor,
                     ctx.signatures,
@@ -2781,7 +2783,12 @@ fn lower_delegating_constructor(
                         returns_result,
                     ),
                     ctx.facts,
-                ));
+                );
+                if returns_result {
+                    function.return_type =
+                        Some(exception_result_type(RustType::Named(ty.name.clone())));
+                }
+                return Some(function);
             }
             (unsupported_constructor_body(kind), false)
         }
@@ -2995,6 +3002,7 @@ fn source_super_constructor_fields_and_trailing<'a>(
             matches!(
                 stmt,
                 DelegatedConstructorTrailingStmt::InstanceCall { .. }
+                    | DelegatedConstructorTrailingStmt::Statement { .. }
                     | DelegatedConstructorTrailingStmt::ExprStatement { .. }
             )
         })
@@ -3226,6 +3234,9 @@ fn delegated_constructor_trailing_read_names(
             }
             DelegatedConstructorTrailingStmt::ExprStatement { expr } => {
                 collect_expr_read_names(expr, &mut names);
+            }
+            DelegatedConstructorTrailingStmt::Statement { stmt } => {
+                collect_stmt_read_names(std::slice::from_ref(stmt), &mut names);
             }
         }
     }
@@ -3725,6 +3736,9 @@ fn delegated_constructor_trailing_can_throw(
         DelegatedConstructorTrailingStmt::ExprStatement { expr } => {
             slot_expr_needs_result_propagation(expr, env, ctx)
         }
+        DelegatedConstructorTrailingStmt::Statement { stmt } => {
+            delegated_constructor_trailing_stmt_can_throw(stmt, env, ctx)
+        }
     })
 }
 
@@ -3742,6 +3756,49 @@ fn delegated_constructor_trailing_side_effects<'a>(
         })
         .cloned()
         .collect()
+}
+
+fn delegated_constructor_trailing_stmt_can_throw(
+    stmt: &Stmt,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> bool {
+    match stmt {
+        Stmt::Throw(_) => true,
+        Stmt::Expr(expr) | Stmt::Return(Some(expr)) => {
+            slot_expr_needs_result_propagation(expr, env, ctx)
+        }
+        Stmt::VarDecl {
+            initializer: Some(expr),
+            ..
+        } => slot_expr_needs_result_propagation(expr, env, ctx),
+        Stmt::Assign { target, value } => {
+            slot_expr_needs_result_propagation(target, env, ctx)
+                || slot_expr_needs_result_propagation(value, env, ctx)
+        }
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            slot_expr_needs_result_propagation(condition, env, ctx)
+                || then_block
+                    .statements
+                    .iter()
+                    .any(|stmt| delegated_constructor_trailing_stmt_can_throw(stmt, env, ctx))
+                || else_block.as_ref().is_some_and(|block| {
+                    block
+                        .statements
+                        .iter()
+                        .any(|stmt| delegated_constructor_trailing_stmt_can_throw(stmt, env, ctx))
+                })
+        }
+        Stmt::Block(block) => block
+            .statements
+            .iter()
+            .any(|stmt| delegated_constructor_trailing_stmt_can_throw(stmt, env, ctx)),
+        _ => false,
+    }
 }
 
 fn lower_delegated_constructor_trailing_stmt(
@@ -3803,7 +3860,31 @@ fn lower_delegated_constructor_trailing_stmt(
             }
             expr_stmt(lowered)
         }
+        DelegatedConstructorTrailingStmt::Statement { stmt } => {
+            lower_delegated_constructor_trailing_plain_stmt(stmt, env, ctx, returns_result)
+        }
     }
+}
+
+fn lower_delegated_constructor_trailing_plain_stmt(
+    stmt: &Stmt,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    returns_result: bool,
+) -> RustStmt {
+    let mut local_env = env.clone();
+    let mut lowered = Vec::new();
+    lower_stmt(
+        stmt,
+        &mut local_env,
+        returns_result,
+        constructor_self_temporary_lower_ctx(ctx),
+        &ExprRefinements::default(),
+        &mut lowered,
+    );
+    lowered.into_iter().next().unwrap_or_else(|| {
+        RustStmt::Raw("/* unsupported delegated constructor trailing statement */".to_string())
+    })
 }
 
 fn lower_inherited_context_trailing_expr_stmt(

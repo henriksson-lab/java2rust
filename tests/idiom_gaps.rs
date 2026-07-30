@@ -10687,6 +10687,69 @@ class ParentWriter {
 }
 
 #[test]
+fn source_super_constructor_with_trailing_throw_guard_lowers() {
+    let subclass = r#"
+class CheckedChild extends CheckedBase {
+    CheckedChild(String name, int count, String kind) {
+        super(name, count, kind, "CHILD");
+        if (count < 0)
+            throw new IllegalArgumentException("bad count");
+    }
+}
+"#;
+    let superclass = r#"
+class CheckedBase {
+    private final String name;
+    private final int count;
+    private final String kind;
+    private final String target;
+
+    CheckedBase(String name, int count, String kind, String target) {
+        this.name = name;
+        this.count = count;
+        this.kind = kind;
+        this.target = target;
+    }
+}
+"#;
+
+    let translation = translate_source_with_context_sources(
+        subclass,
+        &[superclass.to_string()],
+        &FactSet::default(),
+    );
+
+    assert!(
+        translation.rust.contains("name: name")
+            && translation.rust.contains("count: count")
+            && translation.rust.contains("kind: kind")
+            && translation.rust.contains("target: \"CHILD\".to_string()")
+            && translation
+                .rust
+                .contains("-> Result<CheckedChild, JavaException>")
+            && translation.rust.contains("if count < 0")
+            && translation
+                .rust
+                .contains("return Err(JavaException::new(\"IllegalArgumentException\"")
+            && !translation
+                .rust
+                .contains("super(...) requires inheritance lowering")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_super_constructor_with_trailing_throw_guard",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn source_super_constructor_composes_delegated_parameter_bindings() {
     let translation = translate_source(&idiom_gap("SourceSuperDelegatedParamSubstitution.java"));
 

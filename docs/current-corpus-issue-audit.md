@@ -1484,6 +1484,17 @@ upcast after optional carrier unwrap recovery. This closes the
 types, 2 unsupported concrete `instanceof`, and 2 unsupported `super(...)`
 inheritance constructor calls.
 
+Reduced HTSJDK VCF trailing-super-throw follow-up:
+`.tmp/corpus-rerun-20260730-vcf-standard-bound-after-trailing-super-throw`
+translates the same 9-file subset and reduces generated Rust errors from `9`
+to `8`. Source-super constructor recovery now accepts self-independent trailing
+`if` statements, allowing constructors shaped like `super(...); if (...)
+throw ...;` to reuse flattened inherited-field initialization while promoting
+the constructor return to `Result<..., JavaException>`. This closes the
+`VCFFormatHeaderLine(String,int,...)` unsupported-super row. Remaining
+reduced-subset buckets are 4 mismatched types, 2 unsupported concrete
+`instanceof`, and 1 unsupported `super(...)` inheritance constructor call.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from
