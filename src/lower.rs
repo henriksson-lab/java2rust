@@ -23,12 +23,12 @@ use crate::call_plan::{
     external_method_rust_name, external_receiver_call_return_type_with_external_index,
     facade_abi_argument_plan_for_rust_method_name, facade_abi_argument_plan_for_rust_path,
     facade_receiver_slot_plan, known_external_call_lowered_type, native_collection_lowered_type,
-    native_collection_method_arg_shapes, non_self_trivial_accessor_target,
-    optional_borrowed_receiver_slot_plan, optional_receiver_slot_plan, plan_call_arguments,
-    plan_call_arguments_with_facts_and_args, plan_call_exception_propagation_with_external_index,
-    plan_call_expr_with_external_index, plan_call_statement, plan_constructor_arguments,
-    plan_native_collection_extend_arg, plan_new_target_for_args_with_facts,
-    resource_close_declares_result_with_external_index, retarget_static_call_to_receiver_if,
+    non_self_trivial_accessor_target, optional_borrowed_receiver_slot_plan,
+    optional_receiver_slot_plan, plan_call_arguments, plan_call_arguments_with_facts_and_args,
+    plan_call_exception_propagation_with_external_index, plan_call_expr_with_external_index,
+    plan_call_statement, plan_constructor_arguments, plan_native_collection_extend_arg,
+    plan_new_target_for_args_with_facts, resource_close_declares_result_with_external_index,
+    retarget_static_call_to_receiver_if,
 };
 use crate::coercion::{
     BorrowProjectionUse, Coercion, JavaDisplayPlan, OptionalSequenceReceiverProjection,
@@ -12365,8 +12365,31 @@ fn native_collection_argument_plan_for_target(
             .unwrap_or_else(|| crate::types::infer_expr_type(receiver, env.type_env()))
         })
     })?;
-    native_collection_method_arg_shapes(&receiver_ty, *method, arg_count, ctx.facts)
-        .map(ArgumentLoweringPlan::Shaped)
+    match method {
+        NativeCollectionMethod::ListPush | NativeCollectionMethod::SetInsert if arg_count == 1 => {
+            let element_ty = crate::types::sequence_element_type(&receiver_ty)?;
+            Some(ArgumentLoweringPlan::Shaped(vec![
+                crate::shape_projection::storage_shape_for_java_type(
+                    ctx.representations,
+                    element_ty,
+                ),
+            ]))
+        }
+        NativeCollectionMethod::MapInsert if arg_count == 2 => {
+            let (key_ty, value_ty) = crate::stdlib::java_map_type_args(&receiver_ty)?;
+            Some(ArgumentLoweringPlan::Shaped(vec![
+                crate::shape_projection::storage_shape_for_java_type(
+                    ctx.representations,
+                    key_ty.clone(),
+                ),
+                crate::shape_projection::storage_shape_for_java_type(
+                    ctx.representations,
+                    value_ty.clone(),
+                ),
+            ]))
+        }
+        _ => None,
+    }
 }
 
 fn native_numeric_parse_argument_plan(

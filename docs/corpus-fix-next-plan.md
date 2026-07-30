@@ -6239,6 +6239,43 @@ idiom_gaps --quiet`,
 `git diff --check`, and
 `cargo build --release --quiet --bin new-java2rust`.
 
+2026-07-30 collection lookup/storage follow-up:
+the next full `cargo test --test idiom_gaps --quiet` boundary was interrupted
+after 1713.27s near the tail, so it is not a full-suite green or full-suite
+failure count. It reached at least `557/583` and exposed seven concrete
+failures:
+`documents_map_put_get_java_api_gap`,
+`integer_parse_int_unwraps_sequence_get_argument`,
+`map_get_keyset_loop_does_not_double_borrow_key`,
+`map_put_else_branch_reused_key_clones_before_later_block_read`,
+`map_put_else_branch_reassigned_key_clones_before_later_block_read`,
+`negated_java_equals_uses_inequality_projection`, and
+`typed_set_add_source_constructor_keeps_concrete_element_slot`.
+
+The common cause was over-applying the new native collection argument-shape
+helper inside expression lowering. Lookup methods such as `List.get`,
+`Map.get`, and `Map.containsKey` need their lookup-specific projections
+(`index as usize`, `key.as_str()`, optional element borrowing), while mutating
+storage methods need representation-aware storage slots. Expression lowering
+now uses representation-aware `storage_shape_for_java_type` only for
+`List.add`, `Set.add`, and `Map.put`; lookup methods fall back to the existing
+lookup-specific argument paths. This preserves the boxed-dyn interface insert
+fix while restoring concrete source set inserts and borrowed string map keys.
+
+Focused verification passed:
+`cargo test documents_map_put_get_java_api_gap --test idiom_gaps --quiet`,
+`cargo test integer_parse_int_unwraps_sequence_get_argument --test idiom_gaps --quiet`,
+`cargo test map_get_keyset_loop_does_not_double_borrow_key --test idiom_gaps --quiet`,
+`cargo test map_put_else_branch_reused_key_clones_before_later_block_read --test idiom_gaps --quiet`,
+`cargo test map_put_else_branch_reassigned_key_clones_before_later_block_read --test idiom_gaps --quiet`,
+`cargo test negated_java_equals_uses_inequality_projection --test idiom_gaps --quiet`,
+`cargo test typed_set_add_source_constructor_keeps_concrete_element_slot --test idiom_gaps --quiet`,
+`cargo test native_collection --test slot_shape_design --quiet`,
+`cargo fmt --check`,
+`cargo check --quiet`,
+`git diff --check`, and
+`cargo build --release --quiet --bin new-java2rust`.
+
 ## Rerun Protocol
 
 After each fix:
