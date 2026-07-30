@@ -237,6 +237,7 @@ pub fn constructor_function_shell_with_facts(
 ) -> RustFunction {
     RustFunction {
         name: ctor.rust_name.clone().unwrap_or_else(|| "new".to_string()),
+        type_params: function_type_params_with_optional_lifetime(&ctor.type_params, false),
         params: constructor_params(ty, ctor, signatures, facts),
         return_type: Some(constructor_return_type(ty, ctor, signatures)),
         body,
@@ -250,6 +251,18 @@ pub fn constructor_return_body(ty: &TypeDecl, fields: Vec<(String, RustExpr)>) -
         name: rust_use_name_for_source_type(ty),
         fields: reorder_struct_literal_moves_after_reads(fields),
     }))]
+}
+
+fn function_type_params_with_optional_lifetime(
+    type_params: &[String],
+    needs_lifetime: bool,
+) -> Vec<String> {
+    let mut params = Vec::new();
+    if needs_lifetime {
+        params.push("'a".to_string());
+    }
+    params.extend(type_params.iter().cloned());
+    params
 }
 
 fn reorder_struct_literal_moves_after_reads(
@@ -396,15 +409,16 @@ pub fn method_function_shell_with_facts_and_exception_plan(
 ) -> RustFunction {
     let needs_lifetime =
         static_method_needs_borrowed_return_lifetime(ty, method, signatures, facts);
-    let mut name = method
+    let name = method
         .rust_name
         .clone()
         .unwrap_or_else(|| crate::parser::to_snake_case(&method.name));
-    if needs_lifetime {
-        name.push_str("<'a>");
-    }
     RustFunction {
         name,
+        type_params: function_type_params_with_optional_lifetime(
+            &method.type_params,
+            needs_lifetime,
+        ),
         params: method_params_with_optional_lifetime(ty, method, signatures, facts, needs_lifetime),
         return_type: method_return_type_with_optional_lifetime(
             ty,

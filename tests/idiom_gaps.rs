@@ -8645,6 +8645,59 @@ class Box<T extends Named> {
 }
 
 #[test]
+fn source_generic_method_preserves_type_params() {
+    let translation = translate_source(
+        r#"
+class SourceGenericMethod {
+    static <U> U identity(U value) {
+        return value;
+    }
+
+    <T> T instanceIdentity(T value) {
+        return value;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn identity<U>(value: U) -> U")
+            && translation
+                .rust
+                .contains("pub fn instance_identity<T>(&self, value: T) -> T")
+            && !translation.rust.contains("identity(value: U) -> U")
+            && !translation
+                .rust
+                .contains("instance_identity(&self, value: T) -> T"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "source_generic_method",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn generic_methods_round_trip_values() {
+        let fixture = SourceGenericMethod {};
+        assert_eq!(SourceGenericMethod::identity::<i32>(3), 3);
+        assert_eq!(fixture.instance_identity::<String>("x".to_string()), "x");
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
 fn generic_source_map_storage_return_adds_clone_bound() {
     let source = r#"
 import java.util.HashMap;

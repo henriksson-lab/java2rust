@@ -1078,6 +1078,7 @@ fn static_storage_accessors_for_field(
     vec![
         RustFunction {
             name: getter_name,
+            type_params: Vec::new(),
             params: Vec::new(),
             return_type: Some(rust_ty.clone()),
             body: vec![RustStmt::Return(Some(
@@ -1088,6 +1089,7 @@ fn static_storage_accessors_for_field(
         },
         RustFunction {
             name: setter_name,
+            type_params: Vec::new(),
             params: vec![crate::rust_ir::RustParam {
                 name: "value".to_string(),
                 ty: rust_ty,
@@ -1904,6 +1906,7 @@ fn lower_implicit_default_constructor(
     );
     RustFunction {
         name: "new".to_string(),
+        type_params: Vec::new(),
         params: Vec::new(),
         return_type: Some(RustType::Named(rust_use_name_for_source_type(ty))),
         body: constructor_return_body(ty, fields),

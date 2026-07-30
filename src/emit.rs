@@ -88,8 +88,13 @@ fn emit_function(function: &RustFunction, indent: usize) -> String {
         .as_ref()
         .map(|ty| format!(" -> {}", emit_type(ty)))
         .unwrap_or_default();
+    let type_params = if function.type_params.is_empty() {
+        String::new()
+    } else {
+        format!("<{}>", function.type_params.join(", "))
+    };
     let mut out = format!(
-        "{pad}{vis}fn {}({}){ret} {{\n",
+        "{pad}{vis}fn {}{type_params}({}){ret} {{\n",
         rust_ident(&function.name),
         params.join(", ")
     );

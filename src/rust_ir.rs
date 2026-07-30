@@ -45,6 +45,7 @@ pub struct RustAssociatedConst {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RustFunction {
     pub name: String,
+    pub type_params: Vec<String>,
     pub params: Vec<RustParam>,
     pub return_type: Option<RustType>,
     pub body: Vec<RustStmt>,
