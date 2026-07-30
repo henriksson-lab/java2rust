@@ -5874,17 +5874,33 @@ fn collect_type_signatures(
             type_name: ty.name.clone(),
             field_name: inherited.field.name.clone(),
         };
-        let field_constraints = constraints
-            .fields
-            .get(&field_key)
-            .cloned()
-            .unwrap_or_else(|| {
-                field_shape_constraints_with_owner_name(
-                    &inherited.declaring_type,
-                    &inherited.field,
-                    facts,
-                )
-            });
+        let declaring_ty = find_signature_type_decl(support_program, &inherited.declaring_type);
+        let mut field_constraints =
+            constraints
+                .fields
+                .get(&field_key)
+                .cloned()
+                .unwrap_or_else(|| {
+                    field_shape_constraints_with_owner_name(
+                        &inherited.declaring_type,
+                        &inherited.field,
+                        facts,
+                    )
+                });
+        push_unique_signature_constraints(
+            &mut field_constraints,
+            &field_shape_constraints_with_owner_name(
+                &inherited.declaring_type,
+                &inherited.field,
+                facts,
+            ),
+        );
+        if let Some(declaring_ty) = declaring_ty {
+            push_unique_signature_constraints(
+                &mut field_constraints,
+                &delegated_null_constructor_field_constraints(declaring_ty, &inherited.field),
+            );
+        }
         plan.fields.insert(
             field_key,
             constrained_field_shape(
@@ -7568,6 +7584,10 @@ pub fn field_shape_constraints_with_usage(
     let mut constraints = field_shape_constraints_with_facts(ty, field, facts);
     push_unique_signature_constraints(
         &mut constraints,
+        &delegated_null_constructor_field_constraints(ty, field),
+    );
+    push_unique_signature_constraints(
+        &mut constraints,
         &external_call_return_field_constraints(ty, field, usage, facts),
     );
     if let Some(kind) = field_boundary_policy(ty, field, usage).kind {
@@ -7577,6 +7597,142 @@ pub fn field_shape_constraints_with_usage(
         );
     }
     constraints
+}
+
+fn delegated_null_constructor_field_constraints(
+    ty: &TypeDecl,
+    field: &FieldDecl,
+) -> Vec<SignatureConstraint> {
+    if matches!(field.ty, JavaType::Primitive(_) | JavaType::Void) {
+        return Vec::new();
+    }
+    let field_name = field.name.as_str();
+    for ctor in ty.members.iter().filter_map(|member| match member {
+        crate::java_ir::Member::Constructor(ctor) => Some(ctor),
+        _ => None,
+    }) {
+        let Some(body) = ctor.body.as_ref() else {
+            continue;
+        };
+        let Some(Stmt::ConstructorInvocation {
+            kind: crate::java_ir::ConstructorInvocationKind::This,
+            args,
+            resolved,
+        }) = body.statements.first()
+        else {
+            continue;
+        };
+        let Some(target) = resolved
+            .as_ref()
+            .and_then(|resolved| constructor_decl_for_resolved_name(ty, &resolved.rust_name))
+            .or_else(|| {
+                constructor_decl_for_delegated_field_assignment(ty, args.len(), field_name)
+            })
+        else {
+            continue;
+        };
+        let Some(target_param_index) = target.params.iter().position(|param| {
+            target_constructor_param_initializes_field(target, &param.name, field_name)
+        }) else {
+            continue;
+        };
+        if args
+            .get(target_param_index)
+            .is_some_and(|arg| matches!(arg, Expr::Literal(Literal::Null)))
+        {
+            return vec![SignatureConstraint::RequiredStorageNullability(
+                NullabilityState::MaybeNull,
+            )];
+        }
+    }
+    Vec::new()
+}
+
+fn constructor_decl_for_resolved_name<'a>(
+    ty: &'a TypeDecl,
+    rust_name: &str,
+) -> Option<&'a ConstructorDecl> {
+    ty.members.iter().find_map(|member| match member {
+        crate::java_ir::Member::Constructor(ctor)
+            if constructor_rust_name(ctor) == rust_name
+                || ctor.rust_name.as_deref() == Some(rust_name) =>
+        {
+            Some(ctor)
+        }
+        _ => None,
+    })
+}
+
+fn constructor_decl_for_delegated_field_assignment<'a>(
+    ty: &'a TypeDecl,
+    arity: usize,
+    field_name: &str,
+) -> Option<&'a ConstructorDecl> {
+    ty.members.iter().find_map(|member| match member {
+        crate::java_ir::Member::Constructor(ctor)
+            if ctor.params.len() == arity
+                && ctor.params.iter().any(|param| {
+                    target_constructor_param_initializes_field(ctor, &param.name, field_name)
+                }) =>
+        {
+            Some(ctor)
+        }
+        _ => None,
+    })
+}
+
+fn target_constructor_param_initializes_field(
+    ctor: &ConstructorDecl,
+    param_name: &str,
+    field_name: &str,
+) -> bool {
+    let Some(body) = ctor.body.as_ref() else {
+        return false;
+    };
+    body.statements.iter().any(|stmt| match stmt {
+        Stmt::Assign { target, value } => {
+            constructor_assignment_targets_field(target, field_name)
+                && matches!(value, Expr::Var(name) if name == param_name)
+        }
+        Stmt::Expr(Expr::Binary {
+            op: BinaryOp::Assign,
+            left,
+            right,
+        }) => {
+            constructor_assignment_targets_field(left, field_name)
+                && matches!(right.as_ref(), Expr::Var(name) if name == param_name)
+        }
+        _ => false,
+    })
+}
+
+fn constructor_assignment_targets_field(expr: &Expr, field_name: &str) -> bool {
+    match expr {
+        Expr::Var(name) => name == field_name,
+        Expr::FieldAccess(receiver, field)
+            if matches!(receiver.as_ref(), Expr::This) && field == field_name =>
+        {
+            true
+        }
+        _ => false,
+    }
+}
+
+fn find_signature_type_decl<'a>(program: &'a Program, type_name: &str) -> Option<&'a TypeDecl> {
+    program
+        .types
+        .iter()
+        .find_map(|ty| find_signature_type_decl_in_type(ty, type_name))
+}
+
+fn find_signature_type_decl_in_type<'a>(ty: &'a TypeDecl, type_name: &str) -> Option<&'a TypeDecl> {
+    if ty.name == type_name || crate::facts::external_type_name_matches(&ty.name, type_name) {
+        return Some(ty);
+    }
+    ty.members.iter().find_map(|member| match member {
+        crate::java_ir::Member::Type(nested) => find_signature_type_decl_in_type(nested, type_name),
+        _ => None,
+    })
 }
 
 pub fn external_call_return_field_constraints(

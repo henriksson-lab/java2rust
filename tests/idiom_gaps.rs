@@ -10517,6 +10517,47 @@ fn source_super_constructor_composes_delegated_parameter_bindings() {
 }
 
 #[test]
+fn source_super_constructor_delegated_null_marks_flattened_field_optional() {
+    let superclass = r#"
+class HeaderBase {
+    private String source;
+
+    HeaderBase(String name) {
+        this(name, null);
+    }
+
+    HeaderBase(String name, String source) {
+        this.source = source;
+    }
+}
+"#;
+    let subclass = r#"
+class HeaderChild extends HeaderBase {
+    HeaderChild(String name) {
+        super(name);
+    }
+}
+"#;
+
+    let translation = translate_source_with_context_sources(
+        subclass,
+        &[superclass.to_string()],
+        &FactSet::default(),
+    );
+
+    assert!(
+        translation.rust.contains("source: Option<String>")
+            && !translation.rust.contains("source: String")
+            && !translation
+                .rust
+                .contains("super(...) requires inheritance lowering")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn constructor_trailing_instance_call_rewrites_self_arguments() {
     let translation = translate_source(&idiom_gap("ConstructorTrailingCallReadsSeededField.java"));
 

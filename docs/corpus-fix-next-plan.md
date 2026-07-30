@@ -6500,13 +6500,24 @@ Reduced VCF reruns:
   enum return shapes are forced back to owned/native after signature solving,
   so `VCFCompoundHeaderLine::get_type()` and `get_count_type()` return typed
   optional enum carriers instead of erased objects or borrowed enum references.
+- `.tmp/corpus-rerun-20260730-vcf-standard-bound-after-delegated-null-fields`:
+  9 files, 60.284s, 37 generated-Rust errors. Inherited source fields now merge
+  declaring-owner field facts before solving the subclass flattened field shape,
+  and source `this(..., null)` delegation can contribute an explicit nullable
+  storage constraint when the target constructor parameter initializes that
+  field. The previous `source: None`/`version: None` into concrete `String`
+  mismatches in `VCFFormatHeaderLine` and `VCFInfoHeaderLine` are gone; those
+  fields now render as `Option<String>`.
 
 Remaining top reduced-VCF clusters after this follow-up:
-25 mismatched types, 4 missing `mapping`, 3 possibly-uninitialized `number`, 3
+19 mismatched types, 4 missing `mapping`, 3 possibly-uninitialized `number`, 3
 type annotations needed, 2 unsupported concrete `instanceof`, 2 unsupported
 `super(...)` inheritance constructor calls, and single missing facade/source
 surface gaps for `set_v_c_f_header_version`, `is_at_least_as_recent_as`, and
-`VCFHeader::HEADER_INDICATOR`.
+`VCFHeader::HEADER_INDICATOR`. The next reduced-VCF target should be mutable
+source-super forwarding through flattened inherited fields, where generated
+impls still call `VCFCompoundHeaderLine::set_*(&{ let __java_super = ... })`
+against methods that require `&mut VCFCompoundHeaderLine`.
 
 ## Rerun Protocol
 
