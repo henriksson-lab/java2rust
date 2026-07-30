@@ -261,6 +261,32 @@ VCF rerun before this follow-up was
 next full VCF rerun should check whether `VCFStandardHeaderLines` no longer
 emits unresolved `get_count` calls on `T`.
 
+Reduced VCF evidence after the follow-up:
+`.tmp/corpus-rerun-20260730-vcf-standard-bound-after-call-shaping` translated a
+9-file VCF standard-lines subset in 60.878s and failed cargo check with 65
+generated-Rust errors. This reduced run proves the targeted
+`VCFStandardHeaderLinesStandards<T>` row now calls `get_count_()?` through
+`T: VCFCompoundHeaderLineBound`; the old unresolved `get_count` symptom is
+gone in that class. The full VCF rerun
+`.tmp/corpus-rerun-20260730-htsjdk-vcf-after-bound-call-shaping` stalled at
+`batch_parse_global_emit_start` with no per-file status and was interrupted, so
+do not use it as a corpus baseline. Next VCF batch should target:
+
+- bound trait impl return adaptation for nullable implementation methods, e.g.
+  `VCFCompoundHeaderLine::get_i_d(self)` needs the same optional-to-declared
+  unwrap as the focused `HeaderLine` idiom;
+- typed enum/source facade returns for `get_type` and `get_count_type`, which
+  currently flow through `Box<dyn Any>` in the `VCFCompoundHeaderLineBound`
+  forwarding impl;
+- optional display/projection cleanup for bound trait `String` returns, where
+  generated code still emits `.unwrap()` or `.as_deref()` after methods whose
+  bound contract already returns `String`;
+- generic impl constraints such as adding `T: Clone` when `Standards<T>` stores
+  and returns owned `T` values;
+- generic constructor turbofish rendering, e.g. use
+  `VCFStandardHeaderLinesStandards::<T> { ... }` instead of a value expression
+  parsed as chained comparison.
+
 Attempted VCF refresh:
 `.tmp/corpus-rerun-20260730-htsjdk-vcf-current-refresh` stalled during
 `batch_parse_global_emit_start` before per-file statuses or generated source
