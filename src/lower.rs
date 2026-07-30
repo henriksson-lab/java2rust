@@ -429,6 +429,7 @@ pub fn lower_program_with_semantic_plans_and_support_context(
     file.items.extend(source_object_to_string_fallback_items(
         program,
         &occupied_inherent_methods,
+        ctx,
     ));
     LoweredProgram { file, diagnostics }
 }
@@ -436,10 +437,16 @@ pub fn lower_program_with_semantic_plans_and_support_context(
 fn source_object_to_string_fallback_items(
     program: &Program,
     occupied_inherent_methods: &BTreeSet<(String, String)>,
+    ctx: LowerCtx,
 ) -> Vec<RustItem> {
     let mut items = Vec::new();
     for ty in &program.types {
-        collect_source_object_to_string_fallback_items(ty, occupied_inherent_methods, &mut items);
+        collect_source_object_to_string_fallback_items(
+            ty,
+            occupied_inherent_methods,
+            ctx,
+            &mut items,
+        );
     }
     items
 }
@@ -479,10 +486,18 @@ fn type_has_source_object_get_class_fallback_item(ty: &TypeDecl) -> bool {
 fn collect_source_object_to_string_fallback_items(
     ty: &TypeDecl,
     occupied_inherent_methods: &BTreeSet<(String, String)>,
+    ctx: LowerCtx,
     items: &mut Vec<RustItem>,
 ) {
     if matches!(ty.kind, TypeKind::Class | TypeKind::Record)
         && !generic_source_type_has_primary_inherent_impl(ty)
+        && !matches!(
+            ctx.representations.dispatch_for(&JavaType::Named {
+                name: ty.name.clone(),
+                args: Vec::new(),
+            }),
+            DispatchShape::ClosedEnum { .. }
+        )
     {
         let rust_name = crate::slot_render::rust_name_for_java_named_type(&ty.name);
         let rust_use_name = rust_use_name_for_source_type(ty);
@@ -516,6 +531,7 @@ fn collect_source_object_to_string_fallback_items(
             collect_source_object_to_string_fallback_items(
                 nested,
                 occupied_inherent_methods,
+                ctx,
                 items,
             );
         }
@@ -1424,6 +1440,7 @@ fn source_supertype_conversion_impls_for_type(ty: &TypeDecl, ctx: LowerCtx) -> V
                 super_ty,
                 ctx.support_local_type_program,
                 ctx.source_summary_type_program,
+                ctx.representations,
             )
         {
             impls.push(item);
@@ -1487,13 +1504,25 @@ fn source_supertype_conversion_impl_for_pair(
     super_ty: &TypeDecl,
     support_program: &Program,
     source_summary_program: &Program,
+    representations: &RepresentationPlan,
 ) -> Option<String> {
+    let sub_name = crate::slot_render::rust_name_for_java_named_type(&sub_ty.name);
+    let super_ty_java = JavaType::Named {
+        name: super_ty.name.clone(),
+        args: Vec::new(),
+    };
+    if let DispatchShape::ClosedEnum { enum_name } = representations.dispatch_for(&super_ty_java) {
+        return (sub_name != enum_name).then(|| {
+            format!(
+                "impl From<{sub_name}> for {enum_name} {{\n    fn from(value: {sub_name}) -> Self {{\n        {enum_name}::{sub_name}(value)\n    }}\n}}"
+            )
+        });
+    }
     let field_names = source_instance_field_names_for_conversion(
         super_ty,
         support_program,
         source_summary_program,
     );
-    let sub_name = crate::slot_render::rust_name_for_java_named_type(&sub_ty.name);
     let super_name = crate::slot_render::rust_name_for_java_named_type(&super_ty.name);
     if sub_name == super_name {
         return None;
@@ -9483,6 +9512,26 @@ fn lower_enhanced_for_stmt(
     {
         loop_env.insert_local_shape(var_name.to_string(), element_shape);
     }
+    if var_is_assigned
+        && let Some(element_ty) = enhanced_for_iterable_element_type(iterable, env, ctx)
+    {
+        let element_shape = crate::shape_projection::value_shape_for_java_type(
+            ctx.representations,
+            element_ty.clone(),
+        );
+        if matches!(element_shape.dispatch, DispatchShape::ClosedEnum { .. }) {
+            loop_env.insert_local_shape(var_name.to_string(), element_shape);
+            let iterator = sequence_iter_cloned_projection(lower_enhanced_for_iterable_expr(
+                iterable, env, ctx,
+            ));
+            return render_enhanced_for_iterator(
+                &format!("mut {var_name}"),
+                &iterator,
+                &lower_block(body, &mut loop_env, wrap_returns_in_ok, ctx),
+                label,
+            );
+        }
+    }
     if let Some(iterator) = lower_int_stream_range_expr(iterable, env, ctx) {
         return render_enhanced_for_iterator(
             var_name,
@@ -9518,7 +9567,7 @@ fn lower_enhanced_for_stmt(
     if let Some(element_ty) = enhanced_for_iterable_element_type(iterable, env, ctx) {
         loop_env.insert_local_shape(
             var_name.to_string(),
-            borrowed_sequence_element_shape(element_ty),
+            borrowed_sequence_element_shape_with_facts(element_ty, ctx.facts, ctx.representations),
         );
     }
     render_enhanced_for(
@@ -23320,7 +23369,8 @@ fn lower_sequence_get_call_expr_for_slot(
     }
     let index_expr = lower_expr_for_slot(&args[0], env, index_slot(), ctx);
     let get_expr = sequence_get_expect_projection(receiver_expr, index_expr);
-    let actual = borrowed_sequence_element_shape_with_facts(element_ty, ctx.facts);
+    let actual =
+        borrowed_sequence_element_shape_with_facts(element_ty, ctx.facts, ctx.representations);
     if let Some(adapted) =
         lower_borrowed_sequence_get_subtype_to_concrete_slot(&get_expr, &actual, slot, ctx.facts)
     {
@@ -23334,8 +23384,13 @@ fn lower_sequence_get_call_expr_for_slot(
 fn borrowed_sequence_element_shape_with_facts(
     element_ty: JavaType,
     facts: &FactSet,
+    representations: &RepresentationPlan,
 ) -> RustSlotShape {
     let mut shape = crate::shape_projection::borrowed_sequence_element_shape(element_ty.clone());
+    let dispatch = representations.dispatch_for(&element_ty);
+    if !matches!(dispatch, DispatchShape::Concrete) {
+        crate::shape_projection::apply_required_dispatch(&mut shape, dispatch);
+    }
     if let JavaType::Named { name, args } = &element_ty
         && args.is_empty()
         && facts.object_safe_trait_fact_for_name(name) == Some(true)

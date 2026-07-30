@@ -324,6 +324,62 @@ class Use {
 }
 
 #[test]
+fn object_model_input_usage_records_enhanced_for_instanceof_dispatch_requirement() {
+    let parsed = parse_java_source(
+        r#"
+sealed class HeaderLine permits InfoHeaderLine {}
+final class InfoHeaderLine extends HeaderLine {}
+class Use {
+    void repairAll(java.util.Set<HeaderLine> lines) {
+        for (HeaderLine line : lines) {
+            if (line instanceof InfoHeaderLine) {
+            }
+        }
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let effective_facts = EffectiveFacts::new(&resolved.facts);
+    let usage = analyze_usage(&resolved.program);
+    let method_usage = usage
+        .methods
+        .get(&UsageMethodKey {
+            type_name: "Use".to_string(),
+            method_name: "repairAll".to_string(),
+        })
+        .expect("usage should include Use.repairAll");
+    assert!(
+        method_usage
+            .bindings
+            .get("line")
+            .expect("enhanced-for line binding should be tracked")
+            .uses
+            .iter()
+            .any(
+                |usage| matches!(usage, BindingUse::InstanceOfTarget { target_ty }
+                if matches!(target_ty, JavaType::Named { name, args } if name == "InfoHeaderLine" && args.is_empty()))
+            ),
+        "enhanced-for instanceof should be represented as a dispatch requirement source"
+    );
+
+    let object_plan = plan_object_model_from_input(ObjectModelInput {
+        program: &resolved.program,
+        facts: &resolved.facts,
+        effective_facts: &effective_facts,
+        usage: Some(&usage),
+    });
+
+    assert_eq!(
+        object_plan.strategy_for("HeaderLine").unwrap().strategy,
+        ObjectRepresentation::ClosedEnum {
+            enum_name: "HeaderLineValue".to_string(),
+            variants: vec!["InfoHeaderLine".to_string()],
+        }
+    );
+}
+
+#[test]
 fn object_model_policy_keeps_effective_object_safety_decision_separate() {
     let mut facts = FactSet::default();
     facts

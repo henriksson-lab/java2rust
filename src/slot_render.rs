@@ -1,5 +1,5 @@
 use crate::effective_facts::EffectiveFacts;
-use crate::facts::{ExternalLibraryMode, FactSet, HierarchyStrategy};
+use crate::facts::{DispatchRequirementKind, ExternalLibraryMode, FactSet, HierarchyStrategy};
 use crate::java_ir::{JavaType, PrimitiveType, WildcardBound};
 use crate::rust_ir::{RustExpr, RustType};
 use crate::slot_shape::{DispatchShape, OwnershipShape, RustSlotShape, ViewShape};
@@ -538,6 +538,11 @@ pub fn native_java_rust_type_policy_with_effective_facts(
             ty: RustType::Named(rust_name_for_java_named_type(name)),
         };
     }
+    if let Some(enum_name) = closed_runtime_case_split_enum_name(ty, facts) {
+        return NativeJavaRustTypePolicy::Direct {
+            ty: RustType::Named(enum_name),
+        };
+    }
     if let JavaType::Named { name, args } = ty
         && (!args.is_empty() || raw_java_collection_erasure_name(name))
         && let Some(kind) = crate::stdlib::java_collection_kind_for_type(ty)
@@ -870,6 +875,9 @@ fn rust_type_for_java_generic_arg_with_effective_facts(
     ty: &JavaType,
     facts: &EffectiveFacts<'_>,
 ) -> RustType {
+    if let Some(enum_name) = closed_runtime_case_split_enum_name(ty, facts) {
+        return RustType::Named(enum_name);
+    }
     if let Some(HierarchyStrategy::DynTrait { trait_name }) =
         facts.object_representation_override_strategy_for(ty)
     {
@@ -898,6 +906,42 @@ fn rust_type_for_java_generic_arg_with_effective_facts(
         return RustType::Named(rust_name_for_java_named_type(name));
     }
     rust_type_for_java_type_with_effective_facts(ty, facts)
+}
+
+fn closed_runtime_case_split_enum_name(
+    ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+) -> Option<String> {
+    let JavaType::Named { name, args } = ty else {
+        return None;
+    };
+    if !args.is_empty() || facts.closed_hierarchy_fact_for_name(name) != Some(true) {
+        return None;
+    }
+    let requirements = facts.dispatch_requirements_for(name);
+    if !requirements.iter().any(|requirement| {
+        matches!(
+            requirement,
+            DispatchRequirementKind::NeedsClosedRuntimeCaseSplit
+                | DispatchRequirementKind::NeedsInstanceof
+                | DispatchRequirementKind::NeedsDowncast
+                | DispatchRequirementKind::NeedsUnknownRuntimeObject
+        )
+    }) {
+        return None;
+    }
+    let permitted = facts.sealed_permitted_subtypes_for(name)?.value;
+    if permitted.is_empty()
+        || !permitted.iter().all(|subtype| {
+            facts.is_final_type(&JavaType::Named {
+                name: subtype.clone(),
+                args: Vec::new(),
+            })
+        })
+    {
+        return None;
+    }
+    Some(format!("{name}Value"))
 }
 
 fn java_type_variable_name(name: &str) -> bool {

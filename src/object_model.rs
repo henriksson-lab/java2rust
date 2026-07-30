@@ -888,11 +888,12 @@ fn apply_closed_enum_strategy_selection(facts: &EffectiveFacts<'_>, plan: &mut O
         if strategy.primary_provenance() == FactProvenance::UserOverride {
             continue;
         }
-        let policy = closed_enum_inference_policy_with_effective_facts(
+        let policy = closed_enum_inference_policy_with_effective_facts_and_requirements(
             &strategy.root,
             &strategy.strategy,
             &strategy.direct_subtypes,
             facts,
+            &strategy.requirements,
         );
         if let Some(representation) = policy.representation {
             if closed_enum_is_rejected_by_requirements(&strategy.requirements) {
@@ -1341,6 +1342,22 @@ pub fn closed_enum_inference_policy_with_effective_facts(
     direct_subtypes: &[String],
     facts: &EffectiveFacts<'_>,
 ) -> ClosedEnumInferencePolicy {
+    closed_enum_inference_policy_with_effective_facts_and_requirements(
+        type_name,
+        current_representation,
+        direct_subtypes,
+        facts,
+        &facts.dispatch_requirements_for(type_name),
+    )
+}
+
+fn closed_enum_inference_policy_with_effective_facts_and_requirements(
+    type_name: &str,
+    current_representation: &ObjectRepresentation,
+    direct_subtypes: &[String],
+    facts: &EffectiveFacts<'_>,
+    requirements: &[DispatchRequirement],
+) -> ClosedEnumInferencePolicy {
     let proof_policy =
         closed_enum_proof_policy_with_effective_facts(type_name, direct_subtypes, facts);
     let variants = match &proof_policy.proof {
@@ -1357,9 +1374,7 @@ pub fn closed_enum_inference_policy_with_effective_facts(
             })
         }
         ObjectRepresentation::ConcreteStruct
-            if closed_runtime_case_split_is_useful(
-                facts.dispatch_requirements_for(type_name).as_slice(),
-            ) =>
+            if closed_runtime_case_split_is_useful(requirements) =>
         {
             Some(ObjectRepresentation::ClosedEnum {
                 enum_name: format!("{type_name}Value"),

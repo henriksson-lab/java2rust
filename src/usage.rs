@@ -1429,7 +1429,13 @@ fn analyze_stmt(
                 );
             }
         }
-        Stmt::EnhancedFor { iterable, body, .. } => {
+        Stmt::EnhancedFor {
+            var_type,
+            var_name,
+            iterable,
+            body,
+            ..
+        } => {
             analyze_expr(
                 iterable,
                 facts,
@@ -1438,6 +1444,15 @@ fn analyze_stmt(
                 field_names,
                 field_types,
                 semantic_facts,
+            );
+            let saved_binding = facts.bindings.remove(var_name);
+            facts.bindings.insert(
+                var_name.clone(),
+                BindingUseFacts {
+                    name: var_name.clone(),
+                    java_ty: var_type.clone(),
+                    uses: Vec::new(),
+                },
             );
             for stmt in &body.statements {
                 analyze_stmt(
@@ -1449,6 +1464,10 @@ fn analyze_stmt(
                     field_types,
                     semantic_facts,
                 );
+            }
+            if let Some(saved_binding) = saved_binding {
+                facts.bindings.remove(var_name);
+                facts.bindings.insert(var_name.clone(), saved_binding);
             }
         }
         Stmt::Switch { selector, cases } => {

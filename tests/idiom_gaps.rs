@@ -9376,6 +9376,68 @@ class StandardLineRepair {
 }
 
 #[test]
+fn sealed_source_hierarchy_instanceof_repair_uses_closed_enum_runtime_carrier() {
+    let source = r#"
+sealed class HeaderLine permits FormatLine, InfoLine {
+    String id;
+}
+
+final class FormatLine extends HeaderLine {
+}
+
+final class InfoLine extends HeaderLine {
+}
+
+class Standards<T> {
+    T last;
+
+    T repair(T line) {
+        return line;
+    }
+}
+
+class StandardLineRepair {
+    Standards<FormatLine> formats;
+    Standards<InfoLine> infos;
+
+    void repairAll(java.util.Set<HeaderLine> lines) {
+        for (HeaderLine line : lines) {
+            if (line instanceof FormatLine) {
+                line = formats.repair((FormatLine) line);
+            } else if (line instanceof InfoLine) {
+                line = infos.repair((InfoLine) line);
+            }
+        }
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        !translation
+            .rust
+            .contains("unsupported Java instanceof shape")
+            && translation
+                .rust
+                .contains("matches!(line, HeaderLineValue::FormatLine(_))")
+            && translation
+                .rust
+                .contains("matches!(line, HeaderLineValue::InfoLine(_))"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "sealed_source_hierarchy_instanceof_repair",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 #[ignore = "tracks remaining VCF source hierarchy instanceof/downcast repair slot gap"]
 fn source_hierarchy_instanceof_repair_keeps_supertype_slot_adapted() {
     let source = r#"

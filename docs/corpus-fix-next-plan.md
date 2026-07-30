@@ -6918,6 +6918,18 @@ duplicate `From<T> for Box<dyn Any>` support. The next reduced-VCF target should
 either implement concrete source-hierarchy runtime checks/downcasts directly, or
 pair any erased-object fallback with the required emitted source method facade.
 
+2026-07-30 sealed source-hierarchy checkpoint: proven closed source class
+hierarchies with enhanced-for `instanceof` now feed usage-derived dispatch
+requirements into representation planning and type rendering. Assigned
+enhanced-for locals over closed-enum collection elements iterate cloned owned
+values, so branch-local repair calls can downcast the closed enum payload,
+repair the subtype, and wrap it back into the base enum. Focused verification:
+`sealed_source_hierarchy_instanceof_repair_uses_closed_enum_runtime_carrier` and
+`object_model_input_usage_records_enhanced_for_instanceof_dispatch_requirement`.
+This does not close the open VCF cluster: non-sealed/open source hierarchies
+still need an explicit erased/dyn/source-carrier plan before concrete
+`instanceof` can be translated soundly.
+
 ## 2026-07-30 Facade Correctness Note
 
 `StringBuilder`/`StringBuffer` now emit stateful JDK facade support instead of

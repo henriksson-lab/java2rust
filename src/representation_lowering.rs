@@ -146,7 +146,7 @@ pub fn type_emission_for_with_facts_and_exceptions(
                 .collect::<Vec<_>>()
                 .join("\n");
             RepresentationTypeEmission::RawRustItem(format!(
-                "pub enum {enum_name} {{\n{variants}\n}}"
+                "#[derive(Clone, PartialEq)]\npub enum {enum_name} {{\n{variants}\n}}"
             ))
         }
         ObjectRepresentation::ErasedObject => RepresentationTypeEmission::RawRustItem(format!(

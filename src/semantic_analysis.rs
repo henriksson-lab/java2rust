@@ -98,6 +98,7 @@ pub fn analyze_program_with_config(
         );
     }
     let usage = usage::analyze_usage_with_facts(program, &facts);
+    collect_usage_dispatch_requirement_facts(&usage, &mut facts);
     let field_nullability_iterations =
         collect_field_nullability_facts(program, &mut facts, &mut diagnostics);
     if config.enable_external_api_guesses {
@@ -184,6 +185,27 @@ fn collect_builtin_external_representation_facts(facts: &mut FactSet, enabled: b
     for fact in builtin.external_conversion_adapter_facts {
         if !facts.external_conversion_adapter_facts.contains(&fact) {
             facts.external_conversion_adapter_facts.push(fact);
+        }
+    }
+}
+
+fn collect_usage_dispatch_requirement_facts(usage: &UsageFacts, facts: &mut FactSet) {
+    for (type_name, requirements) in crate::object_model::dispatch_requirements_from_usage(usage) {
+        for requirement in requirements {
+            if facts.dispatch_requirement_facts.iter().any(|fact| {
+                fact.type_name == type_name
+                    && fact.requirement == requirement
+                    && fact.provenance == FactProvenance::ParsedSource
+            }) {
+                continue;
+            }
+            facts
+                .dispatch_requirement_facts
+                .push(DispatchRequirementFact {
+                    type_name: type_name.clone(),
+                    requirement,
+                    provenance: FactProvenance::ParsedSource,
+                });
         }
     }
 }
