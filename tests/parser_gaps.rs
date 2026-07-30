@@ -356,6 +356,33 @@ fn parses_java_hex_floating_point_literals() {
 }
 
 #[test]
+fn invalid_numeric_literals_surface_as_unsupported_not_raw() {
+    let integer = new_java2rust::parser::parse_expr("2147483648");
+    assert!(matches!(
+        integer,
+        Expr::Unsupported { ref reason, .. }
+            if reason.contains("invalid Java integer literal")
+    ));
+
+    let hex_float = new_java2rust::parser::parse_expr("0x1p999999999999999999999999999999");
+    assert!(matches!(
+        hex_float,
+        Expr::Unsupported { ref reason, .. }
+            if reason.contains("invalid Java hex floating-point literal")
+    ));
+}
+
+#[test]
+fn expression_helper_parse_failures_surface_as_unsupported_not_raw() {
+    let expr = new_java2rust::parser::parse_expr("@");
+    assert!(matches!(
+        expr,
+        Expr::Unsupported { ref reason, .. }
+            if reason.contains("unsupported Java expression parse helper input")
+    ));
+}
+
+#[test]
 fn parses_parenthesized_condition_after_block_comment() {
     let parsed = parse_java_source(
         r#"

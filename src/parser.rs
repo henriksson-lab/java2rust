@@ -2105,6 +2105,13 @@ fn unsupported_expr_node(node: tree_sitter::Node, reason: &str) -> Expr {
     }
 }
 
+fn unsupported_expr_reason(reason: impl Into<String>) -> Expr {
+    Expr::Unsupported {
+        reason: reason.into(),
+        span: Span::default(),
+    }
+}
+
 fn parse_array_creation_expr(node: tree_sitter::Node, source: &str) -> Expr {
     let element_type = node
         .child_by_field_name("type")
@@ -2496,7 +2503,11 @@ pub fn parse_expr(src: &str) -> Expr {
             } => Some(expr.clone()),
             _ => None,
         })
-        .unwrap_or_else(|| Expr::Raw(src.to_string()))
+        .unwrap_or_else(|| {
+            unsupported_expr_reason(format!(
+                "unsupported Java expression parse helper input: {src}"
+            ))
+        })
 }
 
 fn collect_syntax_diagnostics(node: tree_sitter::Node, diagnostics: &mut DiagnosticBag) {
@@ -2539,7 +2550,9 @@ fn parse_integer_literal(src: &str) -> Expr {
         parse_java_integer_digits_i64(num, true)
             .map(Literal::Long)
             .map(Expr::Literal)
-            .unwrap_or_else(|_| Expr::Raw(src))
+            .unwrap_or_else(|_| {
+                unsupported_expr_reason(format!("invalid Java integer literal: {src}"))
+            })
     } else {
         match parse_java_integer_digits_i64(&src, false) {
             Ok(value) => match i32::try_from(value) {
@@ -2547,11 +2560,13 @@ fn parse_integer_literal(src: &str) -> Expr {
                 Err(_) if integer_literal_allows_twos_complement_int(&src) => {
                     parse_java_integer_digits_u32(&src)
                         .map(|value| Expr::Literal(Literal::Int(value as i32)))
-                        .unwrap_or_else(|_| Expr::Raw(src))
+                        .unwrap_or_else(|_| {
+                            unsupported_expr_reason(format!("invalid Java integer literal: {src}"))
+                        })
                 }
-                Err(_) => Expr::Raw(src),
+                Err(_) => unsupported_expr_reason(format!("invalid Java integer literal: {src}")),
             },
-            Err(_) => Expr::Raw(src),
+            Err(_) => unsupported_expr_reason(format!("invalid Java integer literal: {src}")),
         }
     }
 }
@@ -2607,7 +2622,9 @@ fn parse_decimal_floating_literal(src: &str) -> Expr {
         num.parse()
             .map(Literal::Float)
             .map(Expr::Literal)
-            .unwrap_or_else(|_| Expr::Raw(src))
+            .unwrap_or_else(|_| {
+                unsupported_expr_reason(format!("invalid Java floating-point literal: {src}"))
+            })
     } else {
         let num = src
             .strip_suffix('d')
@@ -2616,7 +2633,9 @@ fn parse_decimal_floating_literal(src: &str) -> Expr {
         num.parse()
             .map(Literal::Double)
             .map(Expr::Literal)
-            .unwrap_or_else(|_| Expr::Raw(src))
+            .unwrap_or_else(|_| {
+                unsupported_expr_reason(format!("invalid Java floating-point literal: {src}"))
+            })
     }
 }
 
@@ -2628,19 +2647,19 @@ fn parse_hex_floating_literal(src: &str) -> Expr {
         _ => (src.as_str(), false),
     };
     let Some((mantissa, exponent)) = body.split_once(['p', 'P']) else {
-        return Expr::Raw(src);
+        return unsupported_expr_reason(format!("invalid Java hex floating-point literal: {src}"));
     };
     let Some(mantissa) = mantissa
         .strip_prefix("0x")
         .or_else(|| mantissa.strip_prefix("0X"))
     else {
-        return Expr::Raw(src);
+        return unsupported_expr_reason(format!("invalid Java hex floating-point literal: {src}"));
     };
     let Ok(exponent) = exponent.parse::<i32>() else {
-        return Expr::Raw(src);
+        return unsupported_expr_reason(format!("invalid Java hex floating-point literal: {src}"));
     };
     let Some(value) = parse_hex_float_mantissa(mantissa) else {
-        return Expr::Raw(src);
+        return unsupported_expr_reason(format!("invalid Java hex floating-point literal: {src}"));
     };
     let value = value * 2f64.powi(exponent);
     if is_float {

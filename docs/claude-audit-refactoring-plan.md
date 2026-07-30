@@ -57,6 +57,9 @@ Landed in this batch:
   `parse_failures` and set `cargo_type_errors_valid=0`.
 - Unknown named block statements are surfaced as `Stmt::Unsupported`; focused
   parser probes cover both `assert_statement` and `yield_statement`.
+- Parser-local Java expression fallbacks no longer construct `Expr::Raw` for
+  invalid numeric literals, invalid hex floating literals, or expression-helper
+  parse failures; these now surface as `Expr::Unsupported`.
 
 1. Add a generated-Rust parse gate to focused corpus scripts.
    - Report parse failures separately from type-check errors.
