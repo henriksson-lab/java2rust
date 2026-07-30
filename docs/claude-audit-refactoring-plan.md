@@ -273,6 +273,10 @@ Landed in this batch:
   typed slots instead of collapsing to arity-only `Any` patterns. Built-in pack
   constructor indexing stores each fact's callable key and keeps the old
   `(type, arity)` map as compatibility fallback.
+- Resolved emitted-source call argument planning now asks
+  `SignaturePlan::method_signature_by_java_key(JavaCallableKey::source_method(...))`
+  for the selected declaration before falling back to the legacy Rust-name
+  required-signature lookup.
 
 1. Add a `CallableAnalysis` shell.
    - Introduce `src/callable_analysis.rs`.

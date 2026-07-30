@@ -14576,7 +14576,12 @@ fn emitted_source_resolved_call_argument_plan(
             None
         }
     })?;
-    let signature = ctx.signatures.required_method_signature(owner, method);
+    let java_key =
+        crate::java_signature::JavaCallableKey::source_method(owner.name.clone(), method);
+    let signature = ctx
+        .signatures
+        .method_signature_by_java_key(&java_key)
+        .unwrap_or_else(|| ctx.signatures.required_method_signature(owner, method));
     Some(ArgumentLoweringPlan::Shaped(
         signature
             .params

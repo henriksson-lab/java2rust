@@ -3355,6 +3355,13 @@ fn callable_analysis_shell_reaches_lowering_context() {
             && lower_source.contains("let callable_analysis =\n        CallableAnalysis::new")
     );
     assert!(lower_source.contains(".callable_analysis\n            .method_usage(&exact_key)"));
+    let resolved_source_arg_plan = lower_source
+        .split("fn emitted_source_resolved_call_argument_plan")
+        .nth(1)
+        .and_then(|tail| tail.split("fn method_effective_rust_name").next())
+        .expect("resolved source call argument planner should be present");
+    assert!(resolved_source_arg_plan.contains("JavaCallableKey::source_method"));
+    assert!(resolved_source_arg_plan.contains("method_signature_by_java_key"));
     assert!(
         lower_source
             .contains(".callable_analysis\n            .constructor_usage(&UsageConstructorKey")
@@ -8704,6 +8711,7 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
             ref rust_name,
             return_type: JavaType::String,
             propagates_result: false,
+            ..
         } if rust_name == "read_name"
     ));
     assert_eq!(super_target.receiver_expr(), None);
