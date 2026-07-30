@@ -115,6 +115,9 @@ Landed in this batch:
 - `CallableAnalysis` now exposes source-method usage, signature, exception, and
   fallibility convenience queries, and the lower-time source Result-propagation
   check uses `source_method_returns_result`.
+- The lower-local call exception-propagation wrapper now asks source-call
+  fallibility through the shared analysis before delegating to legacy
+  external/unresolved call planning.
 
 1. Add a `CallableAnalysis` shell.
    - Introduce `src/callable_analysis.rs`.

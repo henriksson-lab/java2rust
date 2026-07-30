@@ -14860,6 +14860,16 @@ fn plan_call_exception_propagation_with_lower_context(
     env: &ShapeEnv,
     current_type: Option<&str>,
 ) -> CallExceptionPropagationPlan {
+    if source_method_call_returns_result_with_exception_plan(
+        receiver,
+        name,
+        args.len(),
+        resolved,
+        env,
+        ctx,
+    ) {
+        return CallExceptionPropagationPlan::PropagateResult;
+    }
     plan_call_exception_propagation_with_external_index(
         receiver,
         name,

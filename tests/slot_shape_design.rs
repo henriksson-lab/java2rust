@@ -3362,7 +3362,15 @@ fn callable_analysis_shell_reaches_lowering_context() {
     assert!(lower_source.contains(
         ".callable_analysis\n        .external_method_returns_result(receiver_type, name, arg_count)"
     ));
-    assert!(lower_source.contains(".callable_analysis.source_method_returns_result(ty, method)"));
+    assert!(lower_source.contains(".source_method_returns_result(ty, method)"));
+    assert!(lower_source.contains(
+        "fn plan_call_exception_propagation_with_lower_context(\n    receiver: Option<&Expr>,"
+    ));
+    assert!(
+        lower_source.contains(
+            "if source_method_call_returns_result_with_exception_plan(\n        receiver,"
+        )
+    );
 }
 
 #[test]
