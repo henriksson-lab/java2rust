@@ -10662,6 +10662,63 @@ class HeaderChild extends HeaderBase {
 }
 
 #[test]
+fn source_super_constructor_uses_resolved_overload_not_first_same_arity() {
+    let superclass = r#"
+enum CountKind {
+    INTEGER,
+    UNBOUNDED
+}
+
+enum ValueType {
+    STRING
+}
+
+class HeaderBase {
+    private int count;
+    private CountKind countType;
+    private ValueType type;
+
+    HeaderBase(String name, int count, ValueType type) {
+        this.countType = CountKind.INTEGER;
+        this.count = count;
+        this.type = type;
+    }
+
+    HeaderBase(String name, CountKind count, ValueType type) {
+        this.count = -1;
+        this.countType = count;
+        this.type = type;
+    }
+}
+"#;
+    let subclass = r#"
+class HeaderChild extends HeaderBase {
+    HeaderChild(String name, CountKind count, ValueType type) {
+        super(name, count, type);
+    }
+}
+"#;
+
+    let translation = translate_source_with_context_sources(
+        subclass,
+        &[superclass.to_string()],
+        &FactSet::default(),
+    );
+
+    assert!(
+        translation.rust.contains("count: -1")
+            && translation.rust.contains("count_type: Some(count")
+            && !translation.rust.contains("count: count")
+            && !translation
+                .rust
+                .contains("count_type: Some(CountKind::INTEGER)")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn external_pack_static_utility_call_uses_static_owner() {
     let translation = translate_source(
         r#"

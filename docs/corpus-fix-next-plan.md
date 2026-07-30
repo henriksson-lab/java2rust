@@ -6544,16 +6544,36 @@ Reduced VCF reruns:
   prefixes. The generated format/info parsing constructors now render
   `VCFHeaderLineTranslator::parse_line(...)` and recover owned optional map
   values as `mapping.get(...).cloned()`.
+- `.tmp/corpus-rerun-20260730-vcf-standard-bound-after-resolved-super-overload`:
+  9 files, 30.760s, 19 generated-Rust errors. Source-super constructor
+  selection now first honors resolved constructor identity, then matches source
+  constructor parameter signatures, then ranks same-owner source constructors by
+  inferred argument Java types before falling back to arity. Focused tests
+  `source_super_constructor_uses_resolved_overload_not_first_same_arity` and
+  the broader `source_super_constructor` idiom filter pass. The previous
+  `VCFHeaderLineCount` flowing into inherited `count: i32` constructor-field
+  bucket is gone from the reduced VCF top errors.
+  Verification note: `cargo fmt --check`, `cargo check --quiet`,
+  `git diff --check`, and `cargo build --release --quiet --bin new-java2rust`
+  passed. A full `cargo test --test idiom_gaps --quiet` run was started but
+  killed after it stopped producing output near the end; before termination it
+  had already reported failures in unrelated tests including
+  `broad_headerless_sam_comparator_converts_to_java_comparator`,
+  `corpus_spark_rdd_pipeline_keeps_stream_lowering_at_noop_spark_boundary`,
+  `foreach_lambda_throw_wraps_enclosing_method_in_result`, and
+  `nested_interface_implementor_forwarding_uses_flattened_rust_type_name`.
+  Treat the full idiom target as not clean until those failures are separately
+  triaged.
 
 Remaining top reduced-VCF clusters after this follow-up:
-10 mismatched types, 3 possibly-uninitialized `number`, 3 type annotations
+7 mismatched types, 3 possibly-uninitialized `number`, 3 type annotations
 needed, 2 unsupported concrete `instanceof`, 2 unsupported `super(...)`
 inheritance constructor calls, and one `VCFHeader: Default` bound from erased
-return adaptation. The old missing-super-local `mapping` bucket and the
-`v_c_f_header_line_translator` static-owner bucket are closed. The next
-reduced-VCF target should tackle concrete `instanceof`, the constructor
-overload/field-shape mismatch where `VCFHeaderLineCount` flows into `count:
-i32`, or the `number` definite-assignment gap.
+return adaptation. The old missing-super-local `mapping` bucket,
+`v_c_f_header_line_translator` static-owner bucket, and same-arity source-super
+overload bucket are closed. The next reduced-VCF target should tackle concrete
+`instanceof`, unsupported source-super shapes that still require inheritance
+lowering, or the `number` definite-assignment gap.
 
 ## Rerun Protocol
 

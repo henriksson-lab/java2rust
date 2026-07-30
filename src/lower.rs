@@ -2809,6 +2809,7 @@ fn source_super_constructor_with_trailing_fields<'a>(
     let Stmt::ConstructorInvocation {
         kind: crate::java_ir::ConstructorInvocationKind::Super,
         args,
+        resolved,
         ..
     } = body.statements.first()?
     else {
@@ -2817,13 +2818,22 @@ fn source_super_constructor_with_trailing_fields<'a>(
     let trailing = crate::constructor_plan::delegated_constructor_trailing_stmts_for_lowering(
         &body.statements[1..],
     )?;
-    source_super_constructor_fields_and_trailing(ty, body, args, trailing, env, ctx)
+    source_super_constructor_fields_and_trailing(
+        ty,
+        body,
+        args,
+        resolved.as_ref(),
+        trailing,
+        env,
+        ctx,
+    )
 }
 
 fn source_super_constructor_fields_and_trailing<'a>(
     ty: &'a TypeDecl,
     body: &'a Block,
     args: &'a [Expr],
+    resolved_super: Option<&'a crate::java_ir::ResolvedConstructor>,
     trailing: Vec<DelegatedConstructorTrailingStmt<'a>>,
     env: &ShapeEnv,
     ctx: LowerCtx<'a>,
@@ -2835,14 +2845,7 @@ fn source_super_constructor_fields_and_trailing<'a>(
 )> {
     let superclass = ty.extends.as_deref()?;
     let super_ty = find_super_type_decl_by_erased_name(ctx.support_local_type_program, superclass)?;
-    let super_ctor = super_ty
-        .members
-        .iter()
-        .filter_map(|member| match member {
-            Member::Constructor(ctor) if constructor_arity_matches(ctor, args.len()) => Some(ctor),
-            _ => None,
-        })
-        .next()?;
+    let super_ctor = select_source_super_constructor(super_ty, args, resolved_super, env, ctx)?;
     let (super_body, super_bindings) =
         delegated_source_constructor_body(super_ty, super_ctor, args).unwrap_or_else(|| {
             (
@@ -3320,7 +3323,114 @@ fn implicit_source_super_constructor_with_trailing_fields<'a>(
     let trailing = crate::constructor_plan::delegated_constructor_trailing_stmts_for_lowering(
         &body.statements,
     )?;
-    source_super_constructor_fields_and_trailing(ty, body, &[], trailing, env, ctx)
+    source_super_constructor_fields_and_trailing(ty, body, &[], None, trailing, env, ctx)
+}
+
+fn select_source_super_constructor<'a>(
+    super_ty: &'a TypeDecl,
+    args: &[Expr],
+    resolved_super: Option<&crate::java_ir::ResolvedConstructor>,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<&'a ConstructorDecl> {
+    if let Some(resolved) = resolved_super
+        && let Some(ctor) = super_ty.members.iter().find_map(|member| match member {
+            Member::Constructor(ctor)
+                if ctor
+                    .rust_name
+                    .as_deref()
+                    .is_some_and(|rust_name| rust_name == resolved.rust_name) =>
+            {
+                Some(ctor)
+            }
+            _ => None,
+        })
+    {
+        return Some(ctor);
+    }
+    if let Some(resolved) = resolved_super
+        && let Some(ctor) = super_ty.members.iter().find_map(|member| match member {
+            Member::Constructor(ctor)
+                if source_constructor_params_match_resolved(ctor, resolved) =>
+            {
+                Some(ctor)
+            }
+            _ => None,
+        })
+    {
+        return Some(ctor);
+    }
+    if let Some(ctor) = select_source_super_constructor_by_arg_shapes(super_ty, args, env, ctx) {
+        return Some(ctor);
+    }
+    super_ty.members.iter().find_map(|member| match member {
+        Member::Constructor(ctor) if constructor_arity_matches(ctor, args.len()) => Some(ctor),
+        _ => None,
+    })
+}
+
+fn select_source_super_constructor_by_arg_shapes<'a>(
+    super_ty: &'a TypeDecl,
+    args: &[Expr],
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<&'a ConstructorDecl> {
+    let shape_ctx = ExprShapeContext {
+        signatures: Some(ctx.signatures),
+        representations: Some(ctx.representations),
+        facts: Some(ctx.facts),
+    };
+    let arg_types = args
+        .iter()
+        .map(|arg| infer_expr_shape_with_context(arg, env, shape_ctx).java_ty)
+        .collect::<Vec<_>>();
+    let mut matches = super_ty
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            Member::Constructor(ctor) => {
+                source_constructor_arg_type_score(ctor, &arg_types).map(|score| (ctor, score))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by_key(|(_, score)| std::cmp::Reverse(*score));
+    match matches.as_slice() {
+        [(ctor, _)] => Some(*ctor),
+        [(ctor, best), (_, next), ..] if best > next => Some(*ctor),
+        _ => None,
+    }
+}
+
+fn source_constructor_arg_type_score(
+    ctor: &ConstructorDecl,
+    arg_types: &[JavaType],
+) -> Option<usize> {
+    if ctor.params.len() != arg_types.len() {
+        return None;
+    }
+    ctor.params
+        .iter()
+        .zip(arg_types)
+        .try_fold(0usize, |score, (param, arg_ty)| {
+            known_arg_type_param_match_score(arg_ty, &param.ty).map(|next| score + next)
+        })
+}
+
+fn source_constructor_params_match_resolved(
+    ctor: &ConstructorDecl,
+    resolved: &crate::java_ir::ResolvedConstructor,
+) -> bool {
+    if ctor.params.len() != resolved.params.len() {
+        return false;
+    }
+    ctor.params
+        .iter()
+        .zip(&resolved.params)
+        .all(|(ctor_param, resolved_param)| {
+            ctor_param.is_varargs == resolved_param.is_varargs
+                && same_concrete_java_type(&ctor_param.ty, &resolved_param.ty)
+        })
 }
 
 fn constructor_arity_matches(ctor: &crate::java_ir::ConstructorDecl, arg_count: usize) -> bool {
