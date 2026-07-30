@@ -2221,6 +2221,13 @@ pub fn arrays_copy_of_range_projection(source: RustExpr, from: RustExpr, to: Rus
     ))
 }
 
+pub fn arrays_to_string_projection(source: RustExpr) -> RustExpr {
+    RustExpr::Raw(format!(
+        "java_arrays_to_string({})",
+        emit::emit_expr(&source)
+    ))
+}
+
 pub fn collections_empty_list_projection() -> RustExpr {
     RustExpr::Raw("Vec::new()".to_string())
 }

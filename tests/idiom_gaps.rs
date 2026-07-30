@@ -19900,6 +19900,62 @@ mod generated_tests {
 }
 
 #[test]
+fn java_arrays_to_string_lowers_as_static_platform_format_projection() {
+    let translation = translate_source(
+        r#"
+import java.util.Arrays;
+
+class JavaArraysToStringUse {
+    String ints(int[] values) {
+        return Arrays.toString(values);
+    }
+
+    String names(String[] values) {
+        return Arrays.toString(values);
+    }
+
+    String empty(byte[] values) {
+        return Arrays.toString(values);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("java_arrays_to_string(values)")
+            && !translation.rust.contains("Arrays::to_string")
+            && !translation.rust.contains("JavaUtilArrays::to_string"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "java_arrays_to_string_use",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn formats_arrays_with_java_delimiters() {
+        let fixture = JavaArraysToStringUse {};
+        assert_eq!(fixture.ints(&[1, 2, 3]), "[1, 2, 3]");
+        assert_eq!(
+            fixture.names(&["alpha".to_string(), "beta".to_string()]),
+            "[alpha, beta]"
+        );
+        assert_eq!(fixture.empty(&[]), "[]");
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
 fn documents_equals_and_objects_gap() {
     let translation = translate_source(&idiom_gap("EqualsAndObjects.java"));
 

@@ -3226,6 +3226,7 @@ fn known_argument_sensitive_external_method_return_type(
         (Some("Arrays"), "equals", [JavaType::Array(_), JavaType::Array(_)]) => {
             Some(JavaType::Primitive(PrimitiveType::Boolean))
         }
+        (Some("Arrays"), "toString" | "to_string", [JavaType::Array(_)]) => Some(JavaType::String),
         (Some("Arrays"), "copyOf", [JavaType::Array(element), _]) => {
             Some(JavaType::Array(element.clone()))
         }
@@ -5559,6 +5560,16 @@ pub fn java_math_min_f64(left: f64, right: f64) -> f64 {
     } else {
         left.min(right)
     }
+}
+
+pub fn java_arrays_to_string<T: std::fmt::Display, V: AsRef<[T]>>(values: V) -> String {
+    let body = values
+        .as_ref()
+        .iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{body}]")
 }
 
 pub mod logger {
@@ -15356,22 +15367,23 @@ fn expr_is_java_platform_static_call(receiver: &Expr, name: &str, args: &[Expr])
             "ClassLoader",
             "getSystemResource" | "get_system_resource",
             1
-        ) | (
-            "Math",
-            "max"
-                | "min"
-                | "log"
-                | "exp"
-                | "round"
-                | "abs"
-                | "toIntExact"
-                | "to_int_exact"
-                | "floorDiv"
-                | "floor_div"
-                | "floorMod"
-                | "floor_mod",
-            1..=2
-        )
+        ) | ("Arrays", "toString" | "to_string", 1)
+            | (
+                "Math",
+                "max"
+                    | "min"
+                    | "log"
+                    | "exp"
+                    | "round"
+                    | "abs"
+                    | "toIntExact"
+                    | "to_int_exact"
+                    | "floorDiv"
+                    | "floor_div"
+                    | "floorMod"
+                    | "floor_mod",
+                1..=2,
+            )
     )
 }
 
@@ -16799,6 +16811,7 @@ fn external_api_method_policy_provenance_with_builtin_packs(
     match (receiver_type, name, arg_count) {
         (Some("Arrays"), "asList" | "stream", _) => FactProvenance::BuiltinExternalModel,
         (Some("Arrays"), "equals", 2) => FactProvenance::BuiltinExternalModel,
+        (Some("Arrays"), "toString" | "to_string", 1) => FactProvenance::BuiltinExternalModel,
         (Some("Arrays"), "copyOf", 2) => FactProvenance::BuiltinExternalModel,
         (Some("Arrays"), "copyOfRange", 3) => FactProvenance::BuiltinExternalModel,
         (_, "compareTo", 0 | 1) => FactProvenance::BuiltinExternalModel,
@@ -17236,6 +17249,7 @@ pub fn external_api_return_nullability(
         }
         (Some("Arrays"), "asList" | "stream", _) => NullabilityState::DefinitelyNonNull,
         (Some("Arrays"), "equals", 2) => NullabilityState::DefinitelyNonNull,
+        (Some("Arrays"), "toString" | "to_string", 1) => NullabilityState::DefinitelyNonNull,
         (Some("Arrays"), "copyOf", 2) => NullabilityState::DefinitelyNonNull,
         (Some("Arrays"), "copyOfRange", 3) => NullabilityState::DefinitelyNonNull,
         (Some("ArrayUtils"), "addAll", 2) => NullabilityState::DefinitelyNonNull,
@@ -17396,6 +17410,7 @@ fn static_utility_method_role(
         (Some("IntStream" | "LongStream" | "DoubleStream"), "sum", 0) => ExternalApiRole::Getter,
         (Some("Arrays"), "asList" | "stream", _) => ExternalApiRole::Getter,
         (Some("Arrays"), "equals", 2) => ExternalApiRole::BooleanGetter,
+        (Some("Arrays"), "toString" | "to_string", 1) => ExternalApiRole::Getter,
         (Some("Arrays"), "copyOf", 2) => ExternalApiRole::Getter,
         (Some("Arrays"), "copyOfRange", 3) => ExternalApiRole::Getter,
         (Some("ArrayUtils"), "addAll", 2) => ExternalApiRole::Getter,

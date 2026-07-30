@@ -6715,11 +6715,15 @@ class ArraysCollectionFactUse {
     Stream<String> stream(String[] values) {
         return Arrays.stream(values);
     }
+
+    String rendered(int[] values) {
+        return Arrays.toString(values);
+    }
 }
 "#,
     );
 
-    for method in ["asList", "stream"] {
+    for method in ["asList", "stream", "toString"] {
         let effect = semantic
             .facts
             .external_api_effect_for_receiver(Some("Arrays"), method)
