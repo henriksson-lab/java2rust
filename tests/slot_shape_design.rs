@@ -26088,6 +26088,123 @@ class UseExternalBuilderMissingReturnFact {
 }
 
 #[test]
+fn external_getter_without_return_fact_uses_named_unmodelled_result_shim() {
+    let source = r#"
+class UseExternalGetterMissingReturnFact {
+    Object read(ExternalHandle handle) {
+        return handle.fetchRecord("sample");
+    }
+}
+"#;
+    let mut facts = FactSet::default();
+    facts.hierarchy_overrides.push(HierarchyOverride {
+        type_name: "ExternalHandle".to_string(),
+        strategy: HierarchyStrategy::ErasedObject,
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "fetchRecord".to_string(),
+        receiver_type: Some("ExternalHandle".to_string()),
+        arg_count: Some(1),
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: None,
+        return_nullability: NullabilityState::Unknown,
+        thrown: Vec::new(),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts
+        .external_api_argument_effect_facts
+        .push(ExternalApiArgumentEffectFact {
+            receiver_type: Some("ExternalHandle".to_string()),
+            method_name: "fetchRecord".to_string(),
+            arg_count: Some(1),
+            parameter_index: 0,
+            parameter_type: Some(JavaType::String),
+            parameter_nullability: NullabilityState::DefinitelyNonNull,
+            argument_mutability: ReceiverMutabilityFact::ReadOnly,
+            alias_policy: ExternalArgumentAliasPolicy::Borrowed,
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+
+    let translation = translate_source_with_facts(source, &facts);
+
+    assert!(
+        translation
+            .rust
+            .contains("pub struct ExternalHandleFetchRecord1Result"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains(
+            "pub fn fetch_record(&self, _arg0: &str) -> ExternalHandleFetchRecord1Result { unimplemented!(\"ExternalHandle.fetchRecord is not modelled\") }"
+        ),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("fn fetch_record<T0>(&self, _arg0: T0) -> ();"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn external_new_builder_without_return_fact_uses_named_builder_shim() {
+    let source = r#"
+class UseExternalNewBuilderMissingReturnFact {
+    Object make() {
+        return ExternalProduct.newBuilder();
+    }
+}
+"#;
+    let mut facts = FactSet::default();
+    facts.hierarchy_overrides.push(HierarchyOverride {
+        type_name: "ExternalProduct".to_string(),
+        strategy: HierarchyStrategy::ErasedObject,
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "newBuilder".to_string(),
+        receiver_type: Some("ExternalProduct".to_string()),
+        arg_count: Some(0),
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: None,
+        return_nullability: NullabilityState::Unknown,
+        thrown: Vec::new(),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+
+    let translation = translate_source_with_facts(source, &facts);
+
+    assert!(
+        translation
+            .rust
+            .contains("pub struct ExternalProductBuilder"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains(
+            "pub fn new_builder() -> ExternalProductBuilder { unimplemented!(\"ExternalProduct.newBuilder is not modelled\") }"
+        ),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("pub fn new_builder() -> Box<dyn std::any::Any>"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn erased_object_facade_includes_modeled_void_methods() {
     let source = r#"
 class ErasedVoidFacadeUse {

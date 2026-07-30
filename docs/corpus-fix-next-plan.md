@@ -220,6 +220,17 @@ from the builder name (`FooBuilder -> Foo`) instead of
 remaining opaque-shim work is ordinary non-builder external API support and
 loud unmodelled method bodies.
 
+Ordinary missing-return external API step: getter-like external facts with no
+return type now emit a named opaque result shim and a loud
+`unimplemented!("Receiver.method is not modelled")` body. Side-effect and
+mutator facts with no return type still represent Java `void` and keep `()`
+support. Focused coverage:
+`external_getter_without_return_fact_uses_named_unmodelled_result_shim`,
+`external_new_builder_without_return_fact_uses_named_builder_shim`, and
+`erased_object_facade_includes_modeled_void_methods`. Remaining work is to
+apply the same explicit unmodelled/fact-backed split to imported static
+fallbacks, inherited support surfaces, and generic getter fallbacks.
+
 2026-07-29 PrintStream overload cleanup: JDK `PrintStream.print/println`
 arity-1 calls now have explicit platform API facts, resolved external instance
 calls can preserve overload-safe arity names, and generated support emits a

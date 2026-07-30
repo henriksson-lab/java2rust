@@ -6931,15 +6931,32 @@ impl ExternalApiFacadeSupport {
             }
 
             if rust_base_method == "new_builder" {
+                let mut unmodelled_value_return = false;
                 let return_rust = fact
                     .return_type
                     .as_ref()
                     .map(|return_type| external_facade_return_type_with_facts(return_type, facts))
-                    .unwrap_or_else(|| "Box<dyn std::any::Any>".to_string());
-                self.add_method(
-                    receiver_rust,
-                    external_facade_static_method(&rust_base_method, 0, &return_rust),
-                );
+                    .unwrap_or_else(|| {
+                        unmodelled_value_return = true;
+                        external_facade_new_builder_result_type(&receiver_rust)
+                    });
+                if unmodelled_value_return {
+                    self.add_opaque_type(return_rust.clone());
+                }
+                let method_body = if unmodelled_value_return {
+                    external_facade_unmodelled_method_with_facts(
+                        facts,
+                        &receiver_key,
+                        &fact.method_name,
+                        &rust_base_method,
+                        0,
+                        &return_rust,
+                        true,
+                    )
+                } else {
+                    external_facade_static_method(&rust_base_method, 0, &return_rust)
+                };
+                self.add_method(receiver_rust, method_body);
             } else if receiver_rust.ends_with("Builder") {
                 continue;
             } else {
@@ -6952,6 +6969,7 @@ impl ExternalApiFacadeSupport {
                 if !valid_rust_method_ident(&rust_method) {
                     continue;
                 }
+                let mut unmodelled_value_return = false;
                 let mut return_rust = fact
                     .return_type
                     .as_ref()
@@ -6965,7 +6983,21 @@ impl ExternalApiFacadeSupport {
                             fact.return_nullability,
                         )
                     })
-                    .unwrap_or_else(|| "()".to_string());
+                    .unwrap_or_else(|| {
+                        if external_api_role_returns_value(fact.role) {
+                            unmodelled_value_return = true;
+                            external_facade_unmodelled_result_type(
+                                &receiver_rust,
+                                &rust_method,
+                                arg_count,
+                            )
+                        } else {
+                            "()".to_string()
+                        }
+                    });
+                if unmodelled_value_return {
+                    self.add_opaque_type(return_rust.clone());
+                }
                 self.add_external_argument_types(
                     facts,
                     &receiver_key,
@@ -6987,6 +7019,7 @@ impl ExternalApiFacadeSupport {
                         arg_count,
                     )
                     && !is_static_facade_method
+                    && !unmodelled_value_return
                 {
                     self.add_erased_object_method(
                         facts,
@@ -6996,7 +7029,17 @@ impl ExternalApiFacadeSupport {
                         return_rust.clone(),
                     );
                 }
-                let method_body = if is_static_facade_method {
+                let method_body = if unmodelled_value_return {
+                    external_facade_unmodelled_method_with_facts(
+                        facts,
+                        &receiver_key,
+                        &fact.method_name,
+                        &rust_method,
+                        arg_count,
+                        &return_rust,
+                        is_static_facade_method,
+                    )
+                } else if is_static_facade_method {
                     external_facade_static_method_with_facts(
                         facts,
                         &receiver_key,
@@ -11568,6 +11611,27 @@ fn external_facade_static_method_with_facts(
     )
 }
 
+fn external_facade_unmodelled_method_with_facts(
+    facts: &FactSet,
+    receiver_key: &str,
+    java_method: &str,
+    rust_method: &str,
+    arg_count: usize,
+    return_type: &str,
+    is_static: bool,
+) -> String {
+    let escaped_rust_method = rust_raw_ident_if_needed(rust_method);
+    let args = if is_static {
+        external_facade_args_with_facts(facts, receiver_key, java_method, arg_count)
+    } else {
+        external_facade_self_args_with_facts(facts, receiver_key, java_method, arg_count)
+    };
+    let receiver = canonical_external_receiver_type_key(receiver_key);
+    format!(
+        "    pub fn {escaped_rust_method}{args} -> {return_type} {{ unimplemented!(\"{receiver}.{java_method} is not modelled\") }}"
+    )
+}
+
 fn external_facade_constructor_name(arg_count: usize, overload_by_arity: bool) -> String {
     if overload_by_arity {
         format!("new_{arg_count}")
@@ -12162,6 +12226,35 @@ fn facade_method_return_type<'a>(method_body: &'a str, method: &str) -> Option<&
 
 fn weak_external_facade_return_type(return_type: &str) -> bool {
     matches!(return_type, "()" | "Box<dyn std::any::Any>" | "R" | "T")
+}
+
+fn external_api_role_returns_value(role: ExternalApiRole) -> bool {
+    matches!(
+        role,
+        ExternalApiRole::Getter | ExternalApiRole::BooleanGetter | ExternalApiRole::IndexedGetter
+    )
+}
+
+fn external_facade_unmodelled_result_type(
+    receiver_rust: &str,
+    rust_method: &str,
+    arg_count: usize,
+) -> String {
+    let suffix = if arg_count == 0 {
+        "Result".to_string()
+    } else {
+        format!("{}Result", arg_count)
+    };
+    format!(
+        "{}{}{}",
+        receiver_rust,
+        upper_camel_from_snake(rust_method),
+        suffix
+    )
+}
+
+fn external_facade_new_builder_result_type(receiver_rust: &str) -> String {
+    format!("{receiver_rust}Builder")
 }
 
 fn external_erased_object_trait_method(method: &ExternalErasedObjectMethod) -> String {

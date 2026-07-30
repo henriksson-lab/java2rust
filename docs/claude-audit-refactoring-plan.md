@@ -195,6 +195,10 @@ Landed in this batch:
 - External builder `build()` support without explicit return facts now falls
   back to an inferred named opaque product shim (`FooBuilder -> Foo`) instead
   of broad `Box<dyn std::any::Any>`.
+- Getter-like external API facts without return types now emit named opaque
+  result shims with `unimplemented!("Receiver.method is not modelled")` bodies
+  instead of silently lowering as `()` or broadening the erased-object facade.
+  Void-like side-effect/mutator facts still emit `()` surfaces.
 
 1. Expand rust signature facts.
    - Prefer function signature facts over tailored call rules whenever the same
