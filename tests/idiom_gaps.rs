@@ -7675,6 +7675,84 @@ class HeaderChild extends HeaderBase {
 }
 
 #[test]
+fn source_generic_class_preserves_type_params_and_interface_bounds() {
+    let source = r#"
+interface Named {
+    String id();
+}
+
+class Box<T extends Named> {
+    private T value;
+
+    Box(T value) {
+        this.value = value;
+    }
+
+    String id() {
+        return value.id();
+    }
+
+    T get() {
+        return value;
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation.rust.contains("pub struct Box<T>")
+            && translation.rust.contains("impl<T: Named> Box<T>")
+            && translation.rust.contains("pub fn new(value: T) -> Box<T>")
+            && translation.rust.contains("return Box<T> {")
+            && translation.rust.contains("return self.value.id();"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn nested_generic_source_alias_preserves_type_params() {
+    let source = r#"
+class Outer {
+    static class Inner<T> {
+        T value;
+
+        Inner(T value) {
+            this.value = value;
+        }
+    }
+
+    Inner<String> make(String value) {
+        return new Inner<String>(value);
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub type Inner<T> = OuterInner<T>;")
+            && translation.rust.contains("pub struct OuterInner<T>")
+            && translation
+                .rust
+                .contains("pub fn make(&self, value: String) -> OuterInner<String>"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn plain_returning_method_recovers_fallible_helper_call_without_question_mark() {
     let translation = translate_source(
         r#"

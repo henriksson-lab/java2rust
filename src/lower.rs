@@ -121,8 +121,9 @@ use crate::facts::{
 };
 use crate::item_assembly::{
     constructor_default_field_value_with_facts, constructor_function_shell_with_facts,
-    constructor_return_body, delegating_constructor_return_body, impl_item_for_type,
-    is_static_final_field, method_function_shell_with_facts_and_exception_plan, raw_item,
+    constructor_return_body, delegating_constructor_return_body,
+    impl_item_for_type_with_support_context, is_static_final_field,
+    method_function_shell_with_facts_and_exception_plan, raw_item, rust_use_name_for_source_type,
     static_storage_initial_fallback_value, struct_item_for_type_with_facts_and_support_context,
 };
 use crate::java_ir::Member as Jm;
@@ -463,8 +464,12 @@ fn collect_source_object_to_string_fallback_items(
     occupied_inherent_methods: &BTreeSet<(String, String)>,
     items: &mut Vec<RustItem>,
 ) {
-    if matches!(ty.kind, TypeKind::Class | TypeKind::Record) {
+    if matches!(ty.kind, TypeKind::Class | TypeKind::Record)
+        && !generic_source_type_has_primary_inherent_impl(ty)
+    {
         let rust_name = crate::slot_render::rust_name_for_java_named_type(&ty.name);
+        let rust_use_name = rust_use_name_for_source_type(ty);
+        let impl_header = source_object_fallback_impl_header(ty);
         let mut methods = Vec::new();
         if !type_declares_zero_arg_rust_method(ty, "to_string")
             && !occupied_inherent_methods.contains(&(rust_name.clone(), "to_string".to_string()))
@@ -478,13 +483,13 @@ fn collect_source_object_to_string_fallback_items(
             && !occupied_inherent_methods.contains(&(rust_name.clone(), "get_class".to_string()))
         {
             methods.push(format!(
-                "    pub fn get_class(&self) -> JavaClass<{rust_name}> {{ JavaClass::<{rust_name}>::literal({:?}) }}",
+                "    pub fn get_class(&self) -> JavaClass<{rust_use_name}> {{ JavaClass::<{rust_use_name}>::literal({:?}) }}",
                 ty.name
             ));
         }
         if !methods.is_empty() {
             items.push(RustItem::Raw(format!(
-                "impl {rust_name} {{\n{}\n}}",
+                "{impl_header} {{\n{}\n}}",
                 methods.join("\n")
             )));
         }
@@ -497,6 +502,23 @@ fn collect_source_object_to_string_fallback_items(
                 items,
             );
         }
+    }
+}
+
+fn generic_source_type_has_primary_inherent_impl(ty: &TypeDecl) -> bool {
+    !ty.type_params.is_empty()
+        && ty
+            .members
+            .iter()
+            .any(|member| matches!(member, Member::Constructor(_) | Member::Method(_)))
+}
+
+fn source_object_fallback_impl_header(ty: &TypeDecl) -> String {
+    let rust_use_name = rust_use_name_for_source_type(ty);
+    if ty.type_params.is_empty() {
+        format!("impl {rust_use_name}")
+    } else {
+        format!("impl<{}> {rust_use_name}", ty.type_params.join(", "))
     }
 }
 
@@ -844,7 +866,11 @@ fn lower_type(
     }
     functions.extend(static_storage_accessor_functions_for_type(ty, ctx));
     functions.extend(abstract_interface_method_stubs(ty, ctx));
-    file.items.push(impl_item_for_type(ty, functions));
+    file.items.push(impl_item_for_type_with_support_context(
+        ty,
+        functions,
+        ctx.support_local_type_program,
+    ));
     for item in trait_impl_emissions_for_type_with_facts_and_exceptions(
         ctx.representations,
         ctx.support_local_type_program,
@@ -1460,8 +1486,15 @@ fn nested_type_simple_alias_item(nested: &TypeDecl) -> Option<String> {
     let target = crate::slot_render::rust_name_for_java_named_type(&nested.name);
     let target = if nested.kind == TypeKind::Interface {
         format!("dyn {target}")
-    } else {
+    } else if nested.type_params.is_empty() {
         target
+    } else {
+        format!("{}<{}>", target, nested.type_params.join(", "))
+    };
+    let alias = if nested.type_params.is_empty() {
+        alias
+    } else {
+        format!("{}<{}>", alias, nested.type_params.join(", "))
     };
     (alias != target).then(|| format!("pub type {alias} = {target};"))
 }
@@ -1713,9 +1746,7 @@ fn lower_implicit_default_constructor(
     RustFunction {
         name: "new".to_string(),
         params: Vec::new(),
-        return_type: Some(RustType::Named(
-            crate::slot_render::rust_name_for_java_named_type(&ty.name),
-        )),
+        return_type: Some(RustType::Named(rust_use_name_for_source_type(ty))),
         body: constructor_return_body(ty, fields),
         is_pub: true,
         receiver: None,

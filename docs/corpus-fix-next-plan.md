@@ -438,6 +438,41 @@ files with 20 invalid-pattern files and reduced generated Rust errors from
 owner row is gone; `VCFFileReader::to_interval_list...` now renders
 `for_each_remaining(|value| interval_list.add(value))`.
 
+2026-07-30 source generic type rendering: source type declarations now
+preserve declared Java type parameters in Rust struct names, constructor return
+types, struct literals, and impl targets. Ordinary named Java type uses with
+generic arguments now retain those arguments after the JDK collection/Class/
+Iterator special cases, so source helper types such as
+`Standards<VCFFormatHeaderLine>` no longer collapse to raw
+`Standards`/`VCFStandardHeaderLinesStandards`. Nested generic aliases now render
+as `pub type Alias<T> = OwnerAlias<T>`, and generic source types with primary
+inherent methods no longer get a separate object-fallback impl that can shadow
+the real impl during batch assembly.
+
+Focused coverage passed:
+`source_generic_class_preserves_type_params_and_interface_bounds`,
+`nested_generic_source_alias_preserves_type_params`, `cargo fmt --check`,
+`cargo check --quiet`, `git diff --check`, and release rebuild.
+
+Release-backed HTSJDK VCF reruns:
+`.tmp/corpus-rerun-20260730-htsjdk-vcf-after-source-generics` translated 32/32
+files with 20 invalid-pattern files and reduced generated Rust errors from
+`343` to `329`. Follow-up cleanup rerun
+`.tmp/corpus-rerun-20260730-htsjdk-vcf-after-source-generics-cleanup`
+translated 32/32 files with 20 invalid-pattern files and reduced generated
+Rust errors to `328`. The raw pre-strip output for `VCFStandardHeaderLines`
+contains the real `impl<T> VCFStandardHeaderLinesStandards<T>` methods, and the
+assembled output now preserves `pub type Standards<T> =
+VCFStandardHeaderLinesStandards<T>`, but the focused-package assembly still
+drops the primary generic impl and leaves only the generic struct plus static
+call sites. Treat the remaining
+`VCFStandardHeaderLinesStandards<T>::repair/get/add/new` errors as a
+shared-support merge/strip issue for generic source impl blocks, not a missing
+source generic parser/lowering issue. The other dominant remaining families are
+unchanged: broad mismatched types, type inference holes, concrete
+`instanceof`, inherited `super(...)` constructors, boxed dyn optional
+comparisons, and source/facade precision gaps such as `GenotypeBuilder`.
+
 The adjacent VCF `VCFHeaderLine instanceof VCFInfoHeaderLine`/`VCFIDHeaderLine`
 failures are a different class of issue. The translator currently records
 `NeedsInstanceof` on the declared base binding, but parsed source classes still

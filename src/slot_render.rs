@@ -668,6 +668,18 @@ pub fn native_java_rust_type_policy_with_effective_facts(
                 )),
             }
         }
+        JavaType::Named { name, args } if !args.is_empty() => NativeJavaRustTypePolicy::Direct {
+            ty: RustType::Raw(format!(
+                "{}<{}>",
+                rust_name_for_java_named_type(name),
+                args.iter()
+                    .map(|arg| crate::emit::emit_type(
+                        &rust_type_for_java_generic_arg_with_effective_facts(arg, facts)
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+        },
         JavaType::Named { name, .. } => {
             if let JavaType::Named { args, .. } = ty
                 && let Some(ty) = external_crate_mapped_named_rust_type(name, args, facts)

@@ -1412,6 +1412,18 @@ emitting `Some(self.line_type)`, and the `VCFSimpleHeaderLine::new_string_map`
 trailing initializer call no longer leaks bare `self.name` into a static
 constructor.
 
+Release-backed HTSJDK VCF source-generics rerun:
+`.tmp/corpus-rerun-20260730-htsjdk-vcf-after-source-generics-cleanup`
+translates all `32/32` files, keeps `invalid_pattern_files=20`, and has `328`
+generated Rust errors, down from the previous complete
+`.tmp/corpus-rerun-20260730-htsjdk-vcf-after-bound-methodref` baseline of
+`343`. Source generic declarations and ordinary named generic uses now retain
+type parameters, and nested aliases render as `Alias<T> = OwnerAlias<T>`. The
+remaining `VCFStandardHeaderLinesStandards<T>::repair/get/add/new` errors are
+not parser/lowering loss: the raw pre-strip file contains the primary generic
+impl, but focused-package assembly still drops it. Treat that as the next VCF
+shared-support merge/strip task.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from
@@ -1421,7 +1433,8 @@ constructor.
 2. Continue generalizing optional carrier projection through slot plans, with an
    audit pass for old narrow rules that still emit wrapper-level
    `.clone().unwrap()` instead of borrowing and cloning the contained value.
-3. Minimize the VCF shared-support enum assembly failure.
+3. Preserve generic source impl blocks during focused-package shared-support
+   merge/strip, starting with `VCFStandardHeaderLinesStandards<T>`.
 4. Add a Spark/DISQ interface bridge fixture around `getBases`.
 5. Convert shared errors from the newly unblocked ndarray corpus reruns into
    fixtures, especially `super(...)`, array creation, switch scaffolding,

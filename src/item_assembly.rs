@@ -45,17 +45,75 @@ pub fn struct_item_for_type_with_facts_and_support_context(
 ) -> RustItem {
     let fields = struct_fields_for_type(ty, signatures, facts, support_program);
     RustItem::Struct(RustStruct {
-        name: rust_name_for_java_named_type(&ty.name),
+        name: rust_decl_name_for_source_type(ty),
         derives: struct_derives_for_type(ty, &fields, signatures, facts, support_program),
         fields,
     })
 }
 
 pub fn impl_item_for_type(ty: &TypeDecl, functions: Vec<RustFunction>) -> RustItem {
+    impl_item_for_type_with_support_context(ty, functions, &Program::default())
+}
+
+pub fn impl_item_for_type_with_support_context(
+    ty: &TypeDecl,
+    functions: Vec<RustFunction>,
+    support_program: &Program,
+) -> RustItem {
     RustItem::Impl(RustImpl {
-        target: rust_name_for_java_named_type(&ty.name),
+        target: rust_impl_target_for_source_type(ty, support_program),
         associated_consts: associated_consts_for_type(ty),
         functions,
+    })
+}
+
+pub fn rust_decl_name_for_source_type(ty: &TypeDecl) -> String {
+    let name = rust_name_for_java_named_type(&ty.name);
+    if ty.type_params.is_empty() {
+        name
+    } else {
+        format!("{}<{}>", name, ty.type_params.join(", "))
+    }
+}
+
+pub fn rust_use_name_for_source_type(ty: &TypeDecl) -> String {
+    rust_decl_name_for_source_type(ty)
+}
+
+fn rust_impl_target_for_source_type(ty: &TypeDecl, support_program: &Program) -> String {
+    let use_name = rust_use_name_for_source_type(ty);
+    let impl_params = rust_impl_params_for_source_type(ty, support_program);
+    if impl_params.is_empty() {
+        use_name
+    } else {
+        format!("<{}> {}", impl_params.join(", "), use_name)
+    }
+}
+
+fn rust_impl_params_for_source_type(ty: &TypeDecl, support_program: &Program) -> Vec<String> {
+    ty.type_params
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let mut bounds = Vec::new();
+            if let Some(Some(JavaType::Named { name: bound, .. })) = ty.type_param_bounds.get(index)
+                && source_type_bound_is_trait_like(bound, support_program)
+            {
+                bounds.push(rust_name_for_java_named_type(bound));
+            }
+            if bounds.is_empty() {
+                name.clone()
+            } else {
+                format!("{name}: {}", bounds.join(" + "))
+            }
+        })
+        .collect()
+}
+
+fn source_type_bound_is_trait_like(bound: &str, support_program: &Program) -> bool {
+    support_program.types.iter().any(|ty| {
+        (ty.name == bound || rust_name_for_java_named_type(&ty.name) == bound)
+            && matches!(ty.kind, crate::java_ir::TypeKind::Interface)
     })
 }
 
@@ -91,7 +149,7 @@ pub fn constructor_function_shell_with_facts(
 
 pub fn constructor_return_body(ty: &TypeDecl, fields: Vec<(String, RustExpr)>) -> Vec<RustStmt> {
     vec![RustStmt::Return(Some(RustExpr::StructLit {
-        name: rust_name_for_java_named_type(&ty.name),
+        name: rust_use_name_for_source_type(ty),
         fields: reorder_struct_literal_moves_after_reads(fields),
     }))]
 }
@@ -1205,7 +1263,7 @@ fn constructor_return_type(
     signatures: &SignaturePlan,
 ) -> RustType {
     let _ = signatures.required_constructor_signature(ty, ctor);
-    RustType::Named(rust_name_for_java_named_type(&ty.name))
+    RustType::Named(rust_use_name_for_source_type(ty))
 }
 
 fn method_params(
