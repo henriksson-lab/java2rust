@@ -1080,6 +1080,42 @@ class DecimalFormatNumericExpressionConcat {
 }
 
 #[test]
+fn string_concat_preserves_parenthesized_numeric_addition() {
+    let translation = translate_source(
+        r#"
+class StringConcatNestedArithmetic {
+    String nested(int a, int b) {
+        return "x" + (a + b);
+    }
+
+    String chain(int a, int b) {
+        return "x" + a + b;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("format!(\"x{}\", (a + b))")
+            && translation
+                .rust
+                .contains("format!(\"x{}{}\", (a).to_string(), (b).to_string())")
+            && !translation.rust.contains("format!(\"x{}{}\", a + b"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "string_concat_nested_arithmetic",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn jdk_file_reader_and_system_facades_keep_control_flow_shapes() {
     let translation = translate_source(
         r#"
