@@ -79,6 +79,7 @@ pub enum CallTargetPlan<'a> {
         mutates_receiver: bool,
     },
     SuperBoundary {
+        declaring_type: String,
         rust_name: String,
         return_type: JavaType,
         propagates_result: bool,
@@ -2098,6 +2099,7 @@ fn plan_call_target_with_external_index_impl<'a>(
         && matches!(call.kind, CallKind::Instance)
     {
         return CallTargetPlan::SuperBoundary {
+            declaring_type: call.declaring_type.clone(),
             rust_name: call.rust_name.clone(),
             return_type: call.return_type.clone(),
             propagates_result: facts

@@ -6709,7 +6709,9 @@ impl ExternalApiFacadeSupport {
                     self.add_java_type(&param.ty);
                 }
                 changed |= self.opaque_types.len() != opaque_count_before;
-                let method_body = external_facade_instance_method(
+                let method_body = source_summary_facade_instance_method(
+                    type_key,
+                    &method.name,
                     &rust_method,
                     method.params.len(),
                     &return_type,
@@ -6882,8 +6884,13 @@ impl ExternalApiFacadeSupport {
                         self.add_java_type(&param.ty);
                     }
                     self.add_external_facade_return_opaque_type(&return_type);
-                    let method_body =
-                        external_facade_instance_method(&rust_method, arity, &return_type);
+                    let method_body = source_summary_facade_instance_method(
+                        &summary_super.name,
+                        &method.name,
+                        &rust_method,
+                        arity,
+                        &return_type,
+                    );
                     if self.has_method_signature(&owner, &rust_method, arity)
                         && !self.replace_weak_method_return(
                             &owner,
@@ -12645,6 +12652,25 @@ fn external_facade_instance_method(name: &str, arg_count: usize, return_type: &s
         "    pub fn {rust_name}{} -> {return_type} {{ {} }}",
         external_facade_self_args(arg_count),
         external_facade_default_expr(return_type, Some(name))
+    )
+}
+
+fn source_summary_facade_instance_method(
+    owner: &str,
+    java_name: &str,
+    rust_name: &str,
+    arg_count: usize,
+    return_type: &str,
+) -> String {
+    let rust_name = rust_raw_ident_if_needed(rust_name);
+    let body = if return_type == "()" {
+        "()".to_string()
+    } else {
+        format!("unimplemented!(\"source-summary method {owner}.{java_name} is not translated\")")
+    };
+    format!(
+        "    pub fn {rust_name}{} -> {return_type} {{ {body} }}",
+        external_facade_self_args(arg_count)
     )
 }
 

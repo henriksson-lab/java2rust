@@ -344,6 +344,12 @@ fallback rendering. Block lambda local declarations are added to a scoped
 `ShapeEnv`, so later expressions such as `pieces.length` can use the same typed
 member-access plan as ordinary expression lowering.
 
+Source-summary fallback follow-up: bodyless source-summary value methods now
+emit loud `unimplemented!("source-summary method ... is not translated")`
+returns, both in summary-only facade support and emitted source-summary super
+boundaries. Void methods still lower to `()`/`Ok(())`, so source-summary gaps no
+longer masquerade as implemented value defaults.
+
 2026-07-30 VCF source-hierarchy note: the ignored
 `source_hierarchy_instanceof_repair_keeps_supertype_slot_adapted` fixture still
 fails because source-super loop variables are represented as concrete

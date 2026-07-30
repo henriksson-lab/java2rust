@@ -4367,6 +4367,8 @@ fn lower_method_with_exception_owner(
         ))]
     } else if method.body.is_none() {
         bodyless_source_summary_method_body(
+            &exception_ty.name,
+            &method.name,
             method_signature.return_shape.as_ref(),
             wrap_returns_in_ok,
         )
@@ -4421,6 +4423,8 @@ fn lower_inherited_method(
 }
 
 fn bodyless_source_summary_method_body(
+    owner: &str,
+    method: &str,
     return_shape: Option<&RustSlotShape>,
     wrap_returns_in_ok: bool,
 ) -> Vec<RustStmt> {
@@ -4431,7 +4435,7 @@ fn bodyless_source_summary_method_body(
             .collect();
     }
     vec![return_stmt(
-        Some(RustExpr::Raw("Default::default()".to_string())),
+        Some(source_summary_method_unimplemented_expr(owner, method)),
         wrap_returns_in_ok,
     )]
 }
@@ -10124,6 +10128,9 @@ fn lower_expr_with_refinements(
                 resolved.as_ref(),
                 ctx,
             );
+            if let Some(expr) = lower_source_summary_super_boundary_call(&target, name, ctx) {
+                return expr;
+            }
             let arg_plan = plan_call_arguments_with_facts_and_args(
                 receiver.as_deref(),
                 name,
@@ -22866,6 +22873,42 @@ fn retarget_receiverless_resolved_static_owner_call<'a>(
         ),
         rust_name,
     }
+}
+
+fn lower_source_summary_super_boundary_call(
+    target: &CallTargetPlan<'_>,
+    java_name: &str,
+    ctx: LowerCtx,
+) -> Option<RustExpr> {
+    let CallTargetPlan::SuperBoundary {
+        declaring_type,
+        return_type,
+        propagates_result,
+        ..
+    } = target
+    else {
+        return None;
+    };
+    if !context_type_key_is_summary_only(ctx, declaring_type)
+        || matches!(return_type, JavaType::Void)
+    {
+        return None;
+    }
+    let gap = source_summary_method_unimplemented_expr(declaring_type, java_name);
+    if *propagates_result {
+        Some(function_call_projection(
+            RustExpr::Raw("Ok".to_string()),
+            vec![gap],
+        ))
+    } else {
+        Some(gap)
+    }
+}
+
+fn source_summary_method_unimplemented_expr(owner: &str, method: &str) -> RustExpr {
+    RustExpr::Raw(format!(
+        "unimplemented!(\"source-summary method {owner}.{method} is not translated\")"
+    ))
 }
 
 fn static_context_owner_is_emitted(owner: &str, ctx: LowerCtx) -> bool {

@@ -9768,6 +9768,9 @@ class Path {
         translation.rust.contains("pub struct FeatureInput;")
             && translation.rust.contains("impl FeatureInput")
             && translation.rust.contains("pub fn to_path(&self) -> Path")
+            && translation.rust.contains(
+                "unimplemented!(\"source-summary method GATKPath.toPath is not translated\")"
+            )
             && translation
                 .rust
                 .contains("self.header_override.as_ref().unwrap().to_path()"),
@@ -9915,6 +9918,9 @@ class Dictionary {
             && translation
                 .rust
                 .contains("pub fn dictionary(&self) -> Dictionary")
+            && translation.rust.contains(
+                "unimplemented!(\"source-summary method Header.dictionary is not translated\")"
+            )
             && translation
                 .rust
                 .contains("pub fn sam_header(&self) -> Option<SAMFileHeader>")
@@ -10736,6 +10742,9 @@ class VCFHeaderLine {
             && translation
                 .rust
                 .contains("pub fn get_default_tool_v_c_f_header_lines(&self) -> Option<std::collections::HashSet<VCFHeaderLine>>")
+            && translation.rust.contains(
+                "unimplemented!(\"source-summary method GatkTool.getDefaultToolVCFHeaderLines is not translated\")"
+            )
             && translation
                 .rust
                 .contains("self.get_default_tool_v_c_f_header_lines().unwrap()")
@@ -11569,7 +11578,9 @@ class IOException extends Exception {
     assert!(!translation.rust.contains("super."), "{}", translation.rust);
     assert!(
         translation.rust.contains("Ok::<(), JavaException>(())?;")
-            && translation.rust.contains("return Default::default();"),
+            && translation.rust.contains(
+                "return unimplemented!(\"source-summary method SummaryBase.label is not translated\");"
+            ),
         "{}",
         translation.rust
     );
