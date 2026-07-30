@@ -3297,7 +3297,9 @@ fn plan_native_java_static_call<'a>(
         return None;
     };
     let receiver_key = crate::stdlib::canonical_external_receiver_type_key(receiver_name);
-    let method = match (receiver_key.as_str(), name) {
+    let receiver_key =
+        crate::javalibs::native_java_static_owner_alias(&receiver_key).unwrap_or(&receiver_key);
+    let method = match (receiver_key, name) {
         ("Math", "max") => NativeJavaStaticMethod::MathMax {
             primitive: math_binary_overload_primitive(args, types),
         },

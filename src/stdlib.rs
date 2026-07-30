@@ -5467,6 +5467,100 @@ impl JavaPathArg for &File {
     }
 }
 
+pub fn java_math_floor_div_i32(left: i32, right: i32) -> i32 {
+    let quotient = left / right;
+    let remainder = left % right;
+    if remainder != 0 && ((left < 0) != (right < 0)) {
+        quotient - 1
+    } else {
+        quotient
+    }
+}
+
+pub fn java_math_floor_mod_i32(left: i32, right: i32) -> i32 {
+    left - java_math_floor_div_i32(left, right) * right
+}
+
+pub fn java_math_round_f32(value: f32) -> i32 {
+    if value.is_nan() {
+        0
+    } else if value >= i32::MAX as f32 {
+        i32::MAX
+    } else if value <= i32::MIN as f32 {
+        i32::MIN
+    } else {
+        (value + 0.5).floor() as i32
+    }
+}
+
+pub fn java_math_round_f64(value: f64) -> i64 {
+    if value.is_nan() {
+        0
+    } else if value >= i64::MAX as f64 {
+        i64::MAX
+    } else if value <= i64::MIN as f64 {
+        i64::MIN
+    } else {
+        (value + 0.5).floor() as i64
+    }
+}
+
+pub fn java_math_max_f32(left: f32, right: f32) -> f32 {
+    if left.is_nan() || right.is_nan() {
+        f32::NAN
+    } else if left == 0.0 && right == 0.0 {
+        if left.is_sign_positive() || right.is_sign_positive() {
+            0.0
+        } else {
+            -0.0
+        }
+    } else {
+        left.max(right)
+    }
+}
+
+pub fn java_math_max_f64(left: f64, right: f64) -> f64 {
+    if left.is_nan() || right.is_nan() {
+        f64::NAN
+    } else if left == 0.0 && right == 0.0 {
+        if left.is_sign_positive() || right.is_sign_positive() {
+            0.0
+        } else {
+            -0.0
+        }
+    } else {
+        left.max(right)
+    }
+}
+
+pub fn java_math_min_f32(left: f32, right: f32) -> f32 {
+    if left.is_nan() || right.is_nan() {
+        f32::NAN
+    } else if left == 0.0 && right == 0.0 {
+        if left.is_sign_negative() || right.is_sign_negative() {
+            -0.0
+        } else {
+            0.0
+        }
+    } else {
+        left.min(right)
+    }
+}
+
+pub fn java_math_min_f64(left: f64, right: f64) -> f64 {
+    if left.is_nan() || right.is_nan() {
+        f64::NAN
+    } else if left == 0.0 && right == 0.0 {
+        if left.is_sign_negative() || right.is_sign_negative() {
+            -0.0
+        } else {
+            0.0
+        }
+    } else {
+        left.min(right)
+    }
+}
+
 pub mod logger {
     pub fn info<M: std::fmt::Display>(_message: M) {}
     pub fn warn<M: std::fmt::Display>(_message: M) {}
@@ -5618,100 +5712,6 @@ pub fn java_primitive_compare_to<T: PartialOrd>(left: T, right: T) -> i32 {
         1
     } else {
         0
-    }
-}
-
-pub fn java_math_floor_div_i32(left: i32, right: i32) -> i32 {
-    let quotient = left / right;
-    let remainder = left % right;
-    if remainder != 0 && ((left < 0) != (right < 0)) {
-        quotient - 1
-    } else {
-        quotient
-    }
-}
-
-pub fn java_math_floor_mod_i32(left: i32, right: i32) -> i32 {
-    left - java_math_floor_div_i32(left, right) * right
-}
-
-pub fn java_math_round_f32(value: f32) -> i32 {
-    if value.is_nan() {
-        0
-    } else if value >= i32::MAX as f32 {
-        i32::MAX
-    } else if value <= i32::MIN as f32 {
-        i32::MIN
-    } else {
-        (value + 0.5).floor() as i32
-    }
-}
-
-pub fn java_math_round_f64(value: f64) -> i64 {
-    if value.is_nan() {
-        0
-    } else if value >= i64::MAX as f64 {
-        i64::MAX
-    } else if value <= i64::MIN as f64 {
-        i64::MIN
-    } else {
-        (value + 0.5).floor() as i64
-    }
-}
-
-pub fn java_math_max_f32(left: f32, right: f32) -> f32 {
-    if left.is_nan() || right.is_nan() {
-        f32::NAN
-    } else if left == 0.0 && right == 0.0 {
-        if left.is_sign_positive() || right.is_sign_positive() {
-            0.0
-        } else {
-            -0.0
-        }
-    } else {
-        left.max(right)
-    }
-}
-
-pub fn java_math_max_f64(left: f64, right: f64) -> f64 {
-    if left.is_nan() || right.is_nan() {
-        f64::NAN
-    } else if left == 0.0 && right == 0.0 {
-        if left.is_sign_positive() || right.is_sign_positive() {
-            0.0
-        } else {
-            -0.0
-        }
-    } else {
-        left.max(right)
-    }
-}
-
-pub fn java_math_min_f32(left: f32, right: f32) -> f32 {
-    if left.is_nan() || right.is_nan() {
-        f32::NAN
-    } else if left == 0.0 && right == 0.0 {
-        if left.is_sign_negative() || right.is_sign_negative() {
-            -0.0
-        } else {
-            0.0
-        }
-    } else {
-        left.min(right)
-    }
-}
-
-pub fn java_math_min_f64(left: f64, right: f64) -> f64 {
-    if left.is_nan() || right.is_nan() {
-        f64::NAN
-    } else if left == 0.0 && right == 0.0 {
-        if left.is_sign_negative() || right.is_sign_negative() {
-            -0.0
-        } else {
-            0.0
-        }
-    } else {
-        left.min(right)
     }
 }
 
@@ -15347,16 +15347,30 @@ fn expr_is_java_platform_static_call(receiver: &Expr, name: &str, args: &[Expr])
     let Expr::Var(receiver_name) = receiver else {
         return false;
     };
+    let receiver_key = crate::stdlib::canonical_external_receiver_type_key(receiver_name);
+    let receiver_key =
+        crate::javalibs::native_java_static_owner_alias(&receiver_key).unwrap_or(&receiver_key);
     matches!(
-        (
-            crate::stdlib::canonical_external_receiver_type_key(receiver_name).as_str(),
-            name,
-            args.len()
-        ),
+        (receiver_key, name, args.len()),
         (
             "ClassLoader",
             "getSystemResource" | "get_system_resource",
             1
+        ) | (
+            "Math",
+            "max"
+                | "min"
+                | "log"
+                | "exp"
+                | "round"
+                | "abs"
+                | "toIntExact"
+                | "to_int_exact"
+                | "floorDiv"
+                | "floor_div"
+                | "floorMod"
+                | "floor_mod",
+            1..=2
         )
     )
 }

@@ -785,6 +785,52 @@ mod generated_tests {
 }
 
 #[test]
+fn apache_fast_math_uses_javalibs_native_math_alias() {
+    let translation = translate_source(
+        r#"
+import org.apache.commons.math3.util.FastMath;
+
+class ApacheFastMathUse {
+    static double log2(double value) {
+        return FastMath.log(value) / FastMath.log(2);
+    }
+
+    static double clipped(double left, double right) {
+        return FastMath.max(left, right);
+    }
+
+    static int rounded(float value) {
+        return FastMath.round(value);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("(value as f64).ln()")
+            && translation.rust.contains("(2 as f64).ln()")
+            && translation.rust.contains("java_math_max_f64(left, right)")
+            && translation.rust.contains("java_math_round_f32(value)")
+            && !translation.rust.contains("FastMath::")
+            && !translation.rust.contains("fast_math.")
+            && !translation
+                .rust
+                .contains("OrgApacheCommonsMath3UtilFastMath::"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "apache_fast_math_use",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn jdk_decimal_and_integer_constants_are_typed_facade_facts() {
     let translation = translate_source(
         r#"

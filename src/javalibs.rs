@@ -195,6 +195,17 @@ pub fn is_static_facade_method(receiver_type: &str, method: &str, arg_count: usi
     )
 }
 
+pub fn native_java_static_owner_alias(receiver_type: &str) -> Option<&'static str> {
+    let receiver = crate::stdlib::canonical_external_receiver_type_key(receiver_type);
+    match receiver.as_str() {
+        "FastMath"
+        | "fast_math"
+        | "OrgApacheCommonsMath3UtilFastMath"
+        | "org.apache.commons.math3.util.FastMath" => Some("Math"),
+        _ => None,
+    }
+}
+
 pub fn preferred_static_owner_alias(
     owner: &str,
     method: &str,
