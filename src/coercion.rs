@@ -4237,6 +4237,7 @@ fn apply_dyn_trait_downcast(
     invalid_cast: &InvalidCastPolicy,
 ) -> RustExpr {
     let rendered = parenthesize_cast_method_receiver(&emit::emit_expr(&expr));
+    let target_type = normalize_downcast_target_type(target_type);
     match invalid_cast {
         InvalidCastPolicy::Panic => RustExpr::Raw(format!(
             "{rendered}.as_any().downcast_ref::<{target_type}>().expect(\"invalid Java cast\")"
@@ -4250,6 +4251,7 @@ fn apply_boxed_dyn_trait_downcast(
     invalid_cast: &InvalidCastPolicy,
 ) -> RustExpr {
     let rendered = parenthesize_cast_method_receiver(&emit::emit_expr(&expr));
+    let target_type = normalize_downcast_target_type(target_type);
     match invalid_cast {
         InvalidCastPolicy::Panic => RustExpr::Raw(format!(
             "{rendered}.as_ref().as_any().downcast_ref::<{target_type}>().expect(\"invalid Java cast\")"
@@ -4263,6 +4265,7 @@ pub fn erased_object_borrowed_downcast_ref_projection(
     optional_carrier: bool,
 ) -> RustExpr {
     let rendered = emit::emit_expr(&expr);
+    let target_type = normalize_downcast_target_type(target_type);
     if optional_carrier {
         RustExpr::Raw(format!(
             "{rendered}.as_ref().and_then(|value| value.downcast_ref::<{target_type}>()).expect(\"invalid Java cast\")"
@@ -4280,7 +4283,8 @@ fn apply_erased_object_downcast(
     target_type: &str,
     invalid_cast: &InvalidCastPolicy,
 ) -> RustExpr {
-    if !plausible_rust_nominal_type_name(target_type) {
+    let target_type = normalize_downcast_target_type(target_type);
+    if !plausible_rust_nominal_type_name(&target_type) {
         return expr;
     }
     let rendered = parenthesize_cast_method_receiver(&emit::emit_expr(&expr));
@@ -4288,6 +4292,14 @@ fn apply_erased_object_downcast(
         InvalidCastPolicy::Panic => RustExpr::Raw(format!(
             "*{rendered}.downcast::<{target_type}>().expect(\"invalid Java cast\")"
         )),
+    }
+}
+
+fn normalize_downcast_target_type(target_type: &str) -> String {
+    if target_type.contains('.') || target_type.contains('$') {
+        crate::slot_render::rust_name_for_java_named_type(target_type)
+    } else {
+        target_type.to_string()
     }
 }
 
@@ -5098,6 +5110,14 @@ mod tests {
             )),
             "obj.as_ref().and_then(|value| value.downcast_ref::<Target>()).expect(\"invalid Java cast\")"
         );
+        assert_eq!(
+            emit::emit_expr(&erased_object_borrowed_downcast_ref_projection(
+                RustExpr::Var("obj".to_string()),
+                "GuideTree.Node",
+                false,
+            )),
+            "obj.downcast_ref::<GuideTreeNode>().expect(\"invalid Java cast\")"
+        );
     }
 
     #[test]
@@ -5372,6 +5392,16 @@ mod tests {
         assert_eq!(
             emit::emit_expr(&expr),
             "*(Box::new(value) as Box<dyn std::any::Any>).downcast::<Target>().expect(\"invalid Java cast\")"
+        );
+
+        let nested = apply_erased_object_downcast(
+            RustExpr::Var("value".to_string()),
+            "GuideTree.Node",
+            &InvalidCastPolicy::Panic,
+        );
+        assert_eq!(
+            emit::emit_expr(&nested),
+            "*value.downcast::<GuideTreeNode>().expect(\"invalid Java cast\")"
         );
     }
 
