@@ -8147,6 +8147,11 @@ class AssignmentOrderArrayIndex {
         return a[0];
     }
 
+    int expr(int[] a) {
+        int k = 0;
+        return (a[k++] = k);
+    }
+
     void plain(int[] a, int i, int v) {
         a[i] = v;
     }
@@ -8159,6 +8164,7 @@ class AssignmentOrderArrayIndex {
             .rust
             .contains("let __java_assignment_index = { let __java_old_value = k; k = (k).wrapping_add(1); __java_old_value } as usize;")
             && translation.rust.contains("a[__java_assignment_index] = k;")
+            && translation.rust.contains("{ let __java_assignment_index = { let __java_old_value = k; k = (k).wrapping_add(1); __java_old_value } as usize; a[__java_assignment_index] = k; a[__java_assignment_index] }")
             && translation.rust.contains("a[i as usize] = v;")
             && !translation
                 .rust
@@ -8183,6 +8189,10 @@ mod generated_tests {
         let mut values = vec![0, 0];
         assert_eq!(fixture.arr(&mut values), 1);
         assert_eq!(values[0], 1);
+        values = vec![0, 0];
+        assert_eq!(fixture.expr(&mut values), 1);
+        assert_eq!(values[0], 1);
+        assert_eq!(values[1], 0);
         fixture.plain(&mut values, 1, 7);
         assert_eq!(values[1], 7);
     }
