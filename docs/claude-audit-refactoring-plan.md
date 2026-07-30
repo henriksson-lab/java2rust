@@ -237,6 +237,9 @@ Landed in this batch:
   source method/constructor type parameters emit as `fn name<T>(...)` instead
   of leaving return/argument `T`/`U` identifiers undeclared. The previous static
   borrowed-return lifetime spelling also uses this structured generic list.
+- Ordinary emitted source methods now project simple source interface/class
+  bounds into Rust function generics, including nested source interfaces such as
+  `<N extends Named>` lowering to `fn call_name<N: OuterNamed>(...)`.
 
 1. Add a `CallableAnalysis` shell.
    - Introduce `src/callable_analysis.rs`.
@@ -445,7 +448,7 @@ Completion checklist for any audit marked `fixed locally`:
 | `0014` labelled statements deleted | fixed locally | Moved to `claude_audits/done`; CFG liveness still needs labelled edges |
 | `0015` static initializer blocks dropped | partial | Loud diagnostic now; full class-init later |
 | `0016` no-op JDK facades | partial | `StringBuilder`/`StringBuffer` and literal `Pattern`/`Matcher` paths are stateful; `Arrays.copyOf/copyOfRange/toString/fill/sort` and common `Math` calls lower natively without dead `Math` fallback support; Apache `FastMath` uses a javalibs owner alias to the Math planner; remaining Arrays helpers and broader facade fallibility still open |
-| `0017` generic bounds dropped | partial | Method/constructor type parameters now emit as structured Rust function generics; method-level bounds and full typed type parsing remain open |
+| `0017` generic bounds dropped | partial | Method/constructor type parameters now emit as structured Rust function generics, and ordinary source method bounds that resolve to source interfaces/classes emit Rust bounds; constructor-bound support context, raw trait signatures, multi-bounds, external bounds, and full typed type parsing remain open |
 | `0018` compile metric blind spots | partial | Parse gate and coverage counters |
 | `0019` raw Java expression fallback | fixed locally | Moved to `claude_audits/done`; simple switch expressions now lower to Rust `match` |
 | `0020` text block processing | fixed locally | Moved to `claude_audits/done` |

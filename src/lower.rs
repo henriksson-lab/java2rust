@@ -125,8 +125,9 @@ use crate::item_assembly::{
     constructor_default_field_value_with_facts, constructor_function_shell_with_facts,
     constructor_return_body, delegating_constructor_return_body,
     impl_item_for_type_with_support_context, is_static_final_field,
-    method_function_shell_with_facts_and_exception_plan, raw_item, rust_use_name_for_source_type,
-    static_storage_initial_fallback_value, struct_item_for_type_with_facts_and_support_context,
+    method_function_shell_with_facts_exception_plan_and_support_context, raw_item,
+    rust_use_name_for_source_type, static_storage_initial_fallback_value,
+    struct_item_for_type_with_facts_and_support_context,
 };
 use crate::java_ir::Member as Jm;
 use crate::java_ir::*;
@@ -1588,13 +1589,14 @@ fn abstract_interface_method_stub(
         return_expr,
         exception_plan.wrap_returns_in_result,
     )];
-    method_function_shell_with_facts_and_exception_plan(
+    method_function_shell_with_facts_exception_plan_and_support_context(
         interface,
         interface_method,
         ctx.signatures,
         body,
         ctx.facts,
         exception_plan,
+        ctx.program,
     )
 }
 
@@ -4363,13 +4365,14 @@ fn lower_method_with_exception_owner(
         body.push(return_stmt(None, true));
     }
     prepend_assigned_parameter_shadows(method, &mut body);
-    method_function_shell_with_facts_and_exception_plan(
+    method_function_shell_with_facts_exception_plan_and_support_context(
         ty,
         method,
         ctx.signatures,
         body,
         ctx.facts,
         exception_plan,
+        ctx.program,
     )
 }
 

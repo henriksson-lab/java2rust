@@ -8663,12 +8663,20 @@ fn source_generic_method_preserves_type_params() {
     let translation = translate_source(
         r#"
 class SourceGenericMethod {
+    interface Named {
+        String name();
+    }
+
     static <U> U identity(U value) {
         return value;
     }
 
     <T> T instanceIdentity(T value) {
         return value;
+    }
+
+    static <N extends Named> String callName(N value) {
+        return value.name();
     }
 }
 "#,
@@ -8681,6 +8689,10 @@ class SourceGenericMethod {
             && translation
                 .rust
                 .contains("pub fn instance_identity<T>(&self, value: T) -> T")
+            && translation
+                .rust
+                .contains("pub fn call_name<N: SourceGenericMethodNamed>(value: N) -> String")
+            && translation.rust.contains("return value.name();")
             && !translation.rust.contains("identity(value: U) -> U")
             && !translation
                 .rust

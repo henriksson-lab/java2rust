@@ -155,7 +155,25 @@ fn find_type_decl_by_name_or_rust_name<'a>(
     program
         .types
         .iter()
-        .find(|ty| ty.name == name || rust_name_for_java_named_type(&ty.name) == name)
+        .find_map(|ty| find_type_decl_by_name_or_rust_name_in_type(ty, name))
+}
+
+fn find_type_decl_by_name_or_rust_name_in_type<'a>(
+    ty: &'a TypeDecl,
+    name: &str,
+) -> Option<&'a TypeDecl> {
+    let simple_name = ty.name.rsplit('.').next().unwrap_or(&ty.name);
+    if ty.name == name
+        || simple_name == name
+        || rust_name_for_java_named_type(&ty.name) == name
+        || rust_name_for_java_named_type(simple_name) == name
+    {
+        return Some(ty);
+    }
+    ty.members.iter().find_map(|member| match member {
+        Member::Type(nested) => find_type_decl_by_name_or_rust_name_in_type(nested, name),
+        _ => None,
+    })
 }
 
 fn source_type_param_needs_clone_bound(ty: &TypeDecl, type_param: &str) -> bool {
@@ -202,17 +220,13 @@ fn java_type_contains_type_param(ty: &JavaType, type_param: &str) -> bool {
 }
 
 fn source_type_bound_is_trait_like(bound: &str, support_program: &Program) -> bool {
-    support_program.types.iter().any(|ty| {
-        (ty.name == bound || rust_name_for_java_named_type(&ty.name) == bound)
-            && matches!(ty.kind, crate::java_ir::TypeKind::Interface)
-    })
+    find_type_decl_by_name_or_rust_name(support_program, bound)
+        .is_some_and(|ty| matches!(ty.kind, crate::java_ir::TypeKind::Interface))
 }
 
 fn source_type_bound_is_class_like(bound: &str, support_program: &Program) -> bool {
-    support_program.types.iter().any(|ty| {
-        (ty.name == bound || rust_name_for_java_named_type(&ty.name) == bound)
-            && matches!(ty.kind, crate::java_ir::TypeKind::Class)
-    })
+    find_type_decl_by_name_or_rust_name(support_program, bound)
+        .is_some_and(|ty| matches!(ty.kind, crate::java_ir::TypeKind::Class))
 }
 
 pub fn raw_item(item: String) -> RustItem {
@@ -237,7 +251,12 @@ pub fn constructor_function_shell_with_facts(
 ) -> RustFunction {
     RustFunction {
         name: ctor.rust_name.clone().unwrap_or_else(|| "new".to_string()),
-        type_params: function_type_params_with_optional_lifetime(&ctor.type_params, false),
+        type_params: function_type_params_with_optional_lifetime(
+            &ctor.type_params,
+            &ctor.type_param_bounds,
+            false,
+            &Program::default(),
+        ),
         params: constructor_params(ty, ctor, signatures, facts),
         return_type: Some(constructor_return_type(ty, ctor, signatures)),
         body,
@@ -255,13 +274,29 @@ pub fn constructor_return_body(ty: &TypeDecl, fields: Vec<(String, RustExpr)>) -
 
 fn function_type_params_with_optional_lifetime(
     type_params: &[String],
+    type_param_bounds: &[Option<JavaType>],
     needs_lifetime: bool,
+    support_program: &Program,
 ) -> Vec<String> {
     let mut params = Vec::new();
     if needs_lifetime {
         params.push("'a".to_string());
     }
-    params.extend(type_params.iter().cloned());
+    params.extend(type_params.iter().enumerate().map(|(index, name)| {
+        let Some(Some(JavaType::Named { name: bound, .. })) = type_param_bounds.get(index) else {
+            return name.clone();
+        };
+        if source_type_bound_is_trait_like(bound, support_program) {
+            format!("{name}: {}", rust_name_for_java_named_type(bound))
+        } else if source_type_bound_is_class_like(bound, support_program) {
+            format!(
+                "{name}: {}",
+                crate::representation_lowering::source_class_bound_trait_name(bound)
+            )
+        } else {
+            name.clone()
+        }
+    }));
     params
 }
 
@@ -407,6 +442,26 @@ pub fn method_function_shell_with_facts_and_exception_plan(
     facts: &FactSet,
     exceptions: MethodExceptionPlan,
 ) -> RustFunction {
+    method_function_shell_with_facts_exception_plan_and_support_context(
+        ty,
+        method,
+        signatures,
+        body,
+        facts,
+        exceptions,
+        &Program::default(),
+    )
+}
+
+pub fn method_function_shell_with_facts_exception_plan_and_support_context(
+    ty: &TypeDecl,
+    method: &MethodDecl,
+    signatures: &SignaturePlan,
+    body: Vec<RustStmt>,
+    facts: &FactSet,
+    exceptions: MethodExceptionPlan,
+    support_program: &Program,
+) -> RustFunction {
     let needs_lifetime =
         static_method_needs_borrowed_return_lifetime(ty, method, signatures, facts);
     let name = method
@@ -417,7 +472,9 @@ pub fn method_function_shell_with_facts_and_exception_plan(
         name,
         type_params: function_type_params_with_optional_lifetime(
             &method.type_params,
+            &method.type_param_bounds,
             needs_lifetime,
+            support_program,
         ),
         params: method_params_with_optional_lifetime(ty, method, signatures, facts, needs_lifetime),
         return_type: method_return_type_with_optional_lifetime(
