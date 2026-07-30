@@ -92,7 +92,8 @@ Landed in this batch:
   detection marking the target array for both arities.
 - Focused corpus summaries now emit all planned measurement keys:
   `parse_failures`, unsupported statement/member/expression counts,
-  `unmodelled_types`, `unmodelled_call_sites`, and `noop_facade_methods`.
+  `unmodelled_types`, `unmodelled_call_sites`, `noop_facade_methods`, and
+  `stubbed_constants`.
   Unsupported member counts include batch/non-batch translation diagnostics,
   so skipped unsupported members are visible even when no Rust marker is
   generated.
@@ -424,7 +425,7 @@ Completion checklist for any audit marked `fixed locally`:
 | `0028` reference equality | open | Object/reference representation |
 | `0029` static field mutation invalid Rust | open | Static storage model |
 | `0030` Java statics are thread-local | open | Static storage model |
-| `0031` stubbed constant census | partial | JDK and selected HTSJDK domain constants are explicit; unknown primitive external constants now fail loudly, but corpus-wide census/reporting still needs completion |
+| `0031` stubbed constant census | partial | JDK and selected HTSJDK domain constants are explicit; unknown primitive external constants now fail loudly and `summary.tsv` reports `stubbed_constants`; corpus reruns still need to prove the remaining count |
 | `0032` java.lang.Math mistranslated | partial | Round edge semantics and i32/i64 floorDiv/floorMod improved; broader overload/constant audit remains |
 
 ## Parallel Work Split

@@ -152,6 +152,13 @@ SIGNALS = [
         "javalibs facade coverage",
         "StringBuilderFacade.java",
     ),
+    Signal(
+        "stubbed_constants",
+        "External static constants without modeled values",
+        r'compile_error!\("external static constant [^"]+ has no modeled value"\)',
+        "javalibs facade constant coverage",
+        "NumericLimitConstants.java; ExternalConstantValue.java",
+    ),
 ]
 
 

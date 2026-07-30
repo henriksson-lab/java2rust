@@ -177,6 +177,7 @@ def main() -> int:
             "unmodelled_types",
             "unmodelled_call_sites",
             "noop_facade_methods",
+            "stubbed_constants",
             "invalid_pattern_files",
             "cargo_check",
             "cargo_check_errors",

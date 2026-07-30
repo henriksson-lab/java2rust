@@ -596,6 +596,7 @@ public class MatrixSource {
     assert!(summary.contains("unmodelled_types\t0"), "{summary}");
     assert!(summary.contains("unmodelled_call_sites\t0"), "{summary}");
     assert!(summary.contains("noop_facade_methods\t"), "{summary}");
+    assert!(summary.contains("stubbed_constants\t0"), "{summary}");
     assert!(
         out.join("parse-failures.tsv").exists(),
         "missing parse failure report"

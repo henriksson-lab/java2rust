@@ -2626,6 +2626,8 @@ pub fn facade_examples() {
     unimplemented!("Graphics.drawLine is not modelled");
     Default::default()
 }
+
+pub const UNKNOWN_LIMIT: i32 = { compile_error!("external static constant SomeLib.UNKNOWN_LIMIT has no modeled value"); 0 };
 "#,
     )
     .unwrap();
@@ -2637,4 +2639,5 @@ pub fn facade_examples() {
     assert_eq!(counts.get("unmodelled_types").copied(), Some(1));
     assert_eq!(counts.get("unmodelled_call_sites").copied(), Some(1));
     assert_eq!(counts.get("noop_facade_methods").copied(), Some(1));
+    assert_eq!(counts.get("stubbed_constants").copied(), Some(1));
 }

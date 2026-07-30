@@ -61,6 +61,13 @@ instead of plausible `0`/`false` defaults. Audit `0024` is moved to
 `claude_audits/done`; audit `0031` remains partial until the broader stubbed
 constant census/reporting work is complete.
 
+2026-07-30 constant-census metric checkpoint: generated-idiom sweeps now count
+external static constants without modeled values as `stubbed_constants`, and
+focused-package `summary.tsv` emits that metric. This counts the new loud
+`compile_error!("external static constant ... has no modeled value")` marker,
+not silent primitive zero defaults. Next corpus reruns should inspect
+`stubbed_constants` alongside `noop_facade_methods` and `unmodelled_call_sites`.
+
 ## 2026-07-28 Batch Status: Borrow Drift Narrowing
 
 Latest full boundary before this slice:

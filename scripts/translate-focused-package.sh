@@ -2748,6 +2748,7 @@ unsupported_expression_count="$(idiom_signal_count "$idiom_sweep_tsv" "unsupport
 unmodelled_type_count="$(idiom_signal_count "$idiom_sweep_tsv" "unmodelled_types")"
 unmodelled_call_site_count="$(idiom_signal_count "$idiom_sweep_tsv" "unmodelled_call_sites")"
 noop_facade_method_count="$(idiom_signal_count "$idiom_sweep_tsv" "noop_facade_methods")"
+stubbed_constant_count="$(idiom_signal_count "$idiom_sweep_tsv" "stubbed_constants")"
 total_elapsed_ms="$(elapsed_ms_since "$script_start_ms")"
 printf "total\tok\t%s\t%s\n" "$total_elapsed_ms" "$out_dir" >> "$phase_events_path"
 
@@ -2792,6 +2793,7 @@ printf "total\tok\t%s\t%s\n" "$total_elapsed_ms" "$out_dir" >> "$phase_events_pa
   printf "unmodelled_types\t%s\n" "$unmodelled_type_count"
   printf "unmodelled_call_sites\t%s\n" "$unmodelled_call_site_count"
   printf "noop_facade_methods\t%s\n" "$noop_facade_method_count"
+  printf "stubbed_constants\t%s\n" "$stubbed_constant_count"
   printf "invalid_pattern_files\t%s\n" "$invalid_pattern_files"
   printf "invalid_patterns\t%s\n" "$invalid_patterns_path"
   if [[ -f "$batch_manifest_path" ]]; then
