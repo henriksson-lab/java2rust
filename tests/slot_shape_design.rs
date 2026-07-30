@@ -32906,6 +32906,23 @@ fn stdlib_collection_signature_facts_precede_native_collection_arg_fallbacks() {
 }
 
 #[test]
+fn map_get_return_adaptation_uses_native_lowered_type_plan() {
+    let lower_source = include_str!("../src/lower.rs");
+    let function = lower_source
+        .split("fn lower_map_get_call_expr_for_slot")
+        .nth(1)
+        .expect("map get slot lowering helper should exist")
+        .split("fn lower_map_get_to_array_call_expr_for_slot")
+        .next()
+        .expect("map get slot lowering helper should be followed by toArray helper");
+
+    assert!(function.contains("native_collection_lowered_type"));
+    assert!(function.contains("plan_lowered_slot_conversion"));
+    assert!(!function.contains("map_type_args_from_java_type(&receiver_ty)"));
+    assert!(!function.contains("borrowed_sequence_element_shape(value_ty)"));
+}
+
+#[test]
 fn stream_lambda_emission_owns_java_string_method_mappings() {
     assert_eq!(
         emit_stream_lambda_body(

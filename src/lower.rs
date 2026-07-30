@@ -22691,19 +22691,22 @@ fn lower_map_get_call_expr_for_slot(
         return None;
     }
     let receiver = receiver.as_deref()?;
-    let receiver_ty = types::infer_expr_type(receiver, env.type_env());
-    let (_, value_ty, _) = map_type_args_from_java_type(&receiver_ty)?;
     let plan =
         plan_call_expr_with_lower_context(Some(receiver), name, args, resolved.as_ref(), ctx, env);
     let CallExprPlan::Target(
         target @ CallTargetPlan::NativeCollectionMethod {
-            method: NativeCollectionMethod::MapGet,
+            receiver: target_receiver,
+            method,
             ..
         },
     ) = plan
     else {
         return None;
     };
+    if method != NativeCollectionMethod::MapGet {
+        return None;
+    }
+    let actual = native_collection_lowered_type(target_receiver, method, env.type_env())?;
     let rust_args = lower_args_for_call_target(
         &target,
         Some(receiver),
@@ -22735,14 +22738,11 @@ fn lower_map_get_call_expr_for_slot(
             JavaDisplayPlan::OptionalBorrowedValue,
         ));
     }
-    let actual = crate::shape_projection::borrowed_sequence_element_shape(value_ty);
-    let target_shape = slot_target_shape(slot)?;
-    if target_shape
-        .optional_element_type()
-        .is_some_and(|element_ty| element_ty == actual.java_ty)
-    {
+    if matches!(
+        slot,
+        Slot::Assignment(_) | Slot::Return(_) | Slot::Argument(_)
+    ) {
         let get_expr = map_get_projection(lowered_receiver, key);
-        let actual = LoweredType::optional_element_borrow_shape(actual);
         let plan = plan_lowered_slot_conversion(&actual, slot.clone(), ctx.facts);
         return Some(apply_lowered_slot_expr_conversion(
             crate::coercion::LoweredExpr {
@@ -22752,9 +22752,10 @@ fn lower_map_get_call_expr_for_slot(
             &plan,
         ));
     }
-    if target_shape.java_ty != actual.java_ty {
+    let LoweredType::OptionalElementBorrow { element_shape, .. } = actual else {
         return None;
-    }
+    };
+    let actual = *element_shape;
     let get_expr = map_get_expect_projection(lowered_receiver, key);
     Some(apply_expr_to_slot_via_plan(
         get_expr, actual, slot, ctx.facts,

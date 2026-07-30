@@ -68,6 +68,13 @@ focused-package `summary.tsv` emits that metric. This counts the new loud
 not silent primitive zero defaults. Next corpus reruns should inspect
 `stubbed_constants` alongside `noop_facade_methods` and `unmodelled_call_sites`.
 
+2026-07-30 map-get ABI cleanup checkpoint: `HashMap.get` return adaptation no
+longer reconstructs map value type and optional-borrow target shape inside
+`lower.rs`. The lowered expression now uses `native_collection_lowered_type` and
+`plan_lowered_slot_conversion` for assignment/return/argument slots, leaving
+only the display/string-concat bridge until display slots consume
+`OptionalElementBorrow` directly.
+
 ## 2026-07-28 Batch Status: Borrow Drift Narrowing
 
 Latest full boundary before this slice:
