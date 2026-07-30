@@ -26608,6 +26608,39 @@ class UseImportedStaticMissingReturnFact {
 }
 
 #[test]
+fn external_api_support_passes_share_missing_return_surface_policy() {
+    let source = include_str!("../src/stdlib.rs");
+    let support_impl = source
+        .split("impl ExternalApiFacadeSupport {")
+        .nth(1)
+        .expect("external facade support impl should exist");
+    assert!(
+        support_impl.contains("fn external_api_fact_return_surface"),
+        "{}",
+        support_impl
+    );
+    for function_name in [
+        "fn add_used_external_api_facts",
+        "fn add_builtin_used_external_api_facts",
+        "fn add_static_external_api_facts_for_surface_types",
+    ] {
+        let body = support_impl
+            .split(function_name)
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .unwrap_or_else(|| panic!("{function_name} should exist"));
+        assert!(
+            body.contains("external_api_fact_return_surface"),
+            "{function_name} should route missing return facts through the shared policy:\n{body}"
+        );
+        assert!(
+            !body.contains(".unwrap_or_else(|| \"()\".to_string())"),
+            "{function_name} must not locally treat all missing return facts as void:\n{body}"
+        );
+    }
+}
+
+#[test]
 fn erased_object_facade_includes_modeled_void_methods() {
     let source = r#"
 class ErasedVoidFacadeUse {

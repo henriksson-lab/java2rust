@@ -7505,35 +7505,15 @@ impl ExternalApiFacadeSupport {
                 if !valid_rust_method_ident(&rust_method) {
                     continue;
                 }
-                let mut unmodelled_value_return = false;
-                let mut return_rust = fact
-                    .return_type
-                    .as_ref()
-                    .map(|return_type| {
-                        external_facade_method_return_type_with_facts(
-                            facts,
-                            Some(&receiver_key),
-                            &fact.method_name,
-                            Some(arg_count),
-                            return_type,
-                            fact.return_nullability,
-                        )
-                    })
-                    .unwrap_or_else(|| {
-                        if external_api_role_returns_value(fact.role) {
-                            unmodelled_value_return = true;
-                            external_facade_unmodelled_result_type(
-                                &receiver_rust,
-                                &rust_method,
-                                arg_count,
-                            )
-                        } else {
-                            "()".to_string()
-                        }
-                    });
-                if unmodelled_value_return {
-                    self.add_opaque_type(return_rust.clone());
-                }
+                let (mut return_rust, mut unmodelled_value_return) = self
+                    .external_api_fact_return_surface(
+                        facts,
+                        &receiver_key,
+                        &fact.method_name,
+                        &rust_method,
+                        arg_count,
+                        fact,
+                    );
                 self.add_external_argument_types(
                     facts,
                     &receiver_key,
@@ -7546,6 +7526,10 @@ impl ExternalApiFacadeSupport {
                 {
                     self.add_opaque_type("Future".to_string());
                     return_rust = "Future".to_string();
+                    unmodelled_value_return = false;
+                }
+                if unmodelled_value_return {
+                    self.add_opaque_type(return_rust.clone());
                 }
                 if fact.provenance != FactProvenance::ConservativeFallback
                     && !external_facade_method_is_self_returning_fluent(
@@ -7676,29 +7660,21 @@ impl ExternalApiFacadeSupport {
                     if !valid_rust_method_ident(&rust_method) {
                         continue;
                     }
-                    if let Some(return_type) = &fact.return_type {
-                        self.add_java_type(return_type);
-                    }
                     self.add_external_argument_types(
                         facts,
                         &receiver_key,
                         &fact.method_name,
                         *arg_count,
                     );
-                    let return_rust = fact
-                        .return_type
-                        .as_ref()
-                        .map(|return_type| {
-                            external_facade_method_return_type_with_facts(
-                                facts,
-                                Some(&receiver_key),
-                                &fact.method_name,
-                                Some(*arg_count),
-                                return_type,
-                                fact.return_nullability,
-                            )
-                        })
-                        .unwrap_or_else(|| "()".to_string());
+                    let (return_rust, unmodelled_value_return) = self
+                        .external_api_fact_return_surface(
+                            facts,
+                            &receiver_key,
+                            &fact.method_name,
+                            &rust_method,
+                            *arg_count,
+                            &fact,
+                        );
                     let method_body = external_facade_instance_method_with_facts(
                         facts,
                         &receiver_key,
@@ -7755,6 +7731,9 @@ impl ExternalApiFacadeSupport {
                     {
                         continue;
                     }
+                    if unmodelled_value_return {
+                        self.add_opaque_type(return_rust.clone());
+                    }
                     self.add_method(receiver_rust, method_body);
                 }
             }
@@ -7795,29 +7774,20 @@ impl ExternalApiFacadeSupport {
                 if !valid_rust_method_ident(&rust_method) {
                     continue;
                 }
-                if let Some(return_type) = &fact.return_type {
-                    self.add_java_type(return_type);
-                }
                 self.add_external_argument_types(
                     &merged_facts,
                     &receiver_key,
                     &fact.method_name,
                     arg_count,
                 );
-                let return_rust = fact
-                    .return_type
-                    .as_ref()
-                    .map(|return_type| {
-                        external_facade_method_return_type_with_facts(
-                            &merged_facts,
-                            Some(&receiver_key),
-                            &fact.method_name,
-                            Some(arg_count),
-                            return_type,
-                            fact.return_nullability,
-                        )
-                    })
-                    .unwrap_or_else(|| "()".to_string());
+                let (return_rust, unmodelled_value_return) = self.external_api_fact_return_surface(
+                    &merged_facts,
+                    &receiver_key,
+                    &fact.method_name,
+                    &rust_method,
+                    arg_count,
+                    &fact,
+                );
                 let method_body = external_facade_static_method_with_facts(
                     &merged_facts,
                     &receiver_key,
@@ -7826,8 +7796,44 @@ impl ExternalApiFacadeSupport {
                     arg_count,
                     &return_rust,
                 );
+                if unmodelled_value_return {
+                    self.add_opaque_type(return_rust.clone());
+                }
                 self.add_method(receiver_rust.clone(), method_body);
             }
+        }
+    }
+
+    fn external_api_fact_return_surface(
+        &mut self,
+        facts: &FactSet,
+        receiver_key: &str,
+        java_method: &str,
+        rust_method: &str,
+        arg_count: usize,
+        fact: &ExternalApiEffectFact,
+    ) -> (String, bool) {
+        if let Some(return_type) = &fact.return_type {
+            self.add_java_type(return_type);
+            return (
+                external_facade_method_return_type_with_facts(
+                    facts,
+                    Some(receiver_key),
+                    java_method,
+                    Some(arg_count),
+                    return_type,
+                    fact.return_nullability,
+                ),
+                false,
+            );
+        }
+        if external_api_role_returns_value(fact.role) {
+            let receiver_rust = rust_name_for_java_named_type(receiver_key);
+            let return_rust =
+                external_facade_unmodelled_result_type(&receiver_rust, rust_method, arg_count);
+            (return_rust, true)
+        } else {
+            ("()".to_string(), false)
         }
     }
 

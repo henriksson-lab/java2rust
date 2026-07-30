@@ -318,6 +318,13 @@ instead of `Box<dyn std::any::Any>`. This keeps missing external builder
 returns typed and loud while preserving the rule that generic-looking product
 names such as `T`/`R` are not accepted as real facade products.
 
+Follow-up: external API support generation now routes ordinary, builtin, and
+static-surface fact returns through one `external_api_fact_return_surface`
+helper. Getter-like facts with missing return types select named unmodelled
+result shims; mutator/side-effect no-return facts remain `()`. The guard
+`external_api_support_passes_share_missing_return_surface_policy` rejects local
+`None -> ()` return fallback decisions in those passes.
+
 2026-07-30 VCF source-hierarchy note: the ignored
 `source_hierarchy_instanceof_repair_keeps_supertype_slot_adapted` fixture still
 fails because source-super loop variables are represented as concrete
