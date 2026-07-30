@@ -305,6 +305,18 @@ from 64 to 61 generated-Rust errors. Remaining leading errors in that subset:
 annotations needed, enum `.as_ref()` misuse, enum `Default` support, concrete
 `instanceof`, `super(...)`, and `T: Clone` propagation.
 
+2026-07-30 generic source clone-bound propagation: inherent impl headers now
+add `Clone` for source type parameters when the type stores that parameter and
+its method surface accepts or returns the parameter by value. This covers
+Java-reference semantics that Rust must implement by cloning from owned storage
+or after reusing an owned parameter. Focused coverage:
+`generic_source_map_storage_return_adds_clone_bound` and the updated
+`source_generic_class_preserves_type_params_and_interface_bounds`. Reduced VCF
+subset `.tmp/corpus-rerun-20260730-vcf-standard-bound-after-clone-bound` now
+emits `impl<T: VCFCompoundHeaderLineBound + Clone>
+VCFStandardHeaderLinesStandards<T>` and dropped from 61 to 59 generated-Rust
+errors. The clone-specific `T` errors are gone from the top-error table.
+
 Attempted VCF refresh:
 `.tmp/corpus-rerun-20260730-htsjdk-vcf-current-refresh` stalled during
 `batch_parse_global_emit_start` before per-file statuses or generated source

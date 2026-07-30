@@ -7737,10 +7737,49 @@ class Box<T extends Named> {
     );
     assert!(
         translation.rust.contains("pub struct Box<T>")
-            && translation.rust.contains("impl<T: Named> Box<T>")
+            && translation.rust.contains("impl<T: Named + Clone> Box<T>")
             && translation.rust.contains("pub fn new(value: T) -> Box<T>")
             && translation.rust.contains("return Box::<T> {")
             && translation.rust.contains("return self.value.id();"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn generic_source_map_storage_return_adds_clone_bound() {
+    let source = r#"
+import java.util.HashMap;
+import java.util.Map;
+
+interface Named {
+    String id();
+}
+
+class Standards<T extends Named> {
+    private Map<String, T> standards = new HashMap<String, T>();
+
+    void add(T line) {
+        standards.put(line.id(), line);
+    }
+
+    T get(String id) {
+        return standards.get(id);
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("impl<T: Named + Clone> Standards<T>")
+            && translation.rust.contains(".cloned()"),
         "{}",
         translation.rust
     );

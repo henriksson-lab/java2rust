@@ -105,6 +105,9 @@ fn rust_impl_params_for_source_type(ty: &TypeDecl, support_program: &Program) ->
                         .push(crate::representation_lowering::source_class_bound_trait_name(bound));
                 }
             }
+            if source_type_param_needs_clone_bound(ty, name) {
+                bounds.push("Clone".to_string());
+            }
             if bounds.is_empty() {
                 name.clone()
             } else {
@@ -112,6 +115,49 @@ fn rust_impl_params_for_source_type(ty: &TypeDecl, support_program: &Program) ->
             }
         })
         .collect()
+}
+
+fn source_type_param_needs_clone_bound(ty: &TypeDecl, type_param: &str) -> bool {
+    type_has_field_containing_type_param(ty, type_param)
+        && ty.members.iter().any(|member| match member {
+            Member::Method(method) => {
+                java_type_contains_type_param(&method.return_type, type_param)
+                    || method
+                        .params
+                        .iter()
+                        .any(|param| java_type_contains_type_param(&param.ty, type_param))
+            }
+            _ => false,
+        })
+}
+
+fn type_has_field_containing_type_param(ty: &TypeDecl, type_param: &str) -> bool {
+    ty.members.iter().any(|member| match member {
+        Member::Field(field) => java_type_contains_type_param(&field.ty, type_param),
+        _ => false,
+    })
+}
+
+fn java_type_contains_type_param(ty: &JavaType, type_param: &str) -> bool {
+    match ty {
+        JavaType::Named { name, args } => {
+            (args.is_empty() && name == type_param)
+                || args
+                    .iter()
+                    .any(|arg| java_type_contains_type_param(arg, type_param))
+        }
+        JavaType::Unknown(name) => name == type_param,
+        JavaType::Array(element) => java_type_contains_type_param(element, type_param),
+        JavaType::Wildcard(Some(bound)) => match bound {
+            crate::java_ir::WildcardBound::Extends(inner)
+            | crate::java_ir::WildcardBound::Super(inner) => {
+                java_type_contains_type_param(inner, type_param)
+            }
+        },
+        JavaType::Void | JavaType::Primitive(_) | JavaType::String | JavaType::Wildcard(None) => {
+            false
+        }
+    }
 }
 
 fn source_type_bound_is_trait_like(bound: &str, support_program: &Program) -> bool {
