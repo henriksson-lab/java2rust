@@ -39,6 +39,19 @@ for that audit item are complete.
 Goal: unmodelled behavior must be visible as a diagnostic, parseable Rust, or a
 coverage counter. It must not silently disappear or look implemented.
 
+Landed in this batch:
+
+- Parser expression fallback now emits `Expr::Unsupported` for unknown
+  expression node kinds, malformed expression nodes, and missing required
+  expression children that previously used plausible raw placeholders.
+- Parser fallback collectors in both parser-focused test suites now record
+  `Expr::Unsupported`, so unsupported expressions are visible to tests instead
+  of only raw snippets being counted.
+- Direct `compile_error!` producers in `src/coercion.rs`,
+  `src/slot_render.rs`, and `src/call_lowering.rs` route through the shared
+  escaped `unsupported::compile_error_*` helpers. Focused regressions cover
+  quoted and backslash-containing diagnostic text.
+
 1. Add a generated-Rust parse gate to focused corpus scripts.
    - Report parse failures separately from type-check errors.
    - Treat parse failures as invalidating per-file type-error counts.
@@ -240,14 +253,14 @@ the fixes do not become more isolated rules.
 | `0009` overload identity collapse | open | Java callable signature identity |
 | `0010` fallibility disagrees | open | Callable fallibility plan |
 | `0011` dyn Any fallback cascades | open | Opaque external shims |
-| `0012` invalid unsupported diagnostics | partial | Parse-safe diagnostic audit |
+| `0012` invalid unsupported diagnostics | fixed for named audit modules | Broader source audit still useful |
 | `0013` nested downcast names | open | Type-name normalization |
 | `0014` labelled statements deleted | fixed locally | CFG liveness still needs labelled edges |
 | `0015` static initializer blocks dropped | partial | Loud diagnostic now; full class-init later |
 | `0016` no-op JDK facades | open | Core facade coverage |
 | `0017` generic bounds dropped | open | Typed type parsing and generics |
 | `0018` compile metric blind spots | open | Parse gate and coverage counters |
-| `0019` raw Java expression fallback | open | Unsupported expression nodes |
+| `0019` raw Java expression fallback | partial | Unsupported expression nodes |
 | `0020` text block processing | open | Literal semantics |
 | `0021` instanceof pattern binding | open | BindingId and pattern lowering |
 | `0022` source-text type reparsing | open | Typed type parser |
