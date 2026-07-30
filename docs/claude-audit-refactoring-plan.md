@@ -97,6 +97,15 @@ Goal: create the path that lets later fixes replace local rules with shared
 answers. This should be behavior-preserving at first, with divergence logging
 where we compute both old and new answers.
 
+Landed in this batch:
+
+- `CallableAnalysis` is present in `LowerCtx` and carries usage, call graph,
+  signatures, exception plans, and fallibility plans.
+- Lowering has started migrating from direct fallibility/fact probes to shared
+  `CallableAnalysis` queries. External method Result-return checks now ask the
+  analysis first and keep the legacy external-index scan as a compatibility
+  fallback.
+
 1. Add a `CallableAnalysis` shell.
    - Introduce `src/callable_analysis.rs`.
    - Wrap existing `UsageFacts`, `CallGraph`, `SignaturePlan`,
