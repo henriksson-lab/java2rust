@@ -6607,18 +6607,27 @@ Reduced VCF reruns:
   `cargo test switch --test idiom_gaps --quiet`, `cargo fmt --check`,
   `cargo check --quiet`, `git diff --check`, and
   `cargo build --release --quiet --bin new-java2rust`.
+- `.tmp/corpus-rerun-20260730-vcf-standard-bound-after-constant-facade-default`:
+  9 files, 29.873s, 10 generated-Rust errors. External static-constant facade
+  shells now derive `Default`, matching opaque external API facade shells. This
+  closes the `VCFHeader: Default` bound exposed by `VCFHeader::new_2(...)`
+  returning `Default::default()` after the VCF `HEADER_INDICATOR` constant
+  support emitted the owner shell. Focused verification passed:
+  `external_constant_facade_shells_are_defaultable_for_constructor_fallbacks`,
+  `external_static_string_constant_support_is_generated_from_field_facts`,
+  `cargo fmt --check`, `cargo check --quiet`, `git diff --check`, and
+  `cargo build --release --quiet --bin new-java2rust`.
 
 Remaining top reduced-VCF clusters after this follow-up:
 5 mismatched types, 2 unsupported concrete `instanceof`, 2 unsupported
-`super(...)` inheritance constructor calls, and one `VCFHeader: Default` bound
-from erased return adaptation. The old missing-super-local `mapping` bucket,
+`super(...)` inheritance constructor calls. The old missing-super-local `mapping` bucket,
 `v_c_f_header_line_translator` static-owner bucket, same-arity source-super
 overload bucket, nested unchecked exception/result-shell bucket, switch
 definite-assignment bucket, and negated super-call type-inference bucket are
-closed. The next reduced-VCF target should tackle concrete `instanceof`,
-unsupported source-super shapes that still require inheritance lowering,
-generic/source hierarchy slot adaptation in `VCFStandardHeaderLines`, or the
-`VCFHeader: Default` facade-support gap.
+closed. The `VCFHeader: Default` facade-support bucket is also closed. The next
+reduced-VCF target should tackle concrete `instanceof`, unsupported
+source-super shapes that still require inheritance lowering, or generic/source
+hierarchy slot adaptation in `VCFStandardHeaderLines`.
 
 ## Rerun Protocol
 

@@ -1462,6 +1462,15 @@ types, 2 unsupported concrete `instanceof`, 2 unsupported `super(...)`
 inheritance constructor calls, and one `VCFHeader: Default` facade-support
 bound.
 
+Reduced HTSJDK VCF facade-default follow-up:
+`.tmp/corpus-rerun-20260730-vcf-standard-bound-after-constant-facade-default`
+translates the same 9-file subset and reduces generated Rust errors from `11`
+to `10`. Static-constant external facade owner shells now derive `Default`, so
+`VCFHeader::new_2(...) -> Self { Default::default() }` type-checks after
+`VCFHeader.HEADER_INDICATOR` support emits the `VCFHeader` shell. Remaining
+reduced-subset buckets are 5 mismatched types, 2 unsupported concrete
+`instanceof`, and 2 unsupported `super(...)` inheritance constructor calls.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from

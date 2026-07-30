@@ -13711,7 +13711,8 @@ fn external_static_string_constant_support_item(
             .collect::<Vec<_>>()
             .join("\n\n")
     } else {
-        let owner_block = format!("pub struct {owner};\n\n{impl_block}");
+        let owner_block =
+            format!("#[derive(Clone, Debug, Default)]\npub struct {owner};\n\n{impl_block}");
         [owner_block, aliases, alias_impls, external_trait_impls]
             .into_iter()
             .filter(|part| !part.is_empty())

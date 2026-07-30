@@ -11178,6 +11178,64 @@ class ExternalConstructorCaller {
 }
 
 #[test]
+fn external_constant_facade_shells_are_defaultable_for_constructor_fallbacks() {
+    let mut facts = FactSet::default();
+    facts.external_field_facts.push(ExternalFieldFact {
+        field: FactFieldKey {
+            type_name: "ExternalHeader".to_string(),
+            field_name: "HEADER_INDICATOR".to_string(),
+        },
+        field_type: Some(JavaType::String),
+        field_kind: ExternalFieldKind::StaticFinal,
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts
+        .external_constructor_facts
+        .push(ExternalConstructorFact {
+            type_name: "ExternalHeader".to_string(),
+            arg_types: vec![JavaType::String, JavaType::Primitive(PrimitiveType::Int)],
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+
+    let translation = translate_source_with_facts(
+        r#"
+class ExternalConstantConstructorCaller {
+    ExternalHeader make(String name, int count) {
+        return new ExternalHeader(name, count);
+    }
+
+    String marker() {
+        return ExternalHeader.HEADER_INDICATOR;
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("#[derive(Clone, Debug, Default)]\npub struct ExternalHeader;"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn new<T0, T1>(_arg0: T0, _arg1: T1) -> Self { Default::default() }"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub const HEADER_INDICATOR: &'static str = \"HEADER_INDICATOR\";"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn builtin_external_constructor_calls_use_arity_names_for_overloaded_facades() {
     let translation = translate_source(
         r#"
