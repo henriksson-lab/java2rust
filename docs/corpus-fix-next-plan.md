@@ -6787,11 +6787,11 @@ runtime assertion for `"ok!"`.
 
 Audit `0016` remains partial, not fixed: remaining Arrays helpers still need
 follow-up work, and broader facade fallibility remains open.
-`Arrays.copyOf(...)`, `Arrays.copyOfRange(...)`, and `Arrays.toString(...)` now
-lower through native projections with Java-style default padding/formatting.
-Apache Commons `FastMath` is modelled in `javalibs` as a native static owner
-alias to the existing JDK `Math` planner, keeping package-specific ownership
-outside `stdlib.rs`. Literal
+`Arrays.copyOf(...)`, `Arrays.copyOfRange(...)`, `Arrays.toString(...)`, and
+whole/range `Arrays.fill(...)` now lower through native projections with
+Java-style default padding/formatting/mutation. Apache Commons `FastMath` is
+modelled in `javalibs` as a native static owner alias to the existing JDK
+`Math` planner, keeping package-specific ownership outside `stdlib.rs`. Literal
 `Pattern.compile(...)` static-final paths now preserve the pattern text and use
 lightweight stateful `Pattern`/`Matcher` facades for `matcher(...)`,
 `matches()`, and `group(...)`. The separate checked-exception fallibility leak

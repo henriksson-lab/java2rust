@@ -4147,7 +4147,7 @@ pub fn canonical_external_receiver_type_key(name: &str) -> String {
         "standard_open_option" => "StandardOpenOption",
         "access_mode" => "AccessMode",
         "posix_file_permission" => "PosixFilePermission",
-        "arrays" => "Arrays",
+        "arrays" | "java.util.Arrays" | "JavaUtilArrays" | "java_util_arrays" => "Arrays",
         "math_arrays" => "MathArrays",
         "array_utils" => "ArrayUtils",
         "beta" => "Beta",
@@ -16814,6 +16814,7 @@ fn external_api_method_policy_provenance_with_builtin_packs(
         (Some("Arrays"), "toString" | "to_string", 1) => FactProvenance::BuiltinExternalModel,
         (Some("Arrays"), "copyOf", 2) => FactProvenance::BuiltinExternalModel,
         (Some("Arrays"), "copyOfRange", 3) => FactProvenance::BuiltinExternalModel,
+        (Some("Arrays"), "fill", 2 | 4) => FactProvenance::BuiltinExternalModel,
         (_, "compareTo", 0 | 1) => FactProvenance::BuiltinExternalModel,
         (_, "getCanonicalPath", 0) => FactProvenance::BuiltinExternalModel,
         (_, name, _) if is_known_output_side_effect_method(name) => {
@@ -17413,6 +17414,7 @@ fn static_utility_method_role(
         (Some("Arrays"), "toString" | "to_string", 1) => ExternalApiRole::Getter,
         (Some("Arrays"), "copyOf", 2) => ExternalApiRole::Getter,
         (Some("Arrays"), "copyOfRange", 3) => ExternalApiRole::Getter,
+        (Some("Arrays"), "fill", 2 | 4) => ExternalApiRole::Mutator,
         (Some("ArrayUtils"), "addAll", 2) => ExternalApiRole::Getter,
         (Some("MathArrays"), "ebeMultiply", 2) => ExternalApiRole::Getter,
         (Some(owner), "decode", _) if known_external_decoder_return_type(owner).is_some() => {

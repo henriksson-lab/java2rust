@@ -2373,6 +2373,21 @@ pub fn array_fill_projection(target: RustExpr, value: RustExpr) -> RustExpr {
     ))
 }
 
+pub fn array_fill_range_projection(
+    target: RustExpr,
+    from: RustExpr,
+    to: RustExpr,
+    value: RustExpr,
+) -> RustExpr {
+    RustExpr::Raw(format!(
+        "{{ let __java_arrays_target = &mut {}; let __java_arrays_from = ({}).max(0) as usize; let __java_arrays_to = ({}).max(0) as usize; let __java_arrays_to = __java_arrays_to.min(__java_arrays_target.len()); if __java_arrays_from < __java_arrays_to {{ __java_arrays_target[__java_arrays_from..__java_arrays_to].fill({}); }} }}",
+        emit::emit_expr(&target),
+        emit::emit_expr(&from),
+        emit::emit_expr(&to),
+        emit::emit_expr(&value)
+    ))
+}
+
 pub fn sequence_get_expect_projection(receiver: RustExpr, index: RustExpr) -> RustExpr {
     RustExpr::Raw(format!(
         "{}.get({}).expect(\"Java index out of bounds\")",

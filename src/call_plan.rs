@@ -1308,6 +1308,8 @@ pub enum CallStatementPlan<'a> {
     },
     NativeArraysFill {
         target: &'a Expr,
+        from: Option<&'a Expr>,
+        to: Option<&'a Expr>,
         value: &'a Expr,
     },
     NativeSystemPrintStream {
@@ -1906,7 +1908,18 @@ fn plan_native_arrays_statement<'a>(
     }
     match (name, args) {
         ("sort", [target]) => Some(CallStatementPlan::NativeArraysSort { target }),
-        ("fill", [target, value]) => Some(CallStatementPlan::NativeArraysFill { target, value }),
+        ("fill", [target, value]) => Some(CallStatementPlan::NativeArraysFill {
+            target,
+            from: None,
+            to: None,
+            value,
+        }),
+        ("fill", [target, from, to, value]) => Some(CallStatementPlan::NativeArraysFill {
+            target,
+            from: Some(from),
+            to: Some(to),
+            value,
+        }),
         _ => None,
     }
 }

@@ -19956,6 +19956,72 @@ mod generated_tests {
 }
 
 #[test]
+fn java_arrays_fill_lowers_whole_and_range_mutations() {
+    let translation = translate_source(
+        r#"
+import java.util.Arrays;
+
+class JavaArraysFillUse {
+    static byte[] all(byte[] values) {
+        Arrays.fill(values, (byte) 7);
+        return values;
+    }
+
+    static int[] range(int[] values) {
+        Arrays.fill(values, 1, 3, 9);
+        return values;
+    }
+
+    static String[] names(String[] values) {
+        Arrays.fill(values, 0, 2, "x");
+        return values;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(".fill(7 as i8)")
+            && translation
+                .rust
+                .contains("__java_arrays_target[__java_arrays_from..__java_arrays_to].fill(9)")
+            && translation.rust.contains(
+                "__java_arrays_target[__java_arrays_from..__java_arrays_to].fill(\"x\".to_string())"
+            )
+            && !translation.rust.contains("Arrays::fill")
+            && !translation.rust.contains("JavaUtilArrays::fill"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "java_arrays_fill_use",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn fills_whole_arrays_and_subranges() {
+        let bytes = JavaArraysFillUse::all(vec![1, 2, 3]);
+        assert_eq!(bytes, vec![7, 7, 7]);
+
+        let ints = JavaArraysFillUse::range(vec![1, 2, 3, 4]);
+        assert_eq!(ints, vec![1, 9, 9, 4]);
+
+        let names = JavaArraysFillUse::names(vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        assert_eq!(names, vec!["x".to_string(), "x".to_string(), "c".to_string()]);
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
 fn documents_equals_and_objects_gap() {
     let translation = translate_source(&idiom_gap("EqualsAndObjects.java"));
 

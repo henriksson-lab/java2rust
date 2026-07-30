@@ -6739,6 +6739,34 @@ class ArraysCollectionFactUse {
 }
 
 #[test]
+fn arrays_fill_fact_role_is_builtin_mutator() {
+    let semantic = analyze(
+        r#"
+class ArraysFillFactUse {
+    void all(byte[] values) {
+        Arrays.fill(values, (byte) 1);
+    }
+
+    void range(int[] values) {
+        Arrays.fill(values, 1, 3, 9);
+    }
+}
+"#,
+    );
+
+    let effect = semantic
+        .facts
+        .external_api_effect_for_receiver(Some("Arrays"), "fill")
+        .unwrap();
+    assert_eq!(effect.role, ExternalApiRole::Mutator);
+    assert_eq!(
+        effect.receiver_mutability,
+        ReceiverMutabilityFact::MutatesReceiver
+    );
+    assert_eq!(effect.provenance, FactProvenance::BuiltinExternalModel);
+}
+
+#[test]
 fn external_array_math_is_non_null_read_only_array_fact() {
     let semantic = analyze(
         r#"

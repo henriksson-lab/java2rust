@@ -36,8 +36,8 @@ use crate::coercion::{
     SequenceIterationProjection, abstract_interface_method_stub_projection,
     abstract_method_stub_projection, anonymous_dyn_trait_projection, apply_audited_clone_recovery,
     apply_clone_projection, apply_coercions, apply_java_display_plan, apply_literal_slot_plan,
-    array_fill_projection, array2_rows_i32_projection, borrow_as_dyn_trait,
-    borrowed_sequence_extend_arg, borrowed_string_literal_temporary_plan,
+    array_fill_projection, array_fill_range_projection, array2_rows_i32_projection,
+    borrow_as_dyn_trait, borrowed_sequence_extend_arg, borrowed_string_literal_temporary_plan,
     boxed_dyn_trait_projection, char_sequence_collect_string_projection,
     clone_erased_object_ref_once, collection_sort_by_comparator_projection,
     collection_sort_projection, constructor_self_field_projection,
@@ -9003,9 +9003,25 @@ fn lower_planned_call_expr_stmt(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> O
             };
             Some(RustStmt::Expr(expr))
         }
-        CallStatementPlan::NativeArraysFill { target, value } => Some(RustStmt::Expr(
-            array_fill_projection(lower_expr(target, env, ctx), lower_expr(value, env, ctx)),
-        )),
+        CallStatementPlan::NativeArraysFill {
+            target,
+            from,
+            to,
+            value,
+        } => {
+            let target = lower_expr(target, env, ctx);
+            let value = lower_expr(value, env, ctx);
+            let expr = match (from, to) {
+                (Some(from), Some(to)) => array_fill_range_projection(
+                    target,
+                    lower_expr(from, env, ctx),
+                    lower_expr(to, env, ctx),
+                    value,
+                ),
+                _ => array_fill_projection(target, value),
+            };
+            Some(RustStmt::Expr(expr))
+        }
         CallStatementPlan::NativeSystemPrintStream {
             stream,
             method,
