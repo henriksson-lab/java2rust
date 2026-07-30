@@ -6204,6 +6204,41 @@ top families are broad mismatched types, type annotations, concrete
 clone/optional comparisons, and facade/source method precision such as
 `BCF2Codec::SIZEOF_BCF_HEADER`.
 
+2026-07-30 native collection storage-slot reuse:
+native collection argument shaping is now exposed through
+`native_collection_method_arg_shapes` and reused by expression lowering. This
+keeps `List.add`, `Set.add`, and `Map.put` argument slots aligned with the
+call-plan storage policy, including object-safe interface elements that must be
+stored as `Box<dyn Trait>` rather than borrowed `&dyn Trait`. The focused
+regression `source_interface_collection_elements_use_boxed_dyn_trait` now
+passes through the shared native collection slot path.
+
+The interrupted post-stream full `idiom_gaps` boundary reached at least
+`566/583` tests before it was stopped and exposed three focused failures. The
+three exposed cases are now resolved locally:
+`source_interface_collection_elements_use_boxed_dyn_trait`,
+`jdk_stream_wrapper_super_with_self_linking_trailing_mutation_is_precise_gap`,
+and `translates_jaligner_fallthrough_try_catch_result_without_placeholder`.
+The latter two were expectation drift: stream-wrapper constructors still emit
+the precise `unsupported Java constructor: super(...) followed by unsupported
+object graph mutation` diagnostic, and JAligner fallthrough try/catch now
+correctly assigns `line = Some(reader.read_line()?);` under optional carrier
+semantics. This is not a full-suite green claim; rerun the full suite at the
+next batch boundary.
+
+Focused verification passed:
+`cargo test native_collection --test slot_shape_design --quiet`,
+`cargo test source_interface_collection_elements_use_boxed_dyn_trait --test
+idiom_gaps --quiet`,
+`cargo test jdk_stream_wrapper_super_with_self_linking_trailing_mutation_is_precise_gap
+--test idiom_gaps --quiet`,
+`cargo test translates_jaligner_fallthrough_try_catch_result_without_placeholder
+--test idiom_gaps --quiet`,
+`cargo fmt --check`,
+`cargo check --quiet`,
+`git diff --check`, and
+`cargo build --release --quiet --bin new-java2rust`.
+
 ## Rerun Protocol
 
 After each fix:

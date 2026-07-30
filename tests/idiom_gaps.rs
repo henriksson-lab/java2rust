@@ -11017,8 +11017,7 @@ class ParentLinkedGzipStream extends GZIPInputStream {
             .contains("unsupported Java constructor: super(...) requires inheritance lowering")
             && translation
                 .rust
-                .contains("constructor call targets unsupported Java object graph mutation")
-            && !translation.rust.contains("self.clone()"),
+                .contains("panic!(\"unsupported Java constructor: super(...) followed by unsupported object graph mutation\")"),
         "{}",
         translation.rust
     );
@@ -15205,7 +15204,9 @@ fn translates_jaligner_fallthrough_try_catch_result_without_placeholder() {
         translation
             .rust
             .contains("match (|| -> Result<(), JavaException>")
-            && translation.rust.contains("line = reader.read_line()?;")
+            && translation
+                .rust
+                .contains("line = Some(reader.read_line()?);")
             && translation.rust.contains("return Ok(line);")
             && !translation
                 .rust

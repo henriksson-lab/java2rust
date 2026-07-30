@@ -3918,7 +3918,6 @@ pub fn native_collection_arg_shapes_with_facts(
     types: &TypeEnv,
     facts: &FactSet,
 ) -> Option<Vec<RustSlotShape>> {
-    let effective_facts = EffectiveFacts::new(facts);
     let receiver = receiver?;
     let receiver_ty = infer_expr_type(receiver, types);
     let receiver_ty = effective_native_collection_receiver_type(&receiver_ty);
@@ -3926,6 +3925,17 @@ pub fn native_collection_arg_shapes_with_facts(
         CallTargetPlan::NativeCollectionMethod { method, .. } => method,
         _ => return None,
     };
+    native_collection_method_arg_shapes(&receiver_ty, method, arg_count, facts)
+}
+
+pub fn native_collection_method_arg_shapes(
+    receiver_ty: &JavaType,
+    method: NativeCollectionMethod,
+    arg_count: usize,
+    facts: &FactSet,
+) -> Option<Vec<RustSlotShape>> {
+    let effective_facts = EffectiveFacts::new(facts);
+    let receiver_ty = effective_native_collection_receiver_type(receiver_ty);
     let shapes = match method {
         NativeCollectionMethod::ListPush | NativeCollectionMethod::SetInsert if arg_count == 1 => {
             vec![collection_element_arg_shape_with_effective_facts(

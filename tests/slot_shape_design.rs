@@ -8920,6 +8920,50 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
     assert_eq!(final_list_push_shapes[0].java_ty, final_product);
     assert_eq!(final_list_push_shapes[0].dispatch, DispatchShape::Concrete);
     assert_eq!(final_list_push_shapes[0].view, ViewShape::Native);
+    let localizable = JavaType::Named {
+        name: "Localizable".to_string(),
+        args: Vec::new(),
+    };
+    let mut interface_collection_types = TypeEnv::new();
+    interface_collection_types.insert_local(
+        "patterns",
+        JavaType::Named {
+            name: "List".to_string(),
+            args: vec![localizable.clone()],
+        },
+    );
+    let mut interface_facts = FactSet::default();
+    interface_facts
+        .type_capability_overrides
+        .push(TypeCapabilityOverride {
+            type_name: "Localizable".to_string(),
+            copy: None,
+            clone: None,
+            string_like: None,
+            sequence_like: None,
+            implements: Vec::new(),
+            extends: None,
+            final_type: None,
+            object_safe_trait: Some(true),
+            provenance: FactProvenance::ParsedSource,
+        });
+    let patterns = Expr::Var("patterns".to_string());
+    let interface_list_push_shapes = native_collection_arg_shapes_with_facts(
+        Some(&patterns),
+        "add",
+        1,
+        &interface_collection_types,
+        &interface_facts,
+    )
+    .expect("object-safe interface Vec push should use owned boxed-dyn storage");
+    assert_eq!(interface_list_push_shapes[0].java_ty, localizable);
+    assert_eq!(
+        interface_list_push_shapes[0].dispatch,
+        DispatchShape::BoxedDynTrait {
+            trait_name: "Localizable".to_string()
+        }
+    );
+    assert_eq!(interface_list_push_shapes[0].view, ViewShape::DynTraitView);
     let Some(map_get_shapes) =
         native_collection_arg_shapes(Some(&counts), "get", 1, &collection_types)
     else {
