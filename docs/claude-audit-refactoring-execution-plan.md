@@ -22,10 +22,14 @@ on shared identities, analysis facts, and typed fallback surfaces.
 
 ## Batch 1: Close The Measurement And Safety Loop
 
-Status: partially done. Unsupported expressions/statements and summary counters
-exist, but the audit pass is not complete.
+Status: partially done. Unsupported expressions/statements, summary counters,
+centralized dynamic `compile_error!` rendering, and nested downcast type-name
+normalization exist, but the parse gate and value-level probes are not complete.
 
 1. Finish parse-safe diagnostic audit.
+   - Done for dynamic diagnostic message renderers:
+     `src/unsupported.rs`, `src/coercion.rs`, and `src/slot_render.rs` now
+     share escaped compile-error helpers.
    - Inspect all `compile_error!` producers in `src/unsupported.rs`,
      `src/coercion.rs`, `src/slot_render.rs`, `src/call_lowering.rs`, and any
      direct raw string emitters found by `rg 'compile_error!' src`.
@@ -53,6 +57,7 @@ exist, but the audit pass is not complete.
      gates cannot catch these audit classes.
 
 4. Normalize nested Rust type names before emission.
+   - Done for current downcast helpers in `src/coercion.rs`.
    - Change downcast helpers in `src/coercion.rs` to accept `JavaType` or a
      `RustTypeName` newtype rather than raw strings.
    - Route nested names through `src/java_naming.rs` and
@@ -62,8 +67,10 @@ exist, but the audit pass is not complete.
 
 ## Batch 2: Java Callable Identity
 
-Status: `CallableAnalysis` exists as a shell, but source methods, inheritance,
-usage, and signatures still rely heavily on emitted Rust names.
+Status: `CallableAnalysis` exists as a shell, `JavaCallableKey` and
+`JavaCallableSlotKey` exist, inheritance override suppression uses erased Java
+parameter slots, and source usage/signature plans have Java-key compatibility
+maps. Many consumers still rely on emitted Rust names.
 
 1. Add source callable keys.
    - Add `JavaCallableKey` and `JavaCallableSlotKey` in a small module such as
@@ -73,6 +80,7 @@ usage, and signatures still rely heavily on emitted Rust names.
      matching.
 
 2. Migrate inheritance first.
+   - Done for source inherited instance methods.
    - Touch `src/inherited_members.rs`.
    - Replace direct/inherited method deduping by `(rust_name, arity)` with
      `JavaCallableSlotKey`.
@@ -83,6 +91,8 @@ usage, and signatures still rely heavily on emitted Rust names.
      `Base.f(int,int)`; same-arity `f(int)` and `f(String)` stay distinct.
 
 3. Add compatibility maps keyed by Java callable identity.
+   - Done for source methods in `UsageFacts` and `SignaturePlan`; constructors
+     and external facts still need migration.
    - Touch `src/signature.rs`, `src/usage.rs`, and `src/callable_analysis.rs`.
    - Add `methods_by_java_key` beside existing Rust-name maps.
    - Populate both maps during migration and expose Java-key accessors through
@@ -101,9 +111,13 @@ usage, and signatures still rely heavily on emitted Rust names.
 
 ## Batch 3: Fallibility As One Solved Relation
 
-Status: open. `?` insertion and `Result` signatures can still disagree.
+Status: skeleton exists. `ProgramFallibilityPlan` is built over the existing
+call graph, seeded from current method/external method throw facts, propagated
+to a fixpoint, and exposed through `CallableAnalysis`. `?` insertion and
+`Result` signatures still use legacy decisions.
 
 1. Add `CallableFallibilityPlan`.
+   - Initial skeleton is done under `ProgramFallibilityPlan`.
    - Build over the existing `usage::CallGraph`.
    - Store at least a thrown set plus a derived `returns_result` answer.
    - Seed from declared `throws`, explicit `throw`, builtin/external API
