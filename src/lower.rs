@@ -4650,6 +4650,18 @@ fn lower_stmt(
                     Vec::new(),
                 )));
             } else {
+                if let Some(stmt) = lower_ordered_array_index_assignment_stmt(
+                    target,
+                    value,
+                    env,
+                    ctx,
+                    refinements,
+                    assignment_slot.clone(),
+                ) {
+                    out.push(stmt);
+                    refine_assigned_local_shape(target, value, env, ctx);
+                    return;
+                }
                 let lowered_value = lower_assignment_value_for_slot(
                     target,
                     value,
@@ -10663,6 +10675,108 @@ fn lower_array_assignment_value_expr(
         emit::emit_expr(&assigned_value),
         emit::emit_expr(&assigned_readback),
     )))
+}
+
+fn lower_ordered_array_index_assignment_stmt(
+    target: &Expr,
+    value: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+    assignment_slot: Slot,
+) -> Option<RustStmt> {
+    let Expr::ArrayAccess(array, index) = target else {
+        return None;
+    };
+    if !array_assignment_receiver_is_simple(array) || !expr_has_assignment_order_side_effect(index)
+    {
+        return None;
+    }
+    let lowered_index = lower_expr_for_slot(index, env, index_slot(), ctx);
+    let lowered_target = indexed_expr(
+        lower_write_sequence_receiver(array, env, ctx, refinements),
+        RustExpr::Raw("__java_assignment_index".to_string()),
+    );
+    let lowered_value =
+        lower_assignment_value_for_slot(target, value, env, &assignment_slot, ctx, refinements);
+    let lowered_value =
+        adapt_reused_owned_value_for_slot(lowered_value, value, &assignment_slot, env, ctx);
+    let assigned_value =
+        wrap_optional_assignment_value_if_needed(value, env, assignment_slot, lowered_value, ctx);
+    Some(RustStmt::Raw(format!(
+        "{{\n    let __java_assignment_index = {};\n    {} = {};\n}}",
+        emit::emit_expr(&lowered_index),
+        emit::emit_expr(&lowered_target),
+        emit::emit_expr(&assigned_value),
+    )))
+}
+
+fn array_assignment_receiver_is_simple(expr: &Expr) -> bool {
+    match expr {
+        Expr::Var(_) | Expr::This | Expr::Super => true,
+        Expr::FieldAccess(receiver, _) => array_assignment_receiver_is_simple(receiver),
+        _ => false,
+    }
+}
+
+fn expr_has_assignment_order_side_effect(expr: &Expr) -> bool {
+    match expr {
+        Expr::Unary {
+            op: UnaryOp::PreInc | UnaryOp::PreDec | UnaryOp::PostInc | UnaryOp::PostDec,
+            ..
+        } => true,
+        Expr::Unary { expr, .. } => expr_has_assignment_order_side_effect(expr),
+        Expr::Binary {
+            op: BinaryOp::Assign,
+            ..
+        } => true,
+        Expr::Call { .. } | Expr::New { .. } | Expr::Raw(_) | Expr::Unsupported { .. } => true,
+        Expr::FieldAccess(receiver, _) => expr_has_assignment_order_side_effect(receiver),
+        Expr::ArrayAccess(array, index) => {
+            expr_has_assignment_order_side_effect(array)
+                || expr_has_assignment_order_side_effect(index)
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            dimensions.iter().any(expr_has_assignment_order_side_effect)
+                || initializer
+                    .as_ref()
+                    .is_some_and(|items| items.iter().any(expr_has_assignment_order_side_effect))
+        }
+        Expr::ArrayInitializer(items) => items.iter().any(expr_has_assignment_order_side_effect),
+        Expr::Binary { left, right, .. } => {
+            expr_has_assignment_order_side_effect(left)
+                || expr_has_assignment_order_side_effect(right)
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            expr_has_assignment_order_side_effect(condition)
+                || expr_has_assignment_order_side_effect(then_expr)
+                || expr_has_assignment_order_side_effect(else_expr)
+        }
+        Expr::Switch { selector, cases } => {
+            expr_has_assignment_order_side_effect(selector)
+                || cases
+                    .iter()
+                    .any(|case| expr_has_assignment_order_side_effect(&case.value))
+        }
+        Expr::Cast { expr, .. } | Expr::InstanceOf { expr, .. } => {
+            expr_has_assignment_order_side_effect(expr)
+        }
+        Expr::Lambda { .. }
+        | Expr::MethodReference { .. }
+        | Expr::ClassLiteral(_)
+        | Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super => false,
+    }
 }
 
 fn lower_array_assignment_target_for_stmt(

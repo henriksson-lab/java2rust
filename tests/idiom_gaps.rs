@@ -8101,6 +8101,62 @@ mod generated_tests {
 }
 
 #[test]
+fn array_assignment_with_side_effecting_index_preserves_java_order() {
+    let translation = translate_source(
+        r#"
+class AssignmentOrderArrayIndex {
+    int arr(int[] a) {
+        int k = 0;
+        a[k++] = k;
+        return a[0];
+    }
+
+    void plain(int[] a, int i, int v) {
+        a[i] = v;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let __java_assignment_index = { let __java_old_value = k; k = (k).wrapping_add(1); __java_old_value } as usize;")
+            && translation.rust.contains("a[__java_assignment_index] = k;")
+            && translation.rust.contains("a[i as usize] = v;")
+            && !translation
+                .rust
+                .contains("a[{ let __java_old_value = k;"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "assignment_order_array_index",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn array_assignment_index_runs_before_rhs() {
+        let fixture = AssignmentOrderArrayIndex {};
+        let mut values = vec![0, 0];
+        assert_eq!(fixture.arr(&mut values), 1);
+        assert_eq!(values[0], 1);
+        fixture.plain(&mut values, 1, 7);
+        assert_eq!(values[1], 7);
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
 fn chained_array_assignment_expression_returns_assigned_value() {
     let translation = translate_source(
         r#"
