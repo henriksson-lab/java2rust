@@ -32918,6 +32918,7 @@ fn map_get_return_adaptation_uses_native_lowered_type_plan() {
 
     assert!(function.contains("native_collection_lowered_type"));
     assert!(function.contains("plan_lowered_slot_conversion"));
+    assert!(!function.contains("JavaDisplayPlan::OptionalBorrowedValue"));
     assert!(!function.contains("map_type_args_from_java_type(&receiver_ty)"));
     assert!(!function.contains("borrowed_sequence_element_shape(value_ty)"));
 }

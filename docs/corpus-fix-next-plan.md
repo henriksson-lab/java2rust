@@ -79,6 +79,14 @@ longer reconstructs map value type and optional-borrow target shape inside
 only the display/string-concat bridge until display slots consume
 `OptionalElementBorrow` directly.
 
+2026-07-30 optional-display slot checkpoint: display and string-concat slots
+now consume `LoweredType::OptionalElementBorrow` through
+`plan_lowered_slot_conversion`, using an explicit
+`OptionalBorrowedToJavaDisplayValue` syntax policy. The `HashMap.get` lowering
+helper no longer owns a local `JavaDisplayPlan::OptionalBorrowedValue` branch,
+so map-get display follows the same lowered-slot path as return, assignment,
+and argument adaptation.
+
 ## 2026-07-28 Batch Status: Borrow Drift Narrowing
 
 Latest full boundary before this slice:

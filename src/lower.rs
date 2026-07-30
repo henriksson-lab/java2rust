@@ -22731,16 +22731,13 @@ fn lower_map_get_call_expr_for_slot(
         let lowered = lower_expr_with_refinements(receiver, env, ctx, refinements);
         adapt_call_target_receiver(&target, receiver, lowered, env, ctx, refinements)
     })?;
-    if matches!(slot, Slot::StringConcatSegment | Slot::DisplaySegment) {
-        let get_expr = map_get_projection(lowered_receiver, key);
-        return Some(apply_java_display_plan(
-            get_expr,
-            JavaDisplayPlan::OptionalBorrowedValue,
-        ));
-    }
     if matches!(
         slot,
-        Slot::Assignment(_) | Slot::Return(_) | Slot::Argument(_)
+        Slot::Assignment(_)
+            | Slot::Return(_)
+            | Slot::Argument(_)
+            | Slot::StringConcatSegment
+            | Slot::DisplaySegment
     ) {
         let get_expr = map_get_projection(lowered_receiver, key);
         let plan = plan_lowered_slot_conversion(&actual, slot.clone(), ctx.facts);

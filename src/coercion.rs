@@ -143,6 +143,7 @@ pub enum Coercion {
     ErasedObjectToJavaDisplayString,
     OptionalToJavaDisplayString,
     OptionalToJavaDisplayValue,
+    OptionalBorrowedToJavaDisplayValue,
     AsStr,
     ToOwnedString,
     AsSlice,
@@ -244,6 +245,9 @@ impl SyntaxSlotCoercionPolicy {
             }
             SyntaxSlotCoercionPolicy::OptionalToJavaDisplayValue => {
                 vec![Coercion::OptionalToJavaDisplayValue]
+            }
+            SyntaxSlotCoercionPolicy::OptionalBorrowedToJavaDisplayValue => {
+                vec![Coercion::OptionalBorrowedToJavaDisplayValue]
             }
         }
     }
@@ -4084,6 +4088,9 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
         }
         Coercion::OptionalToJavaDisplayValue => {
             apply_java_display_plan(expr, JavaDisplayPlan::OptionalValue)
+        }
+        Coercion::OptionalBorrowedToJavaDisplayValue => {
+            apply_java_display_plan(expr, JavaDisplayPlan::OptionalBorrowedValue)
         }
         Coercion::AsStr => {
             let rendered = emit::emit_expr(&expr);

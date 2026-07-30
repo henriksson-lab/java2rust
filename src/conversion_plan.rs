@@ -135,6 +135,7 @@ pub enum SyntaxSlotCoercionPolicy {
     ErasedObjectToJavaDisplayString,
     OptionalToJavaDisplayString,
     OptionalToJavaDisplayValue,
+    OptionalBorrowedToJavaDisplayValue,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3360,6 +3361,19 @@ pub fn lowered_slot_conversion_plan_with_facts(
             LoweredType::RustUnsignedByteArray { java_shape, .. },
             Slot::Assignment(_) | Slot::Return(_) | Slot::Argument(_),
         ) => slot_conversion_plan_with_facts(java_shape, slot, facts),
+        (
+            LoweredType::OptionalElementBorrow {
+                option_shape,
+                element_shape,
+                ..
+            },
+            Slot::StringConcatSegment | Slot::DisplaySegment,
+        ) => SlotConversionPlan::Syntax(SyntaxCoercionPlan {
+            actual: option_shape.java_ty.clone(),
+            slot: slot.clone(),
+            content: coercion_content_policy(&element_shape.java_ty, facts),
+            policy: SyntaxSlotCoercionPolicy::OptionalBorrowedToJavaDisplayValue,
+        }),
         (
             LoweredType::OptionalElementBorrow {
                 option_shape,

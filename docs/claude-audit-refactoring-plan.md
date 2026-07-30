@@ -207,6 +207,10 @@ Landed in this batch:
   edge kind for these cases, so caught `Appendable.append` `IOException` paths
   do not force `Result` signatures when the catch rethrows only known unchecked
   exceptions.
+- `LoweredType::OptionalElementBorrow` display and string-concat adaptation now
+  flows through `plan_lowered_slot_conversion` via an explicit
+  `OptionalBorrowedToJavaDisplayValue` policy. `HashMap.get` display lowering no
+  longer carries its own optional-borrow display branch in `lower.rs`.
 
 1. Add a `CallableAnalysis` shell.
    - Introduce `src/callable_analysis.rs`.
@@ -395,6 +399,7 @@ Completion checklist for any audit marked `fixed locally`:
 - Keep the move in the same verified checkpoint as the implementation.
 - Note the move in the plan row and, when committing, in the commit summary.
 - Do not move partial or exploratory audit files.
+- Treat the audit as still open if its file remains outside `claude_audits/done`.
 
 | Audit | Status | Plan owner |
 |---|---:|---|

@@ -2459,6 +2459,56 @@ fn optional_platform_facade_display_segments_use_display_value_policy() {
 }
 
 #[test]
+fn optional_element_borrow_display_segments_use_lowered_slot_policy() {
+    let actual =
+        LoweredType::optional_element_borrow_shape(RustSlotShape::conservative(JavaType::Named {
+            name: "URI".to_string(),
+            args: Vec::new(),
+        }));
+
+    assert_eq!(
+        lowered_slot_conversion_plan(&actual, &Slot::DisplaySegment),
+        SlotConversionPlan::Syntax(SyntaxCoercionPlan {
+            actual: optional_java_type(JavaType::Named {
+                name: "URI".to_string(),
+                args: Vec::new(),
+            }),
+            slot: Slot::DisplaySegment,
+            content: CoercionContentPolicy {
+                java_ty: JavaType::Named {
+                    name: "URI".to_string(),
+                    args: Vec::new(),
+                },
+                string_content: false,
+            },
+            policy: SyntaxSlotCoercionPolicy::OptionalBorrowedToJavaDisplayValue,
+        })
+    );
+    assert_eq!(
+        apply_lowered_slot_expr_conversion(
+            LoweredExpr {
+                expr: RustExpr::Raw("values.get(key.as_str())".to_string()),
+                actual,
+            },
+            &plan_lowered_slot_conversion(
+                &LoweredType::optional_element_borrow_shape(RustSlotShape::conservative(
+                    JavaType::Named {
+                        name: "URI".to_string(),
+                        args: Vec::new(),
+                    },
+                )),
+                Slot::StringConcatSegment,
+                &FactSet::default(),
+            ),
+        ),
+        RustExpr::Raw(
+            "values.get(key.as_str()).map(|value| value.to_string()).unwrap_or_else(|| \"null\".to_string())"
+                .to_string(),
+        )
+    );
+}
+
+#[test]
 fn conversion_plan_owns_return_slot_construction() {
     let shape = RustSlotShape::conservative(JavaType::String);
 
