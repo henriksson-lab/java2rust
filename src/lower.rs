@@ -21041,12 +21041,13 @@ fn method_call_return_shape_from_receiver(
     {
         return None;
     }
+    let arg_types = expr_arg_types(args, env, ctx);
     if let Some(resolved) = resolved
         && context_type_key_is_summary_only(ctx, &resolved.declaring_type)
         && let Some(shape) = source_summary_declared_method_return_shape(
             &resolved.declaring_type,
             name,
-            args.len(),
+            &arg_types,
             ctx,
         )
     {
@@ -21054,7 +21055,7 @@ fn method_call_return_shape_from_receiver(
     }
     if context_type_key_is_summary_only(ctx, &receiver_name)
         && let Some(shape) =
-            source_summary_declared_method_return_shape(&receiver_name, name, args.len(), ctx)
+            source_summary_declared_method_return_shape(&receiver_name, name, &arg_types, ctx)
     {
         return Some(shape);
     }
@@ -21079,14 +21080,14 @@ fn method_call_return_shape_from_receiver(
         && let Some(shape) = source_summary_declared_method_return_shape(
             &resolved.declaring_type,
             name,
-            args.len(),
+            &arg_types,
             ctx,
         )
     {
         return Some(shape);
     }
     if let Some(shape) =
-        source_summary_declared_method_return_shape(&receiver_name, name, args.len(), ctx)
+        source_summary_declared_method_return_shape(&receiver_name, name, &arg_types, ctx)
     {
         return Some(shape);
     }
@@ -21097,14 +21098,7 @@ fn method_call_return_shape_from_receiver(
         return Some(shape);
     }
     ctx.signatures
-        .method_signature_by_base_name_and_arg_types(
-            &receiver_name,
-            name,
-            &args
-                .iter()
-                .map(|arg| crate::types::infer_expr_type(arg, env.type_env()))
-                .collect::<Vec<_>>(),
-        )
+        .method_signature_by_base_name_and_arg_types(&receiver_name, name, &arg_types)
         .or_else(|| {
             ctx.signatures
                 .method_signature_by_base_name_and_arity(&receiver_name, name, args.len())
@@ -21165,14 +21159,35 @@ fn getter_field_return_shape_from_receiver(
 fn source_summary_declared_method_return_shape(
     receiver_name: &str,
     method_name: &str,
-    arg_count: usize,
+    arg_types: &[JavaType],
     ctx: LowerCtx,
 ) -> Option<RustSlotShape> {
     let ty = find_context_type_by_key(ctx.program, receiver_name)
         .or_else(|| find_context_type_by_key(ctx.support_local_type_program, receiver_name))
         .or_else(|| find_context_type_by_key(ctx.source_summary_type_program, receiver_name))?;
-    let method = find_declared_method_by_name_and_arity(ty, method_name, arg_count)?;
+    let method = find_declared_method_by_name_and_arg_types(ty, method_name, arg_types)
+        .or_else(|| find_declared_method_by_name_and_arity(ty, method_name, arg_types.len()))?;
     source_summary_declared_return_shape_for_method(ty, method, ctx)
+}
+
+fn expr_arg_types(args: &[Expr], env: &ShapeEnv, ctx: LowerCtx) -> Vec<JavaType> {
+    let shape_ctx = ExprShapeContext {
+        signatures: Some(ctx.signatures),
+        representations: Some(ctx.representations),
+        facts: Some(ctx.facts),
+    };
+    args.iter()
+        .map(|arg| infer_expr_shape_with_context(arg, env, shape_ctx).java_ty)
+        .collect()
+}
+
+fn find_declared_method_by_name_and_arg_types<'a>(
+    ty: &'a TypeDecl,
+    method_name: &str,
+    arg_types: &[JavaType],
+) -> Option<&'a MethodDecl> {
+    let matching_methods = declared_methods_by_name_and_arity(ty, method_name, arg_types.len());
+    unique_method_matching_known_arg_types(&matching_methods, arg_types)
 }
 
 fn find_declared_method_by_name_and_arity<'a>(
@@ -21180,19 +21195,34 @@ fn find_declared_method_by_name_and_arity<'a>(
     method_name: &str,
     arg_count: usize,
 ) -> Option<&'a MethodDecl> {
-    ty.members.iter().find_map(|member| {
-        let Member::Method(method) = member else {
-            return None;
-        };
-        let rust_name = method
-            .rust_name
-            .as_deref()
-            .map(str::to_owned)
-            .unwrap_or_else(|| crate::parser::to_snake_case(&method.name));
-        (method.params.len() == arg_count
-            && (method.name == method_name || rust_name == method_name))
-            .then_some(method)
-    })
+    let matching_methods = declared_methods_by_name_and_arity(ty, method_name, arg_count);
+    match matching_methods.as_slice() {
+        [method] => Some(*method),
+        _ => None,
+    }
+}
+
+fn declared_methods_by_name_and_arity<'a>(
+    ty: &'a TypeDecl,
+    method_name: &str,
+    arg_count: usize,
+) -> Vec<&'a MethodDecl> {
+    ty.members
+        .iter()
+        .filter_map(|member| {
+            let Member::Method(method) = member else {
+                return None;
+            };
+            let rust_name = method
+                .rust_name
+                .as_deref()
+                .map(str::to_owned)
+                .unwrap_or_else(|| crate::parser::to_snake_case(&method.name));
+            (method.params.len() == arg_count
+                && (method.name == method_name || rust_name == method_name))
+                .then_some(method)
+        })
+        .collect()
 }
 
 fn source_summary_declared_return_shape_for_method(
@@ -21800,6 +21830,13 @@ fn source_context_current_static_method_fallback_signature(
 }
 
 fn unique_static_method_matching_known_arg_types<'a>(
+    methods: &[&'a MethodDecl],
+    arg_types: &[JavaType],
+) -> Option<&'a MethodDecl> {
+    unique_method_matching_known_arg_types(methods, arg_types)
+}
+
+fn unique_method_matching_known_arg_types<'a>(
     methods: &[&'a MethodDecl],
     arg_types: &[JavaType],
 ) -> Option<&'a MethodDecl> {
@@ -24147,5 +24184,83 @@ fn lower_stmt_for_body(
             &ExprRefinements::default(),
             out,
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::java_ir::{JavaType, Member, PrimitiveType};
+    use crate::parser::parse_java_source;
+
+    #[test]
+    fn declared_method_lookup_uses_known_arg_types_for_same_arity_overloads() {
+        let parsed = parse_java_source(
+            r#"
+class SummaryBox {
+    int pick(int value) {
+        return 1;
+    }
+
+    String pick(String value) {
+        return "";
+    }
+}
+"#,
+        );
+        let ty = &parsed.program.types[0];
+        let selected = find_declared_method_by_name_and_arg_types(ty, "pick", &[JavaType::String])
+            .expect("String overload should be selected by argument type");
+
+        assert_eq!(selected.return_type, JavaType::String);
+    }
+
+    #[test]
+    fn declared_method_arity_lookup_rejects_ambiguous_same_arity_overloads() {
+        let parsed = parse_java_source(
+            r#"
+class SummaryBox {
+    int pick(int value) {
+        return 1;
+    }
+
+    String pick(String value) {
+        return "";
+    }
+}
+"#,
+        );
+        let ty = &parsed.program.types[0];
+
+        assert!(find_declared_method_by_name_and_arity(ty, "pick", 1).is_none());
+    }
+
+    #[test]
+    fn declared_method_lookup_allows_primitive_widening_score() {
+        let parsed = parse_java_source(
+            r#"
+class NumericBox {
+    long pick(long value) {
+        return value;
+    }
+}
+"#,
+        );
+        let methods = parsed.program.types[0]
+            .members
+            .iter()
+            .filter_map(|member| match member {
+                Member::Method(method) => Some(method),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        let selected = unique_method_matching_known_arg_types(
+            &methods,
+            &[JavaType::Primitive(PrimitiveType::Int)],
+        )
+        .expect("int argument can widen to long");
+
+        assert_eq!(selected.name, "pick");
     }
 }
