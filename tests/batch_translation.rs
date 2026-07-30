@@ -526,6 +526,18 @@ public class MatrixSource {
     let summary = fs::read_to_string(out.join("summary.tsv")).unwrap();
     assert!(summary.contains("cargo_check\tok"), "{summary}");
     assert!(summary.contains("cargo_failure_kind\tnone"), "{summary}");
+    assert!(summary.contains("parse_failures\t0"), "{summary}");
+    assert!(summary.contains("cargo_type_errors_valid\t1"), "{summary}");
+    assert!(summary.contains("unsupported_statements\t0"), "{summary}");
+    assert!(summary.contains("unsupported_members\t0"), "{summary}");
+    assert!(summary.contains("unsupported_expressions\t0"), "{summary}");
+    assert!(summary.contains("unmodelled_types\t0"), "{summary}");
+    assert!(summary.contains("unmodelled_call_sites\t0"), "{summary}");
+    assert!(summary.contains("noop_facade_methods\t"), "{summary}");
+    assert!(
+        out.join("parse-failures.tsv").exists(),
+        "missing parse failure report"
+    );
 }
 
 #[test]

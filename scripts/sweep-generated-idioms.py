@@ -62,6 +62,27 @@ SIGNALS = [
         "SimpleTryCatchReturn.java; SimpleTryFinallyCleanup.java; TryWithResourcesCopy.java",
     ),
     Signal(
+        "unsupported_statements",
+        "Unsupported Java statement diagnostics",
+        r"unsupported Java statement:",
+        "parser/lowering unsupported coverage",
+        "AssertStatementUnsupported.java; YieldStatementUnsupported.java",
+    ),
+    Signal(
+        "unsupported_members",
+        "Unsupported Java member diagnostics",
+        r"unsupported Java member:",
+        "parser/member unsupported coverage",
+        "StaticInitializerUnsupported.java",
+    ),
+    Signal(
+        "unsupported_expressions",
+        "Unsupported Java expression diagnostics",
+        r"unsupported Java expression:",
+        "parser/expression unsupported coverage",
+        "SwitchExpressionUnsupported.java",
+    ),
+    Signal(
         "array_placeholder",
         "Java array creation placeholder",
         r"Java array creation|unsupported Java array creation",
@@ -109,6 +130,27 @@ SIGNALS = [
         r"unsupported Java instanceof|unsupported Java cast",
         "representation dispatch and narrowing",
         "InstanceofGuardNarrowsCast.java",
+    ),
+    Signal(
+        "unmodelled_types",
+        "Opaque Any fallback types",
+        r"Box<dyn std::any::Any>",
+        "external fallback shape",
+        "OpaqueExternalShim.java",
+    ),
+    Signal(
+        "unmodelled_call_sites",
+        "Explicit unmodelled facade call sites",
+        r"unimplemented!\([^)]*is not modelled",
+        "javalibs facade coverage",
+        "UnmodelledFacadeCall.java",
+    ),
+    Signal(
+        "noop_facade_methods",
+        "Facade methods returning default placeholders",
+        r"Default::default\(\)",
+        "javalibs facade coverage",
+        "StringBuilderFacade.java",
     ),
 ]
 

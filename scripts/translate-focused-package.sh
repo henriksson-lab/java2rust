@@ -28,6 +28,7 @@ Output:
   <out-dir>/status.tsv
   <out-dir>/batch-manifest.tsv
   <out-dir>/compile.log
+  <out-dir>/parse-failures.tsv
   <out-dir>/invalid-patterns.tsv
   <out-dir>/idiom-sweep.md
   <out-dir>/idiom-sweep.tsv
@@ -359,6 +360,7 @@ batch_manifest_path="$out_dir/batch-manifest.tsv"
 analysis_profile_path="$out_dir/analysis-profile.tsv"
 compile_log="$out_dir/compile.log"
 invalid_patterns_path="$out_dir/invalid-patterns.tsv"
+parse_failures_path="$out_dir/parse-failures.tsv"
 top_compile_errors="$out_dir/top-compile-errors.tsv"
 resolver_log="$out_dir/resolver-bench.txt"
 translate_log_dir="$out_dir/translation-logs"
@@ -371,7 +373,7 @@ slowest_workers_path="$out_dir/slowest-workers.tsv"
 script_start_ms="$(now_ms)"
 
 mkdir -p "$generated_dir" "$translate_log_dir"
-rm -f "$status_path" "$batch_manifest_path" "$analysis_profile_path" "$compile_log" "$invalid_patterns_path" "$top_compile_errors" "$resolver_log" "$idiom_sweep_tsv" "$idiom_sweep_md" "$phase_events_path" "$worker_events_path" "$slowest_phases_path" "$slowest_workers_path"
+rm -f "$status_path" "$batch_manifest_path" "$analysis_profile_path" "$compile_log" "$invalid_patterns_path" "$parse_failures_path" "$top_compile_errors" "$resolver_log" "$idiom_sweep_tsv" "$idiom_sweep_md" "$phase_events_path" "$worker_events_path" "$slowest_phases_path" "$slowest_workers_path"
 find "$generated_dir" -type f -name '*.rs' -delete
 printf "phase\tstatus\telapsed_ms\tdetail\n" > "$phase_events_path"
 printf "event\tpid\tindex\tsource\telapsed_ms\tstatus\trust_path\n" > "$worker_events_path"
@@ -483,6 +485,31 @@ count_concrete_none_assignment_files() {
       done \
     | wc -l \
     | tr -d ' '
+}
+
+write_parse_failures() {
+  local compile_log="$1"
+  local out_path="$2"
+  {
+    printf "error\tcount\n"
+    grep -E '^error: (expected|unknown start of token|mismatched closing delimiter|unexpected closing delimiter|this file contains an unclosed delimiter|suffixes on string literals are invalid|unterminated|character literal may only contain one codepoint|invalid suffix)' "$compile_log" \
+      | sed 's/[[:space:]]\+/ /g' \
+      | sort \
+      | uniq -c \
+      | sort -nr \
+      | awk '{ count = $1; $1 = ""; sub(/^ /, ""); gsub(/\t/, " "); printf "%s\t%s\n", $0, count }'
+  } > "$out_path"
+}
+
+parse_failure_count_from_report() {
+  local path="$1"
+  awk -F '\t' 'NR > 1 { count += $2 } END { print count + 0 }' "$path"
+}
+
+idiom_signal_count() {
+  local path="$1"
+  local signal="$2"
+  awk -F '\t' -v signal="$signal" 'NR > 1 && $1 == signal { found = 1; print $2 } END { if (!found) print 0 }' "$path"
 }
 
 translate_one() {
@@ -2552,6 +2579,16 @@ fi
 cargo_elapsed_ms="$(elapsed_ms_since "$cargo_start_ms")"
 printf "cargo_check\t%s\t%s\t%s\n" "$compile_status" "$cargo_elapsed_ms" "$compile_log" >> "$phase_events_path"
 
+parse_failure_scan_start_ms="$(now_ms)"
+write_parse_failures "$compile_log" "$parse_failures_path"
+parse_failure_count="$(parse_failure_count_from_report "$parse_failures_path")"
+cargo_type_errors_valid=1
+if [[ "$parse_failure_count" -gt 0 ]]; then
+  cargo_type_errors_valid=0
+fi
+parse_failure_scan_elapsed_ms="$(elapsed_ms_since "$parse_failure_scan_start_ms")"
+printf "parse_failure_scan\tok\t%s\t%s\n" "$parse_failure_scan_elapsed_ms" "$parse_failures_path" >> "$phase_events_path"
+
 total_files="${#java_files[@]}"
 translated_failed="$(awk -F '\t' 'NR > 1 && $3 != "ok" { count++ } END { print count + 0 }' "$status_path")"
 diagnostic_files="$(awk -F '\t' 'NR > 1 && $4 > 0 { count++ } END { print count + 0 }' "$status_path")"
@@ -2610,6 +2647,12 @@ python3 "$repo_root/scripts/sweep-generated-idioms.py" \
   --out-md "$idiom_sweep_md"
 idiom_sweep_elapsed_ms="$(elapsed_ms_since "$idiom_sweep_start_ms")"
 printf "idiom_sweep\tok\t%s\t%s\n" "$idiom_sweep_elapsed_ms" "$idiom_sweep_md" >> "$phase_events_path"
+unsupported_statement_count="$(idiom_signal_count "$idiom_sweep_tsv" "unsupported_statements")"
+unsupported_member_count="$(idiom_signal_count "$idiom_sweep_tsv" "unsupported_members")"
+unsupported_expression_count="$(idiom_signal_count "$idiom_sweep_tsv" "unsupported_expressions")"
+unmodelled_type_count="$(idiom_signal_count "$idiom_sweep_tsv" "unmodelled_types")"
+unmodelled_call_site_count="$(idiom_signal_count "$idiom_sweep_tsv" "unmodelled_call_sites")"
+noop_facade_method_count="$(idiom_signal_count "$idiom_sweep_tsv" "noop_facade_methods")"
 total_elapsed_ms="$(elapsed_ms_since "$script_start_ms")"
 printf "total\tok\t%s\t%s\n" "$total_elapsed_ms" "$out_dir" >> "$phase_events_path"
 
@@ -2639,11 +2682,21 @@ printf "total\tok\t%s\t%s\n" "$total_elapsed_ms" "$out_dir" >> "$phase_events_pa
   printf "translation_elapsed_ms\t%s\n" "$translation_elapsed_ms"
   printf "crate_assembly_elapsed_ms\t%s\n" "$assembly_elapsed_ms"
   printf "cargo_check_elapsed_ms\t%s\n" "$cargo_elapsed_ms"
+  printf "parse_failure_scan_elapsed_ms\t%s\n" "$parse_failure_scan_elapsed_ms"
   printf "invalid_scan_elapsed_ms\t%s\n" "$invalid_scan_elapsed_ms"
   printf "idiom_sweep_elapsed_ms\t%s\n" "$idiom_sweep_elapsed_ms"
   printf "total_elapsed_ms\t%s\n" "$total_elapsed_ms"
   printf "translate_failed_files\t%s\n" "$translated_failed"
   printf "diagnostic_files\t%s\n" "$diagnostic_files"
+  printf "parse_failures\t%s\n" "$parse_failure_count"
+  printf "parse_failures_tsv\t%s\n" "$parse_failures_path"
+  printf "cargo_type_errors_valid\t%s\n" "$cargo_type_errors_valid"
+  printf "unsupported_statements\t%s\n" "$unsupported_statement_count"
+  printf "unsupported_members\t%s\n" "$unsupported_member_count"
+  printf "unsupported_expressions\t%s\n" "$unsupported_expression_count"
+  printf "unmodelled_types\t%s\n" "$unmodelled_type_count"
+  printf "unmodelled_call_sites\t%s\n" "$unmodelled_call_site_count"
+  printf "noop_facade_methods\t%s\n" "$noop_facade_method_count"
   printf "invalid_pattern_files\t%s\n" "$invalid_pattern_files"
   printf "invalid_patterns\t%s\n" "$invalid_patterns_path"
   if [[ -f "$batch_manifest_path" ]]; then

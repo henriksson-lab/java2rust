@@ -2566,3 +2566,34 @@ pub fn collection_examples() {
     let counts = run_idiom_sweep(&dir);
     assert_eq!(counts.get("java_collection_api").copied(), Some(4));
 }
+
+#[test]
+fn idiom_sweep_counts_unsupported_and_facade_coverage_signals() {
+    let dir = unique_temp_dir("idiom_sweep_coverage_signals");
+    fs::write(
+        dir.join("generated.rs"),
+        r#"
+pub type OpaqueThing = Box<dyn std::any::Any>;
+
+pub fn unsupported_examples() {
+    compile_error!("unsupported Java statement: assert_statement");
+    compile_error!("unsupported Java member: unsupported member node: static_initializer");
+    compile_error!("unsupported Java expression: unsupported expression node: switch_expression");
+}
+
+pub fn facade_examples() {
+    unimplemented!("Graphics.drawLine is not modelled");
+    Default::default()
+}
+"#,
+    )
+    .unwrap();
+
+    let counts = run_idiom_sweep(&dir);
+    assert_eq!(counts.get("unsupported_statements").copied(), Some(1));
+    assert_eq!(counts.get("unsupported_members").copied(), Some(1));
+    assert_eq!(counts.get("unsupported_expressions").copied(), Some(1));
+    assert_eq!(counts.get("unmodelled_types").copied(), Some(1));
+    assert_eq!(counts.get("unmodelled_call_sites").copied(), Some(1));
+    assert_eq!(counts.get("noop_facade_methods").copied(), Some(1));
+}
