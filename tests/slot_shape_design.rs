@@ -32702,7 +32702,7 @@ fn statement_render_owns_raw_block_and_enhanced_for_wrappers() {
         RustStmt::Raw("unsafe_raw();".to_string())
     );
     assert_eq!(
-        render_enhanced_for("item", &RustExpr::Var("items".to_string()), &body),
+        render_enhanced_for("item", &RustExpr::Var("items".to_string()), &body, None),
         RustStmt::Raw("for item in items.iter() {\n    touch(item);\n\n}".to_string())
     );
     assert_eq!(
@@ -32737,12 +32737,16 @@ fn loop_lowering_owns_classic_for_default_condition_label_and_continue_updates()
     };
     assert_eq!(
         assemble_for_loop(None, body.clone(), Some("outer".to_string())),
-        RustStmt::While {
-            condition: RustExpr::Literal("true".to_string()),
-            body: vec![RustStmt::Loop {
-                label: Some("outer".to_string()),
-                body,
-            }],
+        RustStmt::Loop {
+            label: Some("outer".to_string()),
+            body: vec![
+                RustStmt::If {
+                    condition: RustExpr::Raw("!(true)".to_string()),
+                    then_body: vec![RustStmt::Break(Some("outer".to_string()))],
+                    else_body: Vec::new(),
+                },
+                RustStmt::Expr(RustExpr::Var("body".to_string())),
+            ],
         }
     );
     assert_eq!(
@@ -32778,6 +32782,7 @@ fn loop_lowering_owns_classic_for_default_condition_label_and_continue_updates()
             &Stmt::While {
                 condition: parse_expr("ready"),
                 body: then_block.clone(),
+                label: None,
             },
             &update_exprs,
         ),
@@ -32818,6 +32823,7 @@ fn loop_lowering_owns_classic_for_default_condition_label_and_continue_updates()
             vec![RustStmt::Expr(RustExpr::Raw(
                 "count += row.size()".to_string()
             ))],
+            None,
         ),
         RustStmt::Loop {
             label: None,

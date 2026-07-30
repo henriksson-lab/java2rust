@@ -160,7 +160,8 @@ fn stmt_has_lowerable_try_scope(stmt: &Stmt) -> bool {
         | Stmt::DoWhile { body, .. }
         | Stmt::For { body, .. }
         | Stmt::EnhancedFor { body, .. }
-        | Stmt::Block(body) => block_has_lowerable_try_scope(body),
+        | Stmt::Block(body)
+        | Stmt::LabeledBlock { body, .. } => block_has_lowerable_try_scope(body),
         Stmt::Switch { cases, .. } => cases
             .iter()
             .any(|case| case.statements.iter().any(stmt_has_lowerable_try_scope)),
@@ -355,7 +356,9 @@ fn block_terminates_with_exception_boundary(block: &Block) -> bool {
 fn stmt_terminates_with_exception_boundary(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Return(_) | Stmt::Throw(_) => true,
-        Stmt::Block(block) => block_terminates_with_exception_boundary(block),
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            block_terminates_with_exception_boundary(block)
+        }
         Stmt::If {
             then_block,
             else_block,

@@ -361,7 +361,12 @@ fn qualify_nested_stmt_types(stmt: &mut Stmt, direct_nested: &HashMap<String, St
                 qualify_nested_block_types(else_block, direct_nested);
             }
         }
-        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
             qualify_nested_expr_types(condition, direct_nested);
             qualify_nested_block_types(body, direct_nested);
         }
@@ -427,7 +432,9 @@ fn qualify_nested_stmt_types(stmt: &mut Stmt, direct_nested: &HashMap<String, St
             }
         }
         Stmt::LocalType(local) => rewrite_type_decl_references(local, direct_nested),
-        Stmt::Block(body) => qualify_nested_block_types(body, direct_nested),
+        Stmt::Block(body) | Stmt::LabeledBlock { body, .. } => {
+            qualify_nested_block_types(body, direct_nested)
+        }
         Stmt::Return(None) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => {}
     }
 }
@@ -1054,7 +1061,12 @@ impl ProgramSymbols {
                     self.collect_local_types_from_block(else_block, enclosing_type);
                 }
             }
-            Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+            Stmt::While {
+                condition, body, ..
+            }
+            | Stmt::DoWhile {
+                condition, body, ..
+            } => {
                 self.collect_local_types_from_expr(condition, enclosing_type);
                 self.collect_local_types_from_block(body, enclosing_type);
             }
@@ -1080,7 +1092,9 @@ impl ProgramSymbols {
                 self.collect_local_types_from_expr(iterable, enclosing_type);
                 self.collect_local_types_from_block(body, enclosing_type);
             }
-            Stmt::Block(body) => self.collect_local_types_from_block(body, enclosing_type),
+            Stmt::Block(body) | Stmt::LabeledBlock { body, .. } => {
+                self.collect_local_types_from_block(body, enclosing_type)
+            }
             Stmt::Switch {
                 selector, cases, ..
             } => {
@@ -2041,7 +2055,12 @@ fn resolve_stmt_calls(
                 );
             }
         }
-        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
             resolve_expr_calls(
                 condition,
                 current_type,
@@ -2132,6 +2151,7 @@ fn resolve_stmt_calls(
             var_name,
             iterable,
             body,
+            ..
         } => {
             resolve_expr_calls(
                 iterable,
@@ -2340,7 +2360,7 @@ fn resolve_stmt_calls(
                 }
             }
         }
-        Stmt::Block(block) => resolve_block_calls(
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => resolve_block_calls(
             block,
             current_type,
             symbols,
@@ -6151,7 +6171,12 @@ impl CaptureAnalyzer {
                     self.analyze_block(block, &mut ctx.clone(), None);
                 }
             }
-            Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+            Stmt::While {
+                condition, body, ..
+            }
+            | Stmt::DoWhile {
+                condition, body, ..
+            } => {
                 self.analyze_expr(condition, ctx);
                 self.analyze_block(body, &mut ctx.clone(), None);
             }
@@ -6182,6 +6207,7 @@ impl CaptureAnalyzer {
                 var_name,
                 iterable,
                 body,
+                ..
             } => {
                 self.analyze_expr(iterable, ctx);
                 let mut body_ctx = ctx.clone();
@@ -6238,7 +6264,9 @@ impl CaptureAnalyzer {
                     self.analyze_expr(arg, ctx);
                 }
             }
-            Stmt::Block(block) => self.analyze_block(block, &mut ctx.clone(), None),
+            Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+                self.analyze_block(block, &mut ctx.clone(), None)
+            }
             _ => {}
         }
     }
@@ -6343,7 +6371,9 @@ impl CaptureAnalyzer {
                     self.collect_block_captures(block, &mut ctx.clone(), captures);
                 }
             }
-            Stmt::Block(block) => self.collect_block_captures(block, &mut ctx.clone(), captures),
+            Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+                self.collect_block_captures(block, &mut ctx.clone(), captures)
+            }
             _ => self.analyze_stmt(stmt, ctx),
         }
     }
@@ -6679,7 +6709,12 @@ fn collect_mutated_names_stmt(stmt: &Stmt, out: &mut HashSet<String>) {
                 }
             }
         }
-        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
             collect_mutated_names_expr(condition, out);
             for stmt in &body.statements {
                 collect_mutated_names_stmt(stmt, out);
@@ -6705,7 +6740,7 @@ fn collect_mutated_names_stmt(stmt: &Stmt, out: &mut HashSet<String>) {
                 collect_mutated_names_stmt(stmt, out);
             }
         }
-        Stmt::Block(block) => {
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
             for stmt in &block.statements {
                 collect_mutated_names_stmt(stmt, out);
             }

@@ -569,11 +569,15 @@ fn collect_stmt_fallbacks(stmt: &Stmt, out: &mut Vec<String>) {
                 collect_block_fallbacks(block, out);
             }
         }
-        Stmt::While { condition, body } => {
+        Stmt::While {
+            condition, body, ..
+        } => {
             collect_expr_fallbacks(condition, out);
             collect_block_fallbacks(body, out);
         }
-        Stmt::DoWhile { body, condition } => {
+        Stmt::DoWhile {
+            body, condition, ..
+        } => {
             collect_block_fallbacks(body, out);
             collect_expr_fallbacks(condition, out);
         }
@@ -639,7 +643,9 @@ fn collect_stmt_fallbacks(stmt: &Stmt, out: &mut Vec<String>) {
                 collect_expr_fallbacks(arg, out);
             }
         }
-        Stmt::Block(block) => collect_block_fallbacks(block, out),
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            collect_block_fallbacks(block, out)
+        }
         Stmt::Unsupported(reason) => out.push(format!("stmt unsupported: {reason}")),
         Stmt::Return(None) | Stmt::Break(_) | Stmt::Continue(_) => {}
     }

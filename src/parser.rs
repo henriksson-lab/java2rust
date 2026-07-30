@@ -258,7 +258,12 @@ fn qualify_java_sql_stmt(stmt: &mut Stmt, imported: &JavaSqlImports) {
                 qualify_java_sql_block(else_block, imported);
             }
         }
-        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
             qualify_java_sql_expr(condition, imported);
             qualify_java_sql_block(body, imported);
         }
@@ -329,7 +334,9 @@ fn qualify_java_sql_stmt(stmt: &mut Stmt, imported: &JavaSqlImports) {
                 qualify_java_sql_expr(arg, imported);
             }
         }
-        Stmt::Block(block) => qualify_java_sql_block(block, imported),
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            qualify_java_sql_block(block, imported)
+        }
     }
 }
 
@@ -1224,6 +1231,7 @@ fn parse_block_like(
             | "switch_statement"
             | "break_statement"
             | "continue_statement"
+            | "labeled_statement"
             | "block"
             | "class_declaration"
             | "interface_declaration"
@@ -1266,11 +1274,12 @@ fn parse_stmt_node(node: tree_sitter::Node, source: &str, diagnostics: &mut Diag
         "do_statement" => parse_do_while_node(node, source, diagnostics),
         "for_statement" => parse_for_node(node, source, diagnostics),
         "enhanced_for_statement" => parse_enhanced_for_node(node, source, diagnostics),
+        "labeled_statement" => parse_labeled_node(node, source, diagnostics),
         "break_statement" => {
-            Stmt::Break(first_named_child(node).map(|id| text(id, source).to_string()))
+            Stmt::Break(first_named_child(node).map(|id| parse_label_ident(id, source)))
         }
         "continue_statement" => {
-            Stmt::Continue(first_named_child(node).map(|id| text(id, source).to_string()))
+            Stmt::Continue(first_named_child(node).map(|id| parse_label_ident(id, source)))
         }
         "try_statement" | "try_with_resources_statement" => {
             parse_try_node(node, source, diagnostics)
@@ -1293,6 +1302,90 @@ fn parse_stmt_node(node: tree_sitter::Node, source: &str, diagnostics: &mut Diag
             parse_constructor_invocation(node, source, diagnostics)
         }
         _ => Stmt::Unsupported(format!("unsupported statement node: {}", node.kind())),
+    }
+}
+
+fn parse_label_ident(node: tree_sitter::Node, source: &str) -> String {
+    to_snake_case(text(node, source))
+}
+
+fn parse_labeled_node(
+    node: tree_sitter::Node,
+    source: &str,
+    diagnostics: &mut DiagnosticBag,
+) -> Stmt {
+    let label = node
+        .child_by_field_name("label")
+        .or_else(|| {
+            named_children(node)
+                .into_iter()
+                .find(|child| child.kind() == "identifier")
+        })
+        .map(|label| parse_label_ident(label, source))
+        .unwrap_or_else(|| "label".to_string());
+    let body = node.child_by_field_name("body").or_else(|| {
+        named_children(node)
+            .into_iter()
+            .find(|child| child.kind() != "identifier")
+    });
+    let Some(body) = body else {
+        return Stmt::Unsupported(format!(
+            "labeled statement without body: {}",
+            text(node, source)
+        ));
+    };
+    attach_label_to_stmt(label, parse_stmt_node(body, source, diagnostics))
+}
+
+fn attach_label_to_stmt(label: String, stmt: Stmt) -> Stmt {
+    match stmt {
+        Stmt::While {
+            condition, body, ..
+        } => Stmt::While {
+            condition,
+            body,
+            label: Some(label),
+        },
+        Stmt::DoWhile {
+            body, condition, ..
+        } => Stmt::DoWhile {
+            body,
+            condition,
+            label: Some(label),
+        },
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            label: Some(label),
+        },
+        Stmt::EnhancedFor {
+            var_type,
+            var_name,
+            iterable,
+            body,
+            ..
+        } => Stmt::EnhancedFor {
+            var_type,
+            var_name,
+            iterable,
+            body,
+            label: Some(label),
+        },
+        Stmt::Block(body) | Stmt::LabeledBlock { body, .. } => Stmt::LabeledBlock { label, body },
+        other => Stmt::LabeledBlock {
+            label,
+            body: Block {
+                statements: vec![other],
+            },
+        },
     }
 }
 
@@ -1642,6 +1735,7 @@ fn parse_while_node(
             .child_by_field_name("body")
             .map(|stmt| statement_as_block(stmt, source, diagnostics))
             .unwrap_or_default(),
+        label: None,
     }
 }
 
@@ -1659,6 +1753,7 @@ fn parse_do_while_node(
             .child_by_field_name("condition")
             .map(|condition| parse_condition_node(condition, source))
             .unwrap_or_else(|| Expr::Raw("true".to_string())),
+        label: None,
     }
 }
 
@@ -1722,6 +1817,7 @@ fn parse_enhanced_for_node(
             .child_by_field_name("body")
             .map(|stmt| statement_as_block(stmt, source, diagnostics))
             .unwrap_or_default(),
+        label: None,
     }
 }
 

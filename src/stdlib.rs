@@ -6579,7 +6579,9 @@ impl ExternalApiFacadeSupport {
                 }
             }
             Stmt::LocalType(ty) => self.add_declared_external_types_from_type(ty, local_types),
-            Stmt::Block(block) => self.add_declared_external_types_from_block(block, local_types),
+            Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+                self.add_declared_external_types_from_block(block, local_types)
+            }
             Stmt::Assign { .. }
             | Stmt::Expr(_)
             | Stmt::Return(_)
@@ -9293,7 +9295,10 @@ fn collect_stmt_imported_static_shadows(stmt: &Stmt, shadows: &mut BTreeSet<Stri
                 collect_block_imported_static_shadows(else_block, shadows);
             }
         }
-        Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::Block(body) => {
+        Stmt::While { body, .. }
+        | Stmt::DoWhile { body, .. }
+        | Stmt::Block(body)
+        | Stmt::LabeledBlock { body, .. } => {
             collect_block_imported_static_shadows(body, shadows);
         }
         Stmt::Switch { cases, .. } => {
@@ -9478,7 +9483,12 @@ fn collect_stmt_imported_static_owner_calls(
                 );
             }
         }
-        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
             collect_expr_imported_static_owner_calls(
                 condition,
                 aliases,
@@ -9627,13 +9637,15 @@ fn collect_stmt_imported_static_owner_calls(
         Stmt::LocalType(ty) => {
             collect_type_imported_static_owner_calls(ty, aliases, static_members, calls)
         }
-        Stmt::Block(block) => collect_block_imported_static_owner_calls(
-            block,
-            aliases,
-            static_members,
-            shadows,
-            calls,
-        ),
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            collect_block_imported_static_owner_calls(
+                block,
+                aliases,
+                static_members,
+                shadows,
+                calls,
+            )
+        }
         Stmt::VarDecl {
             initializer: None, ..
         }
@@ -10165,7 +10177,12 @@ fn collect_stmt_display_return_hints(
                 collect_block_display_return_hints(else_block, &mut else_ctx, hints);
             }
         }
-        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
             collect_expr_display_return_hints(condition, ctx, hints);
             let mut body_ctx = ctx.clone();
             collect_block_display_return_hints(body, &mut body_ctx, hints);
@@ -10194,6 +10211,7 @@ fn collect_stmt_display_return_hints(
             var_type,
             iterable,
             body,
+            ..
         } => {
             collect_expr_display_return_hints(iterable, ctx, hints);
             let mut body_ctx = ctx.clone();
@@ -10235,7 +10253,7 @@ fn collect_stmt_display_return_hints(
             }
         }
         Stmt::LocalType(ty) => collect_type_display_return_hints(ty, hints),
-        Stmt::Block(block) => {
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
             let mut block_ctx = ctx.clone();
             collect_block_display_return_hints(block, &mut block_ctx, hints);
         }
@@ -10517,7 +10535,12 @@ fn collect_stmt_constructor_arities(
                 collect_block_constructor_arities(else_block, constructors);
             }
         }
-        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
             collect_expr_constructor_arities(condition, constructors);
             collect_block_constructor_arities(body, constructors);
         }
@@ -10574,7 +10597,9 @@ fn collect_stmt_constructor_arities(
             }
         }
         Stmt::LocalType(ty) => collect_type_constructor_arities(ty, constructors),
-        Stmt::Block(block) => collect_block_constructor_arities(block, constructors),
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            collect_block_constructor_arities(block, constructors)
+        }
         Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => {}
     }
 }
@@ -10752,7 +10777,12 @@ fn collect_stmt_call_arities(stmt: &Stmt, calls: &mut BTreeMap<String, BTreeSet<
                 collect_block_call_arities(else_block, calls);
             }
         }
-        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
             collect_expr_call_arities(condition, calls);
             collect_block_call_arities(body, calls);
         }
@@ -10812,7 +10842,9 @@ fn collect_stmt_call_arities(stmt: &Stmt, calls: &mut BTreeMap<String, BTreeSet<
             }
         }
         Stmt::LocalType(ty) => collect_type_call_arities(ty, calls),
-        Stmt::Block(block) => collect_block_call_arities(block, calls),
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            collect_block_call_arities(block, calls)
+        }
         Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => {}
     }
 }
@@ -13163,7 +13195,12 @@ fn collect_external_static_string_constants_stmt(
                 );
             }
         }
-        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
             collect_external_static_string_constants_expr(
                 condition,
                 facts,
@@ -13318,7 +13355,7 @@ fn collect_external_static_string_constants_stmt(
                 constants_by_owner,
             );
         }
-        Stmt::Block(block) => {
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
             collect_external_static_string_constants_block(
                 block,
                 facts,
@@ -14224,9 +14261,12 @@ fn stmt_uses_java_platform_facades(stmt: &Stmt) -> bool {
                     .as_ref()
                     .is_some_and(block_uses_java_platform_facades)
         }
-        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
-            expr_uses_java_platform_facades(condition) || block_uses_java_platform_facades(body)
+        Stmt::While {
+            condition, body, ..
         }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => expr_uses_java_platform_facades(condition) || block_uses_java_platform_facades(body),
         Stmt::For {
             init,
             condition,
@@ -14269,7 +14309,9 @@ fn stmt_uses_java_platform_facades(stmt: &Stmt) -> bool {
             args.iter().any(expr_uses_java_platform_facades)
         }
         Stmt::LocalType(ty) => type_uses_java_platform_facades(ty),
-        Stmt::Block(block) => block_uses_java_platform_facades(block),
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            block_uses_java_platform_facades(block)
+        }
         Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => false,
     }
 }
@@ -14541,7 +14583,12 @@ fn stmt_uses_java_erased_object_runtime_support(stmt: &Stmt) -> bool {
                     .as_ref()
                     .is_some_and(block_uses_java_erased_object_runtime_support)
         }
-        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
             expr_uses_java_erased_object_runtime_support(condition)
                 || block_uses_java_erased_object_runtime_support(body)
         }
@@ -14594,7 +14641,9 @@ fn stmt_uses_java_erased_object_runtime_support(stmt: &Stmt) -> bool {
         Stmt::ConstructorInvocation { args, .. } => args
             .iter()
             .any(expr_uses_java_erased_object_runtime_support),
-        Stmt::Block(block) => block_uses_java_erased_object_runtime_support(block),
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            block_uses_java_erased_object_runtime_support(block)
+        }
         Stmt::LocalType(ty) => type_uses_java_erased_object_runtime_support(ty),
         Stmt::VarDecl {
             initializer: None, ..
@@ -14777,9 +14826,12 @@ fn stmt_uses_java_string_format(stmt: &Stmt) -> bool {
                     .as_ref()
                     .is_some_and(block_uses_java_string_format)
         }
-        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
-            expr_uses_java_string_format(condition) || block_uses_java_string_format(body)
+        Stmt::While {
+            condition, body, ..
         }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => expr_uses_java_string_format(condition) || block_uses_java_string_format(body),
         Stmt::For {
             init,
             condition,
@@ -14817,7 +14869,9 @@ fn stmt_uses_java_string_format(stmt: &Stmt) -> bool {
                     .any(|case| case.statements.iter().any(stmt_uses_java_string_format))
         }
         Stmt::ConstructorInvocation { args, .. } => args.iter().any(expr_uses_java_string_format),
-        Stmt::Block(block) => block_uses_java_string_format(block),
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            block_uses_java_string_format(block)
+        }
         Stmt::LocalType(ty) => ty.members.iter().any(member_uses_java_string_format),
         Stmt::VarDecl {
             initializer: None, ..
@@ -14966,7 +15020,12 @@ fn stmt_uses_java_string_runtime_helpers(stmt: &Stmt) -> bool {
                     .as_ref()
                     .is_some_and(block_uses_java_string_runtime_helpers)
         }
-        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
             expr_uses_java_string_runtime_helpers(condition)
                 || block_uses_java_string_runtime_helpers(body)
         }
@@ -15014,7 +15073,9 @@ fn stmt_uses_java_string_runtime_helpers(stmt: &Stmt) -> bool {
         Stmt::ConstructorInvocation { args, .. } => {
             args.iter().any(expr_uses_java_string_runtime_helpers)
         }
-        Stmt::Block(block) => block_uses_java_string_runtime_helpers(block),
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            block_uses_java_string_runtime_helpers(block)
+        }
         Stmt::LocalType(ty) => ty
             .members
             .iter()
@@ -15163,9 +15224,12 @@ fn stmt_uses_java_string_split(stmt: &Stmt) -> bool {
                     .as_ref()
                     .is_some_and(block_uses_java_string_split)
         }
-        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
-            expr_uses_java_string_split(condition) || block_uses_java_string_split(body)
+        Stmt::While {
+            condition, body, ..
         }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => expr_uses_java_string_split(condition) || block_uses_java_string_split(body),
         Stmt::For {
             init,
             condition,
@@ -15203,7 +15267,9 @@ fn stmt_uses_java_string_split(stmt: &Stmt) -> bool {
                     .any(|case| case.statements.iter().any(stmt_uses_java_string_split))
         }
         Stmt::ConstructorInvocation { args, .. } => args.iter().any(expr_uses_java_string_split),
-        Stmt::Block(block) => block_uses_java_string_split(block),
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            block_uses_java_string_split(block)
+        }
         Stmt::LocalType(ty) => ty.members.iter().any(member_uses_java_string_split),
         Stmt::VarDecl {
             initializer: None, ..
@@ -15317,9 +15383,12 @@ fn stmt_uses_java_class_tokens(stmt: &Stmt) -> bool {
                     .as_ref()
                     .is_some_and(block_uses_java_class_tokens)
         }
-        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
-            expr_uses_java_class_tokens(condition) || block_uses_java_class_tokens(body)
+        Stmt::While {
+            condition, body, ..
         }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => expr_uses_java_class_tokens(condition) || block_uses_java_class_tokens(body),
         Stmt::For {
             init,
             condition,
@@ -15357,7 +15426,9 @@ fn stmt_uses_java_class_tokens(stmt: &Stmt) -> bool {
                     .any(|case| case.statements.iter().any(stmt_uses_java_class_tokens))
         }
         Stmt::ConstructorInvocation { args, .. } => args.iter().any(expr_uses_java_class_tokens),
-        Stmt::Block(block) => block_uses_java_class_tokens(block),
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            block_uses_java_class_tokens(block)
+        }
         Stmt::LocalType(ty) => ty.members.iter().any(member_uses_java_class_tokens),
         Stmt::VarDecl {
             initializer: None, ..

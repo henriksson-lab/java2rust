@@ -511,7 +511,12 @@ fn collect_anonymous_class_diagnostics_for_stmt(
                 collect_anonymous_class_diagnostics_for_block(else_block, plan, diagnostics);
             }
         }
-        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
             collect_anonymous_class_diagnostics_for_expr(condition, plan, diagnostics);
             collect_anonymous_class_diagnostics_for_block(body, plan, diagnostics);
         }
@@ -573,7 +578,7 @@ fn collect_anonymous_class_diagnostics_for_stmt(
                 collect_anonymous_class_diagnostics_for_expr(arg, plan, diagnostics);
             }
         }
-        Stmt::Block(block) => {
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
             collect_anonymous_class_diagnostics_for_block(block, plan, diagnostics)
         }
         Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => {}
@@ -793,7 +798,12 @@ fn collect_anonymous_erased_boundary_type_names_for_stmt(
                 );
             }
         }
-        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
             collect_anonymous_erased_boundary_type_names_for_expr(condition, facts, type_names);
             collect_anonymous_erased_boundary_type_names_for_block(body, facts, type_names);
         }
@@ -867,7 +877,7 @@ fn collect_anonymous_erased_boundary_type_names_for_stmt(
                 collect_anonymous_erased_boundary_type_names_for_expr(arg, facts, type_names);
             }
         }
-        Stmt::Block(block) => {
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
             collect_anonymous_erased_boundary_type_names_for_block(block, facts, type_names);
         }
         Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => {}

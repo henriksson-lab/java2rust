@@ -1575,7 +1575,12 @@ fn stmt_uses_zero_arg_constructor_for_type(stmt: &Stmt, type_name: &str) -> bool
                     .as_ref()
                     .is_some_and(|block| block_uses_zero_arg_constructor_for_type(block, type_name))
         }
-        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
             expr_uses_zero_arg_constructor_for_type(condition, type_name)
                 || block_uses_zero_arg_constructor_for_type(body, type_name)
         }
@@ -1629,7 +1634,9 @@ fn stmt_uses_zero_arg_constructor_for_type(stmt: &Stmt, type_name: &str) -> bool
             .iter()
             .any(|expr| expr_uses_zero_arg_constructor_for_type(expr, type_name)),
         Stmt::LocalType(ty) => type_uses_zero_arg_constructor_for_type(ty, type_name),
-        Stmt::Block(block) => block_uses_zero_arg_constructor_for_type(block, type_name),
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            block_uses_zero_arg_constructor_for_type(block, type_name)
+        }
         Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => false,
     }
 }
@@ -3668,7 +3675,9 @@ fn substitute_stmt_vars(stmt: &Stmt, bindings: &[(&str, &Expr)]) -> Stmt {
                 .as_ref()
                 .map(|block| substitute_block_vars(block, bindings)),
         },
-        Stmt::Block(block) => Stmt::Block(substitute_block_vars(block, bindings)),
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            Stmt::Block(substitute_block_vars(block, bindings))
+        }
         _ => stmt.clone(),
     }
 }
@@ -3838,7 +3847,7 @@ fn delegated_constructor_trailing_stmt_can_throw(
                         .any(|stmt| delegated_constructor_trailing_stmt_can_throw(stmt, env, ctx))
                 })
         }
-        Stmt::Block(block) => block
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => block
             .statements
             .iter()
             .any(|stmt| delegated_constructor_trailing_stmt_can_throw(stmt, env, ctx)),
@@ -4712,7 +4721,11 @@ fn lower_stmt(
             ));
             refine_local_shapes_from_branch_assignments(then_block, else_block.as_ref(), env, ctx);
         }
-        Stmt::While { condition, body } => match plan_while_stmt(condition, body) {
+        Stmt::While {
+            condition,
+            body,
+            label,
+        } => match plan_while_stmt(condition, body) {
             WhileStmtPlan::AssignmentInCondition {
                 local_name,
                 value,
@@ -4742,27 +4755,46 @@ fn lower_stmt(
                     assigned_value,
                     null_test,
                     lower_block(body, &mut body_env, wrap_returns_in_ok, ctx),
+                    label.clone(),
                 ));
             }
-            WhileStmtPlan::Plain { condition, body } => out.push(while_stmt(
-                lower_expr_for_slot(condition, env, condition_slot(), ctx),
-                lower_block(body, &mut env.clone(), wrap_returns_in_ok, ctx),
-            )),
+            WhileStmtPlan::Plain { condition, body } => {
+                let condition = lower_expr_for_slot(condition, env, condition_slot(), ctx);
+                let body = lower_block(body, &mut env.clone(), wrap_returns_in_ok, ctx);
+                if let Some(label) = label {
+                    out.push(RustStmt::Loop {
+                        label: Some(label.clone()),
+                        body: std::iter::once(if_stmt(
+                            logical_not_projection(condition),
+                            vec![break_stmt(Some(label.clone()))],
+                            Vec::new(),
+                        ))
+                        .chain(body)
+                        .collect(),
+                    });
+                } else {
+                    out.push(while_stmt(condition, body));
+                }
+            }
             WhileStmtPlan::Infinite { body } => out.push(RustStmt::Loop {
-                label: None,
+                label: label.clone(),
                 body: lower_block(body, &mut env.clone(), wrap_returns_in_ok, ctx),
             }),
         },
-        Stmt::DoWhile { body, condition } => {
+        Stmt::DoWhile {
+            body,
+            condition,
+            label,
+        } => {
             let mut loop_body = lower_block(body, &mut env.clone(), wrap_returns_in_ok, ctx);
             let lowered_condition = lower_expr_for_slot(condition, env, condition_slot(), ctx);
             loop_body.push(if_stmt(
                 logical_not_projection(lowered_condition),
-                vec![break_stmt(None)],
+                vec![break_stmt(label.clone())],
                 Vec::new(),
             ));
             out.push(RustStmt::Loop {
-                label: None,
+                label: label.clone(),
                 body: loop_body,
             });
         }
@@ -4781,13 +4813,15 @@ fn lower_stmt(
             }
             let mut loop_body =
                 lower_block_for_body(body, update, &mut env.clone(), wrap_returns_in_ok, ctx);
-            for expr in update {
-                loop_body.push(expr_stmt(lower_expr_with_refinements(
-                    expr,
-                    env,
-                    ctx,
-                    refinements,
-                )));
+            let lowered_updates = update
+                .iter()
+                .map(|expr| lower_expr_with_refinements(expr, env, ctx, refinements))
+                .collect::<Vec<_>>();
+            if let Some(label) = label {
+                rewrite_labelled_continue_with_updates(&mut loop_body, label, &lowered_updates);
+            }
+            for expr in lowered_updates {
+                loop_body.push(expr_stmt(expr));
             }
             let condition = condition
                 .as_ref()
@@ -4799,7 +4833,7 @@ fn lower_stmt(
             var_name,
             iterable,
             body,
-            ..
+            label,
         } => out.push(lower_enhanced_for_stmt(
             var_type,
             var_name,
@@ -4809,6 +4843,7 @@ fn lower_stmt(
             wrap_returns_in_ok,
             ctx,
             refinements,
+            label.as_deref(),
         )),
         Stmt::Switch { selector, cases } => {
             if let Some(raw) = lower_switch_assignment(selector, cases, env, ctx) {
@@ -4852,10 +4887,63 @@ fn lower_stmt(
             ctx,
             refinements,
         ))),
+        Stmt::LabeledBlock { label, body } => {
+            let mut body = lower_block_with_refinements(
+                body,
+                &mut env.clone(),
+                wrap_returns_in_ok,
+                ctx,
+                refinements,
+            );
+            body.push(break_stmt(Some(label.clone())));
+            out.push(RustStmt::Loop {
+                label: Some(label.clone()),
+                body,
+            });
+        }
         Stmt::LocalType(_) | Stmt::ConstructorInvocation { .. } | Stmt::Unsupported(_) => {
             unreachable!("unsupported statement kinds should be handled before statement lowering")
         }
     }
+}
+
+fn rewrite_labelled_continue_with_updates(
+    statements: &mut Vec<RustStmt>,
+    label: &str,
+    updates: &[RustExpr],
+) {
+    let mut rewritten = Vec::with_capacity(statements.len());
+    for mut stmt in std::mem::take(statements) {
+        match &mut stmt {
+            RustStmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                rewrite_labelled_continue_with_updates(then_body, label, updates);
+                rewrite_labelled_continue_with_updates(else_body, label, updates);
+                rewritten.push(stmt);
+            }
+            RustStmt::While { body, .. } => {
+                rewrite_labelled_continue_with_updates(body, label, updates);
+                rewritten.push(stmt);
+            }
+            RustStmt::Loop {
+                label: Some(loop_label),
+                ..
+            } if loop_label == label => rewritten.push(stmt),
+            RustStmt::Loop { body, .. } => {
+                rewrite_labelled_continue_with_updates(body, label, updates);
+                rewritten.push(stmt);
+            }
+            RustStmt::Continue(Some(target)) if target == label => {
+                rewritten.extend(updates.iter().cloned().map(expr_stmt));
+                rewritten.push(RustStmt::Continue(Some(label.to_string())));
+            }
+            _ => rewritten.push(stmt),
+        }
+    }
+    *statements = rewritten;
 }
 
 fn own_uninitialized_optional_borrowed_local(
@@ -5421,7 +5509,10 @@ fn update_expr_refinements_after_stmt(
             .exact_erased_object_locals
             .insert(local_name, exact_ty);
     }
-    if let Stmt::While { condition, body } = stmt {
+    if let Stmt::While {
+        condition, body, ..
+    } = stmt
+    {
         let plan = plan_while_stmt(condition, body);
         if let crate::loop_plan::PostLoopRefinementPlan::LocalNonNull { local_name } =
             crate::loop_plan::post_loop_refinement_for_while(&plan)
@@ -6250,7 +6341,9 @@ fn collect_branch_assignment_shapes(
                     collect_branch_assignment_shapes(else_block, env, ctx, out);
                 }
             }
-            Stmt::Block(block) => collect_branch_assignment_shapes(block, env, ctx, out),
+            Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+                collect_branch_assignment_shapes(block, env, ctx, out)
+            }
             _ => {}
         }
     }
@@ -6585,7 +6678,9 @@ fn block_returns_or_throws(block: &Block) -> bool {
 fn stmt_returns_or_throws(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Return(_) | Stmt::Throw(_) => true,
-        Stmt::Block(block) => block_returns_or_throws(block),
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            block_returns_or_throws(block)
+        }
         Stmt::If {
             then_block,
             else_block: Some(else_block),
@@ -6603,7 +6698,9 @@ fn stmt_contains_value_return(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Return(Some(_)) => true,
         Stmt::Return(None) | Stmt::Throw(_) => false,
-        Stmt::Block(block) => block_contains_value_return(block),
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            block_contains_value_return(block)
+        }
         Stmt::If {
             then_block,
             else_block,
@@ -7611,7 +7708,12 @@ fn collect_stmt_assigned_names(statements: &[Stmt], names: &mut std::collections
                     collect_stmt_assigned_names(&else_block.statements, names);
                 }
             }
-            Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+            Stmt::While {
+                condition, body, ..
+            }
+            | Stmt::DoWhile {
+                condition, body, ..
+            } => {
                 collect_expr_assigned_names(condition, names);
                 collect_stmt_assigned_names(&body.statements, names);
             }
@@ -7663,7 +7765,9 @@ fn collect_stmt_assigned_names(statements: &[Stmt], names: &mut std::collections
                     collect_stmt_assigned_names(&finally_block.statements, names);
                 }
             }
-            Stmt::Block(block) => collect_stmt_assigned_names(&block.statements, names),
+            Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+                collect_stmt_assigned_names(&block.statements, names)
+            }
             Stmt::Expr(expr) | Stmt::Return(Some(expr)) | Stmt::Throw(expr) => {
                 collect_expr_assigned_names(expr, names);
             }
@@ -7819,7 +7923,12 @@ fn collect_stmt_read_counts(stmt: &Stmt, counts: &mut HashMap<String, usize>) {
                 }
             }
         }
-        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
             collect_expr_read_counts(condition, counts);
             for stmt in &body.statements {
                 collect_stmt_read_counts(stmt, counts);
@@ -7887,7 +7996,7 @@ fn collect_stmt_read_counts(stmt: &Stmt, counts: &mut HashMap<String, usize>) {
                 collect_expr_read_counts(arg, counts);
             }
         }
-        Stmt::Block(block) => {
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
             for stmt in &block.statements {
                 collect_stmt_read_counts(stmt, counts);
             }
@@ -8026,7 +8135,12 @@ fn collect_stmt_read_names(statements: &[Stmt], names: &mut std::collections::Ha
                     collect_stmt_read_names(&else_block.statements, names);
                 }
             }
-            Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+            Stmt::While {
+                condition, body, ..
+            }
+            | Stmt::DoWhile {
+                condition, body, ..
+            } => {
                 collect_expr_read_names(condition, names);
                 collect_stmt_read_names(&body.statements, names);
             }
@@ -8078,7 +8192,9 @@ fn collect_stmt_read_names(statements: &[Stmt], names: &mut std::collections::Ha
                     collect_stmt_read_names(&finally_block.statements, names);
                 }
             }
-            Stmt::Block(block) => collect_stmt_read_names(&block.statements, names),
+            Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+                collect_stmt_read_names(&block.statements, names)
+            }
             Stmt::Return(None)
             | Stmt::LocalType(_)
             | Stmt::ConstructorInvocation { .. }
@@ -8574,7 +8690,12 @@ fn stmt_reads_self(stmt: &Stmt, env: &ShapeEnv, ctx: LowerCtx) -> bool {
                         .any(|stmt| stmt_reads_self(stmt, env, ctx))
                 })
         }
-        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
             expr_reads_self(condition, env, ctx)
                 || body
                     .statements
@@ -8644,7 +8765,7 @@ fn stmt_reads_self(stmt: &Stmt, env: &ShapeEnv, ctx: LowerCtx) -> bool {
                         .any(|stmt| stmt_reads_self(stmt, env, ctx))
                 })
         }
-        Stmt::Block(block) => block
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => block
             .statements
             .iter()
             .any(|stmt| stmt_reads_self(stmt, env, ctx)),
@@ -8799,13 +8920,14 @@ fn lower_iterable_for_each_stmt(
     };
     if let Some(iterator) = lower_int_stream_range_expr(receiver, env, ctx) {
         return Some(render_enhanced_for_iterator(
-            &pattern, &iterator, &loop_body,
+            &pattern, &iterator, &loop_body, None,
         ));
     }
     Some(render_enhanced_for(
         &pattern,
         &lower_enhanced_for_iterable_expr(receiver, env, ctx),
         &loop_body,
+        None,
     ))
 }
 
@@ -8818,6 +8940,7 @@ fn lower_enhanced_for_stmt(
     wrap_returns_in_ok: bool,
     ctx: LowerCtx,
     refinements: &ExprRefinements,
+    label: Option<&str>,
 ) -> RustStmt {
     let mut loop_env = env.clone();
     let var_is_assigned = enhanced_for_var_is_assigned(var_name, body);
@@ -8829,6 +8952,7 @@ fn lower_enhanced_for_stmt(
             &format!("mut {var_name}"),
             &iterator,
             &lower_block(body, &mut loop_env, wrap_returns_in_ok, ctx),
+            label,
         );
     }
     if static_string_sequence_field_iterable(iterable, env, ctx) {
@@ -8839,6 +8963,7 @@ fn lower_enhanced_for_stmt(
             var_name,
             &iterator,
             &lower_block(body, &mut loop_env, wrap_returns_in_ok, ctx),
+            label,
         );
     }
     if matches!(var_type, JavaType::Primitive(_))
@@ -8857,6 +8982,7 @@ fn lower_enhanced_for_stmt(
             &pattern,
             &iterator,
             &lower_block(body, &mut loop_env, wrap_returns_in_ok, ctx),
+            label,
         );
     }
     if !var_is_assigned
@@ -8871,6 +8997,7 @@ fn lower_enhanced_for_stmt(
             var_name,
             &iterator,
             &lower_block(body, &mut loop_env, wrap_returns_in_ok, ctx),
+            label,
         );
     }
     if let Some(element_shape) =
@@ -8883,6 +9010,7 @@ fn lower_enhanced_for_stmt(
             var_name,
             &iterator,
             &lower_block(body, &mut loop_env, wrap_returns_in_ok, ctx),
+            label,
         );
     }
     if let Some((iterator, key_ty, value_ty)) =
@@ -8906,6 +9034,7 @@ fn lower_enhanced_for_stmt(
                 ctx,
                 &loop_refinements,
             ),
+            label,
         );
     }
     if let Some(element_ty) = enhanced_for_iterable_element_type(iterable, env, ctx) {
@@ -8918,6 +9047,7 @@ fn lower_enhanced_for_stmt(
         var_name,
         &lower_enhanced_for_iterable_expr(iterable, env, ctx),
         &lower_block(body, &mut loop_env, wrap_returns_in_ok, ctx),
+        label,
     )
 }
 
@@ -23145,7 +23275,9 @@ fn block_contains_only_throw_or_throw_block(block: &Block) -> bool {
     !block.statements.is_empty()
         && block.statements.iter().all(|stmt| match stmt {
             Stmt::Throw(_) => true,
-            Stmt::Block(block) => block_contains_only_throw_or_throw_block(block),
+            Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+                block_contains_only_throw_or_throw_block(block)
+            }
             _ => false,
         })
 }

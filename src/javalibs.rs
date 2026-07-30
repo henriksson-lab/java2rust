@@ -467,9 +467,12 @@ fn stmt_uses_broad_ioutils_facade(stmt: &Stmt) -> bool {
                     .as_ref()
                     .is_some_and(block_uses_broad_ioutils_facade)
         }
-        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
-            expr_uses_broad_ioutils_facade(condition) || block_uses_broad_ioutils_facade(body)
+        Stmt::While {
+            condition, body, ..
         }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => expr_uses_broad_ioutils_facade(condition) || block_uses_broad_ioutils_facade(body),
         Stmt::For {
             init,
             condition,
@@ -510,7 +513,9 @@ fn stmt_uses_broad_ioutils_facade(stmt: &Stmt) -> bool {
         }
         Stmt::ConstructorInvocation { args, .. } => args.iter().any(expr_uses_broad_ioutils_facade),
         Stmt::LocalType(ty) => type_uses_broad_ioutils_facade(ty),
-        Stmt::Block(block) => block_uses_broad_ioutils_facade(block),
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            block_uses_broad_ioutils_facade(block)
+        }
         Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => false,
     }
 }

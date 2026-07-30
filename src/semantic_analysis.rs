@@ -726,7 +726,12 @@ fn collect_stmt_type_names(stmt: &Stmt, names: &mut HashSet<String>) {
                 collect_block_type_names(else_block, names);
             }
         }
-        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
             collect_expr_type_names(condition, names);
             collect_block_type_names(body, names);
         }
@@ -784,7 +789,9 @@ fn collect_stmt_type_names(stmt: &Stmt, names: &mut HashSet<String>) {
                 collect_expr_type_names(arg, names);
             }
         }
-        Stmt::Block(block) => collect_block_type_names(block, names),
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            collect_block_type_names(block, names)
+        }
         Stmt::VarDecl {
             initializer: None, ..
         }
@@ -1250,7 +1257,12 @@ fn collect_external_api_effects_from_stmt_with_env(
                 );
             }
         }
-        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
             collect_external_api_effects_from_expr_with_env(
                 condition,
                 facts,
@@ -1345,6 +1357,7 @@ fn collect_external_api_effects_from_stmt_with_env(
             var_name,
             iterable,
             body,
+            ..
         } => {
             collect_external_api_effects_from_expr_with_env(
                 iterable,
@@ -1488,18 +1501,20 @@ fn collect_external_api_effects_from_stmt_with_env(
                 );
             }
         }
-        Stmt::Block(block) => collect_external_api_effects_from_block_with_env(
-            block,
-            facts,
-            seen,
-            budget,
-            enable_builtin_external_packs,
-            guessed_count,
-            budget_exhausted,
-            diagnostics,
-            &mut env.clone(),
-            current_type,
-        ),
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            collect_external_api_effects_from_block_with_env(
+                block,
+                facts,
+                seen,
+                budget,
+                enable_builtin_external_packs,
+                guessed_count,
+                budget_exhausted,
+                diagnostics,
+                &mut env.clone(),
+                current_type,
+            )
+        }
     }
 }
 
@@ -2410,7 +2425,8 @@ fn collect_external_api_thrown_exception_types_from_stmt(
         | Stmt::DoWhile { body, .. }
         | Stmt::For { body, .. }
         | Stmt::EnhancedFor { body, .. }
-        | Stmt::Block(body) => {
+        | Stmt::Block(body)
+        | Stmt::LabeledBlock { body, .. } => {
             let mut block_env = env.clone();
             collect_external_api_thrown_exception_types_from_stmts(
                 &body.statements,
@@ -2545,7 +2561,10 @@ fn collect_return_nullability_states_from_stmt(stmt: &Stmt, states: &mut Vec<Nul
         | Stmt::DoWhile { body, .. }
         | Stmt::For { body, .. }
         | Stmt::EnhancedFor { body, .. }
-        | Stmt::Block(body) => collect_return_nullability_states_from_block(body, states),
+        | Stmt::Block(body)
+        | Stmt::LabeledBlock { body, .. } => {
+            collect_return_nullability_states_from_block(body, states)
+        }
         Stmt::Switch { cases, .. } => {
             for case in cases {
                 for stmt in &case.statements {
@@ -2683,7 +2702,8 @@ fn collect_thrown_exception_types_from_stmt(
         | Stmt::DoWhile { body, .. }
         | Stmt::For { body, .. }
         | Stmt::EnhancedFor { body, .. }
-        | Stmt::Block(body) => {
+        | Stmt::Block(body)
+        | Stmt::LabeledBlock { body, .. } => {
             collect_thrown_exception_types_from_block(body, exception_env, facts, thrown)
         }
         Stmt::Switch { cases, .. } => {
@@ -3198,7 +3218,12 @@ fn collect_dispatch_requirement_facts_from_stmt(stmt: &Stmt, facts: &mut FactSet
                 collect_dispatch_requirement_facts_from_block(else_block, facts);
             }
         }
-        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
             collect_dispatch_requirement_facts_from_expr(condition, facts);
             collect_dispatch_requirement_facts_from_block(body, facts);
         }
@@ -3254,7 +3279,9 @@ fn collect_dispatch_requirement_facts_from_stmt(stmt: &Stmt, facts: &mut FactSet
                 collect_dispatch_requirement_facts_from_expr(arg, facts);
             }
         }
-        Stmt::Block(block) => collect_dispatch_requirement_facts_from_block(block, facts),
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            collect_dispatch_requirement_facts_from_block(block, facts)
+        }
         Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => {}
     }
 }
@@ -3607,9 +3634,10 @@ fn collect_stmt_declared_locals(stmt: &Stmt, env: &mut TypeEnv) {
                 collect_block_declared_locals(else_block, env);
             }
         }
-        Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::Block(body) => {
-            collect_block_declared_locals(body, env)
-        }
+        Stmt::While { body, .. }
+        | Stmt::DoWhile { body, .. }
+        | Stmt::Block(body)
+        | Stmt::LabeledBlock { body, .. } => collect_block_declared_locals(body, env),
         Stmt::For { init, body, .. } => {
             for init in init {
                 collect_stmt_declared_locals(init, env);
@@ -3796,7 +3824,9 @@ fn stmt_tail_returns_any_method(stmt: &Stmt, method_names: &HashSet<&str>) -> bo
                     .as_ref()
                     .is_some_and(|block| block_tail_returns_any_method(block, method_names))
         }
-        Stmt::Block(body) => block_tail_returns_any_method(body, method_names),
+        Stmt::Block(body) | Stmt::LabeledBlock { body, .. } => {
+            block_tail_returns_any_method(body, method_names)
+        }
         _ => false,
     }
 }
@@ -3886,7 +3916,12 @@ fn collect_assignment_in_condition_plans(body: &Block, rewrites: &mut Vec<Contro
                     collect_assignment_in_condition_plans(else_block, rewrites);
                 }
             }
-            Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+            Stmt::While {
+                condition, body, ..
+            }
+            | Stmt::DoWhile {
+                condition, body, ..
+            } => {
                 if let Some(plan) = assignment_in_condition_plan(condition) {
                     rewrites.push(ControlFlowRewritePlan::AssignmentInCondition(plan));
                 }
@@ -3902,7 +3937,9 @@ fn collect_assignment_in_condition_plans(body: &Block, rewrites: &mut Vec<Contro
                 }
                 collect_assignment_in_condition_plans(body, rewrites);
             }
-            Stmt::EnhancedFor { body, .. } | Stmt::Block(body) => {
+            Stmt::EnhancedFor { body, .. }
+            | Stmt::Block(body)
+            | Stmt::LabeledBlock { body, .. } => {
                 collect_assignment_in_condition_plans(body, rewrites);
             }
             Stmt::Switch { cases, .. } => {
@@ -4103,7 +4140,10 @@ fn collect_exception_names_from_block(block: &Block, exception_names: &mut HashS
             | Stmt::DoWhile { body, .. }
             | Stmt::For { body, .. }
             | Stmt::EnhancedFor { body, .. }
-            | Stmt::Block(body) => collect_exception_names_from_block(body, exception_names),
+            | Stmt::Block(body)
+            | Stmt::LabeledBlock { body, .. } => {
+                collect_exception_names_from_block(body, exception_names)
+            }
             Stmt::Switch { cases, .. } => {
                 for case in cases {
                     for stmt in &case.statements {
@@ -4245,7 +4285,8 @@ fn collect_catch_facts_from_block(
             | Stmt::DoWhile { body, .. }
             | Stmt::For { body, .. }
             | Stmt::EnhancedFor { body, .. }
-            | Stmt::Block(body) => {
+            | Stmt::Block(body)
+            | Stmt::LabeledBlock { body, .. } => {
                 collect_catch_facts_from_block(body, method, clause_index, facts, hierarchy_index)
             }
             Stmt::Switch { cases, .. } => {
@@ -4272,7 +4313,7 @@ fn collect_catch_facts_from_stmts(
     hierarchy_index: &HierarchyFactLookupIndex,
 ) {
     for stmt in statements {
-        if let Stmt::Block(block) = stmt {
+        if let Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } = stmt {
             collect_catch_facts_from_block(block, method, clause_index, facts, hierarchy_index);
         }
     }
@@ -4621,7 +4662,10 @@ fn collect_field_assignments_from_stmts(
                     );
                 }
             }
-            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::Block(body) => {
+            Stmt::While { body, .. }
+            | Stmt::DoWhile { body, .. }
+            | Stmt::Block(body)
+            | Stmt::LabeledBlock { body, .. } => {
                 let mut body_shadows = local_shadows.clone();
                 collect_field_assignments_from_stmts(
                     &body.statements,
@@ -5395,7 +5439,12 @@ fn stmt_has_assignment_in_condition(stmt: &Stmt) -> bool {
                     .as_ref()
                     .is_some_and(block_has_assignment_in_condition)
         }
-        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
             expr_looks_like_assignment_condition(condition)
                 || block_has_assignment_in_condition(body)
         }
@@ -5407,7 +5456,7 @@ fn stmt_has_assignment_in_condition(stmt: &Stmt) -> bool {
                 .is_some_and(expr_looks_like_assignment_condition)
                 || block_has_assignment_in_condition(body)
         }
-        Stmt::EnhancedFor { body, .. } | Stmt::Block(body) => {
+        Stmt::EnhancedFor { body, .. } | Stmt::Block(body) | Stmt::LabeledBlock { body, .. } => {
             block_has_assignment_in_condition(body)
         }
         Stmt::Switch { cases, .. } => cases
@@ -5487,7 +5536,9 @@ fn stmt_has_tail_recursive_self_call(stmt: &Stmt, method_name: &str) -> bool {
                     .as_ref()
                     .is_some_and(|block| block_has_tail_recursive_self_call(block, method_name))
         }
-        Stmt::Block(body) => block_has_tail_recursive_self_call(body, method_name),
+        Stmt::Block(body) | Stmt::LabeledBlock { body, .. } => {
+            block_has_tail_recursive_self_call(body, method_name)
+        }
         _ => false,
     }
 }
@@ -5523,7 +5574,12 @@ fn walk_stmt_exprs(stmt: &Stmt, visit: &mut impl FnMut(&Expr)) {
                 walk_block_exprs(else_block, visit);
             }
         }
-        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
             walk_expr(condition, visit);
             walk_block_exprs(body, visit);
         }
@@ -5574,7 +5630,7 @@ fn walk_stmt_exprs(stmt: &Stmt, visit: &mut impl FnMut(&Expr)) {
                 walk_block_exprs(finally_block, visit);
             }
         }
-        Stmt::Block(body) => walk_block_exprs(body, visit),
+        Stmt::Block(body) | Stmt::LabeledBlock { body, .. } => walk_block_exprs(body, visit),
         Stmt::VarDecl {
             initializer: None, ..
         }

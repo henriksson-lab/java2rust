@@ -113,7 +113,9 @@ pub fn rewrite_switch_breaks(stmt: &Stmt, switch_label: &str) -> Stmt {
                 .as_ref()
                 .map(|block| rewrite_switch_breaks_in_block(block, switch_label)),
         },
-        Stmt::Block(block) => Stmt::Block(rewrite_switch_breaks_in_block(block, switch_label)),
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            Stmt::Block(rewrite_switch_breaks_in_block(block, switch_label))
+        }
         _ => stmt.clone(),
     }
 }

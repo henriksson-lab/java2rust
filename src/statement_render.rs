@@ -65,9 +65,15 @@ pub fn raw_stmt(raw: String) -> RustStmt {
     RustStmt::Raw(raw)
 }
 
-pub fn render_enhanced_for(var_name: &str, iterable: &RustExpr, body: &[RustStmt]) -> RustStmt {
+pub fn render_enhanced_for(
+    var_name: &str,
+    iterable: &RustExpr,
+    body: &[RustStmt],
+    label: Option<&str>,
+) -> RustStmt {
+    let label = label.map(|label| format!("'{label}: ")).unwrap_or_default();
     RustStmt::Raw(format!(
-        "for {var_name} in {}.iter() {{\n{}\n}}",
+        "{label}for {var_name} in {}.iter() {{\n{}\n}}",
         crate::emit::emit_expr(iterable),
         crate::emit::emit_statements(body, 1)
     ))
@@ -77,9 +83,11 @@ pub fn render_enhanced_for_iterator(
     var_name: &str,
     iterator: &RustExpr,
     body: &[RustStmt],
+    label: Option<&str>,
 ) -> RustStmt {
+    let label = label.map(|label| format!("'{label}: ")).unwrap_or_default();
     RustStmt::Raw(format!(
-        "for {var_name} in {} {{\n{}\n}}",
+        "{label}for {var_name} in {} {{\n{}\n}}",
         crate::emit::emit_expr(iterator),
         crate::emit::emit_statements(body, 1)
     ))

@@ -154,10 +154,12 @@ pub enum Stmt {
     While {
         condition: Expr,
         body: Block,
+        label: Option<String>,
     },
     DoWhile {
         body: Block,
         condition: Expr,
+        label: Option<String>,
     },
     For {
         init: Vec<Stmt>,
@@ -171,6 +173,7 @@ pub enum Stmt {
         var_name: String,
         iterable: Expr,
         body: Block,
+        label: Option<String>,
     },
     Switch {
         selector: Expr,
@@ -192,6 +195,10 @@ pub enum Stmt {
     Break(Option<String>),
     Continue(Option<String>),
     Block(Block),
+    LabeledBlock {
+        label: String,
+        body: Block,
+    },
     Unsupported(String),
 }
 

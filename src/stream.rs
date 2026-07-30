@@ -566,7 +566,7 @@ fn stmt_has_null_return(stmt: &Stmt) -> bool {
             block_has_null_return(then_block)
                 || else_block.as_ref().is_some_and(block_has_null_return)
         }
-        Stmt::Block(block) => block_has_null_return(block),
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => block_has_null_return(block),
         _ => false,
     }
 }

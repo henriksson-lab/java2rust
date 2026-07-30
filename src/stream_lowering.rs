@@ -1741,7 +1741,12 @@ fn collect_stream_stmt_mutated_locals(
                 }
             }
         }
-        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
             collect_stream_expr_mutated_locals(condition, mutated, ctx);
             for stmt in &body.statements {
                 collect_stream_stmt_mutated_locals(stmt, mutated, ctx);
@@ -1804,7 +1809,7 @@ fn collect_stream_stmt_mutated_locals(
                 }
             }
         }
-        Stmt::Block(block) => {
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
             for stmt in &block.statements {
                 collect_stream_stmt_mutated_locals(stmt, mutated, ctx);
             }

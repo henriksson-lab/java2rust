@@ -458,6 +458,23 @@ fn parses_prefix_unary_expressions() {
 }
 
 #[test]
+fn parses_labeled_for_statement_without_deleting_loop() {
+    let parsed = parse_java_source(&fixture("02-control-flow/LabeledContinue.java"));
+    let method = first_method(&parsed.program.types[0]);
+    let body = method.body.as_ref().unwrap();
+
+    assert!(body.statements.iter().any(|stmt| {
+        matches!(
+            stmt,
+            Stmt::For {
+                label: Some(label),
+                ..
+            } if label == "outer"
+        )
+    }));
+}
+
+#[test]
 fn parses_character_literals_as_typed_literals() {
     let parsed = parse_java_source(
         r#"
@@ -1205,7 +1222,9 @@ fn collect_stmt_fallbacks(stmt: &Stmt, out: &mut Vec<String>) {
                 collect_block_fallbacks(block, out);
             }
         }
-        Stmt::While { condition, body } => {
+        Stmt::While {
+            condition, body, ..
+        } => {
             collect_expr_fallbacks(condition, out);
             collect_block_fallbacks(body, out);
         }
@@ -1271,7 +1290,9 @@ fn collect_stmt_fallbacks(stmt: &Stmt, out: &mut Vec<String>) {
                 collect_expr_fallbacks(arg, out);
             }
         }
-        Stmt::Block(block) => collect_block_fallbacks(block, out),
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            collect_block_fallbacks(block, out)
+        }
         Stmt::Unsupported(reason) => out.push(format!("stmt unsupported: {reason}")),
         _ => {}
     }
@@ -1356,9 +1377,9 @@ fn stmt_has_unary(stmt: &Stmt, op: UnaryOp) -> bool {
                     .as_ref()
                     .is_some_and(|block| block_has_unary(block, op))
         }
-        Stmt::While { condition, body } => {
-            expr_has_unary(condition, op) || block_has_unary(body, op)
-        }
+        Stmt::While {
+            condition, body, ..
+        } => expr_has_unary(condition, op) || block_has_unary(body, op),
         Stmt::For {
             init,
             condition,
@@ -1407,7 +1428,7 @@ fn stmt_has_unary(stmt: &Stmt, op: UnaryOp) -> bool {
         Stmt::ConstructorInvocation { args, .. } => {
             args.iter().any(|expr| expr_has_unary(expr, op))
         }
-        Stmt::Block(block) => block_has_unary(block, op),
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => block_has_unary(block, op),
         _ => false,
     }
 }
@@ -1462,7 +1483,9 @@ fn stmt_has_lambda(stmt: &Stmt) -> bool {
                 || block_has_lambda(then_block)
                 || else_block.as_ref().is_some_and(block_has_lambda)
         }
-        Stmt::While { condition, body } => expr_has_lambda(condition) || block_has_lambda(body),
+        Stmt::While {
+            condition, body, ..
+        } => expr_has_lambda(condition) || block_has_lambda(body),
         Stmt::For {
             init,
             condition,
@@ -1495,7 +1518,7 @@ fn stmt_has_lambda(stmt: &Stmt) -> bool {
                 || catches.iter().any(|catch| block_has_lambda(&catch.body))
                 || finally_block.as_ref().is_some_and(block_has_lambda)
         }
-        Stmt::Block(block) => block_has_lambda(block),
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => block_has_lambda(block),
         _ => false,
     }
 }

@@ -516,7 +516,12 @@ fn collect_call_graph_edges_from_stmt(
                 collect_call_graph_edges_from_block(else_block, graph, context);
             }
         }
-        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
             collect_call_graph_edges_from_expr(condition, graph, context);
             collect_call_graph_edges_from_block(body, graph, context);
         }
@@ -600,7 +605,9 @@ fn collect_call_graph_edges_from_stmt(
             }
         }
         Stmt::LocalType(ty) => build_type_call_graph(ty, graph),
-        Stmt::Block(block) => collect_call_graph_edges_from_block(block, graph, context),
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            collect_call_graph_edges_from_block(block, graph, context)
+        }
     }
 }
 
@@ -1111,7 +1118,12 @@ fn analyze_stmt(
                 }
             }
         }
-        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
             analyze_expr(
                 condition,
                 facts,
@@ -1231,7 +1243,7 @@ fn analyze_stmt(
                 }
             }
         }
-        Stmt::Block(block) => {
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
             for stmt in &block.statements {
                 analyze_stmt(
                     stmt,

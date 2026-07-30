@@ -1116,6 +1116,60 @@ class StringConcatNestedArithmetic {
 }
 
 #[test]
+fn labeled_statements_are_preserved_in_generated_rust() {
+    let translation = translate_source(
+        r#"
+class LabeledStatementLowering {
+    int first(int[] left, int[] right) {
+        outer:
+        for (int i = 0; i < left.length; i++) {
+            for (int j = 0; j < right.length; j++) {
+                if (left[i] != right[j]) {
+                    continue outer;
+                }
+                return left[i];
+            }
+        }
+        return -1;
+    }
+
+    int block(int[] values) {
+        int found = -1;
+        outer:
+        {
+            if (values.length == 0) {
+                break outer;
+            }
+            found = 1;
+        }
+        return found;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("'outer: loop")
+            && translation.rust.contains("continue 'outer;")
+            && translation
+                .rust
+                .contains("i += 1; __java_old_value };\n                    continue 'outer;")
+            && translation.rust.contains("break 'outer;"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "labeled_statements_are_preserved",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn jdk_file_reader_and_system_facades_keep_control_flow_shapes() {
     let translation = translate_source(
         r#"

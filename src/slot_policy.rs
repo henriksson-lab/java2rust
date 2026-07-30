@@ -391,7 +391,10 @@ fn stmt_assigns_to_binding(stmt: &Stmt, binding_name: &str) -> bool {
         Stmt::While { body, .. }
         | Stmt::DoWhile { body, .. }
         | Stmt::EnhancedFor { body, .. }
-        | Stmt::Block(body) => stmts_assign_to_binding(&body.statements, binding_name),
+        | Stmt::Block(body)
+        | Stmt::LabeledBlock { body, .. } => {
+            stmts_assign_to_binding(&body.statements, binding_name)
+        }
         Stmt::For { init, body, .. } => {
             stmts_assign_to_binding(init, binding_name)
                 || stmts_assign_to_binding(&body.statements, binding_name)
@@ -461,7 +464,8 @@ fn collect_exact_returned_var_names_from_stmts<'a>(
             | Stmt::DoWhile { body, .. }
             | Stmt::For { body, .. }
             | Stmt::EnhancedFor { body, .. }
-            | Stmt::Block(body) => {
+            | Stmt::Block(body)
+            | Stmt::LabeledBlock { body, .. } => {
                 collect_exact_returned_var_names_from_stmts(&body.statements, names);
             }
             Stmt::Switch { cases, .. } => {

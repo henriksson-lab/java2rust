@@ -8261,14 +8261,16 @@ fn collect_returned_local_initializer_call_states_from_stmts(
                     );
                 }
             }
-            Stmt::Block(block) => collect_returned_local_initializer_call_states_from_stmts(
-                &block.statements,
-                ty,
-                current_method,
-                facts,
-                &mut local_states.clone(),
-                return_states,
-            ),
+            Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+                collect_returned_local_initializer_call_states_from_stmts(
+                    &block.statements,
+                    ty,
+                    current_method,
+                    facts,
+                    &mut local_states.clone(),
+                    return_states,
+                )
+            }
             _ => {}
         }
     }
@@ -8466,7 +8468,8 @@ fn collect_declared_local_names_from_stmt(stmt: &Stmt, out: &mut HashSet<String>
         Stmt::While { body, .. }
         | Stmt::DoWhile { body, .. }
         | Stmt::EnhancedFor { body, .. }
-        | Stmt::Block(body) => {
+        | Stmt::Block(body)
+        | Stmt::LabeledBlock { body, .. } => {
             collect_declared_local_names_from_stmts(&body.statements, out);
         }
         Stmt::For { init, body, .. } => {
@@ -8617,13 +8620,15 @@ fn collect_source_return_nullability_states_from_stmt(
                 states,
             );
         }
-        Stmt::Block(body) => collect_source_return_nullability_states_from_stmts_with_refinements(
-            &body.statements,
-            binding_states,
-            ctx,
-            &mut refinements.clone(),
-            states,
-        ),
+        Stmt::Block(body) | Stmt::LabeledBlock { body, .. } => {
+            collect_source_return_nullability_states_from_stmts_with_refinements(
+                &body.statements,
+                binding_states,
+                ctx,
+                &mut refinements.clone(),
+                states,
+            )
+        }
         Stmt::Switch { cases, .. } => {
             for case in cases {
                 collect_source_return_nullability_states_from_stmts_with_refinements(
@@ -8762,7 +8767,10 @@ fn update_post_stmt_nullability_refinements(stmt: &Stmt, refinements: &mut HashS
     for name in mutated {
         refinements.remove(&name);
     }
-    if let Stmt::While { condition, body } = stmt {
+    if let Stmt::While {
+        condition, body, ..
+    } = stmt
+    {
         let plan = plan_while_stmt(condition, body);
         if let PostLoopRefinementPlan::LocalNonNull { local_name } =
             post_loop_refinement_for_while(&plan)
@@ -8822,7 +8830,12 @@ fn collect_binding_nullability_states_from_stmt(
                 collect_binding_nullability_states_from_stmts(&else_block.statements, states);
             }
         }
-        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
             collect_binding_nullability_states_from_expr(condition, states);
             collect_binding_nullability_states_from_stmts(&body.statements, states);
         }
@@ -8872,7 +8885,7 @@ fn collect_binding_nullability_states_from_stmt(
                 collect_binding_nullability_states_from_stmts(&finally_block.statements, states);
             }
         }
-        Stmt::Block(block) => {
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
             collect_binding_nullability_states_from_stmts(&block.statements, states);
         }
         Stmt::LocalType(ty) => {
@@ -9229,7 +9242,10 @@ fn collect_declared_local_name_counts(
                     collect_declared_local_name_counts(&else_block.statements, counts);
                 }
             }
-            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::Block(body) => {
+            Stmt::While { body, .. }
+            | Stmt::DoWhile { body, .. }
+            | Stmt::Block(body)
+            | Stmt::LabeledBlock { body, .. } => {
                 collect_declared_local_name_counts(&body.statements, counts);
             }
             Stmt::Switch { cases, .. } => {
@@ -9403,7 +9419,10 @@ fn collect_local_constraint_sets_from_stmts(
                     );
                 }
             }
-            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::Block(body) => {
+            Stmt::While { body, .. }
+            | Stmt::DoWhile { body, .. }
+            | Stmt::Block(body)
+            | Stmt::LabeledBlock { body, .. } => {
                 let mut body_types = local_types.clone();
                 collect_local_constraint_sets_from_stmts(
                     &body.statements,
@@ -9592,7 +9611,10 @@ fn collect_local_plans_from_stmts(
                     );
                 }
             }
-            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::Block(body) => {
+            Stmt::While { body, .. }
+            | Stmt::DoWhile { body, .. }
+            | Stmt::Block(body)
+            | Stmt::LabeledBlock { body, .. } => {
                 collect_local_plans_from_stmts(
                     &body.statements,
                     representations,
@@ -10721,7 +10743,12 @@ fn collect_facade_mut_borrow_argument_names_from_stmts(
                     );
                 }
             }
-            Stmt::While { condition, body } | Stmt::DoWhile { body, condition } => {
+            Stmt::While {
+                condition, body, ..
+            }
+            | Stmt::DoWhile {
+                body, condition, ..
+            } => {
                 collect_facade_mut_borrow_argument_names_from_expr(
                     condition,
                     facts,
@@ -10857,7 +10884,7 @@ fn collect_facade_mut_borrow_argument_names_from_stmts(
                     );
                 }
             }
-            Stmt::Block(block) => {
+            Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
                 let mut block_types = local_types.clone();
                 collect_facade_mut_borrow_argument_names_from_stmts(
                     &block.statements,
@@ -11086,7 +11113,12 @@ fn collect_field_receiver_mutated_names_from_stmts(
                     );
                 }
             }
-            Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+            Stmt::While {
+                condition, body, ..
+            }
+            | Stmt::DoWhile {
+                condition, body, ..
+            } => {
                 collect_field_receiver_mutated_names_from_expr(condition, mutated);
                 collect_field_receiver_mutated_names_from_stmts(&body.statements, mutated);
             }
@@ -11137,7 +11169,7 @@ fn collect_field_receiver_mutated_names_from_stmts(
                     );
                 }
             }
-            Stmt::Block(block) => {
+            Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
                 collect_field_receiver_mutated_names_from_stmts(&block.statements, mutated);
             }
             Stmt::Return(None)
@@ -11267,7 +11299,12 @@ fn collect_array_element_mutated_names_from_stmts(
                     collect_array_element_mutated_names_from_stmts(&else_block.statements, mutated);
                 }
             }
-            Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+            Stmt::While {
+                condition, body, ..
+            }
+            | Stmt::DoWhile {
+                condition, body, ..
+            } => {
                 collect_array_element_mutated_names_from_expr(condition, mutated);
                 collect_array_element_mutated_names_from_stmts(&body.statements, mutated);
             }
@@ -11315,7 +11352,7 @@ fn collect_array_element_mutated_names_from_stmts(
                     );
                 }
             }
-            Stmt::Block(block) => {
+            Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
                 collect_array_element_mutated_names_from_stmts(&block.statements, mutated);
             }
             Stmt::Return(None)
@@ -11447,7 +11484,12 @@ fn collect_mutated_local_names_from_stmt(stmt: &Stmt, mutated: &mut HashSet<Stri
                 collect_mutated_local_names_from_stmts(&else_block.statements, mutated);
             }
         }
-        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
             collect_mutated_local_names_from_expr(condition, mutated);
             collect_mutated_local_names_from_stmts(&body.statements, mutated);
         }
@@ -11492,7 +11534,7 @@ fn collect_mutated_local_names_from_stmt(stmt: &Stmt, mutated: &mut HashSet<Stri
                 collect_mutated_local_names_from_stmts(&finally_block.statements, mutated);
             }
         }
-        Stmt::Block(block) => {
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
             collect_mutated_local_names_from_stmts(&block.statements, mutated);
         }
         Stmt::Return(None)
@@ -12030,7 +12072,9 @@ fn stmt_returns_local_initialized_from_call(
                     block_returns_local_initialized_from_call(block, &mut call_locals.clone())
                 })
         }
-        Stmt::Block(block) => block_returns_local_initialized_from_call(block, call_locals),
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            block_returns_local_initialized_from_call(block, call_locals)
+        }
         _ => false,
     }
 }
@@ -12279,7 +12323,8 @@ fn collect_exact_returned_var_names_from_stmts<'a>(
             | Stmt::DoWhile { body, .. }
             | Stmt::For { body, .. }
             | Stmt::EnhancedFor { body, .. }
-            | Stmt::Block(body) => {
+            | Stmt::Block(body)
+            | Stmt::LabeledBlock { body, .. } => {
                 collect_exact_returned_var_names_from_stmts(&body.statements, names);
             }
             Stmt::Switch { cases, .. } => {
@@ -12438,7 +12483,9 @@ fn stmt_returns_matching_anonymous_declared(stmt: &Stmt, declared: &JavaType) ->
                     .as_ref()
                     .is_some_and(|block| block_returns_matching_anonymous_declared(block, declared))
         }
-        Stmt::Block(block) => block_returns_matching_anonymous_declared(block, declared),
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            block_returns_matching_anonymous_declared(block, declared)
+        }
         _ => false,
     }
 }
@@ -12681,7 +12728,10 @@ fn collect_declared_binding_types_from_stmts<'a>(
                     collect_declared_binding_types_from_stmts(&else_block.statements, types);
                 }
             }
-            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::Block(body) => {
+            Stmt::While { body, .. }
+            | Stmt::DoWhile { body, .. }
+            | Stmt::Block(body)
+            | Stmt::LabeledBlock { body, .. } => {
                 collect_declared_binding_types_from_stmts(&body.statements, types);
             }
             Stmt::Switch { cases, .. } => {
@@ -12758,7 +12808,8 @@ fn collect_returned_var_types_from_stmt<'a>(
         | Stmt::DoWhile { body, .. }
         | Stmt::For { body, .. }
         | Stmt::EnhancedFor { body, .. }
-        | Stmt::Block(body) => {
+        | Stmt::Block(body)
+        | Stmt::LabeledBlock { body, .. } => {
             collect_returned_var_types_from_stmts(&body.statements, local_types, out)
         }
         Stmt::Switch { cases, .. } => cases

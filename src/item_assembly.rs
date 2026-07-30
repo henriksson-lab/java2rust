@@ -1463,7 +1463,12 @@ fn collect_mutable_array_target_params_in_stmts(statements: &[Stmt], names: &mut
                     collect_mutable_array_target_params_in_stmts(&else_block.statements, names);
                 }
             }
-            Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+            Stmt::While {
+                condition, body, ..
+            }
+            | Stmt::DoWhile {
+                condition, body, ..
+            } => {
                 collect_mutable_array_target_params_in_expr(condition, names);
                 collect_mutable_array_target_params_in_stmts(&body.statements, names);
             }
@@ -1508,7 +1513,7 @@ fn collect_mutable_array_target_params_in_stmts(statements: &[Stmt], names: &mut
                     collect_mutable_array_target_params_in_stmts(&finally_block.statements, names);
                 }
             }
-            Stmt::Block(block) => {
+            Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
                 collect_mutable_array_target_params_in_stmts(&block.statements, names);
             }
             Stmt::ConstructorInvocation { args, .. } => {
@@ -1726,8 +1731,12 @@ fn scan_stmt_for_callback_param(
                 scan_block_for_callback_param(block, param_name, saw_callback_call, escaped);
             }
         }
-        crate::java_ir::Stmt::While { condition, body }
-        | crate::java_ir::Stmt::DoWhile { condition, body } => {
+        crate::java_ir::Stmt::While {
+            condition, body, ..
+        }
+        | crate::java_ir::Stmt::DoWhile {
+            condition, body, ..
+        } => {
             scan_expr_for_callback_param(condition, param_name, saw_callback_call, escaped);
             scan_block_for_callback_param(body, param_name, saw_callback_call, escaped);
         }
@@ -1788,7 +1797,7 @@ fn scan_stmt_for_callback_param(
                 scan_expr_for_callback_param(arg, param_name, saw_callback_call, escaped);
             }
         }
-        crate::java_ir::Stmt::Block(block) => {
+        crate::java_ir::Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
             scan_block_for_callback_param(block, param_name, saw_callback_call, escaped);
         }
         crate::java_ir::Stmt::Return(None)

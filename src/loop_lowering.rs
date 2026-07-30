@@ -7,9 +7,24 @@ pub fn assemble_for_loop(
     body: Vec<RustStmt>,
     label: Option<String>,
 ) -> RustStmt {
+    if let Some(label) = label {
+        let mut loop_body = Vec::new();
+        loop_body.push(RustStmt::If {
+            condition: crate::coercion::logical_not_projection(
+                condition.unwrap_or_else(default_for_condition),
+            ),
+            then_body: vec![RustStmt::Break(Some(label.clone()))],
+            else_body: Vec::new(),
+        });
+        loop_body.extend(body);
+        return RustStmt::Loop {
+            label: Some(label),
+            body: loop_body,
+        };
+    }
     RustStmt::While {
         condition: condition.unwrap_or_else(default_for_condition),
-        body: wrap_labeled_for_body(body, label),
+        body,
     }
 }
 
@@ -27,6 +42,7 @@ pub fn assignment_condition_loop(
     assigned_value: RustExpr,
     null_test: NullTestKind,
     mut body: Vec<RustStmt>,
+    label: Option<String>,
 ) -> RustStmt {
     let local = RustExpr::Var(local_name.to_string());
     let break_condition = match null_test {
@@ -58,19 +74,11 @@ pub fn assignment_condition_loop(
     }
     loop_body.append(&mut body);
     RustStmt::Loop {
-        label: None,
+        label,
         body: loop_body,
     }
 }
 
 fn default_for_condition() -> RustExpr {
     RustExpr::Literal("true".to_string())
-}
-
-fn wrap_labeled_for_body(body: Vec<RustStmt>, label: Option<String>) -> Vec<RustStmt> {
-    if label.is_some() {
-        vec![RustStmt::Loop { label, body }]
-    } else {
-        body
-    }
 }

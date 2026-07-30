@@ -55,7 +55,9 @@ pub fn plan_for_body_stmt<'a>(stmt: &'a Stmt, updates: &'a [Expr]) -> ForBodyStm
             then_block,
             else_block: else_block.as_ref(),
         },
-        Stmt::While { condition, body } => ForBodyStmtPlan::While { condition, body },
+        Stmt::While {
+            condition, body, ..
+        } => ForBodyStmtPlan::While { condition, body },
         _ => ForBodyStmtPlan::Default { stmt },
     }
 }
@@ -147,7 +149,8 @@ fn stmt_contains_unlabeled_break(stmt: &Stmt) -> bool {
         | Stmt::DoWhile { body, .. }
         | Stmt::For { body, .. }
         | Stmt::EnhancedFor { body, .. }
-        | Stmt::Block(body) => block_contains_unlabeled_break(body),
+        | Stmt::Block(body)
+        | Stmt::LabeledBlock { body, .. } => block_contains_unlabeled_break(body),
         Stmt::Switch { cases, .. } => cases
             .iter()
             .any(|case| case.statements.iter().any(stmt_contains_unlabeled_break)),
