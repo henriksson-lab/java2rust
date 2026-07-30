@@ -66,6 +66,10 @@ Landed in this batch:
   Unsupported member counts include batch/non-batch translation diagnostics,
   so skipped unsupported members are visible even when no Rust marker is
   generated.
+- Java text block literals now run content derivation in the parser before
+  lowering: initial line terminators, incidental indentation, trailing
+  whitespace, and text-block escapes are normalized into the resulting string
+  literal value.
 
 1. Add a generated-Rust parse gate to focused corpus scripts.
    - Report parse failures separately from type-check errors.
@@ -294,7 +298,7 @@ the fixes do not become more isolated rules.
 | `0017` generic bounds dropped | open | Typed type parsing and generics |
 | `0018` compile metric blind spots | partial | Parse gate and coverage counters |
 | `0019` raw Java expression fallback | partial | Raw fallback fixed; switch expressions still unsupported |
-| `0020` text block processing | open | Literal semantics |
+| `0020` text block processing | fixed locally | Moved to `claude_audits/done` |
 | `0021` instanceof pattern binding | open | BindingId and pattern lowering |
 | `0022` source-text type reparsing | open | Typed type parser |
 | `0023` inner-class outer capture | open | Object reference representation |

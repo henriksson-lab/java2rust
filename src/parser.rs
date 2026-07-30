@@ -2684,10 +2684,114 @@ fn parse_hex_float_mantissa(mantissa: &str) -> Option<f64> {
 }
 
 fn parse_string_literal(src: &str) -> String {
-    src.trim()
-        .trim_start_matches('"')
-        .trim_end_matches('"')
-        .replace("\\\"", "\"")
+    let src = src.trim();
+    if src.starts_with("\"\"\"") && src.ends_with("\"\"\"") && src.len() >= 6 {
+        parse_text_block_literal(src)
+    } else {
+        parse_java_string_escapes(src.trim_start_matches('"').trim_end_matches('"'))
+    }
+}
+
+fn parse_text_block_literal(src: &str) -> String {
+    let raw = &src[3..src.len() - 3];
+    let mut content = raw.replace("\r\n", "\n").replace('\r', "\n");
+    if let Some(rest) = content.strip_prefix('\n') {
+        content = rest.to_string();
+    }
+
+    let mut lines = content
+        .split('\n')
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+    let incidental_indent = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let is_closing_delimiter_line = index + 1 == lines.len();
+            if !is_closing_delimiter_line && line.trim().is_empty() {
+                None
+            } else {
+                Some(java_whitespace_indent(line))
+            }
+        })
+        .min()
+        .unwrap_or(0);
+
+    for line in &mut lines {
+        *line = strip_java_whitespace_indent(line, incidental_indent)
+            .trim_end_matches(java_text_block_trailing_whitespace)
+            .to_string();
+    }
+
+    parse_java_string_escapes(&lines.join("\n"))
+}
+
+fn java_whitespace_indent(line: &str) -> usize {
+    line.chars()
+        .take_while(|ch| java_text_block_trailing_whitespace(*ch))
+        .count()
+}
+
+fn strip_java_whitespace_indent(line: &str, indent: usize) -> &str {
+    let mut byte_index = 0usize;
+    for (count, (index, ch)) in line.char_indices().enumerate() {
+        if count >= indent || !java_text_block_trailing_whitespace(ch) {
+            byte_index = index;
+            return &line[byte_index..];
+        }
+        byte_index = index + ch.len_utf8();
+    }
+    if line.chars().count() >= indent {
+        ""
+    } else {
+        &line[byte_index..]
+    }
+}
+
+fn java_text_block_trailing_whitespace(ch: char) -> bool {
+    matches!(ch, ' ' | '\t' | '\u{000c}')
+}
+
+fn parse_java_string_escapes(src: &str) -> String {
+    let mut out = String::new();
+    let mut chars = src.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('\n') => {}
+            Some('\r') => {
+                if matches!(chars.peek(), Some('\n')) {
+                    chars.next();
+                }
+            }
+            Some('b') => out.push('\u{0008}'),
+            Some('t') => out.push('\t'),
+            Some('n') => out.push('\n'),
+            Some('f') => out.push('\u{000c}'),
+            Some('r') => out.push('\r'),
+            Some('"') => out.push('"'),
+            Some('\'') => out.push('\''),
+            Some('\\') => out.push('\\'),
+            Some('s') => out.push(' '),
+            Some(other @ '0'..='7') => {
+                let mut digits = String::from(other);
+                while digits.len() < 3 && matches!(chars.peek(), Some('0'..='7')) {
+                    digits.push(chars.next().unwrap());
+                }
+                if let Ok(value) = u32::from_str_radix(&digits, 8) {
+                    if let Some(ch) = char::from_u32(value) {
+                        out.push(ch);
+                    }
+                }
+            }
+            Some(other) => out.push(other),
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 fn parse_char_literal(src: &str) -> char {

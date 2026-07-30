@@ -383,6 +383,72 @@ fn expression_helper_parse_failures_surface_as_unsupported_not_raw() {
 }
 
 #[test]
+fn java_text_blocks_strip_incidental_indentation() {
+    let expr = new_java2rust::parser::parse_expr(
+        r#""""
+        hello
+        world""""#,
+    );
+    assert!(matches!(
+        expr,
+        Expr::Literal(Literal::String(value)) if value == "hello\nworld"
+    ));
+
+    let expr = new_java2rust::parser::parse_expr(
+        r#""""
+        hello
+    world""""#,
+    );
+    assert!(matches!(
+        expr,
+        Expr::Literal(Literal::String(value)) if value == "    hello\nworld"
+    ));
+}
+
+#[test]
+fn java_text_blocks_include_closing_delimiter_indent_and_trailing_newline() {
+    let expr = new_java2rust::parser::parse_expr(
+        r#""""
+    hello
+    world
+    """""#,
+    );
+    assert!(matches!(
+        expr,
+        Expr::Literal(Literal::String(value)) if value == "hello\nworld\n"
+    ));
+}
+
+#[test]
+fn java_text_block_escapes_are_processed_after_whitespace_stripping() {
+    let expr = new_java2rust::parser::parse_expr(
+        r#""""
+  a\s
+  b""""#,
+    );
+    assert!(matches!(
+        expr,
+        Expr::Literal(Literal::String(value)) if value == "a \nb"
+    ));
+
+    let continued = new_java2rust::parser::parse_expr(
+        r#""""
+  a  \
+  b""""#,
+    );
+    assert!(matches!(
+        continued,
+        Expr::Literal(Literal::String(value)) if value == "a  b"
+    ));
+
+    let ordinary = new_java2rust::parser::parse_expr(r#""a\nb\"c""#);
+    assert!(matches!(
+        ordinary,
+        Expr::Literal(Literal::String(value)) if value == "a\nb\"c"
+    ));
+}
+
+#[test]
 fn parses_parenthesized_condition_after_block_comment() {
     let parsed = parse_java_source(
         r#"
