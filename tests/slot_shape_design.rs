@@ -9471,7 +9471,9 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
     assert_eq!(
         apply_call_target(
             &CallTargetPlan::NativeJavaStatic {
-                method: NativeJavaStaticMethod::MathMax,
+                method: NativeJavaStaticMethod::MathMax {
+                    primitive: PrimitiveType::Int,
+                },
             },
             None,
             vec![
@@ -31692,7 +31694,9 @@ fn stdlib_signature_facts_drive_math_max_owned_arg_shapes() {
         matches!(
             target,
             CallTargetPlan::NativeJavaStatic {
-                method: NativeJavaStaticMethod::MathMax,
+                method: NativeJavaStaticMethod::MathMax {
+                    primitive: PrimitiveType::Int,
+                },
             }
         ),
         "Math.max ABI facts should shape arguments without bypassing native max rendering: {target:?}"

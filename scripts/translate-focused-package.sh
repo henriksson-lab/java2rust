@@ -2106,7 +2106,7 @@ RUST
   printf "FileSystem\nGraphics\nBufferedImage\nPath\nURI\nFile\nURL\nURLConnection\nJarURLConnection\nJarFile\nJarEntry\nManifest\nAttributes\nAttributesName\nEnumeration\nJavaIterator\nAtomicInteger\nJavaPathArg\nIOUtils\nlogger\n" >> "$shared_support_types_path"
 fi
 
-if grep -R -q -E 'java_string_(split|substring|hash_code|index_of|index_of_from|from_byte_range|matches|replace_first|replace_all|compare_to|compare_to_ignore_case|equals_ignore_case)|java_(list|set|map|value)_hash_code|java_primitive_compare_to|java_math_floor_(div|mod)_i32|java_parse_(i8|i16|i32|i64|f32|f64)' "$generated_dir"; then
+if grep -R -q -E 'java_string_(split|substring|hash_code|index_of|index_of_from|from_byte_range|matches|replace_first|replace_all|compare_to|compare_to_ignore_case|equals_ignore_case)|java_(list|set|map|value)_hash_code|java_primitive_compare_to|java_math_(floor_(div|mod)_i32|round_(f32|f64)|m(ax|in)_(f32|f64))|java_parse_(i8|i16|i32|i64|f32|f64)' "$generated_dir"; then
   cat >> "$shared_support_path" <<'RUST'
 pub fn java_string_substring<V: AsRef<str>>(value: V, begin: i32, end: i32) -> String {
     let value = value.as_ref();
@@ -2240,6 +2240,86 @@ pub fn java_math_floor_mod_i32(left: i32, right: i32) -> i32 {
     left - java_math_floor_div_i32(left, right) * right
 }
 
+pub fn java_math_round_f32(value: f32) -> i32 {
+    if value.is_nan() {
+        0
+    } else if value >= i32::MAX as f32 {
+        i32::MAX
+    } else if value <= i32::MIN as f32 {
+        i32::MIN
+    } else {
+        (value + 0.5).floor() as i32
+    }
+}
+
+pub fn java_math_round_f64(value: f64) -> i64 {
+    if value.is_nan() {
+        0
+    } else if value >= i64::MAX as f64 {
+        i64::MAX
+    } else if value <= i64::MIN as f64 {
+        i64::MIN
+    } else {
+        (value + 0.5).floor() as i64
+    }
+}
+
+pub fn java_math_max_f32(left: f32, right: f32) -> f32 {
+    if left.is_nan() || right.is_nan() {
+        f32::NAN
+    } else if left == 0.0 && right == 0.0 {
+        if left.is_sign_positive() || right.is_sign_positive() {
+            0.0
+        } else {
+            -0.0
+        }
+    } else {
+        left.max(right)
+    }
+}
+
+pub fn java_math_max_f64(left: f64, right: f64) -> f64 {
+    if left.is_nan() || right.is_nan() {
+        f64::NAN
+    } else if left == 0.0 && right == 0.0 {
+        if left.is_sign_positive() || right.is_sign_positive() {
+            0.0
+        } else {
+            -0.0
+        }
+    } else {
+        left.max(right)
+    }
+}
+
+pub fn java_math_min_f32(left: f32, right: f32) -> f32 {
+    if left.is_nan() || right.is_nan() {
+        f32::NAN
+    } else if left == 0.0 && right == 0.0 {
+        if left.is_sign_negative() || right.is_sign_negative() {
+            -0.0
+        } else {
+            0.0
+        }
+    } else {
+        left.min(right)
+    }
+}
+
+pub fn java_math_min_f64(left: f64, right: f64) -> f64 {
+    if left.is_nan() || right.is_nan() {
+        f64::NAN
+    } else if left == 0.0 && right == 0.0 {
+        if left.is_sign_negative() || right.is_sign_negative() {
+            -0.0
+        } else {
+            0.0
+        }
+    } else {
+        left.min(right)
+    }
+}
+
 pub fn java_parse_i8<V: AsRef<str>>(value: V) -> i8 {
     value.as_ref().parse::<i8>().expect("Java number format")
 }
@@ -2358,7 +2438,7 @@ fn java_simple_regex_literal(regex: &str) -> &str {
 }
 
 RUST
-  printf "java_string_substring\njava_string_hash_code\njava_list_hash_code\njava_set_hash_code\njava_map_hash_code\njava_value_hash_code\njava_string_index_of\njava_string_index_of_from\njava_string_last_index_of\njava_string_last_index_of_from\njava_string_compare_to\njava_string_compare_to_ignore_case\njava_string_equals_ignore_case\njava_primitive_compare_to\njava_math_floor_div_i32\njava_math_floor_mod_i32\njava_parse_i8\njava_parse_i16\njava_parse_i32\njava_parse_i64\njava_parse_f32\njava_parse_f64\njava_string_from_byte_range\njava_string_from_bytes\njava_string_split\njava_string_matches\njava_string_replace_first\njava_string_replace_all\n" >> "$shared_support_types_path"
+  printf "java_string_substring\njava_string_hash_code\njava_list_hash_code\njava_set_hash_code\njava_map_hash_code\njava_value_hash_code\njava_string_index_of\njava_string_index_of_from\njava_string_last_index_of\njava_string_last_index_of_from\njava_string_compare_to\njava_string_compare_to_ignore_case\njava_string_equals_ignore_case\njava_primitive_compare_to\njava_math_floor_div_i32\njava_math_floor_mod_i32\njava_math_round_f32\njava_math_round_f64\njava_math_max_f32\njava_math_max_f64\njava_math_min_f32\njava_math_min_f64\njava_parse_i8\njava_parse_i16\njava_parse_i32\njava_parse_i64\njava_parse_f32\njava_parse_f64\njava_string_from_byte_range\njava_string_from_bytes\njava_string_split\njava_string_matches\njava_string_replace_first\njava_string_replace_all\n" >> "$shared_support_types_path"
 fi
 
 if grep -R -q 'java_is_serializable' "$generated_dir"; then

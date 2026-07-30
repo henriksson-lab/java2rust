@@ -5179,6 +5179,86 @@ pub fn java_math_floor_mod_i32(left: i32, right: i32) -> i32 {
     left - java_math_floor_div_i32(left, right) * right
 }
 
+pub fn java_math_round_f32(value: f32) -> i32 {
+    if value.is_nan() {
+        0
+    } else if value >= i32::MAX as f32 {
+        i32::MAX
+    } else if value <= i32::MIN as f32 {
+        i32::MIN
+    } else {
+        (value + 0.5).floor() as i32
+    }
+}
+
+pub fn java_math_round_f64(value: f64) -> i64 {
+    if value.is_nan() {
+        0
+    } else if value >= i64::MAX as f64 {
+        i64::MAX
+    } else if value <= i64::MIN as f64 {
+        i64::MIN
+    } else {
+        (value + 0.5).floor() as i64
+    }
+}
+
+pub fn java_math_max_f32(left: f32, right: f32) -> f32 {
+    if left.is_nan() || right.is_nan() {
+        f32::NAN
+    } else if left == 0.0 && right == 0.0 {
+        if left.is_sign_positive() || right.is_sign_positive() {
+            0.0
+        } else {
+            -0.0
+        }
+    } else {
+        left.max(right)
+    }
+}
+
+pub fn java_math_max_f64(left: f64, right: f64) -> f64 {
+    if left.is_nan() || right.is_nan() {
+        f64::NAN
+    } else if left == 0.0 && right == 0.0 {
+        if left.is_sign_positive() || right.is_sign_positive() {
+            0.0
+        } else {
+            -0.0
+        }
+    } else {
+        left.max(right)
+    }
+}
+
+pub fn java_math_min_f32(left: f32, right: f32) -> f32 {
+    if left.is_nan() || right.is_nan() {
+        f32::NAN
+    } else if left == 0.0 && right == 0.0 {
+        if left.is_sign_negative() || right.is_sign_negative() {
+            -0.0
+        } else {
+            0.0
+        }
+    } else {
+        left.min(right)
+    }
+}
+
+pub fn java_math_min_f64(left: f64, right: f64) -> f64 {
+    if left.is_nan() || right.is_nan() {
+        f64::NAN
+    } else if left == 0.0 && right == 0.0 {
+        if left.is_sign_negative() || right.is_sign_negative() {
+            -0.0
+        } else {
+            0.0
+        }
+    } else {
+        left.min(right)
+    }
+}
+
 pub fn java_parse_i8<V: AsRef<str>>(value: V) -> i8 {
     value.as_ref().parse::<i8>().expect("Java number format")
 }
@@ -15196,6 +15276,14 @@ fn expr_uses_java_string_runtime_helpers(expr: &Expr) -> bool {
             ) || matches!(
                 (receiver.as_deref(), name.as_str(), args.len()),
                 (Some(Expr::Var(owner)), "floorDiv" | "floor_div" | "floorMod" | "floor_mod", 2)
+                    if canonical_external_receiver_type_key(owner) == "Math"
+            ) || matches!(
+                (receiver.as_deref(), name.as_str(), args.len()),
+                (Some(Expr::Var(owner)), "round" | "abs", 1)
+                    if canonical_external_receiver_type_key(owner) == "Math"
+            ) || matches!(
+                (receiver.as_deref(), name.as_str(), args.len()),
+                (Some(Expr::Var(owner)), "max" | "min", 2)
                     if canonical_external_receiver_type_key(owner) == "Math"
             );
             uses_runtime_helper

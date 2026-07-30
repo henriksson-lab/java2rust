@@ -641,6 +641,30 @@ class JdkNumericAndFormatFacades {
         return Math.round(value);
     }
 
+    static int roundedFloat(float value) {
+        return Math.round(value);
+    }
+
+    static int absInt(int value) {
+        return Math.abs(value);
+    }
+
+    static long absLong(long value) {
+        return Math.abs(value);
+    }
+
+    static int maxInt(int left, int right) {
+        return Math.max(left, right);
+    }
+
+    static double maxDouble(double left, double right) {
+        return Math.max(left, right);
+    }
+
+    static double minDouble(double left, double right) {
+        return Math.min(left, right);
+    }
+
     static boolean missing(double value) {
         return Double.isNaN(value);
     }
@@ -681,7 +705,12 @@ class JdkNumericAndFormatFacades {
         translation.rust.contains("(value as f64).ln()")
             && translation.rust.contains("(2 as f64).ln()")
             && translation.rust.contains("(value as f64).exp()")
-            && translation.rust.contains("(value as f64).round() as i64")
+            && translation.rust.contains("java_math_round_f64(value)")
+            && translation.rust.contains("java_math_round_f32(value)")
+            && translation.rust.contains("(value).wrapping_abs()")
+            && translation.rust.contains("std::cmp::max(left, right)")
+            && translation.rust.contains("java_math_max_f64(left, right)")
+            && translation.rust.contains("java_math_min_f64(left, right)")
             && translation.rust.contains("value.is_nan()")
             && translation.rust.contains("value.parse::<f32>().unwrap()")
             && translation.rust.contains("return value as i32;")
@@ -723,6 +752,14 @@ mod generated_tests {
     fn numeric_facades_typecheck_and_run() {
         assert!((JdkNumericAndFormatFacades::log2(8.0) - 3.0).abs() < 1e-9);
         assert!((JdkNumericAndFormatFacades::exponent(1.0) - std::f64::consts::E).abs() < 1e-9);
+        assert_eq!(JdkNumericAndFormatFacades::rounded(-2.5), -2);
+        assert_eq!(JdkNumericAndFormatFacades::rounded(-0.5), 0);
+        assert_eq!(JdkNumericAndFormatFacades::rounded_float(-2.5), -2);
+        assert_eq!(JdkNumericAndFormatFacades::abs_int(i32::MIN), i32::MIN);
+        assert_eq!(JdkNumericAndFormatFacades::abs_long(i64::MIN), i64::MIN);
+        assert_eq!(JdkNumericAndFormatFacades::max_int(1, 2), 2);
+        assert!(JdkNumericAndFormatFacades::max_double(f64::NAN, 1.0).is_nan());
+        assert!(JdkNumericAndFormatFacades::min_double(-0.0, 0.0).is_sign_negative());
         assert!(JdkNumericAndFormatFacades::missing(f64::NAN));
         assert_eq!(JdkNumericAndFormatFacades::floor_div(-7, 2), -4);
         assert_eq!(JdkNumericAndFormatFacades::floor_mod(-7, 2), 1);

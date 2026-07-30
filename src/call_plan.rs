@@ -429,11 +429,12 @@ pub enum NativeJavaInstanceMethod {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeJavaStaticMethod {
-    MathMax,
-    MathMin,
+    MathMax { primitive: PrimitiveType },
+    MathMin { primitive: PrimitiveType },
     MathLog,
     MathExp,
-    MathRound,
+    MathRound { source: PrimitiveType },
+    MathAbs { source: PrimitiveType },
     MathToIntExact,
     MathFloorDiv,
     MathFloorMod,
@@ -514,8 +515,9 @@ pub fn native_java_call_lowered_type(target: &CallTargetPlan<'_>) -> Option<Lowe
         CallTargetPlan::NativeJavaStatic {
             method:
                 NativeJavaStaticMethod::IntegerParseInt
-                | NativeJavaStaticMethod::MathMin
-                | NativeJavaStaticMethod::MathRound
+                | NativeJavaStaticMethod::MathRound {
+                    source: PrimitiveType::Float,
+                }
                 | NativeJavaStaticMethod::MathToIntExact
                 | NativeJavaStaticMethod::MathFloorDiv
                 | NativeJavaStaticMethod::MathFloorMod,
@@ -532,6 +534,17 @@ pub fn native_java_call_lowered_type(target: &CallTargetPlan<'_>) -> Option<Lowe
         } => Some(LoweredType::from_java(JavaType::Primitive(
             PrimitiveType::Int,
         ))),
+        CallTargetPlan::NativeJavaStatic {
+            method: NativeJavaStaticMethod::MathRound { .. },
+        } => Some(LoweredType::from_java(JavaType::Primitive(
+            PrimitiveType::Long,
+        ))),
+        CallTargetPlan::NativeJavaStatic {
+            method:
+                NativeJavaStaticMethod::MathMax { primitive }
+                | NativeJavaStaticMethod::MathMin { primitive }
+                | NativeJavaStaticMethod::MathAbs { source: primitive },
+        } => Some(LoweredType::from_java(JavaType::Primitive(*primitive))),
         CallTargetPlan::NativeJavaStatic {
             method: NativeJavaStaticMethod::FloatParseFloat,
         } => Some(LoweredType::from_java(JavaType::Primitive(
@@ -1481,10 +1494,10 @@ pub fn plan_call_expr_with_external_index<'a>(
         };
     }
 
-    let target = plan_call_target_with_external_index_and_arity(
+    let target = plan_call_target_with_external_index_and_args(
         receiver,
         name,
-        args.len(),
+        args,
         resolved,
         facts,
         external_index,
@@ -1998,6 +2011,49 @@ pub fn plan_call_target_with_external_index_and_arity<'a>(
     external_index: &ExternalFactLookupIndex<'_>,
     types: &TypeEnv,
 ) -> CallTargetPlan<'a> {
+    plan_call_target_with_external_index_impl(
+        receiver,
+        name,
+        arg_count,
+        None,
+        resolved,
+        facts,
+        external_index,
+        types,
+    )
+}
+
+pub fn plan_call_target_with_external_index_and_args<'a>(
+    receiver: Option<&'a Expr>,
+    name: &'a str,
+    args: &'a [Expr],
+    resolved: Option<&'a ResolvedCall>,
+    facts: &FactSet,
+    external_index: &ExternalFactLookupIndex<'_>,
+    types: &TypeEnv,
+) -> CallTargetPlan<'a> {
+    plan_call_target_with_external_index_impl(
+        receiver,
+        name,
+        args.len(),
+        Some(args),
+        resolved,
+        facts,
+        external_index,
+        types,
+    )
+}
+
+fn plan_call_target_with_external_index_impl<'a>(
+    receiver: Option<&'a Expr>,
+    name: &'a str,
+    arg_count: usize,
+    args: Option<&'a [Expr]>,
+    resolved: Option<&'a ResolvedCall>,
+    facts: &FactSet,
+    external_index: &ExternalFactLookupIndex<'_>,
+    types: &TypeEnv,
+) -> CallTargetPlan<'a> {
     if matches!(receiver, Some(Expr::Super))
         && let Some(call) = resolved
         && matches!(call.kind, CallKind::Instance)
@@ -2027,7 +2083,7 @@ pub fn plan_call_target_with_external_index_and_arity<'a>(
         return target;
     }
 
-    if let Some(target) = plan_native_java_static_call(receiver, name) {
+    if let Some(target) = plan_native_java_static_call(receiver, name, args, types) {
         return target;
     }
 
@@ -3230,17 +3286,28 @@ fn receiver_type_is_queue(ty: &JavaType) -> bool {
 fn plan_native_java_static_call<'a>(
     receiver: Option<&'a Expr>,
     name: &str,
+    args: Option<&'a [Expr]>,
+    types: &TypeEnv,
 ) -> Option<CallTargetPlan<'a>> {
     let Some(Expr::Var(receiver_name)) = receiver else {
         return None;
     };
     let receiver_key = crate::stdlib::canonical_external_receiver_type_key(receiver_name);
     let method = match (receiver_key.as_str(), name) {
-        ("Math", "max") => NativeJavaStaticMethod::MathMax,
-        ("Math", "min") => NativeJavaStaticMethod::MathMin,
+        ("Math", "max") => NativeJavaStaticMethod::MathMax {
+            primitive: math_binary_overload_primitive(args, types),
+        },
+        ("Math", "min") => NativeJavaStaticMethod::MathMin {
+            primitive: math_binary_overload_primitive(args, types),
+        },
         ("Math", "log") => NativeJavaStaticMethod::MathLog,
         ("Math", "exp") => NativeJavaStaticMethod::MathExp,
-        ("Math", "round") => NativeJavaStaticMethod::MathRound,
+        ("Math", "round") => NativeJavaStaticMethod::MathRound {
+            source: math_unary_overload_primitive(args, types, PrimitiveType::Double),
+        },
+        ("Math", "abs") => NativeJavaStaticMethod::MathAbs {
+            source: math_unary_overload_primitive(args, types, PrimitiveType::Int),
+        },
         ("Math", "toIntExact" | "to_int_exact") => NativeJavaStaticMethod::MathToIntExact,
         ("Math", "floorDiv" | "floor_div") => NativeJavaStaticMethod::MathFloorDiv,
         ("Math", "floorMod" | "floor_mod") => NativeJavaStaticMethod::MathFloorMod,
@@ -3260,6 +3327,61 @@ fn plan_native_java_static_call<'a>(
         _ => return None,
     };
     Some(CallTargetPlan::NativeJavaStatic { method })
+}
+
+fn math_binary_overload_primitive(args: Option<&[Expr]>, types: &TypeEnv) -> PrimitiveType {
+    let Some([left, right]) = args else {
+        return PrimitiveType::Int;
+    };
+    numeric_binary_overload_primitive(
+        expr_numeric_primitive(left, types),
+        expr_numeric_primitive(right, types),
+        PrimitiveType::Int,
+    )
+}
+
+fn math_unary_overload_primitive(
+    args: Option<&[Expr]>,
+    types: &TypeEnv,
+    default: PrimitiveType,
+) -> PrimitiveType {
+    let Some([arg]) = args else {
+        return default;
+    };
+    expr_numeric_primitive(arg, types).unwrap_or(default)
+}
+
+fn expr_numeric_primitive(expr: &Expr, types: &TypeEnv) -> Option<PrimitiveType> {
+    let JavaType::Primitive(primitive) = infer_expr_type(expr, types) else {
+        return None;
+    };
+    Some(primitive)
+}
+
+fn numeric_binary_overload_primitive(
+    left: Option<PrimitiveType>,
+    right: Option<PrimitiveType>,
+    default: PrimitiveType,
+) -> PrimitiveType {
+    use PrimitiveType::*;
+    match std::cmp::max(primitive_numeric_rank(left), primitive_numeric_rank(right)) {
+        5 => Double,
+        4 => Float,
+        3 => Long,
+        2 => Int,
+        _ => default,
+    }
+}
+
+fn primitive_numeric_rank(primitive: Option<PrimitiveType>) -> u8 {
+    use PrimitiveType::*;
+    match primitive {
+        Some(Double) => 5,
+        Some(Float) => 4,
+        Some(Long) => 3,
+        Some(Int | Short | Byte | Char) => 2,
+        _ => 0,
+    }
 }
 
 fn plan_java_class_static_call<'a>(

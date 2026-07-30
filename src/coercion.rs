@@ -1912,8 +1912,24 @@ pub fn primitive_f64_method_projection(arg: RustExpr, method: &str) -> RustExpr 
     RustExpr::Raw(format!("({} as f64).{method}()", emit::emit_expr(&arg)))
 }
 
-pub fn math_round_projection(arg: RustExpr) -> RustExpr {
-    RustExpr::Raw(format!("({} as f64).round() as i64", emit::emit_expr(&arg)))
+pub fn math_round_projection(arg: RustExpr, source: PrimitiveType) -> RustExpr {
+    let rendered = emit::emit_expr(&arg);
+    match source {
+        PrimitiveType::Float => RustExpr::Raw(format!("java_math_round_f32({rendered})")),
+        PrimitiveType::Double => RustExpr::Raw(format!("java_math_round_f64({rendered})")),
+        _ => RustExpr::Raw(format!("java_math_round_f64({rendered} as f64)")),
+    }
+}
+
+pub fn math_abs_projection(arg: RustExpr, source: PrimitiveType) -> RustExpr {
+    let rendered = emit::emit_expr(&arg);
+    match source {
+        PrimitiveType::Long => RustExpr::Raw(format!("({rendered}).wrapping_abs()")),
+        PrimitiveType::Float | PrimitiveType::Double => {
+            RustExpr::Raw(format!("({rendered}).abs()"))
+        }
+        _ => RustExpr::Raw(format!("({rendered}).wrapping_abs()")),
+    }
 }
 
 pub fn math_floor_div_projection(left: RustExpr, right: RustExpr) -> RustExpr {
@@ -2094,17 +2110,41 @@ pub fn logical_not_projection(expr: RustExpr) -> RustExpr {
     RustExpr::Raw(format!("!({})", emit::emit_expr(&expr)))
 }
 
-pub fn math_max_projection(left: RustExpr, right: RustExpr) -> RustExpr {
-    RustExpr::Call {
-        function: Box::new(RustExpr::Raw("std::cmp::max".to_string())),
-        args: vec![left, right],
+pub fn math_max_projection(left: RustExpr, right: RustExpr, primitive: PrimitiveType) -> RustExpr {
+    match primitive {
+        PrimitiveType::Float => RustExpr::Raw(format!(
+            "java_math_max_f32({}, {})",
+            emit::emit_expr(&left),
+            emit::emit_expr(&right)
+        )),
+        PrimitiveType::Double => RustExpr::Raw(format!(
+            "java_math_max_f64({}, {})",
+            emit::emit_expr(&left),
+            emit::emit_expr(&right)
+        )),
+        _ => RustExpr::Call {
+            function: Box::new(RustExpr::Raw("std::cmp::max".to_string())),
+            args: vec![left, right],
+        },
     }
 }
 
-pub fn math_min_projection(left: RustExpr, right: RustExpr) -> RustExpr {
-    RustExpr::Call {
-        function: Box::new(RustExpr::Raw("std::cmp::min".to_string())),
-        args: vec![left, right],
+pub fn math_min_projection(left: RustExpr, right: RustExpr, primitive: PrimitiveType) -> RustExpr {
+    match primitive {
+        PrimitiveType::Float => RustExpr::Raw(format!(
+            "java_math_min_f32({}, {})",
+            emit::emit_expr(&left),
+            emit::emit_expr(&right)
+        )),
+        PrimitiveType::Double => RustExpr::Raw(format!(
+            "java_math_min_f64({}, {})",
+            emit::emit_expr(&left),
+            emit::emit_expr(&right)
+        )),
+        _ => RustExpr::Call {
+            function: Box::new(RustExpr::Raw("std::cmp::min".to_string())),
+            args: vec![left, right],
+        },
     }
 }
 
@@ -4727,6 +4767,7 @@ mod tests {
             emit::emit_expr(&math_max_projection(
                 RustExpr::Var("left".to_string()),
                 RustExpr::Var("right".to_string()),
+                PrimitiveType::Int,
             )),
             "std::cmp::max(left, right)"
         );
@@ -4734,6 +4775,7 @@ mod tests {
             emit::emit_expr(&math_min_projection(
                 RustExpr::Var("left".to_string()),
                 RustExpr::Var("right".to_string()),
+                PrimitiveType::Int,
             )),
             "std::cmp::min(left, right)"
         );

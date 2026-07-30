@@ -29,10 +29,12 @@ Keep the standing constraint: do not make algorithm changes that block future
 global semantic analysis. Prefer explicit keys, indices, compatibility shims,
 and divergence logs.
 
-When an audit item is genuinely done, move its `claude_audits/` issue file to
+Tracking rule: when an audit item is genuinely done, move its
+`claude_audits/` issue file to
 `/home/mahogny/github/claude/new_java2rust/claude_audits/done` as part of the
 same checkpoint. Do this only after the implementation and focused verification
-for that audit item are complete.
+for that audit item are complete, and mention the move in the checkpoint notes
+or commit summary.
 
 ## Next Batch: Measurement And Unsupported Safety
 
@@ -77,6 +79,11 @@ Landed in this batch:
 - `Math.floorDiv(int,int)` and `Math.floorMod(int,int)` now lower through
   explicit Java floor-semantics helpers instead of falling through to an
   undefined lowercase `math` receiver or Rust euclidean remainder semantics.
+- `Math.max`, `Math.min`, `Math.round`, and `Math.abs` now carry primitive
+  overload shape in `NativeJavaStaticMethod`, selected from argument types when
+  expression planning has them. Floating `max/min` and `round` lower through
+  Java-semantics helpers; integer `abs` preserves Java overflow behavior with
+  `wrapping_abs`.
 
 1. Add a generated-Rust parse gate to focused corpus scripts.
    - Report parse failures separately from type-check errors.
