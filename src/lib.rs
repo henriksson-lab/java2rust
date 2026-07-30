@@ -3,6 +3,7 @@ pub mod array_lowering;
 pub mod array_plan;
 pub mod call_lowering;
 pub mod call_plan;
+pub mod callable_analysis;
 pub mod coercion;
 pub mod constructor_plan;
 pub mod control_flow_lowering;

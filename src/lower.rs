@@ -30,6 +30,7 @@ use crate::call_plan::{
     plan_new_target_for_args_with_facts, resource_close_declares_result_with_external_index,
     retarget_static_call_to_receiver_if,
 };
+use crate::callable_analysis::CallableAnalysis;
 use crate::coercion::{
     BorrowProjectionUse, Coercion, JavaDisplayPlan, OptionalSequenceReceiverProjection,
     SequenceIterationProjection, abstract_interface_method_stub_projection,
@@ -220,6 +221,7 @@ struct LowerCtx<'a> {
     facts: &'a FactSet,
     external_index: &'a ExternalFactLookupIndex<'a>,
     usage: &'a UsageFacts,
+    callable_analysis: &'a CallableAnalysis<'a>,
     representations: &'a RepresentationPlan,
     signatures: &'a SignaturePlan,
     current_type: Option<&'a str>,
@@ -331,11 +333,14 @@ pub fn lower_program_with_semantic_plans_and_support_context(
         &mut diagnostics,
     );
     let exceptions = plan_program_exceptions(support_local_type_program, facts);
+    let call_graph = crate::usage::build_call_graph(support_local_type_program);
+    let callable_analysis = CallableAnalysis::new(usage, &call_graph, signatures, &exceptions);
     let ctx = LowerCtx {
         program,
         facts,
         external_index: &external_index,
         usage,
+        callable_analysis: &callable_analysis,
         representations,
         signatures,
         current_type: None,
@@ -16220,9 +16225,8 @@ fn current_callable_binding_use_count(name: &str, ctx: LowerCtx) -> Option<usize
             method_name: current_method.to_string(),
         };
         let exact_count = ctx
-            .usage
-            .methods
-            .get(&exact_key)
+            .callable_analysis
+            .method_usage(&exact_key)
             .and_then(|method| method.bindings.get(name))
             .map(|binding| binding.uses.len());
         let rust_base = crate::parser::to_snake_case(current_method);
@@ -16243,9 +16247,8 @@ fn current_callable_binding_use_count(name: &str, ctx: LowerCtx) -> Option<usize
     }
     if let Some(current_constructor) = ctx.current_constructor {
         return ctx
-            .usage
-            .constructors
-            .get(&UsageConstructorKey {
+            .callable_analysis
+            .constructor_usage(&UsageConstructorKey {
                 type_name: current_type.to_string(),
                 rust_name: current_constructor.to_string(),
             })
@@ -16289,9 +16292,8 @@ fn current_callable_binding_facts<'a>(
             method_name: current_method.to_string(),
         };
         if let Some(binding) = ctx
-            .usage
-            .methods
-            .get(&exact_key)
+            .callable_analysis
+            .method_usage(&exact_key)
             .and_then(|method| method.bindings.get(name))
         {
             return Some(binding);
@@ -16312,9 +16314,8 @@ fn current_callable_binding_facts<'a>(
     }
     if let Some(current_constructor) = ctx.current_constructor {
         return ctx
-            .usage
-            .constructors
-            .get(&UsageConstructorKey {
+            .callable_analysis
+            .constructor_usage(&UsageConstructorKey {
                 type_name: current_type.to_string(),
                 rust_name: current_constructor.to_string(),
             })

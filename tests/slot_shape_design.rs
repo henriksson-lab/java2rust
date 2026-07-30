@@ -3325,6 +3325,47 @@ fn object_representation_policy_is_the_dyn_fallback_entrypoint() {
 }
 
 #[test]
+fn callable_analysis_shell_reaches_lowering_context() {
+    let lib_source = include_str!("../src/lib.rs");
+    let analysis_source = include_str!("../src/callable_analysis.rs");
+    let lower_source = include_str!("../src/lower.rs");
+
+    assert!(lib_source.contains("pub mod callable_analysis;"));
+    assert!(analysis_source.contains("pub struct CallableAnalysis<'a>"));
+    assert!(analysis_source.contains("pub usage: &'a UsageFacts"));
+    assert!(analysis_source.contains("pub call_graph: &'a CallGraph"));
+    assert!(analysis_source.contains("pub signatures: &'a SignaturePlan"));
+    assert!(analysis_source.contains("pub exceptions: &'a ProgramExceptionPlan"));
+    assert!(analysis_source.contains("pub fn method_usage("));
+    assert!(analysis_source.contains("pub fn constructor_usage("));
+    assert!(lower_source.contains("callable_analysis: &'a CallableAnalysis<'a>"));
+    assert!(
+        lower_source.contains("let call_graph = crate::usage::build_call_graph")
+            && lower_source.contains("let callable_analysis = CallableAnalysis::new")
+    );
+    assert!(lower_source.contains(".callable_analysis\n            .method_usage(&exact_key)"));
+    assert!(
+        lower_source
+            .contains(".callable_analysis\n            .constructor_usage(&UsageConstructorKey")
+    );
+}
+
+#[test]
+fn callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating() {
+    let lower_source = include_str!("../src/lower.rs");
+
+    assert!(lower_source.contains("usage: &'a UsageFacts"));
+    assert!(lower_source.contains("signatures: &'a SignaturePlan"));
+    assert!(lower_source.contains("exceptions: &'a ProgramExceptionPlan"));
+    assert!(
+        lower_source.contains("CallableAnalysis::new(usage, &call_graph, signatures, &exceptions)")
+    );
+    assert!(lower_source.contains(
+        "lower_program_with_semantic_plans_and_support_context(\n    program: &Program,\n    mut diagnostics: DiagnosticBag,\n    facts: &FactSet,\n    usage: &UsageFacts,\n    representations: &RepresentationPlan,\n    signatures: &SignaturePlan,"
+    ));
+}
+
+#[test]
 fn representation_plan_uses_object_safety_facts_for_interface_fallback() {
     let parsed = parse_java_source(
         r#"
