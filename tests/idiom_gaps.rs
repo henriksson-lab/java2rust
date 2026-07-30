@@ -7447,7 +7447,9 @@ class FullyQualifiedJdkStaticConstantUse {
     );
 
     assert!(
-        translation.rust.contains("pub const GZIP_MAGIC: i32 = 0;")
+        translation
+            .rust
+            .contains("pub const GZIP_MAGIC: i32 = 0x8b1f;")
             && translation
                 .rust
                 .contains("return GZIPInputStream::GZIP_MAGIC == head;")
@@ -7458,12 +7460,23 @@ class FullyQualifiedJdkStaticConstantUse {
         translation.rust
     );
 
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "fully_qualified_jdk_static_constant_lowers_through_external_field_fact",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn gzip_magic_has_java_value() {
+        assert!(FullyQualifiedJdkStaticConstantUse::is_gzip(0x8b1f));
+        assert!(!FullyQualifiedJdkStaticConstantUse::is_gzip(0));
+    }
+}
+"#,
         }],
     );
 }
@@ -19649,6 +19662,14 @@ class StaticOwnerFieldNameCollision {
 
     StaticOwnerFieldNameCollision() {
     }
+
+    int plain() {
+        return Font.PLAIN;
+    }
+
+    int boldItalic() {
+        return Font.BOLD + Font.ITALIC;
+    }
 }
 "#,
     );
@@ -19656,18 +19677,33 @@ class StaticOwnerFieldNameCollision {
     assert!(
         translation.rust.contains("color: Some(Color::BLACK")
             && translation.rust.contains("Font::PLAIN")
+            && translation.rust.contains("pub const PLAIN: i32 = 0;")
+            && translation.rust.contains("pub const BOLD: i32 = 1;")
+            && translation.rust.contains("pub const ITALIC: i32 = 2;")
             && !translation.rust.contains("self.color")
             && !translation.rust.contains("self.font"),
         "{}",
         translation.rust
     );
 
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "static_owner_field_name_collision",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn font_style_constants_have_java_values() {
+        let fixture = StaticOwnerFieldNameCollision::new();
+        assert_eq!(fixture.plain(), 0);
+        assert_eq!(fixture.bold_italic(), 3);
+    }
+}
+"#,
         }],
     );
 }
