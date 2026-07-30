@@ -94,6 +94,17 @@ pub struct MethodUsageFacts {
     pub mutates_self: bool,
 }
 
+impl UsageFacts {
+    pub fn source_method_usage(
+        &self,
+        ty: &TypeDecl,
+        method: &crate::java_ir::MethodDecl,
+    ) -> Option<&MethodUsageFacts> {
+        self.methods_by_java_key
+            .get(&JavaCallableKey::source_method(ty.name.clone(), method))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BindingUseFacts {
     pub name: String,

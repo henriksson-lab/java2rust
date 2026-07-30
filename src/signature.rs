@@ -6081,10 +6081,7 @@ pub fn method_param_shape_constraints(
     usage: &UsageFacts,
     facts: &FactSet,
 ) -> Vec<SignatureConstraint> {
-    let method_usage = usage.methods.get(&UsageMethodKey {
-        type_name: ty.name.clone(),
-        method_name: method.name.clone(),
-    });
+    let method_usage = usage.source_method_usage(ty, method);
     let binding = method_usage.and_then(|method_usage| method_usage.bindings.get(&param.name));
     let field_receiver_mutated_names = method
         .body
@@ -7923,10 +7920,7 @@ fn collect_type_signature_constraints(
             }
             crate::java_ir::Member::Method(method) => {
                 let captured = captured_binding_names_for_method(facts, &ty.name, &method.name);
-                let method_usage = usage.methods.get(&UsageMethodKey {
-                    type_name: ty.name.clone(),
-                    method_name: method.name.clone(),
-                });
+                let method_usage = usage.source_method_usage(ty, method);
                 let param_names = method
                     .params
                     .iter()
@@ -11798,10 +11792,7 @@ pub fn method_return_shape_constraints(
             )],
         );
     }
-    let method_usage = usage.methods.get(&UsageMethodKey {
-        type_name: ty.name.clone(),
-        method_name: method.name.clone(),
-    });
+    let method_usage = usage.source_method_usage(ty, method);
     let returns_call_result =
         method_usage.is_some_and(|method_usage| !method_usage.returned_call_results.is_empty());
     let returns_unknown_call_result = method_usage.is_some_and(|method_usage| {
@@ -12283,10 +12274,7 @@ fn internal_returned_object_alias_borrow_constraints(
         .as_ref()
         .map(|body| exact_returned_var_names_from_stmts(&body.statements))
         .unwrap_or_default();
-    let Some(method_usage) = usage.methods.get(&UsageMethodKey {
-        type_name: ty.name.clone(),
-        method_name: method.name.clone(),
-    }) else {
+    let Some(method_usage) = usage.source_method_usage(ty, method) else {
         return Vec::new();
     };
     let returned_borrow_safe_alias = method_usage.bindings.values().any(|binding| {
@@ -12382,10 +12370,7 @@ pub fn external_call_return_method_return_constraints(
     facts: &FactSet,
 ) -> Vec<SignatureConstraint> {
     let mut constraints = Vec::new();
-    let Some(method_usage) = usage.methods.get(&UsageMethodKey {
-        type_name: ty.name.clone(),
-        method_name: method.name.clone(),
-    }) else {
+    let Some(method_usage) = usage.source_method_usage(ty, method) else {
         return constraints;
     };
     for returned in &method_usage.returned_call_results {
@@ -12422,10 +12407,7 @@ pub fn method_return_boundary_policy(
     if signature_member_api_boundary_policy(&method.modifiers).public_api {
         kind =
             merge_signature_boundary_kind_policy(kind, Some(SignatureBoundaryKind::PublicApi)).kept;
-    } else if let Some(method_usage) = usage.methods.get(&UsageMethodKey {
-        type_name: ty.name.clone(),
-        method_name: method.name.clone(),
-    }) {
+    } else if let Some(method_usage) = usage.source_method_usage(ty, method) {
         let returns_matching_anonymous_declared =
             method_returns_matching_anonymous_declared(method);
         let returns_unknown_call_result =

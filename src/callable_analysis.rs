@@ -54,7 +54,7 @@ impl<'a> CallableAnalysis<'a> {
         ty: &TypeDecl,
         method: &MethodDecl,
     ) -> Option<&'a MethodUsageFacts> {
-        self.method_usage_by_java_key(&JavaCallableKey::source_method(ty.name.clone(), method))
+        self.usage.source_method_usage(ty, method)
     }
 
     pub fn method_signature_for_source_method(

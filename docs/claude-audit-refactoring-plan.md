@@ -147,6 +147,10 @@ Landed in this batch:
 - The lower-local call exception-propagation wrapper now asks source-call
   fallibility through the shared analysis before delegating to legacy
   external/unresolved call planning.
+- Source-method usage lookups used by signature solving now read
+  `UsageFacts::source_method_usage`, backed by `JavaCallableKey`, for concrete
+  method declarations. This prevents same-name overloads from sharing
+  name-keyed usage facts while broader compatibility maps are still present.
 
 1. Add a `CallableAnalysis` shell.
    - Introduce `src/callable_analysis.rs`.

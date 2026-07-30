@@ -204,6 +204,78 @@ fn analyze(source: &str) -> semantic_analysis::SemanticFacts {
 }
 
 #[test]
+fn source_method_usage_is_keyed_by_erased_overload_signature() {
+    let source = r#"
+class OverloadedUsageKey {
+    void sink(String value) {
+    }
+
+    String choose(int value) {
+        return "i";
+    }
+
+    String choose(String value) {
+        sink(value);
+        return value;
+    }
+}
+"#;
+    let parsed = parser::parse_java_source(source);
+    let ty = parsed
+        .program
+        .types
+        .iter()
+        .find(|ty| ty.name == "OverloadedUsageKey")
+        .unwrap();
+    let methods = ty
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            new_java2rust::java_ir::Member::Method(method) if method.name == "choose" => {
+                Some(method)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let int_method = methods
+        .iter()
+        .copied()
+        .find(|method| matches!(method.params[0].ty, JavaType::Primitive(PrimitiveType::Int)))
+        .unwrap();
+    let string_method = methods
+        .iter()
+        .copied()
+        .find(|method| matches!(method.params[0].ty, JavaType::String))
+        .unwrap();
+
+    let semantic = analyze(source);
+    let int_usage = semantic
+        .usage
+        .source_method_usage(ty, int_method)
+        .expect("int overload usage should be keyed by Java signature");
+    let string_usage = semantic
+        .usage
+        .source_method_usage(ty, string_method)
+        .expect("string overload usage should be keyed by Java signature");
+
+    let int_value = int_usage.bindings.get("value").unwrap();
+    let string_value = string_usage.bindings.get("value").unwrap();
+    assert!(
+        int_value
+            .uses
+            .iter()
+            .all(|use_fact| !matches!(use_fact, BindingUse::PassedToCall { .. })),
+        "{int_value:?}"
+    );
+    assert!(
+        string_value.uses.iter().any(
+            |use_fact| matches!(use_fact, BindingUse::PassedToCall { name, .. } if name == "sink")
+        ),
+        "{string_value:?}"
+    );
+}
+
+#[test]
 fn known_unchecked_exception_fact_beats_parsed_unknown_exception_fact() {
     let semantic = analyze(
         r#"
