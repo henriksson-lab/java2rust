@@ -1709,7 +1709,8 @@ fn expr_uses_zero_arg_constructor_for_type(expr: &Expr, type_name: &str) -> bool
         | Expr::Super
         | Expr::MethodReference { .. }
         | Expr::ClassLiteral(_)
-        | Expr::Raw(_) => false,
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => false,
     }
 }
 
@@ -2086,7 +2087,8 @@ fn constructor_expr_needs_self_temporary(expr: &Expr, env: &ShapeEnv, ctx: Lower
         Expr::Lambda { .. }
         | Expr::MethodReference { .. }
         | Expr::ClassLiteral(_)
-        | Expr::Raw(_) => false,
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => false,
     }
 }
 
@@ -3638,7 +3640,8 @@ fn substitute_expr_vars(expr: &Expr, bindings: &[(&str, &Expr)]) -> Expr {
         | Expr::Lambda { .. }
         | Expr::MethodReference { .. }
         | Expr::ClassLiteral(_)
-        | Expr::Raw(_) => expr.clone(),
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => expr.clone(),
     }
 }
 
@@ -7872,7 +7875,8 @@ fn collect_expr_assigned_names(expr: &Expr, names: &mut std::collections::HashSe
         | Expr::This
         | Expr::Super
         | Expr::ClassLiteral(_)
-        | Expr::Raw(_) => {}
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => {}
     }
 }
 
@@ -8102,7 +8106,8 @@ fn collect_expr_read_counts(expr: &Expr, counts: &mut HashMap<String, usize>) {
         | Expr::This
         | Expr::Super
         | Expr::ClassLiteral(_)
-        | Expr::Raw(_) => {}
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => {}
     }
 }
 
@@ -8288,7 +8293,8 @@ fn collect_expr_read_names(expr: &Expr, names: &mut std::collections::HashSet<St
         | Expr::This
         | Expr::Super
         | Expr::ClassLiteral(_)
-        | Expr::Raw(_) => {}
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => {}
     }
 }
 
@@ -8634,9 +8640,11 @@ fn expr_reads_self(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> bool {
                 .iter()
                 .any(|stmt| stmt_reads_self(stmt, env, ctx)),
         },
-        Expr::Literal(_) | Expr::ClassLiteral(_) | Expr::MethodReference { .. } | Expr::Raw(_) => {
-            false
-        }
+        Expr::Literal(_)
+        | Expr::ClassLiteral(_)
+        | Expr::MethodReference { .. }
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => false,
     }
 }
 
@@ -9876,7 +9884,7 @@ fn lower_expr_with_refinements(
             )
         }
         Expr::ClassLiteral(ty) => apply_class_literal_token(ty, ctx.facts),
-        Expr::Lambda { .. } | Expr::MethodReference { .. } => {
+        Expr::Lambda { .. } | Expr::MethodReference { .. } | Expr::Unsupported { .. } => {
             unreachable!(
                 "unsupported expression kinds should be handled before expression lowering"
             )
@@ -12608,7 +12616,9 @@ fn expr_reads_local_name(expr: &Expr, name: &str) -> bool {
             expr_reads_local_name(expr, name)
         }
         Expr::Lambda { .. } | Expr::MethodReference { .. } | Expr::ClassLiteral(_) => false,
-        Expr::Literal(_) | Expr::This | Expr::Super | Expr::Raw(_) => false,
+        Expr::Literal(_) | Expr::This | Expr::Super | Expr::Raw(_) | Expr::Unsupported { .. } => {
+            false
+        }
     }
 }
 

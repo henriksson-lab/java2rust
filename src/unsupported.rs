@@ -21,6 +21,7 @@ pub enum UnsupportedStatementLowering {
 pub enum UnsupportedExpressionLowering {
     Lambda,
     MethodReference,
+    ParserUnsupported(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +78,9 @@ pub fn plan_unsupported_expression(expr: &Expr) -> Option<UnsupportedExpressionL
     match expr {
         Expr::Lambda { .. } => Some(UnsupportedExpressionLowering::Lambda),
         Expr::MethodReference { .. } => Some(UnsupportedExpressionLowering::MethodReference),
+        Expr::Unsupported { reason, .. } => Some(UnsupportedExpressionLowering::ParserUnsupported(
+            reason.clone(),
+        )),
         _ => None,
     }
 }
@@ -205,6 +209,9 @@ fn expression_message(kind: UnsupportedExpressionLowering) -> String {
         UnsupportedExpressionLowering::Lambda => "unsupported Java expression: lambda".to_string(),
         UnsupportedExpressionLowering::MethodReference => {
             "unsupported Java expression: method reference".to_string()
+        }
+        UnsupportedExpressionLowering::ParserUnsupported(reason) => {
+            format!("unsupported Java expression: {reason}")
         }
     }
 }

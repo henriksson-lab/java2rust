@@ -293,6 +293,10 @@ pub enum Expr {
         method: String,
     },
     ClassLiteral(JavaType),
+    Unsupported {
+        reason: String,
+        span: Span,
+    },
     Raw(String),
 }
 

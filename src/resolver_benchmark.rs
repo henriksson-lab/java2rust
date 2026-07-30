@@ -1021,7 +1021,8 @@ fn collect_anonymous_constructor_target_names_for_expr(
         | Expr::Super
         | Expr::MethodReference { .. }
         | Expr::ClassLiteral(_)
-        | Expr::Raw(_) => {}
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => {}
     }
 }
 
@@ -4077,7 +4078,8 @@ fn collect_expr_source_dependency_resolution_counts(
         | Expr::Super
         | Expr::MethodReference { .. }
         | Expr::ClassLiteral(_)
-        | Expr::Raw(_) => {}
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => {}
     }
 }
 
@@ -6666,7 +6668,8 @@ fn collect_source_expr_type_names(expr: &Expr, names: &mut HashSet<String>) {
         | Expr::Super
         | Expr::MethodReference { .. }
         | Expr::ClassLiteral(_)
-        | Expr::Raw(_) => {}
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => {}
     }
 }
 

@@ -23095,6 +23095,36 @@ class StaticInitializerUnsupportedDiagnostic {
 }
 
 #[test]
+fn unsupported_switch_expression_lowers_to_parse_safe_compile_error() {
+    let translation = translate_source(
+        r#"
+class UnsupportedSwitchExpressionDiagnostic {
+    int run(int value) {
+        int mapped = switch (value) {
+            case 1 -> 10;
+            default -> 0;
+        };
+        return mapped;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "compile_error!(\"unsupported Java expression: unsupported expression node: switch_expression\")"
+        ),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("switch (value)"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn nested_static_table_field_type_guides_static_overload_selection() {
     let translation = translate_source(
         r#"

@@ -485,6 +485,58 @@ class StaticInitializerUnsupportedMember {
     );
 }
 
+#[test]
+fn unknown_named_block_statement_surfaces_as_unsupported_statement() {
+    let parsed = parse_java_source(
+        r#"
+class AssertStatementUnsupported {
+    void run(int value) {
+        assert value > 0 : "positive";
+    }
+}
+"#,
+    );
+    let fallbacks = collect_program_fallbacks(&parsed.program);
+
+    assert!(
+        fallbacks
+            .iter()
+            .any(|fallback| fallback.contains("assert_statement")),
+        "{fallbacks:?}"
+    );
+}
+
+#[test]
+fn switch_expression_surfaces_as_unsupported_expression_not_raw_java() {
+    let parsed = parse_java_source(
+        r#"
+class SwitchExpressionUnsupported {
+    int run(int value) {
+        int mapped = switch (value) {
+            case 1 -> 10;
+            default -> 0;
+        };
+        return mapped;
+    }
+}
+"#,
+    );
+    let fallbacks = collect_program_fallbacks(&parsed.program);
+
+    assert!(
+        fallbacks
+            .iter()
+            .any(|fallback| fallback.contains("unsupported expression node: switch_expression")),
+        "{fallbacks:?}"
+    );
+    assert!(
+        !fallbacks
+            .iter()
+            .any(|fallback| fallback.contains("expr raw: switch")),
+        "{fallbacks:?}"
+    );
+}
+
 fn method_body<'a>(
     ty: &'a new_java2rust::java_ir::TypeDecl,
     rust_name: &str,
@@ -654,6 +706,7 @@ fn collect_stmt_fallbacks(stmt: &Stmt, out: &mut Vec<String>) {
 fn collect_expr_fallbacks(expr: &Expr, out: &mut Vec<String>) {
     match expr {
         Expr::Raw(raw) => out.push(format!("expr raw: {raw}")),
+        Expr::Unsupported { reason, .. } => out.push(format!("expr unsupported: {reason}")),
         Expr::FieldAccess(receiver, _) => collect_expr_fallbacks(receiver, out),
         Expr::ArrayAccess(array, index) => {
             collect_expr_fallbacks(array, out);

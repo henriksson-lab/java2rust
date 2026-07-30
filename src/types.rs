@@ -214,6 +214,7 @@ pub fn infer_expr_type(expr: &Expr, env: &TypeEnv) -> JavaType {
         Expr::Lambda { .. } => JavaType::Unknown("lambda".to_string()),
         Expr::MethodReference { .. } => JavaType::Unknown("method_reference".to_string()),
         Expr::ClassLiteral(ty) => class_literal_type(ty),
+        Expr::Unsupported { reason, .. } => JavaType::Unknown(reason.clone()),
         Expr::Raw(raw) => JavaType::Unknown(raw.clone()),
     }
 }

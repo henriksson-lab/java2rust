@@ -672,7 +672,8 @@ fn collect_anonymous_class_diagnostics_for_expr(
         | Expr::Super
         | Expr::MethodReference { .. }
         | Expr::ClassLiteral(_)
-        | Expr::Raw(_) => {}
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => {}
     }
 }
 
@@ -967,7 +968,8 @@ fn collect_anonymous_erased_boundary_type_names_for_expr(
         | Expr::Super
         | Expr::MethodReference { .. }
         | Expr::ClassLiteral(_)
-        | Expr::Raw(_) => {}
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => {}
     }
 }
 

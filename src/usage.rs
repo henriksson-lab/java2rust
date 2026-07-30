@@ -741,7 +741,8 @@ fn collect_call_graph_edges_from_expr(
         | Expr::Super
         | Expr::MethodReference { .. }
         | Expr::ClassLiteral(_)
-        | Expr::Raw(_) => {}
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => {}
     }
 }
 
@@ -1865,7 +1866,8 @@ fn analyze_expr_with_context(
         | Expr::Super
         | Expr::MethodReference { .. }
         | Expr::ClassLiteral(_)
-        | Expr::Raw(_) => {}
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => {}
     }
 }
 

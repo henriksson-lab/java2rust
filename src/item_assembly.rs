@@ -1614,7 +1614,8 @@ fn collect_mutable_array_target_params_in_expr(expr: &Expr, names: &mut HashSet<
         | Expr::This
         | Expr::Super
         | Expr::ClassLiteral(_)
-        | Expr::Raw(_) => {}
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => {}
     }
 }
 
@@ -1907,7 +1908,8 @@ fn scan_expr_for_callback_param(
         | Expr::Super
         | Expr::MethodReference { .. }
         | Expr::ClassLiteral(_)
-        | Expr::Raw(_) => {}
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => {}
     }
 }
 

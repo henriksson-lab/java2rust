@@ -875,7 +875,8 @@ fn collect_expr_type_names(expr: &Expr, names: &mut HashSet<String>) {
         | Expr::Super
         | Expr::MethodReference { .. }
         | Expr::ClassLiteral(_)
-        | Expr::Raw(_) => {}
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => {}
     }
 }
 
@@ -1680,7 +1681,8 @@ fn walk_expr_outside_lambdas(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
         | Expr::Super
         | Expr::MethodReference { .. }
         | Expr::ClassLiteral(_)
-        | Expr::Raw(_) => {}
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => {}
     }
 }
 
@@ -2887,7 +2889,8 @@ fn collect_thrown_exception_types_from_expr(
         | Expr::Super
         | Expr::ClassLiteral(_)
         | Expr::MethodReference { .. }
-        | Expr::Raw(_) => {}
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => {}
     }
 }
 
@@ -3372,7 +3375,8 @@ fn collect_dispatch_requirement_facts_from_expr(expr: &Expr, facts: &mut FactSet
         | Expr::Super
         | Expr::MethodReference { .. }
         | Expr::ClassLiteral(_)
-        | Expr::Raw(_) => {}
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => {}
     }
 }
 
@@ -5715,6 +5719,7 @@ fn walk_expr(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
         | Expr::Super
         | Expr::MethodReference { .. }
         | Expr::ClassLiteral(_)
-        | Expr::Raw(_) => {}
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => {}
     }
 }

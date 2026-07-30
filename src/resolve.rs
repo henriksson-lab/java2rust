@@ -547,7 +547,8 @@ fn qualify_nested_expr_types(expr: &mut Expr, direct_nested: &HashMap<String, St
         | Expr::This
         | Expr::Super
         | Expr::MethodReference { .. }
-        | Expr::Raw(_) => {}
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => {}
     }
 }
 
@@ -1204,7 +1205,8 @@ impl ProgramSymbols {
             | Expr::Super
             | Expr::MethodReference { .. }
             | Expr::ClassLiteral(_)
-            | Expr::Raw(_) => {}
+            | Expr::Raw(_)
+            | Expr::Unsupported { .. } => {}
         }
     }
 

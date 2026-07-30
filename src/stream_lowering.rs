@@ -1912,7 +1912,8 @@ fn collect_stream_expr_mutated_locals(
         | Expr::This
         | Expr::Super
         | Expr::ClassLiteral(_)
-        | Expr::Raw(_) => {}
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => {}
     }
 }
 

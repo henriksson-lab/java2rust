@@ -9019,7 +9019,8 @@ fn collect_binding_nullability_states_from_expr(
         | Expr::Super
         | Expr::MethodReference { .. }
         | Expr::ClassLiteral(_)
-        | Expr::Raw(_) => {}
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => {}
     }
 }
 
@@ -11046,7 +11047,8 @@ fn collect_facade_mut_borrow_argument_names_from_expr(
         | Expr::This
         | Expr::Super
         | Expr::ClassLiteral(_)
-        | Expr::Raw(_) => {}
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => {}
     }
 }
 
@@ -11258,7 +11260,8 @@ fn collect_field_receiver_mutated_names_from_expr(expr: &Expr, mutated: &mut Has
         | Expr::This
         | Expr::Super
         | Expr::ClassLiteral(_)
-        | Expr::Raw(_) => {}
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => {}
     }
 }
 
@@ -11441,7 +11444,8 @@ fn collect_array_element_mutated_names_from_expr(expr: &Expr, mutated: &mut Hash
         | Expr::This
         | Expr::Super
         | Expr::ClassLiteral(_)
-        | Expr::Raw(_) => {}
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => {}
     }
 }
 
@@ -11628,7 +11632,8 @@ fn collect_mutated_local_names_from_expr(expr: &Expr, mutated: &mut HashSet<Stri
         | Expr::This
         | Expr::Super
         | Expr::ClassLiteral(_)
-        | Expr::Raw(_) => {}
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => {}
     }
 }
 

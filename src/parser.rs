@@ -342,7 +342,12 @@ fn qualify_java_sql_stmt(stmt: &mut Stmt, imported: &JavaSqlImports) {
 
 fn qualify_java_sql_expr(expr: &mut Expr, imported: &JavaSqlImports) {
     match expr {
-        Expr::Literal(_) | Expr::Var(_) | Expr::This | Expr::Super | Expr::Raw(_) => {}
+        Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => {}
         Expr::FieldAccess(receiver, _) => qualify_java_sql_expr(receiver, imported),
         Expr::ArrayAccess(array, index) => {
             qualify_java_sql_expr(array, imported);
@@ -1241,6 +1246,10 @@ fn parse_block_like(
             | "explicit_constructor_invocation" => {
                 statements.extend(parse_stmt_nodes(child, source, diagnostics));
             }
+            _ if child.is_named() => statements.push(Stmt::Unsupported(format!(
+                "unsupported statement node: {}",
+                child.kind()
+            ))),
             _ => {}
         }
     }
@@ -1932,7 +1941,7 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
                     left: Box::new(left),
                     right: Box::new(right),
                 },
-                _ => Expr::Raw(text(node, source).to_string()),
+                _ => unsupported_expr_node(node, "malformed binary_expression"),
             }
         }
         "assignment_expression" => {
@@ -1951,7 +1960,7 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
                     left: Box::new(left.clone()),
                     right: Box::new(compound_assignment_value(op, left, right)),
                 },
-                _ => Expr::Raw(text(node, source).to_string()),
+                _ => unsupported_expr_node(node, "malformed assignment_expression"),
             }
         }
         "update_expression" => {
@@ -1985,7 +1994,7 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
             } else if raw.starts_with('+') {
                 UnaryOp::Pos
             } else {
-                return Expr::Raw(text(node, source).to_string());
+                return unsupported_expr_node(node, "unsupported unary_expression operator");
             };
             Expr::Unary {
                 op,
@@ -2047,7 +2056,9 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
             expr: Box::new(
                 node.child_by_field_name("value")
                     .map(|value| parse_expr_node(value, source))
-                    .unwrap_or_else(|| Expr::Raw(text(node, source).to_string())),
+                    .unwrap_or_else(|| {
+                        unsupported_expr_node(node, "cast_expression without value")
+                    }),
             ),
         },
         "instanceof_expression" => Expr::InstanceOf {
@@ -2068,7 +2079,17 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
                 .map(|ty| parse_type_node(ty, source))
                 .unwrap_or_else(|| JavaType::Unknown("class".to_string())),
         ),
-        _ => Expr::Raw(text(node, source).to_string()),
+        _ => unsupported_expr_node(
+            node,
+            &format!("unsupported expression node: {}", node.kind()),
+        ),
+    }
+}
+
+fn unsupported_expr_node(node: tree_sitter::Node, reason: &str) -> Expr {
+    Expr::Unsupported {
+        reason: reason.to_string(),
+        span: span(node),
     }
 }
 

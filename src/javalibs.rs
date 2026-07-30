@@ -571,7 +571,12 @@ fn expr_uses_broad_ioutils_facade(expr: &Expr) -> bool {
         }
         Expr::ClassLiteral(ty) => java_type_uses_broad_ioutils_facade(ty),
         Expr::MethodReference { target, .. } => is_broad_ioutils_type_name(target),
-        Expr::Literal(_) | Expr::Var(_) | Expr::This | Expr::Super | Expr::Raw(_) => false,
+        Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => false,
     }
 }
 

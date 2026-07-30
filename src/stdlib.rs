@@ -9935,7 +9935,8 @@ fn collect_expr_imported_static_owner_calls(
         | Expr::Super
         | Expr::MethodReference { .. }
         | Expr::ClassLiteral(_)
-        | Expr::Raw(_) => {}
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => {}
     }
 }
 
@@ -10366,7 +10367,8 @@ fn collect_expr_display_return_hints(
         | Expr::Super
         | Expr::MethodReference { .. }
         | Expr::ClassLiteral(_)
-        | Expr::Raw(_) => {}
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => {}
     }
 }
 
@@ -10701,7 +10703,8 @@ fn collect_expr_constructor_arities(
         | Expr::Super
         | Expr::MethodReference { .. }
         | Expr::ClassLiteral(_)
-        | Expr::Raw(_) => {}
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => {}
     }
 }
 
@@ -10947,7 +10950,8 @@ fn collect_expr_call_arities(expr: &Expr, calls: &mut BTreeMap<String, BTreeSet<
         | Expr::This
         | Expr::Super
         | Expr::ClassLiteral(_)
-        | Expr::Raw(_) => {}
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => {}
     }
 }
 
@@ -13599,7 +13603,8 @@ fn collect_external_static_string_constants_expr(
         | Expr::Super
         | Expr::MethodReference { .. }
         | Expr::ClassLiteral(_)
-        | Expr::Raw(_) => {}
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => {}
     }
 }
 
@@ -14382,7 +14387,8 @@ fn expr_uses_java_platform_facades(expr: &Expr) -> bool {
         | Expr::Var(_)
         | Expr::This
         | Expr::Super
-        | Expr::Raw(_) => false,
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => false,
     }
 }
 
@@ -14746,7 +14752,8 @@ fn expr_uses_java_erased_object_runtime_support(expr: &Expr) -> bool {
         | Expr::This
         | Expr::Super
         | Expr::Raw(_)
-        | Expr::MethodReference { .. } => false,
+        | Expr::MethodReference { .. }
+        | Expr::Unsupported { .. } => false,
     }
 }
 
@@ -14943,7 +14950,8 @@ fn expr_uses_java_string_format(expr: &Expr) -> bool {
         | Expr::This
         | Expr::Super
         | Expr::Raw(_)
-        | Expr::MethodReference { .. } => false,
+        | Expr::MethodReference { .. }
+        | Expr::Unsupported { .. } => false,
     }
 }
 
@@ -15171,7 +15179,8 @@ fn expr_uses_java_string_runtime_helpers(expr: &Expr) -> bool {
         | Expr::This
         | Expr::Super
         | Expr::Raw(_)
-        | Expr::MethodReference { .. } => false,
+        | Expr::MethodReference { .. }
+        | Expr::Unsupported { .. } => false,
     }
 }
 
@@ -15333,7 +15342,8 @@ fn expr_uses_java_string_split(expr: &Expr) -> bool {
         | Expr::This
         | Expr::Super
         | Expr::Raw(_)
-        | Expr::MethodReference { .. } => false,
+        | Expr::MethodReference { .. }
+        | Expr::Unsupported { .. } => false,
     }
 }
 
@@ -15497,7 +15507,8 @@ fn expr_uses_java_class_tokens(expr: &Expr) -> bool {
         | Expr::Var(_)
         | Expr::This
         | Expr::Super
-        | Expr::Raw(_) => false,
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => false,
     }
 }
 
