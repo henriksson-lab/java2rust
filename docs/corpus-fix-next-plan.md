@@ -6537,15 +6537,23 @@ Reduced VCF reruns:
   callable-key/staticness gap: `ExternalApiEffectFact::callable_key` still uses
   `Staticness::Unknown`, and support generation treats the method as an
   instance surface.
+- `.tmp/corpus-rerun-20260730-vcf-standard-bound-after-super-prefix-env`:
+  9 files, 29.258s, 22 generated-Rust errors. `javalibs` now marks
+  `VCFHeaderLineTranslator.parseLine` as a static facade method, and source-super
+  field lowering reuses the environment learned while emitting superclass local
+  prefixes. The generated format/info parsing constructors now render
+  `VCFHeaderLineTranslator::parse_line(...)` and recover owned optional map
+  values as `mapping.get(...).cloned()`.
 
 Remaining top reduced-VCF clusters after this follow-up:
 10 mismatched types, 3 possibly-uninitialized `number`, 3 type annotations
-needed, 2 missing `v_c_f_header_line_translator`, 2 unsupported concrete
-`instanceof`, 2 unsupported `super(...)` inheritance constructor calls, and one
-`VCFHeader: Default` bound from erased return adaptation. The next reduced-VCF
-target should fix static utility callable identity/staticness for
-`VCFHeaderLineTranslator.parseLine` or tackle concrete `instanceof`; the old
-missing-super-local `mapping` bucket is closed.
+needed, 2 unsupported concrete `instanceof`, 2 unsupported `super(...)`
+inheritance constructor calls, and one `VCFHeader: Default` bound from erased
+return adaptation. The old missing-super-local `mapping` bucket and the
+`v_c_f_header_line_translator` static-owner bucket are closed. The next
+reduced-VCF target should tackle concrete `instanceof`, the constructor
+overload/field-shape mismatch where `VCFHeaderLineCount` flows into `count:
+i32`, or the `number` definite-assignment gap.
 
 ## Rerun Protocol
 

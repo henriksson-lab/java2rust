@@ -2859,7 +2859,8 @@ fn source_super_constructor_fields_and_trailing<'a>(
         .iter()
         .map(|(name, expr)| (name.as_str(), expr))
         .collect::<Vec<_>>();
-    let super_prefix = source_super_constructor_local_prefix(super_body, &super_bindings, env, ctx);
+    let (super_prefix, super_env) =
+        source_super_constructor_local_prefix(super_body, &super_bindings, env, ctx);
 
     let inherited_field_names = crate::inherited_members::inherited_instance_fields_for_type(
         ty,
@@ -2903,8 +2904,12 @@ fn source_super_constructor_fields_and_trailing<'a>(
             match constructor_field_value_expr(&plan) {
                 Some(value) => {
                     let substituted = substitute_expr_vars(value, &super_bindings);
-                    let lowered =
-                        lower_constructor_field_value_expr_for_shape(&substituted, shape, env, ctx);
+                    let lowered = lower_constructor_field_value_expr_for_shape(
+                        &substituted,
+                        shape,
+                        &super_env,
+                        ctx,
+                    );
                     recover_reused_super_constructor_local_for_field(
                         lowered,
                         &substituted,
@@ -3038,14 +3043,14 @@ fn source_super_constructor_local_prefix(
     super_bindings: &[(&str, &Expr)],
     env: &ShapeEnv,
     ctx: LowerCtx,
-) -> Vec<RustStmt> {
+) -> (Vec<RustStmt>, ShapeEnv) {
     let local_names = constructor_body_local_decl_names(super_body);
     let Some(first_local_dependent_assignment) = super_body
         .statements
         .iter()
         .position(|stmt| constructor_field_assignment_reads_local(stmt, &local_names))
     else {
-        return Vec::new();
+        return (Vec::new(), env.clone());
     };
     let mut local_env = env.clone();
     let mut lowered = Vec::new();
@@ -3063,7 +3068,7 @@ fn source_super_constructor_local_prefix(
             &mut lowered,
         );
     }
-    lowered
+    (lowered, local_env)
 }
 
 fn constructor_field_assignment_reads_local(stmt: &Stmt, local_names: &HashSet<String>) -> bool {

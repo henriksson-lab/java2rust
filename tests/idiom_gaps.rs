@@ -10662,6 +10662,31 @@ class HeaderChild extends HeaderBase {
 }
 
 #[test]
+fn external_pack_static_utility_call_uses_static_owner() {
+    let translation = translate_source(
+        r#"
+class ExternalPackStaticUtilityUse {
+    Map<String, String> parse(VCFHeaderVersion version, String line, List<String> expected, List<String> recommended) {
+        return VCFHeaderLineTranslator.parseLine(version, line, expected, recommended);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("VCFHeaderLineTranslator::parse_line(")
+            && !translation
+                .rust
+                .contains("v_c_f_header_line_translator.parse_line")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn constructor_trailing_instance_call_rewrites_self_arguments() {
     let translation = translate_source(&idiom_gap("ConstructorTrailingCallReadsSeededField.java"));
 
