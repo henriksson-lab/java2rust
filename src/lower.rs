@@ -1698,6 +1698,18 @@ fn expr_uses_zero_arg_constructor_for_type(expr: &Expr, type_name: &str) -> bool
                 || expr_uses_zero_arg_constructor_for_type(then_expr, type_name)
                 || expr_uses_zero_arg_constructor_for_type(else_expr, type_name)
         }
+        Expr::Switch { selector, cases } => {
+            expr_uses_zero_arg_constructor_for_type(selector, type_name)
+                || cases.iter().any(|case| {
+                    case.labels.iter().any(|label| {
+                        matches!(
+                            label,
+                            SwitchLabel::Expr(expr)
+                                if expr_uses_zero_arg_constructor_for_type(expr, type_name)
+                        )
+                    }) || expr_uses_zero_arg_constructor_for_type(&case.value, type_name)
+                })
+        }
         Expr::Call { receiver, args, .. } => {
             receiver.as_ref().is_some_and(|receiver| {
                 expr_uses_zero_arg_constructor_for_type(receiver, type_name)
@@ -2092,6 +2104,18 @@ fn constructor_expr_needs_self_temporary(expr: &Expr, env: &ShapeEnv, ctx: Lower
             constructor_expr_needs_self_temporary(condition, env, ctx)
                 || constructor_expr_needs_self_temporary(then_expr, env, ctx)
                 || constructor_expr_needs_self_temporary(else_expr, env, ctx)
+        }
+        Expr::Switch { selector, cases } => {
+            constructor_expr_needs_self_temporary(selector, env, ctx)
+                || cases.iter().any(|case| {
+                    case.labels.iter().any(|label| {
+                        matches!(
+                            label,
+                            SwitchLabel::Expr(expr)
+                                if constructor_expr_needs_self_temporary(expr, env, ctx)
+                        )
+                    }) || constructor_expr_needs_self_temporary(&case.value, env, ctx)
+                })
         }
         Expr::Lambda { .. }
         | Expr::MethodReference { .. }
@@ -3598,6 +3622,25 @@ fn substitute_expr_vars(expr: &Expr, bindings: &[(&str, &Expr)]) -> Expr {
             condition: Box::new(substitute_expr_vars(condition, bindings)),
             then_expr: Box::new(substitute_expr_vars(then_expr, bindings)),
             else_expr: Box::new(substitute_expr_vars(else_expr, bindings)),
+        },
+        Expr::Switch { selector, cases } => Expr::Switch {
+            selector: Box::new(substitute_expr_vars(selector, bindings)),
+            cases: cases
+                .iter()
+                .map(|case| SwitchExprCase {
+                    labels: case
+                        .labels
+                        .iter()
+                        .map(|label| match label {
+                            SwitchLabel::Expr(expr) => {
+                                SwitchLabel::Expr(substitute_expr_vars(expr, bindings))
+                            }
+                            SwitchLabel::Default => SwitchLabel::Default,
+                        })
+                        .collect(),
+                    value: substitute_expr_vars(&case.value, bindings),
+                })
+                .collect(),
         },
         Expr::Call {
             receiver,
@@ -6576,6 +6619,92 @@ fn lower_switch_assignment_value(
     wrap_optional_assignment_value_if_needed(value, env, assignment_slot, lowered, ctx)
 }
 
+fn lower_switch_expr(
+    selector: &Expr,
+    cases: &[SwitchExprCase],
+    env: &ShapeEnv,
+    slot: Option<Slot>,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> RustExpr {
+    let selector_ty = crate::types::infer_expr_type(selector, env.type_env());
+    let selector_shape = infer_expr_shape_with_context(
+        selector,
+        env,
+        ExprShapeContext {
+            signatures: Some(ctx.signatures),
+            representations: Some(ctx.representations),
+            facts: Some(ctx.facts),
+        },
+    );
+    let selector = lower_switch_match_selector(selector, env, ctx, &selector_ty);
+    let mut arms = Vec::new();
+    let mut default_value = None;
+
+    for case in cases {
+        let labels = switch_expr_case_labels(case);
+        let value = lower_switch_expr_value(&case.value, env, slot.as_ref(), ctx, refinements);
+        if labels
+            .iter()
+            .any(|label| matches!(label, SwitchCaseLabelPlan::Default))
+        {
+            default_value = Some(value.clone());
+        }
+        let patterns = labels
+            .iter()
+            .filter_map(|label| {
+                switch_match_pattern(label, env, ctx, &selector_ty, &selector_shape)
+            })
+            .collect::<Vec<_>>();
+        if !patterns.is_empty() {
+            arms.push((patterns, value));
+        }
+    }
+
+    let default_value = default_value.unwrap_or_else(|| {
+        crate::unsupported::compile_error_expr("unsupported Java switch expression without default")
+    });
+    let mut out = String::new();
+    out.push_str(&format!("match {} {{\n", crate::emit::emit_expr(&selector)));
+    for (patterns, value) in arms {
+        out.push_str(&format!(
+            "    {} => {},\n",
+            patterns.join(" | "),
+            crate::emit::emit_expr(&value)
+        ));
+    }
+    out.push_str(&format!(
+        "    _ => {},\n",
+        crate::emit::emit_expr(&default_value)
+    ));
+    out.push('}');
+    RustExpr::Raw(out)
+}
+
+fn switch_expr_case_labels(case: &SwitchExprCase) -> Vec<SwitchCaseLabelPlan> {
+    case.labels
+        .iter()
+        .map(|label| match label {
+            SwitchLabel::Expr(expr) => SwitchCaseLabelPlan::Expr(expr.clone()),
+            SwitchLabel::Default => SwitchCaseLabelPlan::Default,
+        })
+        .collect()
+}
+
+fn lower_switch_expr_value(
+    value: &Expr,
+    env: &ShapeEnv,
+    slot: Option<&Slot>,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> RustExpr {
+    if let Some(slot) = slot {
+        lower_expr_for_slot_with_refinements(value, env, slot.clone(), ctx, refinements)
+    } else {
+        lower_expr_with_refinements(value, env, ctx, refinements)
+    }
+}
+
 fn plan_switch_assignment(cases: &[SwitchCase]) -> Option<SwitchAssignmentPlan<'_>> {
     if cases.is_empty() {
         return None;
@@ -7838,6 +7967,17 @@ fn collect_expr_assigned_names(expr: &Expr, names: &mut std::collections::HashSe
             collect_expr_assigned_names(then_expr, names);
             collect_expr_assigned_names(else_expr, names);
         }
+        Expr::Switch { selector, cases } => {
+            collect_expr_assigned_names(selector, names);
+            for case in cases {
+                for label in &case.labels {
+                    if let SwitchLabel::Expr(expr) = label {
+                        collect_expr_assigned_names(expr, names);
+                    }
+                }
+                collect_expr_assigned_names(&case.value, names);
+            }
+        }
         Expr::Call {
             receiver,
             name,
@@ -8050,6 +8190,17 @@ fn collect_expr_read_counts(expr: &Expr, counts: &mut HashMap<String, usize>) {
             collect_expr_read_counts(then_expr, counts);
             collect_expr_read_counts(else_expr, counts);
         }
+        Expr::Switch { selector, cases } => {
+            collect_expr_read_counts(selector, counts);
+            for case in cases {
+                for label in &case.labels {
+                    if let SwitchLabel::Expr(expr) = label {
+                        collect_expr_read_counts(expr, counts);
+                    }
+                }
+                collect_expr_read_counts(&case.value, counts);
+            }
+        }
         Expr::Call { receiver, args, .. } => {
             if let Some(receiver) = receiver {
                 collect_expr_read_counts(receiver, counts);
@@ -8246,6 +8397,17 @@ fn collect_expr_read_names(expr: &Expr, names: &mut std::collections::HashSet<St
             collect_expr_read_names(condition, names);
             collect_expr_read_names(then_expr, names);
             collect_expr_read_names(else_expr, names);
+        }
+        Expr::Switch { selector, cases } => {
+            collect_expr_read_names(selector, names);
+            for case in cases {
+                for label in &case.labels {
+                    if let SwitchLabel::Expr(expr) = label {
+                        collect_expr_read_names(expr, names);
+                    }
+                }
+                collect_expr_read_names(&case.value, names);
+            }
         }
         Expr::Call { receiver, args, .. } => {
             if let Some(receiver) = receiver {
@@ -8633,6 +8795,17 @@ fn expr_reads_self(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> bool {
             expr_reads_self(condition, env, ctx)
                 || expr_reads_self(then_expr, env, ctx)
                 || expr_reads_self(else_expr, env, ctx)
+        }
+        Expr::Switch { selector, cases } => {
+            expr_reads_self(selector, env, ctx)
+                || cases.iter().any(|case| {
+                    case.labels.iter().any(|label| {
+                        matches!(
+                            label,
+                            SwitchLabel::Expr(expr) if expr_reads_self(expr, env, ctx)
+                        )
+                    }) || expr_reads_self(&case.value, env, ctx)
+                })
         }
         Expr::ArrayCreation {
             dimensions,
@@ -9314,6 +9487,9 @@ fn lower_expr_with_refinements(
     if let Expr::MethodReference { target, method } = expr {
         return render_method_reference(&plan_method_reference_with_shape_env(target, method, env));
     }
+    if let Expr::Switch { selector, cases } = expr {
+        return lower_switch_expr(selector, cases, env, None, ctx, refinements);
+    }
     if let Some(kind) = plan_unsupported_expression(expr) {
         return unsupported_expression_expr(kind);
     }
@@ -9900,6 +10076,9 @@ fn lower_expr_with_refinements(
             )
         }
         Expr::ClassLiteral(ty) => apply_class_literal_token(ty, ctx.facts),
+        Expr::Switch { selector, cases } => {
+            lower_switch_expr(selector, cases, env, None, ctx, refinements)
+        }
         Expr::Lambda { .. } | Expr::MethodReference { .. } | Expr::Unsupported { .. } => {
             unreachable!(
                 "unsupported expression kinds should be handled before expression lowering"
@@ -12620,6 +12799,17 @@ fn expr_reads_local_name(expr: &Expr, name: &str) -> bool {
             expr_reads_local_name(condition, name)
                 || expr_reads_local_name(then_expr, name)
                 || expr_reads_local_name(else_expr, name)
+        }
+        Expr::Switch { selector, cases } => {
+            expr_reads_local_name(selector, name)
+                || cases.iter().any(|case| {
+                    case.labels.iter().any(|label| {
+                        matches!(
+                            label,
+                            SwitchLabel::Expr(expr) if expr_reads_local_name(expr, name)
+                        )
+                    }) || expr_reads_local_name(&case.value, name)
+                })
         }
         Expr::Call { receiver, args, .. } => {
             receiver
@@ -17436,6 +17626,9 @@ fn lower_expr_for_slot_with_refinements(
     }
     if let Some(expr) = lower_literal_for_slot(expr, &slot) {
         return expr;
+    }
+    if let Expr::Switch { selector, cases } = expr {
+        return lower_switch_expr(selector, cases, env, Some(slot), ctx, refinements);
     }
     if let Some(expr) = lower_static_primitive_constant_for_slot(expr, env, &slot, ctx, refinements)
     {

@@ -62,6 +62,11 @@ Landed in this batch:
 - Parser-local Java expression fallbacks no longer construct `Expr::Raw` for
   invalid numeric literals, invalid hex floating literals, or expression-helper
   parse failures; these now surface as `Expr::Unsupported`.
+- Java switch expressions with simple arrow expression arms or colon/yield arms
+  now parse as expression IR and lower to Rust `match` expressions. Switch
+  expression selectors, labels, and arm values are traversed by type, usage,
+  resolution, semantic-analysis, signature, facade-support, and stream-support
+  visitors instead of becoming raw Java or disappearing from analysis.
 - Focused corpus summaries now emit all planned measurement keys:
   `parse_failures`, unsupported statement/member/expression counts,
   `unmodelled_types`, `unmodelled_call_sites`, and `noop_facade_methods`.
@@ -346,7 +351,7 @@ the fixes do not become more isolated rules.
 | `0016` no-op JDK facades | open | Core facade coverage |
 | `0017` generic bounds dropped | open | Typed type parsing and generics |
 | `0018` compile metric blind spots | partial | Parse gate and coverage counters |
-| `0019` raw Java expression fallback | partial | Raw fallback fixed; switch expressions still unsupported |
+| `0019` raw Java expression fallback | fixed locally | Moved to `claude_audits/done`; simple switch expressions now lower to Rust `match` |
 | `0020` text block processing | fixed locally | Moved to `claude_audits/done` |
 | `0021` instanceof pattern binding | open | BindingId and pattern lowering |
 | `0022` source-text type reparsing | open | Typed type parser |

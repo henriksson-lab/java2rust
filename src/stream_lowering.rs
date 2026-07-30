@@ -17,7 +17,7 @@ use crate::conversion_plan::{
 };
 use crate::expr_shape::{ExprShapeContext, ShapeEnv, infer_expr_shape_with_context};
 use crate::facts::{ExternalFactLookupIndex, FactSet, ReceiverMutabilityFact};
-use crate::java_ir::{BinaryOp, CallKind, Expr, JavaType, Literal, Stmt, UnaryOp};
+use crate::java_ir::{BinaryOp, CallKind, Expr, JavaType, Literal, Stmt, SwitchLabel, UnaryOp};
 use crate::literal_lowering::literal_to_rust;
 use crate::method_reference_shape::method_reference_receiver_type_for_call_plan_with_facts;
 use crate::operator_lowering::{binary_op_to_rust, stream_unary_prefix};
@@ -1856,6 +1856,17 @@ fn collect_stream_expr_mutated_locals(
             collect_stream_expr_mutated_locals(condition, mutated, ctx);
             collect_stream_expr_mutated_locals(then_expr, mutated, ctx);
             collect_stream_expr_mutated_locals(else_expr, mutated, ctx);
+        }
+        Expr::Switch { selector, cases } => {
+            collect_stream_expr_mutated_locals(selector, mutated, ctx);
+            for case in cases {
+                for label in &case.labels {
+                    if let SwitchLabel::Expr(expr) = label {
+                        collect_stream_expr_mutated_locals(expr, mutated, ctx);
+                    }
+                }
+                collect_stream_expr_mutated_locals(&case.value, mutated, ctx);
+            }
         }
         Expr::FieldAccess(receiver, _) => {
             collect_stream_expr_mutated_locals(receiver, mutated, ctx)

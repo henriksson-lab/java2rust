@@ -10,7 +10,7 @@ use crate::facts::{
 };
 use crate::java_ir::{
     BinaryOp, Block, Expr, FieldDecl, JavaType, Literal, Member, MethodDecl, Modifier,
-    PrimitiveType, Program, Stmt, TypeDecl, TypeKind, WildcardBound,
+    PrimitiveType, Program, Stmt, SwitchLabel, TypeDecl, TypeKind, WildcardBound,
 };
 use crate::shape_projection::{
     apply_borrowed_sequence_content_projection, apply_borrowed_string_content_projection,
@@ -10111,6 +10111,35 @@ fn collect_expr_imported_static_owner_calls(
                 calls,
             );
         }
+        Expr::Switch { selector, cases } => {
+            collect_expr_imported_static_owner_calls(
+                selector,
+                aliases,
+                static_members,
+                shadows,
+                calls,
+            );
+            for case in cases {
+                for label in &case.labels {
+                    if let SwitchLabel::Expr(expr) = label {
+                        collect_expr_imported_static_owner_calls(
+                            expr,
+                            aliases,
+                            static_members,
+                            shadows,
+                            calls,
+                        );
+                    }
+                }
+                collect_expr_imported_static_owner_calls(
+                    &case.value,
+                    aliases,
+                    static_members,
+                    shadows,
+                    calls,
+                );
+            }
+        }
         Expr::New { args, body, .. } => {
             for arg in args {
                 collect_expr_imported_static_owner_calls(
@@ -10585,6 +10614,17 @@ fn collect_expr_display_return_hints(
             collect_expr_display_return_hints(then_expr, ctx, hints);
             collect_expr_display_return_hints(else_expr, ctx, hints);
         }
+        Expr::Switch { selector, cases } => {
+            collect_expr_display_return_hints(selector, ctx, hints);
+            for case in cases {
+                for label in &case.labels {
+                    if let SwitchLabel::Expr(expr) = label {
+                        collect_expr_display_return_hints(expr, ctx, hints);
+                    }
+                }
+                collect_expr_display_return_hints(&case.value, ctx, hints);
+            }
+        }
         Expr::New { args, body, .. } => {
             for arg in args {
                 collect_expr_display_return_hints(arg, ctx, hints);
@@ -10950,6 +10990,17 @@ fn collect_expr_constructor_arities(
             collect_expr_constructor_arities(then_expr, constructors);
             collect_expr_constructor_arities(else_expr, constructors);
         }
+        Expr::Switch { selector, cases } => {
+            collect_expr_constructor_arities(selector, constructors);
+            for case in cases {
+                for label in &case.labels {
+                    if let SwitchLabel::Expr(expr) = label {
+                        collect_expr_constructor_arities(expr, constructors);
+                    }
+                }
+                collect_expr_constructor_arities(&case.value, constructors);
+            }
+        }
         Expr::Lambda { body, .. } => match body {
             crate::java_ir::LambdaBody::Expr(expr) => {
                 collect_expr_constructor_arities(expr, constructors)
@@ -11169,6 +11220,17 @@ fn collect_expr_call_arities(expr: &Expr, calls: &mut BTreeMap<String, BTreeSet<
             collect_expr_call_arities(condition, calls);
             collect_expr_call_arities(then_expr, calls);
             collect_expr_call_arities(else_expr, calls);
+        }
+        Expr::Switch { selector, cases } => {
+            collect_expr_call_arities(selector, calls);
+            for case in cases {
+                for label in &case.labels {
+                    if let SwitchLabel::Expr(expr) = label {
+                        collect_expr_call_arities(expr, calls);
+                    }
+                }
+                collect_expr_call_arities(&case.value, calls);
+            }
         }
         Expr::New { args, body, .. } => {
             for arg in args {
@@ -13848,6 +13910,35 @@ fn collect_external_static_string_constants_expr(
                 constants_by_owner,
             );
         }
+        Expr::Switch { selector, cases } => {
+            collect_external_static_string_constants_expr(
+                selector,
+                facts,
+                local_types,
+                imported_owner_aliases,
+                constants_by_owner,
+            );
+            for case in cases {
+                for label in &case.labels {
+                    if let SwitchLabel::Expr(expr) = label {
+                        collect_external_static_string_constants_expr(
+                            expr,
+                            facts,
+                            local_types,
+                            imported_owner_aliases,
+                            constants_by_owner,
+                        );
+                    }
+                }
+                collect_external_static_string_constants_expr(
+                    &case.value,
+                    facts,
+                    local_types,
+                    imported_owner_aliases,
+                    constants_by_owner,
+                );
+            }
+        }
         Expr::Call { receiver, args, .. } => {
             if let Some(receiver) = receiver {
                 collect_external_static_string_constants_expr(
@@ -14775,6 +14866,17 @@ fn expr_uses_java_platform_facades(expr: &Expr) -> bool {
                 || expr_uses_java_platform_facades(then_expr)
                 || expr_uses_java_platform_facades(else_expr)
         }
+        Expr::Switch { selector, cases } => {
+            expr_uses_java_platform_facades(selector)
+                || cases.iter().any(|case| {
+                    case.labels.iter().any(|label| {
+                        matches!(
+                            label,
+                            SwitchLabel::Expr(expr) if expr_uses_java_platform_facades(expr)
+                        )
+                    }) || expr_uses_java_platform_facades(&case.value)
+                })
+        }
         Expr::InstanceOf { expr, ty } => {
             expr_uses_java_platform_facades(expr) || java_type_uses_java_platform_facade(ty)
         }
@@ -15133,6 +15235,18 @@ fn expr_uses_java_erased_object_runtime_support(expr: &Expr) -> bool {
                 || expr_uses_java_erased_object_runtime_support(then_expr)
                 || expr_uses_java_erased_object_runtime_support(else_expr)
         }
+        Expr::Switch { selector, cases } => {
+            expr_uses_java_erased_object_runtime_support(selector)
+                || cases.iter().any(|case| {
+                    case.labels.iter().any(|label| {
+                        matches!(
+                            label,
+                            SwitchLabel::Expr(expr)
+                                if expr_uses_java_erased_object_runtime_support(expr)
+                        )
+                    }) || expr_uses_java_erased_object_runtime_support(&case.value)
+                })
+        }
         Expr::InstanceOf { expr, ty } => {
             expr_uses_java_erased_object_runtime_support(expr)
                 || java_type_uses_java_erased_object_runtime_support(ty)
@@ -15341,6 +15455,17 @@ fn expr_uses_java_string_format(expr: &Expr) -> bool {
             expr_uses_java_string_format(condition)
                 || expr_uses_java_string_format(then_expr)
                 || expr_uses_java_string_format(else_expr)
+        }
+        Expr::Switch { selector, cases } => {
+            expr_uses_java_string_format(selector)
+                || cases.iter().any(|case| {
+                    case.labels.iter().any(|label| {
+                        matches!(
+                            label,
+                            SwitchLabel::Expr(expr) if expr_uses_java_string_format(expr)
+                        )
+                    }) || expr_uses_java_string_format(&case.value)
+                })
         }
         Expr::InstanceOf { expr, .. } => expr_uses_java_string_format(expr),
         Expr::Lambda { body, .. } => match body {
@@ -15578,6 +15703,18 @@ fn expr_uses_java_string_runtime_helpers(expr: &Expr) -> bool {
                 || expr_uses_java_string_runtime_helpers(then_expr)
                 || expr_uses_java_string_runtime_helpers(else_expr)
         }
+        Expr::Switch { selector, cases } => {
+            expr_uses_java_string_runtime_helpers(selector)
+                || cases.iter().any(|case| {
+                    case.labels.iter().any(|label| {
+                        matches!(
+                            label,
+                            SwitchLabel::Expr(expr)
+                                if expr_uses_java_string_runtime_helpers(expr)
+                        )
+                    }) || expr_uses_java_string_runtime_helpers(&case.value)
+                })
+        }
         Expr::InstanceOf { expr, .. } => expr_uses_java_string_runtime_helpers(expr),
         Expr::Lambda { body, .. } => match body {
             crate::java_ir::LambdaBody::Expr(expr) => expr_uses_java_string_runtime_helpers(expr),
@@ -15748,6 +15885,17 @@ fn expr_uses_java_string_split(expr: &Expr) -> bool {
                 || expr_uses_java_string_split(then_expr)
                 || expr_uses_java_string_split(else_expr)
         }
+        Expr::Switch { selector, cases } => {
+            expr_uses_java_string_split(selector)
+                || cases.iter().any(|case| {
+                    case.labels.iter().any(|label| {
+                        matches!(
+                            label,
+                            SwitchLabel::Expr(expr) if expr_uses_java_string_split(expr)
+                        )
+                    }) || expr_uses_java_string_split(&case.value)
+                })
+        }
         Expr::InstanceOf { expr, .. } => expr_uses_java_string_split(expr),
         Expr::Lambda { body, .. } => match body {
             crate::java_ir::LambdaBody::Expr(expr) => expr_uses_java_string_split(expr),
@@ -15901,6 +16049,17 @@ fn expr_uses_java_class_tokens(expr: &Expr) -> bool {
             expr_uses_java_class_tokens(condition)
                 || expr_uses_java_class_tokens(then_expr)
                 || expr_uses_java_class_tokens(else_expr)
+        }
+        Expr::Switch { selector, cases } => {
+            expr_uses_java_class_tokens(selector)
+                || cases.iter().any(|case| {
+                    case.labels.iter().any(|label| {
+                        matches!(
+                            label,
+                            SwitchLabel::Expr(expr) if expr_uses_java_class_tokens(expr)
+                        )
+                    }) || expr_uses_java_class_tokens(&case.value)
+                })
         }
         Expr::New { args, body, .. } => {
             args.iter().any(expr_uses_java_class_tokens)

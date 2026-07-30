@@ -1569,6 +1569,17 @@ fn collect_mutable_array_target_params_in_expr(expr: &Expr, names: &mut HashSet<
             collect_mutable_array_target_params_in_expr(then_expr, names);
             collect_mutable_array_target_params_in_expr(else_expr, names);
         }
+        Expr::Switch { selector, cases } => {
+            collect_mutable_array_target_params_in_expr(selector, names);
+            for case in cases {
+                for label in &case.labels {
+                    if let crate::java_ir::SwitchLabel::Expr(expr) = label {
+                        collect_mutable_array_target_params_in_expr(expr, names);
+                    }
+                }
+                collect_mutable_array_target_params_in_expr(&case.value, names);
+            }
+        }
         Expr::Call { receiver, args, .. } => {
             if let Some(receiver) = receiver {
                 collect_mutable_array_target_params_in_expr(receiver, names);
@@ -1852,6 +1863,17 @@ fn scan_expr_for_callback_param(
             scan_expr_for_callback_param(condition, param_name, saw_callback_call, escaped);
             scan_expr_for_callback_param(then_expr, param_name, saw_callback_call, escaped);
             scan_expr_for_callback_param(else_expr, param_name, saw_callback_call, escaped);
+        }
+        Expr::Switch { selector, cases } => {
+            scan_expr_for_callback_param(selector, param_name, saw_callback_call, escaped);
+            for case in cases {
+                for label in &case.labels {
+                    if let crate::java_ir::SwitchLabel::Expr(expr) = label {
+                        scan_expr_for_callback_param(expr, param_name, saw_callback_call, escaped);
+                    }
+                }
+                scan_expr_for_callback_param(&case.value, param_name, saw_callback_call, escaped);
+            }
         }
         Expr::Call { receiver, args, .. } => {
             if let Some(receiver) = receiver {

@@ -11,7 +11,7 @@ use crate::facts::{
 use crate::graph::strongly_connected_components;
 use crate::java_ir::{
     BinaryOp, Block, ConstructorDecl, Expr, FieldDecl, JavaType, LambdaBody, Literal, MethodDecl,
-    Modifier, Param, Program, Stmt, TypeDecl, TypeKind, UnaryOp,
+    Modifier, Param, Program, Stmt, SwitchLabel, TypeDecl, TypeKind, UnaryOp,
 };
 use crate::java_signature::JavaCallableKey;
 use crate::lattice::{
@@ -8967,6 +8967,17 @@ fn collect_binding_nullability_states_from_expr(
             collect_binding_nullability_states_from_expr(then_expr, states);
             collect_binding_nullability_states_from_expr(else_expr, states);
         }
+        Expr::Switch { selector, cases } => {
+            collect_binding_nullability_states_from_expr(selector, states);
+            for case in cases {
+                for label in &case.labels {
+                    if let SwitchLabel::Expr(expr) = label {
+                        collect_binding_nullability_states_from_expr(expr, states);
+                    }
+                }
+                collect_binding_nullability_states_from_expr(&case.value, states);
+            }
+        }
         Expr::Call { receiver, args, .. } => {
             if let Some(receiver) = receiver {
                 collect_binding_nullability_states_from_expr(receiver, states);
@@ -10994,6 +11005,32 @@ fn collect_facade_mut_borrow_argument_names_from_expr(
                 mutated,
             );
         }
+        Expr::Switch { selector, cases } => {
+            collect_facade_mut_borrow_argument_names_from_expr(
+                selector,
+                facts,
+                local_types,
+                mutated,
+            );
+            for case in cases {
+                for label in &case.labels {
+                    if let SwitchLabel::Expr(expr) = label {
+                        collect_facade_mut_borrow_argument_names_from_expr(
+                            expr,
+                            facts,
+                            local_types,
+                            mutated,
+                        );
+                    }
+                }
+                collect_facade_mut_borrow_argument_names_from_expr(
+                    &case.value,
+                    facts,
+                    local_types,
+                    mutated,
+                );
+            }
+        }
         Expr::ArrayAccess(array, index) => {
             collect_facade_mut_borrow_argument_names_from_expr(array, facts, local_types, mutated);
             collect_facade_mut_borrow_argument_names_from_expr(index, facts, local_types, mutated);
@@ -11220,6 +11257,17 @@ fn collect_field_receiver_mutated_names_from_expr(expr: &Expr, mutated: &mut Has
             collect_field_receiver_mutated_names_from_expr(then_expr, mutated);
             collect_field_receiver_mutated_names_from_expr(else_expr, mutated);
         }
+        Expr::Switch { selector, cases } => {
+            collect_field_receiver_mutated_names_from_expr(selector, mutated);
+            for case in cases {
+                for label in &case.labels {
+                    if let SwitchLabel::Expr(expr) = label {
+                        collect_field_receiver_mutated_names_from_expr(expr, mutated);
+                    }
+                }
+                collect_field_receiver_mutated_names_from_expr(&case.value, mutated);
+            }
+        }
         Expr::ArrayAccess(array, index) => {
             collect_field_receiver_mutated_names_from_expr(array, mutated);
             collect_field_receiver_mutated_names_from_expr(index, mutated);
@@ -11404,6 +11452,17 @@ fn collect_array_element_mutated_names_from_expr(expr: &Expr, mutated: &mut Hash
             collect_array_element_mutated_names_from_expr(then_expr, mutated);
             collect_array_element_mutated_names_from_expr(else_expr, mutated);
         }
+        Expr::Switch { selector, cases } => {
+            collect_array_element_mutated_names_from_expr(selector, mutated);
+            for case in cases {
+                for label in &case.labels {
+                    if let SwitchLabel::Expr(expr) = label {
+                        collect_array_element_mutated_names_from_expr(expr, mutated);
+                    }
+                }
+                collect_array_element_mutated_names_from_expr(&case.value, mutated);
+            }
+        }
         Expr::ArrayAccess(array, index) => {
             collect_array_element_mutated_names_from_expr(array, mutated);
             collect_array_element_mutated_names_from_expr(index, mutated);
@@ -11582,6 +11641,17 @@ fn collect_mutated_local_names_from_expr(expr: &Expr, mutated: &mut HashSet<Stri
             collect_mutated_local_names_from_expr(condition, mutated);
             collect_mutated_local_names_from_expr(then_expr, mutated);
             collect_mutated_local_names_from_expr(else_expr, mutated);
+        }
+        Expr::Switch { selector, cases } => {
+            collect_mutated_local_names_from_expr(selector, mutated);
+            for case in cases {
+                for label in &case.labels {
+                    if let SwitchLabel::Expr(expr) = label {
+                        collect_mutated_local_names_from_expr(expr, mutated);
+                    }
+                }
+                collect_mutated_local_names_from_expr(&case.value, mutated);
+            }
         }
         Expr::FieldAccess(receiver, _) => collect_mutated_local_names_from_expr(receiver, mutated),
         Expr::ArrayAccess(array, index) => {

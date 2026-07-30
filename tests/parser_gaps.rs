@@ -621,10 +621,10 @@ class YieldStatementUnsupported {
 }
 
 #[test]
-fn switch_expression_surfaces_as_unsupported_expression_not_raw_java() {
+fn parses_arrow_switch_expression_without_fallbacks() {
     let parsed = parse_java_source(
         r#"
-class SwitchExpressionUnsupported {
+class SwitchExpressionSupported {
     int run(int value) {
         int mapped = switch (value) {
             case 1 -> 10;
@@ -636,19 +636,44 @@ class SwitchExpressionUnsupported {
 "#,
     );
     let fallbacks = collect_program_fallbacks(&parsed.program);
+    assert!(fallbacks.is_empty(), "{fallbacks:?}");
 
-    assert!(
-        fallbacks
-            .iter()
-            .any(|fallback| fallback.contains("unsupported expression node: switch_expression")),
-        "{fallbacks:?}"
+    let body = method_body(&parsed.program.types[0], "run");
+    assert!(matches!(
+        &body.statements[0],
+        Stmt::VarDecl {
+            initializer: Some(Expr::Switch { cases, .. }),
+            ..
+        } if cases.len() == 2
+    ));
+}
+
+#[test]
+fn parses_yield_switch_expression_without_fallbacks() {
+    let parsed = parse_java_source(
+        r#"
+class YieldSwitchExpressionSupported {
+    int run(int value) {
+        int mapped = switch (value) {
+            case 1: yield 10;
+            default: yield 0;
+        };
+        return mapped;
+    }
+}
+"#,
     );
-    assert!(
-        !fallbacks
-            .iter()
-            .any(|fallback| fallback.contains("expr raw: switch")),
-        "{fallbacks:?}"
-    );
+    let fallbacks = collect_program_fallbacks(&parsed.program);
+    assert!(fallbacks.is_empty(), "{fallbacks:?}");
+
+    let body = method_body(&parsed.program.types[0], "run");
+    assert!(matches!(
+        &body.statements[0],
+        Stmt::VarDecl {
+            initializer: Some(Expr::Switch { cases, .. }),
+            ..
+        } if cases.len() == 2
+    ));
 }
 
 #[test]
@@ -879,6 +904,17 @@ fn collect_expr_fallbacks(expr: &Expr, out: &mut Vec<String>) {
             collect_expr_fallbacks(condition, out);
             collect_expr_fallbacks(then_expr, out);
             collect_expr_fallbacks(else_expr, out);
+        }
+        Expr::Switch { selector, cases } => {
+            collect_expr_fallbacks(selector, out);
+            for case in cases {
+                for label in &case.labels {
+                    if let new_java2rust::java_ir::SwitchLabel::Expr(expr) = label {
+                        collect_expr_fallbacks(expr, out);
+                    }
+                }
+                collect_expr_fallbacks(&case.value, out);
+            }
         }
         Expr::Call { receiver, args, .. } => {
             if let Some(receiver) = receiver {

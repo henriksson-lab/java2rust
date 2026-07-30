@@ -264,6 +264,10 @@ pub enum Expr {
         then_expr: Box<Expr>,
         else_expr: Box<Expr>,
     },
+    Switch {
+        selector: Box<Expr>,
+        cases: Vec<SwitchExprCase>,
+    },
     Call {
         receiver: Option<Box<Expr>>,
         name: String,
@@ -304,6 +308,12 @@ pub enum Expr {
 pub struct LambdaParam {
     pub name: String,
     pub ty: Option<JavaType>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SwitchExprCase {
+    pub labels: Vec<SwitchLabel>,
+    pub value: Expr,
 }
 
 #[derive(Debug, Clone, PartialEq)]

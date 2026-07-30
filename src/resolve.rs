@@ -12,7 +12,8 @@ use crate::facts::{
 use crate::java_ir::{
     Block, CallKind, ConstructorDecl, ConstructorInvocationKind, Expr, JavaCoercionEvidence,
     JavaCoercionKind, JavaType, LambdaBody, Member, MethodDecl, Modifier, Param, PrimitiveType,
-    Program, ResolvedCall, ResolvedConstructor, Stmt, TypeDecl, TypeKind, WildcardBound,
+    Program, ResolvedCall, ResolvedConstructor, Stmt, SwitchLabel, TypeDecl, TypeKind,
+    WildcardBound,
 };
 use crate::types::{TypeEnv, infer_expr_type};
 
@@ -481,6 +482,17 @@ fn qualify_nested_expr_types(expr: &mut Expr, direct_nested: &HashMap<String, St
             qualify_nested_expr_types(condition, direct_nested);
             qualify_nested_expr_types(then_expr, direct_nested);
             qualify_nested_expr_types(else_expr, direct_nested);
+        }
+        Expr::Switch { selector, cases } => {
+            qualify_nested_expr_types(selector, direct_nested);
+            for case in cases {
+                for label in &mut case.labels {
+                    if let SwitchLabel::Expr(expr) = label {
+                        qualify_nested_expr_types(expr, direct_nested);
+                    }
+                }
+                qualify_nested_expr_types(&mut case.value, direct_nested);
+            }
         }
         Expr::Call { receiver, args, .. } => {
             if let Some(receiver) = receiver {
@@ -1173,6 +1185,17 @@ impl ProgramSymbols {
                 self.collect_local_types_from_expr(condition, enclosing_type);
                 self.collect_local_types_from_expr(then_expr, enclosing_type);
                 self.collect_local_types_from_expr(else_expr, enclosing_type);
+            }
+            Expr::Switch { selector, cases } => {
+                self.collect_local_types_from_expr(selector, enclosing_type);
+                for case in cases {
+                    for label in &case.labels {
+                        if let SwitchLabel::Expr(expr) = label {
+                            self.collect_local_types_from_expr(expr, enclosing_type);
+                        }
+                    }
+                    self.collect_local_types_from_expr(&case.value, enclosing_type);
+                }
             }
             Expr::Call { receiver, args, .. } => {
                 if let Some(receiver) = receiver {

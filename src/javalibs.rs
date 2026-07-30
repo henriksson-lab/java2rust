@@ -560,6 +560,18 @@ fn expr_uses_broad_ioutils_facade(expr: &Expr) -> bool {
                 || expr_uses_broad_ioutils_facade(then_expr)
                 || expr_uses_broad_ioutils_facade(else_expr)
         }
+        Expr::Switch { selector, cases } => {
+            expr_uses_broad_ioutils_facade(selector)
+                || cases.iter().any(|case| {
+                    case.labels.iter().any(|label| {
+                        matches!(
+                            label,
+                            crate::java_ir::SwitchLabel::Expr(expr)
+                                if expr_uses_broad_ioutils_facade(expr)
+                        )
+                    }) || expr_uses_broad_ioutils_facade(&case.value)
+                })
+        }
         Expr::InstanceOf { expr, .. } => expr_uses_broad_ioutils_facade(expr),
         Expr::Lambda { body, .. } => match body {
             crate::java_ir::LambdaBody::Expr(expr) => expr_uses_broad_ioutils_facade(expr),

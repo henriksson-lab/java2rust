@@ -280,6 +280,15 @@ conversion plan. Focused coverage:
 `casted_factory_result_into_concrete_optional_slot_uses_slot_shape` and
 `jdk_facade_signature_facts_type_io_zip_xml_awt_and_base64_calls`.
 
+Switch-expression support step: simple Java switch expressions with arrow
+expression arms or colon/yield arms now parse into expression IR and lower to
+Rust `match` expressions, with selectors, labels, and arm values included in
+the existing semantic visitors. This closes the remaining raw-Java expression
+fallback in audit `0019`, whose issue file was moved to `claude_audits/done`.
+Focused coverage: `switch_expression` parser gaps and
+`switch_expression_lowers_to_match_expression` /
+`yield_switch_expression_lowers_to_match_expression` idiom tests.
+
 2026-07-29 PrintStream overload cleanup: JDK `PrintStream.print/println`
 arity-1 calls now have explicit platform API facts, resolved external instance
 calls can preserve overload-safe arity names, and generated support emits a

@@ -5,7 +5,9 @@ use crate::effective_facts::EffectiveFacts;
 use crate::facts::{
     FactProvenance, FactSet, HierarchyEdgeFact, HierarchyOverride, HierarchyStrategy,
 };
-use crate::java_ir::{Block, Expr, JavaType, LambdaBody, Member, Program, Stmt, TypeDecl};
+use crate::java_ir::{
+    Block, Expr, JavaType, LambdaBody, Member, Program, Stmt, SwitchLabel, TypeDecl,
+};
 pub use crate::object_model::{
     BoxedDynObjectRepresentationInvariant, BoxedDynObjectRepresentationPolicy,
     ClosedEnumFactPolicy, ClosedEnumInferencePolicy, ClosedEnumProof, ClosedEnumProofPolicy,
@@ -633,6 +635,17 @@ fn collect_anonymous_class_diagnostics_for_expr(
             collect_anonymous_class_diagnostics_for_expr(then_expr, plan, diagnostics);
             collect_anonymous_class_diagnostics_for_expr(else_expr, plan, diagnostics);
         }
+        Expr::Switch { selector, cases } => {
+            collect_anonymous_class_diagnostics_for_expr(selector, plan, diagnostics);
+            for case in cases {
+                for label in &case.labels {
+                    if let SwitchLabel::Expr(expr) = label {
+                        collect_anonymous_class_diagnostics_for_expr(expr, plan, diagnostics);
+                    }
+                }
+                collect_anonymous_class_diagnostics_for_expr(&case.value, plan, diagnostics);
+            }
+        }
         Expr::Call { receiver, args, .. } => {
             if let Some(receiver) = receiver {
                 collect_anonymous_class_diagnostics_for_expr(receiver, plan, diagnostics);
@@ -942,6 +955,23 @@ fn collect_anonymous_erased_boundary_type_names_for_expr(
             collect_anonymous_erased_boundary_type_names_for_expr(condition, facts, type_names);
             collect_anonymous_erased_boundary_type_names_for_expr(then_expr, facts, type_names);
             collect_anonymous_erased_boundary_type_names_for_expr(else_expr, facts, type_names);
+        }
+        Expr::Switch { selector, cases } => {
+            collect_anonymous_erased_boundary_type_names_for_expr(selector, facts, type_names);
+            for case in cases {
+                for label in &case.labels {
+                    if let SwitchLabel::Expr(expr) = label {
+                        collect_anonymous_erased_boundary_type_names_for_expr(
+                            expr, facts, type_names,
+                        );
+                    }
+                }
+                collect_anonymous_erased_boundary_type_names_for_expr(
+                    &case.value,
+                    facts,
+                    type_names,
+                );
+            }
         }
         Expr::Call { receiver, args, .. } => {
             if let Some(receiver) = receiver {

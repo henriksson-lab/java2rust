@@ -387,6 +387,17 @@ fn qualify_java_sql_expr(expr: &mut Expr, imported: &JavaSqlImports) {
             qualify_java_sql_expr(then_expr, imported);
             qualify_java_sql_expr(else_expr, imported);
         }
+        Expr::Switch { selector, cases } => {
+            qualify_java_sql_expr(selector, imported);
+            for case in cases {
+                for label in &mut case.labels {
+                    if let SwitchLabel::Expr(expr) = label {
+                        qualify_java_sql_expr(expr, imported);
+                    }
+                }
+                qualify_java_sql_expr(&mut case.value, imported);
+            }
+        }
         Expr::Call { receiver, args, .. } => {
             if let Some(receiver) = receiver {
                 qualify_java_sql_expr(receiver, imported);
@@ -2031,6 +2042,7 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
                 else_expr: Box::new(else_expr),
             }
         }
+        "switch_expression" => parse_switch_expr_node(node, source),
         "method_invocation" => {
             let receiver = node
                 .child_by_field_name("object")
@@ -2110,6 +2122,87 @@ fn unsupported_expr_reason(reason: impl Into<String>) -> Expr {
         reason: reason.into(),
         span: Span::default(),
     }
+}
+
+fn parse_switch_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
+    let selector = node
+        .child_by_field_name("condition")
+        .map(|condition| parse_condition_node(condition, source))
+        .unwrap_or_else(|| unsupported_expr_node(node, "switch_expression without selector"));
+    let cases = node
+        .child_by_field_name("body")
+        .map(|body| parse_switch_expr_block(body, source))
+        .unwrap_or_default();
+    Expr::Switch {
+        selector: Box::new(selector),
+        cases,
+    }
+}
+
+fn parse_switch_expr_block(node: tree_sitter::Node, source: &str) -> Vec<SwitchExprCase> {
+    named_children(node)
+        .into_iter()
+        .filter_map(|child| match child.kind() {
+            "switch_rule" => Some(parse_switch_expr_rule(child, source)),
+            "switch_block_statement_group" => parse_switch_expr_yield_group(child, source),
+            _ => None,
+        })
+        .collect()
+}
+
+fn parse_switch_expr_rule(node: tree_sitter::Node, source: &str) -> SwitchExprCase {
+    let mut labels = Vec::new();
+    let mut value = None;
+    for child in named_children(node) {
+        match child.kind() {
+            "switch_label" => labels.push(parse_switch_label(child, source)),
+            "expression_statement" => {
+                value = first_named_child(child).map(|expr| parse_expr_node(expr, source));
+            }
+            "throw_statement" => {
+                value = Some(unsupported_expr_node(
+                    child,
+                    "unsupported switch expression throw arm",
+                ));
+            }
+            "block" => {
+                value = Some(unsupported_expr_node(
+                    child,
+                    "unsupported switch expression block arm",
+                ));
+            }
+            _ => {}
+        }
+    }
+    SwitchExprCase {
+        labels,
+        value: value
+            .unwrap_or_else(|| unsupported_expr_node(node, "switch expression rule without value")),
+    }
+}
+
+fn parse_switch_expr_yield_group(node: tree_sitter::Node, source: &str) -> Option<SwitchExprCase> {
+    let mut labels = Vec::new();
+    let mut value = None;
+    for child in named_children(node) {
+        match child.kind() {
+            "switch_label" => labels.push(parse_switch_label(child, source)),
+            "statement" => {
+                if let Some(stmt) = first_named_child(child)
+                    && stmt.kind() == "yield_statement"
+                {
+                    value = parse_yield_statement_value(stmt, source);
+                }
+            }
+            "yield_statement" => value = parse_yield_statement_value(child, source),
+            _ => {}
+        }
+    }
+    value.map(|value| SwitchExprCase { labels, value })
+}
+
+fn parse_yield_statement_value(node: tree_sitter::Node, source: &str) -> Option<Expr> {
+    first_named_child(node).map(|expr| parse_expr_node(expr, source))
 }
 
 fn parse_array_creation_expr(node: tree_sitter::Node, source: &str) -> Expr {

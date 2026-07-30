@@ -179,6 +179,11 @@ pub fn infer_expr_type(expr: &Expr, env: &TypeEnv) -> JavaType {
             &infer_expr_type(then_expr, env),
             &infer_expr_type(else_expr, env),
         ),
+        Expr::Switch { cases, .. } => cases
+            .iter()
+            .map(|case| infer_expr_type(&case.value, env))
+            .reduce(|left, right| common_type(&left, &right))
+            .unwrap_or_else(|| JavaType::Unknown("switch_expression".to_string())),
         Expr::Call {
             receiver,
             name,

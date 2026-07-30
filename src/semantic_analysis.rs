@@ -13,7 +13,8 @@ use crate::facts::{
 use crate::graph::strongly_connected_components;
 use crate::java_ir::{
     BinaryOp, Block, CatchClause, ConstructorDecl, ConstructorInvocationKind, Expr, FieldDecl,
-    JavaType, LambdaBody, Literal, Member, MethodDecl, Modifier, Param, Program, Stmt, TypeDecl,
+    JavaType, LambdaBody, Literal, Member, MethodDecl, Modifier, Param, Program, Stmt, SwitchLabel,
+    TypeDecl,
 };
 use crate::lattice::field_nullability_join;
 use crate::rewrite::{
@@ -844,6 +845,17 @@ fn collect_expr_type_names(expr: &Expr, names: &mut HashSet<String>) {
             collect_expr_type_names(then_expr, names);
             collect_expr_type_names(else_expr, names);
         }
+        Expr::Switch { selector, cases } => {
+            collect_expr_type_names(selector, names);
+            for case in cases {
+                for label in &case.labels {
+                    if let SwitchLabel::Expr(expr) = label {
+                        collect_expr_type_names(expr, names);
+                    }
+                }
+                collect_expr_type_names(&case.value, names);
+            }
+        }
         Expr::Call { receiver, args, .. } => {
             if let Some(receiver) = receiver {
                 collect_expr_type_names(receiver, names);
@@ -1660,6 +1672,17 @@ fn walk_expr_outside_lambdas(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
             walk_expr_outside_lambdas(condition, visit);
             walk_expr_outside_lambdas(then_expr, visit);
             walk_expr_outside_lambdas(else_expr, visit);
+        }
+        Expr::Switch { selector, cases } => {
+            walk_expr_outside_lambdas(selector, visit);
+            for case in cases {
+                for label in &case.labels {
+                    if let SwitchLabel::Expr(expr) = label {
+                        walk_expr_outside_lambdas(expr, visit);
+                    }
+                }
+                walk_expr_outside_lambdas(&case.value, visit);
+            }
         }
         Expr::Call { receiver, args, .. } => {
             if let Some(receiver) = receiver {
@@ -2837,6 +2860,22 @@ fn collect_thrown_exception_types_from_expr(
             collect_thrown_exception_types_from_expr(then_expr, exception_env, facts, thrown);
             collect_thrown_exception_types_from_expr(else_expr, exception_env, facts, thrown);
         }
+        Expr::Switch { selector, cases } => {
+            collect_thrown_exception_types_from_expr(selector, exception_env, facts, thrown);
+            for case in cases {
+                for label in &case.labels {
+                    if let SwitchLabel::Expr(expr) = label {
+                        collect_thrown_exception_types_from_expr(
+                            expr,
+                            exception_env,
+                            facts,
+                            thrown,
+                        );
+                    }
+                }
+                collect_thrown_exception_types_from_expr(&case.value, exception_env, facts, thrown);
+            }
+        }
         Expr::Call {
             receiver,
             name,
@@ -3338,6 +3377,17 @@ fn collect_dispatch_requirement_facts_from_expr(expr: &Expr, facts: &mut FactSet
             collect_dispatch_requirement_facts_from_expr(condition, facts);
             collect_dispatch_requirement_facts_from_expr(then_expr, facts);
             collect_dispatch_requirement_facts_from_expr(else_expr, facts);
+        }
+        Expr::Switch { selector, cases } => {
+            collect_dispatch_requirement_facts_from_expr(selector, facts);
+            for case in cases {
+                for label in &case.labels {
+                    if let SwitchLabel::Expr(expr) = label {
+                        collect_dispatch_requirement_facts_from_expr(expr, facts);
+                    }
+                }
+                collect_dispatch_requirement_facts_from_expr(&case.value, facts);
+            }
         }
         Expr::Call { receiver, args, .. } => {
             if let Some(receiver) = receiver {
@@ -5695,6 +5745,17 @@ fn walk_expr(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
             walk_expr(condition, visit);
             walk_expr(then_expr, visit);
             walk_expr(else_expr, visit);
+        }
+        Expr::Switch { selector, cases } => {
+            walk_expr(selector, visit);
+            for case in cases {
+                for label in &case.labels {
+                    if let SwitchLabel::Expr(expr) = label {
+                        walk_expr(expr, visit);
+                    }
+                }
+                walk_expr(&case.value, visit);
+            }
         }
         Expr::Call { receiver, args, .. } => {
             if let Some(receiver) = receiver {

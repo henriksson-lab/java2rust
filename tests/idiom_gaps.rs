@@ -23242,10 +23242,10 @@ class StaticInitializerUnsupportedDiagnostic {
 }
 
 #[test]
-fn unsupported_switch_expression_lowers_to_parse_safe_compile_error() {
+fn switch_expression_lowers_to_match_expression() {
     let translation = translate_source(
         r#"
-class UnsupportedSwitchExpressionDiagnostic {
+class SwitchExpressionDiagnostic {
     int run(int value) {
         int mapped = switch (value) {
             case 1 -> 10;
@@ -23258,16 +23258,56 @@ class UnsupportedSwitchExpressionDiagnostic {
     );
 
     assert!(
-        translation.rust.contains(
-            "compile_error!(\"unsupported Java expression: unsupported expression node: switch_expression\")"
-        ),
+        translation.rust.contains("let mapped: i32 = match value {")
+            && translation.rust.contains("1 => 10,")
+            && translation.rust.contains("_ => 0,")
+            && !translation.rust.contains("compile_error!")
+            && !translation.rust.contains("switch (value)"),
         "{}",
         translation.rust
     );
+    cargo_check_generated_modules(
+        "switch_expression_lowers_to_match_expression",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn yield_switch_expression_lowers_to_match_expression() {
+    let translation = translate_source(
+        r#"
+class YieldSwitchExpressionDiagnostic {
+    int run(int value) {
+        int mapped = switch (value) {
+            case 1: yield 10;
+            default: yield 0;
+        };
+        return mapped;
+    }
+}
+"#,
+    );
+
     assert!(
-        !translation.rust.contains("switch (value)"),
+        translation.rust.contains("let mapped: i32 = match value {")
+            && translation.rust.contains("1 => 10,")
+            && translation.rust.contains("_ => 0,")
+            && !translation.rust.contains("compile_error!")
+            && !translation.rust.contains("switch (value)"),
         "{}",
         translation.rust
+    );
+    cargo_check_generated_modules(
+        "yield_switch_expression_lowers_to_match_expression",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 

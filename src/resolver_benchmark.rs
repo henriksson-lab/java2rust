@@ -996,6 +996,17 @@ fn collect_anonymous_constructor_target_names_for_expr(
             collect_anonymous_constructor_target_names_for_expr(then_expr, target_names);
             collect_anonymous_constructor_target_names_for_expr(else_expr, target_names);
         }
+        Expr::Switch { selector, cases } => {
+            collect_anonymous_constructor_target_names_for_expr(selector, target_names);
+            for case in cases {
+                for label in &case.labels {
+                    if let SwitchLabel::Expr(expr) = label {
+                        collect_anonymous_constructor_target_names_for_expr(expr, target_names);
+                    }
+                }
+                collect_anonymous_constructor_target_names_for_expr(&case.value, target_names);
+            }
+        }
         Expr::Call { receiver, args, .. } => {
             if let Some(receiver) = receiver {
                 collect_anonymous_constructor_target_names_for_expr(receiver, target_names);
@@ -3933,6 +3944,41 @@ fn collect_expr_source_dependency_resolution_counts(
                 report,
             );
         }
+        Expr::Switch { selector, cases } => {
+            collect_expr_source_dependency_resolution_counts(
+                selector,
+                current_mode,
+                source_type_modes,
+                source_type_fields,
+                env,
+                context,
+                report,
+            );
+            for case in cases {
+                for label in &case.labels {
+                    if let SwitchLabel::Expr(expr) = label {
+                        collect_expr_source_dependency_resolution_counts(
+                            expr,
+                            current_mode,
+                            source_type_modes,
+                            source_type_fields,
+                            env,
+                            context,
+                            report,
+                        );
+                    }
+                }
+                collect_expr_source_dependency_resolution_counts(
+                    &case.value,
+                    current_mode,
+                    source_type_modes,
+                    source_type_fields,
+                    env,
+                    context,
+                    report,
+                );
+            }
+        }
         Expr::Call {
             receiver,
             args,
@@ -6636,6 +6682,17 @@ fn collect_source_expr_type_names(expr: &Expr, names: &mut HashSet<String>) {
             collect_source_expr_type_names(condition, names);
             collect_source_expr_type_names(then_expr, names);
             collect_source_expr_type_names(else_expr, names);
+        }
+        Expr::Switch { selector, cases } => {
+            collect_source_expr_type_names(selector, names);
+            for case in cases {
+                for label in &case.labels {
+                    if let SwitchLabel::Expr(expr) = label {
+                        collect_source_expr_type_names(expr, names);
+                    }
+                }
+                collect_source_expr_type_names(&case.value, names);
+            }
         }
         Expr::Call { receiver, args, .. } => {
             if let Some(receiver) = receiver {

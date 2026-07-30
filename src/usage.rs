@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::facts::{FacadeSlot, FactSet, TrivialAccessorKind};
 use crate::java_ir::{
     Block, ConstructorInvocationKind, Expr, JavaType, LambdaBody, Member, Modifier, Program,
-    ResolvedCall, ResolvedConstructor, Stmt, TypeDecl,
+    ResolvedCall, ResolvedConstructor, Stmt, SwitchLabel, TypeDecl,
 };
 use crate::java_signature::{JavaCallableKey, source_method_rust_name};
 use crate::stdlib::is_content_read_method;
@@ -748,6 +748,17 @@ fn collect_call_graph_edges_from_expr(
             collect_call_graph_edges_from_expr(condition, graph, context);
             collect_call_graph_edges_from_expr(then_expr, graph, context);
             collect_call_graph_edges_from_expr(else_expr, graph, context);
+        }
+        Expr::Switch { selector, cases } => {
+            collect_call_graph_edges_from_expr(selector, graph, context);
+            for case in cases {
+                for label in &case.labels {
+                    if let SwitchLabel::Expr(expr) = label {
+                        collect_call_graph_edges_from_expr(expr, graph, context);
+                    }
+                }
+                collect_call_graph_edges_from_expr(&case.value, graph, context);
+            }
         }
         Expr::Literal(_)
         | Expr::Var(_)
@@ -1874,6 +1885,41 @@ fn analyze_expr_with_context(
             field_types,
             semantic_facts,
         ),
+        Expr::Switch { selector, cases } => {
+            analyze_expr(
+                selector,
+                facts,
+                current_type,
+                internal_methods,
+                field_names,
+                field_types,
+                semantic_facts,
+            );
+            for case in cases {
+                for label in &case.labels {
+                    if let SwitchLabel::Expr(expr) = label {
+                        analyze_expr(
+                            expr,
+                            facts,
+                            current_type,
+                            internal_methods,
+                            field_names,
+                            field_types,
+                            semantic_facts,
+                        );
+                    }
+                }
+                analyze_expr(
+                    &case.value,
+                    facts,
+                    current_type,
+                    internal_methods,
+                    field_names,
+                    field_types,
+                    semantic_facts,
+                );
+            }
+        }
         Expr::Var(name) => record_use(facts, name, BindingUse::ContentRead),
         Expr::Literal(_)
         | Expr::This
