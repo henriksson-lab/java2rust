@@ -14830,6 +14830,15 @@ fn external_call_returns_rust_result_with_lower_context(
     env: &ShapeEnv,
     current_type: Option<&str>,
 ) -> bool {
+    let receiver_type = receiver
+        .and_then(|receiver| receiver_shape_java_type(receiver, env))
+        .and_then(external_receiver_name_from_shape_type);
+    if ctx
+        .callable_analysis
+        .external_method_returns_result(receiver_type, name, arg_count)
+    {
+        return true;
+    }
     external_call_returns_rust_result_with_external_index(
         receiver,
         name,

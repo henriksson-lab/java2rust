@@ -59,4 +59,18 @@ impl<'a> CallableAnalysis<'a> {
     pub fn callable_returns_result(&self, key: &crate::usage::CallableKey) -> bool {
         self.fallibility.returns_result(key)
     }
+
+    pub fn external_method_returns_result(
+        &self,
+        receiver_type: Option<&str>,
+        method_name: &str,
+        arg_count: usize,
+    ) -> bool {
+        let key = crate::usage::CallableKey::ExternalMethod {
+            receiver_type: receiver_type.map(str::to_string),
+            method_name: method_name.to_string(),
+            arg_count,
+        };
+        self.callable_returns_result(&key)
+    }
 }
