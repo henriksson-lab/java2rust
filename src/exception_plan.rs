@@ -1,9 +1,10 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::facts::FactSet;
 use crate::java_ir::{
     Block, CatchClause, Expr, JavaType, Member, MethodDecl, Program, Stmt, TypeDecl,
 };
+use crate::usage::{CallGraph, CallableKey};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ThrowExprPlan<'a> {
@@ -33,6 +34,25 @@ pub struct MethodExceptionPlan {
 pub struct ProgramExceptionPlan {
     pub support: JavaExceptionSupportPlan,
     methods: BTreeMap<(String, String), MethodExceptionPlan>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProgramFallibilityPlan {
+    callables: HashMap<CallableKey, CallableFallibility>,
+    solve_iterations: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CallableFallibility {
+    pub returns_result: bool,
+    pub reasons: Vec<FallibilityReason>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FallibilityReason {
+    MethodThrowFact,
+    ExternalThrowFact,
+    PropagatedFromCallee,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -77,6 +97,21 @@ impl ProgramExceptionPlan {
             .unwrap_or(MethodExceptionPlan {
                 wrap_returns_in_result: false,
             })
+    }
+}
+
+impl ProgramFallibilityPlan {
+    pub fn callable(&self, key: &CallableKey) -> Option<&CallableFallibility> {
+        self.callables.get(key)
+    }
+
+    pub fn returns_result(&self, key: &CallableKey) -> bool {
+        self.callable(key)
+            .is_some_and(|fallibility| fallibility.returns_result)
+    }
+
+    pub fn solve_iterations(&self) -> usize {
+        self.solve_iterations
     }
 }
 
@@ -202,6 +237,82 @@ pub fn plan_program_exceptions(program: &Program, facts: &FactSet) -> ProgramExc
         support: plan_java_exception_support(program, facts),
         methods,
     }
+}
+
+pub fn plan_program_fallibility(call_graph: &CallGraph, facts: &FactSet) -> ProgramFallibilityPlan {
+    let mut callables = call_graph
+        .nodes
+        .iter()
+        .cloned()
+        .map(|key| {
+            let fallibility = seed_callable_fallibility(&key, facts);
+            (key, fallibility)
+        })
+        .collect::<HashMap<_, _>>();
+    let mut solve_iterations = 0usize;
+    loop {
+        solve_iterations += 1;
+        let mut changed = false;
+        for edge in &call_graph.edges {
+            let callee_returns_result = callables
+                .get(&edge.callee)
+                .is_some_and(|fallibility| fallibility.returns_result);
+            if !callee_returns_result {
+                continue;
+            }
+            let caller = callables.entry(edge.caller.clone()).or_default();
+            if !caller.returns_result {
+                caller.returns_result = true;
+                caller.reasons.push(FallibilityReason::PropagatedFromCallee);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    ProgramFallibilityPlan {
+        callables,
+        solve_iterations,
+    }
+}
+
+fn seed_callable_fallibility(key: &CallableKey, facts: &FactSet) -> CallableFallibility {
+    let reason = match key {
+        CallableKey::Method {
+            type_name,
+            method_name,
+        }
+        | CallableKey::Constructor {
+            type_name,
+            rust_name: method_name,
+        } => facts
+            .method_effect_for(type_name, method_name)
+            .is_some_and(|fact| !fact.thrown.is_empty())
+            .then_some(FallibilityReason::MethodThrowFact),
+        CallableKey::ExternalMethod {
+            receiver_type,
+            method_name,
+            arg_count,
+        } => facts
+            .external_api_effect_facts
+            .iter()
+            .any(|fact| {
+                !fact.thrown.is_empty()
+                    && fact.method_name == *method_name
+                    && fact.arg_count == Some(*arg_count)
+                    && fact.receiver_type.as_ref() == receiver_type.as_ref()
+            })
+            .then_some(FallibilityReason::ExternalThrowFact),
+        CallableKey::ExternalConstructor { .. } => None,
+        CallableKey::Lambda { .. } | CallableKey::AnonymousMethod { .. } => None,
+    };
+    let mut fallibility = CallableFallibility::default();
+    if let Some(reason) = reason {
+        fallibility.returns_result = true;
+        fallibility.reasons.push(reason);
+    }
+    fallibility
 }
 
 pub fn plan_try_stmt<'a>(

@@ -1,4 +1,4 @@
-use crate::exception_plan::ProgramExceptionPlan;
+use crate::exception_plan::{ProgramExceptionPlan, ProgramFallibilityPlan};
 use crate::java_signature::JavaCallableKey;
 use crate::signature::{MethodSignaturePlan, SignaturePlan};
 use crate::usage::{CallGraph, MethodUsageFacts, UsageConstructorKey, UsageFacts, UsageMethodKey};
@@ -9,6 +9,7 @@ pub struct CallableAnalysis<'a> {
     pub call_graph: &'a CallGraph,
     pub signatures: &'a SignaturePlan,
     pub exceptions: &'a ProgramExceptionPlan,
+    pub fallibility: &'a ProgramFallibilityPlan,
 }
 
 impl<'a> CallableAnalysis<'a> {
@@ -17,12 +18,14 @@ impl<'a> CallableAnalysis<'a> {
         call_graph: &'a CallGraph,
         signatures: &'a SignaturePlan,
         exceptions: &'a ProgramExceptionPlan,
+        fallibility: &'a ProgramFallibilityPlan,
     ) -> Self {
         Self {
             usage,
             call_graph,
             signatures,
             exceptions,
+            fallibility,
         }
     }
 
@@ -51,5 +54,9 @@ impl<'a> CallableAnalysis<'a> {
 
     pub fn call_graph_edge_count(&self) -> usize {
         self.call_graph.edges.len()
+    }
+
+    pub fn callable_returns_result(&self, key: &crate::usage::CallableKey) -> bool {
+        self.fallibility.returns_result(key)
     }
 }

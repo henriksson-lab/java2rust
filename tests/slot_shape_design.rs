@@ -55,8 +55,8 @@ use new_java2rust::exception_lowering::{
 use new_java2rust::exception_plan::{
     JavaExceptionSupportPlan, MethodExceptionPlan, ThrowExprPlan, TryBlockCompletion, TryStmtPlan,
     catch_match_class_names, exception_class_name, plan_java_exception_support,
-    plan_method_exceptions, plan_program_exceptions, plan_throw_expr, plan_try_stmt,
-    try_resource_names,
+    plan_method_exceptions, plan_program_exceptions, plan_program_fallibility, plan_throw_expr,
+    plan_try_stmt, try_resource_names,
 };
 use new_java2rust::expr_render::{
     binary_expr, indexed_expr, literal_expr, named_constructor_expr, raw_expr, super_expr,
@@ -3336,15 +3336,18 @@ fn callable_analysis_shell_reaches_lowering_context() {
     assert!(analysis_source.contains("pub call_graph: &'a CallGraph"));
     assert!(analysis_source.contains("pub signatures: &'a SignaturePlan"));
     assert!(analysis_source.contains("pub exceptions: &'a ProgramExceptionPlan"));
+    assert!(analysis_source.contains("pub fallibility: &'a ProgramFallibilityPlan"));
     assert!(analysis_source.contains("pub fn method_usage("));
     assert!(analysis_source.contains("pub fn method_usage_by_java_key("));
     assert!(analysis_source.contains("pub fn method_signature_by_java_key("));
     assert!(analysis_source.contains("pub fn constructor_usage("));
+    assert!(analysis_source.contains("pub fn callable_returns_result("));
     assert!(analysis_source.contains("JavaCallableKey"));
     assert!(lower_source.contains("callable_analysis: &'a CallableAnalysis<'a>"));
     assert!(
         lower_source.contains("let call_graph = crate::usage::build_call_graph")
-            && lower_source.contains("let callable_analysis = CallableAnalysis::new")
+            && lower_source.contains("let fallibility = plan_program_fallibility")
+            && lower_source.contains("let callable_analysis =\n        CallableAnalysis::new")
     );
     assert!(lower_source.contains(".callable_analysis\n            .method_usage(&exact_key)"));
     assert!(
@@ -3366,9 +3369,9 @@ fn callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating() {
     assert!(signature_source.contains("JavaCallableKey::source_method"));
     assert!(usage_source.contains("pub methods_by_java_key: HashMap<JavaCallableKey"));
     assert!(usage_source.contains("JavaCallableKey::source_method"));
-    assert!(
-        lower_source.contains("CallableAnalysis::new(usage, &call_graph, signatures, &exceptions)")
-    );
+    assert!(lower_source.contains(
+        "CallableAnalysis::new(usage, &call_graph, signatures, &exceptions, &fallibility)"
+    ));
     assert!(lower_source.contains(
         "lower_program_with_semantic_plans_and_support_context(\n    program: &Program,\n    mut diagnostics: DiagnosticBag,\n    facts: &FactSet,\n    usage: &UsageFacts,\n    representations: &RepresentationPlan,\n    signatures: &SignaturePlan,"
     ));
@@ -21525,6 +21528,45 @@ class GraphCalls {
             && edge.callee == even
             && edge.kind == new_java2rust::usage::CallGraphEdgeKind::DirectMethodCall
     }));
+}
+
+#[test]
+fn callable_fallibility_plan_propagates_over_call_graph() {
+    let parsed = parse_java_source(
+        r#"
+class FallibleCalls {
+    int entry(int x) { return leaf(x); }
+    int leaf(int x) { return x; }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let graph = new_java2rust::usage::build_call_graph(&resolved.program);
+    let mut facts = FactSet::default();
+    facts.method_effect_facts.push(MethodEffectFact {
+        method: FactMethodKey {
+            type_name: "FallibleCalls".to_string(),
+            method_name: "leaf".to_string(),
+        },
+        receiver_mutability: ReceiverMutabilityFact::Unknown,
+        return_nullability: NullabilityState::Unknown,
+        thrown: vec![JavaType::Unknown("IllegalStateException".to_string())],
+        provenance: FactProvenance::ParsedSource,
+    });
+
+    let fallibility = plan_program_fallibility(&graph, &facts);
+    let entry = new_java2rust::usage::CallableKey::Method {
+        type_name: "FallibleCalls".to_string(),
+        method_name: "entry".to_string(),
+    };
+    let leaf = new_java2rust::usage::CallableKey::Method {
+        type_name: "FallibleCalls".to_string(),
+        method_name: "leaf".to_string(),
+    };
+
+    assert!(fallibility.returns_result(&leaf));
+    assert!(fallibility.returns_result(&entry));
+    assert!(fallibility.solve_iterations() >= 2);
 }
 
 #[test]

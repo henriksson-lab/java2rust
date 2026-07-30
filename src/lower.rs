@@ -104,8 +104,8 @@ use crate::exception_lowering::{
 };
 use crate::exception_plan::{
     ProgramExceptionPlan, ThrowExprPlan, TryBlockCompletion, TryStmtPlan, catch_match_class_names,
-    plan_block_exception_completion, plan_program_exceptions, plan_throw_expr, plan_try_stmt,
-    try_resource_names,
+    plan_block_exception_completion, plan_program_exceptions, plan_program_fallibility,
+    plan_throw_expr, plan_try_stmt, try_resource_names,
 };
 use crate::expr_render::{
     binary_expr, indexed_expr, literal_expr, named_constructor_expr, raw_expr, super_expr,
@@ -332,9 +332,11 @@ pub fn lower_program_with_semantic_plans_and_support_context(
         ),
         &mut diagnostics,
     );
-    let exceptions = plan_program_exceptions(support_local_type_program, facts);
     let call_graph = crate::usage::build_call_graph(support_local_type_program);
-    let callable_analysis = CallableAnalysis::new(usage, &call_graph, signatures, &exceptions);
+    let fallibility = plan_program_fallibility(&call_graph, facts);
+    let exceptions = plan_program_exceptions(support_local_type_program, facts);
+    let callable_analysis =
+        CallableAnalysis::new(usage, &call_graph, signatures, &exceptions, &fallibility);
     let ctx = LowerCtx {
         program,
         facts,
