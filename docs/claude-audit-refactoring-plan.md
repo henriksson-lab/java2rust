@@ -317,8 +317,8 @@ the fixes do not become more isolated rules.
 | `0001` loop back edges invisible | open | Binding/CFG |
 | `0002` object aliasing/clones | open | Clone discipline, then object representation |
 | `0003` integer arithmetic semantics | open | Deferred arithmetic slice |
-| `0004` string concat absorbs arithmetic | fixed locally | Rust IR shape tags prevent recurrence |
-| `0005` unsigned right shift | fixed locally | Arithmetic slice should add shift-distance masking |
+| `0004` string concat absorbs arithmetic | fixed locally | Moved to `claude_audits/done`; Rust IR shape tags prevent recurrence |
+| `0005` unsigned right shift | fixed locally | Moved to `claude_audits/done`; arithmetic slice should add shift-distance masking |
 | `0006` move analysis fragmented | open | CallableAnalysis, BindingId, CFG |
 | `0007` opaque Rust strings | open | Slot/facade generalization, shape tags |
 | `0008` inference does not reach lowering | open | CallableAnalysis |
@@ -327,7 +327,7 @@ the fixes do not become more isolated rules.
 | `0011` dyn Any fallback cascades | open | Opaque external shims |
 | `0012` invalid unsupported diagnostics | fixed locally | Moved to `claude_audits/done` |
 | `0013` nested downcast names | fixed locally | Moved to `claude_audits/done` |
-| `0014` labelled statements deleted | fixed locally | CFG liveness still needs labelled edges |
+| `0014` labelled statements deleted | fixed locally | Moved to `claude_audits/done`; CFG liveness still needs labelled edges |
 | `0015` static initializer blocks dropped | partial | Loud diagnostic now; full class-init later |
 | `0016` no-op JDK facades | open | Core facade coverage |
 | `0017` generic bounds dropped | open | Typed type parsing and generics |
