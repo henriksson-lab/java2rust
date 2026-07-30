@@ -11716,7 +11716,7 @@ fn is_arrays_sort_call(receiver: Option<&Expr>, name: &str, args: &[Expr]) -> bo
     };
     crate::stdlib::canonical_external_receiver_type_key(receiver_name) == "Arrays"
         && name == "sort"
-        && args.len() == 1
+        && matches!(args.len(), 1 | 3)
 }
 
 fn collect_assignment_target_name(expr: &Expr, mutated: &mut HashSet<String>) {

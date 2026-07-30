@@ -6787,9 +6787,10 @@ runtime assertion for `"ok!"`.
 
 Audit `0016` remains partial, not fixed: remaining Arrays helpers still need
 follow-up work, and broader facade fallibility remains open.
-`Arrays.copyOf(...)`, `Arrays.copyOfRange(...)`, `Arrays.toString(...)`, and
-whole/range `Arrays.fill(...)` now lower through native projections with
-Java-style default padding/formatting/mutation. Apache Commons `FastMath` is
+`Arrays.copyOf(...)`, `Arrays.copyOfRange(...)`, `Arrays.toString(...)`,
+whole/range `Arrays.fill(...)`, and whole/range `Arrays.sort(...)` now lower
+through native projections with Java-style default padding/formatting/mutation.
+Apache Commons `FastMath` is
 modelled in `javalibs` as a native static owner alias to the existing JDK
 `Math` planner, keeping package-specific ownership outside `stdlib.rs`.
 `Math.round(...)` now uses the JDK edge-safe floor/difference rule, and

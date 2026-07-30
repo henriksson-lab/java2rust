@@ -12977,6 +12977,28 @@ fn call_plan_owns_trivial_accessor_call_selection_before_lowering() {
         ),
         Some(CallStatementPlan::NativeArraysSort {
             target: Expr::Var(name),
+            from: None,
+            to: None,
+        }) if name == "values"
+    ));
+    assert!(matches!(
+        plan_call_statement(
+            &Expr::Call {
+                receiver: Some(Box::new(Expr::Var("Arrays".to_string()))),
+                name: "sort".to_string(),
+                args: vec![
+                    Expr::Var("values".to_string()),
+                    Expr::Literal(Literal::Int(1)),
+                    Expr::Literal(Literal::Int(3)),
+                ],
+                resolved: None,
+            },
+            &facts,
+        ),
+        Some(CallStatementPlan::NativeArraysSort {
+            target: Expr::Var(name),
+            from: Some(Expr::Literal(Literal::Int(1))),
+            to: Some(Expr::Literal(Literal::Int(3))),
         }) if name == "values"
     ));
     assert!(matches!(

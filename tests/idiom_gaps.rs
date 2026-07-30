@@ -2441,6 +2441,67 @@ class ReusedStringParametersInVecs {
 }
 
 #[test]
+fn java_arrays_sort_lowers_whole_and_range_mutations() {
+    let translation = translate_source(
+        r#"
+import java.util.Arrays;
+
+class JavaArraysSortUse {
+    static int[] whole(int[] values) {
+        Arrays.sort(values);
+        return values;
+    }
+
+    static int[] range(int[] values) {
+        Arrays.sort(values, 1, 4);
+        return values;
+    }
+
+    static String[] names(String[] values) {
+        Arrays.sort(values, 1, 3);
+        return values;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("values.sort()")
+            && translation
+                .rust
+                .contains("__java_arrays_target[__java_arrays_from..__java_arrays_to].sort()")
+            && !translation.rust.contains("Arrays::sort")
+            && !translation.rust.contains("JavaUtilArrays::sort"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "java_arrays_sort_use",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn sorts_whole_arrays_and_subranges() {
+        assert_eq!(JavaArraysSortUse::whole(vec![3, 1, 2]), vec![1, 2, 3]);
+        assert_eq!(JavaArraysSortUse::range(vec![9, 4, 3, 2, 1]), vec![9, 2, 3, 4, 1]);
+        assert_eq!(
+            JavaArraysSortUse::names(vec!["z".to_string(), "b".to_string(), "a".to_string(), "x".to_string()]),
+            vec!["z".to_string(), "a".to_string(), "b".to_string(), "x".to_string()]
+        );
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
 fn reused_string_source_clones_for_multiple_owned_local_assignments() {
     let translation = translate_source(
         r#"

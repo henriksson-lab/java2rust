@@ -86,6 +86,9 @@ Landed in this batch:
   as native mutating Rust operations, and `java.util.Arrays`/`JavaUtilArrays`
   canonicalize to the builtin `Arrays` identity so facade support does not
   synthesize duplicate no-op overloads.
+- `Arrays.sort(...)` now plans both whole-array and subrange statement
+  overloads as native mutating Rust operations, with signature mutation
+  detection marking the target array for both arities.
 - Focused corpus summaries now emit all planned measurement keys:
   `parse_failures`, unsupported statement/member/expression counts,
   `unmodelled_types`, `unmodelled_call_sites`, and `noop_facade_methods`.
@@ -388,7 +391,7 @@ Completion checklist for any audit marked `fixed locally`:
 | `0013` nested downcast names | fixed locally | Moved to `claude_audits/done` |
 | `0014` labelled statements deleted | fixed locally | Moved to `claude_audits/done`; CFG liveness still needs labelled edges |
 | `0015` static initializer blocks dropped | partial | Loud diagnostic now; full class-init later |
-| `0016` no-op JDK facades | partial | `StringBuilder`/`StringBuffer` and literal `Pattern`/`Matcher` paths are stateful; `Arrays.copyOf/copyOfRange/toString/fill` lower natively; Apache `FastMath` uses a javalibs owner alias to the Math planner; remaining Arrays helpers and broader facade fallibility still open |
+| `0016` no-op JDK facades | partial | `StringBuilder`/`StringBuffer` and literal `Pattern`/`Matcher` paths are stateful; `Arrays.copyOf/copyOfRange/toString/fill/sort` lower natively; Apache `FastMath` uses a javalibs owner alias to the Math planner; remaining Arrays helpers and broader facade fallibility still open |
 | `0017` generic bounds dropped | open | Typed type parsing and generics |
 | `0018` compile metric blind spots | partial | Parse gate and coverage counters |
 | `0019` raw Java expression fallback | fixed locally | Moved to `claude_audits/done`; simple switch expressions now lower to Rust `match` |

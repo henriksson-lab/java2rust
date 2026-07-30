@@ -40,8 +40,9 @@ use crate::coercion::{
     borrow_as_dyn_trait, borrowed_sequence_extend_arg, borrowed_string_literal_temporary_plan,
     boxed_dyn_trait_projection, char_sequence_collect_string_projection,
     clone_erased_object_ref_once, collection_sort_by_comparator_projection,
-    collection_sort_projection, constructor_self_field_projection,
-    constructor_self_field_replacement, deref_borrowed_projection, ensure_borrow_projection,
+    collection_sort_projection, collection_sort_range_projection,
+    constructor_self_field_projection, constructor_self_field_replacement,
+    deref_borrowed_projection, ensure_borrow_projection,
     erased_object_borrowed_downcast_ref_projection, erased_object_box_projection,
     exception_self_as_supertype_facade_boundary_projection,
     explicit_java_facade_cast_placeholder_projection, force_shared_borrow_projection,
@@ -8989,9 +8990,18 @@ fn lower_planned_call_expr_stmt(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> O
             param_names,
             body,
         } => lower_iterable_for_each_stmt(receiver, &param_names, body, env, ctx),
-        CallStatementPlan::NativeArraysSort { target } => Some(RustStmt::Expr(
-            collection_sort_projection(lower_expr(target, env, ctx)),
-        )),
+        CallStatementPlan::NativeArraysSort { target, from, to } => {
+            let target = lower_expr(target, env, ctx);
+            let expr = match (from, to) {
+                (Some(from), Some(to)) => collection_sort_range_projection(
+                    target,
+                    lower_expr(from, env, ctx),
+                    lower_expr(to, env, ctx),
+                ),
+                _ => collection_sort_projection(target),
+            };
+            Some(RustStmt::Expr(expr))
+        }
         CallStatementPlan::NativeCollectionsSort { target, comparator } => {
             let expr = if let Some(comparator) = comparator {
                 collection_sort_by_comparator_projection(

@@ -2370,6 +2370,19 @@ pub fn collection_sort_projection(target: RustExpr) -> RustExpr {
     RustExpr::Raw(format!("{}.sort()", emit::emit_expr(&target)))
 }
 
+pub fn collection_sort_range_projection(
+    target: RustExpr,
+    from: RustExpr,
+    to: RustExpr,
+) -> RustExpr {
+    RustExpr::Raw(format!(
+        "{{ let __java_arrays_target = &mut {}; let __java_arrays_from = ({}).max(0) as usize; let __java_arrays_to = ({}).max(0) as usize; let __java_arrays_to = __java_arrays_to.min(__java_arrays_target.len()); if __java_arrays_from < __java_arrays_to {{ __java_arrays_target[__java_arrays_from..__java_arrays_to].sort(); }} }}",
+        emit::emit_expr(&target),
+        emit::emit_expr(&from),
+        emit::emit_expr(&to),
+    ))
+}
+
 pub fn collection_sort_by_comparator_projection(
     target: RustExpr,
     comparator: RustExpr,

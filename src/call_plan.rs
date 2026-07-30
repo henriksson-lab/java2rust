@@ -1301,6 +1301,8 @@ pub enum CallStatementPlan<'a> {
     },
     NativeArraysSort {
         target: &'a Expr,
+        from: Option<&'a Expr>,
+        to: Option<&'a Expr>,
     },
     NativeCollectionsSort {
         target: &'a Expr,
@@ -1907,7 +1909,16 @@ fn plan_native_arrays_statement<'a>(
         return None;
     }
     match (name, args) {
-        ("sort", [target]) => Some(CallStatementPlan::NativeArraysSort { target }),
+        ("sort", [target]) => Some(CallStatementPlan::NativeArraysSort {
+            target,
+            from: None,
+            to: None,
+        }),
+        ("sort", [target, from, to]) => Some(CallStatementPlan::NativeArraysSort {
+            target,
+            from: Some(from),
+            to: Some(to),
+        }),
         ("fill", [target, value]) => Some(CallStatementPlan::NativeArraysFill {
             target,
             from: None,

@@ -6742,7 +6742,7 @@ class ArraysCollectionFactUse {
 fn arrays_fill_fact_role_is_builtin_mutator() {
     let semantic = analyze(
         r#"
-class ArraysFillFactUse {
+class ArraysMutatorFactUse {
     void all(byte[] values) {
         Arrays.fill(values, (byte) 1);
     }
@@ -6750,20 +6750,30 @@ class ArraysFillFactUse {
     void range(int[] values) {
         Arrays.fill(values, 1, 3, 9);
     }
+
+    void sortAll(int[] values) {
+        Arrays.sort(values);
+    }
+
+    void sortRange(int[] values) {
+        Arrays.sort(values, 1, 3);
+    }
 }
 "#,
     );
 
-    let effect = semantic
-        .facts
-        .external_api_effect_for_receiver(Some("Arrays"), "fill")
-        .unwrap();
-    assert_eq!(effect.role, ExternalApiRole::Mutator);
-    assert_eq!(
-        effect.receiver_mutability,
-        ReceiverMutabilityFact::MutatesReceiver
-    );
-    assert_eq!(effect.provenance, FactProvenance::BuiltinExternalModel);
+    for method in ["fill", "sort"] {
+        let effect = semantic
+            .facts
+            .external_api_effect_for_receiver(Some("Arrays"), method)
+            .unwrap();
+        assert_eq!(effect.role, ExternalApiRole::Mutator);
+        assert_eq!(
+            effect.receiver_mutability,
+            ReceiverMutabilityFact::MutatesReceiver
+        );
+        assert_eq!(effect.provenance, FactProvenance::BuiltinExternalModel);
+    }
 }
 
 #[test]
