@@ -7716,6 +7716,60 @@ class Box<T extends Named> {
 }
 
 #[test]
+fn source_generic_class_bound_method_call_uses_bound_surface() {
+    let source = r#"
+class HeaderLine {
+    String id;
+
+    String getID() {
+        return id;
+    }
+}
+
+class FormatLine extends HeaderLine {
+}
+
+class Box<T extends HeaderLine> {
+    private T value;
+
+    Box(T value) {
+        this.value = value;
+    }
+
+    String id() {
+        return value.getID();
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation.rust.contains("pub struct Box<T>")
+            && translation.rust.contains("pub trait HeaderLineBound")
+            && translation.rust.contains("fn get_i_d(&self) -> String;")
+            && translation
+                .rust
+                .contains("impl HeaderLineBound for HeaderLine")
+            && translation
+                .rust
+                .contains("impl HeaderLineBound for FormatLine")
+            && translation.rust.contains("impl<T: HeaderLineBound> Box<T>")
+            && translation
+                .rust
+                .contains("HeaderLine::get_i_d(self).expect(\"Java null receiver\")")
+            && translation.rust.contains("pub fn id(&self) -> String")
+            && translation.rust.contains("return self.value.get_i_d();"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn nested_generic_source_alias_preserves_type_params() {
     let source = r#"
 class Outer {

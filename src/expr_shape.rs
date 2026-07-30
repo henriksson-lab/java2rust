@@ -77,6 +77,10 @@ impl ShapeEnv {
         self.types.insert_static_member_import(member, owner_type);
     }
 
+    pub fn insert_type_param_bound(&mut self, name: impl Into<String>, bound: JavaType) {
+        self.types.insert_type_param_bound(name, bound);
+    }
+
     pub fn insert_field_shape(&mut self, name: impl Into<String>, shape: RustSlotShape) {
         let name = name.into();
         let alias = crate::parser::to_snake_case(&name);
@@ -564,6 +568,7 @@ fn shape_env_for_type_with_fields(
     include_instance_fields: bool,
 ) -> ShapeEnv {
     let mut env = ShapeEnv::new();
+    seed_type_param_bounds(&mut env, &ty.type_params, &ty.type_param_bounds);
     for member in &ty.members {
         if let Member::Field(field) = member {
             let shape = signatures.required_field_shape(&ty.name, &field.name);
@@ -609,8 +614,21 @@ pub fn shape_env_for_method(
     } else {
         shape_env_for_type(ty, signatures)
     };
+    seed_type_param_bounds(&mut env, &method.type_params, &method.type_param_bounds);
     insert_param_shapes(&mut env, &method_signature.params);
     env
+}
+
+fn seed_type_param_bounds(
+    env: &mut ShapeEnv,
+    type_params: &[String],
+    type_param_bounds: &[Option<JavaType>],
+) {
+    for (name, bound) in type_params.iter().zip(type_param_bounds.iter()) {
+        if let Some(bound) = bound {
+            env.insert_type_param_bound(name.clone(), bound.clone());
+        }
+    }
 }
 
 pub fn learn_stmt_shapes(

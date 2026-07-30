@@ -201,6 +201,7 @@ use crate::{
     representation::RepresentationPlan,
     representation_lowering::{
         raw_type_item_for_program_with_facts_and_exceptions,
+        source_class_bound_trait_impl_emissions_for_type, source_class_bound_trait_item_for_type,
         trait_impl_emissions_for_type_with_facts_and_exceptions,
     },
     types,
@@ -831,6 +832,16 @@ fn lower_type(
         return;
     }
 
+    if let Some(item) = source_class_bound_trait_item_for_type(
+        program,
+        ty,
+        ctx.signatures,
+        ctx.facts,
+        ctx.exceptions,
+    ) {
+        file.items.push(raw_item(item));
+    }
+
     file.items
         .push(struct_item_for_type_with_facts_and_support_context(
             ty,
@@ -873,6 +884,15 @@ fn lower_type(
     ));
     for item in trait_impl_emissions_for_type_with_facts_and_exceptions(
         ctx.representations,
+        ctx.support_local_type_program,
+        ty,
+        ctx.signatures,
+        ctx.facts,
+        ctx.exceptions,
+    ) {
+        file.items.push(raw_item(item));
+    }
+    for item in source_class_bound_trait_impl_emissions_for_type(
         ctx.support_local_type_program,
         ty,
         ctx.signatures,

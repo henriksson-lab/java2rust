@@ -11,7 +11,10 @@ use crate::java_ir::{
 use crate::representation::{ObjectRepresentation, RepresentationPlan};
 use crate::rust_ir::RustType;
 use crate::signature::{ReceiverPlan, SignaturePlan};
-use crate::slot_render::{rust_name_for_java_named_type, rust_type_for_slot_with_facts};
+use crate::slot_render::{
+    rust_name_for_java_named_type, rust_type_for_java_type_with_facts,
+    rust_type_for_slot_with_facts,
+};
 use crate::slot_shape::{OwnershipShape, RustSlotShape, ViewShape};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +41,10 @@ pub enum TraitImplMethodCompatibilityError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraitImplMethodMessagePolicy {
     pub message: String,
+}
+
+pub fn source_class_bound_trait_name(type_name: &str) -> String {
+    format!("{}Bound", rust_name_for_java_named_type(type_name))
 }
 
 impl TraitImplMethodMessagePolicy {
@@ -441,6 +448,232 @@ pub fn trait_impl_emissions_for_type_with_facts_and_exceptions(
             )
         })
         .collect()
+}
+
+pub fn source_class_bound_trait_item_for_type(
+    program: &Program,
+    ty: &TypeDecl,
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    exceptions: &ProgramExceptionPlan,
+) -> Option<String> {
+    if !source_class_is_used_as_type_param_bound(program, &ty.name) {
+        return None;
+    }
+    if !matches!(ty.kind, TypeKind::Class) {
+        return None;
+    }
+    let trait_name = source_class_bound_trait_name(&ty.name);
+    let methods = ty
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            Member::Method(method) if !method.modifiers.contains(&Modifier::Static) => {
+                Some(source_class_bound_trait_method_signature(
+                    ty,
+                    method,
+                    signatures,
+                    facts,
+                    exceptions.method_plan(ty, method),
+                ))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    Some(format!(
+        "pub trait {trait_name} {{\n{}\n}}",
+        methods.join("\n")
+    ))
+}
+
+pub fn source_class_bound_trait_impl_emissions_for_type(
+    program: &Program,
+    ty: &TypeDecl,
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    exceptions: &ProgramExceptionPlan,
+) -> Vec<String> {
+    if !matches!(ty.kind, TypeKind::Class | TypeKind::Enum) {
+        return Vec::new();
+    }
+    source_class_bounds_for_type(program, ty)
+        .into_iter()
+        .filter_map(|bound| {
+            let trait_name = source_class_bound_trait_name(&bound.name);
+            let impl_type_name = rust_name_for_java_named_type(&ty.name);
+            let methods = bound
+                .members
+                .iter()
+                .filter_map(|member| match member {
+                    Member::Method(method) if !method.modifiers.contains(&Modifier::Static) => {
+                        Some(source_class_bound_trait_impl_method(
+                            ty,
+                            bound,
+                            method,
+                            program,
+                            signatures,
+                            facts,
+                            exceptions.method_plan(bound, method),
+                        ))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            Some(format!(
+                "impl {trait_name} for {impl_type_name} {{\n{}\n}}",
+                methods.join("\n")
+            ))
+        })
+        .collect()
+}
+
+fn source_class_bound_trait_method_signature(
+    ty: &TypeDecl,
+    method: &MethodDecl,
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    exceptions: MethodExceptionPlan,
+) -> String {
+    let signature = signatures.required_method_signature(ty, method);
+    let mut params = Vec::new();
+    params.push(match signature.receiver {
+        ReceiverPlan::Mutable => "&mut self".to_string(),
+        ReceiverPlan::Shared | ReceiverPlan::None => "&self".to_string(),
+    });
+    params.extend(signature.params.iter().map(|param| {
+        format!(
+            "{}: {}",
+            param.name,
+            emit_type(&rust_type_for_slot_with_facts(&param.shape, facts))
+        )
+    }));
+    let return_type = source_class_bound_trait_method_return_type(method, facts, exceptions)
+        .map(|ty| format!(" -> {}", emit_type(&ty)))
+        .unwrap_or_default();
+    let rust_name = method
+        .rust_name
+        .clone()
+        .unwrap_or_else(|| crate::parser::to_snake_case(&method.name));
+    format!("    fn {rust_name}({}){return_type};", params.join(", "))
+}
+
+fn source_class_bound_trait_method_return_type(
+    method: &MethodDecl,
+    facts: &FactSet,
+    exceptions: MethodExceptionPlan,
+) -> Option<RustType> {
+    if method.return_type == JavaType::Void {
+        if exceptions.wrap_returns_in_result {
+            return Some(exception_result_type(RustType::Unit));
+        }
+        return None;
+    }
+    let rust_return = rust_type_for_java_type_with_facts(&method.return_type, facts);
+    if exceptions.wrap_returns_in_result {
+        Some(exception_result_type(rust_return))
+    } else {
+        Some(rust_return)
+    }
+}
+
+fn source_class_bound_trait_impl_method(
+    ty: &TypeDecl,
+    bound: &TypeDecl,
+    bound_method: &MethodDecl,
+    program: &Program,
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    exceptions: MethodExceptionPlan,
+) -> String {
+    let signature = source_class_bound_trait_method_signature(
+        bound,
+        bound_method,
+        signatures,
+        facts,
+        exceptions,
+    );
+    let candidates = implementing_method_candidates_in_hierarchy(ty, bound_method, program);
+    if candidates.is_empty() {
+        return trait_impl_method_message_policy(
+            ty,
+            bound_method,
+            TraitImplMethodFallbackPolicy::MissingImplementation,
+        )
+        .compile_error_body(&signature);
+    }
+    let (implementing_owner, implementing_method) = candidates
+        .iter()
+        .copied()
+        .find(|(_, candidate)| {
+            trait_impl_method_compatibility_error(bound_method, candidate).is_none()
+        })
+        .unwrap_or(candidates[0]);
+    if let Some(message) = trait_impl_method_compatibility_error(bound_method, implementing_method)
+    {
+        return trait_impl_method_message_policy(
+            ty,
+            bound_method,
+            TraitImplMethodFallbackPolicy::IncompatibleImplementation { error: message },
+        )
+        .compile_error_body(&signature);
+    }
+    let rust_name = implementing_method
+        .rust_name
+        .clone()
+        .unwrap_or_else(|| crate::parser::to_snake_case(&implementing_method.name));
+    let bound_signature = signatures.required_method_signature(bound, bound_method);
+    let implementation_signature =
+        signatures.required_method_signature(implementing_owner, implementing_method);
+    let args = bound_signature
+        .params
+        .iter()
+        .enumerate()
+        .map(|(index, param)| {
+            let implementation_shape = implementation_signature
+                .params
+                .get(index)
+                .map(|param| &param.shape);
+            trait_impl_forwarded_arg(param.name.as_str(), &param.shape, implementation_shape)
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let receiver_arg = if args.is_empty() {
+        trait_impl_forwarding_receiver_arg(ty, implementing_owner, None)
+    } else {
+        format!(
+            "{}, {args}",
+            trait_impl_forwarding_receiver_arg(ty, implementing_owner, None)
+        )
+    };
+    let implementing_owner_name = rust_name_for_java_named_type(&implementing_owner.name);
+    let call = format!("{implementing_owner_name}::{rust_name}({receiver_arg})");
+    let call = adapt_source_class_bound_trait_impl_return(
+        call,
+        bound_method,
+        &implementation_signature.return_shape,
+    );
+    let body =
+        if source_class_bound_trait_method_return_type(bound_method, facts, exceptions).is_some() {
+            call
+        } else {
+            format!("{call};")
+        };
+    format!("{} {{ {body} }}", signature.trim_end_matches(';'))
+}
+
+fn adapt_source_class_bound_trait_impl_return(
+    call: String,
+    bound_method: &MethodDecl,
+    implementation_return_shape: &Option<RustSlotShape>,
+) -> String {
+    if let Some(shape) = implementation_return_shape
+        && shape
+            .optional_element_type()
+            .is_some_and(|element_ty| element_ty == bound_method.return_type)
+    {
+        return format!("{call}.expect(\"Java null receiver\")");
+    }
+    call
 }
 
 fn implemented_interfaces_for_type(program: &Program, ty: &TypeDecl) -> Vec<String> {
@@ -1121,6 +1354,77 @@ fn implementing_method_candidates_in_hierarchy<'a>(
         ));
     }
     out
+}
+
+fn source_class_bounds_for_type<'a>(program: &'a Program, ty: &TypeDecl) -> Vec<&'a TypeDecl> {
+    source_type_param_bound_names(program)
+        .into_iter()
+        .filter_map(|bound_name| find_type_decl(program, &bound_name))
+        .filter(|bound| {
+            matches!(bound.kind, TypeKind::Class)
+                && (bound.name == ty.name || source_type_extends(program, ty, &bound.name))
+        })
+        .collect()
+}
+
+fn source_class_is_used_as_type_param_bound(program: &Program, type_name: &str) -> bool {
+    source_type_param_bound_names(program)
+        .into_iter()
+        .any(|bound| bound == type_name)
+}
+
+fn source_type_param_bound_names(program: &Program) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for ty in &program.types {
+        collect_source_type_param_bound_names_in_type(ty, &mut seen, &mut out);
+    }
+    out
+}
+
+fn collect_source_type_param_bound_names_in_type(
+    ty: &TypeDecl,
+    seen: &mut HashSet<String>,
+    out: &mut Vec<String>,
+) {
+    collect_bound_names(&ty.type_param_bounds, seen, out);
+    for member in &ty.members {
+        match member {
+            Member::Method(method) => collect_bound_names(&method.type_param_bounds, seen, out),
+            Member::Constructor(constructor) => {
+                collect_bound_names(&constructor.type_param_bounds, seen, out)
+            }
+            Member::Type(nested) => {
+                collect_source_type_param_bound_names_in_type(nested, seen, out)
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_bound_names(
+    bounds: &[Option<JavaType>],
+    seen: &mut HashSet<String>,
+    out: &mut Vec<String>,
+) {
+    for bound in bounds {
+        if let Some(JavaType::Named { name, .. }) = bound
+            && seen.insert(name.clone())
+        {
+            out.push(name.clone());
+        }
+    }
+}
+
+fn source_type_extends(program: &Program, ty: &TypeDecl, target_name: &str) -> bool {
+    let mut next = ty.extends.as_deref();
+    while let Some(name) = next {
+        if name == target_name {
+            return true;
+        }
+        next = find_type_decl(program, name).and_then(|super_ty| super_ty.extends.as_deref());
+    }
+    false
 }
 
 fn find_type_decl<'a>(program: &'a Program, type_name: &str) -> Option<&'a TypeDecl> {

@@ -97,9 +97,13 @@ fn rust_impl_params_for_source_type(ty: &TypeDecl, support_program: &Program) ->
         .map(|(index, name)| {
             let mut bounds = Vec::new();
             if let Some(Some(JavaType::Named { name: bound, .. })) = ty.type_param_bounds.get(index)
-                && source_type_bound_is_trait_like(bound, support_program)
             {
-                bounds.push(rust_name_for_java_named_type(bound));
+                if source_type_bound_is_trait_like(bound, support_program) {
+                    bounds.push(rust_name_for_java_named_type(bound));
+                } else if source_type_bound_is_class_like(bound, support_program) {
+                    bounds
+                        .push(crate::representation_lowering::source_class_bound_trait_name(bound));
+                }
             }
             if bounds.is_empty() {
                 name.clone()
@@ -114,6 +118,13 @@ fn source_type_bound_is_trait_like(bound: &str, support_program: &Program) -> bo
     support_program.types.iter().any(|ty| {
         (ty.name == bound || rust_name_for_java_named_type(&ty.name) == bound)
             && matches!(ty.kind, crate::java_ir::TypeKind::Interface)
+    })
+}
+
+fn source_type_bound_is_class_like(bound: &str, support_program: &Program) -> bool {
+    support_program.types.iter().any(|ty| {
+        (ty.name == bound || rust_name_for_java_named_type(&ty.name) == bound)
+            && matches!(ty.kind, crate::java_ir::TypeKind::Class)
     })
 }
 

@@ -228,6 +228,22 @@ adjacent non-stream negated-equals regression. Additional optional receiver
 coverage now proves direct and sibling-source nullable receiver chains lower
 through `.as_ref().unwrap()` before external getter calls.
 
+2026-07-30 source class-bound generic surface: source classes that are used as
+Java type-parameter bounds now emit a generated `Bound` trait surface, concrete
+source classes/subclasses implement that trait, and generic impl headers use
+the generated bound instead of leaving `T` unconstrained. `ShapeEnv` also seeds
+owner and method type-parameter bounds so ordinary call/slot planners can see
+the same bound facts as the resolver. The generated bound trait exposes the
+declared Java method contract; concrete forwarding impls unwrap optional
+implementation carriers only when the implementation return slot is
+`Optional<declared Java return>`. Focused coverage:
+`source_generic_class_bound_method_call_uses_bound_surface` and the existing
+`source_generic_class_preserves_type_params_and_interface_bounds`. Next VCF
+work should rerun `VCFStandardHeaderLines`/full VCF to measure how many
+`T extends VCFCompoundHeaderLine` rows are removed, then address the remaining
+generic-to-supertype slot conversions such as inserting `T` where
+`VCFHeaderLine` is expected.
+
 Attempted VCF refresh:
 `.tmp/corpus-rerun-20260730-htsjdk-vcf-current-refresh` stalled during
 `batch_parse_global_emit_start` before per-file statuses or generated source
