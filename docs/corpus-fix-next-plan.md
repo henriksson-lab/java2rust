@@ -6522,16 +6522,30 @@ Reduced VCF reruns:
   static-final `VCFHeader.HEADER_INDICATOR`. The previous missing
   `is_at_least_as_recent_as` and `VCFHeader::HEADER_INDICATOR` rows are gone;
   `get_v_c_f_header_version` now returns `VCFHeaderVersion`.
+- `.tmp/corpus-rerun-20260730-vcf-standard-bound-after-super-local-prefix`:
+  9 files, 29.449s, 24 generated-Rust errors. Source-super constructor
+  lowering now emits superclass constructor local prefixes before the child
+  `__java_self` temporary when inherited flattened field values read those
+  locals. The previous four unbound `mapping` rows are gone; the generated
+  VCF format/info parsing constructors now declare `expected_tags`,
+  `recommended_tags`, and `mapping` before constructing the flattened child.
+- `.tmp/corpus-rerun-20260730-vcf-standard-bound-after-vcf-translator-facts`:
+  9 files, 29.233s, 24 generated-Rust errors. The VCF external pack now records
+  `VCFHeaderLineTranslator` as a type and `parseLine` as a typed
+  `Map<String,String>` API surface, but generated calls still render
+  `v_c_f_header_line_translator.parse_line(...)`. The remaining two rows are a
+  callable-key/staticness gap: `ExternalApiEffectFact::callable_key` still uses
+  `Staticness::Unknown`, and support generation treats the method as an
+  instance surface.
 
 Remaining top reduced-VCF clusters after this follow-up:
-10 mismatched types, 4 missing `mapping`, 3 possibly-uninitialized `number`, 3
-type annotations needed, 2 unsupported concrete `instanceof`, and 2 unsupported
-`super(...)` inheritance constructor calls. The remaining
-`set_v_c_f_header_version` row is no longer a missing method fact; it is exposed
-through `repaired_header: Box<dyn Any>`, so the next reduced-VCF target should
-prefer fixing constructor/body projection around the missing `mapping` local and
-the two remaining unsupported `super(...)` constructor calls before returning to
-erased-return adaptation.
+10 mismatched types, 3 possibly-uninitialized `number`, 3 type annotations
+needed, 2 missing `v_c_f_header_line_translator`, 2 unsupported concrete
+`instanceof`, 2 unsupported `super(...)` inheritance constructor calls, and one
+`VCFHeader: Default` bound from erased return adaptation. The next reduced-VCF
+target should fix static utility callable identity/staticness for
+`VCFHeaderLineTranslator.parseLine` or tackle concrete `instanceof`; the old
+missing-super-local `mapping` bucket is closed.
 
 ## Rerun Protocol
 

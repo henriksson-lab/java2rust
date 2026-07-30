@@ -1822,7 +1822,7 @@ fn lower_constructor(
         return function;
     }
     if let Some(body) = &ctor.body
-        && let Some((fields, trailing, returns_result)) =
+        && let Some((fields, prefix, trailing, returns_result)) =
             implicit_source_super_constructor_with_trailing_fields(ty, body, &env, constructor_ctx)
     {
         let mut function = constructor_function_shell_with_facts(
@@ -1832,6 +1832,7 @@ fn lower_constructor(
             super_no_arg_constructor_with_trailing_body(
                 ty,
                 with_outer_this_capture_field(ty, fields, constructor_ctx),
+                prefix,
                 &trailing,
                 &env,
                 constructor_ctx,
@@ -2763,7 +2764,7 @@ fn lower_delegating_constructor(
         }
         ConstructorDelegationPlan::Unsupported(kind) => {
             if kind == crate::unsupported::UnsupportedConstructorLowering::SuperRequiresInheritanceLowering
-                && let Some((fields, trailing, returns_result)) =
+                && let Some((fields, prefix, trailing, returns_result)) =
                     source_super_constructor_with_trailing_fields(ty, body, env, ctx)
             {
                 return Some(constructor_function_shell_with_facts(
@@ -2773,6 +2774,7 @@ fn lower_delegating_constructor(
                     super_no_arg_constructor_with_trailing_body(
                         ty,
                         fields,
+                        prefix,
                         &trailing,
                         env,
                         ctx,
@@ -2800,6 +2802,7 @@ fn source_super_constructor_with_trailing_fields<'a>(
     ctx: LowerCtx<'a>,
 ) -> Option<(
     Vec<(String, RustExpr)>,
+    Vec<RustStmt>,
     Vec<DelegatedConstructorTrailingStmt<'a>>,
     bool,
 )> {
@@ -2826,6 +2829,7 @@ fn source_super_constructor_fields_and_trailing<'a>(
     ctx: LowerCtx<'a>,
 ) -> Option<(
     Vec<(String, RustExpr)>,
+    Vec<RustStmt>,
     Vec<DelegatedConstructorTrailingStmt<'a>>,
     bool,
 )> {
@@ -2855,6 +2859,7 @@ fn source_super_constructor_fields_and_trailing<'a>(
         .iter()
         .map(|(name, expr)| (name.as_str(), expr))
         .collect::<Vec<_>>();
+    let super_prefix = source_super_constructor_local_prefix(super_body, &super_bindings, env, ctx);
 
     let inherited_field_names = crate::inherited_members::inherited_instance_fields_for_type(
         ty,
@@ -2887,7 +2892,7 @@ fn source_super_constructor_fields_and_trailing<'a>(
     let mut fields = Vec::new();
     let mut super_field_values = std::collections::HashMap::new();
     let mut deferred_child_field_assignments = Vec::new();
-    for plan in super_plans {
+    for (plan_index, plan) in super_plans.iter().enumerate() {
         let (field_name, shape) = constructor_field_name_and_shape(&plan);
         if !inherited_field_names.contains(field_name) {
             continue;
@@ -2898,7 +2903,17 @@ fn source_super_constructor_fields_and_trailing<'a>(
             match constructor_field_value_expr(&plan) {
                 Some(value) => {
                     let substituted = substitute_expr_vars(value, &super_bindings);
-                    lower_constructor_field_value_expr_for_shape(&substituted, shape, env, ctx)
+                    let lowered =
+                        lower_constructor_field_value_expr_for_shape(&substituted, shape, env, ctx);
+                    recover_reused_super_constructor_local_for_field(
+                        lowered,
+                        &substituted,
+                        shape,
+                        &super_plans,
+                        plan_index,
+                        &super_bindings,
+                        ctx,
+                    )
                 }
                 None => {
                     constructor_default_field_value_with_facts(
@@ -2979,7 +2994,119 @@ fn source_super_constructor_fields_and_trailing<'a>(
     trailing_instance_calls.splice(0..0, deferred_child_field_assignments);
     let returns_result =
         delegated_constructor_trailing_can_throw(&trailing_instance_calls, env, ctx);
-    Some((fields, trailing_instance_calls, returns_result))
+    Some((
+        fields,
+        super_prefix,
+        trailing_instance_calls,
+        returns_result,
+    ))
+}
+
+fn recover_reused_super_constructor_local_for_field(
+    lowered: RustExpr,
+    value: &Expr,
+    shape: &RustSlotShape,
+    plans: &[ConstructorFieldValuePlan<'_>],
+    plan_index: usize,
+    bindings: &[(&str, &Expr)],
+    ctx: LowerCtx,
+) -> RustExpr {
+    let Expr::Var(name) = value else {
+        return lowered;
+    };
+    if !shape_is_owned_non_erased(shape)
+        || !(known_named_clone_recovery(shape)
+            || known_owned_argument_clone_recovery_with_facts(shape, ctx.facts))
+    {
+        return lowered;
+    }
+    let mut future_reads = HashSet::new();
+    for later in plans.iter().skip(plan_index + 1) {
+        if let Some(expr) = constructor_field_value_expr(later) {
+            collect_expr_read_names(&substitute_expr_vars(expr, bindings), &mut future_reads);
+        }
+    }
+    if future_reads.contains(name) {
+        apply_audited_clone_recovery(lowered)
+    } else {
+        lowered
+    }
+}
+
+fn source_super_constructor_local_prefix(
+    super_body: &Block,
+    super_bindings: &[(&str, &Expr)],
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Vec<RustStmt> {
+    let local_names = constructor_body_local_decl_names(super_body);
+    let Some(first_local_dependent_assignment) = super_body
+        .statements
+        .iter()
+        .position(|stmt| constructor_field_assignment_reads_local(stmt, &local_names))
+    else {
+        return Vec::new();
+    };
+    let mut local_env = env.clone();
+    let mut lowered = Vec::new();
+    for stmt in super_body.statements[..first_local_dependent_assignment]
+        .iter()
+        .filter(|stmt| source_super_constructor_prefix_stmt_is_supported(stmt))
+    {
+        let substituted = substitute_stmt_vars(stmt, super_bindings);
+        lower_stmt(
+            &substituted,
+            &mut local_env,
+            false,
+            ctx,
+            &ExprRefinements::default(),
+            &mut lowered,
+        );
+    }
+    lowered
+}
+
+fn constructor_field_assignment_reads_local(stmt: &Stmt, local_names: &HashSet<String>) -> bool {
+    match stmt {
+        Stmt::Assign { target, value }
+            if constructor_assignment_target_is_instance_field(target) =>
+        {
+            expr_reads_any_name(value, local_names)
+        }
+        _ => false,
+    }
+}
+
+fn constructor_assignment_target_is_instance_field(target: &Expr) -> bool {
+    match target {
+        Expr::FieldAccess(receiver, _) => matches!(receiver.as_ref(), Expr::This | Expr::Super),
+        Expr::Var(_) => true,
+        _ => false,
+    }
+}
+
+fn source_super_constructor_prefix_stmt_is_supported(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::VarDecl { .. } => true,
+        Stmt::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            source_super_constructor_prefix_block_is_supported(then_block)
+                && else_block
+                    .as_ref()
+                    .is_none_or(source_super_constructor_prefix_block_is_supported)
+        }
+        _ => false,
+    }
+}
+
+fn source_super_constructor_prefix_block_is_supported(block: &Block) -> bool {
+    block
+        .statements
+        .iter()
+        .all(|stmt| matches!(stmt, Stmt::Assign { .. } | Stmt::VarDecl { .. }))
 }
 
 fn adapt_inherited_super_field_value_for_child_shape(
@@ -3110,7 +3237,7 @@ fn nested_implicit_source_super_field_values(
         return None;
     }
     implicit_source_super_constructor_with_trailing_fields(ty, body, env, ctx)
-        .map(|(fields, _, _)| fields)
+        .map(|(fields, _, _, _)| fields)
 }
 
 fn delegated_source_constructor_body<'a>(
@@ -3175,6 +3302,7 @@ fn implicit_source_super_constructor_with_trailing_fields<'a>(
     ctx: LowerCtx<'a>,
 ) -> Option<(
     Vec<(String, RustExpr)>,
+    Vec<RustStmt>,
     Vec<DelegatedConstructorTrailingStmt<'a>>,
     bool,
 )> {
@@ -3333,6 +3461,54 @@ fn substitute_expr_vars(expr: &Expr, bindings: &[(&str, &Expr)]) -> Expr {
     }
 }
 
+fn substitute_stmt_vars(stmt: &Stmt, bindings: &[(&str, &Expr)]) -> Stmt {
+    match stmt {
+        Stmt::VarDecl {
+            ty,
+            name,
+            initializer,
+        } => Stmt::VarDecl {
+            ty: ty.clone(),
+            name: name.clone(),
+            initializer: initializer
+                .as_ref()
+                .map(|expr| substitute_expr_vars(expr, bindings)),
+        },
+        Stmt::Assign { target, value } => Stmt::Assign {
+            target: substitute_expr_vars(target, bindings),
+            value: substitute_expr_vars(value, bindings),
+        },
+        Stmt::Expr(expr) => Stmt::Expr(substitute_expr_vars(expr, bindings)),
+        Stmt::Return(expr) => Stmt::Return(
+            expr.as_ref()
+                .map(|expr| substitute_expr_vars(expr, bindings)),
+        ),
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => Stmt::If {
+            condition: substitute_expr_vars(condition, bindings),
+            then_block: substitute_block_vars(then_block, bindings),
+            else_block: else_block
+                .as_ref()
+                .map(|block| substitute_block_vars(block, bindings)),
+        },
+        Stmt::Block(block) => Stmt::Block(substitute_block_vars(block, bindings)),
+        _ => stmt.clone(),
+    }
+}
+
+fn substitute_block_vars(block: &Block, bindings: &[(&str, &Expr)]) -> Block {
+    Block {
+        statements: block
+            .statements
+            .iter()
+            .map(|stmt| substitute_stmt_vars(stmt, bindings))
+            .collect(),
+    }
+}
+
 fn delegated_constructor_with_trailing_body(
     ty: &TypeDecl,
     resolved: &ResolvedConstructor,
@@ -3377,12 +3553,15 @@ fn delegated_constructor_with_trailing_body(
 fn super_no_arg_constructor_with_trailing_body(
     ty: &TypeDecl,
     fields: Vec<(String, RustExpr)>,
+    mut prefix: Vec<RustStmt>,
     trailing: &[DelegatedConstructorTrailingStmt<'_>],
     env: &ShapeEnv,
     ctx: LowerCtx,
     returns_result: bool,
 ) -> Vec<RustStmt> {
-    let mut body = vec![RustStmt::Let {
+    let mut body = Vec::new();
+    body.append(&mut prefix);
+    body.push(RustStmt::Let {
         mutable: true,
         name: "__java_self".to_string(),
         ty: None,
@@ -3390,7 +3569,7 @@ fn super_no_arg_constructor_with_trailing_body(
             name: crate::slot_render::rust_name_for_java_named_type(&ty.name),
             fields,
         }),
-    }];
+    });
     for stmt in trailing {
         body.push(lower_delegated_constructor_trailing_stmt(
             ty,

@@ -10604,6 +10604,64 @@ class HeaderChild extends HeaderBase {
 }
 
 #[test]
+fn source_super_constructor_lowers_locals_needed_by_inherited_fields() {
+    let superclass = r#"
+class HeaderBase {
+    private String name;
+    private String description;
+
+    HeaderBase(String line) {
+        String parsed = parse(line);
+        name = parsed;
+        description = parsed.trim();
+    }
+
+    static String parse(String line) {
+        return line.trim();
+    }
+}
+"#;
+    let subclass = r#"
+class HeaderChild extends HeaderBase {
+    HeaderChild(String line) {
+        super(line);
+    }
+}
+"#;
+
+    let translation = translate_source_with_context_sources(
+        subclass,
+        &[superclass.to_string()],
+        &FactSet::default(),
+    );
+
+    let parsed_pos = translation.rust.find("let mut parsed").unwrap_or_else(|| {
+        panic!(
+            "super constructor local should be emitted before child self construction:\n{}",
+            translation.rust
+        )
+    });
+    let self_pos = translation
+        .rust
+        .find("let mut __java_self = HeaderChild")
+        .unwrap_or_else(|| {
+            panic!(
+                "child constructor should build a self temporary:\n{}",
+                translation.rust
+            )
+        });
+    assert!(
+        parsed_pos < self_pos
+            && translation.rust.contains("name: Some(parsed.clone()")
+            && translation.rust.contains("description: Some(parsed.trim()")
+            && !translation.rust.contains("compile_error!")
+            && !translation.rust.contains("requires inheritance lowering"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn constructor_trailing_instance_call_rewrites_self_arguments() {
     let translation = translate_source(&idiom_gap("ConstructorTrailingCallReadsSeededField.java"));
 

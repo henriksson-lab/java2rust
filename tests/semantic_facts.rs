@@ -4398,6 +4398,26 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         Some(JavaType::Primitive(PrimitiveType::Boolean))
     );
 
+    let parse_line = vcf_facts
+        .external_api_effect_for_receiver_with_arity(
+            Some("VCFHeaderLineTranslator"),
+            "parseLine",
+            Some(4),
+        )
+        .expect("VCFHeaderLineTranslator.parseLine should be explained by VCF pack");
+    assert_eq!(parse_line.role, ExternalApiRole::Getter);
+    assert_eq!(
+        parse_line.receiver_mutability,
+        ReceiverMutabilityFact::ReadOnly
+    );
+    assert_eq!(
+        parse_line.return_type,
+        Some(JavaType::Named {
+            name: "Map".to_string(),
+            args: vec![JavaType::String, JavaType::String],
+        })
+    );
+
     let supported_header_line_type = vcf_facts
         .external_field_for("VCFCompoundHeaderLine", "SupportedHeaderLineType")
         .expect("VCFCompoundHeaderLine.SupportedHeaderLineType should be explained by VCF pack");
