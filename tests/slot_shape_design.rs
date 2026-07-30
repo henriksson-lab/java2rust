@@ -31002,6 +31002,85 @@ fn lowering_diagnostics_only_report_unimplemented_control_flow_rewrites() {
     assert!(!lower_source.contains("requires tail-recursive loop normalization"));
 }
 
+fn lowering_diagnostic_codes_for_source(source: &str) -> Vec<&'static str> {
+    let parsed = parse_java_source(source);
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let facts = FactSet::default();
+    let usage = analyze_usage(&resolved.program);
+    let representations = plan_representations(&resolved.program, &facts);
+    let signatures =
+        solve_signatures_with_facts(&resolved.program, &representations, &usage, &facts);
+    collect_lowering_diagnostic_plans(
+        &resolved.program,
+        &facts,
+        &representations,
+        &signatures,
+        &[],
+    )
+    .into_iter()
+    .map(|diagnostic| diagnostic.code)
+    .collect()
+}
+
+#[test]
+fn lowering_diagnostics_warn_for_reference_identity_equality() {
+    let codes = lowering_diagnostic_codes_for_source(
+        r#"
+class ReferenceIdentityDiagnostics {
+    static class Node { int value; }
+
+    boolean same() {
+        Node left = new Node();
+        Node right = new Node();
+        return left == right;
+    }
+
+    boolean different() {
+        Node left = new Node();
+        Node right = new Node();
+        return left != right;
+    }
+}
+"#,
+    );
+
+    assert_eq!(
+        codes
+            .iter()
+            .filter(|code| **code == "java_reference_identity_equality")
+            .count(),
+        2,
+        "{codes:?}"
+    );
+}
+
+#[test]
+fn lowering_diagnostics_warn_for_string_identity_equality_only() {
+    let codes = lowering_diagnostic_codes_for_source(
+        r#"
+class StringIdentityDiagnostics {
+    boolean stringIdentity(String value) {
+        return value == "x";
+    }
+
+    boolean primitiveEquality(int left, int right) {
+        return left == right;
+    }
+
+    boolean nullCheck(String value) {
+        return value == null;
+    }
+}
+"#,
+    );
+
+    assert!(codes.contains(&"java_string_identity"), "{codes:?}");
+    assert!(
+        !codes.contains(&"java_reference_identity_equality"),
+        "{codes:?}"
+    );
+}
+
 #[test]
 fn stream_shape_owns_lambda_body_borrowed_string_views() {
     let stream_lowering_source = include_str!("../src/stream_lowering.rs");
