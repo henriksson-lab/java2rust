@@ -3360,8 +3360,14 @@ fn callable_analysis_shell_reaches_lowering_context() {
         .nth(1)
         .and_then(|tail| tail.split("fn resolved_source_method_for_call").next())
         .expect("resolved source call argument planner should be present");
-    assert!(resolved_source_arg_plan.contains("JavaCallableKey::source_method"));
-    assert!(resolved_source_arg_plan.contains("method_signature_by_java_key"));
+    assert!(resolved_source_arg_plan.contains("method_signature_for_resolved_source_call"));
+    let resolved_source_signature_helper = lower_source
+        .split("fn method_signature_for_resolved_source_call")
+        .nth(1)
+        .and_then(|tail| tail.split("fn method_effective_rust_name").next())
+        .expect("resolved source signature helper should be present");
+    assert!(resolved_source_signature_helper.contains("JavaCallableKey::source_method"));
+    assert!(resolved_source_signature_helper.contains("method_signature_by_java_key"));
     let resolved_static_fallback = lower_source
         .split("fn source_context_resolved_static_method_fallback_signature")
         .nth(1)
@@ -3373,6 +3379,16 @@ fn callable_analysis_shell_reaches_lowering_context() {
     assert!(resolved_static_fallback.contains("resolved_source_method_for_call"));
     assert!(resolved_static_fallback.contains("JavaCallableKey::source_method"));
     assert!(resolved_static_fallback.contains("method_signature_by_java_key"));
+    let resolved_varargs = lower_source
+        .split("fn lower_resolved_varargs_call_args")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn lower_resolved_constructor_varargs_args")
+                .next()
+        })
+        .expect("resolved varargs lowering should be present");
+    assert!(resolved_varargs.contains("method_signature_for_resolved_source_call"));
+    assert!(resolved_varargs.contains("method_signature_by_rust_name"));
     assert!(
         lower_source
             .contains(".callable_analysis\n            .constructor_usage(&UsageConstructorKey")

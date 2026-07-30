@@ -14549,12 +14549,9 @@ fn emitted_source_resolved_call_argument_plan(
     let resolved = resolved?;
     let owner = find_context_type_by_key(ctx.program, &resolved.declaring_type)?;
     let method = resolved_source_method_for_call(owner, resolved, arg_count)?;
-    let java_key =
-        crate::java_signature::JavaCallableKey::source_method(owner.name.clone(), method);
-    let signature = ctx
-        .signatures
-        .method_signature_by_java_key(&java_key)
-        .unwrap_or_else(|| ctx.signatures.required_method_signature(owner, method));
+    let signature =
+        method_signature_for_resolved_source_call(ctx.signatures, resolved, arg_count, ctx)
+            .unwrap_or_else(|| ctx.signatures.required_method_signature(owner, method));
     Some(ArgumentLoweringPlan::Shaped(
         signature
             .params
@@ -14597,6 +14594,25 @@ fn resolved_source_method_for_call<'a>(
             None
         }
     })
+}
+
+fn method_signature_for_resolved_source_call<'a>(
+    signatures: &'a crate::signature::SignaturePlan,
+    resolved: &ResolvedCall,
+    arg_count: usize,
+    ctx: LowerCtx<'_>,
+) -> Option<&'a crate::signature::MethodSignaturePlan> {
+    let owner = find_context_type_by_key(ctx.program, &resolved.declaring_type)
+        .or_else(|| {
+            find_context_type_by_key(ctx.support_local_type_program, &resolved.declaring_type)
+        })
+        .or_else(|| {
+            find_context_type_by_key(ctx.source_summary_type_program, &resolved.declaring_type)
+        })?;
+    let method = resolved_source_method_for_call(owner, resolved, arg_count)?;
+    let java_key =
+        crate::java_signature::JavaCallableKey::source_method(owner.name.clone(), method);
+    signatures.method_signature_by_java_key(&java_key)
 }
 
 fn method_effective_rust_name(method: &MethodDecl) -> String {
@@ -14951,9 +14967,12 @@ fn lower_resolved_varargs_call_args(
     ctx: LowerCtx,
 ) -> Option<Vec<RustExpr>> {
     let resolved = resolved?;
-    let signature = ctx
-        .signatures
-        .method_signature_by_rust_name(&resolved.declaring_type, &resolved.rust_name)?;
+    let signature =
+        method_signature_for_resolved_source_call(ctx.signatures, resolved, args.len(), ctx)
+            .or_else(|| {
+                ctx.signatures
+                    .method_signature_by_rust_name(&resolved.declaring_type, &resolved.rust_name)
+            })?;
     let varargs_param = signature.params.last()?;
     if !varargs_param.is_varargs {
         return None;

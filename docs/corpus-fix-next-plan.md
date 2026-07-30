@@ -163,6 +163,12 @@ Known remaining clusters from the same full boundary run:
 - Owned recovery at source/facade boundaries: reused map arguments and boxed dyn
   clone recovery still need call planning and clone recovery to agree on the
   actual owned target slot.
+- Source-summary facade precision: GATK/HTSJDK context helpers such as
+  `GATKPath` static helper calls can still solve both caller and callee
+  parameters as erased object (`Box<dyn std::any::Any>`) before fallback slot
+  planning runs. Fix this in signature/source-summary type resolution so known
+  external facade parameter types stay concrete or borrowed, rather than with
+  call-site-only normalization.
 - Source/interface compatibility: fallible trait implementation signatures,
   async template super/interface satisfaction, source enum constant slot
   projection, and swing/component facade upcasts remain separate clusters.

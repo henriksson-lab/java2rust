@@ -285,6 +285,8 @@ Landed in this batch:
   declaration with the same resolved owner/staticness/arity helper and asks
   `SignaturePlan::method_signature_by_java_key(...)` before the legacy
   `(owner, rust_name)` compatibility lookup.
+- Resolved source varargs lowering now asks the same Java-key source-signature
+  helper before falling back to the legacy `(owner, rust_name)` signature map.
 
 1. Add a `CallableAnalysis` shell.
    - Introduce `src/callable_analysis.rs`.
@@ -308,6 +310,10 @@ Landed in this batch:
    - Tests: child overrides `f(int)` while inheriting `f(int,int)`; unrelated
      same-name method in another package must not match.
    - Related audit: `0009`.
+   - Current open precision gap: GATK/HTSJDK source-summary helper signatures
+     can still broaden known external facade parameters to erased object before
+     call fallback planning runs. Fix this in signature/source-summary type
+     resolution rather than by local call-site normalization.
 
 3. Add a fallibility plan skeleton.
    - Build `CallableFallibilityPlan` over the existing `usage::CallGraph`.
