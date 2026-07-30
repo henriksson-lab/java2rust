@@ -485,6 +485,36 @@ dyn trait, or erased-object source representation must be selected from
 whole-program/source-summary evidence before the `instanceof` planner can lower
 those checks.
 
+2026-07-30 generic source impl assembly follow-up: focused-package shared
+support stripping and merging now recognize generic inherent impl targets such
+as `impl<T> VCFStandardHeaderLinesStandards<T> { ... }` as impls for the base
+type. The shared-support merger also preserves generic impl headers when it
+promotes duplicated generic support declarations, emitting
+`impl<T> SharedBox<T>` rather than invalid `impl SharedBox`.
+
+Focused coverage passed:
+`focused_package_shared_support_stripper_matches_generic_inherent_impl_targets`,
+`focused_package_shared_support_stripper_keeps_dyn_trait_inherent_impls`,
+`shared_support_merger_preserves_generic_inherent_impl_methods`,
+`shared_support_merger_keeps_source_owned_nested_types_before_primary`,
+`shared_support_merger_prefers_concrete_method_over_generic_fallback`,
+`cargo test shared_support_merger --test idiom_sweep_script --quiet`,
+`cargo test focused_package_shared_support_stripper --test idiom_sweep_script
+--quiet`, `bash -n scripts/translate-focused-package.sh`,
+`python3 -m py_compile scripts/merge-shared-support-facades.py`,
+`cargo fmt --check`, `cargo check --quiet`, `git diff --check`, and
+`cargo build --release --quiet --bin new-java2rust`.
+
+The attempted full VCF rerun at
+`.tmp/corpus-rerun-20260730-htsjdk-vcf-after-generic-impl-assembly` was
+interrupted before crate assembly and `cargo check`, so it is not a new corpus
+baseline. Its event log reached global signature solving and most emission
+events, including `VCFStandardHeaderLines.java`, but no assembled
+`00030_VCFStandardHeaderLines.rs` was finalized. Keep the previous complete
+VCF baseline,
+`.tmp/corpus-rerun-20260730-htsjdk-vcf-after-source-generics-cleanup`, as the
+current corpus count until the next complete rerun.
+
 2026-07-29 optional clone recovery and parse projection cleanup: clone recovery
 now checks borrowed target slots, including optional targets whose element slot
 borrows, before applying reused-owned optional clone recovery. This prevents

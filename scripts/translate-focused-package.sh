@@ -687,10 +687,10 @@ strip_shared_support_items() {
         }
         next
       }
-      if ($0 ~ /^impl([[:space:]]*<[^>]+>)?[[:space:]]+(dyn[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\{/) {
+      if ($0 ~ /^impl([[:space:]]*<[^>]+>)?[[:space:]]+(dyn[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*(<[^>{}]+>)?[[:space:]]*(\{|where([[:space:]]|$))/) {
         impl_name = $0
         sub(/^impl([[:space:]]*<[^>]+>)?[[:space:]]+(dyn[[:space:]]+)?/, "", impl_name)
-        sub(/[[:space:]]*\{.*/, "", impl_name)
+        sub(/(<[^>{}]+>)?[[:space:]]*(\{|where([[:space:]]|$)).*$/, "", impl_name)
         if (impl_name == "JavaException" || impl_name == "JavaClass" || impl_name == "FileSystem" || impl_name == "Path" || impl_name == "URI" || impl_name == "File" || impl_name == "URL" || impl_name == "URLConnection" || impl_name == "JarURLConnection" || impl_name == "JarFile" || impl_name == "JarEntry" || impl_name == "Manifest" || impl_name == "Attributes" || impl_name == "AttributesName" || impl_name == "Enumeration" || impl_name == "JavaIterator" || impl_name == "IOUtils" || (shared[impl_name] && impl_name != source_type)) {
           skip_depth = 0
           skip_depth += gsub(/\{/, "{")
@@ -797,7 +797,10 @@ source_types.discard(current_source)
 
 lines = rust_path.read_text().splitlines(keepends=True)
 decl_re = re.compile(r"^pub\s+(struct|enum|trait|type)\s+([A-Za-z_][A-Za-z0-9_]*)")
-inherent_impl_re = re.compile(r"^impl(?:\s*<[^>{}]*>)?\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\{|where\b)")
+inherent_impl_re = re.compile(
+    r"^impl(?:\s*<[^>{}]*>)?\s+(?:dyn\s+)?"
+    r"([A-Za-z_][A-Za-z0-9_]*)(?:<[^>{}]*>)?\s*(?:\{|where\b)"
+)
 trait_impl_re = re.compile(
     r"^impl(?:\s*<[^>{}]*>)?\s+.+?\s+for\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\{|where\b)"
 )
@@ -967,7 +970,10 @@ shared_types = {
 decl_re = re.compile(r"^pub\s+(struct|enum|trait|type)\s+([A-Za-z_][A-Za-z0-9_]*)")
 alias_re = re.compile(r"^pub\s+type\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\s*;")
 derive_re = re.compile(r"^#\[derive")
-inherent_impl_re = re.compile(r"^impl(?:\s*<[^>{}]*>)?\s+(?:dyn\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:\{|where\b)")
+inherent_impl_re = re.compile(
+    r"^impl(?:\s*<[^>{}]*>)?\s+(?:dyn\s+)?"
+    r"([A-Za-z_][A-Za-z0-9_]*)(?:<[^>{}]*>)?\s*(?:\{|where\b)"
+)
 trait_impl_re = re.compile(r"^impl(?:\s*<[^>{}]*>)?\s+(.+?)\s+for\s+(.+?)\s*(?:\{|where\b)")
 
 
@@ -1173,7 +1179,10 @@ stem = rust_path.stem
 current_source = re.sub(r"^\d+_", "", stem)
 decl_re = re.compile(r"^pub\s+(struct|enum|trait|type)\s+([A-Za-z_][A-Za-z0-9_]*)")
 derive_re = re.compile(r"^#\[derive")
-inherent_impl_re = re.compile(r"^impl(?:\s*<[^>{}]*>)?\s+(?:dyn\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:\{|where\b)")
+inherent_impl_re = re.compile(
+    r"^impl(?:\s*<[^>{}]*>)?\s+(?:dyn\s+)?"
+    r"([A-Za-z_][A-Za-z0-9_]*)(?:<[^>{}]*>)?\s*(?:\{|where\b)"
+)
 trait_impl_re = re.compile(r"^impl(?:\s*<[^>{}]*>)?\s+(.+?)\s+for\s+(.+?)\s*(?:\{|where\b)")
 alias_re = re.compile(r"^pub\s+type\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\s*;")
 

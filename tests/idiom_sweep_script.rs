@@ -108,11 +108,31 @@ fn focused_package_shared_support_stripper_keeps_dyn_trait_inherent_impls() {
     let script = fs::read_to_string(script_path).unwrap();
 
     assert!(
-        script.contains("(dyn[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\\{"),
+        script.contains(
+            "(dyn[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*(<[^>{}]+>)?[[:space:]]*(\\{|where([[:space:]]|$))"
+        ),
         "{script}"
     );
     assert!(
         script.contains("(dyn[[:space:]]+)?/, \"\", impl_name)"),
+        "{script}"
+    );
+}
+
+#[test]
+fn focused_package_shared_support_stripper_matches_generic_inherent_impl_targets() {
+    let script_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/translate-focused-package.sh");
+    let script = fs::read_to_string(script_path).unwrap();
+
+    assert!(
+        script.contains("[A-Za-z_][A-Za-z0-9_]*(<[^>{}]+>)?[[:space:]]*(\\{|where([[:space:]]|$))"),
+        "{script}"
+    );
+    assert!(
+        script.contains(
+            "sub(/(<[^>{}]+>)?[[:space:]]*(\\{|where([[:space:]]|$)).*$/, \"\", impl_name)"
+        ),
         "{script}"
     );
 }
@@ -2143,6 +2163,76 @@ pub struct UseShared;
     assert!(module.contains("pub fn new(value: i32)"), "{module}");
     assert!(!module.contains("pub fn weak"), "{module}");
     assert!(!module.contains("pub struct SharedFacade"), "{module}");
+}
+
+#[test]
+fn shared_support_merger_preserves_generic_inherent_impl_methods() {
+    let dir = unique_temp_dir("shared_support_generic_impl_methods");
+    let generated_dir = dir.join("generated");
+    fs::create_dir_all(&generated_dir).unwrap();
+    let source = r#"
+#[derive(Clone, Debug, Default)]
+pub struct SharedBox<T> {
+    value: Option<T>,
+}
+
+impl<T> SharedBox<T> {
+    pub fn new(value: T) -> SharedBox<T> {
+        SharedBox { value: Some(value) }
+    }
+
+    pub fn take(&mut self) -> Option<T> {
+        self.value.take()
+    }
+}
+
+pub struct UseShared;
+"#;
+    fs::write(generated_dir.join("00001_UseA.rs"), source).unwrap();
+    fs::write(
+        generated_dir.join("00002_UseB.rs"),
+        source.replace("UseShared", "UseB"),
+    )
+    .unwrap();
+
+    let shared_support = dir.join("shared.rs");
+    let shared_types = dir.join("shared-types.tsv");
+    let conflicts = dir.join("conflicts.tsv");
+    fs::write(&shared_support, "").unwrap();
+    fs::write(&shared_types, "").unwrap();
+
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/merge-shared-support-facades.py");
+    let output = Command::new("python3")
+        .arg(script)
+        .arg("--generated-dir")
+        .arg(&generated_dir)
+        .arg("--shared-support")
+        .arg(&shared_support)
+        .arg("--shared-types")
+        .arg(&shared_types)
+        .arg("--conflicts")
+        .arg(&conflicts)
+        .output()
+        .expect("run shared support merger");
+    assert!(
+        output.status.success(),
+        "shared support merger failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let shared = fs::read_to_string(shared_support).unwrap();
+    assert!(shared.contains("pub struct SharedBox<T>"), "{shared}");
+    assert!(shared.contains("impl<T> SharedBox<T> {"), "{shared}");
+    assert!(
+        shared.contains("pub fn new(value: T) -> SharedBox<T>"),
+        "{shared}"
+    );
+    assert!(
+        shared.contains("pub fn take(&mut self) -> Option<T>"),
+        "{shared}"
+    );
 }
 
 #[test]

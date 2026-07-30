@@ -9,7 +9,10 @@ TYPE_RE = re.compile(r"^pub\s+(struct|enum)\s+([A-Za-z_][A-Za-z0-9_]*)")
 TRAIT_DECL_RE = re.compile(r"^pub\s+trait\s+([A-Za-z_][A-Za-z0-9_]*)\b")
 ALIAS_RE = re.compile(r"^pub\s+type\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\s*;")
 DERIVE_RE = re.compile(r"^#\[derive")
-INHERENT_IMPL_RE = re.compile(r"^impl(?:\s*<[^>{}]*>)?\s+(?:dyn\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:\{|where\b)")
+INHERENT_IMPL_RE = re.compile(
+    r"^impl(?:\s*<[^>{}]*>)?\s+(?:dyn\s+)?"
+    r"([A-Za-z_][A-Za-z0-9_]*)(?:<[^>{}]*>)?\s*(?:\{|where\b)"
+)
 TRAIT_IMPL_RE = re.compile(
     r"^impl(?:\s*<[^>{}]*>)?\s+(.+?)\s+for\s+(.+?)\s*(?:\{|where\b)"
 )
@@ -951,6 +954,53 @@ def preferred_trait_impl_variant(variants: list[str]) -> tuple[str, str]:
     return variants[0], "first"
 
 
+def split_top_level_commas(text: str) -> list[str]:
+    parts = []
+    start = 0
+    depth = 0
+    for index, ch in enumerate(text):
+        if ch == "<":
+            depth += 1
+        elif ch == ">":
+            depth = max(0, depth - 1)
+        elif ch == "," and depth == 0:
+            parts.append(text[start:index].strip())
+            start = index + 1
+    tail = text[start:].strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def generic_arg_name(param: str) -> str:
+    param = param.strip()
+    if not param:
+        return ""
+    if param.startswith("const "):
+        param = param[len("const ") :].strip()
+    return re.split(r"\s*[:=]\s*", param, maxsplit=1)[0].strip()
+
+
+def inherent_impl_header_for_decl(name: str, decl_text: str, selected_decl_is_trait: bool) -> str:
+    if selected_decl_is_trait:
+        return f"impl dyn {name}"
+    generic_match = re.search(
+        rf"(?m)^pub\s+(?:struct|enum)\s+{re.escape(name)}\s*<([^>{{}}]*)>",
+        decl_text,
+    )
+    if not generic_match:
+        return f"impl {name}"
+    impl_generics = generic_match.group(1).strip()
+    generic_args = [
+        arg
+        for arg in (generic_arg_name(param) for param in split_top_level_commas(impl_generics))
+        if arg
+    ]
+    if not generic_args:
+        return f"impl {name}"
+    return f"impl<{impl_generics}> {name}<{', '.join(generic_args)}>"
+
+
 def simple_rust_type_name(name: str) -> bool:
     return bool(re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name))
 
@@ -1350,8 +1400,10 @@ def main() -> int:
                 best_method_variant(method_name, unique_variants, preferred_receiver_kinds)
             )
         if consts_for_type or methods_for_type:
-            impl_target = f"dyn {name}" if selected_decl_is_trait else name
-            shared_chunks.append(f"\nimpl {impl_target} {{\n")
+            impl_header = inherent_impl_header_for_decl(
+                name, selected_decl, selected_decl_is_trait
+            )
+            shared_chunks.append(f"\n{impl_header} {{\n")
             for const in consts_for_type:
                 shared_chunks.append(f"    {const}\n")
             for method in methods_for_type:

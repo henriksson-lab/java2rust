@@ -1424,6 +1424,22 @@ not parser/lowering loss: the raw pre-strip file contains the primary generic
 impl, but focused-package assembly still drops it. Treat that as the next VCF
 shared-support merge/strip task.
 
+Focused generic impl assembly update:
+focused-package shared support stripping and merging now recognize generic
+inherent impl targets such as `impl<T> VCFStandardHeaderLinesStandards<T>` as
+impls for the base type, and promoted generic shared facades now retain their
+generic impl headers. Focused coverage passed:
+`focused_package_shared_support_stripper_matches_generic_inherent_impl_targets`,
+`focused_package_shared_support_stripper_keeps_dyn_trait_inherent_impls`,
+`shared_support_merger_preserves_generic_inherent_impl_methods`,
+`cargo test shared_support_merger --test idiom_sweep_script --quiet`,
+`cargo test focused_package_shared_support_stripper --test idiom_sweep_script
+--quiet`, `cargo fmt --check`, `cargo check --quiet`, `git diff --check`, and
+release rebuild. The attempted full rerun at
+`.tmp/corpus-rerun-20260730-htsjdk-vcf-after-generic-impl-assembly` was
+interrupted before crate assembly and is not a baseline; keep the previous
+complete VCF count until a full rerun completes.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from
@@ -1433,8 +1449,9 @@ shared-support merge/strip task.
 2. Continue generalizing optional carrier projection through slot plans, with an
    audit pass for old narrow rules that still emit wrapper-level
    `.clone().unwrap()` instead of borrowing and cloning the contained value.
-3. Preserve generic source impl blocks during focused-package shared-support
-   merge/strip, starting with `VCFStandardHeaderLinesStandards<T>`.
+3. Rerun VCF to a complete baseline after the generic impl assembly fix, then
+   tackle the newly exposed source-bound generic dispatch and source hierarchy
+   errors without weakening concrete `instanceof` semantics.
 4. Add a Spark/DISQ interface bridge fixture around `getBases`.
 5. Convert shared errors from the newly unblocked ndarray corpus reruns into
    fixtures, especially `super(...)`, array creation, switch scaffolding,
