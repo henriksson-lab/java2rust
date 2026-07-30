@@ -1,6 +1,6 @@
 use crate::exception_plan::{MethodExceptionPlan, ProgramExceptionPlan, ProgramFallibilityPlan};
 use crate::java_ir::{MethodDecl, TypeDecl};
-use crate::java_signature::JavaCallableKey;
+use crate::java_signature::{JavaCallableKey, source_method_rust_name};
 use crate::signature::{MethodSignaturePlan, SignaturePlan};
 use crate::usage::{CallGraph, MethodUsageFacts, UsageConstructorKey, UsageFacts, UsageMethodKey};
 
@@ -49,6 +49,22 @@ impl<'a> CallableAnalysis<'a> {
         self.signatures.method_signature_by_java_key(key)
     }
 
+    pub fn method_usage_for_source_method(
+        &self,
+        ty: &TypeDecl,
+        method: &MethodDecl,
+    ) -> Option<&'a MethodUsageFacts> {
+        self.method_usage_by_java_key(&JavaCallableKey::source_method(ty.name.clone(), method))
+    }
+
+    pub fn method_signature_for_source_method(
+        &self,
+        ty: &TypeDecl,
+        method: &MethodDecl,
+    ) -> Option<&'a MethodSignaturePlan> {
+        self.method_signature_by_java_key(&JavaCallableKey::source_method(ty.name.clone(), method))
+    }
+
     pub fn constructor_usage(&self, key: &UsageConstructorKey) -> Option<&'a MethodUsageFacts> {
         self.usage.constructors.get(key)
     }
@@ -63,6 +79,17 @@ impl<'a> CallableAnalysis<'a> {
 
     pub fn method_exception_plan(&self, ty: &TypeDecl, method: &MethodDecl) -> MethodExceptionPlan {
         self.exceptions.method_plan(ty, method)
+    }
+
+    pub fn source_method_returns_result(&self, ty: &TypeDecl, method: &MethodDecl) -> bool {
+        let key = crate::usage::CallableKey::Method {
+            type_name: ty.name.clone(),
+            method_name: source_method_rust_name(method),
+        };
+        self.callable_returns_result(&key)
+            || self
+                .method_exception_plan(ty, method)
+                .wrap_returns_in_result
     }
 
     pub fn external_method_returns_result(

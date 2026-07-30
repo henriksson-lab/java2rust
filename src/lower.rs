@@ -20469,16 +20469,8 @@ fn source_method_named_returns_result_with_exception_plan(
     let Some(method) = find_declared_method_by_name_and_arity(ty, method_name, arg_count) else {
         return false;
     };
-    let rust_name = method_effective_rust_name(method);
-    let callable_key = crate::usage::CallableKey::Method {
-        type_name: ty.name.clone(),
-        method_name: rust_name,
-    };
-    ctx.callable_analysis.callable_returns_result(&callable_key)
-        || ctx
-            .callable_analysis
-            .method_exception_plan(ty, method)
-            .wrap_returns_in_result
+    ctx.callable_analysis
+        .source_method_returns_result(ty, method)
 }
 
 fn receiver_shape_java_type<'a>(receiver: &Expr, env: &'a ShapeEnv) -> Option<&'a JavaType> {

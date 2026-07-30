@@ -112,6 +112,9 @@ Landed in this batch:
 - Source method Rust-name projection in usage, call graph, exception planning,
   and lowerer compatibility helpers now goes through
   `java_signature::source_method_rust_name`.
+- `CallableAnalysis` now exposes source-method usage, signature, exception, and
+  fallibility convenience queries, and the lower-time source Result-propagation
+  check uses `source_method_returns_result`.
 
 1. Add a `CallableAnalysis` shell.
    - Introduce `src/callable_analysis.rs`.
