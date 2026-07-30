@@ -3375,6 +3375,15 @@ fn callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating() {
     assert!(signature_source.contains("JavaCallableKey::source_method"));
     assert!(usage_source.contains("pub methods_by_java_key: HashMap<JavaCallableKey"));
     assert!(usage_source.contains("JavaCallableKey::source_method"));
+    assert!(usage_source.contains("source_method_rust_name(method)"));
+    assert!(
+        !usage_source.contains("unwrap_or_else(|| crate::parser::to_snake_case(&method.name))")
+    );
+    let exception_source = include_str!("../src/exception_plan.rs");
+    assert!(exception_source.contains("source_method_rust_name(method)"));
+    assert!(
+        !exception_source.contains("unwrap_or_else(|| crate::parser::to_snake_case(&method.name))")
+    );
     assert!(lower_source.contains(
         "CallableAnalysis::new(usage, &call_graph, signatures, &exceptions, &fallibility)"
     ));

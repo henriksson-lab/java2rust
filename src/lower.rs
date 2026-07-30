@@ -13619,10 +13619,7 @@ fn emitted_source_resolved_call_argument_plan(
 }
 
 fn method_effective_rust_name(method: &MethodDecl) -> String {
-    method
-        .rust_name
-        .clone()
-        .unwrap_or_else(|| crate::parser::to_snake_case(&method.name))
+    crate::java_signature::source_method_rust_name(method)
 }
 
 fn method_staticness_matches_resolved(method: &MethodDecl, resolved_kind: CallKind) -> bool {

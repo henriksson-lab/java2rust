@@ -4,6 +4,7 @@ use crate::facts::FactSet;
 use crate::java_ir::{
     Block, CatchClause, Expr, JavaType, Member, MethodDecl, Program, Stmt, TypeDecl,
 };
+use crate::java_signature::source_method_rust_name;
 use crate::usage::{CallGraph, CallableKey};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -218,10 +219,7 @@ pub fn plan_method_exceptions(
     method: &MethodDecl,
     facts: &FactSet,
 ) -> MethodExceptionPlan {
-    let rust_name = method
-        .rust_name
-        .clone()
-        .unwrap_or_else(|| crate::parser::to_snake_case(&method.name));
+    let rust_name = source_method_rust_name(method);
     MethodExceptionPlan {
         wrap_returns_in_result: facts.method_has_thrown_exceptions(&ty.name, &rust_name)
             || facts.method_has_thrown_exceptions(&ty.name, &method.name),
@@ -541,10 +539,7 @@ fn collect_method_exception_plans_for_type(
                 if let Some(fallibility) = fallibility {
                     let key = CallableKey::Method {
                         type_name: ty.name.clone(),
-                        method_name: method
-                            .rust_name
-                            .clone()
-                            .unwrap_or_else(|| crate::parser::to_snake_case(&method.name)),
+                        method_name: source_method_rust_name(method),
                     };
                     plan.wrap_returns_in_result |= fallibility.returns_result(&key);
                 }
@@ -559,13 +554,7 @@ fn collect_method_exception_plans_for_type(
 }
 
 fn method_exception_key(ty: &TypeDecl, method: &MethodDecl) -> (String, String) {
-    (
-        ty.name.clone(),
-        method
-            .rust_name
-            .clone()
-            .unwrap_or_else(|| crate::parser::to_snake_case(&method.name)),
-    )
+    (ty.name.clone(), source_method_rust_name(method))
 }
 
 pub fn plan_throw_expr(expr: &Expr) -> ThrowExprPlan<'_> {

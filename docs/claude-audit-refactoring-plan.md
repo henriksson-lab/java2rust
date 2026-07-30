@@ -109,6 +109,9 @@ Landed in this batch:
   `CallableAnalysis` queries. External method Result-return checks now ask the
   analysis first and keep the legacy external-index scan as a compatibility
   fallback.
+- Source method Rust-name projection in usage, call graph, exception planning,
+  and lowerer compatibility helpers now goes through
+  `java_signature::source_method_rust_name`.
 
 1. Add a `CallableAnalysis` shell.
    - Introduce `src/callable_analysis.rs`.

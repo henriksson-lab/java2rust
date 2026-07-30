@@ -5,7 +5,7 @@ use crate::java_ir::{
     Block, ConstructorInvocationKind, Expr, JavaType, LambdaBody, Member, Modifier, Program,
     ResolvedCall, ResolvedConstructor, Stmt, TypeDecl,
 };
-use crate::java_signature::JavaCallableKey;
+use crate::java_signature::{JavaCallableKey, source_method_rust_name};
 use crate::stdlib::is_content_read_method;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -313,10 +313,7 @@ fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts, semantic_facts: &Fa
                         );
                     }
                 }
-                let rust_method_name = method
-                    .rust_name
-                    .clone()
-                    .unwrap_or_else(|| crate::parser::to_snake_case(&method.name));
+                let rust_method_name = source_method_rust_name(method);
                 let rust_key = UsageMethodKey {
                     type_name: ty.name.clone(),
                     method_name: rust_method_name,
@@ -330,10 +327,7 @@ fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts, semantic_facts: &Fa
                     .insert(rust_key, method_facts.clone());
                 let rust_key = UsageMethodKey {
                     type_name: ty.name.clone(),
-                    method_name: method
-                        .rust_name
-                        .clone()
-                        .unwrap_or_else(|| crate::parser::to_snake_case(&method.name)),
+                    method_name: source_method_rust_name(method),
                 };
                 facts.methods.insert(rust_key, method_facts.clone());
                 facts.methods_by_java_key.insert(
@@ -388,10 +382,7 @@ fn build_type_call_graph(ty: &TypeDecl, graph: &mut CallGraph) {
             Member::Method(method) => {
                 let caller = CallableKey::Method {
                     type_name: ty.name.clone(),
-                    method_name: method
-                        .rust_name
-                        .clone()
-                        .unwrap_or_else(|| method.name.clone()),
+                    method_name: source_method_rust_name(method),
                 };
                 graph.nodes.insert(caller.clone());
                 if let Some(body) = &method.body {
