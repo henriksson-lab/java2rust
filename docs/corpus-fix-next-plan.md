@@ -44,7 +44,7 @@ unrelated user or generated files out of the commit.
 prefer committing each verified shared-policy slice before taking the next
 larger batched risk.
 
-Claude audit tracking: when an issue from `claude_audits/` is genuinely done,
+Claude audit tracking: once an issue from `claude_audits/` is genuinely done,
 move that issue file to
 `/home/mahogny/github/claude/new_java2rust/claude_audits/done` in the same
 checkpoint. Only move it after the implementation and focused verification are

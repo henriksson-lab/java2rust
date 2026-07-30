@@ -566,6 +566,7 @@ interface RejectedReceiver {}
     let effective_facts = EffectiveFacts::new(&facts);
     let usage = UsageFacts {
         methods_by_rust_name: HashMap::new(),
+        methods_by_java_key: HashMap::new(),
         methods: HashMap::from([(
             UsageMethodKey {
                 type_name: "Use".to_string(),
@@ -821,6 +822,38 @@ final class Num implements Expr {}
             },
         ]
     );
+}
+
+#[test]
+fn object_model_selects_closed_enum_for_proven_closed_class_runtime_split() {
+    let parsed = parse_java_source(
+        r#"
+sealed class HeaderLine permits FormatLine, InfoLine {}
+final class FormatLine extends HeaderLine {}
+final class InfoLine extends HeaderLine {}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let mut facts = resolved.facts.clone();
+    facts
+        .dispatch_requirement_facts
+        .push(DispatchRequirementFact {
+            type_name: "HeaderLine".to_string(),
+            requirement: DispatchRequirementKind::NeedsInstanceof,
+            provenance: FactProvenance::ParsedSource,
+        });
+
+    let object_plan = plan_object_model(&resolved.program, &facts);
+    let header_line = object_plan.strategy_for("HeaderLine").unwrap();
+
+    assert_eq!(
+        header_line.strategy,
+        ObjectRepresentation::ClosedEnum {
+            enum_name: "HeaderLineValue".to_string(),
+            variants: vec!["FormatLine".to_string(), "InfoLine".to_string()],
+        }
+    );
+    assert!(header_line.rejected.is_empty());
 }
 
 #[test]

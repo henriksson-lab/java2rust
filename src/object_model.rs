@@ -1357,6 +1357,16 @@ pub fn closed_enum_inference_policy_with_effective_facts(
             })
         }
         ObjectRepresentation::ConcreteStruct
+            if closed_runtime_case_split_is_useful(
+                facts.dispatch_requirements_for(type_name).as_slice(),
+            ) =>
+        {
+            Some(ObjectRepresentation::ClosedEnum {
+                enum_name: format!("{type_name}Value"),
+                variants,
+            })
+        }
+        ObjectRepresentation::ConcreteStruct
         | ObjectRepresentation::JavaEnum { .. }
         | ObjectRepresentation::ClosedEnum { .. } => None,
     });

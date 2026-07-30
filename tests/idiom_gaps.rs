@@ -9329,6 +9329,53 @@ class Standards<T extends CompoundLine> {
 }
 
 #[test]
+fn source_receiver_generic_result_upcasts_to_supertype_assignment_slot() {
+    let source = r#"
+class HeaderLine {
+    String id;
+}
+
+class FormatLine extends HeaderLine {
+}
+
+class Standards<T extends HeaderLine> {
+    T last;
+
+    T repair(T line) {
+        return line;
+    }
+}
+
+class StandardLineRepair {
+    Standards<FormatLine> formats;
+
+    HeaderLine repairOne(FormatLine line) {
+        HeaderLine repaired = formats.repair(line);
+        return repaired;
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation.rust.contains(
+            "let repaired: HeaderLine = self.formats.as_ref().unwrap().repair(line.clone()/* TODO(translation): validate added clone */).into();"
+        ) && translation.rust.contains("return repaired;"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_receiver_generic_result_upcast",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 #[ignore = "tracks remaining VCF source hierarchy instanceof/downcast repair slot gap"]
 fn source_hierarchy_instanceof_repair_keeps_supertype_slot_adapted() {
     let source = r#"

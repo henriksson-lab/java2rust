@@ -18493,6 +18493,17 @@ fn lower_expr_for_slot_with_refinements(
     if let Some(source_call_expr) =
         lower_source_receiver_call_expr_for_slot(expr, env, &slot, ctx, refinements)
     {
+        if let LoweredType::Slot(actual) = &source_call_expr.actual
+            && let Some(upcast) = lower_source_subtype_to_supertype_slot(
+                &source_call_expr.expr,
+                actual,
+                &slot,
+                env,
+                ctx,
+            )
+        {
+            return upcast;
+        }
         let plan = plan_lowered_slot_conversion(&source_call_expr.actual, slot, ctx.facts);
         return apply_lowered_slot_expr_conversion(source_call_expr, &plan);
     }
@@ -21902,6 +21913,7 @@ fn method_call_return_shape_from_receiver(
     {
         return Some(shape);
     }
+    let mut receiver_generic_ty = None;
     let receiver_name = if is_this_receiver_expr(receiver) {
         ctx.current_type?.to_string()
     } else {
@@ -21916,6 +21928,7 @@ fn method_call_return_shape_from_receiver(
         }
         let receiver_ty = crate::types::optional_element_type(&receiver_shape.java_ty)
             .unwrap_or(receiver_shape.java_ty);
+        receiver_generic_ty = Some(receiver_ty.clone());
         match receiver_ty {
             JavaType::Named { name, .. } | JavaType::Unknown(name) => name,
             _ => return None,
@@ -21948,20 +21961,32 @@ fn method_call_return_shape_from_receiver(
             ctx,
         )
     {
-        return Some(shape);
+        return Some(apply_receiver_generic_return_shape(
+            shape,
+            receiver_generic_ty.as_ref(),
+            ctx,
+        ));
     }
     if context_type_key_is_summary_only(ctx, &receiver_name)
         && let Some(shape) =
             source_summary_declared_method_return_shape(&receiver_name, name, &arg_types, ctx)
     {
-        return Some(shape);
+        return Some(apply_receiver_generic_return_shape(
+            shape,
+            receiver_generic_ty.as_ref(),
+            ctx,
+        ));
     }
     if let Some(resolved) = resolved
         && let Some(shape) = ctx
             .signatures
             .method_return_shape_by_rust_name(&resolved.declaring_type, &resolved.rust_name)
     {
-        return Some(shape);
+        return Some(apply_receiver_generic_return_shape(
+            shape,
+            receiver_generic_ty.as_ref(),
+            ctx,
+        ));
     }
     if let Some(shape) = ctx
         .signatures
@@ -21971,7 +21996,11 @@ fn method_call_return_shape_from_receiver(
                 .method_return_shape_by_rust_name(&receiver_name, &snake_name)
         })
     {
-        return Some(shape);
+        return Some(apply_receiver_generic_return_shape(
+            shape,
+            receiver_generic_ty.as_ref(),
+            ctx,
+        ));
     }
     if let Some(resolved) = resolved
         && let Some(shape) = source_summary_declared_method_return_shape(
@@ -21981,12 +22010,20 @@ fn method_call_return_shape_from_receiver(
             ctx,
         )
     {
-        return Some(shape);
+        return Some(apply_receiver_generic_return_shape(
+            shape,
+            receiver_generic_ty.as_ref(),
+            ctx,
+        ));
     }
     if let Some(shape) =
         source_summary_declared_method_return_shape(&receiver_name, name, &arg_types, ctx)
     {
-        return Some(shape);
+        return Some(apply_receiver_generic_return_shape(
+            shape,
+            receiver_generic_ty.as_ref(),
+            ctx,
+        ));
     }
     if args.is_empty()
         && let Some(shape) =
@@ -22001,6 +22038,26 @@ fn method_call_return_shape_from_receiver(
                 .method_signature_by_base_name_and_arity(&receiver_name, name, args.len())
         })
         .and_then(|(_, signature)| signature.return_shape.clone())
+        .map(|shape| apply_receiver_generic_return_shape(shape, receiver_generic_ty.as_ref(), ctx))
+}
+
+fn apply_receiver_generic_return_shape(
+    shape: RustSlotShape,
+    receiver_ty: Option<&JavaType>,
+    ctx: LowerCtx,
+) -> RustSlotShape {
+    let substituted =
+        crate::types::receiver_generic_return_type(receiver_ty, shape.java_ty.clone());
+    if substituted == shape.java_ty {
+        return shape;
+    }
+    let mut substituted_shape =
+        crate::shape_projection::return_shape_for_java_type(ctx.representations, &substituted)
+            .unwrap_or_else(|| RustSlotShape::for_storage(substituted));
+    substituted_shape.ownership = shape.ownership;
+    substituted_shape.view = shape.view;
+    substituted_shape.mutability = shape.mutability;
+    substituted_shape
 }
 
 fn type_param_bound_method_call_return_shape(
