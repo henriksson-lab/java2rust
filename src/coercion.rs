@@ -3414,6 +3414,15 @@ pub fn java_primitive_update_expression_projection(
     }
 }
 
+pub fn java_primitive_updated_value_projection(
+    target: RustExpr,
+    increment: bool,
+    primitive: PrimitiveType,
+) -> Option<RustExpr> {
+    let target = emit::emit_expr(&target);
+    java_primitive_update_value_projection(&target, increment, primitive).map(RustExpr::Raw)
+}
+
 fn java_primitive_update_value_projection(
     target: &str,
     increment: bool,

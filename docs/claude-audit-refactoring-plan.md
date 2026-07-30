@@ -448,7 +448,7 @@ Completion checklist for any audit marked `fixed locally`:
 | `0026` assignment evaluation order | open | Statement/expression lowering semantics |
 | `0027` compound assignment narrowing | fixed locally | Moved to `claude_audits/done`; narrow primitive compound assignment casts back through the shared assignment-value hook |
 | `0028` reference equality | open | Object/reference representation |
-| `0029` static field mutation invalid Rust | open | Static storage model |
+| `0029` static field mutation invalid Rust | fixed locally | Moved to `claude_audits/done`; static `++`/`--` now route through storage setters for current and qualified source statics |
 | `0030` Java statics are thread-local | open | Static storage model |
 | `0031` stubbed constant census | partial | JDK and selected HTSJDK domain constants are explicit; unknown primitive/named external constants now fail loudly and status/summary reports include `stubbed_constants`; corpus reruns still need to prove the remaining count |
 | `0032` java.lang.Math mistranslated | partial | Round edge semantics and i32/i64 floorDiv/floorMod improved; broader overload/constant audit remains |

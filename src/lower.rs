@@ -48,9 +48,9 @@ use crate::coercion::{
     explicit_java_facade_cast_placeholder_projection, force_shared_borrow_projection,
     function_call_projection, into_projection, iterator_next_expect_projection,
     java_integral_literal_char, java_primitive_update_expression_projection,
-    java_update_expression_projection, len_i32_projection, literal_slot_plan,
-    logical_not_projection, map_get_expect_projection, map_get_mut_expect_projection,
-    map_get_projection, normalize_map_key_borrow_projection,
+    java_primitive_updated_value_projection, java_update_expression_projection, len_i32_projection,
+    literal_slot_plan, logical_not_projection, map_get_expect_projection,
+    map_get_mut_expect_projection, map_get_projection, normalize_map_key_borrow_projection,
     normalize_reused_clone_for_borrowed_argument, optional_copied_expect_projection,
     outer_this_field_projection, owned_map_keys_set_projection, owner_associated_path_projection,
     parenthesize_borrowed_method_receiver, print_macro_projection,
@@ -11549,10 +11549,103 @@ fn lower_unary_expr_with_refinements(
     {
         return negated_equality;
     }
+    if let Some(update) = lower_static_storage_update_value_expr(op, expr, env, ctx) {
+        return update;
+    }
     if let Some(update) = lower_local_update_value_expr(op, expr, env, ctx) {
         return update;
     }
     lower_unary_expr(op, lower_expr_with_refinements(expr, env, ctx, refinements))
+}
+
+fn lower_static_storage_update_value_expr(
+    op: UnaryOp,
+    expr: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<RustExpr> {
+    if !matches!(
+        op,
+        UnaryOp::PreInc | UnaryOp::PreDec | UnaryOp::PostInc | UnaryOp::PostDec
+    ) {
+        return None;
+    }
+    let plan = static_storage_update_plan(expr, env, ctx)?;
+    let JavaType::Primitive(primitive) = plan.shape.java_ty else {
+        return None;
+    };
+    lower_static_storage_primitive_update_expr(
+        plan.getter,
+        plan.setter,
+        matches!(op, UnaryOp::PreInc | UnaryOp::PostInc),
+        primitive,
+        matches!(op, UnaryOp::PreInc | UnaryOp::PreDec),
+    )
+}
+
+struct StaticStorageUpdatePlan {
+    getter: RustExpr,
+    setter: RustExpr,
+    shape: RustSlotShape,
+}
+
+fn static_storage_update_plan(
+    expr: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<StaticStorageUpdatePlan> {
+    match expr {
+        Expr::Var(name) => {
+            let static_name = env.static_storage_field_access_name(name)?;
+            Some(StaticStorageUpdatePlan {
+                getter: static_storage_accessor_projection(static_name),
+                setter: static_storage_setter_path_projection(static_name),
+                shape: static_storage_field_shape(name, env, ctx)?,
+            })
+        }
+        Expr::FieldAccess(_, _) => {
+            let plan = qualified_static_storage_assignment_plan(expr, env, ctx)?;
+            Some(StaticStorageUpdatePlan {
+                getter: qualified_static_storage_accessor_projection(
+                    &plan.rust_owner,
+                    &plan.field_name,
+                ),
+                setter: qualified_static_storage_setter_path_projection(
+                    &plan.rust_owner,
+                    &plan.field_name,
+                ),
+                shape: plan.shape,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn lower_static_storage_primitive_update_expr(
+    getter: RustExpr,
+    setter: RustExpr,
+    increment: bool,
+    primitive: PrimitiveType,
+    prefix: bool,
+) -> Option<RustExpr> {
+    let new_value = java_primitive_updated_value_projection(getter.clone(), increment, primitive)?;
+    let setter = emit::emit_expr(&setter);
+    if prefix {
+        Some(RustExpr::Raw(format!(
+            "{{ let __java_new_value = {}; {setter}(__java_new_value); __java_new_value }}",
+            emit::emit_expr(&new_value)
+        )))
+    } else {
+        Some(RustExpr::Raw(format!(
+            "{{ let __java_old_value = {}; {setter}({}); __java_old_value }}",
+            emit::emit_expr(&getter),
+            emit::emit_expr(&java_primitive_updated_value_projection(
+                RustExpr::Raw("__java_old_value".to_string()),
+                increment,
+                primitive,
+            )?)
+        )))
+    }
 }
 
 fn lower_local_update_value_expr(

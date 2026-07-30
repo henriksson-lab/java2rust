@@ -269,6 +269,58 @@ class LowercaseStaticOwnerFieldWrite {
 }
 
 #[test]
+fn static_update_expressions_route_through_storage_setters() {
+    let translation = translate_source(
+        r#"
+class OtherStaticCounter {
+    static int c = 0;
+}
+
+class StaticUpdateExpressions {
+    static int shared = 0;
+    static byte narrow = 10;
+
+    static int bumpAll() {
+        shared = 0;
+        OtherStaticCounter.c = 0;
+        int old = shared++;
+        int now = ++shared;
+        shared--;
+        narrow += 300;
+        OtherStaticCounter.c++;
+        return old + now + shared + narrow + OtherStaticCounter.c;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("Self::__set_static_shared(")
+            && translation.rust.contains("Self::__static_shared()")
+            && translation
+                .rust
+                .contains("OtherStaticCounter::__set_static_c(")
+            && translation
+                .rust
+                .contains("OtherStaticCounter::__static_c()")
+            && !translation.rust.contains("Self::__static_shared() +=")
+            && !translation
+                .rust
+                .contains("OtherStaticCounter::__static_c() +="),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "static_update_expressions",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn public_readonly_string_param_uses_str_view_for_static_string_constants() {
     let translation = translate_source(
         r#"
