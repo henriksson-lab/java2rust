@@ -1,4 +1,5 @@
-use crate::exception_plan::{ProgramExceptionPlan, ProgramFallibilityPlan};
+use crate::exception_plan::{MethodExceptionPlan, ProgramExceptionPlan, ProgramFallibilityPlan};
+use crate::java_ir::{MethodDecl, TypeDecl};
 use crate::java_signature::JavaCallableKey;
 use crate::signature::{MethodSignaturePlan, SignaturePlan};
 use crate::usage::{CallGraph, MethodUsageFacts, UsageConstructorKey, UsageFacts, UsageMethodKey};
@@ -58,6 +59,10 @@ impl<'a> CallableAnalysis<'a> {
 
     pub fn callable_returns_result(&self, key: &crate::usage::CallableKey) -> bool {
         self.fallibility.returns_result(key)
+    }
+
+    pub fn method_exception_plan(&self, ty: &TypeDecl, method: &MethodDecl) -> MethodExceptionPlan {
+        self.exceptions.method_plan(ty, method)
     }
 
     pub fn external_method_returns_result(

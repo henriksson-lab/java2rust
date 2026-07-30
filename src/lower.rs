@@ -1466,7 +1466,9 @@ fn abstract_interface_method_stub(
     interface_method: &MethodDecl,
     ctx: LowerCtx,
 ) -> RustFunction {
-    let exception_plan = ctx.exceptions.method_plan(interface, interface_method);
+    let exception_plan = ctx
+        .callable_analysis
+        .method_exception_plan(interface, interface_method);
     let return_expr = Some(abstract_interface_method_stub_projection(
         &interface.name,
         &interface_method.name,
@@ -4162,7 +4164,9 @@ fn lower_method_with_exception_owner(
         method_ctx.support_local_type_program,
     );
     seed_external_inherited_instance_fields(&mut env, ty, method_ctx.signatures, method_ctx.facts);
-    let exception_plan = method_ctx.exceptions.method_plan(exception_ty, method);
+    let exception_plan = method_ctx
+        .callable_analysis
+        .method_exception_plan(exception_ty, method);
     let wrap_returns_in_ok = exception_plan.wrap_returns_in_result;
     let mut body = if !wrap_returns_in_ok
         && method_has_tail_recursive_loop_rewrite(
@@ -20475,8 +20479,8 @@ fn source_method_named_returns_result_with_exception_plan(
     };
     ctx.callable_analysis.callable_returns_result(&callable_key)
         || ctx
-            .exceptions
-            .method_plan(ty, method)
+            .callable_analysis
+            .method_exception_plan(ty, method)
             .wrap_returns_in_result
 }
 

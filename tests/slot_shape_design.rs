@@ -3342,6 +3342,7 @@ fn callable_analysis_shell_reaches_lowering_context() {
     assert!(analysis_source.contains("pub fn method_signature_by_java_key("));
     assert!(analysis_source.contains("pub fn constructor_usage("));
     assert!(analysis_source.contains("pub fn callable_returns_result("));
+    assert!(analysis_source.contains("pub fn method_exception_plan("));
     assert!(analysis_source.contains("pub fn external_method_returns_result("));
     assert!(analysis_source.contains("JavaCallableKey"));
     assert!(lower_source.contains("callable_analysis: &'a CallableAnalysis<'a>"));
@@ -3358,6 +3359,7 @@ fn callable_analysis_shell_reaches_lowering_context() {
     assert!(lower_source.contains(
         ".callable_analysis\n        .external_method_returns_result(receiver_type, name, arg_count)"
     ));
+    assert!(lower_source.contains(".callable_analysis\n        .method_exception_plan("));
 }
 
 #[test]
