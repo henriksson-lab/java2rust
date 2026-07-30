@@ -18295,6 +18295,38 @@ class StreamFilterNegatedJavaEqualsProjection {
 }
 
 #[test]
+fn stream_joining_nullable_string_items_use_java_display_projection() {
+    let translation = translate_source(
+        r#"
+import java.util.Set;
+import java.util.stream.Collectors;
+
+class StreamJoiningNullableStringItems {
+    static class Version {
+        String name() {
+            return null;
+        }
+    }
+
+    String names(Set<Version> versions) {
+        return versions.stream()
+                .map(version -> version.name())
+                .collect(Collectors.joining(" "));
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            ".map(|item| item.as_ref().map(|value| value.to_string()).unwrap_or_else(|| \"null\".to_string())).collect::<Vec<_>>().join(\" \")"
+        ) && !translation.rust.contains(".map(|item| item.to_string()).collect::<Vec<_>>().join(\" \")"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn nullable_equals_comparisons_use_option_reference_policy() {
     let translation = translate_source(&idiom_gap("NullableEqualsComparison.java"));
 

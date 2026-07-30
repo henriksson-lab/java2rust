@@ -15,7 +15,7 @@ use crate::conversion_plan::{
     LoweredType, Slot, effective_stream_item_shape, plan_lowered_slot_conversion,
     storage_shape_for_java_type,
 };
-use crate::expr_shape::ShapeEnv;
+use crate::expr_shape::{ExprShapeContext, ShapeEnv, infer_expr_shape_with_context};
 use crate::facts::{ExternalFactLookupIndex, FactSet, ReceiverMutabilityFact};
 use crate::java_ir::{BinaryOp, CallKind, Expr, JavaType, Literal, Stmt, UnaryOp};
 use crate::literal_lowering::literal_to_rust;
@@ -773,13 +773,19 @@ fn render_stream_ops_with_options(
                     StreamLambdaValue::OwnedItem
                 };
                 let param_shape = effective_stream_item_shape(&item_shape, item_is_borrowed);
+                let effective_output_shape = if matches!(op, StreamOp::Map { .. }) {
+                    render_context_lambda_output_shape(lambda, &param_shape, ctx)
+                        .unwrap_or_else(|| output_shape.clone())
+                } else {
+                    output_shape.clone()
+                };
                 let param = render_stream_lambda_param(&lambda.param_name, &param_shape, ctx);
                 out.push_str(&format!(
                     ".map(|{param}| {})",
                     emit_stream_lambda_closure_body(lambda, value, ctx, Some(&param_shape))?
                 ));
                 item_is_borrowed = false;
-                item_shape = output_shape.clone();
+                item_shape = effective_output_shape;
             }
             StreamOp::FlatMap(flat_map) => match flat_map {
                 FlatMapPlan::CollectionStreamMethodReference { param_name } => {
@@ -842,6 +848,26 @@ fn render_stream_ops_with_options(
         }
     }
     Some((item_is_borrowed, item_shape))
+}
+
+fn render_context_lambda_output_shape(
+    lambda: &LambdaPlan<'_>,
+    param_shape: &RustSlotShape,
+    ctx: StreamRenderContext<'_>,
+) -> Option<RustSlotShape> {
+    let env = ctx.env?;
+    let return_expr = lambda.body.return_expr()?;
+    let mut lambda_env = env.clone();
+    lambda_env.insert_local_shape(lambda.param_name.clone(), param_shape.clone());
+    Some(infer_expr_shape_with_context(
+        return_expr,
+        &lambda_env,
+        ExprShapeContext {
+            signatures: ctx.signatures,
+            representations: None,
+            facts: ctx.facts,
+        },
+    ))
 }
 
 fn render_stream_lambda_param(
@@ -1023,8 +1049,9 @@ fn render_stream_terminal(
         }
         StreamTerminal::Join { delimiter } => {
             let delimiter = render_stream_join_delimiter(*delimiter, ctx)?;
+            let item_display = render_stream_join_item_display(item_shape);
             out.push_str(&format!(
-                ".map(|item| item.to_string()).collect::<Vec<_>>().join({delimiter})"
+                ".map(|item| {item_display}).collect::<Vec<_>>().join({delimiter})"
             ));
         }
         StreamTerminal::ToArray => out.push_str(".collect::<Vec<_>>()"),
@@ -1055,6 +1082,14 @@ fn render_stream_terminal(
         }
     };
     Some(())
+}
+
+fn render_stream_join_item_display(item_shape: &RustSlotShape) -> &'static str {
+    if item_shape.optional_element_type().is_some() {
+        "item.as_ref().map(|value| value.to_string()).unwrap_or_else(|| \"null\".to_string())"
+    } else {
+        "item.to_string()"
+    }
 }
 
 fn render_stream_join_delimiter(

@@ -235,6 +235,23 @@ files were written and was killed. Do not use that directory as a corpus-quality
 baseline; continue from the last complete VCF baseline until a clean rerun
 finishes.
 
+2026-07-30 nullable stream joining display: stream rendering now refines
+ordinary `map` output shapes from the render-time `ShapeEnv` and signature
+context before terminal rendering. `Collectors.joining(...)` then uses Java
+display semantics for optional stream items, emitting
+`item.as_ref().map(|value| value.to_string()).unwrap_or_else(|| "null".to_string())`
+instead of calling `to_string()` on `Option<T>`. Focused coverage:
+`stream_joining_nullable_string_items_use_java_display_projection`.
+
+Residual stream-design check:
+`cargo test stream --test slot_shape_design --quiet` still fails two existing
+expectation rows around collection output cloning:
+`stream_plan_refines_non_null_filter_elements` and
+`stream_plan_owns_flat_map_lambda_collection_stream_shape` currently render
+`.cloned().collect::<...>()` where the tests expect borrowed collection. Treat
+that as a separate stream ownership-policy cleanup, not as evidence against the
+nullable joining display fix.
+
 2026-07-29 raw collection runtime target slice: `Object instanceof List` now
 uses the same erased JDK collection carrier as raw `List` type rendering:
 `Vec<Box<dyn std::any::Any>>`. This removes the phantom `List` runtime target
