@@ -29,6 +29,10 @@ Keep the standing constraint: do not make algorithm changes that block future
 global semantic analysis. Prefer explicit keys, indices, compatibility shims,
 and divergence logs.
 
+Audit closure rule: no `claude_audits/` item is considered done until its issue
+file has also been moved to
+`/home/mahogny/github/claude/new_java2rust/claude_audits/done`.
+
 Tracking rule: when an audit item is genuinely done, move its
 `claude_audits/` issue file to
 `/home/mahogny/github/claude/new_java2rust/claude_audits/done` as part of the
@@ -277,6 +281,10 @@ Landed in this batch:
   `SignaturePlan::method_signature_by_java_key(JavaCallableKey::source_method(...))`
   for the selected declaration before falling back to the legacy Rust-name
   required-signature lookup.
+- Resolved emitted-source static fallback planning now selects the source
+  declaration with the same resolved owner/staticness/arity helper and asks
+  `SignaturePlan::method_signature_by_java_key(...)` before the legacy
+  `(owner, rust_name)` compatibility lookup.
 
 1. Add a `CallableAnalysis` shell.
    - Introduce `src/callable_analysis.rs`.
@@ -470,7 +478,7 @@ Completion checklist for any audit marked `fixed locally`:
 - Do not move partial or exploratory audit files.
 - Treat the audit as still open if its file remains outside `claude_audits/done`.
 - Do not mark an audit row as fully done unless the issue file has also been
-  moved to `claude_audits/done`.
+  moved to `/home/mahogny/github/claude/new_java2rust/claude_audits/done`.
 
 | Audit | Status | Plan owner |
 |---|---:|---|

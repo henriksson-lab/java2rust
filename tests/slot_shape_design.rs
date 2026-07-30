@@ -3358,10 +3358,21 @@ fn callable_analysis_shell_reaches_lowering_context() {
     let resolved_source_arg_plan = lower_source
         .split("fn emitted_source_resolved_call_argument_plan")
         .nth(1)
-        .and_then(|tail| tail.split("fn method_effective_rust_name").next())
+        .and_then(|tail| tail.split("fn resolved_source_method_for_call").next())
         .expect("resolved source call argument planner should be present");
     assert!(resolved_source_arg_plan.contains("JavaCallableKey::source_method"));
     assert!(resolved_source_arg_plan.contains("method_signature_by_java_key"));
+    let resolved_static_fallback = lower_source
+        .split("fn source_context_resolved_static_method_fallback_signature")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn non_emitted_static_context_fallback_signature_for_method")
+                .next()
+        })
+        .expect("resolved static source fallback planner should be present");
+    assert!(resolved_static_fallback.contains("resolved_source_method_for_call"));
+    assert!(resolved_static_fallback.contains("JavaCallableKey::source_method"));
+    assert!(resolved_static_fallback.contains("method_signature_by_java_key"));
     assert!(
         lower_source
             .contains(".callable_analysis\n            .constructor_usage(&UsageConstructorKey")

@@ -14548,6 +14548,27 @@ fn emitted_source_resolved_call_argument_plan(
 ) -> Option<ArgumentLoweringPlan> {
     let resolved = resolved?;
     let owner = find_context_type_by_key(ctx.program, &resolved.declaring_type)?;
+    let method = resolved_source_method_for_call(owner, resolved, arg_count)?;
+    let java_key =
+        crate::java_signature::JavaCallableKey::source_method(owner.name.clone(), method);
+    let signature = ctx
+        .signatures
+        .method_signature_by_java_key(&java_key)
+        .unwrap_or_else(|| ctx.signatures.required_method_signature(owner, method));
+    Some(ArgumentLoweringPlan::Shaped(
+        signature
+            .params
+            .iter()
+            .map(|param| param.shape.clone())
+            .collect(),
+    ))
+}
+
+fn resolved_source_method_for_call<'a>(
+    owner: &'a TypeDecl,
+    resolved: &ResolvedCall,
+    arg_count: usize,
+) -> Option<&'a MethodDecl> {
     let exact_method = owner.members.iter().find_map(|member| match member {
         Member::Method(method)
             if method.params.len() == arg_count
@@ -14558,7 +14579,7 @@ fn emitted_source_resolved_call_argument_plan(
         }
         _ => None,
     });
-    let method = exact_method.or_else(|| {
+    exact_method.or_else(|| {
         let mut matches = owner.members.iter().filter_map(|member| match member {
             Member::Method(method)
                 if method.params.len() == arg_count
@@ -14575,20 +14596,7 @@ fn emitted_source_resolved_call_argument_plan(
         } else {
             None
         }
-    })?;
-    let java_key =
-        crate::java_signature::JavaCallableKey::source_method(owner.name.clone(), method);
-    let signature = ctx
-        .signatures
-        .method_signature_by_java_key(&java_key)
-        .unwrap_or_else(|| ctx.signatures.required_method_signature(owner, method));
-    Some(ArgumentLoweringPlan::Shaped(
-        signature
-            .params
-            .iter()
-            .map(|param| param.shape.clone())
-            .collect(),
-    ))
+    })
 }
 
 fn method_effective_rust_name(method: &MethodDecl) -> String {
@@ -22624,6 +22632,16 @@ fn source_context_resolved_static_method_fallback_signature(
         .map(|arg| infer_expr_shape_with_context(arg, env, shape_ctx).java_ty)
         .collect::<Vec<_>>();
     let owner_is_emitted = static_context_owner_is_emitted(owner, ctx);
+    let resolved_source_method = resolved_source_method_for_call(ty, resolved, args.len());
+    if owner_is_emitted && let Some(method) = resolved_source_method {
+        let java_key = crate::java_signature::JavaCallableKey::source_method(owner.clone(), method);
+        if let Some(signature) = ctx.signatures.method_signature_by_java_key(&java_key) {
+            return Some(context_fallback_signature_for_signature(
+                resolved.rust_name.clone(),
+                signature,
+            ));
+        }
+    }
     if owner_is_emitted
         && let Some(signature) = ctx
             .signatures
@@ -22662,7 +22680,7 @@ fn source_context_resolved_static_method_fallback_signature(
         });
     }
     if matching_methods.len() == 1 {
-        let method = matching_methods[0];
+        let method = resolved_source_method.unwrap_or(matching_methods[0]);
         return Some(if owner_is_emitted {
             context_fallback_signature_for_method(owner, method, ctx)
         } else {
