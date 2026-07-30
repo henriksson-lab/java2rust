@@ -1471,6 +1471,19 @@ to `10`. Static-constant external facade owner shells now derive `Default`, so
 reduced-subset buckets are 5 mismatched types, 2 unsupported concrete
 `instanceof`, and 2 unsupported `super(...)` inheritance constructor calls.
 
+Reduced HTSJDK VCF generic source-supertype follow-up:
+`.tmp/corpus-rerun-20260730-vcf-standard-bound-after-generic-supertype-into-optional`
+translates the same 9-file subset and reduces generated Rust errors from `10`
+to `9`. Source generic impl parameters now receive transitive
+`Into<SourceSuper>` bounds when the Java type parameter bound extends another
+source class, and shaped argument lowering applies the same source-supertype
+upcast after optional carrier unwrap recovery. This closes the
+`VCFStandardHeaderLinesStandards<T>` insertion mismatch:
+`header_lines.insert(line.unwrap().into())` now type-checks against
+`HashSet<VCFHeaderLine>`. Remaining reduced-subset buckets are 4 mismatched
+types, 2 unsupported concrete `instanceof`, and 2 unsupported `super(...)`
+inheritance constructor calls.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from

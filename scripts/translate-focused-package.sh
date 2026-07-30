@@ -687,10 +687,19 @@ strip_shared_support_items() {
         }
         next
       }
-      if ($0 ~ /^impl([[:space:]]*<[^>]+>)?[[:space:]]+(dyn[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*(<[^>{}]+>)?[[:space:]]*(\{|where([[:space:]]|$))/) {
+      if ($0 ~ /^impl[[:space:]]*<[^{}]+>[[:space:]]+JavaIterator[[:space:]]*</) {
+        skip_depth = 0
+        skip_depth += gsub(/\{/, "{")
+        skip_depth -= gsub(/\}/, "}")
+        if (skip_depth < 1) {
+          skip_depth = 1
+        }
+        next
+      }
+      if ($0 ~ /^impl([[:space:]]*<[^{}]+>)?[[:space:]]+(dyn[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*(<[^{}]+>)?[[:space:]]*(\{|where([[:space:]]|$))/) {
         impl_name = $0
-        sub(/^impl([[:space:]]*<[^>]+>)?[[:space:]]+(dyn[[:space:]]+)?/, "", impl_name)
-        sub(/(<[^>{}]+>)?[[:space:]]*(\{|where([[:space:]]|$)).*$/, "", impl_name)
+        sub(/^impl([[:space:]]*<[^{}]+>)?[[:space:]]+(dyn[[:space:]]+)?/, "", impl_name)
+        sub(/(<[^{}]+>)?[[:space:]]*(\{|where([[:space:]]|$)).*$/, "", impl_name)
         if (impl_name == "JavaException" || impl_name == "JavaClass" || impl_name == "FileSystem" || impl_name == "Path" || impl_name == "URI" || impl_name == "File" || impl_name == "URL" || impl_name == "URLConnection" || impl_name == "JarURLConnection" || impl_name == "JarFile" || impl_name == "JarEntry" || impl_name == "Manifest" || impl_name == "Attributes" || impl_name == "AttributesName" || impl_name == "Enumeration" || impl_name == "JavaIterator" || impl_name == "IOUtils" || (shared[impl_name] && impl_name != source_type)) {
           skip_depth = 0
           skip_depth += gsub(/\{/, "{")
@@ -706,9 +715,9 @@ strip_shared_support_items() {
         copy_depth -= gsub(/\}/, "}")
         next
       }
-      if ($0 ~ /^impl([[:space:]]*<[^>]+>)?[[:space:]]+.*[[:space:]]+for[[:space:]]+[A-Za-z_][A-Za-z0-9_]*(<.*>)?[[:space:]]*\{/) {
+      if ($0 ~ /^impl([[:space:]]*<[^{}]+>)?[[:space:]]+.*[[:space:]]+for[[:space:]]+[A-Za-z_][A-Za-z0-9_]*(<.*>)?[[:space:]]*\{/) {
         impl_trait_raw = $0
-        sub(/^impl([[:space:]]*<[^>]+>)?[[:space:]]+/, "", impl_trait_raw)
+        sub(/^impl([[:space:]]*<[^{}]+>)?[[:space:]]+/, "", impl_trait_raw)
         sub(/[[:space:]]+for[[:space:]].*/, "", impl_trait_raw)
         impl_trait = impl_trait_raw
         sub(/<.*>/, "", impl_trait)

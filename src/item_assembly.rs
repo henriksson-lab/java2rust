@@ -108,6 +108,13 @@ fn rust_impl_params_for_source_type(ty: &TypeDecl, support_program: &Program) ->
             if source_type_param_needs_clone_bound(ty, name) {
                 bounds.push("Clone".to_string());
             }
+            if let Some(Some(JavaType::Named { name: bound, .. })) = ty.type_param_bounds.get(index)
+            {
+                bounds.extend(source_type_param_into_supertype_bounds(
+                    bound,
+                    support_program,
+                ));
+            }
             if bounds.is_empty() {
                 name.clone()
             } else {
@@ -115,6 +122,40 @@ fn rust_impl_params_for_source_type(ty: &TypeDecl, support_program: &Program) ->
             }
         })
         .collect()
+}
+
+fn source_type_param_into_supertype_bounds(bound: &str, support_program: &Program) -> Vec<String> {
+    let mut bounds = Vec::new();
+    let mut current = find_type_decl_by_name_or_rust_name(support_program, bound)
+        .and_then(|ty| ty.extends.as_deref());
+    let mut visited = HashSet::new();
+    while let Some(super_name) = current {
+        let Some(super_ty) = find_type_decl_by_name_or_rust_name(support_program, super_name)
+        else {
+            break;
+        };
+        if !visited.insert(super_ty.name.clone()) {
+            break;
+        }
+        if matches!(super_ty.kind, crate::java_ir::TypeKind::Class) {
+            bounds.push(format!(
+                "Into<{}>",
+                rust_name_for_java_named_type(&super_ty.name)
+            ));
+        }
+        current = super_ty.extends.as_deref();
+    }
+    bounds
+}
+
+fn find_type_decl_by_name_or_rust_name<'a>(
+    program: &'a Program,
+    name: &str,
+) -> Option<&'a TypeDecl> {
+    program
+        .types
+        .iter()
+        .find(|ty| ty.name == name || rust_name_for_java_named_type(&ty.name) == name)
 }
 
 fn source_type_param_needs_clone_bound(ty: &TypeDecl, type_param: &str) -> bool {

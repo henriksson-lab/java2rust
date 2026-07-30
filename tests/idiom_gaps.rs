@@ -8009,6 +8009,73 @@ class BoundEnumReturnEquality {
 }
 
 #[test]
+fn type_param_bound_source_supertype_assignment_uses_into_bound() {
+    let source = r#"
+class HeaderLine {
+    String id;
+}
+
+class CompoundLine extends HeaderLine {
+}
+
+class FormatLine extends CompoundLine {
+}
+
+class Standards<T extends CompoundLine> {
+    private T value;
+
+    Standards(T value) {
+        this.value = value;
+    }
+
+    HeaderLine upcast(T line) {
+        HeaderLine headerLine = line;
+        return headerLine;
+    }
+
+    void addFound(java.util.List<HeaderLine> lines, boolean present, T line) {
+        T value = present ? line : null;
+        if (value != null) {
+            lines.add(value);
+        }
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("impl<T: CompoundLineBound + Clone + Into<HeaderLine>> Standards<T>")
+            && translation
+                .rust
+                .contains("let header_line: HeaderLine = line.into();")
+            && translation
+                .rust
+                .contains("lines.push(value.unwrap().into());")
+            && translation
+                .rust
+                .contains("impl From<FormatLine> for HeaderLine"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "type_param_bound_source_supertype_assignment",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn nested_generic_source_alias_preserves_type_params() {
     let source = r#"
 class Outer {

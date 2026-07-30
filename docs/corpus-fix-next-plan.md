@@ -6617,17 +6617,32 @@ Reduced VCF reruns:
   `external_static_string_constant_support_is_generated_from_field_facts`,
   `cargo fmt --check`, `cargo check --quiet`, `git diff --check`, and
   `cargo build --release --quiet --bin new-java2rust`.
+- `.tmp/corpus-rerun-20260730-vcf-standard-bound-after-generic-supertype-into-optional`:
+  9 files, 30.041s, 9 generated-Rust errors. Generic source type parameters
+  whose Java class bound has source superclasses now get transitive
+  `Into<SourceSuper>` impl bounds, and optional generic values unwrapped for a
+  shaped owned argument apply the same source-supertype upcast. This closes the
+  `VCFStandardHeaderLinesStandards<T>` insertion mismatch: the reduced VCF
+  output now preserves
+  `impl<T: VCFCompoundHeaderLineBound + Clone + Into<VCFHeaderLine>>` and emits
+  `header_lines.insert(line.unwrap().into())`. Focused verification passed:
+  `type_param_bound_source_supertype_assignment_uses_into_bound`, the two
+  focused-package shared-support stripper tests, `bash -n
+  scripts/translate-focused-package.sh`, `cargo fmt --check`, `cargo check
+  --quiet`, `git diff --check`, and `cargo build --release --quiet --bin
+  new-java2rust`.
 
 Remaining top reduced-VCF clusters after this follow-up:
-5 mismatched types, 2 unsupported concrete `instanceof`, 2 unsupported
+4 mismatched types, 2 unsupported concrete `instanceof`, 2 unsupported
 `super(...)` inheritance constructor calls. The old missing-super-local `mapping` bucket,
 `v_c_f_header_line_translator` static-owner bucket, same-arity source-super
 overload bucket, nested unchecked exception/result-shell bucket, switch
 definite-assignment bucket, and negated super-call type-inference bucket are
-closed. The `VCFHeader: Default` facade-support bucket is also closed. The next
-reduced-VCF target should tackle concrete `instanceof`, unsupported
-source-super shapes that still require inheritance lowering, or generic/source
-hierarchy slot adaptation in `VCFStandardHeaderLines`.
+closed. The `VCFHeader: Default` facade-support bucket and the optional generic
+source-supertype insertion bucket are also closed. The next reduced-VCF target
+should tackle concrete `instanceof`, unsupported source-super shapes that still
+require inheritance lowering, or the remaining generic/source hierarchy slot
+adaptation rows in `VCFStandardHeaderLines`.
 
 ## Rerun Protocol
 

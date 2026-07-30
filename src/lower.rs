@@ -11751,7 +11751,21 @@ fn lower_args_with_plan(
                     let lowered = snapshot_same_call_shared_read_before_mut_borrow(
                         lowered, arg, shape, index, args, &shapes,
                     );
-                    adapt_reused_owned_argument(lowered, arg, &shape, Some(actual_shape), env, ctx)
+                    let lowered = adapt_reused_owned_argument(
+                        lowered,
+                        arg,
+                        &shape,
+                        Some(actual_shape),
+                        env,
+                        ctx,
+                    );
+                    apply_source_type_param_optional_unwrap_result_upcast(
+                        lowered,
+                        actual_shape,
+                        &argument_slot(shape.clone()),
+                        env,
+                        ctx,
+                    )
                 })
                 .collect()
         }
@@ -17138,7 +17152,8 @@ fn lower_expr_for_slot_with_refinements(
     {
         return apply_java_display_plan(lowered_expr, JavaDisplayPlan::ConcatValue);
     }
-    if let Some(upcast) = lower_source_subtype_to_supertype_slot(&lowered_expr, &actual, &slot, ctx)
+    if let Some(upcast) =
+        lower_source_subtype_to_supertype_slot(&lowered_expr, &actual, &slot, env, ctx)
     {
         return upcast;
     }
@@ -17216,7 +17231,8 @@ fn lower_source_constructor_expr_for_concrete_slot(
         rust_args,
     );
     let actual = value_shape_for_java_type(ctx.representations, constructed_ty);
-    if let Some(upcast) = lower_source_subtype_to_supertype_slot(&lowered, &actual, slot, ctx) {
+    if let Some(upcast) = lower_source_subtype_to_supertype_slot(&lowered, &actual, slot, env, ctx)
+    {
         return Some(upcast);
     }
     let plan = plan_slot_conversion(actual, slot.clone(), ctx.facts);
@@ -17264,6 +17280,7 @@ fn lower_source_subtype_to_supertype_slot(
     lowered_expr: &RustExpr,
     actual: &RustSlotShape,
     slot: &Slot,
+    env: &ShapeEnv,
     ctx: LowerCtx,
 ) -> Option<RustExpr> {
     if actual.ownership != OwnershipShape::Owned {
@@ -17278,10 +17295,26 @@ fn lower_source_subtype_to_supertype_slot(
     if same_concrete_java_type_name(&actual.java_ty, target_name) {
         return None;
     }
+    if type_param_source_subtype_conversion_available(actual_name, target_name, env, ctx) {
+        return Some(into_projection(lowered_expr.clone()));
+    }
     if !source_subtype_conversion_available(actual_name, target_name, ctx) {
         return None;
     }
     Some(into_projection(lowered_expr.clone()))
+}
+
+fn type_param_source_subtype_conversion_available(
+    actual_name: &str,
+    target_name: &str,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> bool {
+    let Some(JavaType::Named { name: bound, .. }) = env.type_env().type_param_bound(actual_name)
+    else {
+        return false;
+    };
+    source_subtype_conversion_available(bound, target_name, ctx)
 }
 
 fn source_subtype_conversion_available(
@@ -19951,7 +19984,40 @@ fn lower_reused_optional_unwrap_for_slot(
         matches!(slot, Slot::Return(_)),
     )?;
     let plan = plan_lowered_slot_conversion(&lowered.actual, slot.clone(), ctx.facts);
-    Some(apply_lowered_slot_expr_conversion(lowered, &plan))
+    let converted = apply_lowered_slot_expr_conversion(lowered, &plan);
+    Some(apply_source_type_param_optional_unwrap_result_upcast(
+        converted, actual, slot, env, ctx,
+    ))
+}
+
+fn apply_source_type_param_optional_unwrap_result_upcast(
+    converted: RustExpr,
+    optional_actual: &RustSlotShape,
+    slot: &Slot,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> RustExpr {
+    let Some(target) = slot_target_shape(slot) else {
+        return converted;
+    };
+    if target.ownership != OwnershipShape::Owned || target.optional_element_type().is_some() {
+        return converted;
+    }
+    let Some(element_ty) = optional_actual.optional_element_type() else {
+        return converted;
+    };
+    let Some(actual_name) = concrete_java_type_name(&element_ty) else {
+        return converted;
+    };
+    let Some(target_name) = concrete_java_type_name(&target.java_ty) else {
+        return converted;
+    };
+    if same_concrete_java_type_name(&element_ty, target_name)
+        || !type_param_source_subtype_conversion_available(actual_name, target_name, env, ctx)
+    {
+        return converted;
+    }
+    into_projection(converted)
 }
 
 fn reused_optional_unwrap_lowered_expr(

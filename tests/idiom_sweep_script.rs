@@ -109,7 +109,7 @@ fn focused_package_shared_support_stripper_keeps_dyn_trait_inherent_impls() {
 
     assert!(
         script.contains(
-            "(dyn[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*(<[^>{}]+>)?[[:space:]]*(\\{|where([[:space:]]|$))"
+            "(dyn[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*(<[^{}]+>)?[[:space:]]*(\\{|where([[:space:]]|$))"
         ),
         "{script}"
     );
@@ -126,12 +126,12 @@ fn focused_package_shared_support_stripper_matches_generic_inherent_impl_targets
     let script = fs::read_to_string(script_path).unwrap();
 
     assert!(
-        script.contains("[A-Za-z_][A-Za-z0-9_]*(<[^>{}]+>)?[[:space:]]*(\\{|where([[:space:]]|$))"),
+        script.contains("[A-Za-z_][A-Za-z0-9_]*(<[^{}]+>)?[[:space:]]*(\\{|where([[:space:]]|$))"),
         "{script}"
     );
     assert!(
         script.contains(
-            "sub(/(<[^>{}]+>)?[[:space:]]*(\\{|where([[:space:]]|$)).*$/, \"\", impl_name)"
+            "sub(/(<[^{}]+>)?[[:space:]]*(\\{|where([[:space:]]|$)).*$/, \"\", impl_name)"
         ),
         "{script}"
     );
