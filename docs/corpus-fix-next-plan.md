@@ -6515,15 +6515,23 @@ Reduced VCF reruns:
   `VCFFormatHeaderLine` and `VCFInfoHeaderLine` `set_number_to_unbounded`,
   `set_source`, and `set_version` impl rows now call the child method on
   `self`, not a cloned `VCFCompoundHeaderLine` temporary.
+- `.tmp/corpus-rerun-20260730-vcf-standard-bound-after-vcf-header-facts`:
+  9 files, 57.091s, 25 generated-Rust errors. The VCF external pack now gives
+  typed facts for `VCFHeader.getVCFHeaderVersion`,
+  `VCFHeader.setVCFHeaderVersion`, `VCFHeaderVersion.isAtLeastAsRecentAs`, and
+  static-final `VCFHeader.HEADER_INDICATOR`. The previous missing
+  `is_at_least_as_recent_as` and `VCFHeader::HEADER_INDICATOR` rows are gone;
+  `get_v_c_f_header_version` now returns `VCFHeaderVersion`.
 
 Remaining top reduced-VCF clusters after this follow-up:
-11 mismatched types, 4 missing `mapping`, 3 possibly-uninitialized `number`, 3
-type annotations needed, 2 unsupported concrete `instanceof`, 2 unsupported
-`super(...)` inheritance constructor calls, and single missing facade/source
-surface gaps for `set_v_c_f_header_version`, `is_at_least_as_recent_as`, and
-`VCFHeader::HEADER_INDICATOR`. The next reduced-VCF target should move to the
-constructor-parsing gap around the missing `mapping` local and the two remaining
-unsupported `super(...)` constructor calls.
+10 mismatched types, 4 missing `mapping`, 3 possibly-uninitialized `number`, 3
+type annotations needed, 2 unsupported concrete `instanceof`, and 2 unsupported
+`super(...)` inheritance constructor calls. The remaining
+`set_v_c_f_header_version` row is no longer a missing method fact; it is exposed
+through `repaired_header: Box<dyn Any>`, so the next reduced-VCF target should
+prefer fixing constructor/body projection around the missing `mapping` local and
+the two remaining unsupported `super(...)` constructor calls before returning to
+erased-return adaptation.
 
 ## Rerun Protocol
 

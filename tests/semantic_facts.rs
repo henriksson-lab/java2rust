@@ -4339,6 +4339,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
             },
         ),
         ("REFERENCE_KEY", JavaType::String),
+        ("HEADER_INDICATOR", JavaType::String),
     ] {
         let field = vcf_facts
             .external_field_for("VCFHeader", field_name)
@@ -4350,6 +4351,53 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
             FactProvenance::ExternalLibraryPack
         );
     }
+    let header_version_getter = vcf_facts
+        .external_api_effect_for_receiver(Some("VCFHeader"), "getVCFHeaderVersion")
+        .expect("VCFHeader.getVCFHeaderVersion should be explained by VCF pack");
+    assert_eq!(header_version_getter.role, ExternalApiRole::Getter);
+    assert_eq!(
+        header_version_getter.receiver_mutability,
+        ReceiverMutabilityFact::ReadOnly
+    );
+    assert_eq!(
+        header_version_getter.return_type,
+        Some(JavaType::Named {
+            name: "VCFHeaderVersion".to_string(),
+            args: Vec::new(),
+        })
+    );
+    assert_eq!(
+        header_version_getter.provenance,
+        FactProvenance::ExternalLibraryPack
+    );
+
+    let header_version_setter = vcf_facts
+        .external_api_effect_for_receiver(Some("VCFHeader"), "setVCFHeaderVersion")
+        .expect("VCFHeader.setVCFHeaderVersion should be explained by VCF pack");
+    assert_eq!(header_version_setter.role, ExternalApiRole::Mutator);
+    assert_eq!(
+        header_version_setter.receiver_mutability,
+        ReceiverMutabilityFact::MutatesReceiver
+    );
+    assert_eq!(header_version_setter.return_type, Some(JavaType::Void));
+
+    let at_least = vcf_facts
+        .external_api_effect_for_receiver_with_arity(
+            Some("VCFHeaderVersion"),
+            "isAtLeastAsRecentAs",
+            Some(1),
+        )
+        .expect("VCFHeaderVersion.isAtLeastAsRecentAs should be explained by VCF pack");
+    assert_eq!(at_least.role, ExternalApiRole::BooleanGetter);
+    assert_eq!(
+        at_least.receiver_mutability,
+        ReceiverMutabilityFact::ReadOnly
+    );
+    assert_eq!(
+        at_least.return_type,
+        Some(JavaType::Primitive(PrimitiveType::Boolean))
+    );
+
     let supported_header_line_type = vcf_facts
         .external_field_for("VCFCompoundHeaderLine", "SupportedHeaderLineType")
         .expect("VCFCompoundHeaderLine.SupportedHeaderLineType should be explained by VCF pack");
