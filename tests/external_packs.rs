@@ -1202,6 +1202,10 @@ fn htsjdk_util_locatable_pack_strategy_preserves_typed_facade_boundary() {
         gzip_header_read_length.provenance,
         FactProvenance::ExternalLibraryPack
     );
+    let gzip_header_read_length_value = facts
+        .external_field_value_for("IOUtil", "GZIP_HEADER_READ_LENGTH")
+        .expect("IOUtil.GZIP_HEADER_READ_LENGTH should have a pack-owned value");
+    assert_eq!(gzip_header_read_length_value.rust_value, "8000");
 }
 
 #[test]
@@ -1532,6 +1536,7 @@ fn external_pack_manifest_coverage_audit_reports_unclassified_pack_facts() {
                 type_name: "dep.audit.Record",
                 field_name: "KNOWN",
                 field_type: None,
+                field_value: None,
                 field_kind: ExternalFieldKind::StaticFinal,
                 coverage: ExternalApiCoverage::Semantic,
             },
@@ -1539,6 +1544,7 @@ fn external_pack_manifest_coverage_audit_reports_unclassified_pack_facts() {
                 type_name: "dep.audit.Record",
                 field_name: "RAW_HANDLE",
                 field_type: None,
+                field_value: None,
                 field_kind: ExternalFieldKind::StaticFinal,
                 coverage: ExternalApiCoverage::Unsupported,
             },
@@ -2160,6 +2166,7 @@ fn external_pack_manifest_coverage_lookup_is_member_kind_symmetric() {
                 type_name: "dep.boundary.Record",
                 field_name: "KIND",
                 field_type: None,
+                field_value: None,
                 field_kind: ExternalFieldKind::StaticFinal,
                 coverage: ExternalApiCoverage::Semantic,
             },
@@ -2167,6 +2174,7 @@ fn external_pack_manifest_coverage_lookup_is_member_kind_symmetric() {
                 type_name: "dep.boundary.Record",
                 field_name: "RAW_HANDLE",
                 field_type: None,
+                field_value: None,
                 field_kind: ExternalFieldKind::StaticFinal,
                 coverage: ExternalApiCoverage::Unsupported,
             },
@@ -2243,7 +2251,7 @@ fn external_pack_manifest_parser_emits_pack_boundary_and_member_facts() {
         external-pack-api dep.variant dep.variant.Reader read mapped getter read-only maybe-null args=1 return=dep.variant.Record throws=DepIoError rust-return=usize
         external-pack-constructor dep.variant dep.variant.Builder 0 semantic
         external-pack-constructor dep.variant dep.variant.LegacyReader 1 unsupported
-        external-pack-field dep.variant dep.variant.Record TYPE semantic type=dep.variant.RecordType const-kind=enum-variant
+        external-pack-field dep.variant dep.variant.Record TYPE semantic type=dep.variant.RecordType value=DepVariantKind::TYPE const-kind=enum-variant
         external-pack-field dep.variant dep.variant.Record RAW_HANDLE unsupported
         external-pack-unsupported dep.variant dep.variant.Reader rawDecode requires runtime codec state
         "#,
@@ -2594,6 +2602,11 @@ fn external_pack_manifest_parser_emits_pack_boundary_and_member_facts() {
         })
     );
     assert_eq!(field.field_kind, ExternalFieldKind::EnumVariant);
+    let field_value = parsed
+        .facts
+        .external_field_value_for("dep.variant.Record", "TYPE")
+        .expect("manifest field value metadata should produce a value fact");
+    assert_eq!(field_value.rust_value, "DepVariantKind::TYPE");
 
     let unsupported = parsed
         .facts
@@ -3319,6 +3332,10 @@ fn htsjdk_variantcontext_pack_models_builder_and_getter_effects() {
             field.field_type,
             Some(JavaType::Primitive(PrimitiveType::Double))
         );
+        let value = facts
+            .external_field_value_for(type_name, "NO_LOG10_PERROR")
+            .unwrap_or_else(|| panic!("{type_name}.NO_LOG10_PERROR should have a value fact"));
+        assert_eq!(value.rust_value, "1.0");
         let dispatched =
             new_java2rust::external_packs::external_field_for(type_name, "NO_LOG10_PERROR")
                 .unwrap_or_else(|| {
@@ -4472,6 +4489,10 @@ fn htsjdk_bcf_pack_declares_codec_boundary() {
     );
     assert_eq!(header_size.field_kind, ExternalFieldKind::StaticFinal);
     assert_eq!(header_size.provenance, FactProvenance::ExternalLibraryPack);
+    let header_size_value = facts
+        .external_field_value_for("BCF2Codec", "SIZEOF_BCF_HEADER")
+        .expect("BCF2Codec.SIZEOF_BCF_HEADER should have a pack-owned value");
+    assert_eq!(header_size_value.rust_value, "5");
 
     let dispatched = new_java2rust::external_packs::external_field_for(
         "htsjdk.variant.bcf2.BCF2Codec",
@@ -4482,6 +4503,12 @@ fn htsjdk_bcf_pack_declares_codec_boundary() {
         dispatched.field_type,
         Some(JavaType::Primitive(PrimitiveType::Int))
     );
+    let dispatched_value = new_java2rust::external_packs::external_field_value_for(
+        "htsjdk.variant.bcf2.BCF2Codec",
+        "SIZEOF_BCF_HEADER",
+    )
+    .expect("BCF2Codec.SIZEOF_BCF_HEADER value should be pack-dispatched");
+    assert_eq!(dispatched_value.rust_value, "5");
 }
 
 #[test]
@@ -4673,6 +4700,10 @@ fn htsjdk_vcf_pack_models_header_getters_and_mutators() {
         Some(JavaType::Primitive(PrimitiveType::Boolean))
     );
     assert_eq!(debug_mode.field_kind, ExternalFieldKind::StaticFinal);
+    let debug_mode_value = facts
+        .external_field_value_for("GeneralUtils", "DEBUG_MODE_ENABLED")
+        .expect("GeneralUtils.DEBUG_MODE_ENABLED should have a pack-owned value");
+    assert_eq!(debug_mode_value.rust_value, "false");
     let dispatched_debug_mode =
         new_java2rust::external_packs::external_field_for("GeneralUtils", "DEBUG_MODE_ENABLED")
             .expect("GeneralUtils.DEBUG_MODE_ENABLED should be globally pack-dispatched");
@@ -9891,6 +9922,10 @@ fn htsjdk_sam_header_pack_models_dictionary_header_and_read_group_effects() {
         unknown_length.field_type,
         Some(JavaType::Primitive(PrimitiveType::Int))
     );
+    let unknown_length_value = facts
+        .external_field_value_for("SAMSequenceRecord", "UNKNOWN_SEQUENCE_LENGTH")
+        .expect("sequence length constant should have a pack-owned value");
+    assert_eq!(unknown_length_value.rust_value, "0");
     assert_eq!(
         new_java2rust::stdlib::external_field_provenance(
             "SAMSequenceRecord",

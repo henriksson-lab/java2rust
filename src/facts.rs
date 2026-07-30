@@ -32,6 +32,7 @@ pub struct FactSet {
     pub external_constructor_rust_result_facts: Vec<ExternalConstructorRustResultFact>,
     pub external_constructor_facts: Vec<ExternalConstructorFact>,
     pub external_field_facts: Vec<ExternalFieldFact>,
+    pub external_field_value_facts: Vec<ExternalFieldValueFact>,
     pub method_effect_facts: Vec<MethodEffectFact>,
     pub recursion_facts: Vec<RecursionFact>,
     pub constructor_recursion_facts: Vec<ConstructorRecursionFact>,
@@ -1070,6 +1071,13 @@ pub struct ExternalFieldFact {
     pub provenance: FactProvenance,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalFieldValueFact {
+    pub field: FieldKey,
+    pub rust_value: String,
+    pub provenance: FactProvenance,
+}
+
 impl ExternalFieldFact {
     pub fn callable_key(&self) -> CallableKey {
         let (kind, staticness) = match self.field_kind {
@@ -1456,6 +1464,8 @@ impl FactSet {
         self.external_constructor_facts
             .extend(other.external_constructor_facts);
         self.external_field_facts.extend(other.external_field_facts);
+        self.external_field_value_facts
+            .extend(other.external_field_value_facts);
         self.method_effect_facts.extend(other.method_effect_facts);
         self.recursion_facts.extend(other.recursion_facts);
         self.constructor_recursion_facts
@@ -2384,6 +2394,32 @@ impl FactSet {
         self.find_exact_external_field_for(type_name, field_name)
             .or_else(|| self.find_external_field_for(type_name, field_name, true))
             .or_else(|| self.find_external_field_for(type_name, field_name, false))
+    }
+
+    pub fn external_field_value_for(
+        &self,
+        type_name: &str,
+        field_name: &str,
+    ) -> Option<&ExternalFieldValueFact> {
+        self.external_field_value_facts
+            .iter()
+            .rev()
+            .find(|fact| {
+                fact.field.type_name == type_name
+                    && external_field_name_matches(&fact.field.field_name, field_name)
+            })
+            .or_else(|| {
+                self.external_field_value_facts.iter().rev().find(|fact| {
+                    external_type_name_directly_matches(&fact.field.type_name, type_name)
+                        && external_field_name_matches(&fact.field.field_name, field_name)
+                })
+            })
+            .or_else(|| {
+                self.external_field_value_facts.iter().rev().find(|fact| {
+                    external_type_name_matches(&fact.field.type_name, type_name)
+                        && external_field_name_matches(&fact.field.field_name, field_name)
+                })
+            })
     }
 
     pub fn external_field_for_key(&self, key: &CallableKey) -> Option<&ExternalFieldFact> {

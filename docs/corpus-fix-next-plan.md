@@ -52,6 +52,15 @@ complete, and mention the move in the checkpoint notes or commit summary. Leave
 partial, exploratory, or inspiration-only audit files in `claude_audits/` until
 the mapped issue is fully closed.
 
+2026-07-30 constant-fact checkpoint: external field facts can now carry explicit
+Rust constant values from manifests via `value=...`, and built-in HTSJDK/VCF/SAM
+packs provide values for the corpus-visible integer, boolean, and double
+constants that previously fell through to primitive zero stubs. Unknown
+primitive external static constants now emit `compile_error!` initializers
+instead of plausible `0`/`false` defaults. Audit `0024` is moved to
+`claude_audits/done`; audit `0031` remains partial until the broader stubbed
+constant census/reporting work is complete.
+
 ## 2026-07-28 Batch Status: Borrow Drift Narrowing
 
 Latest full boundary before this slice:

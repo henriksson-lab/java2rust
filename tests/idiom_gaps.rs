@@ -2235,9 +2235,13 @@ class JdkNumericLimitConstants {
     static int integerBytes() { return Integer.BYTES; }
     static char maxChar() { return Character.MAX_VALUE; }
     static float minFloat() { return Float.MIN_VALUE; }
+    static float nanFloat() { return Float.NaN; }
     static double minDouble() { return Double.MIN_VALUE; }
     static double nan() { return Double.NaN; }
+    static double posInf() { return Double.POSITIVE_INFINITY; }
+    static double negInf() { return Double.NEGATIVE_INFINITY; }
     static double pi() { return Math.PI; }
+    static double e() { return Math.E; }
     static boolean truth() { return Boolean.TRUE; }
 }
 "#,
@@ -2260,13 +2264,23 @@ class JdkNumericLimitConstants {
             && translation
                 .rust
                 .contains("pub const MIN_VALUE: f32 = f32::from_bits(1);")
+            && translation.rust.contains("pub const NaN: f32 = f32::NAN;")
             && translation
                 .rust
                 .contains("pub const MIN_VALUE: f64 = f64::from_bits(1);")
             && translation.rust.contains("pub const NaN: f64 = f64::NAN;")
             && translation
                 .rust
+                .contains("pub const POSITIVE_INFINITY: f64 = f64::INFINITY;")
+            && translation
+                .rust
+                .contains("pub const NEGATIVE_INFINITY: f64 = f64::NEG_INFINITY;")
+            && translation
+                .rust
                 .contains("pub const PI: f64 = std::f64::consts::PI;")
+            && translation
+                .rust
+                .contains("pub const E: f64 = std::f64::consts::E;")
             && translation.rust.contains("pub const TRUE: bool = true;"),
         "{}",
         translation.rust
@@ -2302,9 +2316,13 @@ mod generated_tests {
         assert_eq!(JdkNumericLimitConstants::integer_bytes(), 4);
         assert_eq!(JdkNumericLimitConstants::max_char(), '\u{ffff}');
         assert!(JdkNumericLimitConstants::min_float() > 0.0);
+        assert!(JdkNumericLimitConstants::nan_float().is_nan());
         assert!(JdkNumericLimitConstants::min_double() > 0.0);
         assert!(JdkNumericLimitConstants::nan().is_nan());
+        assert_eq!(JdkNumericLimitConstants::pos_inf(), f64::INFINITY);
+        assert_eq!(JdkNumericLimitConstants::neg_inf(), f64::NEG_INFINITY);
         assert_eq!(JdkNumericLimitConstants::pi(), std::f64::consts::PI);
+        assert_eq!(JdkNumericLimitConstants::e(), std::f64::consts::E);
         assert!(JdkNumericLimitConstants::truth());
     }
 }
@@ -21458,10 +21476,10 @@ class HtsjdkStaticIntegerConstants {
     assert!(
         translation
             .rust
-            .contains("pub const SIZEOF_BCF_HEADER: i32 = 0;")
+            .contains("pub const SIZEOF_BCF_HEADER: i32 = 5;")
             && translation
                 .rust
-                .contains("pub const GZIP_HEADER_READ_LENGTH: i32 = 0;")
+                .contains("pub const GZIP_HEADER_READ_LENGTH: i32 = 8000;")
             && translation
                 .rust
                 .contains("return BCF2Codec::SIZEOF_BCF_HEADER + IOUtil::GZIP_HEADER_READ_LENGTH;")
@@ -22851,7 +22869,7 @@ class UsesInheritedExternalStaticConstant {
     assert!(
         translation
             .rust
-            .contains("pub const DEFAULT_QUEUE_SIZE: i32 = 0;")
+            .contains("pub const DEFAULT_QUEUE_SIZE: i32 = { compile_error!(\"external static constant ChildWriter.DEFAULT_QUEUE_SIZE has no modeled value\"); 0 };")
             && translation
                 .rust
                 .contains("return ChildWriter::DEFAULT_QUEUE_SIZE;"),

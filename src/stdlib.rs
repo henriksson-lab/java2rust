@@ -7295,9 +7295,16 @@ impl ExternalApiFacadeSupport {
                 let Some(rust_type) = static_constant_rust_type(&inherited.field_type) else {
                     continue;
                 };
+                let constant = StaticConstantFact {
+                    field_type: inherited.field_type.clone(),
+                    field_value: None,
+                    field_kind: ExternalFieldKind::StaticFinal,
+                    alias_owner: None,
+                };
                 let Some(value) = static_constant_default_value(
                     &owner,
                     &inherited.field_name,
+                    Some(&constant),
                     &inherited.field_type,
                     &BTreeMap::new(),
                 ) else {
@@ -14540,6 +14547,7 @@ fn collect_external_static_string_constants_expr(
 #[derive(Clone)]
 struct StaticConstantFact {
     field_type: JavaType,
+    field_value: Option<String>,
     field_kind: ExternalFieldKind,
     alias_owner: Option<String>,
 }
@@ -14597,10 +14605,18 @@ fn external_static_constant_owner(
         .as_ref()
         .map(|fact| fact.field_kind)
         .unwrap_or(ExternalFieldKind::StaticFinal);
+    let field_value = facts
+        .external_field_value_for(&lookup_owner, field)
+        .map(|fact| fact.rust_value.clone())
+        .or_else(|| {
+            crate::external_packs::external_field_value_for(&lookup_owner, field)
+                .map(|fact| fact.rust_value)
+        });
     Some((
         rust_owner,
         StaticConstantFact {
             field_type,
+            field_value,
             field_kind,
             alias_owner: (owner_name != receiver_name)
                 .then(|| external_static_constant_rust_owner(receiver_name))
@@ -14762,6 +14778,7 @@ fn static_constant_impl_lines(
                 let value = static_constant_default_value(
                     owner,
                     field,
+                    Some(constant),
                     &constant.field_type,
                     local_static_string_values,
                 )?;
@@ -14813,9 +14830,13 @@ fn static_constant_named_value_type(name: &str) -> Option<String> {
 fn static_constant_default_value(
     owner: &str,
     field: &str,
+    constant: Option<&StaticConstantFact>,
     java_ty: &JavaType,
     local_static_string_values: &BTreeMap<(String, String), String>,
 ) -> Option<String> {
+    if let Some(value) = constant.and_then(|constant| constant.field_value.as_ref()) {
+        return Some(value.clone());
+    }
     if let Some(value) = known_jdk_static_constant_value(owner, field) {
         return Some(value.to_string());
     }
@@ -14838,14 +14859,9 @@ fn static_constant_default_value(
         JavaType::Array(inner) if primitive_array_static_constant_rust_type(inner).is_some() => {
             Some("Vec::new()".to_string())
         }
-        JavaType::Primitive(PrimitiveType::Boolean) => Some("false".to_string()),
-        JavaType::Primitive(PrimitiveType::Byte)
-        | JavaType::Primitive(PrimitiveType::Short)
-        | JavaType::Primitive(PrimitiveType::Int) => Some("0".to_string()),
-        JavaType::Primitive(PrimitiveType::Long) => Some("0i64".to_string()),
-        JavaType::Primitive(PrimitiveType::Float) => Some("0.0f32".to_string()),
-        JavaType::Primitive(PrimitiveType::Double) => Some("0.0f64".to_string()),
-        JavaType::Primitive(PrimitiveType::Char) => Some("'\\0'".to_string()),
+        JavaType::Primitive(primitive) => Some(unknown_static_constant_compile_error_value(
+            owner, field, *primitive,
+        )),
         JavaType::Named { name, args }
             if name.rsplit('.').next().unwrap_or(name) == "List"
                 && matches!(args.as_slice(), [JavaType::String]) =>
@@ -14858,6 +14874,24 @@ fn static_constant_default_value(
             valid_rust_type_ident(&rust_type).then_some(rust_type)
         }
         _ => None,
+    }
+}
+
+fn unknown_static_constant_compile_error_value(
+    owner: &str,
+    field: &str,
+    primitive: PrimitiveType,
+) -> String {
+    let message = format!("external static constant {owner}.{field} has no modeled value");
+    match primitive {
+        PrimitiveType::Boolean => format!("{{ compile_error!({message:?}); false }}"),
+        PrimitiveType::Byte | PrimitiveType::Short | PrimitiveType::Int => {
+            format!("{{ compile_error!({message:?}); 0 }}")
+        }
+        PrimitiveType::Long => format!("{{ compile_error!({message:?}); 0i64 }}"),
+        PrimitiveType::Float => format!("{{ compile_error!({message:?}); 0.0f32 }}"),
+        PrimitiveType::Double => format!("{{ compile_error!({message:?}); 0.0f64 }}"),
+        PrimitiveType::Char => format!("{{ compile_error!({message:?}); '\\0' }}"),
     }
 }
 
@@ -14941,7 +14975,7 @@ fn source_summary_static_constant_value(
 ) -> Option<String> {
     initializer
         .and_then(|expr| source_summary_static_literal_value(java_ty, expr))
-        .or_else(|| static_constant_default_value(owner, field, java_ty, &BTreeMap::new()))
+        .or_else(|| static_constant_default_value(owner, field, None, java_ty, &BTreeMap::new()))
 }
 
 fn source_summary_static_literal_value(java_ty: &JavaType, initializer: &Expr) -> Option<String> {

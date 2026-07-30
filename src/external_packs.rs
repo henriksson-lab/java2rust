@@ -9,13 +9,14 @@ use crate::facts::{
     ExternalConstructorFact, ExternalConstructorRustResultFact, ExternalConversionAdapterFact,
     ExternalConversionAdapterKind, ExternalCrateApiMappingFact,
     ExternalCrateConstructorMappingFact, ExternalCrateTypeMappingFact, ExternalFfiHandoverFact,
-    ExternalFfiHandoverSlot, ExternalFieldFact, ExternalFieldKind, ExternalLibraryMode,
-    ExternalLibraryPackFact, ExternalRustResultFact, ExternalRustReturnTypeFact, FacadeSlot,
-    FactProvenance, FactSet, FieldKey, FieldNullabilityFact, FieldNullabilityProvenance,
-    HierarchyOverride, HierarchyStrategy, NullabilityState, ObjectSafetyFact,
-    ObjectSafetyViolation, OwnedRecoveryCapability, OwnedRecoveryCapabilityFact,
-    ReceiverMutabilityFact, TypeCapabilityOverride, UnsupportedExternalApiFact,
-    UnsupportedExternalConstructorFact, UnsupportedExternalFieldFact, external_type_name_matches,
+    ExternalFfiHandoverSlot, ExternalFieldFact, ExternalFieldKind, ExternalFieldValueFact,
+    ExternalLibraryMode, ExternalLibraryPackFact, ExternalRustResultFact,
+    ExternalRustReturnTypeFact, FacadeSlot, FactProvenance, FactSet, FieldKey,
+    FieldNullabilityFact, FieldNullabilityProvenance, HierarchyOverride, HierarchyStrategy,
+    NullabilityState, ObjectSafetyFact, ObjectSafetyViolation, OwnedRecoveryCapability,
+    OwnedRecoveryCapabilityFact, ReceiverMutabilityFact, TypeCapabilityOverride,
+    UnsupportedExternalApiFact, UnsupportedExternalConstructorFact, UnsupportedExternalFieldFact,
+    external_type_name_matches,
 };
 use crate::java_ir::{JavaType, PrimitiveType};
 use crate::parser::parse_type;
@@ -239,6 +240,7 @@ pub struct ExternalPackModeledField {
     pub type_name: &'static str,
     pub field_name: &'static str,
     pub field_type: Option<&'static str>,
+    pub field_value: Option<&'static str>,
     pub field_kind: ExternalFieldKind,
     pub coverage: ExternalApiCoverage,
 }
@@ -436,6 +438,18 @@ impl ExternalPackManifest {
                 field_kind: field.field_kind,
                 provenance: FactProvenance::ExternalLibraryPack,
             });
+            if let Some(value) = field.field_value {
+                facts
+                    .external_field_value_facts
+                    .push(ExternalFieldValueFact {
+                        field: FieldKey {
+                            type_name: field.type_name.to_string(),
+                            field_name: field.field_name.to_string(),
+                        },
+                        rust_value: value.to_string(),
+                        provenance: FactProvenance::ExternalLibraryPack,
+                    });
+            }
         }
         for api in self.unsupported_apis {
             facts
@@ -2355,11 +2369,24 @@ fn push_external_pack_field_fact(
         field_kind: parsed_metadata.field_kind,
         provenance: FactProvenance::ExternalLibraryPack,
     });
+    if let Some(value) = parsed_metadata.field_value {
+        facts
+            .external_field_value_facts
+            .push(ExternalFieldValueFact {
+                field: FieldKey {
+                    type_name: type_name.to_string(),
+                    field_name: field_name.to_string(),
+                },
+                rust_value: value,
+                provenance: FactProvenance::ExternalLibraryPack,
+            });
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ExternalPackFieldMetadata {
     field_type: Option<String>,
+    field_value: Option<String>,
     field_kind: ExternalFieldKind,
 }
 
@@ -2367,6 +2394,7 @@ impl Default for ExternalPackFieldMetadata {
     fn default() -> Self {
         Self {
             field_type: None,
+            field_value: None,
             field_kind: ExternalFieldKind::StaticFinal,
         }
     }
@@ -2389,6 +2417,16 @@ fn parse_external_pack_field_metadata(
                 return None;
             }
             parsed.field_type = Some(type_name.to_string());
+        } else if let Some(value) = token.strip_prefix("value=") {
+            if value.is_empty() {
+                push_external_pack_parse_error(
+                    diagnostics,
+                    line_index,
+                    "external-pack-field value metadata must name a Rust literal/expression",
+                );
+                return None;
+            }
+            parsed.field_value = Some(value.to_string());
         } else if let Some(kind) = token.strip_prefix("const-kind=") {
             let Some(field_kind) = parse_external_field_kind(kind) else {
                 push_external_pack_parse_error(
@@ -2403,7 +2441,7 @@ fn parse_external_pack_field_metadata(
             push_external_pack_parse_error(
                 diagnostics,
                 line_index,
-                "unrecognized external-pack-field metadata; expected type=Type or const-kind=static-final",
+                "unrecognized external-pack-field metadata; expected type=Type, value=RustExpr, or const-kind=static-final",
             );
             return None;
         }
@@ -20058,33 +20096,23 @@ const BCF_MODELED_CONSTRUCTORS: &[ExternalPackModeledConstructor] = &[
 ];
 
 const BCF_MODELED_FIELDS: &[ExternalPackModeledField] = &[
-    modeled_semantic_field_typed(
+    modeled_semantic_field_typed_value(
         "htsjdk.variant.bcf2.BCF2Codec",
         "SIZEOF_BCF_HEADER",
         "int",
-        ExternalFieldKind::StaticFinal,
+        "5",
     ),
-    modeled_semantic_field_typed(
-        "BCF2Codec",
-        "SIZEOF_BCF_HEADER",
-        "int",
-        ExternalFieldKind::StaticFinal,
-    ),
+    modeled_semantic_field_typed_value("BCF2Codec", "SIZEOF_BCF_HEADER", "int", "5"),
 ];
 
 const VCF_MODELED_FIELDS: &[ExternalPackModeledField] = &[
-    modeled_semantic_field_typed(
+    modeled_semantic_field_typed_value(
         "htsjdk.variant.utils.GeneralUtils",
         "DEBUG_MODE_ENABLED",
         "boolean",
-        ExternalFieldKind::StaticFinal,
+        "false",
     ),
-    modeled_semantic_field_typed(
-        "GeneralUtils",
-        "DEBUG_MODE_ENABLED",
-        "boolean",
-        ExternalFieldKind::StaticFinal,
-    ),
+    modeled_semantic_field_typed_value("GeneralUtils", "DEBUG_MODE_ENABLED", "boolean", "false"),
     modeled_semantic_field("htsjdk.variant.vcf.VCFConstants", "PASSES_FILTERS_v4"),
     modeled_semantic_field("VCFConstants", "PASSES_FILTERS_v4"),
     modeled_semantic_field("htsjdk.variant.vcf.VCFConstants", "MISSING_VALUE_v4"),
@@ -20499,30 +20527,20 @@ const VARIANTCONTEXT_MODELED_FIELDS: &[ExternalPackModeledField] = &[
         "GenotypeType",
         ExternalFieldKind::EnumVariant,
     ),
-    modeled_semantic_field_typed(
+    modeled_semantic_field_typed_value(
         "htsjdk.variant.variantcontext.CommonInfo",
         "NO_LOG10_PERROR",
         "double",
-        ExternalFieldKind::StaticFinal,
+        "1.0",
     ),
-    modeled_semantic_field_typed(
-        "CommonInfo",
-        "NO_LOG10_PERROR",
-        "double",
-        ExternalFieldKind::StaticFinal,
-    ),
-    modeled_semantic_field_typed(
+    modeled_semantic_field_typed_value("CommonInfo", "NO_LOG10_PERROR", "double", "1.0"),
+    modeled_semantic_field_typed_value(
         "htsjdk.variant.variantcontext.VariantContext",
         "NO_LOG10_PERROR",
         "double",
-        ExternalFieldKind::StaticFinal,
+        "1.0",
     ),
-    modeled_semantic_field_typed(
-        "VariantContext",
-        "NO_LOG10_PERROR",
-        "double",
-        ExternalFieldKind::StaticFinal,
-    ),
+    modeled_semantic_field_typed_value("VariantContext", "NO_LOG10_PERROR", "double", "1.0"),
     modeled_semantic_field_typed(
         "htsjdk.variant.variantcontext.Genotype",
         "UNPHASED_ALLELE_SEPARATOR",
@@ -20848,18 +20866,13 @@ const SAMTOOLS_UTIL_MODELED_FIELDS: &[ExternalPackModeledField] = &[
     modeled_semantic_field("FastqConstants", "SECOND_OF_PAIR"),
     modeled_semantic_field("htsjdk.samtools.util.SequenceUtil", "VALID_BASES_UPPER"),
     modeled_semantic_field("SequenceUtil", "VALID_BASES_UPPER"),
-    modeled_semantic_field_typed(
+    modeled_semantic_field_typed_value(
         "htsjdk.samtools.util.IOUtil",
         "GZIP_HEADER_READ_LENGTH",
         "int",
-        ExternalFieldKind::StaticFinal,
+        "8000",
     ),
-    modeled_semantic_field_typed(
-        "IOUtil",
-        "GZIP_HEADER_READ_LENGTH",
-        "int",
-        ExternalFieldKind::StaticFinal,
-    ),
+    modeled_semantic_field_typed_value("IOUtil", "GZIP_HEADER_READ_LENGTH", "int", "8000"),
     modeled_semantic_field_typed(
         "htsjdk.samtools.util.FileExtensions",
         "FASTA",
@@ -25613,11 +25626,13 @@ const HDF5_MODELED_FIELDS: &[ExternalPackModeledField] = &[
 ];
 
 const SAM_HEADER_MODELED_FIELDS: &[ExternalPackModeledField] = &[
-    modeled_semantic_field(
+    modeled_semantic_field_typed_value(
         "htsjdk.samtools.SAMSequenceRecord",
         "UNKNOWN_SEQUENCE_LENGTH",
+        "int",
+        "0",
     ),
-    modeled_semantic_field("SAMSequenceRecord", "UNKNOWN_SEQUENCE_LENGTH"),
+    modeled_semantic_field_typed_value("SAMSequenceRecord", "UNKNOWN_SEQUENCE_LENGTH", "int", "0"),
     modeled_semantic_field("htsjdk.samtools.SAMReadGroupRecord", "READ_GROUP_ID_TAG"),
     modeled_semantic_field("SAMReadGroupRecord", "READ_GROUP_ID_TAG"),
     modeled_semantic_field(
@@ -27469,6 +27484,7 @@ const fn modeled_semantic_field(
         type_name,
         field_name,
         field_type: None,
+        field_value: None,
         field_kind: ExternalFieldKind::StaticFinal,
         coverage: ExternalApiCoverage::Semantic,
     }
@@ -27482,6 +27498,7 @@ const fn modeled_semantic_instance_field(
         type_name,
         field_name,
         field_type: None,
+        field_value: None,
         field_kind: ExternalFieldKind::InstanceField,
         coverage: ExternalApiCoverage::Semantic,
     }
@@ -27497,7 +27514,24 @@ const fn modeled_semantic_field_typed(
         type_name,
         field_name,
         field_type: Some(field_type),
+        field_value: None,
         field_kind,
+        coverage: ExternalApiCoverage::Semantic,
+    }
+}
+
+const fn modeled_semantic_field_typed_value(
+    type_name: &'static str,
+    field_name: &'static str,
+    field_type: &'static str,
+    field_value: &'static str,
+) -> ExternalPackModeledField {
+    ExternalPackModeledField {
+        type_name,
+        field_name,
+        field_type: Some(field_type),
+        field_value: Some(field_value),
+        field_kind: ExternalFieldKind::StaticFinal,
         coverage: ExternalApiCoverage::Semantic,
     }
 }
@@ -27547,6 +27581,7 @@ const fn modeled_mapped_field(
         type_name,
         field_name,
         field_type: None,
+        field_value: None,
         field_kind: ExternalFieldKind::StaticFinal,
         coverage: ExternalApiCoverage::Mapped,
     }
@@ -29307,6 +29342,7 @@ struct BuiltinExternalPackLookupIndex {
     unsupported_constructors: HashMap<(String, usize), UnsupportedExternalConstructorFact>,
     fields_by_key: HashMap<CallableKey, ExternalFieldFact>,
     fields: HashMap<(String, String), ExternalFieldFact>,
+    field_values: HashMap<(String, String), ExternalFieldValueFact>,
     unsupported_fields: HashMap<(String, String), UnsupportedExternalFieldFact>,
     crate_api_mappings: HashMap<(String, String, Option<usize>), ExternalCrateApiMappingFact>,
     crate_constructor_mappings: HashMap<(String, usize), ExternalCrateConstructorMappingFact>,
@@ -29404,6 +29440,16 @@ fn builtin_external_pack_lookup_index() -> &'static BuiltinExternalPackLookupInd
                             .or_insert_with(|| fact.clone());
                         index
                             .fields
+                            .entry((type_alias.clone(), field_alias))
+                            .or_insert_with(|| fact.clone());
+                    }
+                }
+            }
+            for fact in facts.external_field_value_facts.iter().rev() {
+                for type_alias in external_field_type_lookup_aliases(&fact.field.type_name) {
+                    for field_alias in external_field_name_lookup_aliases(&fact.field.field_name) {
+                        index
+                            .field_values
                             .entry((type_alias.clone(), field_alias))
                             .or_insert_with(|| fact.clone());
                     }
@@ -30934,6 +30980,31 @@ pub fn external_field_for(type_name: &str, field_name: &str) -> Option<ExternalF
     .find_map(|(type_key, field_key)| {
         index
             .fields
+            .get(&(type_key.to_string(), field_key.to_string()))
+            .cloned()
+    })
+}
+
+pub fn external_field_value_for(
+    type_name: &str,
+    field_name: &str,
+) -> Option<ExternalFieldValueFact> {
+    let canonical_type_name = crate::stdlib::canonical_external_receiver_type_key(type_name);
+    let snake_type_name = crate::parser::to_snake_case(type_name);
+    let canonical_field_name = crate::parser::to_snake_case(field_name);
+    let index = builtin_external_pack_lookup_index();
+    [
+        (type_name, field_name),
+        (type_name, canonical_field_name.as_str()),
+        (canonical_type_name.as_str(), field_name),
+        (canonical_type_name.as_str(), canonical_field_name.as_str()),
+        (snake_type_name.as_str(), field_name),
+        (snake_type_name.as_str(), canonical_field_name.as_str()),
+    ]
+    .into_iter()
+    .find_map(|(type_key, field_key)| {
+        index
+            .field_values
             .get(&(type_key.to_string(), field_key.to_string()))
             .cloned()
     })
