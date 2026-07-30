@@ -7882,6 +7882,48 @@ class Box<T extends HeaderLine> {
 }
 
 #[test]
+fn optional_type_param_bound_call_display_uses_bound_return_shape() {
+    let source = r#"
+class HeaderLine {
+    String id;
+
+    String getID() {
+        return id;
+    }
+}
+
+class Box<T extends HeaderLine> {
+    String describe(T line) {
+        if (line == null) {
+            return "missing";
+        }
+        return String.format("%s", line.getID());
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("line.as_ref().unwrap().get_i_d()")
+            && !translation
+                .rust
+                .contains("line.as_ref().unwrap().get_i_d().as_deref()")
+            && !translation
+                .rust
+                .contains("line.as_ref().unwrap().get_i_d().unwrap()"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn nested_generic_source_alias_preserves_type_params() {
     let source = r#"
 class Outer {

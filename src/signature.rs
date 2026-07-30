@@ -8253,6 +8253,7 @@ impl<'a> SourceReturnNullabilityContext<'a> {
 
     fn type_param_bound_for_receiver(&self, receiver: &Expr) -> Option<&JavaType> {
         let receiver_ty = receiver_expr_java_type(receiver, &self.binding_types)?;
+        let receiver_ty = crate::types::optional_element_type(&receiver_ty).unwrap_or(receiver_ty);
         let type_param = match receiver_ty {
             JavaType::Unknown(type_param) => type_param,
             JavaType::Named { name, args } if args.is_empty() => name,

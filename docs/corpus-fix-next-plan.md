@@ -317,6 +317,17 @@ emits `impl<T: VCFCompoundHeaderLineBound + Clone>
 VCFStandardHeaderLinesStandards<T>` and dropped from 61 to 59 generated-Rust
 errors. The clone-specific `T` errors are gone from the top-error table.
 
+2026-07-30 optional type-parameter receiver display: bound-call return shape
+planning now strips optional receiver carriers before matching `T extends
+SourceClass`, so calls through nullable `Option<T>` parameters still use the
+generated bound method contract. Focused coverage:
+`optional_type_param_bound_call_display_uses_bound_return_shape`. Reduced VCF
+subset
+`.tmp/corpus-rerun-20260730-vcf-standard-bound-after-optional-bound-display`
+dropped from 59 to 55 generated-Rust errors; stale `.as_deref()` calls on
+bound trait `String` returns and the `String.unwrap()` display error are gone
+from the top-error table.
+
 Attempted VCF refresh:
 `.tmp/corpus-rerun-20260730-htsjdk-vcf-current-refresh` stalled during
 `batch_parse_global_emit_start` before per-file statuses or generated source

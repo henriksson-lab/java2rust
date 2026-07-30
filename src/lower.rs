@@ -19914,6 +19914,7 @@ fn type_param_bound_method_call_return_shape(
 ) -> Option<RustSlotShape> {
     let resolved = resolved?;
     let receiver_ty = crate::types::infer_expr_type(receiver, env.type_env());
+    let receiver_ty = crate::types::optional_element_type(&receiver_ty).unwrap_or(receiver_ty);
     let type_param = match receiver_ty {
         JavaType::Unknown(type_param) => type_param,
         JavaType::Named { name, args } if args.is_empty() => name,
