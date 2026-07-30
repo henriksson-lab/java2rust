@@ -435,7 +435,12 @@ pub enum NativeJavaStaticMethod {
     MathMax { primitive: PrimitiveType },
     MathMin { primitive: PrimitiveType },
     MathLog,
+    MathLog10,
     MathExp,
+    MathSqrt,
+    MathPow,
+    MathCeil,
+    MathFloor,
     MathRound { source: PrimitiveType },
     MathAbs { source: PrimitiveType },
     MathToIntExact,
@@ -554,7 +559,14 @@ pub fn native_java_call_lowered_type(target: &CallTargetPlan<'_>) -> Option<Lowe
             PrimitiveType::Float,
         ))),
         CallTargetPlan::NativeJavaStatic {
-            method: NativeJavaStaticMethod::MathLog | NativeJavaStaticMethod::MathExp,
+            method:
+                NativeJavaStaticMethod::MathLog
+                | NativeJavaStaticMethod::MathLog10
+                | NativeJavaStaticMethod::MathExp
+                | NativeJavaStaticMethod::MathSqrt
+                | NativeJavaStaticMethod::MathPow
+                | NativeJavaStaticMethod::MathCeil
+                | NativeJavaStaticMethod::MathFloor,
         } => Some(LoweredType::from_java(JavaType::Primitive(
             PrimitiveType::Double,
         ))),
@@ -3333,7 +3345,12 @@ fn plan_native_java_static_call<'a>(
             primitive: math_binary_overload_primitive(args, types),
         },
         ("Math", "log") => NativeJavaStaticMethod::MathLog,
+        ("Math", "log10") => NativeJavaStaticMethod::MathLog10,
         ("Math", "exp") => NativeJavaStaticMethod::MathExp,
+        ("Math", "sqrt") => NativeJavaStaticMethod::MathSqrt,
+        ("Math", "pow") => NativeJavaStaticMethod::MathPow,
+        ("Math", "ceil") => NativeJavaStaticMethod::MathCeil,
+        ("Math", "floor") => NativeJavaStaticMethod::MathFloor,
         ("Math", "round") => NativeJavaStaticMethod::MathRound {
             source: math_unary_overload_primitive(args, types, PrimitiveType::Double),
         },

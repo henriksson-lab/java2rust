@@ -32211,6 +32211,18 @@ fn stdlib_signature_facts_drive_math_max_owned_arg_shapes() {
         ),
         "Math.max ABI facts should shape arguments without bypassing native max rendering: {target:?}"
     );
+
+    let target =
+        plan_call_target_with_facts_and_arity(Some(&receiver), "pow", 2, None, &facts, &types);
+    assert!(
+        matches!(
+            target,
+            CallTargetPlan::NativeJavaStatic {
+                method: NativeJavaStaticMethod::MathPow,
+            }
+        ),
+        "Math.pow should use native math rendering instead of generated facade support: {target:?}"
+    );
 }
 
 #[test]

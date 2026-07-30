@@ -701,6 +701,26 @@ class JdkNumericAndFormatFacades {
         return Math.exp(value);
     }
 
+    static double root(double value) {
+        return Math.sqrt(value);
+    }
+
+    static double square(double value) {
+        return Math.pow(value, 2.0);
+    }
+
+    static double log10(double value) {
+        return Math.log10(value);
+    }
+
+    static double ceil(double value) {
+        return Math.ceil(value);
+    }
+
+    static double floor(double value) {
+        return Math.floor(value);
+    }
+
     static long rounded(double value) {
         return Math.round(value);
     }
@@ -781,6 +801,13 @@ class JdkNumericAndFormatFacades {
         translation.rust.contains("(value as f64).ln()")
             && translation.rust.contains("(2 as f64).ln()")
             && translation.rust.contains("(value as f64).exp()")
+            && translation.rust.contains("(value as f64).sqrt()")
+            && translation
+                .rust
+                .contains("(value as f64).powf(2f64 as f64)")
+            && translation.rust.contains("(value as f64).log10()")
+            && translation.rust.contains("(value as f64).ceil()")
+            && translation.rust.contains("(value as f64).floor()")
             && translation.rust.contains("java_math_round_f64(value)")
             && translation.rust.contains("java_math_round_f32(value)")
             && translation.rust.contains("(value).wrapping_abs()")
@@ -806,6 +833,11 @@ class JdkNumericAndFormatFacades {
             && translation.rust.contains("value.to_string()")
             && !translation.rust.contains("Math::log")
             && !translation.rust.contains("Math::exp")
+            && !translation.rust.contains("Math::sqrt")
+            && !translation.rust.contains("Math::pow")
+            && !translation.rust.contains("Math::log10")
+            && !translation.rust.contains("Math::ceil")
+            && !translation.rust.contains("Math::floor")
             && !translation.rust.contains("Math::round")
             && !translation.rust.contains("Math::to_int_exact")
             && !translation.rust.contains("math.floor_div")
@@ -834,6 +866,11 @@ mod generated_tests {
     fn numeric_facades_typecheck_and_run() {
         assert!((JdkNumericAndFormatFacades::log2(8.0) - 3.0).abs() < 1e-9);
         assert!((JdkNumericAndFormatFacades::exponent(1.0) - std::f64::consts::E).abs() < 1e-9);
+        assert_eq!(JdkNumericAndFormatFacades::root(9.0), 3.0);
+        assert_eq!(JdkNumericAndFormatFacades::square(4.0), 16.0);
+        assert_eq!(JdkNumericAndFormatFacades::log10(1000.0), 3.0);
+        assert_eq!(JdkNumericAndFormatFacades::ceil(1.25), 2.0);
+        assert_eq!(JdkNumericAndFormatFacades::floor(1.75), 1.0);
         assert_eq!(JdkNumericAndFormatFacades::rounded(-2.5), -2);
         assert_eq!(JdkNumericAndFormatFacades::rounded(-0.5), 0);
         assert_eq!(JdkNumericAndFormatFacades::rounded_edge(), 0);
@@ -879,6 +916,10 @@ class ApacheFastMathUse {
     static int rounded(float value) {
         return FastMath.round(value);
     }
+
+    static double shaped(double value) {
+        return FastMath.sqrt(value) + FastMath.pow(value, 2.0) + FastMath.ceil(value) + FastMath.floor(value);
+    }
 }
 "#,
     );
@@ -888,6 +929,12 @@ class ApacheFastMathUse {
             && translation.rust.contains("(2 as f64).ln()")
             && translation.rust.contains("java_math_max_f64(left, right)")
             && translation.rust.contains("java_math_round_f32(value)")
+            && translation.rust.contains("(value as f64).sqrt()")
+            && translation
+                .rust
+                .contains("(value as f64).powf(2f64 as f64)")
+            && translation.rust.contains("(value as f64).ceil()")
+            && translation.rust.contains("(value as f64).floor()")
             && !translation.rust.contains("FastMath::")
             && !translation.rust.contains("fast_math.")
             && !translation
@@ -6500,12 +6547,10 @@ class LowercaseJdkStaticOwners {
 
     assert!(
         translation.rust.contains("Double::is_infinite")
-            && translation.rust.contains("Math::sqrt")
-            && translation.rust.contains("Math::pow")
+            && translation.rust.contains("(y as f64).sqrt()")
+            && translation.rust.contains("(x as f64).powf(2f64 as f64)")
             && translation.rust.contains("StrictMath::i_e_e_eremainder")
             && translation.rust.contains("System::arraycopy")
-            && translation.rust.contains("pub struct Math")
-            && translation.rust.contains("pub fn pow")
             && translation.rust.contains("pub struct StrictMath")
             && translation.rust.contains("pub fn i_e_e_eremainder")
             && translation.rust.contains("pub struct Double")

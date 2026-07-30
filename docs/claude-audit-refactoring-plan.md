@@ -136,6 +136,11 @@ Landed in this batch:
 - `Math.floorDiv` and `Math.floorMod` now carry overload shape and lower to
   i32/i64 helpers as appropriate, with Java-compatible `MIN_VALUE / -1`
   behavior instead of Rust debug overflow.
+- Common floating `Math` methods `sqrt`, `pow`, `log10`, `ceil`, and `floor`
+  now lower through the native static-call planner at call sites, alongside the
+  existing `log` and `exp` paths. The broad JDK support generator can still
+  emit fallback `Math` surfaces when it observes those names, so facade-support
+  pruning remains part of audit `0016`.
 - Apache Commons `FastMath` ownership is modelled as a `javalibs` native static
   owner alias to the existing JDK `Math` planner, so package-specific knowledge
   stays out of `stdlib.rs` while call sites reuse the same math projections.
@@ -451,7 +456,7 @@ Completion checklist for any audit marked `fixed locally`:
 | `0029` static field mutation invalid Rust | fixed locally | Moved to `claude_audits/done`; static `++`/`--` now route through storage setters for current and qualified source statics |
 | `0030` Java statics are thread-local | open | Static storage model |
 | `0031` stubbed constant census | partial | JDK and selected HTSJDK domain constants are explicit; unknown primitive/named external constants now fail loudly and status/summary reports include `stubbed_constants`; corpus reruns still need to prove the remaining count |
-| `0032` java.lang.Math mistranslated | partial | Round edge semantics and i32/i64 floorDiv/floorMod improved; broader overload/constant audit remains |
+| `0032` java.lang.Math mistranslated | partial | Round edge semantics, i32/i64 floorDiv/floorMod, and common floating call-site projections (`sqrt`, `pow`, `log10`, `ceil`, `floor`) improved; broader overload/constant audit and facade-support pruning remain |
 
 ## Parallel Work Split
 

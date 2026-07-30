@@ -1916,6 +1916,14 @@ pub fn primitive_f64_method_projection(arg: RustExpr, method: &str) -> RustExpr 
     RustExpr::Raw(format!("({} as f64).{method}()", emit::emit_expr(&arg)))
 }
 
+pub fn math_pow_projection(base: RustExpr, exponent: RustExpr) -> RustExpr {
+    RustExpr::Raw(format!(
+        "({} as f64).powf({} as f64)",
+        emit::emit_expr(&base),
+        emit::emit_expr(&exponent)
+    ))
+}
+
 pub fn math_round_projection(arg: RustExpr, source: PrimitiveType) -> RustExpr {
     let rendered = emit::emit_expr(&arg);
     match source {

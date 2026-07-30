@@ -17,7 +17,7 @@ use crate::coercion::{
     java_iterator_from_collection_projection, java_list_hash_code_projection,
     java_map_hash_code_projection, java_set_hash_code_projection, java_value_hash_code_projection,
     len_i32_projection, math_abs_projection, math_floor_div_projection, math_floor_mod_projection,
-    math_max_projection, math_min_projection, math_round_projection,
+    math_max_projection, math_min_projection, math_pow_projection, math_round_projection,
     native_collection_default_constructor_projection, native_collection_empty_new_projection,
     native_collection_from_source_projection, native_collection_with_capacity_projection,
     objects_equals_projection, objects_is_null_projection, objects_non_null_projection,
@@ -448,11 +448,45 @@ fn apply_native_java_static_method(
             };
             primitive_f64_method_projection(arg, "ln")
         }
+        NativeJavaStaticMethod::MathLog10 => {
+            let Some(arg) = args.into_iter().next() else {
+                return compile_error_call("Math.log10 requires one argument");
+            };
+            primitive_f64_method_projection(arg, "log10")
+        }
         NativeJavaStaticMethod::MathExp => {
             let Some(arg) = args.into_iter().next() else {
                 return compile_error_call("Math.exp requires one argument");
             };
             primitive_f64_method_projection(arg, "exp")
+        }
+        NativeJavaStaticMethod::MathSqrt => {
+            let Some(arg) = args.into_iter().next() else {
+                return compile_error_call("Math.sqrt requires one argument");
+            };
+            primitive_f64_method_projection(arg, "sqrt")
+        }
+        NativeJavaStaticMethod::MathPow => {
+            let mut args = args.into_iter();
+            let Some(base) = args.next() else {
+                return compile_error_call("Math.pow requires two arguments");
+            };
+            let Some(exponent) = args.next() else {
+                return compile_error_call("Math.pow requires two arguments");
+            };
+            math_pow_projection(base, exponent)
+        }
+        NativeJavaStaticMethod::MathCeil => {
+            let Some(arg) = args.into_iter().next() else {
+                return compile_error_call("Math.ceil requires one argument");
+            };
+            primitive_f64_method_projection(arg, "ceil")
+        }
+        NativeJavaStaticMethod::MathFloor => {
+            let Some(arg) = args.into_iter().next() else {
+                return compile_error_call("Math.floor requires one argument");
+            };
+            primitive_f64_method_projection(arg, "floor")
         }
         NativeJavaStaticMethod::MathRound { source } => {
             let Some(arg) = args.into_iter().next() else {
