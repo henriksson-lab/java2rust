@@ -192,6 +192,9 @@ Landed in this batch:
   `conversion_plan::preconverted_optional_slot_construction_plan`. `lower.rs`
   no longer constructs `OptionalSlotConstructionPlan` directly for optional
   assignment rewraps or optional source-enum field values.
+- External builder `build()` support without explicit return facts now falls
+  back to an inferred named opaque product shim (`FooBuilder -> Foo`) instead
+  of broad `Box<dyn std::any::Any>`.
 
 1. Expand rust signature facts.
    - Prefer function signature facts over tailored call rules whenever the same

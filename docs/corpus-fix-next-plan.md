@@ -212,6 +212,14 @@ where available and loud `unimplemented!(...)` bodies for unmodelled shim
 methods. Keep true Java `Object`/raw-erasure behavior separate from these known
 external receiver shims.
 
+First builder fallback step: external builder `build()` support now prefers
+explicit return facts, then falls back to an inferred named opaque product type
+from the builder name (`FooBuilder -> Foo`) instead of
+`Box<dyn std::any::Any>`. Focused coverage:
+`external_builder_build_without_return_fact_uses_named_opaque_product`. The
+remaining opaque-shim work is ordinary non-builder external API support and
+loud unmodelled method bodies.
+
 2026-07-29 PrintStream overload cleanup: JDK `PrintStream.print/println`
 arity-1 calls now have explicit platform API facts, resolved external instance
 calls can preserve overload-safe arity names, and generated support emits a

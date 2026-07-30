@@ -26022,6 +26022,72 @@ class UseExternalBuilder {
 }
 
 #[test]
+fn external_builder_build_without_return_fact_uses_named_opaque_product() {
+    let source = r#"
+class UseExternalBuilderMissingReturnFact {
+    Object make(ExternalFactory.Product.Builder builder) {
+        return builder.build();
+    }
+}
+"#;
+    let mut facts = FactSet::default();
+    facts.hierarchy_overrides.push(HierarchyOverride {
+        type_name: "ExternalFactory.Product.Builder".to_string(),
+        strategy: HierarchyStrategy::ErasedObject,
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts
+        .type_capability_overrides
+        .push(TypeCapabilityOverride {
+            type_name: "ExternalFactory.Product.Builder".to_string(),
+            copy: None,
+            clone: Some(true),
+            string_like: None,
+            sequence_like: None,
+            implements: Vec::new(),
+            extends: None,
+            final_type: Some(true),
+            object_safe_trait: None,
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "build".to_string(),
+        receiver_type: Some("ExternalFactory.Product.Builder".to_string()),
+        arg_count: Some(0),
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: None,
+        return_nullability: NullabilityState::Unknown,
+        thrown: Vec::new(),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+
+    let translation = translate_source_with_facts(source, &facts);
+
+    assert!(
+        translation
+            .rust
+            .contains("pub struct ExternalFactoryProduct"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn build(&self) -> ExternalFactoryProduct"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("pub fn build(&self) -> Box<dyn std::any::Any>"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn erased_object_facade_includes_modeled_void_methods() {
     let source = r#"
 class ErasedVoidFacadeUse {

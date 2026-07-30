@@ -8301,6 +8301,27 @@ impl ExternalApiFacadeSupport {
         builder: &str,
         arg_count: usize,
     ) -> Option<String> {
+        if let Some(return_rust) =
+            self.external_builder_build_return_type_from_facts(facts, builder, arg_count)
+        {
+            return Some(return_rust);
+        }
+        let product = external_builder_product_type(builder)?;
+        let product_rust = rust_name_for_java_named_type(&product);
+        if !valid_rust_type_ident(&product_rust) || weak_external_facade_return_type(&product_rust)
+        {
+            return None;
+        }
+        self.add_opaque_type(product_rust.clone());
+        Some(product_rust)
+    }
+
+    fn external_builder_build_return_type_from_facts(
+        &mut self,
+        facts: &FactSet,
+        builder: &str,
+        arg_count: usize,
+    ) -> Option<String> {
         let effect = facts
             .external_api_effect_facts
             .iter()
