@@ -7708,7 +7708,7 @@ class Box<T extends Named> {
         translation.rust.contains("pub struct Box<T>")
             && translation.rust.contains("impl<T: Named> Box<T>")
             && translation.rust.contains("pub fn new(value: T) -> Box<T>")
-            && translation.rust.contains("return Box<T> {")
+            && translation.rust.contains("return Box::<T> {")
             && translation.rust.contains("return self.value.id();"),
         "{}",
         translation.rust

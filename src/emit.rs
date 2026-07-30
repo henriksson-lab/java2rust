@@ -262,7 +262,7 @@ fn emit_expr_prec(
                 .map(|(name, value)| format!("{}: {}", rust_ident(name), emit_expr(value)))
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("{} {{ {fields} }}", rust_ident(name))
+            format!("{} {{ {fields} }}", rust_struct_literal_path(name))
         }
         RustExpr::Raw(raw) => normalize_raw_expr_for_context(raw, parent_prec),
     };
@@ -289,6 +289,19 @@ fn rust_ident(name: &str) -> String {
     } else {
         name.to_string()
     }
+}
+
+fn rust_struct_literal_path(name: &str) -> String {
+    let name = rust_ident(name);
+    if name.contains("::<") {
+        return name;
+    }
+    let Some(generic_start) = name.find('<') else {
+        return name;
+    };
+    let mut rendered = name;
+    rendered.insert_str(generic_start, "::");
+    rendered
 }
 
 fn rust_param_ident(name: &str) -> String {
