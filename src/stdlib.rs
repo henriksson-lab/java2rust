@@ -7495,9 +7495,18 @@ impl ExternalApiFacadeSupport {
                         &java_method,
                         *arg_count,
                     ) {
-                        let method_body = external_facade_builder_generic_getter(
-                            &support_rust_method,
+                        let return_rust = external_facade_unmodelled_result_type(
+                            &owner,
+                            &java_method,
                             *arg_count,
+                        );
+                        self.add_opaque_type(return_rust.clone());
+                        let method_body = external_facade_builder_unmodelled_getter(
+                            &owner,
+                            &support_rust_method,
+                            &java_method,
+                            *arg_count,
+                            &return_rust,
                         );
                         if self.has_method_signature(&owner, &support_rust_method, *arg_count) {
                             self.replace_method_signature(
@@ -8330,12 +8339,22 @@ impl ExternalApiFacadeSupport {
                             external_facade_builder_fluent_method(method, *arg_count),
                         );
                     } else if method.starts_with("get_") && method.ends_with("_builder") {
-                        if self.has_method_signature(&builder, method, *arg_count) {
+                        if self.has_method_signature_on_owner_or_alias(&builder, method, *arg_count)
+                        {
                             continue;
                         }
+                        let return_rust =
+                            external_facade_unmodelled_result_type(&builder, method, *arg_count);
+                        self.add_opaque_type(return_rust.clone());
                         self.add_method(
                             builder.clone(),
-                            external_facade_builder_generic_getter(method, *arg_count),
+                            external_facade_builder_unmodelled_getter(
+                                &builder,
+                                method,
+                                method,
+                                *arg_count,
+                                &return_rust,
+                            ),
                         );
                     }
                 }
@@ -8602,6 +8621,25 @@ impl ExternalApiFacadeSupport {
             methods
                 .iter()
                 .any(|body| facade_method_matches_signature(body, method, arg_count))
+        })
+    }
+
+    fn has_method_signature_on_owner_or_alias(
+        &self,
+        owner: &str,
+        method: &str,
+        arg_count: usize,
+    ) -> bool {
+        if self.has_method_signature(owner, method, arg_count) {
+            return true;
+        }
+        if let Some(target) = self.aliases.get(owner)
+            && self.has_method_signature(target, method, arg_count)
+        {
+            return true;
+        }
+        self.aliases.iter().any(|(alias, target)| {
+            target == owner && self.has_method_signature(alias, method, arg_count)
         })
     }
 
@@ -12176,11 +12214,17 @@ fn external_facade_builder_fluent_method(name: &str, arg_count: usize) -> String
     )
 }
 
-fn external_facade_builder_generic_getter(name: &str, arg_count: usize) -> String {
-    let rust_name = rust_raw_ident_if_needed(name);
+fn external_facade_builder_unmodelled_getter(
+    owner: &str,
+    rust_name: &str,
+    java_name: &str,
+    arg_count: usize,
+    return_type: &str,
+) -> String {
+    let rust_name = rust_raw_ident_if_needed(rust_name);
     format!(
-        "    pub fn {rust_name}{} -> T {{ Default::default() }}",
-        external_facade_generic_self_args("T: Default", arg_count)
+        "    pub fn {rust_name}{} -> {return_type} {{ unimplemented!(\"{owner}.{java_name} is not modelled\") }}",
+        external_facade_self_args(arg_count)
     )
 }
 
@@ -12873,20 +12917,6 @@ fn external_facade_argument_effect<'a>(
                 index,
             )
         })
-}
-
-fn external_facade_generic_self_args(first_generic: &str, arg_count: usize) -> String {
-    let mut generics = vec![first_generic.to_string()];
-    generics.extend((0..arg_count).map(|idx| format!("T{idx}")));
-    if arg_count == 0 {
-        format!("<{}>(&self)", generics.join(", "))
-    } else {
-        let args = (0..arg_count)
-            .map(|idx| format!("_arg{idx}: T{idx}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!("<{}>(&self, {args})", generics.join(", "))
-    }
 }
 
 fn is_external_facade_builder_fluent_method(method: &str) -> bool {

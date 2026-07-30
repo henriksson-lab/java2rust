@@ -201,6 +201,8 @@ Landed in this batch:
   Void-like side-effect/mutator facts still emit `()` surfaces.
 - Imported static getter facts with missing return types now use the same named
   unmodelled result shim path instead of generic `R: Default` fallback methods.
+- Builder `get_*_builder` fallback support now uses named opaque result shims
+  with loud unmodelled bodies instead of generic `T: Default` fallback methods.
 
 1. Expand rust signature facts.
    - Prefer function signature facts over tailored call rules whenever the same

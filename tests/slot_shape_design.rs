@@ -26088,6 +26088,61 @@ class UseExternalBuilderMissingReturnFact {
 }
 
 #[test]
+fn external_builder_getter_without_return_fact_uses_named_unmodelled_result_shim() {
+    let source = r#"
+class UseExternalBuilderGetterMissingReturnFact {
+    Object fieldBuilder(ExternalFactory.Product.Builder builder) {
+        return builder.getFieldsBuilder(0);
+    }
+}
+"#;
+    let mut facts = FactSet::default();
+    facts.hierarchy_overrides.push(HierarchyOverride {
+        type_name: "ExternalFactory.Product.Builder".to_string(),
+        strategy: HierarchyStrategy::ErasedObject,
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts
+        .type_capability_overrides
+        .push(TypeCapabilityOverride {
+            type_name: "ExternalFactory.Product.Builder".to_string(),
+            copy: None,
+            clone: Some(true),
+            string_like: None,
+            sequence_like: None,
+            implements: Vec::new(),
+            extends: None,
+            final_type: Some(true),
+            object_safe_trait: None,
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+
+    let translation = translate_source_with_facts(source, &facts);
+
+    assert!(
+        translation
+            .rust
+            .contains("pub struct ExternalFactoryProductBuilderGetFieldsBuilder1Result"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains(
+            "pub fn get_fields_builder<T0>(&self, _arg0: T0) -> ExternalFactoryProductBuilderGetFieldsBuilder1Result { unimplemented!(\"ExternalFactoryProductBuilder.get_fields_builder is not modelled\") }"
+        ),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("pub fn get_fields_builder<T: Default"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn external_getter_without_return_fact_uses_named_unmodelled_result_shim() {
     let source = r#"
 class UseExternalGetterMissingReturnFact {

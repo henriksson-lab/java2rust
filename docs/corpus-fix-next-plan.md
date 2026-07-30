@@ -217,8 +217,8 @@ explicit return facts, then falls back to an inferred named opaque product type
 from the builder name (`FooBuilder -> Foo`) instead of
 `Box<dyn std::any::Any>`. Focused coverage:
 `external_builder_build_without_return_fact_uses_named_opaque_product`. The
-remaining opaque-shim work is ordinary non-builder external API support and
-loud unmodelled method bodies.
+remaining opaque-shim work is to apply the same loud named-result policy beyond
+the first builder/product fallback.
 
 Ordinary missing-return external API step: getter-like external facts with no
 return type now emit a named opaque result shim and a loud
@@ -229,14 +229,21 @@ support. Focused coverage:
 `external_new_builder_without_return_fact_uses_named_builder_shim`, and
 `erased_object_facade_includes_modeled_void_methods`. Remaining work is to
 apply the same explicit unmodelled/fact-backed split to inherited support
-surfaces and generic getter fallbacks.
+surfaces and builder generic getter fallbacks.
 
 Imported-static missing-return step: imported static getter facts with no
 return type now also emit named opaque result shims and loud unmodelled bodies,
 instead of falling through to generic `R: Default` methods. Focused coverage:
 `imported_static_getter_without_return_fact_uses_named_unmodelled_result_shim`.
-Remaining work in this cluster is inherited support surfaces and generic getter
-fallbacks.
+Remaining work in this cluster is inherited support surfaces and builder
+generic getter fallbacks.
+
+Builder getter missing-return step: builder `get_*_builder` fallback support now
+emits named opaque result shims with loud unmodelled bodies instead of generic
+`T: Default` methods. Focused coverage:
+`external_builder_getter_without_return_fact_uses_named_unmodelled_result_shim`.
+Remaining work in this cluster is inherited support surfaces and any non-builder
+generic fallback surfaces found by the next corpus rerun.
 
 2026-07-29 PrintStream overload cleanup: JDK `PrintStream.print/println`
 arity-1 calls now have explicit platform API facts, resolved external instance
