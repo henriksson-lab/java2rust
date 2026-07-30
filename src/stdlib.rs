@@ -14871,7 +14871,9 @@ fn static_constant_default_value(
         JavaType::Named { name, .. } | JavaType::Unknown(name) => {
             let rust_type =
                 rust_name_for_java_named_type(&canonical_external_receiver_type_key(name));
-            valid_rust_type_ident(&rust_type).then_some(rust_type)
+            valid_rust_type_ident(&rust_type).then(|| {
+                unknown_static_named_constant_compile_error_value(owner, field, &rust_type)
+            })
         }
         _ => None,
     }
@@ -14893,6 +14895,15 @@ fn unknown_static_constant_compile_error_value(
         PrimitiveType::Double => format!("{{ compile_error!({message:?}); 0.0f64 }}"),
         PrimitiveType::Char => format!("{{ compile_error!({message:?}); '\\0' }}"),
     }
+}
+
+fn unknown_static_named_constant_compile_error_value(
+    owner: &str,
+    field: &str,
+    rust_type: &str,
+) -> String {
+    let message = format!("external static constant {owner}.{field} has no modeled value");
+    format!("{{ compile_error!({message:?}); {rust_type} }}")
 }
 
 fn known_jdk_static_constant_value(owner: &str, field: &str) -> Option<&'static str> {

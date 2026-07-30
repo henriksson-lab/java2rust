@@ -115,6 +115,9 @@ Landed in this batch:
   `SAMSequenceRecord.UNKNOWN_SEQUENCE_LENGTH`.
 - Unknown primitive external static constants now emit a `compile_error!`
   initializer instead of silently using `0`, `0.0`, `false`, or `'\0'`.
+- Unknown named/reference external static constants now use the same loud
+  `compile_error!` initializer policy unless they are explicit enum variants or
+  carry an explicit field value fact.
 - `Math.floorDiv(int,int)` and `Math.floorMod(int,int)` now lower through
   explicit Java floor-semantics helpers instead of falling through to an
   undefined lowercase `math` receiver or Rust euclidean remainder semantics.
@@ -425,7 +428,7 @@ Completion checklist for any audit marked `fixed locally`:
 | `0028` reference equality | open | Object/reference representation |
 | `0029` static field mutation invalid Rust | open | Static storage model |
 | `0030` Java statics are thread-local | open | Static storage model |
-| `0031` stubbed constant census | partial | JDK and selected HTSJDK domain constants are explicit; unknown primitive external constants now fail loudly and `summary.tsv` reports `stubbed_constants`; corpus reruns still need to prove the remaining count |
+| `0031` stubbed constant census | partial | JDK and selected HTSJDK domain constants are explicit; unknown primitive/named external constants now fail loudly and status/summary reports include `stubbed_constants`; corpus reruns still need to prove the remaining count |
 | `0032` java.lang.Math mistranslated | partial | Round edge semantics and i32/i64 floorDiv/floorMod improved; broader overload/constant audit remains |
 
 ## Parallel Work Split

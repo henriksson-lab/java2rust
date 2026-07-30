@@ -17,26 +17,42 @@ def read_tsv(path: Path) -> list[list[str]]:
     return rows
 
 
-def normalize_manifest(path: Path) -> list[tuple[str, str, str, str, str]]:
+def normalize_manifest(path: Path) -> list[tuple[str, str, str, str, str, str, str]]:
     rows = read_tsv(path)
     if not rows:
         return []
     header = rows[0]
-    expected = ["index", "source", "rust_path", "rust_hash", "diagnostics", "invalid_patterns"]
+    expected = [
+        "index",
+        "source",
+        "rust_path",
+        "rust_hash",
+        "diagnostics",
+        "invalid_patterns",
+        "stubbed_constants",
+    ]
     if header != expected:
         raise ValueError(f"{path}: unexpected batch-manifest header: {header}")
     normalized = []
     for row in rows[1:]:
-        if len(row) != 6:
+        if len(row) != 7:
             raise ValueError(f"{path}: malformed batch-manifest row: {row}")
-        index, source, rust_path, rust_hash, diagnostics, invalid_patterns = row
+        index, source, rust_path, rust_hash, diagnostics, invalid_patterns, stubbed_constants = row
         normalized.append(
-            (index, source, Path(rust_path).name, rust_hash, diagnostics, invalid_patterns)
+            (
+                index,
+                source,
+                Path(rust_path).name,
+                rust_hash,
+                diagnostics,
+                invalid_patterns,
+                stubbed_constants,
+            )
         )
     return normalized
 
 
-def normalize_status(path: Path) -> list[tuple[str, str, str, str, str, str]]:
+def normalize_status(path: Path) -> list[tuple[str, str, str, str, str, str, str]]:
     rows = read_tsv(path)
     if not rows:
         return []
@@ -48,12 +64,13 @@ def normalize_status(path: Path) -> list[tuple[str, str, str, str, str, str]]:
         "diagnostics",
         "invalid_patterns",
         "unsupported_members",
+        "stubbed_constants",
     ]
     if header != expected:
         raise ValueError(f"{path}: unexpected status header: {header}")
     normalized = []
     for row in rows[1:]:
-        if len(row) != 6:
+        if len(row) != 7:
             raise ValueError(f"{path}: malformed status row: {row}")
         (
             source,
@@ -62,6 +79,7 @@ def normalize_status(path: Path) -> list[tuple[str, str, str, str, str, str]]:
             diagnostics,
             invalid_patterns,
             unsupported_members,
+            stubbed_constants,
         ) = row
         normalized.append(
             (
@@ -71,6 +89,7 @@ def normalize_status(path: Path) -> list[tuple[str, str, str, str, str, str]]:
                 diagnostics,
                 invalid_patterns,
                 unsupported_members,
+                stubbed_constants,
             )
         )
     return normalized

@@ -275,14 +275,14 @@ fn translate_batch_cli_writes_phase_and_worker_events() {
     assert_eq!(status.lines().count(), 3, "{status}");
     assert!(
         status.starts_with(
-            "source\trust_path\ttranslate_status\tdiagnostics\tinvalid_patterns\tunsupported_members\n"
+            "source\trust_path\ttranslate_status\tdiagnostics\tinvalid_patterns\tunsupported_members\tstubbed_constants\n"
         ),
         "{status}"
     );
     assert!(
         status.lines().skip(1).all(|line| {
             let fields = line.split('\t').collect::<Vec<_>>();
-            fields.len() == 6
+            fields.len() == 7
         }),
         "{status}"
     );
@@ -293,7 +293,7 @@ fn translate_batch_cli_writes_phase_and_worker_events() {
     assert!(
         manifest.lines().skip(1).all(|line| {
             let fields = line.split('\t').collect::<Vec<_>>();
-            fields.len() == 6 && fields[3].len() == 16
+            fields.len() == 7 && fields[3].len() == 16
         }),
         "{manifest}"
     );
@@ -446,8 +446,72 @@ public class StaticInit {
         .nth(1)
         .unwrap_or_else(|| panic!("missing status row\n{status}"));
     let fields = row.split('\t').collect::<Vec<_>>();
-    assert_eq!(fields.len(), 6, "{status}");
+    assert_eq!(fields.len(), 7, "{status}");
     assert!(fields[5].parse::<usize>().unwrap_or(0) > 0, "{status}");
+}
+
+#[test]
+fn translate_batch_cli_counts_unmodelled_external_constants_in_status() {
+    let dir = unique_temp_dir("translate_batch_stubbed_constant_status");
+    let source_dir = dir.join("java");
+    let out_dir = dir.join("out");
+    let generated_dir = out_dir.join("generated");
+    fs::create_dir_all(&source_dir).unwrap();
+    fs::write(
+        source_dir.join("UseExternalLimit.java"),
+        r#"
+public class UseExternalLimit {
+    int limit() {
+        return ExternalLimits.MAX_COUNT;
+    }
+}
+"#,
+    )
+    .unwrap();
+    let manifest = dir.join("pack.txt");
+    fs::write(
+        &manifest,
+        "external-pack external external semantic\n\
+         external-pack-field external ExternalLimits MAX_COUNT semantic type=int\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_new-java2rust"))
+        .arg("translate-batch")
+        .arg("--primary")
+        .arg(&source_dir)
+        .arg("--out-dir")
+        .arg(&out_dir)
+        .arg("--generated-dir")
+        .arg(&generated_dir)
+        .arg("--external-pack-manifest")
+        .arg(&manifest)
+        .output()
+        .expect("run translate-batch");
+    assert!(
+        output.status.success(),
+        "translate-batch failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let status = fs::read_to_string(out_dir.join("status.tsv")).unwrap();
+    let row = status
+        .lines()
+        .nth(1)
+        .unwrap_or_else(|| panic!("missing status row\n{status}"));
+    let fields = row.split('\t').collect::<Vec<_>>();
+    assert_eq!(fields.len(), 7, "{status}");
+    assert_eq!(fields[6], "1", "{status}");
+
+    let manifest = fs::read_to_string(out_dir.join("batch-manifest.tsv")).unwrap();
+    let row = manifest
+        .lines()
+        .nth(1)
+        .unwrap_or_else(|| panic!("missing manifest row\n{manifest}"));
+    let fields = row.split('\t').collect::<Vec<_>>();
+    assert_eq!(fields.len(), 7, "{manifest}");
+    assert_eq!(fields[6], "1", "{manifest}");
 }
 
 fn write_comparable_batch_output(root: &Path, hash: &str) {
@@ -455,7 +519,7 @@ fn write_comparable_batch_output(root: &Path, hash: &str) {
     fs::write(
         root.join("batch-manifest.tsv"),
         format!(
-            "index\tsource\trust_path\trust_hash\tdiagnostics\tinvalid_patterns\n1\tA.java\t{}/generated/00001_A.rs\t{}\t0\t0\n",
+            "index\tsource\trust_path\trust_hash\tdiagnostics\tinvalid_patterns\tstubbed_constants\n1\tA.java\t{}/generated/00001_A.rs\t{}\t0\t0\t0\n",
             root.display(),
             hash
         ),
@@ -464,7 +528,7 @@ fn write_comparable_batch_output(root: &Path, hash: &str) {
     fs::write(
         root.join("status.tsv"),
         format!(
-            "source\trust_path\ttranslate_status\tdiagnostics\tinvalid_patterns\tunsupported_members\nA.java\t{}/generated/00001_A.rs\tok\t0\t0\t0\n",
+            "source\trust_path\ttranslate_status\tdiagnostics\tinvalid_patterns\tunsupported_members\tstubbed_constants\nA.java\t{}/generated/00001_A.rs\tok\t0\t0\t0\t0\n",
             root.display()
         ),
     )

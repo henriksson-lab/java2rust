@@ -67,6 +67,10 @@ focused-package `summary.tsv` emits that metric. This counts the new loud
 `compile_error!("external static constant ... has no modeled value")` marker,
 not silent primitive zero defaults. Next corpus reruns should inspect
 `stubbed_constants` alongside `noop_facade_methods` and `unmodelled_call_sites`.
+The same counter is now present per file in translator `status.tsv` and
+`batch-manifest.tsv`, so batch comparisons can catch per-file drift. Unknown
+named/reference external static constants now use the same loud initializer
+policy unless an explicit value fact or enum-variant fact owns the value.
 
 2026-07-30 map-get ABI cleanup checkpoint: `HashMap.get` return adaptation no
 longer reconstructs map value type and optional-borrow target shape inside

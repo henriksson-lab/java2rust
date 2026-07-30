@@ -25235,7 +25235,7 @@ class UseExternalNamedConstant {
     assert!(
         translation
             .rust
-            .contains("pub const EMPTY: ExternalToken = ExternalToken;"),
+            .contains("pub const EMPTY: ExternalToken = { compile_error!(\"external static constant ExternalToken.EMPTY has no modeled value\"); ExternalToken };"),
         "{}",
         translation.rust
     );

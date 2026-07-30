@@ -620,10 +620,11 @@ fn run_translate_batch(
         &report.timings,
     )?;
     let mut status = String::from(
-        "source\trust_path\ttranslate_status\tdiagnostics\tinvalid_patterns\tunsupported_members\n",
+        "source\trust_path\ttranslate_status\tdiagnostics\tinvalid_patterns\tunsupported_members\tstubbed_constants\n",
     );
-    let mut manifest =
-        String::from("index\tsource\trust_path\trust_hash\tdiagnostics\tinvalid_patterns\n");
+    let mut manifest = String::from(
+        "index\tsource\trust_path\trust_hash\tdiagnostics\tinvalid_patterns\tstubbed_constants\n",
+    );
     let write_start = Instant::now();
     for (index, translation) in report.translations.iter().enumerate() {
         let rust_path = generated_dir.join(batch_stem(index + 1, &translation.path) + ".rs");
@@ -636,27 +637,30 @@ fn run_translate_batch(
             );
         }
         let invalid_patterns = count_invalid_patterns(&translation.rust);
+        let stubbed_constants = count_stubbed_constants(&translation.rust);
         let unsupported_members = translation
             .diagnostics
             .iter()
             .filter(|diagnostic| diagnostic.code == "unsupported_member")
             .count();
         status.push_str(&format!(
-            "{}\t{}\tok\t{}\t{}\t{}\n",
+            "{}\t{}\tok\t{}\t{}\t{}\t{}\n",
             translation.path,
             rust_path.display(),
             translation.diagnostics.len(),
             invalid_patterns,
-            unsupported_members
+            unsupported_members,
+            stubbed_constants
         ));
         manifest.push_str(&format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\n",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             index + 1,
             translation.path,
             rust_path.display(),
             stable_hash_hex(&translation.rust),
             translation.diagnostics.len(),
-            invalid_patterns
+            invalid_patterns,
+            stubbed_constants
         ));
     }
     if worker_events_path.is_none() {
@@ -991,6 +995,16 @@ fn count_invalid_patterns(rust: &str) -> usize {
                 || (line.contains("= None;")
                     && !line.contains("let mut ")
                     && !line.contains(": Option<"))
+        })
+        .count()
+}
+
+fn count_stubbed_constants(rust: &str) -> usize {
+    rust.lines()
+        .filter(|line| {
+            line.contains("pub const ")
+                && line.contains("compile_error!(\"external static constant ")
+                && line.contains(" has no modeled value\"")
         })
         .count()
 }
