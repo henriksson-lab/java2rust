@@ -90,6 +90,11 @@ Landed in this batch:
 - `Arrays.sort(...)` now plans both whole-array and subrange statement
   overloads as native mutating Rust operations, with signature mutation
   detection marking the target array for both arities.
+- Native `Arrays.copyOf`, `Arrays.copyOfRange`, range `Arrays.fill`, and range
+  `Arrays.sort` projections now reject Java-invalid negative, reversed, or
+  out-of-bounds ranges with explicit runtime panics instead of clamping or
+  saturating them into valid Rust ranges. Valid padding and empty no-op range
+  cases remain covered by generated idiom tests.
 - Focused corpus summaries now emit all planned measurement keys:
   `parse_failures`, unsupported statement/member/expression counts,
   `unmodelled_types`, `unmodelled_call_sites`, `noop_facade_methods`, and

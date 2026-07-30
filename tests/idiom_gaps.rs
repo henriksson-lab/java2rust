@@ -2479,6 +2479,26 @@ class JavaArraysSortUse {
         Arrays.sort(values, 1, 3);
         return values;
     }
+
+    static int[] badRangeOrder(int[] values) {
+        Arrays.sort(values, 4, 1);
+        return values;
+    }
+
+    static int[] noopAtEnd(int[] values) {
+        Arrays.sort(values, 3, 3);
+        return values;
+    }
+
+    static int[] badRangeStart(int[] values) {
+        Arrays.sort(values, -1, 2);
+        return values;
+    }
+
+    static int[] badRangeEnd(int[] values) {
+        Arrays.sort(values, 1, 5);
+        return values;
+    }
 }
 "#,
     );
@@ -2512,6 +2532,11 @@ mod generated_tests {
             JavaArraysSortUse::names(vec!["z".to_string(), "b".to_string(), "a".to_string(), "x".to_string()]),
             vec!["z".to_string(), "a".to_string(), "b".to_string(), "x".to_string()]
         );
+
+        assert_eq!(JavaArraysSortUse::noop_at_end(vec![1, 2, 3]), vec![1, 2, 3]);
+        assert!(std::panic::catch_unwind(|| JavaArraysSortUse::bad_range_order(vec![1, 2, 3])).is_err());
+        assert!(std::panic::catch_unwind(|| JavaArraysSortUse::bad_range_start(vec![1, 2, 3])).is_err());
+        assert!(std::panic::catch_unwind(|| JavaArraysSortUse::bad_range_end(vec![1, 2, 3])).is_err());
     }
 }
 "#,
@@ -20001,6 +20026,26 @@ class JavaArraysCopyUse {
     String[] names(String[] values) {
         return Arrays.copyOfRange(values, 1, 4);
     }
+
+    byte[] padFromEnd(byte[] values) {
+        return Arrays.copyOfRange(values, 3, 5);
+    }
+
+    byte[] badLength(byte[] values) {
+        return Arrays.copyOf(values, -1);
+    }
+
+    byte[] badRangeOrder(byte[] values) {
+        return Arrays.copyOfRange(values, 2, 1);
+    }
+
+    byte[] badRangeStart(byte[] values) {
+        return Arrays.copyOfRange(values, -1, 1);
+    }
+
+    byte[] badRangePastEnd(byte[] values) {
+        return Arrays.copyOfRange(values, 4, 5);
+    }
 }
 "#,
     );
@@ -20032,6 +20077,11 @@ mod generated_tests {
             fixture.names(&["a".to_string(), "b".to_string()]),
             vec!["b".to_string(), String::new(), String::new()]
         );
+        assert_eq!(fixture.pad_from_end(&[1, 2, 3]), vec![0, 0]);
+        assert!(std::panic::catch_unwind(|| fixture.bad_length(&[1, 2, 3])).is_err());
+        assert!(std::panic::catch_unwind(|| fixture.bad_range_order(&[1, 2, 3])).is_err());
+        assert!(std::panic::catch_unwind(|| fixture.bad_range_start(&[1, 2, 3])).is_err());
+        assert!(std::panic::catch_unwind(|| fixture.bad_range_past_end(&[1, 2, 3])).is_err());
     }
 }
 "#,
@@ -20116,6 +20166,26 @@ class JavaArraysFillUse {
         Arrays.fill(values, 0, 2, "x");
         return values;
     }
+
+    static int[] badRangeOrder(int[] values) {
+        Arrays.fill(values, 3, 1, 9);
+        return values;
+    }
+
+    static int[] noopAtEnd(int[] values) {
+        Arrays.fill(values, 3, 3, 9);
+        return values;
+    }
+
+    static int[] badRangeStart(int[] values) {
+        Arrays.fill(values, -1, 2, 9);
+        return values;
+    }
+
+    static int[] badRangeEnd(int[] values) {
+        Arrays.fill(values, 1, 5, 9);
+        return values;
+    }
 }
 "#,
     );
@@ -20154,6 +20224,11 @@ mod generated_tests {
 
         let names = JavaArraysFillUse::names(vec!["a".to_string(), "b".to_string(), "c".to_string()]);
         assert_eq!(names, vec!["x".to_string(), "x".to_string(), "c".to_string()]);
+
+        assert_eq!(JavaArraysFillUse::noop_at_end(vec![1, 2, 3]), vec![1, 2, 3]);
+        assert!(std::panic::catch_unwind(|| JavaArraysFillUse::bad_range_order(vec![1, 2, 3])).is_err());
+        assert!(std::panic::catch_unwind(|| JavaArraysFillUse::bad_range_start(vec![1, 2, 3])).is_err());
+        assert!(std::panic::catch_unwind(|| JavaArraysFillUse::bad_range_end(vec![1, 2, 3])).is_err());
     }
 }
 "#,

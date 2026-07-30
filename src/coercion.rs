@@ -2226,7 +2226,7 @@ pub fn arrays_equals_projection(left: RustExpr, right: RustExpr) -> RustExpr {
 
 pub fn arrays_copy_of_projection(source: RustExpr, len: RustExpr) -> RustExpr {
     RustExpr::Raw(format!(
-        "{{ let __java_arrays_source = &{}; let __java_arrays_len = ({}).max(0) as usize; let mut __java_arrays_out = __java_arrays_source.iter().cloned().take(__java_arrays_len).collect::<Vec<_>>(); __java_arrays_out.resize(__java_arrays_len, Default::default()); __java_arrays_out }}",
+        "{{ let __java_arrays_source = &{}; let __java_arrays_len = {}; if __java_arrays_len < 0 {{ panic!(\"Java NegativeArraySizeException\"); }} let __java_arrays_len = __java_arrays_len as usize; let mut __java_arrays_out = __java_arrays_source.iter().cloned().take(__java_arrays_len).collect::<Vec<_>>(); __java_arrays_out.resize(__java_arrays_len, Default::default()); __java_arrays_out }}",
         emit::emit_expr(&source),
         emit::emit_expr(&len),
     ))
@@ -2234,7 +2234,7 @@ pub fn arrays_copy_of_projection(source: RustExpr, len: RustExpr) -> RustExpr {
 
 pub fn arrays_copy_of_range_projection(source: RustExpr, from: RustExpr, to: RustExpr) -> RustExpr {
     RustExpr::Raw(format!(
-        "{{ let __java_arrays_source = &{}; let __java_arrays_from = ({}).max(0) as usize; let __java_arrays_to = ({}).max(0) as usize; let __java_arrays_len = __java_arrays_to.saturating_sub(__java_arrays_from); let mut __java_arrays_out = if __java_arrays_from < __java_arrays_source.len() {{ __java_arrays_source[__java_arrays_from..__java_arrays_source.len().min(__java_arrays_to)].to_vec() }} else {{ Vec::new() }}; __java_arrays_out.resize(__java_arrays_len, Default::default()); __java_arrays_out }}",
+        "{{ let __java_arrays_source = &{}; let __java_arrays_from = {}; let __java_arrays_to = {}; if __java_arrays_from > __java_arrays_to {{ panic!(\"Java IllegalArgumentException: fromIndex > toIndex\"); }} if __java_arrays_from < 0 || __java_arrays_from as usize > __java_arrays_source.len() {{ panic!(\"Java ArrayIndexOutOfBoundsException\"); }} let __java_arrays_from = __java_arrays_from as usize; let __java_arrays_to = __java_arrays_to as usize; let __java_arrays_len = __java_arrays_to - __java_arrays_from; let mut __java_arrays_out = __java_arrays_source[__java_arrays_from..__java_arrays_source.len().min(__java_arrays_to)].to_vec(); __java_arrays_out.resize(__java_arrays_len, Default::default()); __java_arrays_out }}",
         emit::emit_expr(&source),
         emit::emit_expr(&from),
         emit::emit_expr(&to),
@@ -2380,7 +2380,7 @@ pub fn collection_sort_range_projection(
     to: RustExpr,
 ) -> RustExpr {
     RustExpr::Raw(format!(
-        "{{ let __java_arrays_target = &mut {}; let __java_arrays_from = ({}).max(0) as usize; let __java_arrays_to = ({}).max(0) as usize; let __java_arrays_to = __java_arrays_to.min(__java_arrays_target.len()); if __java_arrays_from < __java_arrays_to {{ __java_arrays_target[__java_arrays_from..__java_arrays_to].sort(); }} }}",
+        "{{ let __java_arrays_target = &mut {}; let __java_arrays_from = {}; let __java_arrays_to = {}; if __java_arrays_from > __java_arrays_to {{ panic!(\"Java IllegalArgumentException: fromIndex > toIndex\"); }} if __java_arrays_from < 0 || __java_arrays_to as usize > __java_arrays_target.len() {{ panic!(\"Java ArrayIndexOutOfBoundsException\"); }} let __java_arrays_from = __java_arrays_from as usize; let __java_arrays_to = __java_arrays_to as usize; __java_arrays_target[__java_arrays_from..__java_arrays_to].sort(); }}",
         emit::emit_expr(&target),
         emit::emit_expr(&from),
         emit::emit_expr(&to),
@@ -2413,7 +2413,7 @@ pub fn array_fill_range_projection(
     value: RustExpr,
 ) -> RustExpr {
     RustExpr::Raw(format!(
-        "{{ let __java_arrays_target = &mut {}; let __java_arrays_from = ({}).max(0) as usize; let __java_arrays_to = ({}).max(0) as usize; let __java_arrays_to = __java_arrays_to.min(__java_arrays_target.len()); if __java_arrays_from < __java_arrays_to {{ __java_arrays_target[__java_arrays_from..__java_arrays_to].fill({}); }} }}",
+        "{{ let __java_arrays_target = &mut {}; let __java_arrays_from = {}; let __java_arrays_to = {}; if __java_arrays_from > __java_arrays_to {{ panic!(\"Java IllegalArgumentException: fromIndex > toIndex\"); }} if __java_arrays_from < 0 || __java_arrays_to as usize > __java_arrays_target.len() {{ panic!(\"Java ArrayIndexOutOfBoundsException\"); }} let __java_arrays_from = __java_arrays_from as usize; let __java_arrays_to = __java_arrays_to as usize; __java_arrays_target[__java_arrays_from..__java_arrays_to].fill({}); }}",
         emit::emit_expr(&target),
         emit::emit_expr(&from),
         emit::emit_expr(&to),

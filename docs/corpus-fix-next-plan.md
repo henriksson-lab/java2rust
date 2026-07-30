@@ -87,6 +87,13 @@ helper no longer owns a local `JavaDisplayPlan::OptionalBorrowedValue` branch,
 so map-get display follows the same lowered-slot path as return, assignment,
 and argument adaptation.
 
+2026-07-30 Arrays range-semantics checkpoint: native `Arrays.copyOf`,
+`Arrays.copyOfRange`, range `Arrays.fill`, and range `Arrays.sort` projections
+now preserve Java-invalid range behavior with explicit panics instead of
+clamping negative bounds, truncating end indices, or saturating reversed ranges.
+Generated fixtures cover valid padding, no-op ranges, negative starts, reversed
+ranges, and upper-bound failures.
+
 ## 2026-07-28 Batch Status: Borrow Drift Narrowing
 
 Latest full boundary before this slice:
