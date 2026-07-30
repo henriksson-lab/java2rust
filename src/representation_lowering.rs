@@ -627,8 +627,16 @@ fn source_class_bound_trait_impl_method(
         .clone()
         .unwrap_or_else(|| crate::parser::to_snake_case(&implementing_method.name));
     let bound_signature = signatures.required_method_signature(bound, bound_method);
-    let implementation_signature =
-        signatures.required_method_signature(implementing_owner, implementing_method);
+    let forwarding_owner = trait_impl_forwarding_owner_for_inherited_source_method(
+        ty,
+        implementing_owner,
+        implementing_method,
+    );
+    let implementation_signature = signatures
+        .method_signature(forwarding_owner, implementing_method)
+        .unwrap_or_else(|| {
+            signatures.required_method_signature(implementing_owner, implementing_method)
+        });
     let args = bound_signature
         .params
         .iter()
@@ -643,14 +651,22 @@ fn source_class_bound_trait_impl_method(
         .collect::<Vec<_>>()
         .join(", ");
     let receiver_arg = if args.is_empty() {
-        trait_impl_forwarding_receiver_arg(ty, implementing_owner, None)
+        trait_impl_forwarding_receiver_arg(
+            ty,
+            forwarding_owner,
+            Some(implementation_signature.receiver),
+        )
     } else {
         format!(
             "{}, {args}",
-            trait_impl_forwarding_receiver_arg(ty, implementing_owner, None)
+            trait_impl_forwarding_receiver_arg(
+                ty,
+                forwarding_owner,
+                Some(implementation_signature.receiver)
+            )
         )
     };
-    let implementing_owner_name = rust_name_for_java_named_type(&implementing_owner.name);
+    let implementing_owner_name = rust_name_for_java_named_type(&forwarding_owner.name);
     let call = format!("{implementing_owner_name}::{rust_name}({receiver_arg})");
     let call = adapt_source_class_bound_trait_impl_return(
         call,
@@ -907,8 +923,16 @@ fn trait_impl_method(
         .clone()
         .unwrap_or_else(|| crate::parser::to_snake_case(&implementing_method.name));
     let interface_signature = signatures.required_method_signature(interface, interface_method);
-    let implementation_signature =
-        signatures.required_method_signature(implementing_owner, implementing_method);
+    let forwarding_owner = trait_impl_forwarding_owner_for_inherited_source_method(
+        ty,
+        implementing_owner,
+        implementing_method,
+    );
+    let implementation_signature = signatures
+        .method_signature(forwarding_owner, implementing_method)
+        .unwrap_or_else(|| {
+            signatures.required_method_signature(implementing_owner, implementing_method)
+        });
     let args = interface_signature
         .params
         .iter()
@@ -925,14 +949,14 @@ fn trait_impl_method(
     let receiver_arg = if interface_method.modifiers.contains(&Modifier::Static) {
         String::new()
     } else if args.is_empty() {
-        trait_impl_forwarding_receiver_arg(ty, implementing_owner, trait_receiver)
+        trait_impl_forwarding_receiver_arg(ty, forwarding_owner, trait_receiver)
     } else {
         format!(
             "{}, {args}",
-            trait_impl_forwarding_receiver_arg(ty, implementing_owner, trait_receiver)
+            trait_impl_forwarding_receiver_arg(ty, forwarding_owner, trait_receiver)
         )
     };
-    let implementing_owner_name = rust_name_for_java_named_type(&implementing_owner.name);
+    let implementing_owner_name = rust_name_for_java_named_type(&forwarding_owner.name);
     let call = format!("{implementing_owner_name}::{rust_name}({receiver_arg})");
     let call = adapt_trait_impl_forwarded_return(
         call,
@@ -978,6 +1002,18 @@ fn adapt_trait_impl_forwarded_return(
         return format!("{call}.expect(\"Java null receiver\")");
     }
     call
+}
+
+fn trait_impl_forwarding_owner_for_inherited_source_method<'a>(
+    ty: &'a TypeDecl,
+    implementing_owner: &'a TypeDecl,
+    implementing_method: &MethodDecl,
+) -> &'a TypeDecl {
+    if implementing_owner.name != ty.name && implementing_method.body.is_some() {
+        ty
+    } else {
+        implementing_owner
+    }
 }
 
 fn trait_impl_forwarding_receiver_arg(

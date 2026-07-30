@@ -6508,16 +6508,22 @@ Reduced VCF reruns:
   field. The previous `source: None`/`version: None` into concrete `String`
   mismatches in `VCFFormatHeaderLine` and `VCFInfoHeaderLine` are gone; those
   fields now render as `Option<String>`.
+- `.tmp/corpus-rerun-20260730-vcf-standard-bound-after-inherited-bound-forwarding`:
+  9 files, 60.940s, 29 generated-Rust errors. Source-class bound trait impls
+  now forward inherited source methods with bodies through the concrete child
+  method when lowering has flattened inherited fields onto the child. The VCF
+  `VCFFormatHeaderLine` and `VCFInfoHeaderLine` `set_number_to_unbounded`,
+  `set_source`, and `set_version` impl rows now call the child method on
+  `self`, not a cloned `VCFCompoundHeaderLine` temporary.
 
 Remaining top reduced-VCF clusters after this follow-up:
-19 mismatched types, 4 missing `mapping`, 3 possibly-uninitialized `number`, 3
+11 mismatched types, 4 missing `mapping`, 3 possibly-uninitialized `number`, 3
 type annotations needed, 2 unsupported concrete `instanceof`, 2 unsupported
 `super(...)` inheritance constructor calls, and single missing facade/source
 surface gaps for `set_v_c_f_header_version`, `is_at_least_as_recent_as`, and
-`VCFHeader::HEADER_INDICATOR`. The next reduced-VCF target should be mutable
-source-super forwarding through flattened inherited fields, where generated
-impls still call `VCFCompoundHeaderLine::set_*(&{ let __java_super = ... })`
-against methods that require `&mut VCFCompoundHeaderLine`.
+`VCFHeader::HEADER_INDICATOR`. The next reduced-VCF target should move to the
+constructor-parsing gap around the missing `mapping` local and the two remaining
+unsupported `super(...)` constructor calls.
 
 ## Rerun Protocol
 

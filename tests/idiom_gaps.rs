@@ -7840,6 +7840,52 @@ class Box<T extends HeaderLine> {
 }
 
 #[test]
+fn source_class_bound_inherited_mutator_forwards_to_child_method() {
+    let source = r#"
+class HeaderLine {
+    String source;
+
+    void setSource(String source) {
+        this.source = source;
+    }
+}
+
+class FormatLine extends HeaderLine {
+}
+
+class Box<T extends HeaderLine> {
+    private T value;
+
+    Box(T value) {
+        this.value = value;
+    }
+
+    void update(String source) {
+        value.setSource(source);
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation.rust.contains("pub trait HeaderLineBound")
+            && translation
+                .rust
+                .contains("fn set_source(&mut self, source: String);")
+            && translation
+                .rust
+                .contains("impl HeaderLineBound for FormatLine")
+            && translation.rust.contains(
+                "fn set_source(&mut self, source: String) { FormatLine::set_source(self, source); }"
+            )
+            && !translation.rust.contains("HeaderLine::set_source(&{")
+            && !translation.rust.contains("HeaderLine::set_source(&mut {"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn source_generic_class_bound_overload_call_uses_bound_rust_name() {
     let source = r#"
 class HeaderLine {
