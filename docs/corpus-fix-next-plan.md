@@ -94,6 +94,12 @@ clamping negative bounds, truncating end indices, or saturating reversed ranges.
 Generated fixtures cover valid padding, no-op ranges, negative starts, reversed
 ranges, and upper-bound failures.
 
+2026-07-30 compound-narrowing checkpoint: assignment lowering now recognizes
+the parser's desugared Java compound-assignment value shape and casts the
+promoted result back to `byte`, `short`, or `char` targets. The shared
+assignment-value helper is used for ordinary statements, expression-valued
+assignments, array targets, and static storage assignment paths.
+
 ## 2026-07-28 Batch Status: Borrow Drift Narrowing
 
 Latest full boundary before this slice:

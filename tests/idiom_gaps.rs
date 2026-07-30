@@ -7837,6 +7837,79 @@ class CompoundAssignmentArgument {
 }
 
 #[test]
+fn compound_assignment_on_narrow_primitives_casts_back_to_target_type() {
+    let translation = translate_source(
+        r#"
+class CompoundAssignmentNarrowing {
+    int byteAdd() {
+        byte b = 10;
+        b += 300;
+        return b;
+    }
+
+    int shortMul() {
+        short s = 1;
+        s *= 100000;
+        return s;
+    }
+
+    int charAdd() {
+        char c = 'a';
+        c += 1;
+        return c;
+    }
+
+    int byteArg(byte b) {
+        return take(b += 300);
+    }
+
+    int take(int value) {
+        return value;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("b = ((b as i32) + 300) as i8;")
+            && translation
+                .rust
+                .contains("s = ((s as i32) * 100000) as i16;")
+            && translation.rust.contains(
+                "c = char::from_u32(((((c as u32) as i32) + 1) as u32) & 0xffff).unwrap_or('\\0');"
+            )
+            && translation
+                .rust
+                .contains("self.take({ b = ((b as i32) + 300) as i8; b } as i32)"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "compound_assignment_narrowing",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn narrow_compound_assignments_match_java_casts() {
+        let fixture = CompoundAssignmentNarrowing {};
+        assert_eq!(fixture.byte_add(), 54);
+        assert_eq!(fixture.short_mul(), -31072);
+        assert_eq!(fixture.char_add(), 98);
+        assert_eq!(fixture.byte_arg(10), 54);
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
 fn chained_array_assignment_expression_returns_assigned_value() {
     let translation = translate_source(
         r#"

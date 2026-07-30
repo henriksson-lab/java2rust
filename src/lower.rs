@@ -4649,10 +4649,11 @@ fn lower_stmt(
                     Vec::new(),
                 )));
             } else {
-                let lowered_value = lower_expr_for_slot_with_refinements(
+                let lowered_value = lower_assignment_value_for_slot(
+                    target,
                     value,
                     env,
-                    assignment_slot.clone(),
+                    &assignment_slot,
                     ctx,
                     refinements,
                 );
@@ -10643,7 +10644,7 @@ fn lower_array_assignment_value_expr(
     };
     let assignment_slot = target_assignment_slot_with_current_type(target, env, ctx, shape_ctx);
     let lowered_value =
-        lower_expr_for_slot_with_refinements(value, env, assignment_slot.clone(), ctx, refinements);
+        lower_assignment_value_for_slot(target, value, env, &assignment_slot, ctx, refinements);
     let lowered_value =
         adapt_reused_owned_value_for_slot(lowered_value, value, &assignment_slot, env, ctx);
     let assigned_value =
@@ -11065,7 +11066,7 @@ fn lower_local_assignment_value_expr(
     };
     let assignment_slot = target_assignment_slot_with_current_type(target, env, ctx, shape_ctx);
     let lowered_value =
-        lower_expr_for_slot_with_refinements(value, env, assignment_slot.clone(), ctx, refinements);
+        lower_assignment_value_for_slot(target, value, env, &assignment_slot, ctx, refinements);
     let lowered_value =
         adapt_reused_owned_value_for_slot(lowered_value, value, &assignment_slot, env, ctx);
     let assigned_value =
@@ -11131,6 +11132,93 @@ fn lower_assignment_null_comparison_expr(
     )))
 }
 
+fn lower_assignment_value_for_slot(
+    target: &Expr,
+    value: &Expr,
+    env: &ShapeEnv,
+    assignment_slot: &Slot,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> RustExpr {
+    lower_compound_assignment_value_with_implicit_narrowing(
+        target,
+        value,
+        env,
+        assignment_slot,
+        ctx,
+        refinements,
+    )
+    .unwrap_or_else(|| {
+        lower_expr_for_slot_with_refinements(value, env, assignment_slot.clone(), ctx, refinements)
+    })
+}
+
+fn lower_compound_assignment_value_with_implicit_narrowing(
+    target: &Expr,
+    value: &Expr,
+    env: &ShapeEnv,
+    assignment_slot: &Slot,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    let target_shape = slot_target_shape(assignment_slot)?;
+    let JavaType::Primitive(target_primitive) = target_shape.java_ty else {
+        return None;
+    };
+    if !compound_assignment_target_needs_implicit_narrowing(target_primitive) {
+        return None;
+    }
+    let Expr::Binary { op, left, .. } = value else {
+        return None;
+    };
+    if !compound_assignment_arithmetic_op(*op) || left.as_ref() != target {
+        return None;
+    }
+    Some(primitive_narrowing_projection(
+        lower_expr_with_refinements(value, env, ctx, refinements),
+        target_primitive,
+    ))
+}
+
+fn compound_assignment_target_needs_implicit_narrowing(primitive: PrimitiveType) -> bool {
+    matches!(
+        primitive,
+        PrimitiveType::Byte | PrimitiveType::Short | PrimitiveType::Char
+    )
+}
+
+fn compound_assignment_arithmetic_op(op: BinaryOp) -> bool {
+    matches!(
+        op,
+        BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::Mul
+            | BinaryOp::Div
+            | BinaryOp::Rem
+            | BinaryOp::BitAnd
+            | BinaryOp::BitOr
+            | BinaryOp::BitXor
+            | BinaryOp::Shl
+            | BinaryOp::Shr
+            | BinaryOp::UShr
+    )
+}
+
+fn primitive_narrowing_projection(expr: RustExpr, primitive: PrimitiveType) -> RustExpr {
+    let rendered = emit::emit_expr(&expr);
+    if primitive == PrimitiveType::Char {
+        return RustExpr::Raw(format!(
+            "char::from_u32((({rendered}) as u32) & 0xffff).unwrap_or('\\0')"
+        ));
+    }
+    RustExpr::Cast {
+        expr: Box::new(expr),
+        ty: crate::coercion::rust_primitive_type_name_policy(primitive)
+            .rust_name
+            .to_string(),
+    }
+}
+
 fn lower_static_storage_assignment_stmt(
     target: &Expr,
     value: &Expr,
@@ -11144,7 +11232,7 @@ fn lower_static_storage_assignment_stmt(
     let static_name = env.static_storage_field_access_name(name)?;
     let assignment_slot = static_storage_field_shape(name, env, ctx).map(Slot::Assignment)?;
     let lowered_value =
-        lower_expr_for_slot_with_refinements(value, env, assignment_slot.clone(), ctx, refinements);
+        lower_assignment_value_for_slot(target, value, env, &assignment_slot, ctx, refinements);
     let lowered_value =
         adapt_reused_owned_value_for_slot(lowered_value, value, &assignment_slot, env, ctx);
     let assigned_value =
@@ -11168,7 +11256,7 @@ fn lower_static_storage_assignment_value_expr(
     let static_name = env.static_storage_field_access_name(name)?;
     let assignment_slot = static_storage_field_shape(name, env, ctx).map(Slot::Assignment)?;
     let lowered_value =
-        lower_expr_for_slot_with_refinements(value, env, assignment_slot.clone(), ctx, refinements);
+        lower_assignment_value_for_slot(target, value, env, &assignment_slot, ctx, refinements);
     let lowered_value =
         adapt_reused_owned_value_for_slot(lowered_value, value, &assignment_slot, env, ctx);
     let assigned_value =
@@ -11191,6 +11279,7 @@ fn lower_qualified_static_storage_assignment_stmt(
 ) -> Option<RustStmt> {
     let plan = qualified_static_storage_assignment_plan(target, env, ctx)?;
     let assigned_value = lower_static_storage_assigned_value(
+        target,
         value,
         env,
         ctx,
@@ -11212,6 +11301,7 @@ fn lower_qualified_static_storage_assignment_value_expr(
 ) -> Option<RustExpr> {
     let plan = qualified_static_storage_assignment_plan(target, env, ctx)?;
     let assigned_value = lower_static_storage_assigned_value(
+        target,
         value,
         env,
         ctx,
@@ -11266,6 +11356,7 @@ fn qualified_static_storage_assignment_plan(
 }
 
 fn lower_static_storage_assigned_value(
+    target: &Expr,
     value: &Expr,
     env: &ShapeEnv,
     ctx: LowerCtx,
@@ -11273,7 +11364,7 @@ fn lower_static_storage_assigned_value(
     assignment_slot: Slot,
 ) -> RustExpr {
     let lowered_value =
-        lower_expr_for_slot_with_refinements(value, env, assignment_slot.clone(), ctx, refinements);
+        lower_assignment_value_for_slot(target, value, env, &assignment_slot, ctx, refinements);
     let lowered_value =
         adapt_reused_owned_value_for_slot(lowered_value, value, &assignment_slot, env, ctx);
     wrap_optional_assignment_value_if_needed(value, env, assignment_slot, lowered_value, ctx)

@@ -139,6 +139,10 @@ Landed in this batch:
 - Apache Commons `FastMath` ownership is modelled as a `javalibs` native static
   owner alias to the existing JDK `Math` planner, so package-specific knowledge
   stays out of `stdlib.rs` while call sites reuse the same math projections.
+- Compound assignment values targeting `byte`, `short`, or `char` now apply the
+  JLS implicit narrowing cast after the promoted operation. The shared
+  assignment-value hook is used by statement, expression, array, and static
+  storage assignment paths.
 
 1. Add a generated-Rust parse gate to focused corpus scripts.
    - Report parse failures separately from type-check errors.
@@ -434,7 +438,7 @@ Completion checklist for any audit marked `fixed locally`:
 | `0024` numeric limit constants stubbed to zero | fixed locally | Moved to `claude_audits/done`; JDK wrapper/Math/GZIP/Font values fixed and unknown primitive constants now fail loudly |
 | `0025` interface default methods discarded | open | Interface/default method representation |
 | `0026` assignment evaluation order | open | Statement/expression lowering semantics |
-| `0027` compound assignment narrowing | open | Arithmetic and assignment semantics |
+| `0027` compound assignment narrowing | fixed locally | Moved to `claude_audits/done`; narrow primitive compound assignment casts back through the shared assignment-value hook |
 | `0028` reference equality | open | Object/reference representation |
 | `0029` static field mutation invalid Rust | open | Static storage model |
 | `0030` Java statics are thread-local | open | Static storage model |
