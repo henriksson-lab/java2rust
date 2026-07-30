@@ -70,6 +70,10 @@ Landed in this batch:
   lowering: initial line terminators, incidental indentation, trailing
   whitespace, and text-block escapes are normalized into the resulting string
   literal value.
+- JDK wrapper numeric limits, size/byte constants, boolean constants,
+  `Float`/`Double` special constants, character limits, and `Math.PI/E` now
+  emit Java-compatible values instead of primitive zero defaults when their
+  facade constant surfaces are generated.
 
 1. Add a generated-Rust parse gate to focused corpus scripts.
    - Report parse failures separately from type-check errors.
@@ -302,6 +306,15 @@ the fixes do not become more isolated rules.
 | `0021` instanceof pattern binding | open | BindingId and pattern lowering |
 | `0022` source-text type reparsing | open | Typed type parser |
 | `0023` inner-class outer capture | open | Object reference representation |
+| `0024` numeric limit constants stubbed to zero | partial | JDK known values fixed; unknown const fallback policy remains |
+| `0025` interface default methods discarded | open | Interface/default method representation |
+| `0026` assignment evaluation order | open | Statement/expression lowering semantics |
+| `0027` compound assignment narrowing | open | Arithmetic and assignment semantics |
+| `0028` reference equality | open | Object/reference representation |
+| `0029` static field mutation invalid Rust | open | Static storage model |
+| `0030` Java statics are thread-local | open | Static storage model |
+| `0031` stubbed constant census | open | Facade constant coverage |
+| `0032` java.lang.Math mistranslated | partial | Round path existed; constants improved; overload/semantics audit remains |
 
 ## Parallel Work Split
 

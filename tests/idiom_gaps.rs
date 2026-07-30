@@ -2086,6 +2086,95 @@ class SAMFileHeader {}
 }
 
 #[test]
+fn jdk_numeric_limit_constants_emit_java_values_not_zero_stubs() {
+    let translation = translate_source(
+        r#"
+class JdkNumericLimitConstants {
+    static int maxInt() { return Integer.MAX_VALUE; }
+    static int minInt() { return Integer.MIN_VALUE; }
+    static long maxLong() { return Long.MAX_VALUE; }
+    static int integerBytes() { return Integer.BYTES; }
+    static char maxChar() { return Character.MAX_VALUE; }
+    static float minFloat() { return Float.MIN_VALUE; }
+    static double minDouble() { return Double.MIN_VALUE; }
+    static double nan() { return Double.NaN; }
+    static double pi() { return Math.PI; }
+    static boolean truth() { return Boolean.TRUE; }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub const MAX_VALUE: i32 = i32::MAX;")
+            && translation
+                .rust
+                .contains("pub const MIN_VALUE: i32 = i32::MIN;")
+            && translation
+                .rust
+                .contains("pub const MAX_VALUE: i64 = i64::MAX;")
+            && translation.rust.contains("pub const BYTES: i32 = 4;")
+            && translation
+                .rust
+                .contains("pub const MAX_VALUE: char = '\\u{ffff}';")
+            && translation
+                .rust
+                .contains("pub const MIN_VALUE: f32 = f32::from_bits(1);")
+            && translation
+                .rust
+                .contains("pub const MIN_VALUE: f64 = f64::from_bits(1);")
+            && translation.rust.contains("pub const NaN: f64 = f64::NAN;")
+            && translation
+                .rust
+                .contains("pub const PI: f64 = std::f64::consts::PI;")
+            && translation.rust.contains("pub const TRUE: bool = true;"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("pub const MAX_VALUE: i32 = 0;")
+            && !translation.rust.contains("pub const MIN_VALUE: i32 = 0;")
+            && !translation
+                .rust
+                .contains("pub const MAX_VALUE: i64 = 0i64;")
+            && !translation
+                .rust
+                .contains("pub const MIN_VALUE: f64 = 0.0f64;"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "jdk_numeric_limit_constants",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn constants_have_java_values() {
+        assert_eq!(JdkNumericLimitConstants::max_int(), i32::MAX);
+        assert_eq!(JdkNumericLimitConstants::min_int(), i32::MIN);
+        assert_eq!(JdkNumericLimitConstants::max_long(), i64::MAX);
+        assert_eq!(JdkNumericLimitConstants::integer_bytes(), 4);
+        assert_eq!(JdkNumericLimitConstants::max_char(), '\u{ffff}');
+        assert!(JdkNumericLimitConstants::min_float() > 0.0);
+        assert!(JdkNumericLimitConstants::min_double() > 0.0);
+        assert!(JdkNumericLimitConstants::nan().is_nan());
+        assert_eq!(JdkNumericLimitConstants::pi(), std::f64::consts::PI);
+        assert!(JdkNumericLimitConstants::truth());
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
 fn translates_java_numeric_relational_promotion_before_rust_comparison() {
     let translation = translate_source(
         r#"

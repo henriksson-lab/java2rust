@@ -2834,6 +2834,7 @@ fn known_numeric_constant_field_type(receiver: &str, field_name: &str) -> Option
         ("Short", "MAX_VALUE" | "MIN_VALUE") => PrimitiveType::Short,
         ("Integer", "MAX_VALUE" | "MIN_VALUE") => PrimitiveType::Int,
         ("Long", "MAX_VALUE" | "MIN_VALUE") => PrimitiveType::Long,
+        ("Character", "MAX_VALUE" | "MIN_VALUE") => PrimitiveType::Char,
         (
             "Float",
             "MAX_VALUE" | "MIN_VALUE" | "NaN" | "POSITIVE_INFINITY" | "NEGATIVE_INFINITY",
@@ -2842,6 +2843,7 @@ fn known_numeric_constant_field_type(receiver: &str, field_name: &str) -> Option
             "Double",
             "MAX_VALUE" | "MIN_VALUE" | "NaN" | "POSITIVE_INFINITY" | "NEGATIVE_INFINITY",
         ) => PrimitiveType::Double,
+        ("Math", "PI" | "E") => PrimitiveType::Double,
         (
             "Pattern",
             "UNIX_LINES"
@@ -13887,6 +13889,9 @@ fn static_constant_default_value(
     java_ty: &JavaType,
     local_static_string_values: &BTreeMap<(String, String), String>,
 ) -> Option<String> {
+    if let Some(value) = known_jdk_static_constant_value(owner, field) {
+        return Some(value.to_string());
+    }
     if owner.rsplit('.').next().unwrap_or(owner) == "BigDecimal"
         && let Some(value) = big_decimal_rounding_constant_value(field)
     {
@@ -13925,6 +13930,60 @@ fn static_constant_default_value(
                 rust_name_for_java_named_type(&canonical_external_receiver_type_key(name));
             valid_rust_type_ident(&rust_type).then_some(rust_type)
         }
+        _ => None,
+    }
+}
+
+fn known_jdk_static_constant_value(owner: &str, field: &str) -> Option<&'static str> {
+    let owner = owner.rsplit('.').next().unwrap_or(owner);
+    let field = canonical_external_field_name(field);
+    match (owner, field.as_str()) {
+        ("Boolean", "TRUE") => Some("true"),
+        ("Boolean", "FALSE") => Some("false"),
+        ("Byte", "MAX_VALUE") => Some("i8::MAX"),
+        ("Byte", "MIN_VALUE") => Some("i8::MIN"),
+        ("Short", "MAX_VALUE") => Some("i16::MAX"),
+        ("Short", "MIN_VALUE") => Some("i16::MIN"),
+        ("Integer", "MAX_VALUE") => Some("i32::MAX"),
+        ("Integer", "MIN_VALUE") => Some("i32::MIN"),
+        ("Long", "MAX_VALUE") => Some("i64::MAX"),
+        ("Long", "MIN_VALUE") => Some("i64::MIN"),
+        ("Character", "MAX_VALUE") => Some("'\\u{ffff}'"),
+        ("Character", "MIN_VALUE") => Some("'\\0'"),
+        ("Float", "MAX_VALUE") => Some("f32::MAX"),
+        ("Float", "MIN_VALUE") => Some("f32::from_bits(1)"),
+        ("Float", "NaN") => Some("f32::NAN"),
+        ("Float", "POSITIVE_INFINITY") => Some("f32::INFINITY"),
+        ("Float", "NEGATIVE_INFINITY") => Some("f32::NEG_INFINITY"),
+        ("Double", "MAX_VALUE") => Some("f64::MAX"),
+        ("Double", "MIN_VALUE") => Some("f64::from_bits(1)"),
+        ("Double", "NaN") => Some("f64::NAN"),
+        ("Double", "POSITIVE_INFINITY") => Some("f64::INFINITY"),
+        ("Double", "NEGATIVE_INFINITY") => Some("f64::NEG_INFINITY"),
+        ("Math", "PI") => Some("std::f64::consts::PI"),
+        ("Math", "E") => Some("std::f64::consts::E"),
+        (owner, "SIZE") => wrapper_size_constant_value(owner),
+        (owner, "BYTES") => wrapper_bytes_constant_value(owner),
+        _ => None,
+    }
+}
+
+fn wrapper_size_constant_value(owner: &str) -> Option<&'static str> {
+    match owner {
+        "Byte" => Some("8"),
+        "Short" | "Character" => Some("16"),
+        "Integer" | "Float" => Some("32"),
+        "Long" | "Double" => Some("64"),
+        _ => None,
+    }
+}
+
+fn wrapper_bytes_constant_value(owner: &str) -> Option<&'static str> {
+    match owner {
+        "Byte" => Some("1"),
+        "Short" | "Character" => Some("2"),
+        "Integer" | "Float" => Some("4"),
+        "Long" | "Double" => Some("8"),
         _ => None,
     }
 }
