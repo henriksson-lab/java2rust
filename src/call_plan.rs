@@ -435,6 +435,8 @@ pub enum NativeJavaStaticMethod {
     MathExp,
     MathRound,
     MathToIntExact,
+    MathFloorDiv,
+    MathFloorMod,
     IntegerParseInt,
     FloatParseFloat,
     DoubleParseDouble,
@@ -514,7 +516,9 @@ pub fn native_java_call_lowered_type(target: &CallTargetPlan<'_>) -> Option<Lowe
                 NativeJavaStaticMethod::IntegerParseInt
                 | NativeJavaStaticMethod::MathMin
                 | NativeJavaStaticMethod::MathRound
-                | NativeJavaStaticMethod::MathToIntExact,
+                | NativeJavaStaticMethod::MathToIntExact
+                | NativeJavaStaticMethod::MathFloorDiv
+                | NativeJavaStaticMethod::MathFloorMod,
         }
         | CallTargetPlan::NativeJavaInstance {
             method:
@@ -3238,6 +3242,8 @@ fn plan_native_java_static_call<'a>(
         ("Math", "exp") => NativeJavaStaticMethod::MathExp,
         ("Math", "round") => NativeJavaStaticMethod::MathRound,
         ("Math", "toIntExact" | "to_int_exact") => NativeJavaStaticMethod::MathToIntExact,
+        ("Math", "floorDiv" | "floor_div") => NativeJavaStaticMethod::MathFloorDiv,
+        ("Math", "floorMod" | "floor_mod") => NativeJavaStaticMethod::MathFloorMod,
         ("Integer", "parseInt" | "parse_int") => NativeJavaStaticMethod::IntegerParseInt,
         ("Float", "parseFloat" | "parse_float") => NativeJavaStaticMethod::FloatParseFloat,
         ("Double", "parseDouble" | "parse_double") => NativeJavaStaticMethod::DoubleParseDouble,

@@ -2106,7 +2106,7 @@ RUST
   printf "FileSystem\nGraphics\nBufferedImage\nPath\nURI\nFile\nURL\nURLConnection\nJarURLConnection\nJarFile\nJarEntry\nManifest\nAttributes\nAttributesName\nEnumeration\nJavaIterator\nAtomicInteger\nJavaPathArg\nIOUtils\nlogger\n" >> "$shared_support_types_path"
 fi
 
-if grep -R -q -E 'java_string_(split|substring|hash_code|index_of|index_of_from|from_byte_range|matches|replace_first|replace_all|compare_to|compare_to_ignore_case|equals_ignore_case)|java_(list|set|map|value)_hash_code|java_primitive_compare_to|java_parse_(i8|i16|i32|i64|f32|f64)' "$generated_dir"; then
+if grep -R -q -E 'java_string_(split|substring|hash_code|index_of|index_of_from|from_byte_range|matches|replace_first|replace_all|compare_to|compare_to_ignore_case|equals_ignore_case)|java_(list|set|map|value)_hash_code|java_primitive_compare_to|java_math_floor_(div|mod)_i32|java_parse_(i8|i16|i32|i64|f32|f64)' "$generated_dir"; then
   cat >> "$shared_support_path" <<'RUST'
 pub fn java_string_substring<V: AsRef<str>>(value: V, begin: i32, end: i32) -> String {
     let value = value.as_ref();
@@ -2224,6 +2224,20 @@ pub fn java_primitive_compare_to<T: PartialOrd>(left: T, right: T) -> i32 {
     } else {
         0
     }
+}
+
+pub fn java_math_floor_div_i32(left: i32, right: i32) -> i32 {
+    let quotient = left / right;
+    let remainder = left % right;
+    if remainder != 0 && ((left < 0) != (right < 0)) {
+        quotient - 1
+    } else {
+        quotient
+    }
+}
+
+pub fn java_math_floor_mod_i32(left: i32, right: i32) -> i32 {
+    left - java_math_floor_div_i32(left, right) * right
 }
 
 pub fn java_parse_i8<V: AsRef<str>>(value: V) -> i8 {
@@ -2344,7 +2358,7 @@ fn java_simple_regex_literal(regex: &str) -> &str {
 }
 
 RUST
-  printf "java_string_substring\njava_string_hash_code\njava_list_hash_code\njava_set_hash_code\njava_map_hash_code\njava_value_hash_code\njava_string_index_of\njava_string_index_of_from\njava_string_last_index_of\njava_string_last_index_of_from\njava_string_compare_to\njava_string_compare_to_ignore_case\njava_string_equals_ignore_case\njava_primitive_compare_to\njava_parse_i8\njava_parse_i16\njava_parse_i32\njava_parse_i64\njava_parse_f32\njava_parse_f64\njava_string_from_byte_range\njava_string_from_bytes\njava_string_split\njava_string_matches\njava_string_replace_first\njava_string_replace_all\n" >> "$shared_support_types_path"
+  printf "java_string_substring\njava_string_hash_code\njava_list_hash_code\njava_set_hash_code\njava_map_hash_code\njava_value_hash_code\njava_string_index_of\njava_string_index_of_from\njava_string_last_index_of\njava_string_last_index_of_from\njava_string_compare_to\njava_string_compare_to_ignore_case\njava_string_equals_ignore_case\njava_primitive_compare_to\njava_math_floor_div_i32\njava_math_floor_mod_i32\njava_parse_i8\njava_parse_i16\njava_parse_i32\njava_parse_i64\njava_parse_f32\njava_parse_f64\njava_string_from_byte_range\njava_string_from_bytes\njava_string_split\njava_string_matches\njava_string_replace_first\njava_string_replace_all\n" >> "$shared_support_types_path"
 fi
 
 if grep -R -q 'java_is_serializable' "$generated_dir"; then

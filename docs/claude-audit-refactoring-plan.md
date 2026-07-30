@@ -74,6 +74,9 @@ Landed in this batch:
   `Float`/`Double` special constants, character limits, and `Math.PI/E` now
   emit Java-compatible values instead of primitive zero defaults when their
   facade constant surfaces are generated.
+- `Math.floorDiv(int,int)` and `Math.floorMod(int,int)` now lower through
+  explicit Java floor-semantics helpers instead of falling through to an
+  undefined lowercase `math` receiver or Rust euclidean remainder semantics.
 
 1. Add a generated-Rust parse gate to focused corpus scripts.
    - Report parse failures separately from type-check errors.

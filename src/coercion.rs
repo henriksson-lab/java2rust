@@ -1916,6 +1916,22 @@ pub fn math_round_projection(arg: RustExpr) -> RustExpr {
     RustExpr::Raw(format!("({} as f64).round() as i64", emit::emit_expr(&arg)))
 }
 
+pub fn math_floor_div_projection(left: RustExpr, right: RustExpr) -> RustExpr {
+    RustExpr::Raw(format!(
+        "java_math_floor_div_i32({}, {})",
+        emit::emit_expr(&left),
+        emit::emit_expr(&right)
+    ))
+}
+
+pub fn math_floor_mod_projection(left: RustExpr, right: RustExpr) -> RustExpr {
+    RustExpr::Raw(format!(
+        "java_math_floor_mod_i32({}, {})",
+        emit::emit_expr(&left),
+        emit::emit_expr(&right)
+    ))
+}
+
 pub fn len_i32_projection(expr: RustExpr) -> RustExpr {
     RustExpr::Raw(format!("{}.len() as i32", emit::emit_expr(&expr)))
 }

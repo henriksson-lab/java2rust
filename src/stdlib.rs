@@ -5165,6 +5165,20 @@ pub fn java_primitive_compare_to<T: PartialOrd>(left: T, right: T) -> i32 {
     }
 }
 
+pub fn java_math_floor_div_i32(left: i32, right: i32) -> i32 {
+    let quotient = left / right;
+    let remainder = left % right;
+    if remainder != 0 && ((left < 0) != (right < 0)) {
+        quotient - 1
+    } else {
+        quotient
+    }
+}
+
+pub fn java_math_floor_mod_i32(left: i32, right: i32) -> i32 {
+    left - java_math_floor_div_i32(left, right) * right
+}
+
 pub fn java_parse_i8<V: AsRef<str>>(value: V) -> i8 {
     value.as_ref().parse::<i8>().expect("Java number format")
 }
@@ -15162,7 +15176,7 @@ fn expr_uses_java_string_runtime_helpers(expr: &Expr) -> bool {
             args,
             ..
         } => {
-            matches!(
+            let uses_runtime_helper = matches!(
                 (name.as_str(), args.len()),
                 ("split", 1 | 2)
                     | ("substring", 1 | 2)
@@ -15179,9 +15193,15 @@ fn expr_uses_java_string_runtime_helpers(expr: &Expr) -> bool {
                     | ("equalsIgnoreCase", 1)
                     | ("equals_ignore_case", 1)
                     | ("matches", 1)
-            ) || receiver
-                .as_deref()
-                .is_some_and(expr_uses_java_string_runtime_helpers)
+            ) || matches!(
+                (receiver.as_deref(), name.as_str(), args.len()),
+                (Some(Expr::Var(owner)), "floorDiv" | "floor_div" | "floorMod" | "floor_mod", 2)
+                    if canonical_external_receiver_type_key(owner) == "Math"
+            );
+            uses_runtime_helper
+                || receiver
+                    .as_deref()
+                    .is_some_and(expr_uses_java_string_runtime_helpers)
                 || args.iter().any(expr_uses_java_string_runtime_helpers)
         }
         Expr::FieldAccess(receiver, _) => expr_uses_java_string_runtime_helpers(receiver),

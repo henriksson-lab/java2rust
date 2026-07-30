@@ -657,6 +657,14 @@ class JdkNumericAndFormatFacades {
         return Math.toIntExact(value);
     }
 
+    static int floorDiv(int left, int right) {
+        return Math.floorDiv(left, right);
+    }
+
+    static int floorMod(int left, int right) {
+        return Math.floorMod(left, right);
+    }
+
     static void collect() {
         System.gc();
     }
@@ -677,12 +685,20 @@ class JdkNumericAndFormatFacades {
             && translation.rust.contains("value.is_nan()")
             && translation.rust.contains("value.parse::<f32>().unwrap()")
             && translation.rust.contains("return value as i32;")
+            && translation
+                .rust
+                .contains("java_math_floor_div_i32(left, right)")
+            && translation
+                .rust
+                .contains("java_math_floor_mod_i32(left, right)")
             && translation.rust.contains("pub fn collect() {\n    }")
             && translation.rust.contains("value.to_string()")
             && !translation.rust.contains("Math::log")
             && !translation.rust.contains("Math::exp")
             && !translation.rust.contains("Math::round")
             && !translation.rust.contains("Math::to_int_exact")
+            && !translation.rust.contains("math.floor_div")
+            && !translation.rust.contains("math.floor_mod")
             && !translation.rust.contains("Double::is_na_n")
             && !translation.rust.contains("Float::is_na_n")
             && !translation.rust.contains("float.parse_float")
@@ -708,6 +724,9 @@ mod generated_tests {
         assert!((JdkNumericAndFormatFacades::log2(8.0) - 3.0).abs() < 1e-9);
         assert!((JdkNumericAndFormatFacades::exponent(1.0) - std::f64::consts::E).abs() < 1e-9);
         assert!(JdkNumericAndFormatFacades::missing(f64::NAN));
+        assert_eq!(JdkNumericAndFormatFacades::floor_div(-7, 2), -4);
+        assert_eq!(JdkNumericAndFormatFacades::floor_mod(-7, 2), 1);
+        assert_eq!(JdkNumericAndFormatFacades::floor_mod(7, -2), -1);
         assert!(JdkNumericAndFormatFacades::render(1.25).starts_with("v="));
     }
 }

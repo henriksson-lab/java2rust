@@ -15,16 +15,16 @@ use crate::coercion::{
     java_class_literal_path_projection, java_class_static_path_projection,
     java_iterator_from_collection_projection, java_list_hash_code_projection,
     java_map_hash_code_projection, java_set_hash_code_projection, java_value_hash_code_projection,
-    len_i32_projection, math_max_projection, math_min_projection, math_round_projection,
-    native_collection_default_constructor_projection, native_collection_empty_new_projection,
-    native_collection_from_source_projection, native_collection_with_capacity_projection,
-    objects_equals_projection, objects_is_null_projection, objects_non_null_projection,
-    optional_get_owned_value_projection, optional_or_else_owned_value_projection,
-    owned_collection_to_vec_projection_for_receiver_type, owned_map_keys_vec_projection,
-    owned_map_values_vec_projection, owner_associated_path_projection,
-    primitive_compare_to_projection, primitive_f64_method_projection,
-    primitive_hash_code_projection, primitive_is_nan_projection, primitive_number_value_projection,
-    primitive_parse_projection, receiver_method_call_projection,
+    len_i32_projection, math_floor_div_projection, math_floor_mod_projection, math_max_projection,
+    math_min_projection, math_round_projection, native_collection_default_constructor_projection,
+    native_collection_empty_new_projection, native_collection_from_source_projection,
+    native_collection_with_capacity_projection, objects_equals_projection,
+    objects_is_null_projection, objects_non_null_projection, optional_get_owned_value_projection,
+    optional_or_else_owned_value_projection, owned_collection_to_vec_projection_for_receiver_type,
+    owned_map_keys_vec_projection, owned_map_values_vec_projection,
+    owner_associated_path_projection, primitive_compare_to_projection,
+    primitive_f64_method_projection, primitive_hash_code_projection, primitive_is_nan_projection,
+    primitive_number_value_projection, primitive_parse_projection, receiver_method_call_projection,
     receiver_method_call_projection_exact, self_associated_path_projection,
     sequence_index_of_projection, string_char_at_projection,
     string_compare_to_ignore_case_projection, string_compare_to_projection,
@@ -463,6 +463,26 @@ fn apply_native_java_static_method(
                 return compile_error_call("Math.toIntExact requires one argument");
             };
             primitive_number_value_projection(arg, PrimitiveType::Int)
+        }
+        NativeJavaStaticMethod::MathFloorDiv => {
+            let mut args = args.into_iter();
+            let Some(left) = args.next() else {
+                return compile_error_call("Math.floorDiv requires two arguments");
+            };
+            let Some(right) = args.next() else {
+                return compile_error_call("Math.floorDiv requires two arguments");
+            };
+            math_floor_div_projection(left, right)
+        }
+        NativeJavaStaticMethod::MathFloorMod => {
+            let mut args = args.into_iter();
+            let Some(left) = args.next() else {
+                return compile_error_call("Math.floorMod requires two arguments");
+            };
+            let Some(right) = args.next() else {
+                return compile_error_call("Math.floorMod requires two arguments");
+            };
+            math_floor_mod_projection(left, right)
         }
         NativeJavaStaticMethod::IntegerParseInt => {
             let Some(arg) = args.into_iter().next() else {
