@@ -12230,19 +12230,26 @@ fn external_facade_static_method_with_facts(
     return_type: &str,
 ) -> String {
     let escaped_rust_method = rust_raw_ident_if_needed(rust_method);
-    let body = if return_type == "String"
+    if return_type == "String"
         && arg_count == 1
         && matches!(rust_method, "to_string" | "toString")
         && external_facade_method_uses_display_argument(receiver_key, java_method, 0)
     {
-        "_arg0.to_string()".to_string()
+        return format!(
+            "    pub fn {escaped_rust_method}{} -> {return_type} {{ _arg0.to_string() }}",
+            external_facade_args_with_facts(facts, receiver_key, java_method, arg_count),
+        );
     } else {
-        external_facade_default_expr(return_type, Some(rust_method))
-    };
-    format!(
-        "    pub fn {escaped_rust_method}{} -> {return_type} {{ {body} }}",
-        external_facade_args_with_facts(facts, receiver_key, java_method, arg_count),
-    )
+        external_facade_unmodelled_method_with_facts(
+            facts,
+            receiver_key,
+            java_method,
+            rust_method,
+            arg_count,
+            return_type,
+            true,
+        )
+    }
 }
 
 fn external_facade_unmodelled_method_with_facts(
@@ -12378,8 +12385,8 @@ fn external_facade_imported_static_method(name: &str, arg_count: usize) -> Strin
     } else {
         let rust_name = rust_raw_ident_if_needed(name);
         format!(
-            "    pub fn {rust_name}{} -> R {{ Default::default() }}",
-            external_facade_generic_args("R: Default", arg_count)
+            "    pub fn {rust_name}{} -> R {{ unimplemented!(\"imported static method {name} is not modelled\") }}",
+            external_facade_generic_args("R", arg_count)
         )
     }
 }
@@ -12738,10 +12745,14 @@ fn external_facade_instance_method_with_facts(
             external_facade_self_args_with_facts(facts, receiver_key, java_method, arg_count),
         );
     }
-    format!(
-        "    pub fn {escaped_rust_method}{} -> {return_type} {{ {} }}",
-        external_facade_self_args_with_facts(facts, receiver_key, java_method, arg_count),
-        external_facade_default_expr(return_type, Some(rust_method))
+    external_facade_unmodelled_method_with_facts(
+        facts,
+        receiver_key,
+        java_method,
+        rust_method,
+        arg_count,
+        return_type,
+        false,
     )
 }
 

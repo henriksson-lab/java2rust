@@ -48,7 +48,9 @@ Claude audit tracking: when an issue from `claude_audits/` is genuinely done,
 move that issue file to
 `/home/mahogny/github/claude/new_java2rust/claude_audits/done` in the same
 checkpoint. Only move it after the implementation and focused verification are
-complete, and mention the move in the checkpoint notes or commit summary.
+complete, and mention the move in the checkpoint notes or commit summary. Leave
+partial, exploratory, or inspiration-only audit files in `claude_audits/` until
+the mapped issue is fully closed.
 
 ## 2026-07-28 Batch Status: Borrow Drift Narrowing
 
@@ -1913,6 +1915,11 @@ Current implementation note, 2026-07-23:
   `R: Default` or `()` fallback methods. The late opaque-support pass now also
   honors the shared static-facade classification, so static signatures such as
   `RepaintManager.currentManager(...)` stay associated functions;
+- imported static methods without return facts now keep generic return inference
+  but emit loud `unimplemented!(...)` bodies instead of `R: Default`
+  `Default::default()` shims, and typed fact-backed external static/instance
+  methods now use the same loud unmodelled method body unless an explicit
+  modeled helper path applies;
 - a narrow source singleton idiom now treats `private static T instance = new
   T(); public static T getInstance() { return instance; }` as an owned
   initialized source value, avoiding nonexistent Rust static storage.

@@ -10874,24 +10874,65 @@ class StaticImportTypedReturn {
     assert!(
         translation
             .rust
-            .contains("StaticUtility::read_value(path.as_str())"),
+            .contains("ExternalLibStaticUtility::read_value(path.as_str())")
+            || translation
+                .rust
+                .contains("ExternalLibStaticUtility::read_value(path)")
+            || translation
+                .rust
+                .contains("StaticUtility::read_value(path.as_str())"),
         "{}",
         translation.rust
     );
     assert!(
-        translation
-            .rust
-            .contains("pub fn read_value(_arg0: &str) -> String"),
+        translation.rust.contains(
+            "pub fn read_value(_arg0: &str) -> String { unimplemented!(\"external.lib.StaticUtility.readValue is not modelled\") }"
+        ),
         "{}",
         translation.rust
     );
     assert!(
-        !translation.rust.contains("pub fn read_value<R: Default"),
+        !translation.rust.contains("pub fn read_value<R: Default")
+            && !translation
+                .rust
+                .contains("pub fn read_value(_arg0: &str) -> String { Default::default() }"),
         "{}",
         translation.rust
     );
     assert!(
         !translation.rust.contains("pub fn read_value<T0>(&self"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn static_import_without_return_fact_is_loud_generic_fallback() {
+    let translation = translate_source(
+        r#"
+import static external.lib.StaticUtility.readValue;
+
+class StaticImportNoFacts {
+    Object read(String path) {
+        return readValue(path);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "pub fn read_value<R, T0>(_arg0: T0) -> R { unimplemented!(\"imported static method read_value is not modelled\") }"
+        ) || translation.rust.contains(
+            "pub fn readValue<R, T0>(_arg0: T0) -> R { unimplemented!(\"imported static method readValue is not modelled\") }"
+        ),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("read_value<R: Default")
+            && !translation.rust.contains("readValue<R: Default")
+            && !translation.rust.contains("-> R { Default::default() }"),
         "{}",
         translation.rust
     );

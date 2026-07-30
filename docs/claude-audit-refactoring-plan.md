@@ -34,7 +34,8 @@ Tracking rule: when an audit item is genuinely done, move its
 `/home/mahogny/github/claude/new_java2rust/claude_audits/done` as part of the
 same checkpoint. Do this only after the implementation and focused verification
 for that audit item are complete, and mention the move in the checkpoint notes
-or commit summary.
+or commit summary. Leave partial, exploratory, or inspiration-only audit files
+in `claude_audits/` until the mapped issue is fully closed.
 
 ## Next Batch: Measurement And Unsupported Safety
 
@@ -248,6 +249,12 @@ Landed in this batch:
   Void-like side-effect/mutator facts still emit `()` surfaces.
 - Imported static getter facts with missing return types now use the same named
   unmodelled result shim path instead of generic `R: Default` fallback methods.
+- Imported static methods without return facts now keep their generic return
+  shape for type inference but emit a loud `unimplemented!(...)` body instead
+  of `R: Default` plus `Default::default()`.
+- Typed fact-backed external static/instance methods now use the shared loud
+  unmodelled method body unless they hit an explicit modeled helper path, so
+  signature facts no longer imply silent default semantics by themselves.
 - Builder `get_*_builder` fallback support now uses named opaque result shims
   with loud unmodelled bodies instead of generic `T: Default` fallback methods.
 - Inherited external getter facts without return types now use the same named
@@ -375,6 +382,7 @@ Completion checklist for any audit marked `fixed locally`:
   `/home/mahogny/github/claude/new_java2rust/claude_audits/done`.
 - Keep the move in the same verified checkpoint as the implementation.
 - Note the move in the plan row and, when committing, in the commit summary.
+- Do not move partial or exploratory audit files.
 
 | Audit | Status | Plan owner |
 |---|---:|---|
@@ -388,7 +396,7 @@ Completion checklist for any audit marked `fixed locally`:
 | `0008` inference does not reach lowering | open | CallableAnalysis |
 | `0009` overload identity collapse | open | Java callable signature identity |
 | `0010` fallibility disagrees | open | Callable fallibility plan |
-| `0011` dyn Any fallback cascades | open | Opaque external shims |
+| `0011` dyn Any fallback cascades | partial | Opaque external shims; generic/static typed facade fallbacks are now loud, broader erased-object fallback remains |
 | `0012` invalid unsupported diagnostics | fixed locally | Moved to `claude_audits/done` |
 | `0013` nested downcast names | fixed locally | Moved to `claude_audits/done` |
 | `0014` labelled statements deleted | fixed locally | Moved to `claude_audits/done`; CFG liveness still needs labelled edges |
