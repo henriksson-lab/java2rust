@@ -142,11 +142,43 @@ pub fn lower_numeric_binary_expr(
     if op == BinaryOp::UShr {
         return lower_unsigned_right_shift_expr(left, right, plan);
     }
+    if let Some(expr) = lower_java_integer_binary_expr(op, &left, &right, &plan) {
+        return expr;
+    }
     crate::expr_render::binary_expr(
         op,
         apply_coercions(left, &plan.left),
         apply_coercions(right, &plan.right),
     )
+}
+
+fn lower_java_integer_binary_expr(
+    op: BinaryOp,
+    left: &RustExpr,
+    right: &RustExpr,
+    plan: &NumericBinaryPromotionPlan,
+) -> Option<RustExpr> {
+    if !matches!(plan.promoted, PrimitiveType::Int | PrimitiveType::Long) {
+        return None;
+    }
+    let method = match op {
+        BinaryOp::Add => "wrapping_add",
+        BinaryOp::Sub => "wrapping_sub",
+        BinaryOp::Mul => "wrapping_mul",
+        BinaryOp::Div => "wrapping_div",
+        BinaryOp::Rem => "wrapping_rem",
+        BinaryOp::Shl => "wrapping_shl",
+        BinaryOp::Shr => "wrapping_shr",
+        _ => return None,
+    };
+    let left = crate::emit::emit_expr(&apply_coercions(left.clone(), &plan.left));
+    let right = crate::emit::emit_expr(&apply_coercions(right.clone(), &plan.right));
+    if matches!(op, BinaryOp::Shl | BinaryOp::Shr) {
+        return Some(RustExpr::Raw(format!(
+            "({left}).{method}(({right}) as u32)"
+        )));
+    }
+    Some(RustExpr::Raw(format!("({left}).{method}({right})")))
 }
 
 pub fn lower_unsigned_right_shift_expr(
@@ -161,7 +193,7 @@ pub fn lower_unsigned_right_shift_expr(
     let left = crate::emit::emit_expr(&apply_coercions(left, &plan.left));
     let right = crate::emit::emit_expr(&apply_coercions(right, &plan.right));
     RustExpr::Raw(format!(
-        "(({left} as {unsigned_ty}) >> {right}) as {signed_ty}"
+        "(({left} as {unsigned_ty}).wrapping_shr(({right}) as u32)) as {signed_ty}"
     ))
 }
 

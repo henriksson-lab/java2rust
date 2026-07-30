@@ -143,6 +143,12 @@ Landed in this batch:
   JLS implicit narrowing cast after the promoted operation. The shared
   assignment-value hook is used by statement, expression, array, and static
   storage assignment paths.
+- Integer binary `+`, `-`, `*`, `/`, `%`, `<<`, and `>>` now lower through Rust
+  wrapping operations for Java `int`/`long` promoted operands, and `>>>` uses a
+  wrapping unsigned carrier shift. This removes debug/release drift for binary
+  overflow and masks shift distances. Divide-by-zero still surfaces as a Rust
+  panic rather than a catchable `ArithmeticException`, and `++`/`--` wrapping is
+  still pending.
 
 1. Add a generated-Rust parse gate to focused corpus scripts.
    - Report parse failures separately from type-check errors.
@@ -414,7 +420,7 @@ Completion checklist for any audit marked `fixed locally`:
 |---|---:|---|
 | `0001` loop back edges invisible | open | Binding/CFG |
 | `0002` object aliasing/clones | open | Clone discipline, then object representation |
-| `0003` integer arithmetic semantics | open | Deferred arithmetic slice |
+| `0003` integer arithmetic semantics | partial | Binary int/long overflow and shift-distance masking fixed; divide-by-zero exception integration and update-expression wrapping remain |
 | `0004` string concat absorbs arithmetic | fixed locally | Moved to `claude_audits/done`; Rust IR shape tags prevent recurrence |
 | `0005` unsigned right shift | fixed locally | Moved to `claude_audits/done`; arithmetic slice should add shift-distance masking |
 | `0006` move analysis fragmented | open | CallableAnalysis, BindingId, CFG |

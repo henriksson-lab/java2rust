@@ -4706,7 +4706,7 @@ class JavaShiftPromotion {
     assert!(
         translation
             .rust
-            .contains("((value >> 12) as f64) / Self::SCALE")
+            .contains("((value).wrapping_shr((12) as u32) as f64) / Self::SCALE")
             && !translation.rust.contains("value >> 12 as f64"),
         "{}",
         translation.rust
@@ -4714,7 +4714,7 @@ class JavaShiftPromotion {
     assert!(
         translation
             .rust
-            .contains("((((high & 4095i64) << 40) + (low >> 24)) as f64) / Self::SCALE")
+            .contains("((((high & 4095i64).wrapping_shl((40) as u32)).wrapping_add((low).wrapping_shr((24) as u32)) as f64) / Self::SCALE")
             && !translation.rust.contains("+ (low >> 24) as f64"),
         "{}",
         translation.rust
@@ -4758,14 +4758,16 @@ class JavaUnsignedRightShift {
     assert!(
         translation
             .rust
-            .contains("return ((value as u32) >> 8) as i32;")
-            && translation.rust.contains("return value >> 8;")
+            .contains("return ((value as u32).wrapping_shr((8) as u32)) as i32;")
             && translation
                 .rust
-                .contains("return ((value as u64) >> 8) as i64;")
+                .contains("return (value).wrapping_shr((8) as u32);")
             && translation
                 .rust
-                .contains("value = ((value as u32) >> 8) as i32;")
+                .contains("return ((value as u64).wrapping_shr((8) as u32)) as i64;")
+            && translation
+                .rust
+                .contains("value = ((value as u32).wrapping_shr((8) as u32)) as i32;")
             && !translation.rust.contains("value = 8;"),
         "{}",
         translation.rust
@@ -4777,6 +4779,71 @@ class JavaUnsignedRightShift {
             name: "fixture",
             rust: translation.rust,
             tests: "",
+        }],
+    );
+}
+
+#[test]
+fn java_integer_binary_ops_wrap_and_mask_shift_distance() {
+    let translation = translate_source(
+        r#"
+class JavaIntegerBinarySemantics {
+    int multiplyAdd(int a, int b) {
+        return a * b + a;
+    }
+
+    int minDiv(int value) {
+        return value / -1;
+    }
+
+    int shiftInt(int value, int count) {
+        return value << count;
+    }
+
+    long shiftLong(long value, int count) {
+        return value << count;
+    }
+
+    int unsignedShiftInt(int value, int count) {
+        return value >>> count;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(".wrapping_mul(")
+            && translation.rust.contains(".wrapping_add(")
+            && translation.rust.contains(".wrapping_div(")
+            && translation.rust.contains(".wrapping_shl(")
+            && translation.rust.contains(".wrapping_shr(")
+            && !translation.rust.contains("value << count")
+            && !translation.rust.contains("value >> count"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "java_integer_binary_semantics",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn integer_binary_ops_match_java_wrapping_edges() {
+        let fixture = JavaIntegerBinarySemantics {};
+        assert_eq!(fixture.multiply_add(2_000_000_000, 2), 1_705_032_704);
+        assert_eq!(fixture.min_div(i32::MIN), i32::MIN);
+        assert_eq!(fixture.shift_int(1, 33), 2);
+        assert_eq!(fixture.shift_long(1, 65), 2);
+        assert_eq!(fixture.unsigned_shift_int(-1, 33), 2_147_483_647);
+    }
+}
+"#,
         }],
     );
 }
@@ -7871,16 +7938,16 @@ class CompoundAssignmentNarrowing {
     );
 
     assert!(
-        translation.rust.contains("b = ((b as i32) + 300) as i8;")
+        translation.rust.contains("b = (b as i32).wrapping_add(300) as i8;")
             && translation
                 .rust
-                .contains("s = ((s as i32) * 100000) as i16;")
+                .contains("s = (s as i32).wrapping_mul(100000) as i16;")
             && translation.rust.contains(
-                "c = char::from_u32(((((c as u32) as i32) + 1) as u32) & 0xffff).unwrap_or('\\0');"
+                "c = char::from_u32(((((c as u32) as i32).wrapping_add(1)) as u32) & 0xffff).unwrap_or('\\0');"
             )
             && translation
                 .rust
-                .contains("self.take({ b = ((b as i32) + 300) as i8; b } as i32)"),
+                .contains("self.take({ b = (b as i32).wrapping_add(300) as i8; b } as i32)"),
         "{}",
         translation.rust
     );

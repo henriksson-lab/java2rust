@@ -100,6 +100,13 @@ promoted result back to `byte`, `short`, or `char` targets. The shared
 assignment-value helper is used for ordinary statements, expression-valued
 assignments, array targets, and static storage assignment paths.
 
+2026-07-30 integer-binary semantics checkpoint: Java `int`/`long` binary
+arithmetic now lowers through wrapping Rust methods for `+`, `-`, `*`, `/`, and
+`%`, and all Java shift operators use wrapping/masked shift counts. This fixes
+debug/release overflow drift and Java shift-distance masking for binary
+expressions. Remaining arithmetic semantics work: catchable
+`ArithmeticException` for divide/remainder-by-zero and wrapping `++`/`--`.
+
 ## 2026-07-28 Batch Status: Borrow Drift Narrowing
 
 Latest full boundary before this slice:
