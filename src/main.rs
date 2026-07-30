@@ -619,8 +619,9 @@ fn run_translate_batch(
         &report.analysis_profile,
         &report.timings,
     )?;
-    let mut status =
-        String::from("source\trust_path\ttranslate_status\tdiagnostics\tinvalid_patterns\n");
+    let mut status = String::from(
+        "source\trust_path\ttranslate_status\tdiagnostics\tinvalid_patterns\tunsupported_members\n",
+    );
     let mut manifest =
         String::from("index\tsource\trust_path\trust_hash\tdiagnostics\tinvalid_patterns\n");
     let write_start = Instant::now();
@@ -635,12 +636,18 @@ fn run_translate_batch(
             );
         }
         let invalid_patterns = count_invalid_patterns(&translation.rust);
+        let unsupported_members = translation
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "unsupported_member")
+            .count();
         status.push_str(&format!(
-            "{}\t{}\tok\t{}\t{}\n",
+            "{}\t{}\tok\t{}\t{}\t{}\n",
             translation.path,
             rust_path.display(),
             translation.diagnostics.len(),
-            invalid_patterns
+            invalid_patterns,
+            unsupported_members
         ));
         manifest.push_str(&format!(
             "{}\t{}\t{}\t{}\t{}\t{}\n",

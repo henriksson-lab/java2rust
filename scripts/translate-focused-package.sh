@@ -459,7 +459,7 @@ if [[ "$run_resolver_bench" -eq 1 ]]; then
 fi
 printf "resolver_bench\t%s\t%s\t%s\n" "$resolver_status" "$resolver_elapsed_ms" "$resolver_log" >> "$phase_events_path"
 
-printf "source\trust_path\ttranslate_status\tdiagnostics\tinvalid_patterns\n" > "$status_path"
+printf "source\trust_path\ttranslate_status\tdiagnostics\tinvalid_patterns\tunsupported_members\n" > "$status_path"
 mapfile -t java_files < <(find "$primary" -type f -name '*.java' | sort)
 
 if [[ "${#java_files[@]}" -eq 0 ]]; then
@@ -492,6 +492,27 @@ idiom_signal_count() {
   local path="$1"
   local signal="$2"
   awk -F '\t' -v signal="$signal" 'NR > 1 && $1 == signal { found = 1; print $2 } END { if (!found) print 0 }' "$path"
+}
+
+status_column_sum() {
+  local path="$1"
+  local column="$2"
+  awk -F '\t' -v column="$column" '
+    NR == 1 {
+      for (i = 1; i <= NF; i++) {
+        if ($i == column) {
+          target = i
+        }
+      }
+      next
+    }
+    target > 0 {
+      sum += $target
+    }
+    END {
+      print sum + 0
+    }
+  ' "$path"
 }
 
 translate_one() {
@@ -533,8 +554,9 @@ translate_one() {
   fi
   elapsed_ms="$(elapsed_ms_since "$start_ms")"
   printf "translate_end\t%s\t%s\t%s\t%s\t%s\t%s\n" "$BASHPID" "$index" "$java_file" "$elapsed_ms" "$status" "$rust_path" >> "$event_path"
-  local diagnostics invalid_patterns
+  local diagnostics invalid_patterns unsupported_members
   diagnostics="$(wc -l < "$log_path" | tr -d ' ')"
+  unsupported_members="$(grep -E '(^|[[:space:]])unsupported_member:' "$log_path" | wc -l | tr -d ' ')"
   invalid_patterns="$(
     {
       grep -E 'compile_error!|downcast::<.*>\(\)\.expect\("invalid Java cast"\)|\.add_all\(|\.put\(|unsupported Java lambda|unsupported Java method reference|unsupported Java array creation' "$rust_path" || true
@@ -542,7 +564,7 @@ translate_one() {
         | grep -v -E 'let mut [A-Za-z_][A-Za-z0-9_]*: Option<.*> = None;' || true
     } | wc -l | tr -d ' '
   )"
-  printf "%s\t%s\t%s\t%s\t%s\n" "$java_file" "$rust_path" "$status" "$diagnostics" "$invalid_patterns"
+  printf "%s\t%s\t%s\t%s\t%s\t%s\n" "$java_file" "$rust_path" "$status" "$diagnostics" "$invalid_patterns" "$unsupported_members"
 }
 
 export -f translate_one
@@ -2627,7 +2649,7 @@ python3 "$repo_root/scripts/sweep-generated-idioms.py" \
 idiom_sweep_elapsed_ms="$(elapsed_ms_since "$idiom_sweep_start_ms")"
 printf "idiom_sweep\tok\t%s\t%s\n" "$idiom_sweep_elapsed_ms" "$idiom_sweep_md" >> "$phase_events_path"
 unsupported_statement_count="$(idiom_signal_count "$idiom_sweep_tsv" "unsupported_statements")"
-unsupported_member_count="$(idiom_signal_count "$idiom_sweep_tsv" "unsupported_members")"
+unsupported_member_count="$(( $(idiom_signal_count "$idiom_sweep_tsv" "unsupported_members") + $(status_column_sum "$status_path" "unsupported_members") ))"
 unsupported_expression_count="$(idiom_signal_count "$idiom_sweep_tsv" "unsupported_expressions")"
 unmodelled_type_count="$(idiom_signal_count "$idiom_sweep_tsv" "unmodelled_types")"
 unmodelled_call_site_count="$(idiom_signal_count "$idiom_sweep_tsv" "unmodelled_call_sites")"

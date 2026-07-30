@@ -273,6 +273,19 @@ fn translate_batch_cli_writes_phase_and_worker_events() {
 
     let status = fs::read_to_string(out_dir.join("status.tsv")).unwrap();
     assert_eq!(status.lines().count(), 3, "{status}");
+    assert!(
+        status.starts_with(
+            "source\trust_path\ttranslate_status\tdiagnostics\tinvalid_patterns\tunsupported_members\n"
+        ),
+        "{status}"
+    );
+    assert!(
+        status.lines().skip(1).all(|line| {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            fields.len() == 6
+        }),
+        "{status}"
+    );
     assert!(status.contains("\tok\t"), "{status}");
 
     let manifest = fs::read_to_string(out_dir.join("batch-manifest.tsv")).unwrap();
@@ -391,6 +404,52 @@ fn translate_batch_cli_writes_phase_and_worker_events() {
     );
 }
 
+#[test]
+fn translate_batch_cli_counts_unsupported_member_diagnostics_in_status() {
+    let dir = unique_temp_dir("translate_batch_unsupported_member_status");
+    let source_dir = dir.join("java");
+    let out_dir = dir.join("out");
+    let generated_dir = out_dir.join("generated");
+    fs::create_dir_all(&source_dir).unwrap();
+    fs::write(
+        source_dir.join("StaticInit.java"),
+        r#"
+public class StaticInit {
+    static {
+        int value = 1;
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_new-java2rust"))
+        .arg("translate-batch")
+        .arg("--primary")
+        .arg(&source_dir)
+        .arg("--out-dir")
+        .arg(&out_dir)
+        .arg("--generated-dir")
+        .arg(&generated_dir)
+        .output()
+        .expect("run translate-batch");
+    assert!(
+        output.status.success(),
+        "translate-batch failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let status = fs::read_to_string(out_dir.join("status.tsv")).unwrap();
+    let row = status
+        .lines()
+        .nth(1)
+        .unwrap_or_else(|| panic!("missing status row\n{status}"));
+    let fields = row.split('\t').collect::<Vec<_>>();
+    assert_eq!(fields.len(), 6, "{status}");
+    assert!(fields[5].parse::<usize>().unwrap_or(0) > 0, "{status}");
+}
+
 fn write_comparable_batch_output(root: &Path, hash: &str) {
     fs::create_dir_all(root).unwrap();
     fs::write(
@@ -405,7 +464,7 @@ fn write_comparable_batch_output(root: &Path, hash: &str) {
     fs::write(
         root.join("status.tsv"),
         format!(
-            "source\trust_path\ttranslate_status\tdiagnostics\tinvalid_patterns\nA.java\t{}/generated/00001_A.rs\tok\t0\t0\n",
+            "source\trust_path\ttranslate_status\tdiagnostics\tinvalid_patterns\tunsupported_members\nA.java\t{}/generated/00001_A.rs\tok\t0\t0\t0\n",
             root.display()
         ),
     )
@@ -568,6 +627,7 @@ public class Broken {
         r#"#!/usr/bin/env bash
 set -u
 set -o pipefail
+printf 'Warning unsupported_member: static initializer\n' >&2
 printf 'pub struct Broken {\n'
 "#,
     )
@@ -603,6 +663,7 @@ printf 'pub struct Broken {\n'
         "{summary}"
     );
     assert!(summary.contains("cargo_type_errors_valid\t0"), "{summary}");
+    assert!(summary.contains("unsupported_members\t1"), "{summary}");
     assert!(!summary.contains("parse_failures\t0"), "{summary}");
     let parse_failures = fs::read_to_string(out.join("parse-failures.tsv")).unwrap();
     assert!(

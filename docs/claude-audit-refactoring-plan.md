@@ -60,6 +60,12 @@ Landed in this batch:
 - Parser-local Java expression fallbacks no longer construct `Expr::Raw` for
   invalid numeric literals, invalid hex floating literals, or expression-helper
   parse failures; these now surface as `Expr::Unsupported`.
+- Focused corpus summaries now emit all planned measurement keys:
+  `parse_failures`, unsupported statement/member/expression counts,
+  `unmodelled_types`, `unmodelled_call_sites`, and `noop_facade_methods`.
+  Unsupported member counts include batch/non-batch translation diagnostics,
+  so skipped unsupported members are visible even when no Rust marker is
+  generated.
 
 1. Add a generated-Rust parse gate to focused corpus scripts.
    - Report parse failures separately from type-check errors.
@@ -286,8 +292,8 @@ the fixes do not become more isolated rules.
 | `0015` static initializer blocks dropped | partial | Loud diagnostic now; full class-init later |
 | `0016` no-op JDK facades | open | Core facade coverage |
 | `0017` generic bounds dropped | open | Typed type parsing and generics |
-| `0018` compile metric blind spots | open | Parse gate and coverage counters |
-| `0019` raw Java expression fallback | partial | Unsupported expression nodes |
+| `0018` compile metric blind spots | partial | Parse gate and coverage counters |
+| `0019` raw Java expression fallback | partial | Raw fallback fixed; switch expressions still unsupported |
 | `0020` text block processing | open | Literal semantics |
 | `0021` instanceof pattern binding | open | BindingId and pattern lowering |
 | `0022` source-text type reparsing | open | Typed type parser |

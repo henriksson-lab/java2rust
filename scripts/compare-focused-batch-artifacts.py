@@ -36,21 +36,42 @@ def normalize_manifest(path: Path) -> list[tuple[str, str, str, str, str]]:
     return normalized
 
 
-def normalize_status(path: Path) -> list[tuple[str, str, str, str, str]]:
+def normalize_status(path: Path) -> list[tuple[str, str, str, str, str, str]]:
     rows = read_tsv(path)
     if not rows:
         return []
     header = rows[0]
-    expected = ["source", "rust_path", "translate_status", "diagnostics", "invalid_patterns"]
+    expected = [
+        "source",
+        "rust_path",
+        "translate_status",
+        "diagnostics",
+        "invalid_patterns",
+        "unsupported_members",
+    ]
     if header != expected:
         raise ValueError(f"{path}: unexpected status header: {header}")
     normalized = []
     for row in rows[1:]:
-        if len(row) != 5:
+        if len(row) != 6:
             raise ValueError(f"{path}: malformed status row: {row}")
-        source, rust_path, translate_status, diagnostics, invalid_patterns = row
+        (
+            source,
+            rust_path,
+            translate_status,
+            diagnostics,
+            invalid_patterns,
+            unsupported_members,
+        ) = row
         normalized.append(
-            (source, Path(rust_path).name, translate_status, diagnostics, invalid_patterns)
+            (
+                source,
+                Path(rust_path).name,
+                translate_status,
+                diagnostics,
+                invalid_patterns,
+                unsupported_members,
+            )
         )
     return normalized
 
