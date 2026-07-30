@@ -278,7 +278,7 @@ the fixes do not become more isolated rules.
 | `0010` fallibility disagrees | open | Callable fallibility plan |
 | `0011` dyn Any fallback cascades | open | Opaque external shims |
 | `0012` invalid unsupported diagnostics | fixed locally | Moved to `claude_audits/done` |
-| `0013` nested downcast names | open | Type-name normalization |
+| `0013` nested downcast names | fixed locally | Moved to `claude_audits/done` |
 | `0014` labelled statements deleted | fixed locally | CFG liveness still needs labelled edges |
 | `0015` static initializer blocks dropped | partial | Loud diagnostic now; full class-init later |
 | `0016` no-op JDK facades | open | Core facade coverage |
