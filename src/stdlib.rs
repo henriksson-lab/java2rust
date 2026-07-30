@@ -15427,7 +15427,7 @@ fn expr_uses_java_platform_facades(expr: &Expr) -> bool {
                     }) || expr_uses_java_platform_facades(&case.value)
                 })
         }
-        Expr::InstanceOf { expr, ty } => {
+        Expr::InstanceOf { expr, ty, .. } => {
             expr_uses_java_platform_facades(expr) || java_type_uses_java_platform_facade(ty)
         }
         Expr::Lambda { body, .. } => match body {
@@ -15818,7 +15818,7 @@ fn expr_uses_java_erased_object_runtime_support(expr: &Expr) -> bool {
                     }) || expr_uses_java_erased_object_runtime_support(&case.value)
                 })
         }
-        Expr::InstanceOf { expr, ty } => {
+        Expr::InstanceOf { expr, ty, .. } => {
             expr_uses_java_erased_object_runtime_support(expr)
                 || java_type_uses_java_erased_object_runtime_support(ty)
         }

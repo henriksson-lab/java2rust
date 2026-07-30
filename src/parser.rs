@@ -417,7 +417,7 @@ fn qualify_java_sql_expr(expr: &mut Expr, imported: &JavaSqlImports) {
                 }
             }
         }
-        Expr::Cast { ty, expr } | Expr::InstanceOf { expr, ty } => {
+        Expr::Cast { ty, expr } | Expr::InstanceOf { expr, ty, .. } => {
             qualify_java_sql_type(ty, imported);
             qualify_java_sql_expr(expr, imported);
         }
@@ -2083,19 +2083,7 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
                     }),
             ),
         },
-        "instanceof_expression" => Expr::InstanceOf {
-            expr: Box::new(
-                node.child_by_field_name("left")
-                    .map(|left| parse_expr_node(left, source))
-                    .unwrap_or_else(|| {
-                        unsupported_expr_node(node, "instanceof_expression without left operand")
-                    }),
-            ),
-            ty: node
-                .child_by_field_name("right")
-                .map(|right| parse_type_node(right, source))
-                .unwrap_or_else(|| JavaType::Unknown("instanceof".to_string())),
-        },
+        "instanceof_expression" => parse_instanceof_expr_node(node, source),
         "lambda_expression" => parse_lambda_node(node, source),
         "method_reference" => parse_method_reference_node(node, source),
         "class_literal" => Expr::ClassLiteral(
@@ -2387,6 +2375,25 @@ pub fn parse_hierarchy_type(src: &str) -> JavaType {
 
 fn parse_type_node(node: tree_sitter::Node, source: &str) -> JavaType {
     parse_type_text(text(node, source))
+}
+
+fn parse_instanceof_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
+    Expr::InstanceOf {
+        expr: Box::new(
+            node.child_by_field_name("left")
+                .map(|left| parse_expr_node(left, source))
+                .unwrap_or_else(|| {
+                    unsupported_expr_node(node, "instanceof_expression without left operand")
+                }),
+        ),
+        ty: node
+            .child_by_field_name("right")
+            .map(|right| parse_type_node(right, source))
+            .unwrap_or_else(|| JavaType::Unknown("instanceof".to_string())),
+        binding: node
+            .child_by_field_name("name")
+            .map(|name| text(name, source).to_string()),
+    }
 }
 
 fn parse_new_type_node(node: tree_sitter::Node, source: &str) -> JavaType {

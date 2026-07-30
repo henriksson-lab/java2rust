@@ -287,6 +287,7 @@ pub enum Expr {
     InstanceOf {
         expr: Box<Expr>,
         ty: JavaType,
+        binding: Option<String>,
     },
     Lambda {
         params: Vec<LambdaParam>,

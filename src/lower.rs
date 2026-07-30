@@ -84,8 +84,8 @@ use crate::conversion_lowering::{
     apply_reused_optional_unwrap, apply_slot_expr_conversion, construct_optional_value_for_target,
 };
 use crate::conversion_plan::{
-    CloneRecoveryPolicy, DispatchCoercionPolicy, LoweredType, ReturnValuePlan, Slot,
-    SlotConversionPlan, actual_shape_for_slot_expr, actual_shape_for_slot_expr_with_slot,
+    CloneRecoveryPolicy, DispatchCoercionPolicy, InstanceOfCheck, LoweredType, ReturnValuePlan,
+    Slot, SlotConversionPlan, actual_shape_for_slot_expr, actual_shape_for_slot_expr_with_slot,
     argument_slot, assignment_statement_plan_for_target, assignment_value_plan_for_shape,
     assignment_value_plan_for_target, borrowed_element_target_matches_element, condition_slot,
     index_slot, optional_element_slot_shape_with_facts, optional_slot_construction_plan_for_actual,
@@ -3678,9 +3678,10 @@ fn substitute_expr_vars(expr: &Expr, bindings: &[(&str, &Expr)]) -> Expr {
             ty: ty.clone(),
             expr: Box::new(substitute_expr_vars(expr, bindings)),
         },
-        Expr::InstanceOf { expr, ty } => Expr::InstanceOf {
+        Expr::InstanceOf { expr, ty, binding } => Expr::InstanceOf {
             expr: Box::new(substitute_expr_vars(expr, bindings)),
             ty: ty.clone(),
+            binding: binding.clone(),
         },
         Expr::Literal(_)
         | Expr::This
@@ -4761,6 +4762,26 @@ fn lower_stmt(
                 exclusive_terminal_branch_read_names: else_exclusive_reads.as_ref(),
                 ..ctx
             };
+            if let Some(stmt) = lower_instanceof_pattern_if_stmt(
+                condition,
+                then_block,
+                else_block.as_ref(),
+                env,
+                wrap_returns_in_ok,
+                then_ctx,
+                else_ctx,
+                &then_refinements,
+                &else_refinements,
+            ) {
+                out.push(stmt);
+                refine_local_shapes_from_branch_assignments(
+                    then_block,
+                    else_block.as_ref(),
+                    env,
+                    ctx,
+                );
+                return;
+            }
             out.push(if_stmt(
                 lower_expr_for_slot(condition, env, condition_slot(), ctx),
                 lower_block_with_refinements(
@@ -5675,8 +5696,83 @@ fn exact_type_refinement_from_rejected_instanceof_condition(
     }
 }
 
+fn lower_instanceof_pattern_if_stmt(
+    condition: &Expr,
+    then_block: &Block,
+    else_block: Option<&Block>,
+    env: &ShapeEnv,
+    wrap_returns_in_ok: bool,
+    then_ctx: LowerCtx,
+    else_ctx: LowerCtx,
+    then_refinements: &ExprRefinements,
+    else_refinements: &ExprRefinements,
+) -> Option<RustStmt> {
+    let Expr::InstanceOf {
+        expr,
+        ty,
+        binding: Some(binding),
+    } = condition
+    else {
+        return None;
+    };
+    let plan = plan_instanceof(
+        expr,
+        ty,
+        env,
+        ExprShapeContext {
+            signatures: Some(then_ctx.signatures),
+            representations: Some(then_ctx.representations),
+            facts: Some(then_ctx.facts),
+        },
+    );
+    let InstanceOfCheck::ErasedObjectType { target_type } = plan.check else {
+        return None;
+    };
+    let lowered_source = lower_expr_with_refinements(expr, env, then_ctx, then_refinements);
+    let mut then_env = env.clone();
+    then_env.insert_local_shape(binding.clone(), instanceof_pattern_binding_shape(ty));
+    let then_body = lower_block_with_refinements(
+        then_block,
+        &mut then_env,
+        wrap_returns_in_ok,
+        then_ctx,
+        then_refinements,
+    );
+    let else_body = else_block
+        .map(|block| {
+            lower_block_with_refinements(
+                block,
+                &mut env.clone(),
+                wrap_returns_in_ok,
+                else_ctx,
+                else_refinements,
+            )
+        })
+        .unwrap_or_default();
+    Some(RustStmt::Raw(format!(
+        "if let Some({}) = {}.downcast_ref::<{}>() {{\n{}}}{}",
+        crate::parser::to_snake_case(binding),
+        emit::emit_expr(&lowered_source),
+        target_type,
+        emit::emit_statements(&then_body, 1),
+        if else_body.is_empty() {
+            String::new()
+        } else {
+            format!(" else {{\n{}}}", emit::emit_statements(&else_body, 1))
+        }
+    )))
+}
+
+fn instanceof_pattern_binding_shape(ty: &JavaType) -> RustSlotShape {
+    if ty == &JavaType::String {
+        borrowed_string_content_shape()
+    } else {
+        RustSlotShape::for_storage(ty.clone())
+    }
+}
+
 fn exact_type_refinement_from_instanceof_expr(expr: &Expr) -> Option<(String, JavaType)> {
-    let Expr::InstanceOf { expr, ty } = expr else {
+    let Expr::InstanceOf { expr, ty, .. } = expr else {
         return None;
     };
     let Expr::Var(local_name) = expr.as_ref() else {
@@ -10099,7 +10195,7 @@ fn lower_expr_with_refinements(
                 &plan,
             )
         }
-        Expr::InstanceOf { expr, ty } => {
+        Expr::InstanceOf { expr, ty, .. } => {
             let plan = plan_instanceof(
                 expr,
                 ty,

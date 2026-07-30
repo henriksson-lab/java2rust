@@ -440,7 +440,7 @@ Completion checklist for any audit marked `fixed locally`:
 | `0018` compile metric blind spots | partial | Parse gate and coverage counters |
 | `0019` raw Java expression fallback | fixed locally | Moved to `claude_audits/done`; simple switch expressions now lower to Rust `match` |
 | `0020` text block processing | fixed locally | Moved to `claude_audits/done` |
-| `0021` instanceof pattern binding | open | BindingId and pattern lowering |
+| `0021` instanceof pattern binding | partial | Positive-block `if (o instanceof T v)` now parses the binding and lowers erased-object checks as `if let Some(v) = ...downcast_ref::<T>()`; negated definite-match scopes, `&&` chains, record patterns, and broader binding analysis remain open |
 | `0022` source-text type reparsing | open | Typed type parser |
 | `0023` inner-class outer capture | open | Object reference representation |
 | `0024` numeric limit constants stubbed to zero | fixed locally | Moved to `claude_audits/done`; JDK wrapper/Math/GZIP/Font values fixed and unknown primitive constants now fail loudly |

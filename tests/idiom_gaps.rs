@@ -2811,6 +2811,42 @@ class ErasedObjectBooleanInstanceof {
 }
 
 #[test]
+fn instanceof_pattern_variable_basic_block_compiles() {
+    let translation = translate_source(
+        r#"
+class InstanceofPatternVariableBasic {
+    int run(Object o) {
+        int t = 1;
+        if (o instanceof String s) {
+            t = s.length();
+        }
+        return t;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("if let Some(s) = o.downcast_ref::<String>()")
+            && translation.rust.contains("t = s.len() as i32;")
+            && !translation.rust.contains("s.length()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "instanceof_pattern_variable_basic",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn erased_object_raw_list_instanceof_uses_vec_erasure_runtime_target() {
     let translation = translate_source(
         r#"

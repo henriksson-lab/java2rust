@@ -1938,7 +1938,7 @@ fn analyze_expr_with_context(
             field_types,
             semantic_facts,
         ),
-        Expr::InstanceOf { expr, ty } => {
+        Expr::InstanceOf { expr, ty, .. } => {
             if let Expr::Var(binding) = expr.as_ref() {
                 record_use(
                     facts,

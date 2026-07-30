@@ -589,7 +589,10 @@ fn cause_or_self_rethrow_target<'a>(
     then_expr: &'a Expr,
     else_expr: &'a Expr,
 ) -> Option<(&'a Expr, String)> {
-    let Expr::InstanceOf { expr: cause, ty } = condition else {
+    let Expr::InstanceOf {
+        expr: cause, ty, ..
+    } = condition
+    else {
         return None;
     };
     let Expr::Cast { ty: cast_ty, expr } = then_expr else {

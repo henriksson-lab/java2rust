@@ -3334,7 +3334,7 @@ fn collect_dispatch_requirement_facts_from_expr(expr: &Expr, facts: &mut FactSet
             push_dispatch_requirement_fact(facts, ty, DispatchRequirementKind::NeedsDowncast);
             collect_dispatch_requirement_facts_from_expr(expr, facts);
         }
-        Expr::InstanceOf { expr, ty } => {
+        Expr::InstanceOf { expr, ty, .. } => {
             push_dispatch_requirement_fact(facts, ty, DispatchRequirementKind::NeedsInstanceof);
             collect_dispatch_requirement_facts_from_expr(expr, facts);
         }

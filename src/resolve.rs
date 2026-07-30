@@ -538,7 +538,7 @@ fn qualify_nested_expr_types(expr: &mut Expr, direct_nested: &HashMap<String, St
                 }
             }
         }
-        Expr::Cast { ty, expr } | Expr::InstanceOf { ty, expr } => {
+        Expr::Cast { ty, expr } | Expr::InstanceOf { ty, expr, .. } => {
             qualify_nested_java_type(ty, direct_nested);
             qualify_nested_expr_types(expr, direct_nested);
         }

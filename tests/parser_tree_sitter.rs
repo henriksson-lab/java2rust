@@ -313,6 +313,41 @@ class VarargsParameters {
 }
 
 #[test]
+fn parses_instanceof_type_pattern_binding() {
+    let parsed = parse_java_source(
+        r#"
+class InstanceofPatternBinding {
+    int run(Object o) {
+        if (o instanceof String s) {
+            return s.length();
+        }
+        return 0;
+    }
+}
+"#,
+    );
+    let ty = &parsed.program.types[0];
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "run" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let body = method.body.as_ref().unwrap();
+    let Stmt::If { condition, .. } = &body.statements[0] else {
+        panic!("expected if statement");
+    };
+    let Expr::InstanceOf { ty, binding, .. } = condition else {
+        panic!("expected instanceof condition");
+    };
+
+    assert_eq!(ty, &JavaType::String);
+    assert_eq!(binding.as_deref(), Some("s"));
+}
+
+#[test]
 fn parses_varargs_parameter_after_fixed_parameter() {
     let parsed = parse_java_source(
         r#"
