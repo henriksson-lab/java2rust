@@ -2012,6 +2012,10 @@ class StringEqualitySlots {
         return values[0] == expected;
     }
 
+    static boolean firstEquals(String[] values, String expected) {
+        return values[0].equals(expected);
+    }
+
     static boolean literalIs(String value) {
         return value == "Chrom";
     }
@@ -2027,6 +2031,11 @@ class StringEqualitySlots {
         translation
             .rust
             .contains("values[0 as usize].as_str() == expected")
+            && translation
+                .rust
+                .matches("AUDIT(java-string-identity)")
+                .count()
+                == 3
             && translation
                 .rust
                 .contains("value == \"Chrom\".to_string().as_str()")
@@ -2052,6 +2061,7 @@ class StringEqualitySlots {
 fn compares_string_slots() {
     let values = vec!["Chrom".to_string(), "Other".to_string()];
     assert!(StringEqualitySlots::first_is(&values, "Chrom"));
+    assert!(StringEqualitySlots::first_equals(&values, "Chrom"));
     assert!(StringEqualitySlots::literal_is("Chrom"));
     assert!(StringEqualitySlots::sorted_same(&values, &values));
 }

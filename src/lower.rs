@@ -142,11 +142,11 @@ use crate::method_reference_plan::{
 };
 use crate::nullability_plan::{TernaryNullRefinementPlan, plan_ternary_null_refinement};
 use crate::operator_lowering::lower_equality_comparison_expr_for_op;
-use crate::operator_lowering::{lower_null_comparison_expr, lower_unary_expr};
 use crate::operator_lowering::{
-    lower_numeric_binary_expr, plan_equality_comparison, plan_equality_comparison_with_facts,
-    plan_numeric_binary_promotion,
+    EqualityComparisonPlan, lower_numeric_binary_expr, plan_equality_comparison,
+    plan_equality_comparison_with_facts, plan_numeric_binary_promotion,
 };
+use crate::operator_lowering::{lower_null_comparison_expr, lower_unary_expr};
 use crate::rewrite::{MethodControlFlowPlan, method_has_tail_recursive_loop_rewrite};
 use crate::rust_ir::*;
 use crate::shape_projection::{
@@ -10586,12 +10586,18 @@ fn lower_binary_expr(
                 plan,
             );
         }
-        return lower_equality_comparison_expr_for_op(
+        let equality_plan = plan_equality_comparison(&left_shape, &right_shape);
+        let equality_expr = lower_equality_comparison_expr_for_op(
             op,
-            plan_equality_comparison(&left_shape, &right_shape),
+            equality_plan.clone(),
             lower_expr_with_refinements(left, env, ctx, refinements),
             lower_expr_with_refinements(right, env, ctx, refinements),
         );
+        return if matches!(equality_plan, EqualityComparisonPlan::StringView { .. }) {
+            java_string_identity_audit_projection(equality_expr)
+        } else {
+            equality_expr
+        };
     }
     if let Some(plan) = numeric_promotion {
         return lower_numeric_binary_expr(
@@ -11646,6 +11652,13 @@ fn lower_static_storage_primitive_update_expr(
             )?)
         )))
     }
+}
+
+fn java_string_identity_audit_projection(expr: RustExpr) -> RustExpr {
+    RustExpr::Raw(format!(
+        "/* AUDIT(java-string-identity): Java `==`/`!=` on String was lowered to value comparison. */ {}",
+        emit::emit_expr(&expr)
+    ))
 }
 
 fn lower_local_update_value_expr(
