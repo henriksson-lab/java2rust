@@ -2250,6 +2250,7 @@ fn external_pack_manifest_parser_emits_pack_boundary_and_member_facts() {
         external-pack-api dep.variant dep.variant.Builder setContig semantic fluent-mutator mutates-receiver definitely-non-null return=dep.variant.Builder
         external-pack-api dep.variant dep.variant.Reader read mapped getter read-only maybe-null args=1 return=dep.variant.Record throws=DepIoError rust-return=usize
         external-pack-constructor dep.variant dep.variant.Builder 0 semantic
+        external-pack-constructor dep.variant dep.variant.Builder 2 semantic
         external-pack-constructor dep.variant dep.variant.LegacyReader 1 unsupported
         external-pack-field dep.variant dep.variant.Record TYPE semantic type=dep.variant.RecordType value=DepVariantKind::TYPE const-kind=enum-variant
         external-pack-field dep.variant dep.variant.Record RAW_HANDLE unsupported
@@ -2522,6 +2523,28 @@ fn external_pack_manifest_parser_emits_pack_boundary_and_member_facts() {
         builder_constructor_argument.alias_policy,
         ExternalArgumentAliasPolicy::Borrowed
     );
+    let builder_constructor = parsed
+        .facts
+        .external_constructor_for_key(&CallableKey::constructor(
+            "dep.variant.Builder",
+            vec![
+                new_java2rust::facts::TypePattern::Any,
+                new_java2rust::facts::TypePattern::Erased(new_java2rust::facts::TypeKey {
+                    type_name: "Options".to_string(),
+                }),
+            ],
+        ))
+        .expect("constructor argument type facts should refine constructor callable keys");
+    assert_eq!(
+        builder_constructor.arg_types,
+        vec![
+            JavaType::Unknown("_".to_string()),
+            JavaType::Named {
+                name: "Options".to_string(),
+                args: Vec::new(),
+            },
+        ]
+    );
     let conversion_adapter = parsed
         .facts
         .external_conversion_adapter_for("dep.variant.Leaf", "dep.variant.Root")
@@ -2686,6 +2709,16 @@ fn callable_keys_lookup_external_pack_api_constructor_and_field_facts() {
     let builtin_field = new_java2rust::external_packs::external_field_for_key(&builtin_key)
         .expect("builtin pack field should be addressable through the key index");
     assert_eq!(builtin_field.field_kind, ExternalFieldKind::EnumVariant);
+}
+
+#[test]
+fn builtin_external_pack_constructor_lookup_uses_callable_key_index() {
+    let key = CallableKey::constructor("HDF5File", vec![new_java2rust::facts::TypePattern::Any]);
+    let constructor = new_java2rust::external_packs::external_constructor_for_key(&key)
+        .expect("builtin constructor fact should remain addressable by callable key");
+
+    assert_eq!(constructor.type_name, "HDF5File");
+    assert_eq!(constructor.arg_types.len(), 1);
 }
 
 #[test]

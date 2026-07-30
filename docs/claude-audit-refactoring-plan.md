@@ -267,6 +267,12 @@ Landed in this batch:
 - Borrowed method receiver parenthesizing and redundant shared-borrow collapse
   now prefer typed `RustExpr::Unary` shapes and keep rendered-string checks only
   as compatibility fallbacks for legacy `RustExpr::Raw` carriers.
+- External-pack constructor facts now copy typed
+  `external-pack-constructor-argument ... type=...` metadata into the
+  constructor fact's `arg_types`, so constructor callable keys can distinguish
+  typed slots instead of collapsing to arity-only `Any` patterns. Built-in pack
+  constructor indexing stores each fact's callable key and keeps the old
+  `(type, arity)` map as compatibility fallback.
 
 1. Add a `CallableAnalysis` shell.
    - Introduce `src/callable_analysis.rs`.

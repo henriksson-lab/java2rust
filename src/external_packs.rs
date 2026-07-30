@@ -2061,9 +2061,31 @@ pub fn parse_external_pack_manifest(source: &str) -> ExternalPackManifestParse {
         }
     }
 
+    refine_constructor_fact_arg_types_from_argument_effects(&mut facts);
     diagnostics.extend(audit_external_pack_fact_boundaries(&facts));
 
     ExternalPackManifestParse { facts, diagnostics }
+}
+
+fn refine_constructor_fact_arg_types_from_argument_effects(facts: &mut FactSet) {
+    for constructor in &mut facts.external_constructor_facts {
+        for argument in &facts.external_constructor_argument_effect_facts {
+            if !external_type_name_matches(&argument.type_name, &constructor.type_name)
+                || argument.arg_count != constructor.arg_types.len()
+            {
+                continue;
+            }
+            let Some(parameter_type) = &argument.parameter_type else {
+                continue;
+            };
+            let Some(slot) = constructor.arg_types.get_mut(argument.parameter_index) else {
+                continue;
+            };
+            if matches!(slot, JavaType::Unknown(_)) {
+                *slot = parameter_type.clone();
+            }
+        }
+    }
 }
 
 fn strip_comment(line: &str) -> &str {
@@ -29404,12 +29426,11 @@ fn builtin_external_pack_lookup_index() -> &'static BuiltinExternalPackLookupInd
             }
             for fact in facts.external_constructor_facts.iter().rev() {
                 for type_alias in external_receiver_lookup_aliases(&fact.type_name) {
+                    let mut key = fact.callable_key();
+                    key.owner.type_name = type_alias.clone();
                     index
                         .constructors_by_key
-                        .entry(CallableKey::constructor(
-                            type_alias.clone(),
-                            vec![crate::facts::TypePattern::Any; fact.arg_types.len()],
-                        ))
+                        .entry(key)
                         .or_insert_with(|| fact.clone());
                     index
                         .constructors
