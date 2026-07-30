@@ -369,6 +369,9 @@ impl ExternalPackManifest {
         if self.pack_name == BROAD_HELLBENDER_UTILS_PACK {
             push_broad_hellbender_conversion_facts(facts);
         }
+        if self.pack_name == SAMTOOLS_UTIL_PACK {
+            push_samtools_util_conversion_facts(facts);
+        }
         for field in self.field_nullability {
             facts
                 .field_nullability_facts
@@ -563,6 +566,30 @@ fn push_broad_hellbender_conversion_facts(facts: &mut FactSet) {
             "java.util.Comparator",
         ),
         ("HeaderlessSAMRecordCoordinateComparator", "Comparator"),
+    ] {
+        facts
+            .external_conversion_adapter_facts
+            .push(ExternalConversionAdapterFact {
+                from_type: from_type.to_string(),
+                to_type: to_type.to_string(),
+                kind: ExternalConversionAdapterKind::Into,
+                provenance: FactProvenance::ExternalLibraryPack,
+            });
+    }
+}
+
+fn push_samtools_util_conversion_facts(facts: &mut FactSet) {
+    for (from_type, to_type) in [
+        (
+            "htsjdk.samtools.seekablestream.SeekablePathStream",
+            "java.io.InputStream",
+        ),
+        (
+            "htsjdk.samtools.seekablestream.SeekablePathStream",
+            "InputStream",
+        ),
+        ("SeekablePathStream", "java.io.InputStream"),
+        ("SeekablePathStream", "InputStream"),
     ] {
         facts
             .external_conversion_adapter_facts
@@ -20617,7 +20644,9 @@ const SAMTOOLS_UTIL_MODELED_CONSTRUCTORS: &[ExternalPackModeledConstructor] = &[
     modeled_semantic_constructor("htsjdk.samtools.seekablestream.SeekableBufferedStream", 1),
     modeled_semantic_constructor("SeekableBufferedStream", 1),
     modeled_semantic_constructor("htsjdk.samtools.seekablestream.SeekablePathStream", 1),
+    modeled_semantic_constructor("htsjdk.samtools.seekablestream.SeekablePathStream", 2),
     modeled_semantic_constructor("SeekablePathStream", 1),
+    modeled_semantic_constructor("SeekablePathStream", 2),
     modeled_semantic_constructor("htsjdk.samtools.util.BinaryCodec", 0),
     modeled_semantic_constructor("htsjdk.samtools.util.BinaryCodec", 1),
     modeled_semantic_constructor("BinaryCodec", 0),

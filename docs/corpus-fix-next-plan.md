@@ -252,6 +252,17 @@ expectation rows around collection output cloning:
 that as a separate stream ownership-policy cleanup, not as evidence against the
 nullable joining display fix.
 
+2026-07-30 HTSJDK receiverless overload delegation facts: the samtools-util
+external pack now models `SeekablePathStream(Path, Function)` and publishes
+`SeekablePathStream -> InputStream` conversion adapters for simple and qualified
+type names. This lets receiverless overload delegation such as
+`open(new SeekablePathStream(path, wrapper))` select the current receiver
+`open(InputStream)` overload via pack constructor/conversion facts instead of
+emitting a free `open(...)` fallback. Focused coverage:
+`external_receiverless_instance_overload_delegation_uses_pack_constructor_and_conversion`,
+`receiverless_instance_overload_delegation_uses_current_self_and_subtype_argument`,
+and `htsjdk_samtools_util_pack_declares_interval_and_iterator_boundary`.
+
 2026-07-29 raw collection runtime target slice: `Object instanceof List` now
 uses the same erased JDK collection carrier as raw `List` type rendering:
 `Vec<Box<dyn std::any::Any>>`. This removes the phantom `List` runtime target

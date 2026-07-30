@@ -5679,6 +5679,71 @@ class ReceiverlessOverloadedStaticCall {
 }
 
 #[test]
+fn receiverless_instance_overload_delegation_uses_current_self_and_subtype_argument() {
+    let translation = translate_source(
+        r#"
+class ReceiverlessInstanceOverloadDelegation {
+    static class BaseStream {}
+    static class LocalPath {}
+    static class LocalFunction {}
+    static class LocalSeekablePathStream extends BaseStream {
+        LocalSeekablePathStream(LocalPath path, LocalFunction wrapper) {}
+    }
+    static class Iterator {}
+
+    Iterator open(BaseStream in) {
+        return new Iterator();
+    }
+
+    Iterator open(LocalPath path, LocalFunction wrapper) {
+        return open(new LocalSeekablePathStream(path, wrapper));
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("return self.open_")
+            && !translation.rust.contains("return open("),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn external_receiverless_instance_overload_delegation_uses_pack_constructor_and_conversion() {
+    let translation = translate_source(
+        r#"
+import java.io.InputStream;
+import java.nio.file.Path;
+import java.util.Iterator;
+import java.util.function.Function;
+import htsjdk.samtools.seekablestream.SeekableByteChannel;
+import htsjdk.samtools.seekablestream.SeekablePathStream;
+
+class ExternalReceiverlessInstanceOverloadDelegation {
+    Iterator open(InputStream in) {
+        return null;
+    }
+
+    Iterator open(Path path, Function<SeekableByteChannel, SeekableByteChannel> wrapper) {
+        return open(new SeekablePathStream(path, wrapper));
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("return self.open_input_stream(")
+            && translation.rust.contains("SeekablePathStream::new_")
+            && translation.rust.contains(".into())")
+            && !translation.rust.contains("return open("),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn lowercase_jdk_static_owner_aliases_recover_canonical_static_calls() {
     let translation = translate_source(
         r#"

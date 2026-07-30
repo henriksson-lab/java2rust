@@ -14751,6 +14751,19 @@ fn htsjdk_samtools_util_pack_declares_interval_and_iterator_boundary() {
                 args: Vec::new(),
             }],
         ),
+        (
+            "SeekablePathStream",
+            vec![
+                JavaType::Named {
+                    name: "Path".to_string(),
+                    args: Vec::new(),
+                },
+                JavaType::Named {
+                    name: "Function".to_string(),
+                    args: Vec::new(),
+                },
+            ],
+        ),
         ("BinaryCodec", Vec::new()),
         (
             "BinaryCodec",
@@ -14798,6 +14811,28 @@ fn htsjdk_samtools_util_pack_declares_interval_and_iterator_boundary() {
             "{type_name}/{:?} should be owned by the samtools-util external pack, not stdlib",
             args.len()
         );
+    }
+
+    for (from_type, to_type) in [
+        ("SeekablePathStream", "InputStream"),
+        ("SeekablePathStream", "java.io.InputStream"),
+        (
+            "htsjdk.samtools.seekablestream.SeekablePathStream",
+            "InputStream",
+        ),
+        (
+            "htsjdk.samtools.seekablestream.SeekablePathStream",
+            "java.io.InputStream",
+        ),
+    ] {
+        let adapter = facts
+            .external_conversion_adapter_facts
+            .iter()
+            .find(|fact| fact.from_type == from_type && fact.to_type == to_type)
+            .unwrap_or_else(|| {
+                panic!("samtools-util conversion fact should include {from_type} -> {to_type}")
+            });
+        assert_eq!(adapter.provenance, FactProvenance::ExternalLibraryPack);
     }
 }
 
