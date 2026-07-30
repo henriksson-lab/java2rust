@@ -1072,11 +1072,58 @@ fn non_literal_static_final_const_type_and_value(
     if !is_static_final_field(field) || field.initializer.is_none() {
         return None;
     }
-    let JavaType::Named { name, .. } = &field.ty else {
-        return None;
+    let name = match &field.ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => name,
+        _ => return None,
     };
     let rust_name = rust_name_for_java_named_type(name);
+    if matches!(rust_name.as_str(), "Pattern" | "JavaUtilRegexPattern")
+        && let Some(value) = static_final_pattern_compile_literal(field.initializer.as_ref()?)
+    {
+        return Some((
+            RustType::Named(rust_name),
+            RustExpr::Call {
+                function: Box::new(owner_associated_path_projection(
+                    "Pattern",
+                    "compile_static",
+                )),
+                args: vec![RustExpr::Literal(format!("{value:?}"))],
+            },
+        ));
+    }
     Some((RustType::Named(rust_name.clone()), RustExpr::Var(rust_name)))
+}
+
+fn static_final_pattern_compile_literal(initializer: &Expr) -> Option<String> {
+    let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        ..
+    } = initializer
+    else {
+        return None;
+    };
+    if !matches!(
+        name.as_str(),
+        "compile" | "compile_1" | "compile_static" | "Pattern::compile"
+    ) {
+        return None;
+    }
+    let Expr::Var(receiver_name) = receiver.as_ref() else {
+        return None;
+    };
+    let receiver_name = rust_name_for_java_named_type(receiver_name);
+    if !matches!(
+        receiver_name.as_str(),
+        "Pattern" | "JavaUtilRegexPattern" | "pattern" | "java_util_regex_pattern"
+    ) {
+        return None;
+    }
+    let [Expr::Literal(Literal::String(value))] = args.as_slice() else {
+        return None;
+    };
+    Some(value.clone())
 }
 
 fn static_final_default_const_type_and_value(field: &FieldDecl) -> Option<(RustType, RustExpr)> {

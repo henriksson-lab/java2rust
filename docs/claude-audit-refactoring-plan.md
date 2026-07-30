@@ -71,6 +71,9 @@ Landed in this batch:
   shared buffer storage instead of unit structs with default-returning
   `append`/`toString`/`length` stubs. Constructor lowering uses explicit arity
   names (`new_0`, `new_1`) for these overloaded Java constructors.
+- `Pattern`/`Matcher` now use lightweight stateful JDK facade support for
+  literal `Pattern.compile(...)`, `matcher(...)`, `matches()`, and `group(...)`
+  paths instead of always emitting inert `Default::default()` facades.
 - Focused corpus summaries now emit all planned measurement keys:
   `parse_failures`, unsupported statement/member/expression counts,
   `unmodelled_types`, `unmodelled_call_sites`, and `noop_facade_methods`.
@@ -365,7 +368,7 @@ Completion checklist for any audit marked `fixed locally`:
 | `0013` nested downcast names | fixed locally | Moved to `claude_audits/done` |
 | `0014` labelled statements deleted | fixed locally | Moved to `claude_audits/done`; CFG liveness still needs labelled edges |
 | `0015` static initializer blocks dropped | partial | Loud diagnostic now; full class-init later |
-| `0016` no-op JDK facades | partial | `StringBuilder`/`StringBuffer` are stateful; `Arrays`, `Pattern`, `FastMath`, and broader facade fallibility still open |
+| `0016` no-op JDK facades | partial | `StringBuilder`/`StringBuffer` and literal `Pattern`/`Matcher` paths are stateful; `Arrays`, `FastMath`, and broader facade fallibility still open |
 | `0017` generic bounds dropped | open | Typed type parsing and generics |
 | `0018` compile metric blind spots | partial | Parse gate and coverage counters |
 | `0019` raw Java expression fallback | fixed locally | Moved to `claude_audits/done`; simple switch expressions now lower to Rust `match` |

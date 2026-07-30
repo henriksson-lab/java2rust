@@ -22380,7 +22380,7 @@ public class UsesStaticFinalPattern {
     assert!(
         translation
             .rust
-            .contains("const LINE_PATTERN: Pattern = Pattern;")
+            .contains("const LINE_PATTERN: Pattern = Pattern::compile_static(\"<line/>\");")
             && translation
                 .rust
                 .contains("let m: Matcher = Self::LINE_PATTERN.matcher(line.trim());")
@@ -22394,7 +22394,18 @@ public class UsesStaticFinalPattern {
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn static_pattern_matches_runtime_input() {
+        assert!(UsesStaticFinalPattern::matches_line("  <line/>  "));
+        assert!(!UsesStaticFinalPattern::matches_line("<rect/>"));
+    }
+}
+"#,
         }],
     );
 }

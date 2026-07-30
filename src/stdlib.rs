@@ -4763,6 +4763,135 @@ fn java_string_buffer_insert(value: &mut String, offset: i32, inserted: String) 
     value.insert_str(offset, &inserted);
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Pattern {
+    pattern: &'static str,
+}
+
+impl Pattern {
+    pub const CASE_INSENSITIVE: i32 = 2;
+
+    pub const fn compile_static(pattern: &'static str) -> Pattern {
+        Pattern { pattern }
+    }
+
+    pub fn compile<S: AsRef<str>>(pattern: S) -> Pattern {
+        Pattern {
+            pattern: Box::leak(pattern.as_ref().to_string().into_boxed_str()),
+        }
+    }
+
+    pub fn matcher<S: AsRef<str>>(&self, input: S) -> Matcher {
+        let input = input.as_ref().to_string();
+        let matched = java_pattern_matches(self.pattern, &input);
+        let groups = if matched {
+            java_pattern_capture_groups(self.pattern, &input)
+        } else {
+            Vec::new()
+        };
+        Matcher {
+            input,
+            matched,
+            groups,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct Matcher {
+    input: String,
+    matched: bool,
+    groups: Vec<String>,
+}
+
+impl Matcher {
+    pub fn matches(&self) -> bool {
+        self.matched
+    }
+
+    pub fn group<T: Into<i32>>(&self, index: T) -> String {
+        let index = index.into();
+        if index == 0 && self.matched {
+            return self.input.clone();
+        }
+        self.groups
+            .get((index - 1).max(0) as usize)
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+
+fn java_pattern_matches(pattern: &str, input: &str) -> bool {
+    match pattern {
+        "[0-9]" => input.chars().count() == 1 && input.chars().all(|ch| ch.is_ascii_digit()),
+        "\\d+" | "[0-9]+" => !input.is_empty() && input.chars().all(|ch| ch.is_ascii_digit()),
+        "\\s+" => !input.is_empty() && input.chars().all(|ch| ch.is_whitespace()),
+        _ if pattern.contains('(') => !java_pattern_capture_groups(pattern, input).is_empty(),
+        _ => input == java_pattern_simple_regex_literal(pattern),
+    }
+}
+
+fn java_pattern_capture_groups(pattern: &str, input: &str) -> Vec<String> {
+    let mut groups = Vec::new();
+    let mut remaining = input;
+    let parts = pattern.split('(').collect::<Vec<_>>();
+    if parts.len() == 1 {
+        return groups;
+    }
+    let mut prefix = java_pattern_simple_regex_literal(parts[0]);
+    if !remaining.starts_with(prefix) {
+        return Vec::new();
+    }
+    remaining = &remaining[prefix.len()..];
+    for part in parts.iter().skip(1) {
+        let Some((capture_pattern, tail)) = part.split_once(')') else {
+            return Vec::new();
+        };
+        let tail_literal = java_pattern_simple_regex_literal(tail);
+        let capture_len = if tail_literal.is_empty() {
+            remaining.len()
+        } else if let Some(index) = remaining.find(tail_literal) {
+            index
+        } else {
+            return Vec::new();
+        };
+        let capture = &remaining[..capture_len];
+        if !java_pattern_group_matches(capture_pattern, capture) {
+            return Vec::new();
+        }
+        groups.push(capture.to_string());
+        remaining = &remaining[capture_len..];
+        if !tail_literal.is_empty() {
+            remaining = &remaining[tail_literal.len()..];
+        }
+        prefix = tail_literal;
+    }
+    if remaining.is_empty() || prefix.is_empty() {
+        groups
+    } else {
+        Vec::new()
+    }
+}
+
+fn java_pattern_group_matches(pattern: &str, input: &str) -> bool {
+    match pattern {
+        "[0-9]" | "\\d" => input.chars().count() == 1 && input.chars().all(|ch| ch.is_ascii_digit()),
+        "[0-9]+" | "\\d+" => !input.is_empty() && input.chars().all(|ch| ch.is_ascii_digit()),
+        ".+" => !input.is_empty(),
+        ".*" => true,
+        _ => input == java_pattern_simple_regex_literal(pattern),
+    }
+}
+
+fn java_pattern_simple_regex_literal(regex: &str) -> &str {
+    match regex {
+        "\\t" | "\\\\t" => "\t",
+        "\\n" | "\\\\n" => "\n",
+        "\\r" | "\\\\r" => "\r",
+        other => other,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct URLConnection;
 
@@ -13364,6 +13493,10 @@ fn is_builtin_external_facade_type(name: &str) -> bool {
             | "StringBuilder"
             | "Class"
             | "JavaClass"
+            | "Pattern"
+            | "Matcher"
+            | "JavaUtilRegexPattern"
+            | "JavaUtilRegexMatcher"
             | "File"
             | "Path"
             | "URI"
@@ -14929,6 +15062,10 @@ pub fn program_uses_java_platform_facades(program: &Program) -> bool {
                 | "Iterator"
                 | "StringBuffer"
                 | "StringBuilder"
+                | "Pattern"
+                | "Matcher"
+                | "JavaUtilRegexPattern"
+                | "JavaUtilRegexMatcher"
                 | "AtomicInteger"
                 | "ClassLoader"
                 | "BufferedImage"
@@ -14957,6 +15094,8 @@ pub fn program_uses_java_platform_facades(program: &Program) -> bool {
                 | "java.util.Iterator"
                 | "java.lang.StringBuffer"
                 | "java.lang.StringBuilder"
+                | "java.util.regex.Pattern"
+                | "java.util.regex.Matcher"
                 | "java.util.concurrent.atomic.AtomicInteger"
                 | "java.lang.ClassLoader"
                 | "java.awt.image.BufferedImage"
@@ -15277,6 +15416,10 @@ pub fn is_java_platform_facade_type_name(name: &str) -> bool {
             | "Iterator"
             | "StringBuffer"
             | "StringBuilder"
+            | "Pattern"
+            | "Matcher"
+            | "JavaUtilRegexPattern"
+            | "JavaUtilRegexMatcher"
             | "AtomicInteger"
             | "ClassLoader"
             | "Serializable"
