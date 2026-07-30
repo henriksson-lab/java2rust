@@ -7385,6 +7385,9 @@ impl ExternalApiFacadeSupport {
                         type_key, arg_count, index,
                     )
                     .and_then(|effect| effect.parameter_type)
+                })
+                .or_else(|| {
+                    unique_external_constructor_fact_arg_type(facts, type_key, arg_count, index)
                 });
             if let Some(parameter_type) = parameter_type {
                 self.add_java_type(&parameter_type);
@@ -12349,18 +12352,65 @@ fn external_facade_constructor_argument_rust_type(
     arg_count: usize,
     index: usize,
 ) -> Option<String> {
-    let effect = facts
+    let java_ty = facts
         .external_constructor_argument_effect_for(type_name, arg_count, index)
         .cloned()
         .or_else(|| {
             crate::external_packs::java_platform_constructor_argument_effect_for(
                 type_name, arg_count, index,
             )
+        })
+        .and_then(|effect| effect.parameter_type)
+        .or_else(|| {
+            unique_external_constructor_fact_arg_type(facts, type_name, arg_count, index)
         })?;
-    let java_ty = effect.parameter_type?;
     Some(crate::emit::emit_type(&rust_type_for_java_type_with_facts(
         &java_ty, facts,
     )))
+}
+
+fn unique_external_constructor_fact_arg_type(
+    facts: &FactSet,
+    type_name: &str,
+    arg_count: usize,
+    index: usize,
+) -> Option<JavaType> {
+    let arg_types = unique_external_constructor_fact_arg_types(facts, type_name, arg_count)?;
+    let arg_type = arg_types.get(index)?;
+    java_constructor_fact_arg_type_is_precise(arg_type).then(|| arg_type.clone())
+}
+
+fn unique_external_constructor_fact_arg_types(
+    facts: &FactSet,
+    type_name: &str,
+    arg_count: usize,
+) -> Option<Vec<JavaType>> {
+    let mut matches = Vec::new();
+    for fact in facts.external_constructor_facts.iter().chain(
+        crate::external_packs::builtin_external_library_packs()
+            .external_constructor_facts
+            .iter(),
+    ) {
+        if external_constructor_type_matches(&fact.type_name, type_name)
+            && fact.arg_types.len() == arg_count
+            && !matches.iter().any(|seen| seen == &fact.arg_types)
+        {
+            matches.push(fact.arg_types.clone());
+        }
+    }
+    if matches.len() == 1 {
+        matches.pop()
+    } else {
+        None
+    }
+}
+
+fn java_constructor_fact_arg_type_is_precise(java_type: &JavaType) -> bool {
+    match java_type {
+        JavaType::Unknown(_) | JavaType::Wildcard(_) | JavaType::Void => false,
+        JavaType::Array(element) => java_constructor_fact_arg_type_is_precise(element),
+        JavaType::Primitive(_) | JavaType::String | JavaType::Named { .. } => true,
+    }
 }
 
 fn external_facade_eq_impl(ty: &str) -> String {

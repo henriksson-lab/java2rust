@@ -11373,19 +11373,69 @@ class ExternalConstructorCaller {
     assert!(
         translation
             .rust
-            .contains("pub fn new_1<T0>(_arg0: T0) -> Self"),
+            .contains("pub fn new_1(_arg0: String) -> Self"),
         "{}",
         translation.rust
     );
     assert!(
         translation
             .rust
-            .contains("pub fn new_2<T0, T1>(_arg0: T0, _arg1: T1) -> Self"),
+            .contains("pub fn new_2(_arg0: String, _arg1: i32) -> Self"),
         "{}",
         translation.rust
     );
     assert!(
         !translation.rust.contains("ExternalBox::new(label"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn external_constructor_support_keeps_generic_args_for_same_arity_overloads() {
+    let mut facts = FactSet::default();
+    facts
+        .external_constructor_facts
+        .push(ExternalConstructorFact {
+            type_name: "ExternalChoice".to_string(),
+            arg_types: vec![JavaType::String],
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+    facts
+        .external_constructor_facts
+        .push(ExternalConstructorFact {
+            type_name: "ExternalChoice".to_string(),
+            arg_types: vec![JavaType::Primitive(PrimitiveType::Int)],
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+
+    let translation = translate_source_with_facts(
+        r#"
+class ExternalChoiceConstructorCaller {
+    ExternalChoice one(String label) {
+        return new ExternalChoice(label);
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn new<T0>(_arg0: T0) -> Self"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("pub fn new(_arg0: String) -> Self"),
         "{}",
         translation.rust
     );
@@ -11436,7 +11486,7 @@ class ExternalConstantConstructorCaller {
     assert!(
         translation
             .rust
-            .contains("pub fn new<T0, T1>(_arg0: T0, _arg1: T1) -> Self { Default::default() }"),
+            .contains("pub fn new(_arg0: String, _arg1: i32) -> Self { Default::default() }"),
         "{}",
         translation.rust
     );

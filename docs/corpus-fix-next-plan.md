@@ -331,6 +331,13 @@ unmodelled body, rather than a `T: Default` method or synthetic
 `FutureGetResult` placeholder. This lets source `Future<T>` fields and method
 calls agree on one generic support surface.
 
+Constructor signature follow-up: external constructor support now consumes
+unique `(type, arity)` `ExternalConstructorFact.arg_types` when emitting facade
+constructor signatures, instead of requiring separate argument-effect facts for
+the same information. Same-arity overload ambiguity still falls back to generic
+shim parameters, because Rust cannot overload a single constructor name by
+argument type.
+
 2026-07-30 VCF source-hierarchy note: the ignored
 `source_hierarchy_instanceof_repair_keeps_supertype_slot_adapted` fixture still
 fails because source-super loop variables are represented as concrete

@@ -37,6 +37,12 @@ for that audit item are complete, and mention the move in the checkpoint notes
 or commit summary. Leave partial, exploratory, or inspiration-only audit files
 in `claude_audits/` until the mapped issue is fully closed.
 
+Checkpoint requirement: every future audit-closing patch must include the code
+fix, regression/focused verification, audit-status update, and the corresponding
+`claude_audits/<issue>.md` move into
+`/home/mahogny/github/claude/new_java2rust/claude_audits/done` before it is
+committed. If any of those pieces is missing, keep the audit open.
+
 ## Next Batch: Measurement And Unsupported Safety
 
 Goal: unmodelled behavior must be visible as a diagnostic, parseable Rust, or a
