@@ -288,11 +288,7 @@ impl<'a> EffectiveFacts<'a> {
             .iter()
             .filter(|override_fact| type_name_matches(&override_fact.type_name, type_name))
             .filter(|override_fact| {
-                !external_simple_erased_override_conflicts_with_parsed_source(
-                    override_fact,
-                    type_name,
-                    self.facts,
-                )
+                !erased_override_conflicts_with_parsed_source(override_fact, type_name, self.facts)
             })
             .max_by_key(|override_fact| {
                 (
@@ -480,12 +476,12 @@ fn type_name_matches(fact_type_name: &str, query_type_name: &str) -> bool {
     crate::facts::external_type_name_matches(fact_type_name, query_type_name)
 }
 
-fn external_simple_erased_override_conflicts_with_parsed_source(
+fn erased_override_conflicts_with_parsed_source(
     override_fact: &HierarchyOverride,
     query_type_name: &str,
     facts: &FactSet,
 ) -> bool {
-    override_fact.provenance == FactProvenance::ExternalLibraryPack
+    override_fact.provenance != FactProvenance::UserOverride
         && matches!(override_fact.strategy, HierarchyStrategy::ErasedObject)
         && facts.type_capability_overrides.iter().any(|capability| {
             capability.provenance == FactProvenance::ParsedSource

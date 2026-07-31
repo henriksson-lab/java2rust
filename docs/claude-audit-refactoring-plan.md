@@ -31,6 +31,10 @@ and divergence logs.
 
 Operating invariant: a Claude audit is not done until its issue file has been
 moved to `/home/mahogny/github/claude/new_java2rust/claude_audits/done`.
+Whenever an audit-backed fix is completed, move the corresponding
+`claude_audits/*.md` file into that `done/` directory in the same checkpoint as
+the code, tests, and plan update. Do not leave completed audit files in the
+active audit directory.
 
 ## Audit File Definition Of Done
 
@@ -214,6 +218,21 @@ Landed in this batch:
 - One-dimensional array compound assignments with side-effecting indices now
   hoist the Java index once, save the old element value before evaluating the
   RHS, and reuse the shared numeric binary/narrowing planners for writeback.
+- Parsed-source concrete object representations now reject non-user erased
+  hierarchy overrides from external packs, corpus source-summary boundaries,
+  and dispatch fallback pressure. Signature planning applies the same selected
+  representation principle, so a declared parsed-source concrete peer parameter
+  no longer widens to `Box<dyn Any>` solely because stale summary/fallback facts
+  mention erased object dispatch.
+- 2026-07-31 reduced VCF rerun:
+  `.tmp/corpus-rerun-20260731-vcf-signature-erasure-guard-r1` translated 9/9
+  files with `parse_failures=0`, `stubbed_constants=0`, and
+  `cargo_check_errors=22`, down from the prior 41-error
+  parsed-concrete-fallback rerun. The `other.name`/`other.line_type` on
+  `Box<dyn Any>` family is gone. Remaining VCF blockers are mainly nullable
+  enum switch/match comparisons, value-vs-borrowed concrete argument
+  adaptation, concrete/concrete `instanceof`, enum `hash_code`, and the
+  existing unsupported member markers.
 
 1. Add a generated-Rust parse gate to focused corpus scripts.
    - Report parse failures separately from type-check errors.

@@ -6688,7 +6688,10 @@ fn signature_erased_object_boundary_constraints_with_effective_facts(
 ) -> Vec<SignatureConstraint> {
     let fact_policy =
         signature_boundary_representation_fact_policy_with_effective_facts(java_ty, facts);
-    if !is_declared_java_object_type(java_ty) || fact_policy.object_representation_facts {
+    if !is_declared_java_object_type(java_ty)
+        || signature_declared_type_has_parsed_source_capability(java_ty, facts)
+        || fact_policy.object_representation_facts
+    {
         return Vec::new();
     }
     vec![
@@ -6786,9 +6789,21 @@ fn external_erased_override_conflicts_with_parsed_source(
     query_type_name: &str,
     facts: &EffectiveFacts<'_>,
 ) -> bool {
-    override_fact.provenance == FactProvenance::ExternalLibraryPack
+    override_fact.provenance != FactProvenance::UserOverride
         && matches!(override_fact.strategy, HierarchyStrategy::ErasedObject)
         && facts.has_parsed_source_type_capability_for_name(query_type_name)
+}
+
+fn signature_declared_type_has_parsed_source_capability(
+    java_ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+) -> bool {
+    match java_ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+            facts.has_parsed_source_type_capability_for_name(name)
+        }
+        _ => false,
+    }
 }
 
 fn signature_hierarchy_override_type_name_matches(
@@ -6883,9 +6898,16 @@ pub fn signature_slot_dispatch_requirement_policy_with_effective_facts(
             constraints: Vec::new(),
         };
     }
-    let requirements = java_type_name_for_signature_dispatch(java_ty)
+    let mut requirements = java_type_name_for_signature_dispatch(java_ty)
         .map(|type_name| facts.dispatch_requirements_for(type_name))
         .unwrap_or_default();
+    if matches!(source_dispatch, DispatchShape::Concrete)
+        && signature_declared_type_has_parsed_source_capability(java_ty, facts)
+    {
+        requirements.retain(|requirement| {
+            *requirement != DispatchRequirementKind::NeedsUnknownRuntimeObject
+        });
+    }
     let constraints = signature_slot_dispatch_requirement_constraints(
         role,
         source_dispatch.clone(),

@@ -4068,6 +4068,61 @@ class VariantLikeTool extends FrameworkBase<Payload> {}
 }
 
 #[test]
+fn source_summary_boundary_erasure_does_not_replace_parsed_source_type() {
+    let parsed = parse_java_source(
+        r#"
+abstract class VCFCompoundHeaderLine {
+    String name;
+}
+
+class VCFInfoHeaderLine extends VCFCompoundHeaderLine {}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let mut source_type_modes = HashMap::new();
+    source_type_modes.insert(
+        "VCFCompoundHeaderLine".to_string(),
+        DependencyMode::SourceSummary,
+    );
+    source_type_modes.insert(
+        "VCFInfoHeaderLine".to_string(),
+        DependencyMode::PrimarySource,
+    );
+
+    let mut facts = resolved.facts.clone();
+    let boundary_policy = extend_representation_facts_for_source_summary_superclass_boundaries(
+        [&resolved.program].into_iter(),
+        &source_type_modes,
+        &mut facts,
+    );
+    assert_eq!(
+        boundary_policy.boundary_types,
+        vec!["VCFCompoundHeaderLine".to_string()]
+    );
+    assert_eq!(
+        boundary_policy.facts[0].provenance,
+        FactProvenance::CorpusAnalysis
+    );
+    assert_eq!(
+        boundary_policy.facts[0].strategy,
+        HierarchyStrategy::ErasedObject
+    );
+
+    let representations = plan_representations(&resolved.program, &facts);
+    let representation = representations
+        .type_representation("VCFCompoundHeaderLine")
+        .unwrap();
+    assert_eq!(
+        representation.representation,
+        ObjectRepresentation::ConcreteStruct
+    );
+    assert_eq!(
+        representation.provenance,
+        RepresentationProvenance::ParsedSource
+    );
+}
+
+#[test]
 fn external_erased_override_does_not_replace_parsed_source_type() {
     let parsed = parse_java_source(
         r#"
@@ -4153,16 +4208,24 @@ class VCFInfoHeaderLine extends VCFCompoundHeaderLine {}
         strategy: HierarchyStrategy::ErasedObject,
         provenance: FactProvenance::ExternalLibraryPack,
     });
+    facts
+        .dispatch_requirement_facts
+        .push(DispatchRequirementFact {
+            type_name: "VCFCompoundHeaderLine".to_string(),
+            requirement: DispatchRequirementKind::NeedsUnknownRuntimeObject,
+            provenance: FactProvenance::ParsedSource,
+        });
 
     let representations = plan_representations(&resolved.program, &facts);
 
+    let representation = representations
+        .type_representation("VCFCompoundHeaderLine")
+        .unwrap();
     assert_eq!(
-        representations
-            .type_representation("VCFCompoundHeaderLine")
-            .unwrap()
-            .representation,
+        representation.representation,
         ObjectRepresentation::ConcreteStruct
     );
+    assert!(representation.provenance == RepresentationProvenance::ParsedSource);
 
     let pack_facts = new_java2rust::external_packs::htsjdk_vcf_pack_facts();
     let mut combined_pack_facts = resolved.facts.clone();
@@ -4211,6 +4274,53 @@ class VCFInfoHeaderLine extends VCFCompoundHeaderLine {}
         !translation
             .rust
             .contains("pub type VCFCompoundHeaderLine = Box<dyn std::any::Any>"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn parsed_source_declared_peer_param_keeps_concrete_signature_under_erased_pressure() {
+    let source = r#"
+abstract class VCFCompoundHeaderLine {
+    String name;
+
+    boolean sameLineTypeAndName(VCFCompoundHeaderLine other) {
+        return name == other.name;
+    }
+}
+"#;
+    let parsed = parse_java_source(source);
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let mut facts = resolved.facts.clone();
+    facts.hierarchy_overrides.push(HierarchyOverride {
+        type_name: "VCFCompoundHeaderLine".to_string(),
+        strategy: HierarchyStrategy::ErasedObject,
+        provenance: FactProvenance::CorpusAnalysis,
+    });
+    facts
+        .dispatch_requirement_facts
+        .push(DispatchRequirementFact {
+            type_name: "VCFCompoundHeaderLine".to_string(),
+            requirement: DispatchRequirementKind::NeedsUnknownRuntimeObject,
+            provenance: FactProvenance::CorpusAnalysis,
+        });
+
+    let translation = translate_source_with_facts(source, &facts);
+    assert!(
+        translation
+            .rust
+            .contains("pub fn same_line_type_and_name(&self, other: &VCFCompoundHeaderLine)"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("other: Box<dyn std::any::Any>"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("other.name"),
         "{}",
         translation.rust
     );

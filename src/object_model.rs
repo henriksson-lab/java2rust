@@ -1001,6 +1001,15 @@ fn apply_erased_object_requirement_fallback(strategy: &mut ObjectStrategyPlan) {
     if matches!(strategy.strategy, ObjectRepresentation::ErasedObject) {
         return;
     }
+    if matches!(strategy.strategy, ObjectRepresentation::ConcreteStruct)
+        && strategy.has_provenance(FactProvenance::ParsedSource)
+    {
+        strategy.rejected.push(RejectedObjectStrategy {
+            strategy: ObjectRepresentation::ErasedObject,
+            reason,
+        });
+        return;
+    }
     if matches!(
         strategy.strategy,
         ObjectRepresentation::DynTrait { .. } | ObjectRepresentation::ConcreteStruct
@@ -1069,7 +1078,7 @@ fn apply_hierarchy_overrides_to_strategy_plan(
             continue;
         };
         if let Some(strategy) = plan.strategy_for_mut(&policy.type_name) {
-            if external_pack_override_should_not_replace_parsed_source(override_fact, strategy) {
+            if erased_override_should_not_replace_parsed_source(override_fact, strategy) {
                 continue;
             }
             strategy.strategy = representation;
@@ -1078,7 +1087,7 @@ fn apply_hierarchy_overrides_to_strategy_plan(
             strategy.rejected.clear();
             continue;
         }
-        if external_pack_override_should_not_insert_beside_parsed_source(override_fact, plan) {
+        if erased_override_should_not_insert_beside_parsed_source(override_fact, plan) {
             continue;
         }
         plan.insert_strategy(ObjectStrategyPlan {
@@ -1093,19 +1102,21 @@ fn apply_hierarchy_overrides_to_strategy_plan(
     }
 }
 
-fn external_pack_override_should_not_replace_parsed_source(
+fn erased_override_should_not_replace_parsed_source(
     override_fact: &HierarchyOverride,
     strategy: &ObjectStrategyPlan,
 ) -> bool {
-    override_fact.provenance == FactProvenance::ExternalLibraryPack
+    override_fact.provenance != FactProvenance::UserOverride
+        && matches!(override_fact.strategy, HierarchyStrategy::ErasedObject)
         && strategy.has_provenance(FactProvenance::ParsedSource)
 }
 
-fn external_pack_override_should_not_insert_beside_parsed_source(
+fn erased_override_should_not_insert_beside_parsed_source(
     override_fact: &HierarchyOverride,
     plan: &ObjectModelPlan,
 ) -> bool {
-    override_fact.provenance == FactProvenance::ExternalLibraryPack
+    override_fact.provenance != FactProvenance::UserOverride
+        && matches!(override_fact.strategy, HierarchyStrategy::ErasedObject)
         && plan.strategies.values().any(|strategy| {
             strategy.has_provenance(FactProvenance::ParsedSource)
                 && crate::facts::external_type_name_matches(
