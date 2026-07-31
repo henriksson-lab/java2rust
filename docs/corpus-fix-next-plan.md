@@ -7682,19 +7682,24 @@ locally. The subtype path now uses the shared
 rendered-string centralization guard rejects reintroducing
 `rendered.contains(".clone()")` in `lower.rs`.
 
-2026-07-31 ndarray assignment-order checkpoint: nested `matrix[row++][col++]`
-assignments over ndarray-backed Java 2D numeric arrays now hoist row and column
-indices before lowering the RHS, matching Java target-before-value evaluation
-for both statement assignments and assignment expressions. Compound assignments
-reuse the existing old-value capture after the indices are hoisted. Focused
-verification covers
+2026-07-31 ndarray/receiver assignment-order checkpoint: nested
+`matrix[row++][col++]` assignments over ndarray-backed Java 2D numeric arrays
+now hoist row and column indices before lowering the RHS, matching Java
+target-before-value evaluation for both statement assignments and assignment
+expressions. One-dimensional array assignments whose receiver expression has
+side effects, such as `pick(values)[i] = remember()`, also hoist the receiver
+and index before the RHS. Compound assignments reuse the existing old-value
+capture after the target subexpressions are hoisted. Focused verification
+covers
 `ndarray_assignment_with_side_effecting_indices_preserves_java_order`,
+`array_assignment_with_side_effecting_receiver_preserves_java_order`,
 `array_assignment_with_side_effecting_index_preserves_java_order`,
 `compound_array_assignment_with_side_effecting_index_preserves_java_order`,
 `rendered_string_heuristics_have_centralization_guardrails`,
 `cargo fmt --check`, `cargo check --tests --quiet`, and `git diff --check`.
-Audit `0026` remains partial because side-effecting array receivers such as
-`provider()[i] = rhs` still need receiver-temp hoisting before the RHS.
+Audit `0026` remains partial because non-array assignment places with
+side-effecting receivers, multi-level ragged array receivers, and full
+array-store exception ordering are still outside this localized slice.
 
 ## Rerun Protocol
 

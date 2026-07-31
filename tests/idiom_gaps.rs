@@ -8908,6 +8908,89 @@ mod generated_tests {
 }
 
 #[test]
+fn array_assignment_with_side_effecting_receiver_preserves_java_order() {
+    let translation = translate_source(
+        r#"
+class AssignmentOrderArrayReceiver {
+    int marker;
+    int seen;
+
+    int[] pick(int[] values) {
+        marker++;
+        return values;
+    }
+
+    int remember() {
+        seen = marker;
+        return marker;
+    }
+
+    int stmt(int[] values) {
+        marker = 0;
+        seen = -1;
+        pick(values)[0] = remember();
+        return seen;
+    }
+
+    int expr(int[] values) {
+        marker = 0;
+        seen = -1;
+        return (pick(values)[0] = remember());
+    }
+
+    int compound(int[] values) {
+        marker = 0;
+        values[0] = 10;
+        return (pick(values)[0] += remember());
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let mut __java_assignment_receiver = self.pick(values);")
+            && translation
+                .rust
+                .contains("__java_assignment_receiver[__java_assignment_index] = self.remember();")
+            && translation.rust.contains(
+                "let __java_assignment_old = __java_assignment_receiver[__java_assignment_index];"
+            )
+            && !translation
+                .rust
+                .contains("self.pick(values)[0 as usize] = self.remember();"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "assignment_order_array_receiver",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn array_receiver_runs_before_rhs() {
+        let mut fixture = AssignmentOrderArrayReceiver { marker: 0, seen: 0 };
+        let mut values = vec![0, 0];
+        assert_eq!(fixture.stmt(&mut values), 1);
+        values = vec![0, 0];
+        assert_eq!(fixture.expr(&mut values), 1);
+        values = vec![10, 0];
+        assert_eq!(fixture.compound(&mut values), 11);
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
 fn chained_array_assignment_expression_returns_assigned_value() {
     let translation = translate_source(
         r#"
