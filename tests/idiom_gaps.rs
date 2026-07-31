@@ -21213,6 +21213,41 @@ class Base64 {
 }
 
 #[test]
+fn java_assert_statements_lower_to_assertion_error_throw_paths() {
+    let translation = translate_source(
+        r#"
+class JavaAssertStatementUse {
+    int checked(int value) {
+        assert value > 0 : "positive";
+        assert value != 7;
+        return value;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("AssertionError")
+            && translation.rust.contains("positive")
+            && !translation
+                .rust
+                .contains("unsupported statement node: assert_statement")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "java_assert_statement_use",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn optional_source_receiver_uses_mut_projection_for_mutating_context_fallback() {
     let translation = translate_source(
         r#"

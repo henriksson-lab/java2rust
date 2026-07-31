@@ -7575,6 +7575,21 @@ slots. Focused verification covers
 `cargo check --tests --quiet`. This is further `0011` representation/facade
 work, but audit `0011` remains partial and its issue file must stay active.
 
+2026-07-31 Java assert lowering checkpoint: parser handling for
+`assert_statement` now lowers Java assertions into existing `if (!condition)
+throw new AssertionError(...)` IR, preserving optional assertion messages and
+reusing the normal throwable lowering path instead of emitting `compile_error!`.
+Focused verification covers
+`assert_statement_lowers_to_existing_control_flow_ir`,
+`java_assert_statements_lower_to_assertion_error_throw_paths`,
+`cargo check --tests --quiet`, and release-backed Base64 rerun
+`.tmp/corpus-fastqc-base64-single-after-assert-lowering-r1`. That rerun has
+`unsupported_statements=0`, `unsupported_expressions=0`, `stubbed_constants=0`,
+0 compile-error placeholders, and generated-Rust errors reduced from `16` to
+`11`. Remaining Base64 families are type/coercion issues: 7 mismatched types,
+one `Option<&[i8]>.cloned()` call, one `Box<dyn Any>.as_bytes` call, and one
+missing `InputStream: From<JavaIoInputStream>` conversion.
+
 ## Rerun Protocol
 
 After each fix:

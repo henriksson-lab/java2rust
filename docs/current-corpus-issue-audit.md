@@ -1564,6 +1564,17 @@ downcast patterns, 1 `Option<&[i8]>.cloned()` mismatch, 1
 `Box<dyn Any>.as_bytes` call, and 1 missing `InputStream:
 From<JavaIoInputStream>` conversion.
 
+Focused FastQC Base64 Java-assert follow-up:
+`.tmp/corpus-fastqc-base64-single-after-assert-lowering-r1` translates the
+same one-file slice with 0 translate failures, 0 parse failures,
+`unsupported_statements=0`, `unsupported_expressions=0`, `stubbed_constants=0`,
+0 compile-error placeholders, and generated-Rust errors reduced from `16` to
+`11`. Parser assert statements now lower to ordinary `if (!condition) throw new
+AssertionError(...)` IR, so the five Base64 assertion compile errors are gone.
+Remaining top families are 7 mismatched types, 1 `Option<&[i8]>.cloned()` call,
+1 `Box<dyn Any>.as_bytes` call, and 1 missing `InputStream:
+From<JavaIoInputStream>` conversion.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from

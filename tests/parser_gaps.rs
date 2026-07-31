@@ -600,7 +600,7 @@ class StaticInitializerUnsupportedMember {
 }
 
 #[test]
-fn unknown_named_block_statement_surfaces_as_unsupported_statement() {
+fn assert_statement_lowers_to_existing_control_flow_ir() {
     let parsed = parse_java_source(
         r#"
 class AssertStatementUnsupported {
@@ -613,7 +613,7 @@ class AssertStatementUnsupported {
     let fallbacks = collect_program_fallbacks(&parsed.program);
 
     assert!(
-        fallbacks
+        !fallbacks
             .iter()
             .any(|fallback| fallback.contains("assert_statement")),
         "{fallbacks:?}"

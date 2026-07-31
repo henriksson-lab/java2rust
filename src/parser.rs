@@ -1246,6 +1246,7 @@ fn parse_block_like(
             | "try_with_resources_statement"
             | "synchronized_statement"
             | "throw_statement"
+            | "assert_statement"
             | "switch_expression"
             | "switch_statement"
             | "break_statement"
@@ -1313,6 +1314,7 @@ fn parse_stmt_node(node: tree_sitter::Node, source: &str, diagnostics: &mut Diag
         "throw_statement" => first_named_child(node)
             .map(|expr| Stmt::Throw(parse_expr_node(expr, source)))
             .unwrap_or_else(|| Stmt::Unsupported("throw without expression".to_string())),
+        "assert_statement" => parse_assert_node(node, source),
         "switch_expression" | "switch_block" | "switch_statement" => {
             parse_switch_node(node, source, diagnostics)
         }
@@ -1332,6 +1334,35 @@ fn parse_stmt_node(node: tree_sitter::Node, source: &str, diagnostics: &mut Diag
 
 fn parse_label_ident(node: tree_sitter::Node, source: &str) -> String {
     to_snake_case(text(node, source))
+}
+
+fn parse_assert_node(node: tree_sitter::Node, source: &str) -> Stmt {
+    let mut exprs = named_children(node)
+        .into_iter()
+        .filter(|child| child.kind() != "comment")
+        .map(|child| parse_expr_node(child, source));
+    let Some(condition) = exprs.next() else {
+        return Stmt::Unsupported("assert without condition".to_string());
+    };
+    let message = exprs.next();
+    Stmt::If {
+        condition: Expr::Unary {
+            op: UnaryOp::Not,
+            expr: Box::new(condition),
+        },
+        then_block: Block {
+            statements: vec![Stmt::Throw(Expr::New {
+                ty: JavaType::Named {
+                    name: "AssertionError".to_string(),
+                    args: Vec::new(),
+                },
+                args: message.into_iter().collect(),
+                body: None,
+                resolved: None,
+            })],
+        },
+        else_block: None,
+    }
 }
 
 fn parse_labeled_node(
