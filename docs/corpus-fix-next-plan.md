@@ -7092,6 +7092,21 @@ families are erased-carrier field/method access, duplicate erased
 `From<T> for Box<dyn Any>` impls, modeled static constants, generic
 `Standards<T>` clone bounds, and one cast-parentheses row.
 
+2026-07-31 `.into()` receiver parenthesization checkpoint: the shared
+`into_projection` helper now parenthesizes raw/cast receivers before appending
+`.into()`, so expressions such as `Box::new(value) as Box<dyn Any>` render as
+`(Box::new(value) as Box<dyn Any>).into()` instead of invalid Rust syntax.
+Focused verification: `into_projection_parenthesizes_raw_cast_receiver`,
+`cargo check --tests --quiet`, `cargo fmt --check`, release rebuild, and
+reduced VCF rerun
+`.tmp/corpus-rerun-20260731-vcf-standard-bound-after-into-parens-r1`. That
+rerun translates 9/9 files, reports 0 parse failures and
+`unsupported_statements=0`, and reduces generated-Rust errors from 34 to 33.
+The `cast cannot be followed by a method call` row is gone. Remaining top
+families are erased-carrier field/method access, duplicate erased
+`From<T> for Box<dyn Any>` impls, modeled static constants, and generic
+`Standards<T>` clone bounds.
+
 2026-07-31 fact-backed initializer checkpoint: declared external locals whose
 initializer has a planned typed return now anchor through a general erased-type
 identity predicate in signature/lowering instead of the former

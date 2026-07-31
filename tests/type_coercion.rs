@@ -8,12 +8,12 @@ use new_java2rust::coercion::{
     apply_syntax_coercion_plan, borrowed_element_recovery_fallback_message_policy,
     borrowed_string_view_projection, collapse_redundant_shared_borrow_projection,
     dispatch_coercion_fallback_message_policy, instanceof_fallback_message_policy,
-    instanceof_pattern_downcast_ref_projection, java_integral_literal_char, literal_slot_plan,
-    normalize_map_key_borrow_projection, ownership_coercion_fallback_message_policy,
-    parenthesize_borrowed_method_receiver, plan_coercion, plan_coercion_with_facts,
-    plan_shape_coercion, plan_shape_coercion_with_facts, render_index_to_usize_projection,
-    render_instanceof_check, rust_expr_is_constructed_optional_value,
-    rust_primitive_type_name_policy, unwrap_some_expr,
+    instanceof_pattern_downcast_ref_projection, into_projection, java_integral_literal_char,
+    literal_slot_plan, normalize_map_key_borrow_projection,
+    ownership_coercion_fallback_message_policy, parenthesize_borrowed_method_receiver,
+    plan_coercion, plan_coercion_with_facts, plan_shape_coercion, plan_shape_coercion_with_facts,
+    render_index_to_usize_projection, render_instanceof_check,
+    rust_expr_is_constructed_optional_value, rust_primitive_type_name_policy, unwrap_some_expr,
 };
 use new_java2rust::conversion_lowering::{
     adapt_optional_assignment_value_for_target, apply_lowered_slot_expr_conversion,
@@ -130,6 +130,16 @@ fn rust_get_projection_counts_as_existing_optional_carrier() {
             args: Vec::new(),
         }
     ));
+}
+
+#[test]
+fn into_projection_parenthesizes_raw_cast_receiver() {
+    assert_eq!(
+        new_java2rust::emit::emit_expr(&into_projection(RustExpr::Raw(
+            "Box::new(value) as Box<dyn std::any::Any>".to_string()
+        ))),
+        "(Box::new(value) as Box<dyn std::any::Any>).into()"
+    );
 }
 
 #[test]

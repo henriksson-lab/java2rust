@@ -3642,7 +3642,13 @@ pub fn apply_clone_projection(expr: RustExpr) -> RustExpr {
 }
 
 pub fn into_projection(expr: RustExpr) -> RustExpr {
-    RustExpr::Raw(format!("{}.into()", emit::emit_expr(&expr)))
+    let rendered = emit::emit_expr(&expr);
+    let receiver = if rust_receiver_expr_needs_parentheses(&expr, &rendered) {
+        format!("({rendered})")
+    } else {
+        rendered
+    };
+    RustExpr::Raw(format!("{receiver}.into()"))
 }
 
 pub fn java_update_expression_projection(
@@ -5310,6 +5316,12 @@ mod tests {
         assert_eq!(
             emit::emit_expr(&into_projection(RustExpr::Var("value".to_string()))),
             "value.into()"
+        );
+        assert_eq!(
+            emit::emit_expr(&into_projection(RustExpr::Raw(
+                "Box::new(value) as Box<dyn std::any::Any>".to_string()
+            ))),
+            "(Box::new(value) as Box<dyn std::any::Any>).into()"
         );
         assert_eq!(
             emit::emit_expr(&java_update_expression_projection(
