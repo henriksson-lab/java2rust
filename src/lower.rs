@@ -17549,6 +17549,15 @@ fn lower_optional_owned_argument_for_owned_target(
         return None;
     }
     let slot = argument_slot(target_shape.clone());
+    if borrowed_self_receiver_can_read_fields(ctx)
+        && shared_self_field_read_name_with_ctx(arg, env, ctx).is_some()
+        && (!matches!(target_shape.java_ty, JavaType::Primitive(_))
+            && (known_owned_argument_clone_recovery_with_facts(target_shape, ctx.facts)
+                || known_named_clone_recovery(target_shape)))
+    {
+        let lowered = lower_expr_with_refinements(arg, env, ctx, &ExprRefinements::default());
+        return apply_optional_field_borrowed_carrier_to_slot(lowered, actual_shape, slot, ctx);
+    }
     let unwrap_plan =
         reused_optional_unwrap_plan_for_slot(actual_shape, element_ty, &slot, true, ctx.facts)?;
     let lowered = lower_expr_with_refinements(arg, env, ctx, &ExprRefinements::default());

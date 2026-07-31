@@ -758,10 +758,31 @@ pub fn render_stream_plan_with_context(
     let mut out = render_stream_source_iter(&source, &plan.source, ctx);
     let (item_is_borrowed, item_shape) = render_stream_ops(&mut out, plan, ctx)?;
     render_stream_terminal(&mut out, plan, item_is_borrowed, &item_shape, ctx)?;
+    let actual = stream_terminal_actual_after_rendered_ops(plan, item_is_borrowed, &item_shape);
     Some(LoweredExpr {
         expr: RustExpr::Raw(out),
-        actual: plan.actual.clone(),
+        actual,
     })
+}
+
+fn stream_terminal_actual_after_rendered_ops(
+    plan: &StreamPlan<'_>,
+    item_is_borrowed: bool,
+    item_shape: &RustSlotShape,
+) -> LoweredType {
+    if item_is_borrowed {
+        match plan.terminal {
+            StreamTerminal::Collect(crate::stdlib::JavaCollectionKind::List)
+            | StreamTerminal::ToArray => {
+                return LoweredType::collected_list_from_element_shape(item_shape.clone());
+            }
+            StreamTerminal::Collect(crate::stdlib::JavaCollectionKind::Set) => {
+                return LoweredType::collected_set_from_element_shape(item_shape.clone());
+            }
+            _ => {}
+        }
+    }
+    plan.actual.clone()
 }
 
 fn render_stream_source_iter(
@@ -1133,28 +1154,10 @@ fn render_stream_terminal(
             out.push_str(&format!(".fold({identity}, |{left}, {right}| {body})"));
         }
         StreamTerminal::Collect(crate::stdlib::JavaCollectionKind::List) => {
-            if item_is_borrowed
-                && !stream_collect_terminal_preserves_borrowed_items(
-                    &plan.actual,
-                    crate::stdlib::JavaCollectionKind::List,
-                )
-            {
-                out.push_str(".cloned().collect::<Vec<_>>()");
-            } else {
-                out.push_str(".collect::<Vec<_>>()");
-            }
+            out.push_str(".collect::<Vec<_>>()");
         }
         StreamTerminal::Collect(crate::stdlib::JavaCollectionKind::Set) => {
-            if item_is_borrowed
-                && !stream_collect_terminal_preserves_borrowed_items(
-                    &plan.actual,
-                    crate::stdlib::JavaCollectionKind::Set,
-                )
-            {
-                out.push_str(".cloned().collect::<std::collections::HashSet<_>>()");
-            } else {
-                out.push_str(".collect::<std::collections::HashSet<_>>()");
-            }
+            out.push_str(".collect::<std::collections::HashSet<_>>()");
         }
         StreamTerminal::Collect(crate::stdlib::JavaCollectionKind::Map) => return None,
         StreamTerminal::CollectToMap { key, value } => {
@@ -1225,22 +1228,6 @@ fn render_stream_join_item_display(item_shape: &RustSlotShape) -> &'static str {
     } else {
         "item.to_string()"
     }
-}
-
-fn stream_collect_terminal_preserves_borrowed_items(
-    actual: &LoweredType,
-    kind: crate::stdlib::JavaCollectionKind,
-) -> bool {
-    matches!(
-        (kind, actual),
-        (
-            crate::stdlib::JavaCollectionKind::List,
-            LoweredType::VecElementBorrow { .. }
-        ) | (
-            crate::stdlib::JavaCollectionKind::Set,
-            LoweredType::SetElementBorrow { .. }
-        )
-    )
 }
 
 fn render_stream_join_delimiter(

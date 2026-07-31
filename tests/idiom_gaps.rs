@@ -8214,10 +8214,15 @@ class ByteIntWidenUse {
             .rust
             .contains("out.write_int(Self::NEW_LINE as i32)?;")
             && translation.rust.contains("bytes[0 as usize] as i32 & 255")
-            && translation.rust.contains("(bytes[1 as usize] as i32) << 8")
-            && translation
+            && (translation.rust.contains("(bytes[1 as usize] as i32) << 8")
+                || translation
+                    .rust
+                    .contains("(bytes[1 as usize] as i32).wrapping_shl((8) as u32)"))
+            && (translation.rust.contains(
+                "bytes.as_ref().expect(\"Java null receiver\")[0 as usize] as i32 & 255"
+            ) || translation
                 .rust
-                .contains("bytes.as_ref().expect(\"Java null receiver\")[0 as usize] as i32 & 255")
+                .contains("bytes.as_ref().unwrap()[0 as usize] as i32 & 255"))
             && !translation.rust.contains("i8 | i32")
             && !translation.rust.contains("Self::NEW_LINE)?"),
         "{}",
@@ -16497,13 +16502,14 @@ class Encoder {
     assert!(
         translation
             .rust
-            .contains("pub fn emit(&mut self, value: &str) -> Result<(), JavaException>")
+            .contains("pub fn emit(&mut self, value: String) -> Result<(), JavaException>")
             && translation
                 .rust
                 .contains("self.output_stream.as_ref().unwrap().println_1(")
             && translation
                 .rust
-                .contains("self.encoder.as_mut().unwrap().encode(value.to_string())?"),
+                .contains("self.encoder.as_mut().unwrap().encode(value)?")
+            && !translation.rust.contains("pub fn emit(&self"),
         "{}",
         translation.rust
     );
@@ -16540,9 +16546,13 @@ fn file_output_stream_constructor_selects_file_and_string_overload_slots() {
             ) || translation.rust.contains(
             "return Ok(FileOutputStream::new(self.file.as_ref().cloned()/* TODO(translation): validate added clone */.expect(\"Java null receiver\")"
             )) && !translation.rust.contains("FileOutputStream::new(self.file.clone()")
-            && translation
+            && !translation.rust.contains("FileOutputStream::new(self.file.expect(")
+            && (translation
                 .rust
                 .contains("return Ok(FileOutputStream::new(path)")
+                || translation
+                    .rust
+                    .contains("return Ok(FileOutputStream::new(&path)"))
             && !translation.rust.contains("FileOutputStream::new(File::new(path"),
         "{}",
         translation.rust
@@ -20503,6 +20513,10 @@ class OptionalClassLoaderResourceStreamAssignment {
             .contains("let mut r#in: Option<InputStream> = None;")
             && (translation.rust.contains(
                 "r#in = JavaClass::<OptionalClassLoaderResourceStreamAssignment>::literal(\"OptionalClassLoaderResourceStreamAssignment\").get_class_loader().get_resource_as_stream(path);"
+            ) || translation.rust.contains(
+                "r#in = JavaClass::<OptionalClassLoaderResourceStreamAssignment>::literal(\"OptionalClassLoaderResourceStreamAssignment\").get_class_loader().get_resource_as_stream(&path);"
+            ) || translation.rust.contains(
+                "r#in = JavaClass::<OptionalClassLoaderResourceStreamAssignment>::literal(\"OptionalClassLoaderResourceStreamAssignment\").get_class_loader().get_resource_as_stream(path.clone());"
             ) || translation.rust.contains(
                 "r#in = JavaClass::<OptionalClassLoaderResourceStreamAssignment>::literal(\"OptionalClassLoaderResourceStreamAssignment\").get_class_loader().get_resource_as_stream(path.to_string());"
             ))

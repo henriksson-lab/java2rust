@@ -180,6 +180,7 @@ pub struct CallSiteUse {
     pub result_returned: bool,
     pub receiver_is_self: bool,
     pub receiver_targets_self_field: bool,
+    pub receiver_type: Option<JavaType>,
     pub null_arg_indices: Vec<usize>,
     pub boundary: CallArgumentBoundary,
     pub resolved: Option<ResolvedCall>,
@@ -271,12 +272,21 @@ fn propagate_self_mutability_through_self_calls(facts: &mut UsageFacts) {
             }
             if usage.call_sites.iter().any(|call_site| {
                 (call_site.receiver_is_self || call_site.receiver_targets_self_field)
-                    && call_site.resolved.as_ref().is_some_and(|resolved| {
+                    && (call_site.resolved.as_ref().is_some_and(|resolved| {
                         mutating_methods.contains(&(
                             resolved.declaring_type.clone(),
                             resolved.rust_name.clone(),
-                        ))
-                    })
+                        )) || mutating_methods
+                            .contains(&(resolved.declaring_type.clone(), call_site.name.clone()))
+                    }) || call_site
+                        .receiver_type
+                        .as_ref()
+                        .is_some_and(|receiver_type| {
+                            java_type_name_for_usage(receiver_type).is_some_and(|receiver_name| {
+                                mutating_methods
+                                    .contains(&(receiver_name.to_string(), call_site.name.clone()))
+                            })
+                        }))
             }) {
                 usage.mutates_self = true;
                 changed = true;
@@ -1866,6 +1876,7 @@ fn analyze_expr_with_context(
                 receiver_targets_self_field: receiver
                     .as_deref()
                     .is_some_and(|receiver| expr_targets_self_field(receiver, facts, field_names)),
+                receiver_type: receiver_type.clone(),
                 null_arg_indices: null_argument_indices(args),
                 boundary: call_boundary,
                 resolved: resolved.clone(),

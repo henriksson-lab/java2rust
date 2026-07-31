@@ -687,6 +687,9 @@ Run at each checkpoint:
   has been moved to
   `/home/mahogny/github/claude/new_java2rust/claude_audits/done` in the same
   checkpoint.
+- If the issue file has not been moved to
+  `/home/mahogny/github/claude/new_java2rust/claude_audits/done`, the audit is
+  still open regardless of code status.
 
 Run at batch boundaries:
 

@@ -1598,6 +1598,17 @@ Current remaining refactor priority from the parallel audit:
    Focused receiver verification covers nullable external getters, optional
    collection mutation, overload-selected optional field mutation, and
    context-fallback mutable source receivers.
+   Stream collect terminals now emit plain `.collect::<...>()` and report a
+   borrowed-element collection actual when rendered stream ops still borrow
+   items, leaving cloned-collection recovery to shared slot conversion instead
+   of stream-local `.cloned()` insertion. The same slice records typed receiver
+   identity on usage call sites so self-field calls inside call arguments can
+   propagate `&mut self`, and routes owned optional self-field constructor
+   arguments through the existing borrowed-carrier slot conversion rather than
+   moving out of `&self`. Verification: focused optional stream/constructor
+   regressions, `type_coercion::coercion_fuses_borrowed_collection_clone_recovery_into_terminal_collect`,
+   `cargo check --tests --quiet`, `git diff --check`, and
+   `cargo test stream --test idiom_gaps --quiet` all passed.
 
 Current implementation note, 2026-07-23:
 
