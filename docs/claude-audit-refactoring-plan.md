@@ -467,6 +467,9 @@ Landed in this batch:
 - External constructor support checks for concrete-slot lowering now go through
   `call_plan::external_constructor_is_modeled`; `lower.rs` no longer probes
   external constructor facts directly.
+- External result propagation from shape-env slots now asks
+  `call_plan::external_call_returns_rust_result_for_receiver`, so lowering no
+  longer opens facade ABI and legacy Rust-result facts directly for that path.
 
 1. Add a `CallableAnalysis` shell.
    - Introduce `src/callable_analysis.rs`.

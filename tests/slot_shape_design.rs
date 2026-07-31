@@ -3483,6 +3483,19 @@ fn callable_analysis_shell_reaches_lowering_context() {
         })
         .expect("resolved call argument planner with args should be present");
     assert!(resolved_with_args.contains("resolved_call_signature_arg_shapes_by_java_key"));
+    assert!(call_plan_source.contains("pub fn external_call_returns_rust_result_for_receiver"));
+    assert!(call_plan_source.contains("facts.facade_abi_for_key(&key)"));
+    let slot_result_helper = lower_source
+        .split("fn slot_expr_needs_result_propagation_from_shape_env")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn source_method_call_returns_result_with_exception_plan")
+                .next()
+        })
+        .expect("slot result propagation helper should be present");
+    assert!(slot_result_helper.contains("external_call_returns_rust_result_for_receiver"));
+    assert!(!slot_result_helper.contains("facade_abi_for_key"));
+    assert!(!slot_result_helper.contains("external_rust_result_for_receiver"));
     let for_each_lambda_body = lower_source
         .split("fn lower_for_each_lambda_body_expr")
         .nth(1)

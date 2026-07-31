@@ -126,8 +126,7 @@ use crate::expr_shape::{
     shape_env_for_method, shape_env_for_type,
 };
 use crate::facts::{
-    CallableKey, ExternalFactLookupIndex, FactSet, HierarchyStrategy, NullabilityState,
-    OwnedRecoveryCapability, ResultAbi, Staticness,
+    ExternalFactLookupIndex, FactSet, HierarchyStrategy, NullabilityState, OwnedRecoveryCapability,
 };
 use crate::item_assembly::{
     constructor_default_field_value_with_facts,
@@ -23515,27 +23514,7 @@ fn slot_expr_needs_result_propagation_from_shape_env(
     {
         return true;
     }
-    let key = CallableKey::method(
-        receiver_name.to_string(),
-        name.to_string(),
-        Staticness::Unknown,
-        arg_count,
-    );
-    if ctx
-        .facts
-        .facade_abi_for_key(&key)
-        .is_some_and(|abi| matches!(abi.result, ResultAbi::ResultWrapped))
-    {
-        return true;
-    }
-    if ctx
-        .facts
-        .external_rust_result_for_receiver(Some(receiver_name), name, Some(arg_count))
-        .is_some_and(|fact| fact.returns_result)
-    {
-        return true;
-    }
-    crate::call_plan::external_call_has_thrown_effect_for_receiver(
+    crate::call_plan::external_call_returns_rust_result_for_receiver(
         ctx.facts,
         receiver_name,
         name,

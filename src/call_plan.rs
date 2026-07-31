@@ -1291,6 +1291,29 @@ pub fn external_call_returns_rust_result_with_external_index(
         .is_some_and(|effect| facts.thrown_types_include_checked_exception(&effect.thrown))
 }
 
+pub fn external_call_returns_rust_result_for_receiver(
+    facts: &FactSet,
+    receiver_key: &str,
+    name: &str,
+    arg_count: usize,
+) -> bool {
+    let key = CallableKey::method(
+        receiver_key.to_string(),
+        name.to_string(),
+        Staticness::Unknown,
+        arg_count,
+    );
+    if let Some(abi) = facts.facade_abi_for_key(&key) {
+        return matches!(abi.result, ResultAbi::ResultWrapped);
+    }
+    if let Some(fallibility) =
+        facts.external_rust_result_for_receiver(Some(receiver_key), name, Some(arg_count))
+    {
+        return fallibility.returns_result;
+    }
+    external_call_has_thrown_effect_for_receiver(facts, receiver_key, name, arg_count)
+}
+
 pub fn external_call_has_thrown_effect_for_receiver(
     facts: &FactSet,
     receiver_name: &str,
