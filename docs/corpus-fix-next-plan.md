@@ -7523,6 +7523,23 @@ Remaining top families are `Box<dyn Any>` field access/comparison and clone
 capability gaps, so audit `0011` remains partial and its issue file must stay
 active.
 
+2026-07-31 concrete source slot and erased-facade return checkpoint: exact
+downcast locals now render as borrowed concrete source views instead of
+representation-erased `Box<dyn Any>` slots, parsed source peer parameters used
+for direct field reads force concrete/native signature constraints, and
+erased-object facade method assembly upgrades weak returns from unique matching
+typed facade impl signatures. Focused verification covers
+`parsed_source_peer_params_and_exact_cast_locals_stay_concrete_under_carrier_pressure`,
+`external_set_return_uses_source_hierarchy_companion_carrier_element`,
+`exact_class_guard_casts_erased_object_to_borrowed_view`, `cargo check --tests
+--quiet`, and release-backed reduced VCF rerun
+`.tmp/corpus-rerun-20260731-vcf-after-erased-facade-return-unique-r12`.
+That rerun translates 9/9 files with 0 parse failures,
+`unsupported_statements=0`, `stubbed_constants=0`, 0 invalid-pattern files,
+and `cargo_check=ok` with 0 generated-Rust errors. The generated erased-object
+trait now exposes `get_v_c_f_header_version(&self) -> VCFHeaderVersion`.
+Audit `0011` still remains partial, so its issue file must stay active.
+
 ## Rerun Protocol
 
 After each fix:

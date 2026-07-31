@@ -4235,6 +4235,7 @@ fn external_set_return_uses_source_hierarchy_companion_carrier_element() {
     let parsed = parse_java_source(
         r#"
 import htsjdk.variant.vcf.VCFHeader;
+import htsjdk.variant.vcf.VCFHeaderVersion;
 
 class VCFHeaderLine {
     String name;
@@ -4255,6 +4256,7 @@ class UseHeader {
                 line.key();
             }
         }
+        VCFHeaderVersion version = header.getVCFHeaderVersion();
     }
 }
 "#,
@@ -4278,6 +4280,14 @@ class UseHeader {
         ) && !rendered.contains(
             "pub fn get_meta_data_in_input_order(&self) -> std::collections::HashSet<VCFHeaderLine>"
         ),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("pub fn get_v_c_f_header_version(&self) -> VCFHeaderVersion"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("    fn get_v_c_f_header_version(&self) -> VCFHeaderVersion;"),
         "{rendered}"
     );
 }
@@ -4491,6 +4501,92 @@ abstract class VCFCompoundHeaderLine {
     );
     assert!(
         translation.rust.contains("other.name"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn parsed_source_peer_params_and_exact_cast_locals_stay_concrete_under_carrier_pressure() {
+    let source = r#"
+class HeaderLine {
+    String key;
+
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+        HeaderLine that = (HeaderLine) o;
+        return key.equals(that.key);
+    }
+}
+
+class CompoundLine extends HeaderLine {
+    String name;
+    int count;
+
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass() || !super.equals(o)) return false;
+        CompoundLine that = (CompoundLine) o;
+        return equalsExcludingDescription(that) && name.equals(that.name);
+    }
+
+    boolean equalsExcludingDescription(CompoundLine other) {
+        return count == other.count && name.equals(other.name);
+    }
+}
+
+class FormatLine extends CompoundLine {}
+class InfoLine extends CompoundLine {}
+
+class Standards<T extends CompoundLine> {
+    boolean accepts(T line) {
+        return line instanceof FormatLine;
+    }
+}
+"#;
+    let parsed = parse_java_source(source);
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let mut facts = resolved.facts.clone();
+    facts
+        .dispatch_requirement_facts
+        .push(DispatchRequirementFact {
+            type_name: "CompoundLine".to_string(),
+            requirement: DispatchRequirementKind::NeedsUnknownRuntimeObject,
+            provenance: FactProvenance::CorpusAnalysis,
+        });
+
+    let translation = translate_source_with_facts(source, &facts);
+    assert!(
+        translation.rust.contains(
+            "let that: &HeaderLine = o.as_ref().and_then(|value| value.downcast_ref::<HeaderLine>()).expect(\"invalid Java cast\");"
+        ),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains(
+            "let that: &CompoundLine = o.as_ref().and_then(|value| value.downcast_ref::<CompoundLine>()).expect(\"invalid Java cast\");"
+        ),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn equals_excluding_description(&self, other: &CompoundLine)"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("let that: &Box<dyn std::any::Any>"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("other: Box<dyn std::any::Any>"),
         "{}",
         translation.rust
     );

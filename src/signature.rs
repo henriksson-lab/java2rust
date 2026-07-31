@@ -6185,6 +6185,11 @@ pub fn method_param_shape_constraints(
         .as_ref()
         .map(collect_field_receiver_mutated_names)
         .unwrap_or_default();
+    let field_receiver_read_names = method
+        .body
+        .as_ref()
+        .map(collect_field_receiver_read_names)
+        .unwrap_or_default();
     let array_element_mutated_names = method
         .body
         .as_ref()
@@ -6345,6 +6350,20 @@ pub fn method_param_shape_constraints(
                 &[
                     SignatureConstraint::RequiredOwnership(OwnershipShape::MutableBorrow),
                     SignatureConstraint::MutableBinding,
+                ],
+            );
+        }
+        if field_receiver_read_names.contains(&param.name)
+            && signature_declared_type_has_parsed_source_capability(
+                &param.ty,
+                &EffectiveFacts::new(facts),
+            )
+        {
+            push_unique_signature_constraints(
+                &mut constraints,
+                &[
+                    SignatureConstraint::RequiredDispatch(DispatchShape::Concrete),
+                    SignatureConstraint::RequiredView(ViewShape::Native),
                 ],
             );
         }
@@ -6901,9 +6920,7 @@ pub fn signature_slot_dispatch_requirement_policy_with_effective_facts(
     let mut requirements = java_type_name_for_signature_dispatch(java_ty)
         .map(|type_name| facts.dispatch_requirements_for(type_name))
         .unwrap_or_default();
-    if matches!(source_dispatch, DispatchShape::Concrete)
-        && signature_declared_type_has_parsed_source_capability(java_ty, facts)
-    {
+    if signature_declared_type_has_parsed_source_capability(java_ty, facts) {
         requirements.retain(|requirement| {
             *requirement != DispatchRequirementKind::NeedsUnknownRuntimeObject
         });
@@ -11222,6 +11239,12 @@ fn collect_field_receiver_mutated_names(block: &Block) -> HashSet<String> {
     mutated
 }
 
+fn collect_field_receiver_read_names(block: &Block) -> HashSet<String> {
+    let mut read = HashSet::new();
+    collect_field_receiver_read_names_from_stmts(&block.statements, &mut read);
+    read
+}
+
 fn collect_facade_mut_borrow_argument_names_from_stmts(
     statements: &[Stmt],
     facts: &FactSet,
@@ -11662,6 +11685,178 @@ fn facade_abi_owner_matches_java_type(abi: &FacadeAbiFact, receiver_ty: &JavaTyp
             crate::facts::external_type_name_matches(owner, name)
         }
         _ => false,
+    }
+}
+
+fn collect_field_receiver_read_names_from_stmts(statements: &[Stmt], read: &mut HashSet<String>) {
+    for stmt in statements {
+        match stmt {
+            Stmt::Assign { target, value } => {
+                collect_field_receiver_read_names_from_expr(target, read);
+                collect_field_receiver_read_names_from_expr(value, read);
+            }
+            Stmt::VarDecl { initializer, .. } => {
+                if let Some(expr) = initializer {
+                    collect_field_receiver_read_names_from_expr(expr, read);
+                }
+            }
+            Stmt::Expr(expr) | Stmt::Return(Some(expr)) | Stmt::Throw(expr) => {
+                collect_field_receiver_read_names_from_expr(expr, read);
+            }
+            Stmt::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
+                collect_field_receiver_read_names_from_expr(condition, read);
+                collect_field_receiver_read_names_from_stmts(&then_block.statements, read);
+                if let Some(else_block) = else_block {
+                    collect_field_receiver_read_names_from_stmts(&else_block.statements, read);
+                }
+            }
+            Stmt::While {
+                condition, body, ..
+            }
+            | Stmt::DoWhile {
+                condition, body, ..
+            } => {
+                collect_field_receiver_read_names_from_expr(condition, read);
+                collect_field_receiver_read_names_from_stmts(&body.statements, read);
+            }
+            Stmt::For {
+                init,
+                condition,
+                update,
+                body,
+                ..
+            } => {
+                collect_field_receiver_read_names_from_stmts(init, read);
+                if let Some(condition) = condition {
+                    collect_field_receiver_read_names_from_expr(condition, read);
+                }
+                for expr in update {
+                    collect_field_receiver_read_names_from_expr(expr, read);
+                }
+                collect_field_receiver_read_names_from_stmts(&body.statements, read);
+            }
+            Stmt::EnhancedFor { iterable, body, .. } => {
+                collect_field_receiver_read_names_from_expr(iterable, read);
+                collect_field_receiver_read_names_from_stmts(&body.statements, read);
+            }
+            Stmt::Switch { selector, cases } => {
+                collect_field_receiver_read_names_from_expr(selector, read);
+                for case in cases {
+                    collect_field_receiver_read_names_from_stmts(&case.statements, read);
+                }
+            }
+            Stmt::Try {
+                resources,
+                body,
+                catches,
+                finally_block,
+            } => {
+                collect_field_receiver_read_names_from_stmts(resources, read);
+                collect_field_receiver_read_names_from_stmts(&body.statements, read);
+                for catch in catches {
+                    collect_field_receiver_read_names_from_stmts(&catch.body.statements, read);
+                }
+                if let Some(finally_block) = finally_block {
+                    collect_field_receiver_read_names_from_stmts(&finally_block.statements, read);
+                }
+            }
+            Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+                collect_field_receiver_read_names_from_stmts(&block.statements, read);
+            }
+            Stmt::Return(None)
+            | Stmt::LocalType(_)
+            | Stmt::ConstructorInvocation { .. }
+            | Stmt::Break(_)
+            | Stmt::Continue(_)
+            | Stmt::Unsupported(_) => {}
+        }
+    }
+}
+
+fn collect_field_receiver_read_names_from_expr(expr: &Expr, read: &mut HashSet<String>) {
+    match expr {
+        Expr::FieldAccess(receiver, _) => {
+            if let Expr::Var(name) = receiver.as_ref() {
+                read.insert(name.clone());
+            }
+            collect_field_receiver_read_names_from_expr(receiver, read);
+        }
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::InstanceOf { expr, .. } => {
+            collect_field_receiver_read_names_from_expr(expr, read)
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_field_receiver_read_names_from_expr(left, read);
+            collect_field_receiver_read_names_from_expr(right, read);
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_field_receiver_read_names_from_expr(condition, read);
+            collect_field_receiver_read_names_from_expr(then_expr, read);
+            collect_field_receiver_read_names_from_expr(else_expr, read);
+        }
+        Expr::Switch { selector, cases } => {
+            collect_field_receiver_read_names_from_expr(selector, read);
+            for case in cases {
+                for label in &case.labels {
+                    if let SwitchLabel::Expr(expr) = label {
+                        collect_field_receiver_read_names_from_expr(expr, read);
+                    }
+                }
+                collect_field_receiver_read_names_from_expr(&case.value, read);
+            }
+        }
+        Expr::ArrayAccess(array, index) => {
+            collect_field_receiver_read_names_from_expr(array, read);
+            collect_field_receiver_read_names_from_expr(index, read);
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            for expr in dimensions {
+                collect_field_receiver_read_names_from_expr(expr, read);
+            }
+            if let Some(initializer) = initializer {
+                for expr in initializer {
+                    collect_field_receiver_read_names_from_expr(expr, read);
+                }
+            }
+        }
+        Expr::ArrayInitializer(elements) | Expr::New { args: elements, .. } => {
+            for expr in elements {
+                collect_field_receiver_read_names_from_expr(expr, read);
+            }
+        }
+        Expr::Call { receiver, args, .. } => {
+            if let Some(receiver) = receiver {
+                collect_field_receiver_read_names_from_expr(receiver, read);
+            }
+            for arg in args {
+                collect_field_receiver_read_names_from_expr(arg, read);
+            }
+        }
+        Expr::Lambda { body, .. } => match body {
+            LambdaBody::Expr(expr) => collect_field_receiver_read_names_from_expr(expr, read),
+            LambdaBody::Block(block) => {
+                collect_field_receiver_read_names_from_stmts(&block.statements, read);
+            }
+        },
+        Expr::MethodReference { .. }
+        | Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::ClassLiteral(_)
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => {}
     }
 }
 

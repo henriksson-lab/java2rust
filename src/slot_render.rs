@@ -120,6 +120,7 @@ pub fn rust_type_for_slot_with_facts_and_representations(
     facts: &FactSet,
     representations: &RepresentationPlan,
 ) -> RustType {
+    let effective_facts = EffectiveFacts::new(facts);
     if let Some(element_ty) = shape.optional_element_type() {
         let mut element_shape = shape.clone();
         element_shape.java_ty = element_ty;
@@ -135,12 +136,21 @@ pub fn rust_type_for_slot_with_facts_and_representations(
     let viewed = match (&shape.view, &shape.dispatch) {
         (ViewShape::Str, _) => return rust_type_for_slot_with_facts(shape, facts),
         (ViewShape::Slice, _) => return rust_type_for_slot_with_facts(shape, facts),
-        (_, DispatchShape::Concrete) => rust_type_for_java_type_with_facts_and_representations(
-            &shape.java_ty,
-            facts,
-            representations,
+        (_, DispatchShape::Concrete) => {
+            if crate::stdlib::java_collection_kind_for_type(&shape.java_ty).is_some() {
+                rust_type_for_java_type_with_facts_and_representations(
+                    &shape.java_ty,
+                    facts,
+                    representations,
+                )
+            } else {
+                rust_type_for_java_type_with_facts(&shape.java_ty, facts)
+            }
+        }
+        _ => render_slot_value_rust_type_policy_with_effective_facts(
+            &slot_value_rust_type_policy_with_effective_facts(shape, &effective_facts),
+            &effective_facts,
         ),
-        _ => rust_type_for_slot_with_facts(shape, facts),
     };
 
     match shape.ownership {

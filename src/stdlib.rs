@@ -6996,8 +6996,8 @@ struct ExternalApiFacadeSupport {
     fields: BTreeMap<String, BTreeMap<String, String>>,
     impls: BTreeMap<String, BTreeSet<String>>,
     from_impls: BTreeSet<(String, String)>,
-    erased_object_methods: BTreeMap<String, ExternalErasedObjectMethod>,
-    erased_object_method_conflicts: BTreeSet<String>,
+    erased_object_methods: BTreeMap<(String, usize), ExternalErasedObjectMethod>,
+    erased_object_method_conflicts: BTreeSet<(String, usize)>,
     emitted_source_methods: BTreeSet<(String, String, usize)>,
     erased_source_alias_owners: BTreeSet<String>,
 }
@@ -7391,21 +7391,34 @@ impl ExternalApiFacadeSupport {
                 {
                     continue;
                 }
+                let effect = facts.external_api_effect_for_receiver_with_arity(
+                    Some(type_key),
+                    &method.name,
+                    Some(method.params.len()),
+                );
+                let effective_return_type = effect
+                    .and_then(|effect| effect.return_type.as_ref())
+                    .unwrap_or(&method.return_type);
+                let effective_nullability = effect
+                    .map(|effect| effect.return_nullability)
+                    .unwrap_or_else(|| {
+                        source_summary_method_effective_return_nullability(facts, type_key, method)
+                    });
                 let return_type = external_facade_method_return_type_with_facts(
                     facts,
                     Some(type_key),
                     &method.name,
                     Some(method.params.len()),
-                    &method.return_type,
-                    source_summary_method_effective_return_nullability(facts, type_key, method),
+                    effective_return_type,
+                    effective_nullability,
                 );
                 let opaque_count_before = self.opaque_types.len();
                 self.add_source_summary_java_type(
-                    &method.return_type,
+                    effective_return_type,
                     source_summary_types,
                     emitted_local_types,
                 );
-                self.add_java_type(&method.return_type);
+                self.add_java_type(effective_return_type);
                 for param in &method.params {
                     self.add_source_summary_java_type(
                         &param.ty,
@@ -7423,6 +7436,15 @@ impl ExternalApiFacadeSupport {
                     &return_type,
                 );
                 self.add_external_facade_return_opaque_type(&return_type);
+                if !weak_external_facade_return_type(&return_type) {
+                    self.add_erased_object_method(
+                        facts,
+                        Some(type_key),
+                        rust_method.clone(),
+                        method.params.len(),
+                        return_type.clone(),
+                    );
+                }
                 if self.has_method_signature(&owner, &rust_method, method.params.len())
                     && !self.replace_weak_method_return(
                         &owner,
@@ -8395,6 +8417,28 @@ impl ExternalApiFacadeSupport {
                             *arg_count,
                             &fact,
                         );
+                    if fact.provenance != FactProvenance::ConservativeFallback
+                        && !external_facade_method_is_self_returning_fluent(
+                            facts,
+                            &receiver_key,
+                            &fact.method_name,
+                            *arg_count,
+                        )
+                        && !crate::javalibs::is_static_facade_method(
+                            &receiver_key,
+                            &fact.method_name,
+                            *arg_count,
+                        )
+                        && !unmodelled_value_return
+                    {
+                        self.add_erased_object_method(
+                            facts,
+                            Some(&receiver_key),
+                            rust_method.clone(),
+                            *arg_count,
+                            return_rust.clone(),
+                        );
+                    }
                     let method_body = external_facade_instance_method_with_facts(
                         facts,
                         &receiver_key,
@@ -8809,21 +8853,12 @@ impl ExternalApiFacadeSupport {
                         }
                         continue;
                     }
-                    if let Some(effect) = facts
-                        .external_api_effect_for_receiver_with_arity(
-                            Some(&owner),
-                            &java_method,
-                            Some(*arg_count),
-                        )
-                        .cloned()
-                        .or_else(|| {
-                            crate::external_packs::external_api_effect_for_receiver_with_arity(
-                                Some(&owner),
-                                &java_method,
-                                Some(*arg_count),
-                            )
-                        })
-                    {
+                    if let Some(effect) = Self::external_api_effect_for_support_owner(
+                        facts,
+                        &owner,
+                        &java_method,
+                        *arg_count,
+                    ) {
                         let return_rust = effect
                             .return_type
                             .as_ref()
@@ -8883,16 +8918,23 @@ impl ExternalApiFacadeSupport {
                         self.add_method(owner.clone(), method_body);
                         continue;
                     }
-                    let Some(return_type) =
+                    let Some(return_type) = Self::external_api_effect_for_support_owner(
+                        facts,
+                        &owner,
+                        &java_method,
+                        *arg_count,
+                    )
+                    .and_then(|effect| effect.return_type)
+                    .or_else(|| {
                         known_external_method_return_type(Some(&owner), &java_method, *arg_count)
-                            .or_else(|| {
-                                Self::known_missing_opaque_support_method_return_type(
-                                    &owner,
-                                    &java_method,
-                                    *arg_count,
-                                )
-                            })
-                    else {
+                    })
+                    .or_else(|| {
+                        Self::known_missing_opaque_support_method_return_type(
+                            &owner,
+                            &java_method,
+                            *arg_count,
+                        )
+                    }) else {
                         continue;
                     };
                     let return_rust = external_facade_method_return_type_with_facts(
@@ -9011,6 +9053,39 @@ impl ExternalApiFacadeSupport {
                 Some(arg_count),
             )
             .is_some()
+    }
+
+    fn external_api_effect_for_support_owner(
+        facts: &FactSet,
+        owner: &str,
+        java_method: &str,
+        arg_count: usize,
+    ) -> Option<ExternalApiEffectFact> {
+        facts
+            .external_api_effect_for_receiver_with_arity(Some(owner), java_method, Some(arg_count))
+            .cloned()
+            .or_else(|| {
+                facts
+                    .external_api_effect_facts
+                    .iter()
+                    .find(|fact| {
+                        fact.method_name == java_method
+                            && fact.arg_count.is_none_or(|arity| arity == arg_count)
+                            && fact.receiver_type.as_ref().is_some_and(|receiver_type| {
+                                rust_name_for_java_named_type(
+                                    &canonical_external_receiver_type_key(receiver_type),
+                                ) == owner
+                            })
+                    })
+                    .cloned()
+            })
+            .or_else(|| {
+                crate::external_packs::external_api_effect_for_receiver_with_arity(
+                    Some(owner),
+                    java_method,
+                    Some(arg_count),
+                )
+            })
     }
 
     fn has_facade_abi_for_rust_method(
@@ -10030,12 +10105,16 @@ impl ExternalApiFacadeSupport {
         arg_count: usize,
         return_type: String,
     ) {
-        if self.erased_object_method_conflicts.contains(&name) {
+        let key = (name.clone(), arg_count);
+        if self.erased_object_method_conflicts.contains(&key) {
             return;
         }
-        let return_type =
-            normalize_external_facade_support_return_type(facts, receiver_type, &return_type);
-        match self.erased_object_methods.get(&name) {
+        let return_type = if weak_external_facade_return_type(&return_type) {
+            normalize_external_facade_support_return_type(facts, receiver_type, &return_type)
+        } else {
+            normalize_external_facade_return_type_text(&return_type)
+        };
+        match self.erased_object_methods.get(&key) {
             Some(existing)
                 if existing.arg_count == arg_count && existing.return_type == return_type => {}
             Some(existing)
@@ -10044,7 +10123,7 @@ impl ExternalApiFacadeSupport {
                     && !weak_external_facade_return_type(&return_type) =>
             {
                 self.erased_object_methods.insert(
-                    name.clone(),
+                    key,
                     ExternalErasedObjectMethod {
                         name,
                         arg_count,
@@ -10052,13 +10131,21 @@ impl ExternalApiFacadeSupport {
                     },
                 );
             }
+            Some(existing)
+                if existing.arg_count == arg_count
+                    && !weak_external_facade_return_type(&existing.return_type)
+                    && weak_external_facade_return_type(&return_type) => {}
+            Some(existing)
+                if existing.arg_count == arg_count
+                    && !weak_external_facade_return_type(&existing.return_type)
+                    && !weak_external_facade_return_type(&return_type) => {}
             Some(_) => {
-                self.erased_object_methods.remove(&name);
-                self.erased_object_method_conflicts.insert(name);
+                self.erased_object_methods.remove(&key);
+                self.erased_object_method_conflicts.insert(key);
             }
             None => {
                 self.erased_object_methods.insert(
-                    name.clone(),
+                    key,
                     ExternalErasedObjectMethod {
                         name,
                         arg_count,
@@ -10495,6 +10582,8 @@ impl ExternalApiFacadeSupport {
                 "impl From<{from}> for {to} {{\n    fn from(_value: {from}) -> Self {{ Default::default() }}\n}}"
             ));
         }
+        let erased_object_return_upgrades =
+            strong_external_facade_method_returns_by_signature(&self.impls);
         for (owner, methods) in self.impls {
             if is_builtin_external_facade_type(&owner)
                 || alias_names.contains(&owner)
@@ -10514,6 +10603,15 @@ impl ExternalApiFacadeSupport {
                 .erased_object_methods
                 .values()
                 .cloned()
+                .map(|mut method| {
+                    if weak_external_facade_return_type(&method.return_type)
+                        && let Some(return_type) = erased_object_return_upgrades
+                            .get(&(method.name.clone(), method.arg_count))
+                    {
+                        method.return_type = return_type.clone();
+                    }
+                    method
+                })
                 .collect::<Vec<_>>();
             let trait_methods = methods
                 .iter()
@@ -13907,6 +14005,40 @@ fn facade_method_return_type<'a>(method_body: &'a str, method: &str) -> Option<&
         .nth(1)
         .and_then(|rest| rest.split(" {").next())
         .map(str::trim)
+}
+
+fn strong_external_facade_method_returns_by_signature(
+    impls: &BTreeMap<String, BTreeSet<String>>,
+) -> BTreeMap<(String, usize), String> {
+    let mut returns: BTreeMap<(String, usize), Option<String>> = BTreeMap::new();
+    for methods in impls.values() {
+        for body in methods {
+            let Some(method_name) = facade_method_name(body) else {
+                continue;
+            };
+            let Some(return_type) = facade_method_return_type(body, method_name) else {
+                continue;
+            };
+            if weak_external_facade_return_type(return_type) {
+                continue;
+            }
+            let arg_count = facade_method_arg_count(body);
+            let key = (method_name.to_string(), arg_count);
+            match returns.get_mut(&key) {
+                Some(Some(existing)) if existing == return_type => {}
+                Some(existing) => {
+                    *existing = None;
+                }
+                None => {
+                    returns.insert(key, Some(return_type.to_string()));
+                }
+            }
+        }
+    }
+    returns
+        .into_iter()
+        .filter_map(|(key, return_type)| return_type.map(|return_type| (key, return_type)))
+        .collect()
 }
 
 fn weak_external_facade_return_type(return_type: &str) -> bool {
