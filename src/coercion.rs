@@ -2362,11 +2362,10 @@ pub fn arrays_binary_search_range_projection(
 }
 
 pub fn arrays_compare_projection(left: RustExpr, right: RustExpr) -> RustExpr {
-    RustExpr::Raw(format!(
-        "{{ match {}.cmp(&{}) {{ std::cmp::Ordering::Less => -1, std::cmp::Ordering::Equal => 0, std::cmp::Ordering::Greater => 1 }} }}",
-        emit::emit_expr(&left),
-        emit::emit_expr(&right),
-    ))
+    RustExpr::Call {
+        function: Box::new(RustExpr::Raw("java_arrays_compare".to_string())),
+        args: vec![left, right],
+    }
 }
 
 pub fn arrays_copy_of_projection(source: RustExpr, len: RustExpr) -> RustExpr {

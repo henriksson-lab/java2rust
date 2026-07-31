@@ -21366,16 +21366,18 @@ class JavaArraysCompareUse {
     int names(String[] left, String[] right) {
         return Arrays.compare(left, right);
     }
+
+    int doubles(double[] left, double[] right) {
+        return Arrays.compare(left, right);
+    }
 }
 "#,
     );
 
     assert!(
-        translation.rust.contains("std::cmp::Ordering::Less => -1")
-            && translation.rust.contains("std::cmp::Ordering::Equal => 0")
-            && translation
-                .rust
-                .contains("std::cmp::Ordering::Greater => 1")
+        translation
+            .rust
+            .contains("java_arrays_compare(left, right)")
             && !translation.rust.contains("Arrays::compare")
             && !translation.rust.contains("JavaUtilArrays::compare"),
         "{}",
@@ -21399,6 +21401,8 @@ mod generated_tests {
         assert_eq!(fixture.ints(&[1, 2], &[1, 2]), 0);
         assert_eq!(fixture.ints(&[1, 3], &[1, 2]), 1);
         assert_eq!(fixture.names(&["a".to_string()], &["b".to_string()]), -1);
+        assert_eq!(fixture.doubles(&[1.0, f64::NAN], &[1.0, 2.0]), 1);
+        assert_eq!(fixture.doubles(&[-0.0], &[0.0]), -1);
     }
 }
 "#,

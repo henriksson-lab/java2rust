@@ -5685,6 +5685,112 @@ pub fn java_arrays_hash_code<T: JavaArraysHashElement>(value: &[T]) -> i32 {
     })
 }
 
+pub trait JavaArraysCompareElement {
+    fn java_arrays_compare(&self, other: &Self) -> i32;
+}
+
+pub fn java_arrays_compare<T: JavaArraysCompareElement, L: AsRef<[T]>, R: AsRef<[T]>>(
+    left: L,
+    right: R,
+) -> i32 {
+    let left = left.as_ref();
+    let right = right.as_ref();
+    for (left_item, right_item) in left.iter().zip(right.iter()) {
+        let cmp = left_item.java_arrays_compare(right_item);
+        if cmp != 0 {
+            return cmp;
+        }
+    }
+    match left.len().cmp(&right.len()) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    }
+}
+
+macro_rules! impl_java_arrays_compare_ord {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl JavaArraysCompareElement for $ty {
+                fn java_arrays_compare(&self, other: &Self) -> i32 {
+                    match self.cmp(other) {
+                        std::cmp::Ordering::Less => -1,
+                        std::cmp::Ordering::Equal => 0,
+                        std::cmp::Ordering::Greater => 1,
+                    }
+                }
+            }
+        )*
+    };
+}
+
+impl_java_arrays_compare_ord!(bool, i8, i16, i32, i64, char, String, &str);
+
+fn java_compare_f32(left: f32, right: f32) -> i32 {
+    if left.is_nan() {
+        return if right.is_nan() { 0 } else { 1 };
+    }
+    if right.is_nan() {
+        return -1;
+    }
+    if left == 0.0 && right == 0.0 {
+        return match (left.is_sign_negative(), right.is_sign_negative()) {
+            (true, false) => -1,
+            (false, true) => 1,
+            _ => 0,
+        };
+    }
+    match left.partial_cmp(&right).unwrap() {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    }
+}
+
+fn java_compare_f64(left: f64, right: f64) -> i32 {
+    if left.is_nan() {
+        return if right.is_nan() { 0 } else { 1 };
+    }
+    if right.is_nan() {
+        return -1;
+    }
+    if left == 0.0 && right == 0.0 {
+        return match (left.is_sign_negative(), right.is_sign_negative()) {
+            (true, false) => -1,
+            (false, true) => 1,
+            _ => 0,
+        };
+    }
+    match left.partial_cmp(&right).unwrap() {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    }
+}
+
+impl JavaArraysCompareElement for f32 {
+    fn java_arrays_compare(&self, other: &Self) -> i32 {
+        java_compare_f32(*self, *other)
+    }
+}
+
+impl JavaArraysCompareElement for f64 {
+    fn java_arrays_compare(&self, other: &Self) -> i32 {
+        java_compare_f64(*self, *other)
+    }
+}
+
+impl<T: JavaArraysCompareElement> JavaArraysCompareElement for Option<T> {
+    fn java_arrays_compare(&self, other: &Self) -> i32 {
+        match (self, other) {
+            (None, None) => 0,
+            (None, Some(_)) => -1,
+            (Some(_), None) => 1,
+            (Some(left), Some(right)) => left.java_arrays_compare(right),
+        }
+    }
+}
+
 impl JavaArraysHashElement for bool {
     fn java_arrays_hash_code(&self) -> i32 {
         if *self { 1231 } else { 1237 }
@@ -16478,6 +16584,7 @@ fn expr_uses_java_string_runtime_helpers(expr: &Expr) -> bool {
             ) || matches!(
                 (receiver.as_deref(), name.as_str(), args.len()),
                 (Some(Expr::Var(owner)), "hashCode" | "hash_code", 1)
+                    | (Some(Expr::Var(owner)), "compare", 2)
                     if canonical_external_receiver_type_key(owner) == "Arrays"
             ) || matches!(
                 (receiver.as_deref(), name.as_str(), args.len()),
