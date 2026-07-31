@@ -29,66 +29,18 @@ Keep the standing constraint: do not make algorithm changes that block future
 global semantic analysis. Prefer explicit keys, indices, compatibility shims,
 and divergence logs.
 
-Audit file housekeeping is part of the work, not a later cleanup step: once a
-Claude audit has been fully implemented and verified, move its issue file from
-`claude_audits/` to
+## Audit File Definition Of Done
+
+Audit file housekeeping is part of the work, not a later cleanup step. Once a
+Claude audit has been fully implemented and focused verification has passed,
+move its issue file from `claude_audits/` to
 `/home/mahogny/github/claude/new_java2rust/claude_audits/done` in the same
-checkpoint. Leave partially addressed audits in the active directory.
+checkpoint as the implementation, plan-status update, and verification notes.
 
-Audit closure rule: no `claude_audits/` item is considered done until its issue
-file has also been moved to
-`/home/mahogny/github/claude/new_java2rust/claude_audits/done`.
-
-Tracking rule: when an audit item is genuinely done, move its
-`claude_audits/` issue file to
-`/home/mahogny/github/claude/new_java2rust/claude_audits/done` as part of the
-same checkpoint. Do this only after the implementation and focused verification
-for that audit item are complete, and mention the move in the checkpoint notes
-or commit summary. Leave partial, exploratory, or inspiration-only audit files
-in `claude_audits/` until the mapped issue is fully closed.
-
-Checkpoint requirement: every future audit-closing patch must include the code
-fix, regression/focused verification, audit-status update, and the corresponding
-`claude_audits/<issue>.md` move into
-`/home/mahogny/github/claude/new_java2rust/claude_audits/done` before it is
-committed. If any of those pieces is missing, keep the audit open.
-During review, treat an audit marked done while its file still lives directly
-under `claude_audits/` as incomplete work to fix before the checkpoint lands.
-For partial checkpoints, leave the audit file active and note the remaining
-open scope instead of moving it.
-
-Operational reminder: when an audit issue is done, move the issue file into
-`/home/mahogny/github/claude/new_java2rust/claude_audits/done` immediately;
-do not leave completed audit notes in the active `claude_audits/` directory.
-
-2026-07-31 user reminder: every completed Claude audit must be moved out of
-`claude_audits/` and into
-`/home/mahogny/github/claude/new_java2rust/claude_audits/done` once the fix and
-verification are done. Do not close or commit an audit as finished while its
-issue file remains in the active audit directory.
-
-Current operating rule: every implementation checkpoint that resolves a Claude
-audit must include the corresponding move from `claude_audits/` to
-`/home/mahogny/github/claude/new_java2rust/claude_audits/done`; if the audit is
-only partially addressed, leave the file active and record the remaining work.
-
-2026-07-31 latest reminder: after an audit is fully fixed and verified, move
-the finished audit file into
-`/home/mahogny/github/claude/new_java2rust/claude_audits/done`; this move is
-part of the definition of done for the audit.
-
-2026-07-31 user instruction: add to the plan and keep enforcing that completed
-Claude audits are moved to
-`/home/mahogny/github/claude/new_java2rust/claude_audits/done` once done.
-This is part of audit definition-of-done: do not mark an audit row complete,
-or describe it as closed in a checkpoint, until the issue file has been moved
-there.
-
-Current checkpoint action: whenever a fix fully resolves a `claude_audits/*.md`
-issue, include the file move to
-`/home/mahogny/github/claude/new_java2rust/claude_audits/done` in the same
-patch/commit as the implementation and focused verification notes. Partial
-audit work must stay in the active `claude_audits/` directory.
+Do not mark an audit row complete, describe an audit as closed, or commit an
+audit-closing checkpoint while its issue file still lives directly under
+`claude_audits/`. Leave partial, exploratory, or inspiration-only audit files in
+the active directory and record the remaining open scope instead.
 
 ## Next Batch: Measurement And Unsupported Safety
 

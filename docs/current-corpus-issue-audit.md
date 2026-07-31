@@ -1515,6 +1515,19 @@ without matching erased-object method facade emission; it regressed the focused
 subset to 9 generated-Rust errors by exposing missing source method traits and
 duplicate `From<T> for Box<dyn Any>` support.
 
+Reduced HTSJDK VCF generic clone-derive follow-up:
+`.tmp/corpus-rerun-20260731-vcf-standard-bound-after-generic-clone-derive-r1`
+translates the 9-file VCF standard-header subset, reports 0 parse failures,
+`unsupported_statements=0`, and `stubbed_constants=0`, and reduces generated
+Rust errors from `25` to `23` versus
+`.tmp/corpus-rerun-20260731-vcf-standard-bound-after-local-erased-alias-impl-guard-r1`.
+Source generic structs whose fields contain Rust type parameters now allow
+`#[derive(Clone)]` through those parameters and through hidden `PhantomData`
+markers, so the `VCFStandardHeaderLinesStandards<T>` thread-local static
+accessor no longer fails on `Option<Standards<T>>::clone()`. Remaining top
+families are erased-carrier field/static-method access, `HashSet<Box<dyn Any>>`
+trait bounds, and two mismatched-type rows.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from

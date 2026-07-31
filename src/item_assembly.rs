@@ -864,9 +864,11 @@ fn struct_derives_for_type(
     support_program: &Program,
 ) -> Vec<String> {
     let mut derives = Vec::new();
+    let type_params: HashSet<String> = ty.type_params.iter().cloned().collect();
     if fields.iter().all(|field| {
         rust_type_supports_struct_derive_clone(
             &field.ty,
+            &type_params,
             signatures,
             facts,
             support_program,
@@ -913,6 +915,7 @@ fn source_type_declares_java_hash_equality(ty: &TypeDecl) -> bool {
 
 fn rust_type_supports_struct_derive_clone(
     ty: &RustType,
+    type_params: &HashSet<String>,
     signatures: &SignaturePlan,
     facts: &FactSet,
     support_program: &Program,
@@ -932,14 +935,17 @@ fn rust_type_supports_struct_derive_clone(
         RustType::Vec(inner) | RustType::Array2(inner) | RustType::Option(inner) => {
             rust_type_supports_struct_derive_clone(
                 inner,
+                type_params,
                 signatures,
                 facts,
                 support_program,
                 visiting,
             )
         }
+        RustType::Named(name) if type_params.contains(name) => true,
         RustType::Named(name) => rust_named_type_supports_struct_derive_clone(
             name,
+            type_params,
             signatures,
             facts,
             support_program,
@@ -949,6 +955,7 @@ fn rust_type_supports_struct_derive_clone(
             if raw.starts_with("std::rc::Rc<")
                 || raw_rust_type_supports_derive_clone(
                     raw,
+                    type_params,
                     signatures,
                     facts,
                     support_program,
@@ -963,27 +970,47 @@ fn rust_type_supports_struct_derive_clone(
 
 fn raw_rust_type_supports_derive_clone(
     raw: &str,
+    type_params: &HashSet<String>,
     signatures: &SignaturePlan,
     facts: &FactSet,
     support_program: &Program,
     visiting: &mut HashSet<String>,
 ) -> bool {
     let raw = raw.trim();
+    if type_params.contains(raw) {
+        return true;
+    }
+    if raw_rust_generic_args(raw, "std::marker::PhantomData")
+        .or_else(|| raw_rust_generic_args(raw, "PhantomData"))
+        .is_some()
+    {
+        return true;
+    }
     if raw_rust_box_dyn_trait(raw).is_some_and(raw_dyn_trait_supports_box_clone_adapter) {
         return true;
     }
     if let Some(args) = raw_rust_generic_args(raw, "std::collections::HashMap")
+        .or_else(|| raw_rust_generic_args(raw, "HashMap"))
         && args.len() == 2
     {
         return args.iter().all(|arg| {
-            raw_type_arg_supports_derive_clone(arg, signatures, facts, support_program, visiting)
+            raw_type_arg_supports_derive_clone(
+                arg,
+                type_params,
+                signatures,
+                facts,
+                support_program,
+                visiting,
+            )
         });
     }
     if let Some(args) = raw_rust_generic_args(raw, "std::collections::HashSet")
+        .or_else(|| raw_rust_generic_args(raw, "HashSet"))
         && args.len() == 1
     {
         return raw_type_arg_supports_derive_clone(
             args[0],
+            type_params,
             signatures,
             facts,
             support_program,
@@ -995,12 +1022,16 @@ fn raw_rust_type_supports_derive_clone(
 
 fn raw_type_arg_supports_derive_clone(
     arg: &str,
+    type_params: &HashSet<String>,
     signatures: &SignaturePlan,
     facts: &FactSet,
     support_program: &Program,
     visiting: &mut HashSet<String>,
 ) -> bool {
     let raw = arg.trim();
+    if type_params.contains(raw) {
+        return true;
+    }
     if matches!(
         raw,
         "String" | "bool" | "char" | "i8" | "i16" | "i32" | "i64" | "f32" | "f64"
@@ -1010,6 +1041,7 @@ fn raw_type_arg_supports_derive_clone(
     if let Some(inner) = raw_rust_option_inner(raw) {
         return raw_type_arg_supports_derive_clone(
             inner,
+            type_params,
             signatures,
             facts,
             support_program,
@@ -1019,6 +1051,7 @@ fn raw_type_arg_supports_derive_clone(
     if let Some(inner) = raw_rust_vec_inner(raw) {
         return raw_type_arg_supports_derive_clone(
             inner,
+            type_params,
             signatures,
             facts,
             support_program,
@@ -1031,13 +1064,21 @@ fn raw_type_arg_supports_derive_clone(
     if raw.contains('<') {
         return raw_rust_type_supports_derive_clone(
             raw,
+            type_params,
             signatures,
             facts,
             support_program,
             visiting,
         );
     }
-    rust_named_type_supports_struct_derive_clone(raw, signatures, facts, support_program, visiting)
+    rust_named_type_supports_struct_derive_clone(
+        raw,
+        type_params,
+        signatures,
+        facts,
+        support_program,
+        visiting,
+    )
 }
 
 fn raw_dyn_trait_supports_box_clone_adapter(trait_name: &str) -> bool {
@@ -1046,11 +1087,15 @@ fn raw_dyn_trait_supports_box_clone_adapter(trait_name: &str) -> bool {
 
 fn rust_named_type_supports_struct_derive_clone(
     name: &str,
+    type_params: &HashSet<String>,
     signatures: &SignaturePlan,
     facts: &FactSet,
     support_program: &Program,
     visiting: &mut HashSet<String>,
 ) -> bool {
+    if type_params.contains(name) {
+        return true;
+    }
     let Some(ty) = find_type_decl_by_rust_name(support_program, name) else {
         return true;
     };
@@ -1061,6 +1106,7 @@ fn rust_named_type_supports_struct_derive_clone(
     let supports_clone = fields.iter().all(|field| {
         rust_type_supports_struct_derive_clone(
             &field.ty,
+            type_params,
             signatures,
             facts,
             support_program,

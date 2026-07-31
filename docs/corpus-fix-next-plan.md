@@ -7247,6 +7247,23 @@ parameter types remain as a conservative compatibility guard, so mismatched
 typed calls no longer accidentally select an arity-only return fact when
 parameter evidence exists.
 
+2026-07-31 generic clone-derive checkpoint: source generic struct derive
+eligibility now treats the current Rust type parameters as clone-derivable
+components, including inside raw `HashMap`/`HashSet` fields, and recognizes
+`PhantomData<...>` marker fields as always cloneable. This lets Rust derive
+generate the required `T: Clone` implementation for holders such as
+`Standards<T>` instead of leaving static `Option<Standards<Concrete>>::clone()`
+without a valid bound. Focused verification passed with
+`generic_source_map_storage_return_adds_clone_bound`, `cargo fmt --check`,
+`cargo check --tests --quiet`, `git diff --check`, and a release-backed reduced
+VCF rerun:
+`.tmp/corpus-rerun-20260731-vcf-standard-bound-after-generic-clone-derive-r1`.
+That rerun translates 9/9 files, has 0 parse failures,
+`unsupported_statements=0`, `stubbed_constants=0`, and reduces generated Rust
+errors from 25 to 23. The generic `Standards<T>` clone-bound rows are gone;
+remaining top families are erased-carrier field/static-method access,
+`HashSet<Box<dyn Any>>` trait bounds, and two mismatched-type rows.
+
 ## 2026-07-30 Facade Correctness Note
 
 `StringBuilder`/`StringBuffer` now emit stateful JDK facade support instead of

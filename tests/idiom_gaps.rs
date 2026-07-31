@@ -9513,12 +9513,28 @@ interface Named {
 class Standards<T extends Named> {
     private Map<String, T> standards = new HashMap<String, T>();
 
-    void add(T line) {
-        standards.put(line.id(), line);
-    }
-
     T get(String id) {
         return standards.get(id);
+    }
+}
+
+class NamedLine implements Named {
+    String name;
+
+    NamedLine(String name) {
+        this.name = name;
+    }
+
+    public String id() {
+        return name;
+    }
+}
+
+class StandardsRegistry {
+    private static Standards<NamedLine> lines = new Standards<NamedLine>();
+
+    static Standards<NamedLine> lines() {
+        return lines;
     }
 }
 "#;
@@ -9532,10 +9548,22 @@ class Standards<T extends Named> {
     assert!(
         translation
             .rust
-            .contains("impl<T: Named + Clone> Standards<T>")
+            .contains("#[derive(Clone)]\npub struct Standards<T>")
+            && translation
+                .rust
+                .contains("impl<T: Named + Clone> Standards<T>")
             && translation.rust.contains(".cloned()"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "generic_source_map_storage_return_clone",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
