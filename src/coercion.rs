@@ -2338,6 +2338,14 @@ pub fn arrays_equals_projection(left: RustExpr, right: RustExpr) -> RustExpr {
     }
 }
 
+pub fn arrays_binary_search_projection(source: RustExpr, key: RustExpr) -> RustExpr {
+    RustExpr::Raw(format!(
+        "{{ let __java_arrays_source = &{}; let __java_arrays_key = {}; match __java_arrays_source.binary_search(&__java_arrays_key) {{ Ok(__java_arrays_index) => __java_arrays_index as i32, Err(__java_arrays_insert) => -((__java_arrays_insert as i32) + 1) }} }}",
+        emit::emit_expr(&source),
+        emit::emit_expr(&key),
+    ))
+}
+
 pub fn arrays_copy_of_projection(source: RustExpr, len: RustExpr) -> RustExpr {
     RustExpr::Raw(format!(
         "{{ let __java_arrays_source = &{}; let __java_arrays_len = {}; if __java_arrays_len < 0 {{ panic!(\"Java NegativeArraySizeException\"); }} let __java_arrays_len = __java_arrays_len as usize; let mut __java_arrays_out = __java_arrays_source.iter().cloned().take(__java_arrays_len).collect::<Vec<_>>(); __java_arrays_out.resize(__java_arrays_len, Default::default()); __java_arrays_out }}",

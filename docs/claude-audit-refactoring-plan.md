@@ -124,6 +124,9 @@ Landed in this batch:
 - `Arrays.sort(...)` now plans both whole-array and subrange statement
   overloads as native mutating Rust operations, with signature mutation
   detection marking the target array for both arities.
+- `Arrays.binarySearch(array, key)` now lowers through a native Rust slice
+  binary-search projection with Java's negative insertion-point result instead
+  of depending on a generated no-op `Arrays` facade.
 - Native `Arrays.copyOf`, `Arrays.copyOfRange`, range `Arrays.fill`, and range
   `Arrays.sort` projections now reject Java-invalid negative, reversed, or
   out-of-bounds ranges with explicit runtime panics instead of clamping or

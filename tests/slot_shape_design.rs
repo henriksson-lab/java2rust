@@ -30606,6 +30606,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(!native_collection_static_source.contains("vec![{value}; {count} as usize]"));
     assert!(call_source.contains("arrays_as_list_projection(args)"));
     assert!(call_source.contains("arrays_equals_projection(left, right)"));
+    assert!(call_source.contains("arrays_binary_search_projection(source, key)"));
     assert!(call_source.contains("collections_singleton_map_projection(key, value)"));
     assert!(coercion_source.contains("pub fn collections_n_copies_projection"));
     assert!(!call_source.contains("{{ let _ = {}; }}"));

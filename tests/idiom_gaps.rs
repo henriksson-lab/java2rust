@@ -21276,6 +21276,58 @@ mod generated_tests {
 }
 
 #[test]
+fn java_arrays_binary_search_lowers_as_static_platform_search_projection() {
+    let translation = translate_source(
+        r#"
+import java.util.Arrays;
+
+class JavaArraysBinarySearchUse {
+    int found(int[] values, int key) {
+        return Arrays.binarySearch(values, key);
+    }
+
+    int missing(int[] values, int key) {
+        return Arrays.binarySearch(values, key);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains(".binary_search(&__java_arrays_key)")
+            && !translation.rust.contains("Arrays::binary_search")
+            && !translation.rust.contains("JavaUtilArrays::binary_search"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "java_arrays_binary_search_use",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn returns_java_index_or_negative_insertion_point() {
+        let fixture = JavaArraysBinarySearchUse {};
+        assert_eq!(fixture.found(&[1, 3, 5, 7], 5), 2);
+        assert_eq!(fixture.missing(&[1, 3, 5, 7], 4), -3);
+        assert_eq!(fixture.missing(&[1, 3, 5, 7], 0), -1);
+        assert_eq!(fixture.missing(&[1, 3, 5, 7], 9), -5);
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
 fn java_arrays_hash_code_lowers_as_static_platform_hash_projection() {
     let translation = translate_source(
         r#"
