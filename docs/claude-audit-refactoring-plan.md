@@ -393,6 +393,10 @@ Landed in this batch:
   values before falling back to raw `Some(...)` parsing, so the shared optional
   construction path no longer depends on rendered text for ordinary optional
   carriers.
+- Optional erased-object clone recovery and try-with-resources cleanup panic
+  rendering now delegate their Rust spellings to `coercion.rs` helpers, reducing
+  the rendered-string surface that `lower.rs` owns while preserving the current
+  Java null/uncaught-exception behavior.
 
 1. Expand rust signature facts.
    - Prefer function signature facts over tailored call rules whenever the same

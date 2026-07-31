@@ -1070,6 +1070,17 @@ clone-recovery idempotence helper. Verified with
 `rendered_string_heuristics_have_centralization_guardrails`,
 `cargo test clone_recovery --test slot_shape_design --quiet`, and
 `cargo test clone --test idiom_gaps --quiet`.
+Optional clone recovery centralization: optional owned-element recovery now
+delegates erased-object clone projection, cloned/consuming optional unwrap
+replacement, and already-unwrapped/null-expect detection to `coercion.rs`
+helpers. Try-with-resources cleanup panic rendering also uses the shared
+uncaught-Java-exception statement projection. This removes the direct
+`java_clone_erased_object_ref(...)` and cleanup `panic!(...)` spellings from
+`lower.rs`, and the broad rendered-string centralization guard now passes again.
+Verified with `rendered_string_heuristics_have_centralization_guardrails`,
+`reused_optional_erased_object_cast_clones_with_erased_helper`,
+`documents_try_with_resources_copy_gap`, and
+`java_arrays_copy_lowers_as_static_platform_copy_projection`.
 Audited clone projection follow-up: self-cast facade boundaries and owned
 receiver-field recoveries now call `coercion::apply_audited_clone_recovery`
 instead of formatting `self.clone()/* TODO(...) */` or

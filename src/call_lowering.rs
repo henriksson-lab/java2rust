@@ -667,7 +667,7 @@ fn apply_native_collection_static_method(
             let source = args
                 .first()
                 .cloned()
-                .unwrap_or_else(|| RustExpr::Raw("Vec::new()".to_string()));
+                .unwrap_or_else(collections_empty_list_projection);
             let len = args
                 .get(1)
                 .cloned()
@@ -678,7 +678,7 @@ fn apply_native_collection_static_method(
             let source = args
                 .first()
                 .cloned()
-                .unwrap_or_else(|| RustExpr::Raw("Vec::new()".to_string()));
+                .unwrap_or_else(collections_empty_list_projection);
             let from = args
                 .get(1)
                 .cloned()

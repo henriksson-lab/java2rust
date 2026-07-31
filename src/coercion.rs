@@ -13,7 +13,7 @@ use crate::conversion_plan::{
 use crate::emit;
 use crate::facts::FactSet;
 use crate::java_ir::{JavaType, Literal, PrimitiveType};
-use crate::rust_ir::RustExpr;
+use crate::rust_ir::{RustExpr, RustStmt};
 use crate::slot_shape::ViewShape;
 use crate::slot_shape::{DispatchShape, OwnershipShape, RustSlotShape};
 
@@ -1555,6 +1555,64 @@ pub fn clone_erased_object_ref_once(expr: RustExpr) -> RustExpr {
     RustExpr::Raw(format!("java_clone_erased_object_ref(&{borrow_operand})"))
 }
 
+pub fn optional_clone_recovery_unwrap_replacement(name: &str, erased_object: bool) -> String {
+    if erased_object {
+        format!(
+            "{name}.as_ref().map(|value| java_clone_erased_object_ref(value)){}\
+             .expect(\"Java null receiver\")",
+            render_clone_recovery_policy(&CloneRecoveryPolicy::AuditRequired)
+        )
+    } else {
+        format!(
+            "{name}.as_ref().cloned(){}.expect(\"Java null receiver\")",
+            render_clone_recovery_policy(&CloneRecoveryPolicy::AuditRequired)
+        )
+    }
+}
+
+pub fn replace_optional_clone_recovery_unwrap(
+    rendered: &str,
+    name: &str,
+    clone_before_unwrap: bool,
+    erased_object: bool,
+) -> Option<String> {
+    let unwrap_expr = if clone_before_unwrap {
+        format!("{name}.clone().unwrap()")
+    } else {
+        format!("{name}.unwrap()")
+    };
+    rendered.contains(&unwrap_expr).then(|| {
+        rendered.replacen(
+            &unwrap_expr,
+            &optional_clone_recovery_unwrap_replacement(name, erased_object),
+            1,
+        )
+    })
+}
+
+pub fn rendered_expr_has_optional_unwrap_or_java_null_expect(rendered: &str) -> bool {
+    rendered.contains(".unwrap()") || rendered.contains(".expect(\"Java null receiver\")")
+}
+
+pub fn optional_clone_recovery_owned_element_projection(
+    option_expr: RustExpr,
+    erased_object: bool,
+) -> RustExpr {
+    let rendered = emit::emit_expr(&option_expr);
+    if erased_object {
+        RustExpr::Raw(format!(
+            "{rendered}.as_ref().map(|value| java_clone_erased_object_ref(value)){}\
+             .expect(\"Java null receiver\")",
+            render_clone_recovery_policy(&CloneRecoveryPolicy::AuditRequired)
+        ))
+    } else {
+        RustExpr::Raw(format!(
+            "{rendered}.as_ref().cloned(){}.expect(\"Java null receiver\")",
+            render_clone_recovery_policy(&CloneRecoveryPolicy::AuditRequired)
+        ))
+    }
+}
+
 pub fn render_parse_receiver(expr: RustExpr) -> String {
     let rendered = emit::emit_expr(&expr);
     let Some(stripped) = rendered.trim().strip_prefix('&') else {
@@ -2779,6 +2837,13 @@ pub fn unwrap_result_or_panic_uncaught_java_exception(expr: RustExpr) -> RustExp
         return RustExpr::Raw(recovered);
     }
     RustExpr::Raw(format!("{rendered}{panic_recovery}"))
+}
+
+pub fn if_err_panic_uncaught_java_exception_stmt(expr: RustExpr) -> RustStmt {
+    RustStmt::Raw(format!(
+        "if let Err(ex) = {} {{ panic!(\"uncaught Java exception: {{:?}}\", ex); }}",
+        emit::emit_expr(&expr)
+    ))
 }
 
 fn recover_nested_result_try_operator(expr: RustExpr, recovery: &str) -> Option<RustExpr> {

@@ -46,20 +46,22 @@ use crate::coercion::{
     erased_object_borrowed_downcast_ref_projection, erased_object_box_projection,
     exception_self_as_supertype_facade_boundary_projection,
     explicit_java_facade_cast_placeholder_projection, force_shared_borrow_projection,
-    function_call_projection, into_projection, iterator_next_expect_projection,
-    java_integral_literal_char, java_primitive_update_expression_projection,
-    java_primitive_updated_value_projection, java_update_expression_projection, len_i32_projection,
-    literal_slot_plan, logical_not_projection, map_get_expect_projection,
-    map_get_mut_expect_projection, map_get_projection, normalize_map_key_borrow_projection,
-    normalize_reused_clone_for_borrowed_argument, optional_copied_expect_projection,
-    outer_this_field_projection, owned_map_keys_set_projection, owner_associated_path_projection,
-    parenthesize_borrowed_method_receiver, print_macro_projection,
-    project_optional_element_borrow_carrier, project_optional_receiver,
+    function_call_projection, if_err_panic_uncaught_java_exception_stmt, into_projection,
+    iterator_next_expect_projection, java_integral_literal_char,
+    java_primitive_update_expression_projection, java_primitive_updated_value_projection,
+    java_update_expression_projection, len_i32_projection, literal_slot_plan,
+    logical_not_projection, map_get_expect_projection, map_get_mut_expect_projection,
+    map_get_projection, normalize_map_key_borrow_projection,
+    normalize_reused_clone_for_borrowed_argument, optional_clone_recovery_owned_element_projection,
+    optional_copied_expect_projection, outer_this_field_projection, owned_map_keys_set_projection,
+    owner_associated_path_projection, parenthesize_borrowed_method_receiver,
+    print_macro_projection, project_optional_element_borrow_carrier, project_optional_receiver,
     project_optional_sequence_receiver, propagate_result_projection,
     qualified_static_storage_accessor_projection, qualified_static_storage_setter_path_projection,
     reborrow_optional_mut_projection, receiver_method_call_projection_exact,
     render_sequence_iteration_source, rendered_expr_has_clone_recovery,
-    rendered_expr_has_direct_clone_recovery, rendered_expr_is_mutable_alias,
+    rendered_expr_has_direct_clone_recovery, rendered_expr_has_optional_unwrap_or_java_null_expect,
+    rendered_expr_is_mutable_alias, replace_optional_clone_recovery_unwrap,
     rewrite_downcast_expect_message, rust_expr_is_constructed_optional_value,
     rust_expr_mentions_constructor_self_temporary, self_associated_path_projection,
     sequence_get_expect_projection, sequence_iter_cloned_projection,
@@ -8241,10 +8243,7 @@ fn try_resource_cleanup_stmts(
                 if outer_returns_result {
                     expr_stmt(propagate_result_projection(close_call))
                 } else {
-                    RustStmt::Raw(format!(
-                        "if let Err(ex) = {} {{ panic!(\"uncaught Java exception: {{:?}}\", ex); }}",
-                        crate::emit::emit_expr(&close_call)
-                    ))
+                    if_err_panic_uncaught_java_exception_stmt(close_call)
                 }
             } else {
                 expr_stmt(close_call)
@@ -16978,56 +16977,29 @@ fn adapt_reused_owned_optional_argument(
         return None;
     }
     let rendered = emit::emit_expr(&lowered);
-    let cloned_unwrap = format!("{name}.clone().unwrap()");
-    if rendered.contains(&cloned_unwrap) {
-        if optional_shape_contains_erased_object(&actual_shape) {
-            return Some(RustExpr::Raw(rendered.replacen(
-                &cloned_unwrap,
-                &format!(
-                    "{name}.as_ref().map(|value| java_clone_erased_object_ref(value))/* TODO(translation): validate added clone */.expect(\"Java null receiver\")"
-                ),
-                1,
-            )));
-        }
-        return Some(RustExpr::Raw(rendered.replacen(
-            &cloned_unwrap,
-            &format!(
-                "{name}.as_ref().cloned()/* TODO(translation): validate added clone */.expect(\"Java null receiver\")"
-            ),
-            1,
-        )));
+    if let Some(recovered) = replace_optional_clone_recovery_unwrap(
+        &rendered,
+        name,
+        true,
+        optional_shape_contains_erased_object(&actual_shape),
+    ) {
+        return Some(RustExpr::Raw(recovered));
     }
-    let consuming_unwrap = format!("{name}.unwrap()");
-    if rendered.contains(&consuming_unwrap) {
-        if optional_shape_contains_erased_object(&actual_shape) {
-            return Some(RustExpr::Raw(rendered.replacen(
-                &consuming_unwrap,
-                &format!(
-                    "{name}.as_ref().map(|value| java_clone_erased_object_ref(value))/* TODO(translation): validate added clone */.expect(\"Java null receiver\")"
-                ),
-                1,
-            )));
-        }
-        return Some(RustExpr::Raw(rendered.replacen(
-            &consuming_unwrap,
-            &format!(
-                "{name}.as_ref().cloned()/* TODO(translation): validate added clone */.expect(\"Java null receiver\")"
-            ),
-            1,
-        )));
+    if let Some(recovered) = replace_optional_clone_recovery_unwrap(
+        &rendered,
+        name,
+        false,
+        optional_shape_contains_erased_object(&actual_shape),
+    ) {
+        return Some(RustExpr::Raw(recovered));
     }
-    if rendered.contains(".unwrap()") || rendered.contains(".expect(\"Java null receiver\")") {
+    if rendered_expr_has_optional_unwrap_or_java_null_expect(&rendered) {
         return Some(lowered);
     }
-    let owned_element = if optional_shape_contains_erased_object(&actual_shape) {
-        RustExpr::Raw(format!(
-            "{rendered}.as_ref().map(|value| java_clone_erased_object_ref(value))/* TODO(translation): validate added clone */.expect(\"Java null receiver\")"
-        ))
-    } else {
-        RustExpr::Raw(format!(
-            "{rendered}.as_ref().cloned()/* TODO(translation): validate added clone */.expect(\"Java null receiver\")"
-        ))
-    };
+    let owned_element = optional_clone_recovery_owned_element_projection(
+        lowered,
+        optional_shape_contains_erased_object(&actual_shape),
+    );
     Some(apply_expr_to_slot_via_plan(
         owned_element,
         element_shape,
@@ -17243,18 +17215,10 @@ fn apply_clone_recovery_decision(lowered: RustExpr, decision: CloneRecoveryDecis
     } = decision
     {
         let rendered = emit::emit_expr(&lowered);
-        let consuming_unwrap = format!("{name}.unwrap()");
-        if rendered.contains(&consuming_unwrap) {
-            let replacement = if erased_object {
-                format!(
-                    "{name}.as_ref().map(|value| java_clone_erased_object_ref(value))/* TODO(translation): validate added clone */.expect(\"Java null receiver\")"
-                )
-            } else {
-                format!(
-                    "{name}.as_ref().cloned()/* TODO(translation): validate added clone */.expect(\"Java null receiver\")"
-                )
-            };
-            return RustExpr::Raw(rendered.replacen(&consuming_unwrap, &replacement, 1));
+        if let Some(recovered) =
+            replace_optional_clone_recovery_unwrap(&rendered, &name, false, erased_object)
+        {
+            return RustExpr::Raw(recovered);
         }
         return apply_audited_clone_recovery(lowered);
     }
