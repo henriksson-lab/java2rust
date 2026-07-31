@@ -29158,6 +29158,45 @@ class MappedExternalFacadeReturn {
 }
 
 #[test]
+fn fact_backed_typed_external_initializer_anchors_declared_local_shape() {
+    let facts = parse_external_pack_manifest(
+        r#"
+external-pack dep ExternalReader rust-crate-mapping mapped target=dep_facade
+external-pack dep ExternalRecord rust-crate-mapping mapped target=dep_facade
+external-pack-object dep ExternalReader concrete
+external-pack-object dep ExternalRecord concrete
+external-pack-api dep ExternalReader readRecord mapped getter read-only definitely-non-null args=0 return=ExternalRecord rust=read_record
+external-pack-api dep ExternalRecord label mapped getter read-only definitely-non-null args=0 return=String rust=label
+"#,
+    )
+    .facts;
+    let translation = translate_source_with_facts(
+        r#"
+class FactBackedTypedExternalInitializer {
+    String run(ExternalReader reader) {
+        ExternalRecord record = reader.readRecord();
+        return record.label();
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let record = dep_facade::read_record(reader);")
+            && translation.rust.contains("dep_facade::label(record)")
+            && !translation
+                .rust
+                .contains("let record: Box<dyn std::any::Any>")
+            && !translation.rust.contains("downcast"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn external_facade_support_uses_exact_rust_return_facts_for_stub_signatures() {
     let facts = parse_external_pack_manifest(
         r#"

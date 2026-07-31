@@ -4840,9 +4840,11 @@ fn lower_stmt(
             {
                 local_plan.shape = shape;
             }
-            if declared_graphics_create_initializer_should_anchor_local_type(
+            if declared_typed_initializer_should_anchor_local_type(
                 ty,
                 initializer.as_ref(),
+                env,
+                ctx,
             ) {
                 local_plan.shape = declared_generic_local_slot_shape(ty, &local_plan.shape);
             }
@@ -6725,27 +6727,23 @@ fn raw_cast_initializer_erases_declared_local_type(
         && !slot_has_generic_or_sequence_detail(&local_shape.java_ty)
 }
 
-fn declared_graphics_create_initializer_should_anchor_local_type(
+fn declared_typed_initializer_should_anchor_local_type(
     declared_ty: &JavaType,
     initializer: Option<&Expr>,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
 ) -> bool {
-    let name = match declared_ty {
-        JavaType::Named { name, .. } | JavaType::Unknown(name) => name,
-        _ => return false,
-    };
-    if !matches!(name.rsplit('.').next().unwrap_or(name.as_str()), "Graphics") {
+    if matches!(
+        declared_ty,
+        JavaType::Primitive(_) | JavaType::Void | JavaType::Wildcard(_)
+    ) {
         return false;
     }
-    let Some(Expr::Call {
-        receiver: Some(_),
-        name,
-        args,
-        resolved: _,
-    }) = initializer
-    else {
-        return false;
-    };
-    args.is_empty() && matches!(name.as_str(), "createGraphics" | "create_graphics")
+    initializer
+        .and_then(|initializer| planned_external_facade_call_java_type(initializer, env, ctx))
+        .is_some_and(|initializer_ty| {
+            java_types_have_same_erased_identity(declared_ty, &initializer_ty)
+        })
 }
 
 fn declared_generic_local_slot_shape(

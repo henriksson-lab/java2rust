@@ -7020,6 +7020,29 @@ duplicate `From<T> for Box<dyn Any>` support. The next reduced-VCF target should
 either implement concrete source-hierarchy runtime checks/downcasts directly, or
 pair any erased-object fallback with the required emitted source method facade.
 
+2026-07-31 VCF open-hierarchy investigation checkpoint: the ignored
+`source_hierarchy_instanceof_repair_keeps_supertype_slot_adapted` probe still
+renders `repair_all(&self, lines: &[HeaderLine])`, iterates `for line in
+lines.iter()`, and emits `unsupported Java instanceof shape: actual=Concrete,
+target=Concrete`. Parallel explorers traced this to three required pieces:
+`object_model.rs::apply_erased_object_requirement_fallback` currently demotes
+only dyn-trait strategies and does not demote open concrete class roots with
+`NeedsInstanceof`; collection element rendering still needs the erased-object
+decision encoded before facts-only generic argument rendering; and
+`lower_enhanced_for_stmt` needs an assigned-loop-variable erased-object branch
+that iterates owned cloned erased carriers rather than borrowed `&HeaderLine`
+values. Do not land just the object-model demotion alone: without sequence
+element rendering and owned enhanced-for carriers, it trades the current
+diagnostic for method/clone/downcast compile failures.
+
+2026-07-31 fact-backed initializer checkpoint: declared external locals whose
+initializer has a planned typed return now anchor through a general erased-type
+identity predicate in signature/lowering instead of the former
+`Graphics/createGraphics` package-specific rule. Focused verification:
+`fact_backed_typed_external_initializer_anchors_declared_local_shape`,
+`buffered_image_graphics_facades_are_typed`, and
+`buffered_image_create_graphics_returns_graphics2d_without_downcast`.
+
 2026-07-31 pattern-binding scope checkpoint: Java `instanceof` pattern variables
 now cover the audit `0021` source-level cases for positive blocks, negated
 terminating guards, and left-pattern `&&` chains over erased-object checks.

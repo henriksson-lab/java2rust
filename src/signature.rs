@@ -11090,30 +11090,28 @@ fn local_plan(
     constraints: &[SignatureConstraint],
     facts: &FactSet,
 ) -> LocalPlan {
-    let shape =
-        if declared_graphics_create_initializer_should_anchor_local_type(java_ty, initializer) {
-            RustSlotShape::for_storage(java_ty.clone())
-        } else if local_constraints_select_concrete_borrowed_value(constraints) {
-            let mut shape = apply_signature_constraints(
-                RustSlotShape::conservative(java_ty.clone()),
-                constraints,
-            );
-            apply_required_dispatch(&mut shape, DispatchShape::Concrete);
-            apply_required_view(&mut shape, ViewShape::Native);
-            apply_required_ownership(&mut shape, OwnershipShape::SharedBorrow);
-            shape
-        } else {
-            solve_signature_shape_with_facts(
-                representations,
-                SignatureShapeRequest {
-                    java_ty: java_ty.clone(),
-                    role: SignatureSlotRole::Storage,
-                    constraints: constraints.to_vec(),
-                },
-                facts,
-            )
-            .expect("local signature shape is always present")
-        };
+    let shape = if declared_typed_initializer_should_anchor_local_type(java_ty, initializer, facts)
+    {
+        RustSlotShape::for_storage(java_ty.clone())
+    } else if local_constraints_select_concrete_borrowed_value(constraints) {
+        let mut shape =
+            apply_signature_constraints(RustSlotShape::conservative(java_ty.clone()), constraints);
+        apply_required_dispatch(&mut shape, DispatchShape::Concrete);
+        apply_required_view(&mut shape, ViewShape::Native);
+        apply_required_ownership(&mut shape, OwnershipShape::SharedBorrow);
+        shape
+    } else {
+        solve_signature_shape_with_facts(
+            representations,
+            SignatureShapeRequest {
+                java_ty: java_ty.clone(),
+                role: SignatureSlotRole::Storage,
+                constraints: constraints.to_vec(),
+            },
+            facts,
+        )
+        .expect("local signature shape is always present")
+    };
     LocalPlan {
         name: name.to_string(),
         java_ty: java_ty.clone(),
@@ -11122,19 +11120,19 @@ fn local_plan(
     }
 }
 
-fn declared_graphics_create_initializer_should_anchor_local_type(
+fn declared_typed_initializer_should_anchor_local_type(
     declared_ty: &JavaType,
     initializer: Option<&Expr>,
+    facts: &FactSet,
 ) -> bool {
-    let name = match declared_ty {
-        JavaType::Named { name, .. } | JavaType::Unknown(name) => name,
-        _ => return false,
-    };
-    if !matches!(name.rsplit('.').next().unwrap_or(name.as_str()), "Graphics") {
+    if matches!(
+        declared_ty,
+        JavaType::Primitive(_) | JavaType::Void | JavaType::Wildcard(_)
+    ) {
         return false;
     }
     let Some(Expr::Call {
-        receiver: Some(_),
+        receiver,
         name,
         args,
         resolved: _,
@@ -11142,7 +11140,18 @@ fn declared_graphics_create_initializer_should_anchor_local_type(
     else {
         return false;
     };
-    args.is_empty() && matches!(name.as_str(), "createGraphics" | "create_graphics")
+    receiver
+        .as_deref()
+        .and_then(static_initializer_receiver_key)
+        .and_then(|receiver_key| {
+            facts.external_api_effect_for_receiver_with_arity(
+                Some(&receiver_key),
+                name,
+                Some(args.len()),
+            )
+        })
+        .and_then(|effect| effect.return_type.as_ref())
+        .is_some_and(|return_ty| return_type_can_initialize_declared_type(return_ty, declared_ty))
 }
 
 fn local_constraints_select_concrete_borrowed_value(constraints: &[SignatureConstraint]) -> bool {
