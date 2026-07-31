@@ -7736,6 +7736,21 @@ partial because nested checked arithmetic operands inside larger expressions
 and a fuller unchecked-exception propagation model still need a structured
 expression fallibility pass.
 
+2026-07-31 nested integer fallibility checkpoint: numeric and numeric
+comparison expressions whose operands contain fallible Java integer div/rem now
+lower as result-producing blocks with typed promoted temporaries. This lets
+`1 + value / divisor` and `value % divisor == 2` compose with the checked
+div/rem helper and propagate through the existing `?`/uncaught policy instead
+of leaking `Result` values into ordinary arithmetic or comparison operators.
+Focused verification covers the expanded
+`java_integer_division_and_remainder_by_zero_raise_catchable_arithmetic_exception`,
+`java_integer_binary_ops_wrap_and_mask_shift_distance`,
+`operator_lowering_owns_binary_and_unary_rust_spelling`,
+`cargo fmt --check`, `cargo check --tests --quiet`, and `git diff --check`.
+Audit `0003` remains partial because fallible arithmetic in non-slot contexts
+such as conditions, method arguments, array indexes, and ternary arms still
+needs a structured expression fallibility pass.
+
 ## Rerun Protocol
 
 After each fix:

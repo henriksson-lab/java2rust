@@ -5537,6 +5537,22 @@ class JavaIntegerArithmeticExceptionSemantics {
             return 301;
         }
     }
+
+    int catchNestedAdd(int value, int divisor) {
+        try {
+            return 1 + value / divisor;
+        } catch (ArithmeticException ex) {
+            return 401;
+        }
+    }
+
+    boolean catchNestedCompare(int value, int divisor) {
+        try {
+            return value % divisor == 2;
+        } catch (ArithmeticException ex) {
+            return true;
+        }
+    }
 }
 "#,
     );
@@ -5552,7 +5568,11 @@ class JavaIntegerArithmeticExceptionSemantics {
                 .rust
                 .contains("unsupported Java statement: try/catch/finally")
             && !translation.rust.contains("value / divisor")
-            && !translation.rust.contains("value % divisor"),
+            && !translation.rust.contains("value % divisor")
+            && translation
+                .rust
+                .contains("Ok((__java_left).wrapping_add(__java_right))")
+            && translation.rust.contains("Ok(__java_left == __java_right)"),
         "{}",
         translation.rust
     );
@@ -5579,6 +5599,10 @@ mod generated_tests {
         assert_eq!(fixture.catch_long_div(9, 0), 201);
         assert_eq!(fixture.catch_long_rem(9, 0), 202);
         assert_eq!(fixture.catch_runtime_div(8, 0), 301);
+        assert_eq!(fixture.catch_nested_add(8, 2), 5);
+        assert_eq!(fixture.catch_nested_add(8, 0), 401);
+        assert!(!fixture.catch_nested_compare(7, 3));
+        assert!(fixture.catch_nested_compare(8, 0));
         assert_eq!(fixture.catch_int_div(i32::MIN, -1), i32::MIN);
         assert_eq!(fixture.catch_int_rem(i32::MIN, -1), 0);
         assert_eq!(fixture.catch_long_div(i64::MIN, -1), i64::MIN);

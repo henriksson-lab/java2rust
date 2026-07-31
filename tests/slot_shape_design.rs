@@ -36032,14 +36032,7 @@ fn operator_lowering_owns_binary_and_unary_rust_spelling() {
             )
             .unwrap(),
         ),
-        RustExpr::Binary {
-            op: "*".to_string(),
-            left: Box::new(RustExpr::Var("acc".to_string())),
-            right: Box::new(RustExpr::Cast {
-                expr: Box::new(RustExpr::Var("n".to_string())),
-                ty: "i64".to_string(),
-            }),
-        }
+        RustExpr::Raw("(acc).wrapping_mul(n as i64)".to_string())
     );
     assert_eq!(
         plan_numeric_binary_promotion(

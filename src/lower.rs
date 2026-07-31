@@ -6211,6 +6211,68 @@ fn loop_assignment_condition_body_env(
     body_env
 }
 
+fn lower_numeric_binary_expr_with_fallible_operands(
+    op: BinaryOp,
+    left: &Expr,
+    right: &Expr,
+    plan: crate::operator_lowering::NumericBinaryPromotionPlan,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    let left_needs_result = slot_expr_needs_result_propagation(left, env, ctx);
+    let right_needs_result = slot_expr_needs_result_propagation(right, env, ctx);
+    if !left_needs_result && !right_needs_result {
+        return None;
+    }
+    let left_value = lower_numeric_binary_operand(left, env, ctx, refinements);
+    let right_value = lower_numeric_binary_operand(right, env, ctx, refinements);
+    let left_value = if left_needs_result {
+        propagate_result_projection(left_value)
+    } else {
+        left_value
+    };
+    let right_value = if right_needs_result {
+        propagate_result_projection(right_value)
+    } else {
+        right_value
+    };
+    let left_value = apply_coercions(left_value, &plan.left);
+    let right_value = apply_coercions(right_value, &plan.right);
+    let left_temp = RustExpr::Raw("__java_left".to_string());
+    let right_temp = RustExpr::Raw("__java_right".to_string());
+    let promoted_plan = crate::operator_lowering::NumericBinaryPromotionPlan {
+        promoted: plan.promoted,
+        left: Vec::new(),
+        right: Vec::new(),
+    };
+    let temp_ty = crate::coercion::rust_primitive_type_name_policy(plan.promoted).rust_name;
+    let result = if let Some(expr) =
+        crate::operator_lowering::lower_checked_java_integer_div_rem_expr(
+            op,
+            left_temp.clone(),
+            right_temp.clone(),
+            promoted_plan.clone(),
+        ) {
+        emit::emit_expr(&expr)
+    } else {
+        format!(
+            "Ok({})",
+            emit::emit_expr(&lower_numeric_binary_expr(
+                op,
+                left_temp,
+                right_temp,
+                promoted_plan
+            ))
+        )
+    };
+    Some(RustExpr::Raw(format!(
+        "{{ let __java_left: {temp_ty} = {}; let __java_right: {temp_ty} = {}; {result} }}",
+        emit::emit_expr(&left_value),
+        emit::emit_expr(&right_value)
+    )))
+}
+
 fn lower_nullable_assignment_condition_value(
     value: &Expr,
     env: &ShapeEnv,
@@ -11828,6 +11890,17 @@ fn lower_binary_expr(
             return expr;
         }
         if let Some(plan) = numeric_promotion {
+            if let Some(expr) = lower_numeric_binary_expr_with_fallible_operands(
+                op,
+                left,
+                right,
+                plan.clone(),
+                env,
+                ctx,
+                refinements,
+            ) {
+                return expr;
+            }
             return lower_numeric_binary_expr(
                 op,
                 lower_numeric_binary_operand(left, env, ctx, refinements),
@@ -11849,6 +11922,17 @@ fn lower_binary_expr(
         };
     }
     if let Some(plan) = numeric_promotion {
+        if let Some(expr) = lower_numeric_binary_expr_with_fallible_operands(
+            op,
+            left,
+            right,
+            plan.clone(),
+            env,
+            ctx,
+            refinements,
+        ) {
+            return expr;
+        }
         if let Some(expr) = crate::operator_lowering::lower_checked_java_integer_div_rem_expr(
             op,
             lower_numeric_binary_operand(left, env, ctx, refinements),
