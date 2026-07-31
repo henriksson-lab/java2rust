@@ -7718,6 +7718,24 @@ verification covers
 partial because conflicting defaults, indirect interface-super qualification,
 and private/static interface members are still open.
 
+2026-07-31 integer div/rem exception checkpoint: promoted Java `int`/`long`
+division and remainder now lower through a checked helper that evaluates both
+operands once, returns `Err(JavaException::new("ArithmeticException", "/ by
+zero".to_string()))` for zero divisors, and otherwise uses Rust wrapping
+division/remainder to preserve Java's `MIN_VALUE / -1` and `MIN_VALUE % -1`
+edges. Return, local-initializer, and assignment statement boundaries now apply
+the existing result propagation policy to such fallible arithmetic expressions:
+`?` inside result-wrapped try bodies, and uncaught-Java-exception panic outside
+result contexts. `ArithmeticException` is now part of the built-in
+`RuntimeException` subtype set so broader catches can handle it. Focused
+verification covers
+`java_integer_binary_ops_wrap_and_mask_shift_distance`,
+`java_integer_division_and_remainder_by_zero_raise_catchable_arithmetic_exception`,
+`cargo fmt --check`, and `cargo check --tests --quiet`. Audit `0003` remains
+partial because nested checked arithmetic operands inside larger expressions
+and a fuller unchecked-exception propagation model still need a structured
+expression fallibility pass.
+
 ## Rerun Protocol
 
 After each fix:

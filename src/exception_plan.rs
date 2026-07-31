@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::facts::FactSet;
 use crate::java_ir::{
-    Block, CatchClause, Expr, JavaType, Member, MethodDecl, Program, Stmt, TypeDecl,
+    BinaryOp, Block, CatchClause, Expr, JavaType, Member, MethodDecl, Program, Stmt, TypeDecl,
 };
 use crate::java_signature::source_method_rust_name;
 use crate::usage::{CallGraph, CallableKey};
@@ -132,6 +132,7 @@ pub fn program_uses_java_exception_with_facts(program: &Program, facts: &FactSet
         || !facts.exception_facts.is_empty()
         || !facts.catch_facts.is_empty()
         || program_has_lowerable_try_scope(program)
+        || program_has_integer_div_rem_expr(program)
 }
 
 pub fn plan_java_exception_support(program: &Program, facts: &FactSet) -> JavaExceptionSupportPlan {
@@ -211,6 +212,199 @@ fn stmt_has_lowerable_try_scope(stmt: &Stmt) -> bool {
         | Stmt::Break(_)
         | Stmt::Continue(_)
         | Stmt::Unsupported(_) => false,
+    }
+}
+
+fn program_has_integer_div_rem_expr(program: &Program) -> bool {
+    program.types.iter().any(type_has_integer_div_rem_expr)
+}
+
+fn type_has_integer_div_rem_expr(ty: &TypeDecl) -> bool {
+    ty.members.iter().any(|member| match member {
+        Member::Method(method) => method
+            .body
+            .as_ref()
+            .is_some_and(block_has_integer_div_rem_expr),
+        Member::Constructor(constructor) => constructor
+            .body
+            .as_ref()
+            .is_some_and(block_has_integer_div_rem_expr),
+        Member::Field(field) => field
+            .initializer
+            .as_ref()
+            .is_some_and(expr_has_integer_div_rem_expr),
+        Member::Type(nested) => type_has_integer_div_rem_expr(nested),
+        Member::Unsupported { .. } => false,
+    })
+}
+
+fn block_has_integer_div_rem_expr(block: &Block) -> bool {
+    block.statements.iter().any(stmt_has_integer_div_rem_expr)
+}
+
+fn stmt_has_integer_div_rem_expr(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::VarDecl { initializer, .. } | Stmt::Return(initializer) => initializer
+            .as_ref()
+            .is_some_and(expr_has_integer_div_rem_expr),
+        Stmt::Assign { target, value } => {
+            expr_has_integer_div_rem_expr(target) || expr_has_integer_div_rem_expr(value)
+        }
+        Stmt::Expr(expr) | Stmt::Throw(expr) => expr_has_integer_div_rem_expr(expr),
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            expr_has_integer_div_rem_expr(condition)
+                || block_has_integer_div_rem_expr(then_block)
+                || else_block
+                    .as_ref()
+                    .is_some_and(block_has_integer_div_rem_expr)
+        }
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => expr_has_integer_div_rem_expr(condition) || block_has_integer_div_rem_expr(body),
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            init.iter().any(stmt_has_integer_div_rem_expr)
+                || condition
+                    .as_ref()
+                    .is_some_and(expr_has_integer_div_rem_expr)
+                || update.iter().any(expr_has_integer_div_rem_expr)
+                || block_has_integer_div_rem_expr(body)
+        }
+        Stmt::EnhancedFor { iterable, body, .. } => {
+            expr_has_integer_div_rem_expr(iterable) || block_has_integer_div_rem_expr(body)
+        }
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            block_has_integer_div_rem_expr(block)
+        }
+        Stmt::Switch { selector, cases } => {
+            expr_has_integer_div_rem_expr(selector)
+                || cases.iter().any(|case| {
+                    case.labels
+                        .iter()
+                        .any(switch_label_has_integer_div_rem_expr)
+                        || case.statements.iter().any(stmt_has_integer_div_rem_expr)
+                })
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            resources.iter().any(stmt_has_integer_div_rem_expr)
+                || block_has_integer_div_rem_expr(body)
+                || catches
+                    .iter()
+                    .any(|catch| block_has_integer_div_rem_expr(&catch.body))
+                || finally_block
+                    .as_ref()
+                    .is_some_and(block_has_integer_div_rem_expr)
+        }
+        Stmt::LocalType(nested) => type_has_integer_div_rem_expr(nested),
+        Stmt::ConstructorInvocation { args, .. } => args.iter().any(expr_has_integer_div_rem_expr),
+        Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => false,
+    }
+}
+
+fn expr_has_integer_div_rem_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::Binary { op, left, right } => {
+            matches!(op, BinaryOp::Div | BinaryOp::Rem)
+                || expr_has_integer_div_rem_expr(left)
+                || expr_has_integer_div_rem_expr(right)
+        }
+        Expr::Unary { expr, .. }
+        | Expr::Cast { expr, .. }
+        | Expr::FieldAccess(expr, _)
+        | Expr::ArrayAccess(expr, _) => expr_has_integer_div_rem_expr(expr),
+        Expr::Call { receiver, args, .. } => {
+            receiver
+                .as_ref()
+                .is_some_and(|receiver| expr_has_integer_div_rem_expr(receiver))
+                || args.iter().any(expr_has_integer_div_rem_expr)
+        }
+        Expr::New { args, body, .. } => {
+            args.iter().any(expr_has_integer_div_rem_expr)
+                || body.as_ref().is_some_and(|members| {
+                    members.iter().any(|member| match member {
+                        Member::Method(method) => method
+                            .body
+                            .as_ref()
+                            .is_some_and(block_has_integer_div_rem_expr),
+                        Member::Constructor(constructor) => constructor
+                            .body
+                            .as_ref()
+                            .is_some_and(block_has_integer_div_rem_expr),
+                        Member::Field(field) => field
+                            .initializer
+                            .as_ref()
+                            .is_some_and(expr_has_integer_div_rem_expr),
+                        Member::Type(nested) => type_has_integer_div_rem_expr(nested),
+                        Member::Unsupported { .. } => false,
+                    })
+                })
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            dimensions.iter().any(expr_has_integer_div_rem_expr)
+                || initializer
+                    .as_ref()
+                    .is_some_and(|elements| elements.iter().any(expr_has_integer_div_rem_expr))
+        }
+        Expr::ArrayInitializer(elements) => elements.iter().any(expr_has_integer_div_rem_expr),
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            expr_has_integer_div_rem_expr(condition)
+                || expr_has_integer_div_rem_expr(then_expr)
+                || expr_has_integer_div_rem_expr(else_expr)
+        }
+        Expr::Switch { selector, cases } => {
+            expr_has_integer_div_rem_expr(selector)
+                || cases.iter().any(|case| {
+                    case.labels
+                        .iter()
+                        .any(switch_label_has_integer_div_rem_expr)
+                        || expr_has_integer_div_rem_expr(&case.value)
+                })
+        }
+        Expr::InstanceOf { expr, .. } => expr_has_integer_div_rem_expr(expr),
+        Expr::Lambda { body, .. } => match body {
+            crate::java_ir::LambdaBody::Expr(expr) => expr_has_integer_div_rem_expr(expr),
+            crate::java_ir::LambdaBody::Block(block) => block_has_integer_div_rem_expr(block),
+        },
+        Expr::MethodReference { .. } => false,
+        Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::ClassLiteral(_)
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => false,
+    }
+}
+
+fn switch_label_has_integer_div_rem_expr(label: &crate::java_ir::SwitchLabel) -> bool {
+    match label {
+        crate::java_ir::SwitchLabel::Expr(expr) => expr_has_integer_div_rem_expr(expr),
+        crate::java_ir::SwitchLabel::Default => false,
     }
 }
 

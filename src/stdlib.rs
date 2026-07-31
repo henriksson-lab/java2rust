@@ -190,6 +190,7 @@ pub fn is_known_java_subtype(actual: &str, target: &str) -> bool {
                 | "IllegalStateException"
                 | "NoSuchElementException"
                 | "NumberFormatException"
+                | "ArithmeticException"
                 | "ArrayIndexOutOfBoundsException"
                 | "IndexOutOfBoundsException"
                 | "ConcurrentModificationException"

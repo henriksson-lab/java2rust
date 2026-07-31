@@ -5417,6 +5417,18 @@ class JavaIntegerBinarySemantics {
         return value / -1;
     }
 
+    long minLongDiv(long value) {
+        return value / -1L;
+    }
+
+    int minRem(int value) {
+        return value % -1;
+    }
+
+    long minLongRem(long value) {
+        return value % -1L;
+    }
+
     int shiftInt(int value, int count) {
         return value << count;
     }
@@ -5441,7 +5453,9 @@ class JavaIntegerBinarySemantics {
     assert!(
         translation.rust.contains(".wrapping_mul(")
             && translation.rust.contains(".wrapping_add(")
-            && translation.rust.contains(".wrapping_div(")
+            && translation
+                .rust
+                .contains("JavaException::new(\"ArithmeticException\"")
             && translation.rust.contains(".wrapping_shl(")
             && translation.rust.contains(".wrapping_shr(")
             && translation.rust.contains("(31i32).wrapping_mul(result)")
@@ -5466,9 +5480,109 @@ mod generated_tests {
         let fixture = JavaIntegerBinarySemantics {};
         assert_eq!(fixture.multiply_add(2_000_000_000, 2), 1_705_032_704);
         assert_eq!(fixture.min_div(i32::MIN), i32::MIN);
+        assert_eq!(fixture.min_long_div(i64::MIN), i64::MIN);
+        assert_eq!(fixture.min_rem(i32::MIN), 0);
+        assert_eq!(fixture.min_long_rem(i64::MIN), 0);
         assert_eq!(fixture.shift_int(1, 33), 2);
         assert_eq!(fixture.shift_long(1, 65), 2);
         assert_eq!(fixture.unsigned_shift_int(-1, 33), 2_147_483_647);
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn java_integer_division_and_remainder_by_zero_raise_catchable_arithmetic_exception() {
+    let translation = translate_source(
+        r#"
+class JavaIntegerArithmeticExceptionSemantics {
+    int catchIntDiv(int value, int divisor) {
+        try {
+            return value / divisor;
+        } catch (ArithmeticException ex) {
+            return 101;
+        }
+    }
+
+    int catchIntRem(int value, int divisor) {
+        try {
+            return value % divisor;
+        } catch (ArithmeticException ex) {
+            return 102;
+        }
+    }
+
+    long catchLongDiv(long value, long divisor) {
+        try {
+            return value / divisor;
+        } catch (ArithmeticException ex) {
+            return 201L;
+        }
+    }
+
+    long catchLongRem(long value, long divisor) {
+        try {
+            return value % divisor;
+        } catch (ArithmeticException ex) {
+            return 202L;
+        }
+    }
+
+    int catchRuntimeDiv(int value, int divisor) {
+        try {
+            return value / divisor;
+        } catch (RuntimeException ex) {
+            return 301;
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("Err(ex) if ex.is_instance(&[\"ArithmeticException\"])")
+            && translation
+                .rust
+                .contains("JavaException::new(\"ArithmeticException\"")
+            && !translation
+                .rust
+                .contains("unsupported Java statement: try/catch/finally")
+            && !translation.rust.contains("value / divisor")
+            && !translation.rust.contains("value % divisor"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "java_integer_arithmetic_exception_semantics",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn integer_div_rem_zero_is_catchable() {
+        let fixture = JavaIntegerArithmeticExceptionSemantics {};
+        assert_eq!(fixture.catch_int_div(8, 2), 4);
+        assert_eq!(fixture.catch_int_rem(8, 3), 2);
+        assert_eq!(fixture.catch_long_div(9, 3), 3);
+        assert_eq!(fixture.catch_long_rem(9, 4), 1);
+        assert_eq!(fixture.catch_int_div(8, 0), 101);
+        assert_eq!(fixture.catch_int_rem(8, 0), 102);
+        assert_eq!(fixture.catch_long_div(9, 0), 201);
+        assert_eq!(fixture.catch_long_rem(9, 0), 202);
+        assert_eq!(fixture.catch_runtime_div(8, 0), 301);
+        assert_eq!(fixture.catch_int_div(i32::MIN, -1), i32::MIN);
+        assert_eq!(fixture.catch_int_rem(i32::MIN, -1), 0);
+        assert_eq!(fixture.catch_long_div(i64::MIN, -1), i64::MIN);
+        assert_eq!(fixture.catch_long_rem(i64::MIN, -1), 0);
     }
 }
 "#,

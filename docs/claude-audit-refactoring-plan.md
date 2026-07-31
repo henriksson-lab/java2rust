@@ -637,7 +637,7 @@ Completion checklist for any audit marked `fixed locally`:
 |---|---:|---|
 | `0001` loop back edges invisible | partial | Basic loop-carried read compatibility covers the LoopMove-style repeated consume; full CFG/liveness with labelled/switch/exception edges still open |
 | `0002` object aliasing/clones | open | Clone discipline, then object representation |
-| `0003` integer arithmetic semantics | partial | Binary int/long overflow, shift-distance masking, and local integral update wrapping fixed; divide-by-zero exception integration remains |
+| `0003` integer arithmetic semantics | partial | Binary int/long overflow, shift-distance masking, local integral update wrapping, and direct int/long `/`/`%` zero-divisor lowering to catchable `ArithmeticException` are fixed; nested fallible arithmetic operands in larger expressions and a fuller unchecked-exception propagation model remain open |
 | `0004` string concat absorbs arithmetic | fixed locally | Moved to `claude_audits/done`; Rust IR shape tags prevent recurrence |
 | `0005` unsigned right shift | fixed locally | Moved to `claude_audits/done`; arithmetic slice should add shift-distance masking |
 | `0006` move analysis fragmented | partial | CallableAnalysis present; BindingId compatibility ids are attached to ShapeEnv for params, locals, catch params, loop variables, fields, and static fields, plus MoveUseContext use-count projection; CFG/liveness still open |

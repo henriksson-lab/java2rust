@@ -5164,6 +5164,13 @@ fn lower_stmt(
                         ctx,
                         refinements,
                     );
+                    let lowered = apply_result_propagation_policy(
+                        lowered,
+                        expr,
+                        env,
+                        ctx,
+                        wrap_returns_in_ok,
+                    );
                     adapt_reused_owned_value_for_slot(lowered, expr, &initializer_slot, env, ctx)
                 })
                 .or_else(|| {
@@ -5252,6 +5259,13 @@ fn lower_stmt(
                     &assignment_slot,
                     ctx,
                     refinements,
+                );
+                let lowered_value = apply_result_propagation_policy(
+                    lowered_value,
+                    value,
+                    env,
+                    ctx,
+                    wrap_returns_in_ok,
                 );
                 let lowered_value = adapt_reused_owned_value_for_slot(
                     lowered_value,
@@ -8354,13 +8368,33 @@ fn lower_return_stmt_with_refinements(
             }
             ReturnValuePlan::Raw => lower_expr_with_refinements(expr, env, ctx, refinements),
         };
-        if !wrap_returns_in_ok && slot_expr_needs_result_propagation(expr, env, ctx) {
+        if slot_expr_needs_result_propagation(expr, env, ctx) {
+            if wrap_returns_in_ok {
+                return propagate_result_projection(lowered);
+            }
             unwrap_result_or_panic_uncaught_java_exception(lowered)
         } else {
             lowered
         }
     });
     return_stmt(value, wrap_returns_in_ok)
+}
+
+fn apply_result_propagation_policy(
+    lowered: RustExpr,
+    expr: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    wrap_returns_in_ok: bool,
+) -> RustExpr {
+    if !slot_expr_needs_result_propagation(expr, env, ctx) {
+        return lowered;
+    }
+    if wrap_returns_in_ok {
+        propagate_result_projection(lowered)
+    } else {
+        unwrap_result_or_panic_uncaught_java_exception(lowered)
+    }
 }
 
 fn lower_throw_expr_with_refinements(
@@ -11815,6 +11849,14 @@ fn lower_binary_expr(
         };
     }
     if let Some(plan) = numeric_promotion {
+        if let Some(expr) = crate::operator_lowering::lower_checked_java_integer_div_rem_expr(
+            op,
+            lower_numeric_binary_operand(left, env, ctx, refinements),
+            lower_numeric_binary_operand(right, env, ctx, refinements),
+            plan.clone(),
+        ) {
+            return expr;
+        }
         return lower_numeric_binary_expr(
             op,
             lower_numeric_binary_operand(left, env, ctx, refinements),
@@ -23094,6 +23136,13 @@ fn slot_expr_needs_result_propagation(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx
     if let Expr::Cast { expr: inner, .. } = expr {
         return slot_expr_needs_result_propagation(inner, env, ctx);
     }
+    if let Expr::Binary { op, left, right } = expr {
+        if java_integer_div_rem_expr_can_throw(*op, left, right, env, ctx) {
+            return true;
+        }
+        return slot_expr_needs_result_propagation(left, env, ctx)
+            || slot_expr_needs_result_propagation(right, env, ctx);
+    }
     let Expr::Call {
         receiver,
         name,
@@ -23150,6 +23199,22 @@ fn slot_expr_needs_result_propagation(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx
         env,
         ctx,
     )
+}
+
+fn java_integer_div_rem_expr_can_throw(
+    op: BinaryOp,
+    left: &Expr,
+    right: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> bool {
+    matches!(op, BinaryOp::Div | BinaryOp::Rem)
+        && plan_numeric_binary_promotion(
+            op,
+            &numeric_operand_java_type(left, env, ctx),
+            &numeric_operand_java_type(right, env, ctx),
+        )
+        .is_some_and(|plan| matches!(plan.promoted, PrimitiveType::Int | PrimitiveType::Long))
 }
 
 fn slot_expr_needs_result_propagation_from_shape_env(

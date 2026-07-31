@@ -152,6 +152,32 @@ pub fn lower_numeric_binary_expr(
     )
 }
 
+pub fn lower_checked_java_integer_div_rem_expr(
+    op: BinaryOp,
+    left: RustExpr,
+    right: RustExpr,
+    plan: NumericBinaryPromotionPlan,
+) -> Option<RustExpr> {
+    if !matches!(op, BinaryOp::Div | BinaryOp::Rem)
+        || !matches!(plan.promoted, PrimitiveType::Int | PrimitiveType::Long)
+    {
+        return None;
+    }
+    let method = match op {
+        BinaryOp::Div => "wrapping_div",
+        BinaryOp::Rem => "wrapping_rem",
+        _ => unreachable!("checked above"),
+    };
+    let left = integer_wrapping_receiver_text(
+        crate::emit::emit_expr(&apply_coercions(left, &plan.left)),
+        plan.promoted,
+    );
+    let right = crate::emit::emit_expr(&apply_coercions(right, &plan.right));
+    Some(RustExpr::Raw(format!(
+        "{{ let __java_left = {left}; let __java_right = {right}; if __java_right == 0 {{ Err(JavaException::new(\"ArithmeticException\", \"/ by zero\".to_string())) }} else {{ Ok((__java_left).{method}(__java_right)) }} }}"
+    )))
+}
+
 fn lower_java_integer_binary_expr(
     op: BinaryOp,
     left: &RustExpr,
@@ -165,8 +191,6 @@ fn lower_java_integer_binary_expr(
         BinaryOp::Add => "wrapping_add",
         BinaryOp::Sub => "wrapping_sub",
         BinaryOp::Mul => "wrapping_mul",
-        BinaryOp::Div => "wrapping_div",
-        BinaryOp::Rem => "wrapping_rem",
         BinaryOp::Shl => "wrapping_shl",
         BinaryOp::Shr => "wrapping_shr",
         _ => return None,
