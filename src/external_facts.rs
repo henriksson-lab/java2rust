@@ -1338,6 +1338,7 @@ fn push_external_api_effect_fact(
         method_name: method_name.to_string(),
         receiver_type: parse_receiver_type(receiver_type),
         arg_count: parsed_metadata.arg_count,
+        parameter_patterns: None,
         role,
         receiver_mutability,
         return_type: parsed_metadata.return_type,

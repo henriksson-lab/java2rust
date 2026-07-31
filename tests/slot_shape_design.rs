@@ -84,7 +84,7 @@ use new_java2rust::facts::{
     MethodKey as FactMethodKey, NullabilityState, ObjectSafetyViolation, OwnedRecoveryCapability,
     OwnedRecoveryCapabilityFact, ReceiverAbi, ReceiverMutabilityFact, RecursionKind, ResultAbi,
     Staticness, TrivialAccessorFact, TrivialAccessorKind, TypeCapabilityOverride, TypeKey,
-    TypePattern,
+    TypePattern, type_pattern_for_external_java_type, type_pattern_matches_external_java_type,
 };
 use new_java2rust::item_assembly::{
     constructor_default_field_value, constructor_function_shell, constructor_return_body,
@@ -8944,6 +8944,7 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
             method_name: "writeDoubleArray".to_string(),
             receiver_type: Some("HDF5File".to_string()),
             arg_count: None,
+            parameter_patterns: None,
             role: ExternalApiRole::Mutator,
             receiver_mutability: ReceiverMutabilityFact::MutatesReceiver,
             return_type: None,
@@ -11032,6 +11033,7 @@ fn static_import_support_uses_external_return_facts_without_instance_duplicate()
         method_name: "readValue".to_string(),
         receiver_type: Some("external.lib.StaticUtility".to_string()),
         arg_count: Some(1),
+        parameter_patterns: None,
         role: ExternalApiRole::Getter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: Some(JavaType::String),
@@ -11145,6 +11147,7 @@ fn static_external_facade_uses_nullable_argument_fact_without_call_site_type_hac
         method_name: "read".to_string(),
         receiver_type: Some("external.lib.ReaderFactory".to_string()),
         arg_count: Some(6),
+        parameter_patterns: None,
         role: ExternalApiRole::Getter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: Some(JavaType::String),
@@ -11210,6 +11213,7 @@ fn external_static_validation_facade_uses_side_effect_fact_return() {
         method_name: "validate".to_string(),
         receiver_type: Some("org.example.validation.Utils".to_string()),
         arg_count: Some(2),
+        parameter_patterns: None,
         role: ExternalApiRole::SideEffect,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: None,
@@ -11362,6 +11366,7 @@ fn static_import_support_reuses_fqn_return_facts_for_simple_owner_facade() {
         method_name: "isGenomicsDBArray".to_string(),
         receiver_type: Some("org.genomicsdb.GenomicsDBUtils".to_string()),
         arg_count: Some(2),
+        parameter_patterns: None,
         role: ExternalApiRole::Getter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: Some(JavaType::Primitive(PrimitiveType::Boolean)),
@@ -11937,6 +11942,7 @@ fn external_method_support_uses_arity_names_for_overloaded_facades() {
         method_name: "query".to_string(),
         receiver_type: Some("ExternalCursor".to_string()),
         arg_count: Some(1),
+        parameter_patterns: None,
         role: ExternalApiRole::Getter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: Some(JavaType::Named {
@@ -11951,6 +11957,7 @@ fn external_method_support_uses_arity_names_for_overloaded_facades() {
         method_name: "query".to_string(),
         receiver_type: Some("ExternalCursor".to_string()),
         arg_count: Some(3),
+        parameter_patterns: None,
         role: ExternalApiRole::Getter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: Some(JavaType::Named {
@@ -15725,6 +15732,7 @@ fn external_nullable_getter_return_shape_flows_as_owned_optional_carrier() {
         method_name: "getName".to_string(),
         receiver_type: Some("ExternalRecord".to_string()),
         arg_count: Some(0),
+        parameter_patterns: None,
         role: ExternalApiRole::Getter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: Some(JavaType::String),
@@ -15758,12 +15766,126 @@ fn external_nullable_getter_return_shape_flows_as_owned_optional_carrier() {
 }
 
 #[test]
+fn external_api_call_lookup_uses_argument_effect_types_before_arity_fallback() {
+    let mut facts = FactSet::default();
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "read".to_string(),
+        receiver_type: Some("TypedReader".to_string()),
+        arg_count: Some(1),
+        parameter_patterns: None,
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::Primitive(PrimitiveType::Int)),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::UserOverride,
+    });
+    facts
+        .external_api_argument_effect_facts
+        .push(ExternalApiArgumentEffectFact {
+            method_name: "read".to_string(),
+            receiver_type: Some("TypedReader".to_string()),
+            arg_count: Some(1),
+            parameter_index: 0,
+            parameter_type: Some(JavaType::Primitive(PrimitiveType::Int)),
+            parameter_nullability: NullabilityState::DefinitelyNonNull,
+            argument_mutability: ReceiverMutabilityFact::ReadOnly,
+            alias_policy: ExternalArgumentAliasPolicy::Borrowed,
+            provenance: FactProvenance::UserOverride,
+        });
+    let index = facts.external_lookup_index();
+
+    let int_effect = index
+        .external_api_effect_for_call(
+            Some("TypedReader"),
+            "read",
+            &[JavaType::Primitive(PrimitiveType::Int)],
+        )
+        .expect("typed int argument should select the modeled return effect");
+    assert_eq!(
+        int_effect.return_type,
+        Some(JavaType::Primitive(PrimitiveType::Int))
+    );
+    assert!(
+        index
+            .external_api_effect_for_call(Some("TypedReader"), "read", &[JavaType::String])
+            .is_none(),
+        "typed argument facts should prevent mismatched arity-only fallback"
+    );
+}
+
+#[test]
+fn external_api_call_lookup_prefers_parameter_pattern_specificity() {
+    let mut facts = FactSet::default();
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "parse".to_string(),
+        receiver_type: Some("TypedParser".to_string()),
+        arg_count: Some(1),
+        parameter_patterns: Some(vec![TypePattern::Any]),
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::Named {
+            name: "Object".to_string(),
+            args: Vec::new(),
+        }),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "parse".to_string(),
+        receiver_type: Some("TypedParser".to_string()),
+        arg_count: Some(1),
+        parameter_patterns: Some(vec![TypePattern::Exact(TypeKey {
+            type_name: "String".to_string(),
+        })]),
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::String),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    let index = facts.external_lookup_index();
+
+    let string_effect = index
+        .external_api_effect_for_call(Some("TypedParser"), "parse", &[JavaType::String])
+        .expect("String argument should select the more specific callable pattern");
+    assert_eq!(string_effect.return_type, Some(JavaType::String));
+
+    let fallback_effect = index
+        .external_api_effect_for_call(
+            Some("TypedParser"),
+            "parse",
+            &[JavaType::Primitive(PrimitiveType::Int)],
+        )
+        .expect("Any pattern should remain a fallback when no exact pattern matches");
+    assert_eq!(
+        fallback_effect.return_type,
+        Some(JavaType::Named {
+            name: "Object".to_string(),
+            args: Vec::new()
+        })
+    );
+}
+
+#[test]
+fn external_api_parameter_patterns_use_stable_array_type_keys() {
+    let pattern = type_pattern_for_external_java_type(&parse_type("String[]"));
+    assert!(
+        type_pattern_matches_external_java_type(&pattern, &parse_type("java.lang.String[]")),
+        "array parameter patterns should use Java type keys, not debug-formatted TypePattern text"
+    );
+}
+
+#[test]
 fn facade_abi_borrowed_return_shape_does_not_require_rust_type_string_heuristic() {
     let mut facts = FactSet::default();
     facts.external_api_effect_facts.push(ExternalApiEffectFact {
         method_name: "getName".to_string(),
         receiver_type: Some("ExternalRecord".to_string()),
         arg_count: Some(0),
+        parameter_patterns: None,
         role: ExternalApiRole::Getter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: Some(JavaType::String),
@@ -15823,6 +15945,7 @@ fn legacy_rust_return_shape_uses_explicit_slot_not_type_string_heuristic() {
         method_name: "getName".to_string(),
         receiver_type: Some("ExternalRecord".to_string()),
         arg_count: Some(0),
+        parameter_patterns: None,
         role: ExternalApiRole::Getter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: Some(JavaType::String),
@@ -15871,6 +15994,7 @@ fn facade_abi_byte_array_return_shape_does_not_require_rust_type_string_heuristi
         method_name: "readBytes".to_string(),
         receiver_type: Some("BinaryFile".to_string()),
         arg_count: Some(0),
+        parameter_patterns: None,
         role: ExternalApiRole::Unknown,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: Some(byte_array.clone()),
@@ -15929,6 +16053,7 @@ fn facade_abi_result_shape_drives_external_call_fallibility() {
         method_name: "read".to_string(),
         receiver_type: Some("Reader".to_string()),
         arg_count: Some(0),
+        parameter_patterns: None,
         role: ExternalApiRole::Getter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: Some(JavaType::String),
@@ -15973,6 +16098,7 @@ fn facade_abi_plain_result_overrides_thrown_exception_guess() {
         method_name: "getName".to_string(),
         receiver_type: Some("Reader".to_string()),
         arg_count: Some(0),
+        parameter_patterns: None,
         role: ExternalApiRole::Getter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: Some(JavaType::String),
@@ -19422,6 +19548,7 @@ class InternalAliasHelper {
         method_name: "isCram".to_string(),
         receiver_type: Some("Handle".to_string()),
         arg_count: Some(0),
+        parameter_patterns: None,
         role: ExternalApiRole::Getter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: Some(JavaType::Primitive(PrimitiveType::Boolean)),
@@ -19433,6 +19560,7 @@ class InternalAliasHelper {
         method_name: "uri".to_string(),
         receiver_type: Some("Handle".to_string()),
         arg_count: Some(0),
+        parameter_patterns: None,
         role: ExternalApiRole::Getter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: Some(JavaType::Unknown("URI".to_string())),
@@ -19444,6 +19572,7 @@ class InternalAliasHelper {
         method_name: "exists".to_string(),
         receiver_type: Some("Util".to_string()),
         arg_count: Some(2),
+        parameter_patterns: None,
         role: ExternalApiRole::Getter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: Some(JavaType::Primitive(PrimitiveType::Boolean)),
@@ -26155,6 +26284,7 @@ class UseExternalBuilder {
         method_name: "newBuilder".to_string(),
         receiver_type: Some("Product".to_string()),
         arg_count: Some(0),
+        parameter_patterns: None,
         role: ExternalApiRole::Getter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: Some(JavaType::Named {
@@ -26169,6 +26299,7 @@ class UseExternalBuilder {
         method_name: "toBuilder".to_string(),
         receiver_type: Some("Product".to_string()),
         arg_count: Some(0),
+        parameter_patterns: None,
         role: ExternalApiRole::Getter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: Some(JavaType::Named {
@@ -26183,6 +26314,7 @@ class UseExternalBuilder {
         method_name: "build".to_string(),
         receiver_type: Some("ExternalFactory.Product.Builder".to_string()),
         arg_count: Some(0),
+        parameter_patterns: None,
         role: ExternalApiRole::Getter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: Some(JavaType::Named {
@@ -26197,6 +26329,7 @@ class UseExternalBuilder {
         method_name: "getFieldsCount".to_string(),
         receiver_type: Some("ExternalFactory.Product".to_string()),
         arg_count: Some(0),
+        parameter_patterns: None,
         role: ExternalApiRole::Getter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: Some(JavaType::Primitive(PrimitiveType::Int)),
@@ -26208,6 +26341,7 @@ class UseExternalBuilder {
         method_name: "getFieldsCount".to_string(),
         receiver_type: Some("Product".to_string()),
         arg_count: Some(0),
+        parameter_patterns: None,
         role: ExternalApiRole::Getter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: Some(JavaType::Primitive(PrimitiveType::Int)),
@@ -26219,6 +26353,7 @@ class UseExternalBuilder {
         method_name: "getFields".to_string(),
         receiver_type: Some("ExternalFactory.Product".to_string()),
         arg_count: Some(1),
+        parameter_patterns: None,
         role: ExternalApiRole::IndexedGetter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: Some(JavaType::Named {
@@ -26233,6 +26368,7 @@ class UseExternalBuilder {
         method_name: "getFields".to_string(),
         receiver_type: Some("Product".to_string()),
         arg_count: Some(1),
+        parameter_patterns: None,
         role: ExternalApiRole::IndexedGetter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: Some(JavaType::Named {
@@ -26247,6 +26383,7 @@ class UseExternalBuilder {
         method_name: "getName".to_string(),
         receiver_type: Some("ExternalFactory.FieldInfo".to_string()),
         arg_count: Some(0),
+        parameter_patterns: None,
         role: ExternalApiRole::Getter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: Some(JavaType::String),
@@ -26258,6 +26395,7 @@ class UseExternalBuilder {
         method_name: "getFieldsBuilder".to_string(),
         receiver_type: Some("ExternalFactory.Product.Builder".to_string()),
         arg_count: Some(1),
+        parameter_patterns: None,
         role: ExternalApiRole::IndexedGetter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: Some(JavaType::Named {
@@ -26272,6 +26410,7 @@ class UseExternalBuilder {
         method_name: "getFieldsBuilder".to_string(),
         receiver_type: Some("Product.Builder".to_string()),
         arg_count: Some(1),
+        parameter_patterns: None,
         role: ExternalApiRole::IndexedGetter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: Some(JavaType::Named {
@@ -26451,6 +26590,7 @@ class UseExternalBuilderMissingReturnFact {
         method_name: "build".to_string(),
         receiver_type: Some("ExternalFactory.Product.Builder".to_string()),
         arg_count: Some(0),
+        parameter_patterns: None,
         role: ExternalApiRole::Getter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: None,
@@ -26503,6 +26643,7 @@ class UseWeakExternalBuilderMissingReturnFact {
         method_name: "build".to_string(),
         receiver_type: Some("TBuilder".to_string()),
         arg_count: Some(0),
+        parameter_patterns: None,
         role: ExternalApiRole::Getter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: None,
@@ -26608,6 +26749,7 @@ class UseExternalGetterMissingReturnFact {
         method_name: "fetchRecord".to_string(),
         receiver_type: Some("ExternalHandle".to_string()),
         arg_count: Some(1),
+        parameter_patterns: None,
         role: ExternalApiRole::Getter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: None,
@@ -26673,6 +26815,7 @@ class InheritsExternalGetter extends ExternalBase {
         method_name: "fetchRecord".to_string(),
         receiver_type: Some("ExternalBase".to_string()),
         arg_count: Some(1),
+        parameter_patterns: None,
         role: ExternalApiRole::Getter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: None,
@@ -26725,6 +26868,7 @@ class UseExternalNewBuilderMissingReturnFact {
         method_name: "newBuilder".to_string(),
         receiver_type: Some("ExternalProduct".to_string()),
         arg_count: Some(0),
+        parameter_patterns: None,
         role: ExternalApiRole::Getter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: None,
@@ -26779,6 +26923,7 @@ class UseImportedStaticMissingReturnFact {
         method_name: "fetchRecord".to_string(),
         receiver_type: Some("external.lib.StaticUtility".to_string()),
         arg_count: Some(1),
+        parameter_patterns: None,
         role: ExternalApiRole::Getter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: None,
@@ -26873,6 +27018,7 @@ class ErasedVoidFacadeUse {
         method_name: "apply".to_string(),
         receiver_type: Some("ExternalHandle".to_string()),
         arg_count: Some(1),
+        parameter_patterns: None,
         role: ExternalApiRole::Mutator,
         receiver_mutability: ReceiverMutabilityFact::MutatesReceiver,
         return_type: None,
@@ -26884,6 +27030,7 @@ class ErasedVoidFacadeUse {
         method_name: "close".to_string(),
         receiver_type: Some("ExternalHandle".to_string()),
         arg_count: Some(0),
+        parameter_patterns: None,
         role: ExternalApiRole::SideEffect,
         receiver_mutability: ReceiverMutabilityFact::MutatesReceiver,
         return_type: None,
@@ -27036,6 +27183,7 @@ fn concrete_external_facade_strategy_preserves_typed_nullable_returns() {
         method_name: "readMapping".to_string(),
         receiver_type: Some("ExternalImporter".to_string()),
         arg_count: Some(0),
+        parameter_patterns: None,
         role: ExternalApiRole::Getter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: Some(JavaType::Named {
@@ -27050,6 +27198,7 @@ fn concrete_external_facade_strategy_preserves_typed_nullable_returns() {
         method_name: "items".to_string(),
         receiver_type: Some("ExternalMapping".to_string()),
         arg_count: Some(0),
+        parameter_patterns: None,
         role: ExternalApiRole::Getter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: Some(JavaType::Named {
@@ -28161,6 +28310,7 @@ fn exception_lowering_policy_owns_result_support_ok_and_err_shapes() {
             method_name: "validate".to_string(),
             receiver_type: Some("Validator".to_string()),
             arg_count: Some(0),
+            parameter_patterns: None,
             role: ExternalApiRole::Unknown,
             receiver_mutability: ReceiverMutabilityFact::Unknown,
             return_type: Some(JavaType::Void),
@@ -28224,6 +28374,7 @@ fn exception_lowering_policy_owns_result_support_ok_and_err_shapes() {
             method_name: "nonNull".to_string(),
             receiver_type: None,
             arg_count: Some(1),
+            parameter_patterns: None,
             role: ExternalApiRole::BooleanGetter,
             receiver_mutability: ReceiverMutabilityFact::Unknown,
             return_type: Some(JavaType::Primitive(PrimitiveType::Boolean)),
@@ -29803,6 +29954,7 @@ fn facade_abi_fact_owns_borrowed_return_recovery_policy() {
         method_name: "getFile".to_string(),
         receiver_type: Some("HDF5File".to_string()),
         arg_count: Some(0),
+        parameter_patterns: None,
         role: ExternalApiRole::Getter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: Some(JavaType::Named {
@@ -29863,6 +30015,7 @@ fn optional_facade_abi_fact_owns_borrowed_return_recovery_policy() {
         method_name: "getFile".to_string(),
         receiver_type: Some("HDF5File".to_string()),
         arg_count: Some(0),
+        parameter_patterns: None,
         role: ExternalApiRole::Getter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: Some(JavaType::Named {
@@ -31194,6 +31347,7 @@ class TryResourceModeledClose {
             method_name: "close".to_string(),
             receiver_type: Some("FeatureReader".to_string()),
             arg_count: Some(0),
+            parameter_patterns: None,
             role: ExternalApiRole::SideEffect,
             receiver_mutability: ReceiverMutabilityFact::MutatesReceiver,
             return_type: None,
@@ -31593,6 +31747,7 @@ fn stream_shape_uses_shared_call_plan_for_lambda_call_results() {
         method_name: "getName".to_string(),
         receiver_type: Some("ExternalRecord".to_string()),
         arg_count: Some(0),
+        parameter_patterns: None,
         role: ExternalApiRole::Getter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: Some(JavaType::String),
@@ -34541,6 +34696,7 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
             method_name: "label".to_string(),
             receiver_type: Some("FacadeValue".to_string()),
             arg_count: Some(0),
+            parameter_patterns: None,
             role: ExternalApiRole::Getter,
             receiver_mutability: ReceiverMutabilityFact::ReadOnly,
             return_type: Some(JavaType::String),
@@ -34596,6 +34752,7 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
             method_name: "getName".to_string(),
             receiver_type: Some("ExternalRecord".to_string()),
             arg_count: Some(0),
+            parameter_patterns: None,
             role: ExternalApiRole::Getter,
             receiver_mutability: ReceiverMutabilityFact::ReadOnly,
             return_type: Some(JavaType::String),

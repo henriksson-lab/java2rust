@@ -942,14 +942,18 @@ pub fn external_call_lowered_type_from_static_owner_plan_with_external_index(
     static_owner_result_type_candidates(receiver, &owner, types)
         .into_iter()
         .find_map(|owner| {
+            let arg_types = args
+                .iter()
+                .map(|arg| infer_expr_type(arg, types))
+                .collect::<Vec<_>>();
             external_index
-                .external_api_effect_for_receiver_with_arity(Some(&owner), name, Some(args.len()))
+                .external_api_effect_for_call(Some(&owner), name, &arg_types)
                 .cloned()
                 .or_else(|| {
-                    crate::external_packs::external_api_effect_for_receiver_with_arity(
+                    crate::external_packs::external_api_effect_for_call(
                         Some(&owner),
                         name,
-                        Some(args.len()),
+                        &arg_types,
                     )
                 })
                 .and_then(external_effect_lowered_type)

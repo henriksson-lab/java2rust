@@ -7081,8 +7081,16 @@ reach fallback typing instead of the native planner directly. This preserves
 `round(float) -> int`, `round(double) -> long`, `abs(long) -> long`, and
 `floorMod(long,int) -> int` when lowered-type inference has actual argument
 types available. Audit `0032` remains partial because the broader external
-effect lookup still needs parameter-pattern callable-key selection for
-non-Math manifests and user facts.
+effect policy still needs more edge-semantics coverage outside the modeled
+Math/StrictMath overloads.
+
+2026-07-31 parameter-pattern API effect checkpoint: external API effect facts
+can now carry explicit Java parameter patterns, manifests can spell them as
+`params=TypeA,TypeB`, and call lookup selects the highest-specificity matching
+callable key before falling back to legacy arity-only effects. Argument-effect
+parameter types remain as a conservative compatibility guard, so mismatched
+typed calls no longer accidentally select an arity-only return fact when
+parameter evidence exists.
 
 ## 2026-07-30 Facade Correctness Note
 

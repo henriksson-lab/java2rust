@@ -14,7 +14,7 @@ use crate::facts::{
     ExternalRustReturnTypeFact, FacadeSlot, FactProvenance, FactSet, FieldKey,
     FieldNullabilityFact, FieldNullabilityProvenance, HierarchyOverride, HierarchyStrategy,
     NullabilityState, ObjectSafetyFact, ObjectSafetyViolation, OwnedRecoveryCapability,
-    OwnedRecoveryCapabilityFact, ReceiverMutabilityFact, TypeCapabilityOverride,
+    OwnedRecoveryCapabilityFact, ReceiverMutabilityFact, TypeCapabilityOverride, TypePattern,
     UnsupportedExternalApiFact, UnsupportedExternalConstructorFact, UnsupportedExternalFieldFact,
     external_type_name_matches,
 };
@@ -211,6 +211,7 @@ pub struct ExternalPackApiEffect {
     pub receiver_type: &'static str,
     pub method_name: &'static str,
     pub arg_count: Option<usize>,
+    pub params: &'static [&'static str],
     pub rust_name: Option<&'static str>,
     pub role: ExternalApiRole,
     pub receiver_mutability: ReceiverMutabilityFact,
@@ -1591,6 +1592,14 @@ impl ExternalPackApiEffect {
             method_name: self.method_name.to_string(),
             receiver_type: Some(self.receiver_type.to_string()),
             arg_count: self.arg_count,
+            parameter_patterns: (!self.params.is_empty()).then(|| {
+                self.params
+                    .iter()
+                    .map(|param| {
+                        crate::facts::type_pattern_for_external_java_type(&parse_type(param))
+                    })
+                    .collect()
+            }),
             role: self.role,
             receiver_mutability: self.receiver_mutability,
             return_type: self.return_type.map(parse_type),
@@ -2211,6 +2220,7 @@ fn push_external_pack_api_fact(
         method_name: method_name.to_string(),
         receiver_type: Some(receiver_type.to_string()),
         arg_count: parsed_metadata.arg_count,
+        parameter_patterns: parsed_metadata.parameter_patterns,
         role,
         receiver_mutability,
         return_type: parsed_metadata.return_type,
@@ -4092,6 +4102,7 @@ fn parse_pack_metadata(
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct ExternalApiMetadata {
     arg_count: Option<usize>,
+    parameter_patterns: Option<Vec<TypePattern>>,
     return_type: Option<JavaType>,
     thrown: Vec<JavaType>,
     rust_name: Option<String>,
@@ -4143,6 +4154,41 @@ fn parse_external_api_metadata(
                 return None;
             };
             parsed.arg_count = Some(arg_count);
+        } else if let Some(params) = token.strip_prefix("params=") {
+            if params.is_empty() {
+                push_external_pack_parse_error(
+                    diagnostics,
+                    line_index,
+                    "external-pack-api params metadata must name at least one Java type",
+                );
+                return None;
+            }
+            let mut patterns = Vec::new();
+            for param in params.split(',').filter(|param| !param.is_empty()) {
+                patterns.push(crate::facts::type_pattern_for_external_java_type(
+                    &parse_type(param),
+                ));
+            }
+            if patterns.is_empty() {
+                push_external_pack_parse_error(
+                    diagnostics,
+                    line_index,
+                    "external-pack-api params metadata must name at least one Java type",
+                );
+                return None;
+            }
+            if let Some(arg_count) = parsed.arg_count
+                && arg_count != patterns.len()
+            {
+                push_external_pack_parse_error(
+                    diagnostics,
+                    line_index,
+                    "external-pack-api params metadata length must match args metadata",
+                );
+                return None;
+            }
+            parsed.arg_count = Some(patterns.len());
+            parsed.parameter_patterns = Some(patterns);
         } else if let Some(return_type) = token.strip_prefix("return=") {
             if return_type.is_empty() {
                 push_external_pack_parse_error(
@@ -4222,7 +4268,7 @@ fn parse_external_api_metadata(
             push_external_pack_parse_error(
                 diagnostics,
                 line_index,
-                "unrecognized external-pack-api metadata; expected args=N, return=Type, throws=TypeA,TypeB, rust=facade_name, rust-result=true|false, rust-return=RustType or borrowed-return-recovery=clone|to-path-buf",
+                "unrecognized external-pack-api metadata; expected args=N, params=TypeA,TypeB, return=Type, throws=TypeA,TypeB, rust=facade_name, rust-result=true|false, rust-return=RustType or borrowed-return-recovery=clone|to-path-buf",
             );
             return None;
         }
@@ -5330,6 +5376,7 @@ const fn api_effect(
         receiver_type,
         method_name,
         arg_count: None,
+        params: &[],
         rust_name: None,
         role,
         receiver_mutability,
@@ -5353,6 +5400,7 @@ const fn api_effect_with_arity(
         receiver_type,
         method_name,
         arg_count: Some(arg_count),
+        params: &[],
         rust_name: None,
         role,
         receiver_mutability,
@@ -29388,13 +29436,17 @@ fn builtin_external_pack_lookup_index() -> &'static BuiltinExternalPackLookupInd
                     for receiver_alias in external_receiver_lookup_aliases(receiver_type) {
                         for method_alias in external_method_name_lookup_aliases(&fact.method_name) {
                             if let Some(arg_count) = fact.arg_count {
+                                let params = fact
+                                    .parameter_patterns
+                                    .clone()
+                                    .unwrap_or_else(|| vec![TypePattern::Any; arg_count]);
                                 index
                                     .api_effects_by_key
-                                    .entry(CallableKey::method(
+                                    .entry(CallableKey::method_with_params(
                                         receiver_alias.clone(),
                                         method_alias.clone(),
                                         crate::facts::Staticness::Unknown,
-                                        arg_count,
+                                        params,
                                     ))
                                     .or_insert_with(|| fact.clone());
                             }
@@ -29717,6 +29769,159 @@ pub fn external_api_effect_for_receiver_with_arity(
     None
 }
 
+pub fn external_api_effect_for_call(
+    receiver_type: Option<&str>,
+    method_name: &str,
+    arg_types: &[JavaType],
+) -> Option<ExternalApiEffectFact> {
+    let receiver_type = receiver_type?;
+    let arg_count = arg_types.len();
+    if let Some(effect) = java_platform_api_effect_for_receiver_with_arity(
+        receiver_type,
+        method_name,
+        Some(arg_count),
+    ) {
+        return Some(effect);
+    }
+    let index = builtin_external_pack_lookup_index();
+    let query_key = CallableKey::method_with_params(
+        receiver_type.to_string(),
+        method_name.to_string(),
+        crate::facts::Staticness::Unknown,
+        arg_types
+            .iter()
+            .map(crate::facts::type_pattern_for_external_java_type)
+            .collect(),
+    );
+    let mut saw_parameter_facts = false;
+    let mut best = None::<(ExternalApiEffectFact, usize)>;
+    for (key, effect) in &index.api_effects_by_key {
+        if !external_api_key_header_matches(key, &query_key) {
+            continue;
+        }
+        if !crate::facts::type_patterns_match_external_java_types(&key.params, arg_types) {
+            saw_parameter_facts |= key
+                .params
+                .iter()
+                .any(|pattern| !matches!(pattern, TypePattern::Any));
+            continue;
+        }
+        let specificity = crate::facts::callable_type_patterns_specificity(&key.params);
+        saw_parameter_facts |= specificity > 0;
+        if best
+            .as_ref()
+            .is_none_or(|(_, best_specificity)| specificity > *best_specificity)
+        {
+            best = Some((effect.clone(), specificity));
+        }
+    }
+    if let Some((effect, _)) = best {
+        return Some(effect);
+    }
+    for receiver_alias in external_receiver_lookup_aliases(receiver_type) {
+        for method_alias in external_method_name_lookup_aliases(method_name) {
+            let Some(effect) = index.api_effects.get(&(
+                receiver_alias.clone(),
+                method_alias.clone(),
+                Some(arg_count),
+            )) else {
+                continue;
+            };
+            let match_result = builtin_external_api_parameter_match(
+                index,
+                &receiver_alias,
+                &method_alias,
+                arg_types,
+            );
+            saw_parameter_facts |= match_result.saw_parameter_facts;
+            if match_result.matches {
+                if best.as_ref().is_none_or(|(_, best_specificity)| {
+                    match_result.specificity > *best_specificity
+                }) {
+                    best = Some((effect.clone(), match_result.specificity));
+                }
+            }
+        }
+    }
+    best.map(|(effect, _)| effect).or_else(|| {
+        (!saw_parameter_facts)
+            .then(|| {
+                external_api_effect_for_receiver_with_arity(
+                    Some(receiver_type),
+                    method_name,
+                    Some(arg_count),
+                )
+            })
+            .flatten()
+    })
+}
+
+fn external_api_key_header_matches(fact: &CallableKey, query: &CallableKey) -> bool {
+    external_type_name_matches(&fact.owner.type_name, &query.owner.type_name)
+        && fact.member == query.member
+        && fact.kind == query.kind
+        && (fact.staticness == query.staticness
+            || fact.staticness == crate::facts::Staticness::Unknown
+            || query.staticness == crate::facts::Staticness::Unknown)
+        && fact.arity == query.arity
+}
+
+fn builtin_external_api_parameter_match(
+    index: &BuiltinExternalPackLookupIndex,
+    receiver_alias: &str,
+    method_alias: &str,
+    arg_types: &[JavaType],
+) -> BuiltinExternalApiParameterMatch {
+    let mut saw_parameter_facts = false;
+    let mut specificity = 0usize;
+    for (arg_index, arg_type) in arg_types.iter().enumerate() {
+        let Some(argument_fact) = index
+            .api_argument_effects
+            .get(&(
+                receiver_alias.to_string(),
+                method_alias.to_string(),
+                Some(arg_types.len()),
+                arg_index,
+            ))
+            .or_else(|| {
+                index.api_argument_effects.get(&(
+                    receiver_alias.to_string(),
+                    method_alias.to_string(),
+                    None,
+                    arg_index,
+                ))
+            })
+        else {
+            continue;
+        };
+        let Some(parameter_type) = &argument_fact.parameter_type else {
+            continue;
+        };
+        saw_parameter_facts = true;
+        let pattern = crate::facts::type_pattern_for_external_java_type(parameter_type);
+        specificity += crate::facts::callable_type_pattern_specificity(&pattern);
+        if !crate::facts::type_pattern_matches_external_java_type(&pattern, arg_type) {
+            return BuiltinExternalApiParameterMatch {
+                matches: false,
+                saw_parameter_facts,
+                specificity,
+            };
+        }
+    }
+    BuiltinExternalApiParameterMatch {
+        matches: true,
+        saw_parameter_facts,
+        specificity,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BuiltinExternalApiParameterMatch {
+    matches: bool,
+    saw_parameter_facts: bool,
+    specificity: usize,
+}
+
 pub fn external_api_argument_effect_for_receiver_with_arity(
     receiver_type: Option<&str>,
     method_name: &str,
@@ -29922,6 +30127,7 @@ pub fn java_platform_api_effect_for_receiver_with_arity(
             method_name: method_name.to_string(),
             receiver_type: Some(receiver_type.to_string()),
             arg_count: Some(1),
+            parameter_patterns: None,
             role: ExternalApiRole::Getter,
             receiver_mutability: ReceiverMutabilityFact::ReadOnly,
             return_type: Some(JavaType::String),
@@ -29938,6 +30144,7 @@ pub fn java_platform_api_effect_for_receiver_with_arity(
             method_name: method_name.to_string(),
             receiver_type: Some(receiver_type.to_string()),
             arg_count: Some(1),
+            parameter_patterns: None,
             role: ExternalApiRole::FluentMutator,
             receiver_mutability: ReceiverMutabilityFact::MutatesReceiver,
             return_type: Some(JavaType::Named {
@@ -29957,6 +30164,7 @@ pub fn java_platform_api_effect_for_receiver_with_arity(
             method_name: method_name.to_string(),
             receiver_type: Some(receiver_type.to_string()),
             arg_count: Some(0),
+            parameter_patterns: None,
             role: ExternalApiRole::Getter,
             receiver_mutability: ReceiverMutabilityFact::ReadOnly,
             return_type: Some(JavaType::Primitive(PrimitiveType::Int)),
@@ -29973,6 +30181,7 @@ pub fn java_platform_api_effect_for_receiver_with_arity(
             method_name: method_name.to_string(),
             receiver_type: Some(receiver_type.to_string()),
             arg_count: Some(1),
+            parameter_patterns: None,
             role: ExternalApiRole::Getter,
             receiver_mutability: ReceiverMutabilityFact::ReadOnly,
             return_type: Some(JavaType::Primitive(PrimitiveType::Int)),
@@ -30006,6 +30215,7 @@ pub fn java_platform_api_effect_for_receiver_with_arity(
             method_name: method_name.to_string(),
             receiver_type: Some(receiver_type.to_string()),
             arg_count: Some(expected_args),
+            parameter_patterns: None,
             role: ExternalApiRole::Getter,
             receiver_mutability: ReceiverMutabilityFact::ReadOnly,
             return_type: Some(return_type),
@@ -30024,6 +30234,7 @@ pub fn java_platform_api_effect_for_receiver_with_arity(
             method_name: method_name.to_string(),
             receiver_type: Some(receiver_type.to_string()),
             arg_count: Some(1),
+            parameter_patterns: None,
             role: ExternalApiRole::Getter,
             receiver_mutability: ReceiverMutabilityFact::ReadOnly,
             return_type: Some(JavaType::Named {
@@ -30047,6 +30258,7 @@ pub fn java_platform_api_effect_for_receiver_with_arity(
             method_name: method_name.to_string(),
             receiver_type: Some(receiver_type.to_string()),
             arg_count: Some(1),
+            parameter_patterns: None,
             role: ExternalApiRole::Getter,
             receiver_mutability: ReceiverMutabilityFact::ReadOnly,
             return_type: Some(JavaType::Named {
@@ -30077,6 +30289,7 @@ pub fn java_platform_api_effect_for_receiver_with_arity(
             method_name: method_name.to_string(),
             receiver_type: Some(receiver_type.to_string()),
             arg_count: Some(expected_args),
+            parameter_patterns: None,
             role: ExternalApiRole::Getter,
             receiver_mutability: ReceiverMutabilityFact::ReadOnly,
             return_type: Some(return_type),
@@ -30095,6 +30308,7 @@ pub fn java_platform_api_effect_for_receiver_with_arity(
             method_name: method_name.to_string(),
             receiver_type: Some(receiver_type.to_string()),
             arg_count: Some(0),
+            parameter_patterns: None,
             role: ExternalApiRole::Getter,
             receiver_mutability: ReceiverMutabilityFact::ReadOnly,
             return_type: Some(JavaType::Named {
@@ -30116,6 +30330,7 @@ pub fn java_platform_api_effect_for_receiver_with_arity(
             method_name: method_name.to_string(),
             receiver_type: Some(receiver_type.to_string()),
             arg_count: Some(1),
+            parameter_patterns: None,
             role: ExternalApiRole::Getter,
             receiver_mutability: ReceiverMutabilityFact::ReadOnly,
             return_type: Some(JavaType::String),
@@ -30137,6 +30352,7 @@ pub fn java_platform_api_effect_for_receiver_with_arity(
             method_name: method_name.to_string(),
             receiver_type: Some(receiver_type.to_string()),
             arg_count: Some(expected_args),
+            parameter_patterns: None,
             role: ExternalApiRole::Getter,
             receiver_mutability: ReceiverMutabilityFact::ReadOnly,
             return_type: Some(return_type),
@@ -30167,6 +30383,7 @@ pub fn java_platform_api_effect_for_receiver_with_arity(
             method_name: method_name.to_string(),
             receiver_type: Some(receiver_type.to_string()),
             arg_count: Some(0),
+            parameter_patterns: None,
             role: ExternalApiRole::Getter,
             receiver_mutability: ReceiverMutabilityFact::ReadOnly,
             return_type: Some(return_type),
@@ -30185,6 +30402,7 @@ pub fn java_platform_api_effect_for_receiver_with_arity(
             method_name: method_name.to_string(),
             receiver_type: Some(receiver_type.to_string()),
             arg_count: Some(0),
+            parameter_patterns: None,
             role: ExternalApiRole::Getter,
             receiver_mutability: ReceiverMutabilityFact::ReadOnly,
             return_type: Some(JavaType::Named {
@@ -30207,6 +30425,7 @@ pub fn java_platform_api_effect_for_receiver_with_arity(
             method_name: method_name.to_string(),
             receiver_type: Some(receiver_type.to_string()),
             arg_count: Some(1),
+            parameter_patterns: None,
             role: ExternalApiRole::Getter,
             receiver_mutability: ReceiverMutabilityFact::ReadOnly,
             return_type: Some(JavaType::Primitive(PrimitiveType::Int)),
@@ -30244,6 +30463,7 @@ pub fn java_platform_api_effect_for_receiver_with_arity(
             method_name: method_name.to_string(),
             receiver_type: Some(receiver_type.to_string()),
             arg_count: Some(expected_args),
+            parameter_patterns: None,
             role,
             receiver_mutability: if role == ExternalApiRole::Mutator {
                 ReceiverMutabilityFact::MutatesReceiver
@@ -30268,6 +30488,7 @@ pub fn java_platform_api_effect_for_receiver_with_arity(
             method_name: method_name.to_string(),
             receiver_type: Some(receiver_type.to_string()),
             arg_count: Some(0),
+            parameter_patterns: None,
             role: ExternalApiRole::Getter,
             receiver_mutability: ReceiverMutabilityFact::ReadOnly,
             return_type: Some(JavaType::Primitive(PrimitiveType::Int)),
@@ -30287,6 +30508,7 @@ pub fn java_platform_api_effect_for_receiver_with_arity(
             method_name: method_name.to_string(),
             receiver_type: Some(receiver_type.to_string()),
             arg_count: Some(0),
+            parameter_patterns: None,
             role: ExternalApiRole::Getter,
             receiver_mutability: ReceiverMutabilityFact::ReadOnly,
             return_type: Some(JavaType::Primitive(PrimitiveType::Int)),
@@ -30309,6 +30531,7 @@ pub fn java_platform_api_effect_for_receiver_with_arity(
             method_name: method_name.to_string(),
             receiver_type: Some(receiver_type.to_string()),
             arg_count: Some(0),
+            parameter_patterns: None,
             role: ExternalApiRole::Getter,
             receiver_mutability: ReceiverMutabilityFact::ReadOnly,
             return_type: Some(return_type),
@@ -30341,6 +30564,7 @@ pub fn java_platform_api_effect_for_receiver_with_arity(
             method_name: method_name.to_string(),
             receiver_type: Some(receiver_type.to_string()),
             arg_count: Some(expected_args),
+            parameter_patterns: None,
             role: ExternalApiRole::Getter,
             receiver_mutability: ReceiverMutabilityFact::ReadOnly,
             return_type: Some(return_type),
@@ -30390,6 +30614,7 @@ pub fn java_platform_api_effect_for_receiver_with_arity(
             method_name: method_name.to_string(),
             receiver_type: Some(receiver_type.to_string()),
             arg_count: Some(expected_args),
+            parameter_patterns: None,
             role,
             receiver_mutability: if role == ExternalApiRole::Mutator {
                 ReceiverMutabilityFact::MutatesReceiver
@@ -30407,6 +30632,7 @@ pub fn java_platform_api_effect_for_receiver_with_arity(
             method_name: method_name.to_string(),
             receiver_type: Some(receiver_type.to_string()),
             arg_count: Some(0),
+            parameter_patterns: None,
             role: ExternalApiRole::Getter,
             receiver_mutability: ReceiverMutabilityFact::ReadOnly,
             return_type: Some(JavaType::String),
@@ -30459,6 +30685,7 @@ pub fn java_platform_api_effect_for_receiver_with_arity(
         method_name: method_name.to_string(),
         receiver_type: Some(receiver_type.to_string()),
         arg_count: Some(expected_args),
+        parameter_patterns: None,
         role,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type,
@@ -30763,6 +30990,7 @@ fn java_platform_io_api_effect(
         method_name: method_name.to_string(),
         receiver_type: Some(receiver_type.to_string()),
         arg_count: Some(expected_args),
+        parameter_patterns: None,
         role,
         receiver_mutability,
         return_type: Some(return_type),
@@ -30991,6 +31219,7 @@ fn java_platform_concurrent_api_effect(
         method_name: method_name.to_string(),
         receiver_type: Some(receiver_type.to_string()),
         arg_count: Some(expected_args),
+        parameter_patterns: None,
         role,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: Some(return_type),

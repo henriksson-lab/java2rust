@@ -55,6 +55,13 @@ pub struct ExternalFactLookupIndex<'a> {
     external_pack_member_by_type_alias: HashMap<String, Vec<usize>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExternalApiParameterMatch {
+    matches: bool,
+    saw_parameter_facts: bool,
+    specificity: usize,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct HierarchyFactLookupIndex {
     reachable_by_sub_name: HashMap<String, HierarchyReachabilityResult>,
@@ -159,6 +166,32 @@ impl<'a> ExternalFactLookupIndex<'a> {
         .or_else(|| self.find_external_api_effect(None, method_name, arg_count, None))
     }
 
+    pub fn external_api_effect_for_call(
+        &self,
+        receiver_type: Option<&str>,
+        method_name: &str,
+        arg_types: &[JavaType],
+    ) -> Option<&'a ExternalApiEffectFact> {
+        self.find_external_api_effect_for_call(
+            receiver_type,
+            method_name,
+            arg_types,
+            Some(FactProvenance::UserOverride),
+        )
+        .or_else(|| {
+            self.find_external_api_effect_for_call(
+                None,
+                method_name,
+                arg_types,
+                Some(FactProvenance::UserOverride),
+            )
+        })
+        .or_else(|| {
+            self.find_external_api_effect_for_call(receiver_type, method_name, arg_types, None)
+        })
+        .or_else(|| self.find_external_api_effect_for_call(None, method_name, arg_types, None))
+    }
+
     pub fn external_field_for(
         &self,
         type_name: &str,
@@ -253,6 +286,148 @@ impl<'a> ExternalFactLookupIndex<'a> {
                         && (arg_count.is_none() || fact.arg_count.is_none())
                         && provenance.is_none_or(|provenance| fact.provenance == provenance)
                 })
+            })
+    }
+
+    fn find_external_api_effect_for_call(
+        &self,
+        receiver_type: Option<&str>,
+        method_name: &str,
+        arg_types: &[JavaType],
+        provenance: Option<FactProvenance>,
+    ) -> Option<&'a ExternalApiEffectFact> {
+        let arg_count = arg_types.len();
+        let mut saw_parameter_facts = false;
+        let mut best = None::<(&'a ExternalApiEffectFact, (bool, usize, bool))>;
+        for index in self.external_api_candidate_indices(method_name) {
+            let fact = &self.facts.external_api_effect_facts[index];
+            if !external_method_name_matches(&fact.method_name, method_name)
+                || !external_optional_type_name_matches(
+                    fact.receiver_type.as_deref(),
+                    receiver_type,
+                )
+                || fact.arg_count != Some(arg_count)
+                || provenance.is_some_and(|provenance| fact.provenance != provenance)
+            {
+                continue;
+            }
+            let match_result = self.external_api_effect_parameter_match(
+                fact,
+                receiver_type,
+                method_name,
+                arg_types,
+            );
+            saw_parameter_facts |= match_result.saw_parameter_facts;
+            if match_result.matches {
+                let rank = (
+                    fact.provenance == FactProvenance::UserOverride,
+                    match_result.specificity,
+                    fact.return_type.is_some(),
+                );
+                if best.is_none_or(|(_, best_rank)| rank > best_rank) {
+                    best = Some((fact, rank));
+                }
+            }
+        }
+        best.map(|(fact, _)| fact).or_else(|| {
+            (!saw_parameter_facts)
+                .then(|| {
+                    self.find_external_api_effect(
+                        receiver_type,
+                        method_name,
+                        Some(arg_count),
+                        provenance,
+                    )
+                })
+                .flatten()
+        })
+    }
+
+    fn external_api_effect_parameter_match(
+        &self,
+        fact: &ExternalApiEffectFact,
+        receiver_type: Option<&str>,
+        method_name: &str,
+        arg_types: &[JavaType],
+    ) -> ExternalApiParameterMatch {
+        if let Some(parameter_patterns) = &fact.parameter_patterns {
+            return ExternalApiParameterMatch {
+                matches: callable_key_params_match_java_types(parameter_patterns, arg_types),
+                saw_parameter_facts: true,
+                specificity: callable_key_param_specificity(parameter_patterns),
+            };
+        }
+        let mut saw_parameter_facts = false;
+        let mut specificity = 0usize;
+        for arg_index in 0..arg_types.len() {
+            let Some(argument_fact) = self.find_external_api_argument_effect_for_call(
+                fact.receiver_type.as_deref().or(receiver_type),
+                method_name,
+                Some(arg_types.len()),
+                arg_index,
+            ) else {
+                continue;
+            };
+            let Some(parameter_type) = &argument_fact.parameter_type else {
+                continue;
+            };
+            saw_parameter_facts = true;
+            let pattern = external_type_pattern_for_java_type(parameter_type);
+            specificity += callable_key_param_specificity(std::slice::from_ref(&pattern));
+            if !type_pattern_matches_java_type(&pattern, &arg_types[arg_index]) {
+                return ExternalApiParameterMatch {
+                    matches: false,
+                    saw_parameter_facts,
+                    specificity,
+                };
+            }
+        }
+        ExternalApiParameterMatch {
+            matches: true,
+            saw_parameter_facts,
+            specificity,
+        }
+    }
+
+    fn find_external_api_argument_effect_for_call(
+        &self,
+        receiver_type: Option<&str>,
+        method_name: &str,
+        arg_count: Option<usize>,
+        parameter_index: usize,
+    ) -> Option<&'a ExternalApiArgumentEffectFact> {
+        self.facts
+            .external_api_argument_effect_facts
+            .iter()
+            .rev()
+            .find(|fact| {
+                external_method_name_matches(&fact.method_name, method_name)
+                    && external_optional_type_name_matches(
+                        fact.receiver_type.as_deref(),
+                        receiver_type,
+                    )
+                    && (arg_count.is_none()
+                        || fact.arg_count == arg_count
+                        || fact.arg_count.is_none())
+                    && fact.parameter_index == parameter_index
+                    && fact.provenance == FactProvenance::UserOverride
+            })
+            .or_else(|| {
+                self.facts
+                    .external_api_argument_effect_facts
+                    .iter()
+                    .rev()
+                    .find(|fact| {
+                        external_method_name_matches(&fact.method_name, method_name)
+                            && external_optional_type_name_matches(
+                                fact.receiver_type.as_deref(),
+                                receiver_type,
+                            )
+                            && (arg_count.is_none()
+                                || fact.arg_count == arg_count
+                                || fact.arg_count.is_none())
+                            && fact.parameter_index == parameter_index
+                    })
             })
     }
 
@@ -758,6 +933,7 @@ pub struct ExternalApiEffectFact {
     pub method_name: String,
     pub receiver_type: Option<String>,
     pub arg_count: Option<usize>,
+    pub parameter_patterns: Option<Vec<TypePattern>>,
     pub role: ExternalApiRole,
     pub receiver_mutability: ReceiverMutabilityFact,
     pub return_type: Option<JavaType>,
@@ -768,11 +944,19 @@ pub struct ExternalApiEffectFact {
 
 impl ExternalApiEffectFact {
     pub fn callable_key(&self) -> Option<CallableKey> {
-        Some(CallableKey::method(
+        let arg_count = self.arg_count?;
+        let params = self
+            .parameter_patterns
+            .clone()
+            .unwrap_or_else(|| vec![TypePattern::Any; arg_count]);
+        if params.len() != arg_count {
+            return None;
+        }
+        Some(CallableKey::method_with_params(
             self.receiver_type.clone()?,
             self.method_name.clone(),
             Staticness::Unknown,
-            self.arg_count?,
+            params,
         ))
     }
 }
@@ -1048,10 +1232,27 @@ fn external_type_pattern_for_java_type(ty: &JavaType) -> TypePattern {
             type_name: "String".to_string(),
         }),
         JavaType::Array(element) => TypePattern::Erased(TypeKey {
-            type_name: format!("{:?}[]", external_type_pattern_for_java_type(element)),
+            type_name: format!("{}[]", external_type_pattern_key_for_java_type(element)),
         }),
         JavaType::Unknown(_) | JavaType::Wildcard(_) | JavaType::Void => TypePattern::Any,
     }
+}
+
+fn external_type_pattern_key_for_java_type(ty: &JavaType) -> String {
+    match ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => name.clone(),
+        JavaType::Primitive(primitive) => format!("{primitive:?}").to_ascii_lowercase(),
+        JavaType::String => "String".to_string(),
+        JavaType::Array(element) => {
+            format!("{}[]", external_type_pattern_key_for_java_type(element))
+        }
+        JavaType::Wildcard(_) => "Object".to_string(),
+        JavaType::Void => "void".to_string(),
+    }
+}
+
+pub fn type_pattern_for_external_java_type(ty: &JavaType) -> TypePattern {
+    external_type_pattern_for_java_type(ty)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1606,6 +1807,16 @@ impl FactSet {
         })
         .or_else(|| self.find_external_api_effect(receiver_type, method_name, arg_count, None))
         .or_else(|| self.find_external_api_effect(None, method_name, arg_count, None))
+    }
+
+    pub fn external_api_effect_for_call(
+        &self,
+        receiver_type: Option<&str>,
+        method_name: &str,
+        arg_types: &[JavaType],
+    ) -> Option<&ExternalApiEffectFact> {
+        let index = ExternalFactLookupIndex::new(self);
+        index.external_api_effect_for_call(receiver_type, method_name, arg_types)
     }
 
     fn find_external_api_effect(
@@ -3043,6 +3254,14 @@ fn callable_key_param_specificity(params: &[TypePattern]) -> usize {
         .sum()
 }
 
+pub fn callable_type_pattern_specificity(pattern: &TypePattern) -> usize {
+    callable_key_param_specificity(std::slice::from_ref(pattern))
+}
+
+pub fn callable_type_patterns_specificity(patterns: &[TypePattern]) -> usize {
+    callable_key_param_specificity(patterns)
+}
+
 fn type_pattern_matches_java_type(pattern: &TypePattern, java_ty: &JavaType) -> bool {
     if let Some(element_ty) = crate::types::optional_element_type(java_ty)
         && type_pattern_matches_java_type(pattern, &element_ty)
@@ -3057,6 +3276,17 @@ fn type_pattern_matches_java_type(pattern: &TypePattern, java_ty: &JavaType) -> 
             type_key_matches_java_type(&type_key.type_name, &erased)
         }
     }
+}
+
+pub fn type_pattern_matches_external_java_type(pattern: &TypePattern, java_ty: &JavaType) -> bool {
+    type_pattern_matches_java_type(pattern, java_ty)
+}
+
+pub fn type_patterns_match_external_java_types(
+    patterns: &[TypePattern],
+    java_types: &[JavaType],
+) -> bool {
+    callable_key_params_match_java_types(patterns, java_types)
 }
 
 fn erase_java_type_for_pattern(java_ty: &JavaType) -> JavaType {

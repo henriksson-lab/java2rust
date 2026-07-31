@@ -1491,6 +1491,7 @@ fn external_pack_manifest_coverage_audit_reports_unclassified_pack_facts() {
             receiver_type: "dep.audit.Record",
             method_name: "known",
             arg_count: None,
+            params: &[],
             rust_name: None,
             role: ExternalApiRole::Getter,
             receiver_mutability: ReceiverMutabilityFact::ReadOnly,
@@ -1556,6 +1557,7 @@ fn external_pack_manifest_coverage_audit_reports_unclassified_pack_facts() {
         method_name: "missing".to_string(),
         receiver_type: Some("dep.audit.Record".to_string()),
         arg_count: None,
+        parameter_patterns: None,
         role: ExternalApiRole::Getter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: None,
@@ -1567,6 +1569,7 @@ fn external_pack_manifest_coverage_audit_reports_unclassified_pack_facts() {
         method_name: "known".to_string(),
         receiver_type: Some("dep.audit.Record".to_string()),
         arg_count: None,
+        parameter_patterns: None,
         role: ExternalApiRole::Getter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: Some(JavaType::String),
@@ -1578,6 +1581,7 @@ fn external_pack_manifest_coverage_audit_reports_unclassified_pack_facts() {
         method_name: "noEffectRow".to_string(),
         receiver_type: Some("dep.audit.Record".to_string()),
         arg_count: None,
+        parameter_patterns: None,
         role: ExternalApiRole::Getter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: None,
@@ -1801,6 +1805,7 @@ fn external_pack_manifest_coverage_audits_crate_mapping_facts() {
             receiver_type: "dep.crate.Reader",
             method_name: "readRecord",
             arg_count: Some(1),
+            params: &[],
             rust_name: Some("read_record"),
             role: ExternalApiRole::Getter,
             receiver_mutability: ReceiverMutabilityFact::ReadOnly,
@@ -1936,6 +1941,7 @@ fn external_pack_fact_boundary_audit_reports_unowned_manifest_members() {
         method_name: "read".to_string(),
         receiver_type: Some("other.Reader".to_string()),
         arg_count: None,
+        parameter_patterns: None,
         role: ExternalApiRole::Getter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: None,
@@ -2665,6 +2671,7 @@ fn callable_keys_lookup_external_pack_api_constructor_and_field_facts() {
         r#"
         external-pack dep.keys dep.keys external-fact-model semantic
         external-pack-api dep.keys dep.keys.Record name semantic getter read-only definitely-non-null args=0 return=String
+        external-pack-api dep.keys dep.keys.Record parse semantic getter read-only definitely-non-null params=String return=String
         external-pack-constructor dep.keys dep.keys.Builder 1 semantic
         external-pack-field dep.keys dep.keys.Record TYPE semantic type=dep.keys.RecordType const-kind=enum-variant
         "#,
@@ -2677,6 +2684,31 @@ fn callable_keys_lookup_external_pack_api_constructor_and_field_facts() {
         .external_api_effect_for_key(&method_key)
         .expect("method fact should be addressable by callable key");
     assert_eq!(method.return_type, Some(JavaType::String));
+
+    let parse_key = CallableKey::method_with_params(
+        "dep.keys.Record",
+        "parse",
+        Staticness::Unknown,
+        vec![new_java2rust::facts::TypePattern::Exact(
+            new_java2rust::facts::TypeKey {
+                type_name: "String".to_string(),
+            },
+        )],
+    );
+    let parse_method = parsed
+        .facts
+        .external_api_effect_for_key(&parse_key)
+        .expect("typed method fact should be addressable by parameterized callable key");
+    assert_eq!(parse_method.return_type, Some(JavaType::String));
+    assert!(parse_method.callable_key().is_some_and(|key| !matches!(
+        key.params.as_slice(),
+        [new_java2rust::facts::TypePattern::Any]
+    )));
+    let parsed_index = parsed.facts.external_lookup_index();
+    let typed_call = parsed_index
+        .external_api_effect_for_call(Some("dep.keys.Record"), "parse", &[JavaType::String])
+        .expect("call-shaped lookup should select typed external API facts");
+    assert_eq!(typed_call.return_type, Some(JavaType::String));
 
     let constructor_key = CallableKey::constructor(
         "dep.keys.Builder",
@@ -16018,6 +16050,7 @@ fn user_override_beats_crate_mapping_and_builtin_external_facts() {
             method_name: "exists".to_string(),
             receiver_type: Some("HDF5File".to_string()),
             arg_count: None,
+            parameter_patterns: None,
             role: ExternalApiRole::Getter,
             receiver_mutability: ReceiverMutabilityFact::ReadOnly,
             return_type: None,
@@ -16039,6 +16072,7 @@ fn user_override_beats_crate_mapping_and_builtin_external_facts() {
             method_name: "size".to_string(),
             receiver_type: Some("List".to_string()),
             arg_count: None,
+            parameter_patterns: None,
             role: ExternalApiRole::Getter,
             receiver_mutability: ReceiverMutabilityFact::ReadOnly,
             return_type: None,
@@ -16052,6 +16086,7 @@ fn user_override_beats_crate_mapping_and_builtin_external_facts() {
             method_name: "size".to_string(),
             receiver_type: Some("List".to_string()),
             arg_count: None,
+            parameter_patterns: None,
             role: ExternalApiRole::Unknown,
             receiver_mutability: ReceiverMutabilityFact::Unknown,
             return_type: None,

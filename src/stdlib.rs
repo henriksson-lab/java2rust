@@ -1769,6 +1769,7 @@ fn jdk_instance_api_fact(
         method_name: method_name.to_string(),
         receiver_type: Some(owner.to_string()),
         arg_count: Some(arg_count),
+        parameter_patterns: None,
         role: ExternalApiRole::Getter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: Some(return_type),
