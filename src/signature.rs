@@ -9936,21 +9936,17 @@ fn local_shape_constraints_with_usage_and_effective_facts(
             &external_call_return_binding_constraints(binding, facts),
         );
     }
-    let modeled_native_map_get_final_facade_value = usage
+    let modeled_native_map_get_declared_value = usage
         .and_then(|usage| usage.bindings.get(name))
         .is_some_and(|binding| {
-            !native_map_get_final_facade_value_binding_constraints(
-                binding,
-                java_ty,
-                effective_facts,
-            )
-            .is_empty()
+            !native_map_get_declared_value_binding_constraints(binding, java_ty, effective_facts)
+                .is_empty()
         });
     if let Some(kind) = usage
         .and_then(|usage| usage.bindings.get(name))
         .and_then(|binding| binding_boundary_policy(binding).kind)
         .filter(|_| !declared_java_platform_facade_type(java_ty))
-        .filter(|_| !modeled_native_map_get_final_facade_value)
+        .filter(|_| !modeled_native_map_get_declared_value)
     {
         constraints.extend(
             signature_boundary_policy_with_effective_facts(kind, java_ty, effective_facts)
@@ -9960,11 +9956,7 @@ fn local_shape_constraints_with_usage_and_effective_facts(
     if let Some(binding) = usage.and_then(|usage| usage.bindings.get(name)) {
         push_unique_signature_constraints(
             &mut constraints,
-            &native_map_get_final_facade_value_binding_constraints(
-                binding,
-                java_ty,
-                effective_facts,
-            ),
+            &native_map_get_declared_value_binding_constraints(binding, java_ty, effective_facts),
         );
     }
     constraints
@@ -10019,7 +10011,7 @@ fn declared_local_jdk_iterator_constraints(java_ty: &JavaType) -> Vec<SignatureC
     ]
 }
 
-fn native_map_get_final_facade_value_binding_constraints(
+fn native_map_get_declared_value_binding_constraints(
     binding: &BindingUseFacts,
     java_ty: &JavaType,
     facts: &EffectiveFacts<'_>,
@@ -10042,18 +10034,27 @@ fn native_map_get_final_facade_value_binding_constraints(
     if !assigned_from_matching_map_get {
         return Vec::new();
     }
-    if !matches!(
-        facts.object_representation_override_strategy_for(java_ty),
-        Some(HierarchyStrategy::ErasedObject)
-    ) || !facts.is_final_type(java_ty)
-    {
+
+    if is_declared_java_object_type(java_ty) {
         return Vec::new();
     }
-    vec![
+
+    let mut constraints = vec![
         SignatureConstraint::RequiredDispatch(DispatchShape::Concrete),
         SignatureConstraint::RequiredView(ViewShape::Native),
-        SignatureConstraint::RequiredOwnership(OwnershipShape::SharedBorrow),
-    ]
+    ];
+
+    if matches!(
+        facts.object_representation_override_strategy_for(java_ty),
+        Some(HierarchyStrategy::ErasedObject)
+    ) && facts.is_final_type(java_ty)
+    {
+        constraints.push(SignatureConstraint::RequiredOwnership(
+            OwnershipShape::SharedBorrow,
+        ));
+    }
+
+    constraints
 }
 
 fn native_collection_receiver_binding_constraints(
@@ -10370,6 +10371,14 @@ pub fn external_argument_binding_constraints(
             *arg_index,
             facts,
         );
+        let native_collection_constraints = native_collection_argument_constraints_for_binding(
+            receiver_type.as_ref(),
+            name,
+            *arg_count,
+            *arg_index,
+            &binding.java_ty,
+            facts,
+        );
         let constructor_constraints = external_constructor_argument_effect_for_call_arg(
             receiver_type.as_ref(),
             name,
@@ -10383,6 +10392,7 @@ pub fn external_argument_binding_constraints(
         .unwrap_or_default();
         if *boundary == CallArgumentBoundary::Unknown
             && effect.is_none()
+            && native_collection_constraints.is_empty()
             && constructor_constraints.is_empty()
             && !unknown_external_argument_default_non_null_applies(
                 receiver_type.as_ref(),
@@ -10404,6 +10414,8 @@ pub fn external_argument_binding_constraints(
                     facts,
                 ),
             );
+        } else if !native_collection_constraints.is_empty() {
+            push_unique_signature_constraints(&mut constraints, &native_collection_constraints);
         } else if !constructor_constraints.is_empty() {
             push_unique_signature_constraints(&mut constraints, &constructor_constraints);
         } else {
@@ -10417,6 +10429,100 @@ pub fn external_argument_binding_constraints(
             );
         }
     }
+    constraints
+}
+
+fn native_collection_argument_constraints_for_binding(
+    receiver_type: Option<&JavaType>,
+    name: &str,
+    arg_count: usize,
+    arg_index: usize,
+    binding_java_ty: &JavaType,
+    facts: &FactSet,
+) -> Vec<SignatureConstraint> {
+    let Some(receiver_type) = receiver_type else {
+        return Vec::new();
+    };
+    let Some((key_ty, value_ty)) = crate::stdlib::java_map_type_args(receiver_type) else {
+        return Vec::new();
+    };
+    let target = match (name, arg_count, arg_index) {
+        ("get" | "containsKey" | "contains_key", 1, 0) => {
+            NativeCollectionArgumentTarget::Borrowed(key_ty)
+        }
+        ("put" | "insert", 2, 0) => NativeCollectionArgumentTarget::Owned(key_ty),
+        ("put" | "insert", 2, 1) => NativeCollectionArgumentTarget::Owned(value_ty),
+        _ => return Vec::new(),
+    };
+    let expected_ty = target.java_ty();
+    if !java_types_match_with_external_aliases(expected_ty, binding_java_ty) {
+        return Vec::new();
+    }
+    match target {
+        NativeCollectionArgumentTarget::Borrowed(java_ty) => {
+            borrowed_native_collection_argument_constraints(java_ty, facts)
+        }
+        NativeCollectionArgumentTarget::Owned(java_ty) => {
+            owned_native_collection_argument_constraints(java_ty, facts)
+        }
+    }
+}
+
+enum NativeCollectionArgumentTarget<'a> {
+    Borrowed(&'a JavaType),
+    Owned(&'a JavaType),
+}
+
+impl<'a> NativeCollectionArgumentTarget<'a> {
+    fn java_ty(&self) -> &'a JavaType {
+        match self {
+            NativeCollectionArgumentTarget::Borrowed(java_ty)
+            | NativeCollectionArgumentTarget::Owned(java_ty) => java_ty,
+        }
+    }
+}
+
+fn borrowed_native_collection_argument_constraints(
+    java_ty: &JavaType,
+    facts: &FactSet,
+) -> Vec<SignatureConstraint> {
+    let mut constraints = Vec::new();
+    if !matches!(java_ty, JavaType::Primitive(_) | JavaType::Void) {
+        constraints.push(SignatureConstraint::RequiredOwnership(
+            OwnershipShape::SharedBorrow,
+        ));
+    }
+    constraints.push(SignatureConstraint::RequiredDispatch(
+        DispatchShape::Concrete,
+    ));
+    if java_ty == &JavaType::String {
+        constraints.push(SignatureConstraint::RequiredView(ViewShape::Str));
+    } else if matches!(java_ty, JavaType::Array(_)) {
+        constraints.push(SignatureConstraint::RequiredView(ViewShape::Slice));
+    } else if !declared_external_return_has_non_concrete_representation(java_ty, facts) {
+        constraints.push(SignatureConstraint::RequiredView(ViewShape::Native));
+    }
+    constraints
+}
+
+fn owned_native_collection_argument_constraints(
+    java_ty: &JavaType,
+    facts: &FactSet,
+) -> Vec<SignatureConstraint> {
+    let mut constraints = Vec::new();
+    if !matches!(java_ty, JavaType::Primitive(_) | JavaType::Void)
+        && !signature_capability_policy(java_ty, facts)
+            .capability_ownership
+            .is_some_and(|ownership| ownership == OwnershipShape::CopyValue)
+    {
+        constraints.push(SignatureConstraint::RequiredOwnership(
+            OwnershipShape::Owned,
+        ));
+    }
+    constraints.push(SignatureConstraint::RequiredDispatch(
+        DispatchShape::Concrete,
+    ));
+    constraints.push(SignatureConstraint::RequiredView(ViewShape::Native));
     constraints
 }
 
@@ -10551,6 +10657,15 @@ fn unknown_boundary_is_fully_modeled_by_external_argument_effects(
                         facts,
                     )
                     .is_none()
+                    && native_collection_argument_constraints_for_binding(
+                        receiver_type.as_ref(),
+                        name,
+                        *arg_count,
+                        *arg_index,
+                        &binding.java_ty,
+                        facts,
+                    )
+                    .is_empty()
                 {
                     return false;
                 }
@@ -10839,6 +10954,15 @@ fn push_external_call_return_constraints(
     arg_count: Option<usize>,
     facts: &FactSet,
 ) {
+    if native_collection_get_return_may_be_null(receiver_type.as_deref(), name, arg_count) {
+        push_unique_signature_constraints(
+            constraints,
+            &[SignatureConstraint::RequiredStorageNullability(
+                NullabilityState::MaybeNull,
+            )],
+        );
+        return;
+    }
     if let Some(effect) =
         facts.external_api_effect_for_receiver_with_arity(receiver_type.as_deref(), name, arg_count)
         && effect.return_nullability != NullabilityState::Unknown
@@ -10851,6 +10975,25 @@ fn push_external_call_return_constraints(
             )],
         );
     }
+}
+
+fn native_collection_get_return_may_be_null(
+    receiver_type: Option<&str>,
+    name: &str,
+    arg_count: Option<usize>,
+) -> bool {
+    if name != "get" || !matches!(arg_count, Some(1) | None) {
+        return false;
+    }
+    let Some(receiver_type) = receiver_type else {
+        return false;
+    };
+    let receiver_type = crate::stdlib::canonical_external_receiver_type_key(receiver_type);
+    let simple = receiver_type.rsplit('.').next().unwrap_or(&receiver_type);
+    matches!(
+        simple,
+        "List" | "ArrayList" | "LinkedList" | "Map" | "HashMap" | "LinkedHashMap"
+    )
 }
 
 fn external_effect_return_nullability_is_signature_evidence(
@@ -12357,6 +12500,11 @@ fn method_usage_returns_unknown_call_result(
                     declared_return,
                     facts,
                 )
+                && !returned_native_collection_get_result_matches_declared_return(
+                    returned,
+                    declared_return,
+                    facts,
+                )
         })
 }
 
@@ -12852,6 +13000,19 @@ pub fn external_call_return_method_return_constraints(
                 )],
             );
         }
+        if returned_native_collection_get_result_matches_declared_return(
+            returned,
+            &method.return_type,
+            facts,
+        ) {
+            push_unique_signature_constraints(
+                &mut constraints,
+                &[
+                    SignatureConstraint::RequiredDispatch(DispatchShape::Concrete),
+                    SignatureConstraint::RequiredView(ViewShape::Native),
+                ],
+            );
+        }
     }
     constraints
 }
@@ -12975,6 +13136,25 @@ fn returned_external_call_result_matches_declared_return(
         return false;
     };
     java_types_match_with_external_aliases(return_type, declared_return)
+}
+
+fn returned_native_collection_get_result_matches_declared_return(
+    returned: &ReturnedCallResultUse,
+    declared_return: &JavaType,
+    _facts: &FactSet,
+) -> bool {
+    if returned.name != "get" || returned.arg_count != 1 {
+        return false;
+    }
+    let Some(receiver_type) = &returned.receiver_type else {
+        return false;
+    };
+    let value_type = crate::stdlib::java_map_type_args(receiver_type)
+        .map(|(_, value_ty)| value_ty.clone())
+        .or_else(|| crate::types::sequence_element_type(receiver_type));
+    value_type.is_some_and(|value_type| {
+        java_types_match_with_external_aliases(&value_type, declared_return)
+    })
 }
 
 fn returned_call_receiver_type_for_external_lookup(

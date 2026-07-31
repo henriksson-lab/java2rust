@@ -8384,12 +8384,11 @@ class MapGetPrimitiveArithmetic {
     );
 
     assert!(
-        translation
+        translation.rust.contains(
+            "(totals.get(key).copied().expect(\"Java null receiver\")).wrapping_div(count)"
+        ) && !translation
             .rust
-            .contains("totals.get(key).copied().expect(\"Java null receiver\") / count")
-            && !translation
-                .rust
-                .contains("totals.get(key.as_str()) / count"),
+            .contains("totals.get(key.as_str()) / count"),
         "{}",
         translation.rust
     );

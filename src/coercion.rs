@@ -1436,6 +1436,14 @@ pub fn normalize_map_key_borrow_projection(
     } else {
         expr
     };
+    if let (Some(name), Some(shape)) = (local_name, actual)
+        && shape.java_ty == JavaType::String
+        && shape.ownership == OwnershipShape::SharedBorrow
+        && shape.view == ViewShape::Native
+        && rust_expr_is_local_name(&expr, name)
+    {
+        return RustExpr::Raw(format!("{name}.as_str()"));
+    }
     let actual_for_projection = if actual.is_some_and(|shape| {
         matches!(
             shape.ownership,

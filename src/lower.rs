@@ -18890,23 +18890,6 @@ fn lower_expr_for_slot_with_refinements(
     {
         return expr;
     }
-    if let Some(expr) = lower_erased_external_call_cast_for_slot(expr, env, &slot, ctx, refinements)
-    {
-        return expr;
-    }
-    if let Some(expr) = lower_concrete_cast_source_for_slot(expr, env, &slot, ctx, refinements) {
-        return expr;
-    }
-    if let Some(expr) = lower_optional_cast_source_for_slot(expr, env, &slot, ctx, refinements) {
-        return expr;
-    }
-    if let Some(expr) = lower_raw_erasure_cast_source_for_slot(expr, env, &slot, ctx, refinements) {
-        return expr;
-    }
-    if let Some(expr) = lower_closed_enum_cast_for_matching_slot(expr, env, &slot, ctx, refinements)
-    {
-        return expr;
-    }
     if let Some(stream_expr) = lower_stream_expr(expr, env, ctx) {
         let plan = plan_lowered_slot_conversion(&stream_expr.actual, slot, ctx.facts);
         return apply_lowered_slot_expr_conversion(stream_expr, &plan);
@@ -18934,6 +18917,23 @@ fn lower_expr_for_slot_with_refinements(
     if let Some(map_get_expr) = lower_map_get_call_expr_for_slot(expr, env, &slot, ctx, refinements)
     {
         return map_get_expr;
+    }
+    if let Some(expr) = lower_erased_external_call_cast_for_slot(expr, env, &slot, ctx, refinements)
+    {
+        return expr;
+    }
+    if let Some(expr) = lower_concrete_cast_source_for_slot(expr, env, &slot, ctx, refinements) {
+        return expr;
+    }
+    if let Some(expr) = lower_optional_cast_source_for_slot(expr, env, &slot, ctx, refinements) {
+        return expr;
+    }
+    if let Some(expr) = lower_raw_erasure_cast_source_for_slot(expr, env, &slot, ctx, refinements) {
+        return expr;
+    }
+    if let Some(expr) = lower_closed_enum_cast_for_matching_slot(expr, env, &slot, ctx, refinements)
+    {
+        return expr;
     }
     if let Some(map_get_to_array_expr) =
         lower_map_get_to_array_call_expr_for_slot(expr, env, &slot, ctx, refinements)
@@ -24103,25 +24103,7 @@ fn lower_map_get_call_expr_for_slot(
         return None;
     }
     let actual = native_collection_lowered_type(target_receiver, method, env.type_env())?;
-    let rust_args = lower_args_for_call_target(
-        &target,
-        Some(receiver),
-        args,
-        env,
-        plan_call_arguments_with_facts_and_args(
-            Some(receiver),
-            name,
-            resolved.as_ref(),
-            args,
-            ctx.signatures,
-            ctx.facts,
-            env.type_env(),
-        ),
-        resolved.as_ref(),
-        ctx,
-        None,
-    );
-    let key = rust_args.into_iter().next()?;
+    let key = lower_expr_with_refinements(&args[0], env, ctx, refinements);
     let key = lower_map_key_arg_borrow_projection(key, &args[0], env, ctx);
     let lowered_receiver = target.receiver_expr().map(|receiver| {
         let lowered = lower_expr_with_refinements(receiver, env, ctx, refinements);

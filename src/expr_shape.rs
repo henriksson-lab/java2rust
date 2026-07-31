@@ -67,9 +67,33 @@ impl ShapeEnv {
         self.bind_name(BindingKind::Local, name);
     }
 
+    pub fn insert_local_shape_with_java_type(
+        &mut self,
+        name: impl Into<String>,
+        shape: RustSlotShape,
+        java_ty: JavaType,
+    ) {
+        let name = name.into();
+        self.types.insert_local(name.clone(), java_ty);
+        self.local_shapes.insert(name.clone(), shape);
+        self.bind_name(BindingKind::Local, name);
+    }
+
     pub fn insert_param_shape(&mut self, name: impl Into<String>, shape: RustSlotShape) {
         let name = name.into();
         self.types.insert_local(name.clone(), shape.java_ty.clone());
+        self.local_shapes.insert(name.clone(), shape);
+        self.bind_name(BindingKind::Param, name);
+    }
+
+    pub fn insert_param_shape_with_java_type(
+        &mut self,
+        name: impl Into<String>,
+        shape: RustSlotShape,
+        java_ty: JavaType,
+    ) {
+        let name = name.into();
+        self.types.insert_local(name.clone(), java_ty);
         self.local_shapes.insert(name.clone(), shape);
         self.bind_name(BindingKind::Param, name);
     }
@@ -132,6 +156,19 @@ impl ShapeEnv {
         self.binding_ids.insert(alias, binding);
     }
 
+    pub fn insert_field_shape_with_java_type(
+        &mut self,
+        name: impl Into<String>,
+        shape: RustSlotShape,
+        java_ty: JavaType,
+    ) {
+        let name = name.into();
+        let alias = crate::parser::to_snake_case(&name);
+        self.insert_field_shape(name.clone(), shape);
+        self.types.insert_field(name, java_ty.clone());
+        self.types.insert_field(alias, java_ty);
+    }
+
     pub fn insert_type_field_shape(
         &mut self,
         type_name: impl Into<String>,
@@ -154,6 +191,30 @@ impl ShapeEnv {
             );
             self.types
                 .insert_type_field(type_name_alias, alias, shape.java_ty.clone());
+        }
+    }
+
+    pub fn insert_type_field_shape_with_java_type(
+        &mut self,
+        type_name: impl Into<String>,
+        field_name: impl Into<String>,
+        shape: RustSlotShape,
+        java_ty: JavaType,
+    ) {
+        let type_name = type_name.into();
+        let field_name = field_name.into();
+        let type_name_alias = crate::parser::to_snake_case(&type_name);
+        let field_alias = crate::parser::to_snake_case(&field_name);
+        self.insert_type_field_shape(type_name.clone(), field_name.clone(), shape);
+        self.types
+            .insert_type_field(type_name.clone(), field_name.clone(), java_ty.clone());
+        self.types
+            .insert_type_field(type_name.clone(), field_alias.clone(), java_ty.clone());
+        if type_name_alias != type_name {
+            self.types
+                .insert_type_field(type_name_alias.clone(), field_name, java_ty.clone());
+            self.types
+                .insert_type_field(type_name_alias, field_alias, java_ty);
         }
     }
 
@@ -182,6 +243,30 @@ impl ShapeEnv {
         }
     }
 
+    pub fn insert_type_static_storage_field_shape_with_java_type(
+        &mut self,
+        type_name: impl Into<String>,
+        field_name: impl Into<String>,
+        shape: RustSlotShape,
+        java_ty: JavaType,
+    ) {
+        let type_name = type_name.into();
+        let field_name = field_name.into();
+        let type_name_alias = crate::parser::to_snake_case(&type_name);
+        let field_alias = crate::parser::to_snake_case(&field_name);
+        self.insert_type_static_storage_field_shape(type_name.clone(), field_name.clone(), shape);
+        self.types
+            .insert_type_field(type_name.clone(), field_name.clone(), java_ty.clone());
+        self.types
+            .insert_type_field(type_name.clone(), field_alias.clone(), java_ty.clone());
+        if type_name_alias != type_name {
+            self.types
+                .insert_type_field(type_name_alias.clone(), field_name, java_ty.clone());
+            self.types
+                .insert_type_field(type_name_alias, field_alias, java_ty);
+        }
+    }
+
     pub fn insert_static_field_shape(&mut self, name: impl Into<String>, shape: RustSlotShape) {
         let name = name.into();
         let shape = if matches!(shape.java_ty, JavaType::String) {
@@ -199,6 +284,19 @@ impl ShapeEnv {
         self.binding_ids.insert(alias.clone(), binding);
         self.static_field_names.insert(name.clone(), name.clone());
         self.static_field_names.insert(alias, name);
+    }
+
+    pub fn insert_static_field_shape_with_java_type(
+        &mut self,
+        name: impl Into<String>,
+        shape: RustSlotShape,
+        java_ty: JavaType,
+    ) {
+        let name = name.into();
+        let alias = crate::parser::to_snake_case(&name);
+        self.insert_static_field_shape(name.clone(), shape);
+        self.types.insert_field(name, java_ty.clone());
+        self.types.insert_field(alias, java_ty);
     }
 
     pub fn insert_static_field_shape_for_owner(
@@ -238,6 +336,19 @@ impl ShapeEnv {
         self.static_storage_field_names
             .insert(name.clone(), name.clone());
         self.static_storage_field_names.insert(alias, name);
+    }
+
+    pub fn insert_static_storage_field_shape_with_java_type(
+        &mut self,
+        name: impl Into<String>,
+        shape: RustSlotShape,
+        java_ty: JavaType,
+    ) {
+        let name = name.into();
+        let alias = crate::parser::to_snake_case(&name);
+        self.insert_static_storage_field_shape(name.clone(), shape);
+        self.types.insert_field(name, java_ty.clone());
+        self.types.insert_field(alias, java_ty);
     }
 
     pub fn binding_id(&self, name: &str) -> Option<&BindingId> {
@@ -628,20 +739,44 @@ fn shape_env_for_type_with_fields(
         if let Member::Field(field) = member {
             let shape = signatures.required_field_shape(&ty.name, &field.name);
             if crate::item_assembly::static_final_field_has_associated_const(ty, field) {
-                env.insert_type_field_shape(&ty.name, field.name.clone(), shape.clone());
-                env.insert_static_field_shape(field.name.clone(), shape);
-            } else if field.modifiers.contains(&Modifier::Static) {
-                env.insert_type_static_storage_field_shape(
+                env.insert_type_field_shape_with_java_type(
                     &ty.name,
                     field.name.clone(),
                     shape.clone(),
+                    field.ty.clone(),
                 );
-                env.insert_static_storage_field_shape(field.name.clone(), shape);
+                env.insert_static_field_shape_with_java_type(
+                    field.name.clone(),
+                    shape,
+                    field.ty.clone(),
+                );
+            } else if field.modifiers.contains(&Modifier::Static) {
+                env.insert_type_static_storage_field_shape_with_java_type(
+                    &ty.name,
+                    field.name.clone(),
+                    shape.clone(),
+                    field.ty.clone(),
+                );
+                env.insert_static_storage_field_shape_with_java_type(
+                    field.name.clone(),
+                    shape,
+                    field.ty.clone(),
+                );
             } else if include_instance_fields {
-                env.insert_type_field_shape(&ty.name, field.name.clone(), shape.clone());
-                env.insert_field_shape(field.name.clone(), shape);
+                env.insert_type_field_shape_with_java_type(
+                    &ty.name,
+                    field.name.clone(),
+                    shape.clone(),
+                    field.ty.clone(),
+                );
+                env.insert_field_shape_with_java_type(field.name.clone(), shape, field.ty.clone());
             } else {
-                env.insert_type_field_shape(&ty.name, field.name.clone(), shape);
+                env.insert_type_field_shape_with_java_type(
+                    &ty.name,
+                    field.name.clone(),
+                    shape,
+                    field.ty.clone(),
+                );
             }
         }
     }
@@ -697,7 +832,7 @@ pub fn learn_stmt_shapes(
             let shape = local_shape_for_declared_type(signatures, locals, name, ty)
                 .cloned()
                 .unwrap_or_else(|| fallback_local_shape_from_declared_type(ty));
-            env.insert_local_shape(name.clone(), shape);
+            env.insert_local_shape_with_java_type(name.clone(), shape, ty.clone());
         }
         Stmt::For { init, .. } => {
             for stmt in init {
@@ -737,7 +872,11 @@ fn local_shape_for_declared_type<'a>(
 
 fn insert_param_shapes(env: &mut ShapeEnv, params: &[ParamPlan]) {
     for param in params {
-        env.insert_param_shape(param.name.clone(), param.shape.clone());
+        env.insert_param_shape_with_java_type(
+            param.name.clone(),
+            param.shape.clone(),
+            param.java_ty.clone(),
+        );
     }
 }
 

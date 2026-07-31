@@ -586,6 +586,9 @@ Completion checklist for any audit marked `fixed locally`:
 - Fresh-context reminder: an audit is not closed by code alone. Its issue file
   must be moved to the `done` directory below as part of the same completed
   checkpoint.
+- Required file move: once a Claude audit is implemented and focused
+  verification has passed, move its issue file from active `claude_audits/`
+  into `/home/mahogny/github/claude/new_java2rust/claude_audits/done`.
 - Move the corresponding issue file from `claude_audits/` to
   `/home/mahogny/github/claude/new_java2rust/claude_audits/done`.
 - Keep the move in the same verified checkpoint as the implementation.

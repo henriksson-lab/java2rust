@@ -27536,8 +27536,11 @@ fn shape_env_records_declared_locals_as_storage_shapes() {
 fn expr_shape_owns_environment_setup_from_signature_plan() {
     let parsed = parse_java_source(
         r#"
+import java.util.HashMap;
+
 class EnvUse {
     String field;
+    HashMap<String, String> fields;
 
     EnvUse(String field) {
         this.field = field;
@@ -27550,6 +27553,10 @@ class EnvUse {
 
     static String id(String value) {
         return value;
+    }
+
+    String fromMap(HashMap<String, String> values, String key) {
+        return values.get(key);
     }
 }
 "#,
@@ -27575,6 +27582,14 @@ class EnvUse {
             _ => None,
         })
         .unwrap();
+    let map_method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "fromMap" => Some(method),
+            _ => None,
+        })
+        .unwrap();
     let ctor = ty
         .members
         .iter()
@@ -27585,6 +27600,7 @@ class EnvUse {
         .unwrap();
     let method_signature = signatures.method_signature(ty, method).unwrap();
     let static_signature = signatures.method_signature(ty, static_method).unwrap();
+    let map_signature = signatures.method_signature(ty, map_method).unwrap();
     let constructor_signature = signatures.constructor_signature(ty, ctor).unwrap();
 
     let mut env = shape_env_for_type(ty, &signatures);
@@ -27592,6 +27608,11 @@ class EnvUse {
         env.field_shape("field"),
         signatures.field_shape("EnvUse", "field")
     );
+    let string_map_ty = JavaType::Named {
+        name: "HashMap".to_string(),
+        args: vec![JavaType::String, JavaType::String],
+    };
+    assert_eq!(env.type_env().field_type("fields"), Some(&string_map_ty));
     let constructor_env = shape_env_for_constructor(ty, constructor_signature, &signatures);
     assert_eq!(
         constructor_env.local_shape("field"),
@@ -27630,6 +27651,11 @@ class EnvUse {
         Some(BindingKind::Param)
     );
     assert_eq!(static_env.field_shape("field"), None);
+    let map_env = shape_env_for_method(ty, map_method, map_signature, &signatures);
+    assert_eq!(
+        map_env.type_env().local_type("values"),
+        Some(&string_map_ty)
+    );
 
     let Stmt::VarDecl { .. } = &method.body.as_ref().unwrap().statements[0] else {
         panic!("expected local declaration");

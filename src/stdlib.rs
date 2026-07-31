@@ -6,7 +6,7 @@ use crate::facts::{
     CallableKey, ExternalApiEffectFact, ExternalApiRole, ExternalArgumentAliasPolicy,
     ExternalConversionAdapterKind, ExternalFieldFact, ExternalFieldKind, FacadeAbiFact, FacadeSlot,
     FactProvenance, FieldKey, HierarchyStrategy, NullabilityState, ReceiverAbi,
-    ReceiverMutabilityFact, ResultAbi, Staticness, TypeKey, TypePattern,
+    ReceiverMutabilityFact, ResultAbi, Staticness, TypeCapabilityOverride, TypeKey, TypePattern,
 };
 use crate::java_ir::{
     BinaryOp, Block, Expr, FieldDecl, JavaType, Literal, Member, MethodDecl, Modifier,
@@ -357,6 +357,9 @@ pub fn native_collection_constructor_kind_for_type(ty: &JavaType) -> Option<Java
 
 pub fn rust_stdlib_signature_facts() -> FactSet {
     let mut facts = FactSet::default();
+    facts
+        .type_capability_overrides
+        .extend(jdk_boxed_primitive_type_capability_facts());
     facts.facade_abi_facts.extend([
         rust_stdlib_method_abi("String", "length", 0, "str::len", vec![], FacadeSlot::Owned),
         rust_stdlib_method_abi(
@@ -708,6 +711,33 @@ pub fn rust_stdlib_signature_facts() -> FactSet {
     add_jdk_platform_stream_facts(&mut facts);
     add_jdk_platform_io_abi_facts(&mut facts);
     facts
+}
+
+fn jdk_boxed_primitive_type_capability_facts() -> Vec<TypeCapabilityOverride> {
+    [
+        "Boolean",
+        "Byte",
+        "Short",
+        "Character",
+        "Integer",
+        "Long",
+        "Float",
+        "Double",
+    ]
+    .into_iter()
+    .map(|type_name| TypeCapabilityOverride {
+        type_name: type_name.to_string(),
+        copy: Some(true),
+        clone: Some(true),
+        string_like: None,
+        sequence_like: None,
+        implements: Vec::new(),
+        extends: None,
+        final_type: Some(true),
+        object_safe_trait: None,
+        provenance: FactProvenance::BuiltinExternalModel,
+    })
+    .collect()
 }
 
 fn add_jdk_iterator_abi_facts(facts: &mut FactSet) {
