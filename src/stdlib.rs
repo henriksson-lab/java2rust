@@ -3253,6 +3253,9 @@ fn known_argument_sensitive_external_method_return_type(
             Some(JavaType::Primitive(PrimitiveType::Int))
         }
         (Some("Arrays"), "toString" | "to_string", [JavaType::Array(_)]) => Some(JavaType::String),
+        (Some("Arrays"), "deepToString" | "deep_to_string", [JavaType::Array(_)]) => {
+            Some(JavaType::String)
+        }
         (Some("Arrays"), "copyOf", [JavaType::Array(element), _]) => {
             Some(JavaType::Array(element.clone()))
         }
@@ -5634,6 +5637,50 @@ pub fn java_arrays_to_string<T: std::fmt::Display, V: AsRef<[T]>>(values: V) -> 
     format!("[{body}]")
 }
 
+pub trait JavaArraysDeepToStringElement {
+    fn java_arrays_deep_to_string(&self) -> String;
+}
+
+pub fn java_arrays_deep_to_string<T: JavaArraysDeepToStringElement, V: AsRef<[T]>>(
+    values: V,
+) -> String {
+    let body = values
+        .as_ref()
+        .iter()
+        .map(JavaArraysDeepToStringElement::java_arrays_deep_to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{body}]")
+}
+
+macro_rules! impl_java_arrays_deep_to_string_display {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl JavaArraysDeepToStringElement for $ty {
+                fn java_arrays_deep_to_string(&self) -> String {
+                    self.to_string()
+                }
+            }
+        )*
+    };
+}
+
+impl_java_arrays_deep_to_string_display!(bool, i8, i16, i32, i64, char, f32, f64, String, &str);
+
+impl<T: JavaArraysDeepToStringElement> JavaArraysDeepToStringElement for Vec<T> {
+    fn java_arrays_deep_to_string(&self) -> String {
+        java_arrays_deep_to_string(self)
+    }
+}
+
+impl<T: JavaArraysDeepToStringElement> JavaArraysDeepToStringElement for Option<T> {
+    fn java_arrays_deep_to_string(&self) -> String {
+        self.as_ref()
+            .map(JavaArraysDeepToStringElement::java_arrays_deep_to_string)
+            .unwrap_or_else(|| "null".to_string())
+    }
+}
+
 pub mod logger {
     pub fn info<M: std::fmt::Display>(_message: M) {}
     pub fn warn<M: std::fmt::Display>(_message: M) {}
@@ -5696,6 +5743,50 @@ pub fn java_arrays_hash_code<T: JavaArraysHashElement>(value: &[T]) -> i32 {
         hash.wrapping_mul(31)
             .wrapping_add(element.java_arrays_hash_code())
     })
+}
+
+pub trait JavaArraysDeepToStringElement {
+    fn java_arrays_deep_to_string(&self) -> String;
+}
+
+pub fn java_arrays_deep_to_string<T: JavaArraysDeepToStringElement, V: AsRef<[T]>>(
+    values: V,
+) -> String {
+    let body = values
+        .as_ref()
+        .iter()
+        .map(JavaArraysDeepToStringElement::java_arrays_deep_to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{body}]")
+}
+
+macro_rules! impl_java_arrays_deep_to_string_display {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl JavaArraysDeepToStringElement for $ty {
+                fn java_arrays_deep_to_string(&self) -> String {
+                    self.to_string()
+                }
+            }
+        )*
+    };
+}
+
+impl_java_arrays_deep_to_string_display!(bool, i8, i16, i32, i64, char, f32, f64, String, &str);
+
+impl<T: JavaArraysDeepToStringElement> JavaArraysDeepToStringElement for Vec<T> {
+    fn java_arrays_deep_to_string(&self) -> String {
+        java_arrays_deep_to_string(self)
+    }
+}
+
+impl<T: JavaArraysDeepToStringElement> JavaArraysDeepToStringElement for Option<T> {
+    fn java_arrays_deep_to_string(&self) -> String {
+        self.as_ref()
+            .map(JavaArraysDeepToStringElement::java_arrays_deep_to_string)
+            .unwrap_or_else(|| "null".to_string())
+    }
 }
 
 pub trait JavaArraysCompareElement {
@@ -16623,6 +16714,7 @@ fn expr_uses_java_string_runtime_helpers(expr: &Expr) -> bool {
                 (receiver.as_deref(), name.as_str(), args.len()),
                 (Some(Expr::Var(owner)), "equals", 2 | 6)
                     | (Some(Expr::Var(owner)), "hashCode" | "hash_code", 1)
+                    | (Some(Expr::Var(owner)), "deepToString" | "deep_to_string", 1)
                     | (Some(Expr::Var(owner)), "compare", 2 | 6)
                     | (Some(Expr::Var(owner)), "mismatch", 2 | 6)
                     if canonical_external_receiver_type_key(owner) == "Arrays"
@@ -17313,6 +17405,9 @@ fn external_api_method_policy_provenance_with_builtin_packs(
         }
         (Some("Arrays"), "hashCode" | "hash_code", 1) => FactProvenance::BuiltinExternalModel,
         (Some("Arrays"), "toString" | "to_string", 1) => FactProvenance::BuiltinExternalModel,
+        (Some("Arrays"), "deepToString" | "deep_to_string", 1) => {
+            FactProvenance::BuiltinExternalModel
+        }
         (Some("Arrays"), "copyOf", 2) => FactProvenance::BuiltinExternalModel,
         (Some("Arrays"), "copyOfRange", 3) => FactProvenance::BuiltinExternalModel,
         (Some("Arrays"), "fill", 2 | 4) => FactProvenance::BuiltinExternalModel,
@@ -17761,6 +17856,9 @@ pub fn external_api_return_nullability(
         }
         (Some("Arrays"), "hashCode" | "hash_code", 1) => NullabilityState::DefinitelyNonNull,
         (Some("Arrays"), "toString" | "to_string", 1) => NullabilityState::DefinitelyNonNull,
+        (Some("Arrays"), "deepToString" | "deep_to_string", 1) => {
+            NullabilityState::DefinitelyNonNull
+        }
         (Some("Arrays"), "copyOf", 2) => NullabilityState::DefinitelyNonNull,
         (Some("Arrays"), "copyOfRange", 3) => NullabilityState::DefinitelyNonNull,
         (Some("ArrayUtils"), "addAll", 2) => NullabilityState::DefinitelyNonNull,
@@ -17926,6 +18024,7 @@ fn static_utility_method_role(
         (Some("Arrays"), "binarySearch" | "binary_search", 2 | 4) => ExternalApiRole::Getter,
         (Some("Arrays"), "hashCode" | "hash_code", 1) => ExternalApiRole::Getter,
         (Some("Arrays"), "toString" | "to_string", 1) => ExternalApiRole::Getter,
+        (Some("Arrays"), "deepToString" | "deep_to_string", 1) => ExternalApiRole::Getter,
         (Some("Arrays"), "copyOf", 2) => ExternalApiRole::Getter,
         (Some("Arrays"), "copyOfRange", 3) => ExternalApiRole::Getter,
         (Some("Arrays"), "fill", 2 | 4) => ExternalApiRole::Mutator,

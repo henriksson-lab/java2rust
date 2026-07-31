@@ -372,6 +372,7 @@ pub enum NativeCollectionStaticMethod {
     ArraysCopyOf,
     ArraysCopyOfRange,
     ArraysToString,
+    ArraysDeepToString,
     CollectionsEmptyList,
     CollectionsEmptySet,
     CollectionsEmptyMap,
@@ -2990,6 +2991,7 @@ fn plan_native_collection_static_call<'a>(
             "copyOf" | "copy_of" => NativeCollectionStaticMethod::ArraysCopyOf,
             "copyOfRange" | "copy_of_range" => NativeCollectionStaticMethod::ArraysCopyOfRange,
             "toString" | "to_string" => NativeCollectionStaticMethod::ArraysToString,
+            "deepToString" | "deep_to_string" => NativeCollectionStaticMethod::ArraysDeepToString,
             _ => return None,
         };
         return Some(CallTargetPlan::NativeCollectionStatic { method });

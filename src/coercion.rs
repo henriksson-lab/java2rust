@@ -2455,6 +2455,13 @@ pub fn arrays_to_string_projection(source: RustExpr) -> RustExpr {
     ))
 }
 
+pub fn arrays_deep_to_string_projection(source: RustExpr) -> RustExpr {
+    RustExpr::Raw(format!(
+        "java_arrays_deep_to_string({})",
+        emit::emit_expr(&source)
+    ))
+}
+
 pub fn arrays_hash_code_projection(source: RustExpr) -> RustExpr {
     RustExpr::Call {
         function: Box::new(RustExpr::Raw("java_arrays_hash_code".to_string())),

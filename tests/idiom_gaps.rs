@@ -21663,6 +21663,65 @@ mod generated_tests {
 }
 
 #[test]
+fn java_arrays_deep_to_string_lowers_nested_arrays() {
+    let translation = translate_source(
+        r#"
+import java.util.Arrays;
+
+class JavaArraysDeepToStringUse {
+    String names(String[][] values) {
+        return Arrays.deepToString(values);
+    }
+
+    String cubes(String[][][] values) {
+        return Arrays.deepToString(values);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("java_arrays_deep_to_string(values)")
+            && !translation.rust.contains("Arrays::deep_to_string")
+            && !translation.rust.contains("JavaUtilArrays::deep_to_string"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "java_arrays_deep_to_string_use",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn formats_nested_arrays_recursively() {
+        let fixture = JavaArraysDeepToStringUse {};
+        assert_eq!(
+            fixture.names(&[
+                vec!["a".to_string(), "b".to_string()],
+                vec!["c".to_string()]
+            ]),
+            "[[a, b], [c]]"
+        );
+        assert_eq!(
+            fixture.cubes(&[vec![vec!["x".to_string()], vec![]]]),
+            "[[[x], []]]"
+        );
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
 fn java_arrays_fill_lowers_whole_and_range_mutations() {
     let translation = translate_source(
         r#"
