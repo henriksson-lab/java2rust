@@ -1614,7 +1614,7 @@ fn source_supertype_conversion_target_key(
         args: Vec::new(),
     };
     match representations.dispatch_for(&super_ty_java) {
-        DispatchShape::ErasedObject => "Box<dyn std::any::Any>".to_string(),
+        DispatchShape::ErasedObject => emit::emit_type(&erased_object_rust_type()),
         DispatchShape::ClosedEnum { enum_name } => format!("closed-enum:{enum_name}"),
         _ => format!(
             "concrete:{}",
@@ -17810,7 +17810,7 @@ fn adapt_source_subtype_to_supertype_argument(
 
 fn clone_source_subtype_value_for_owned_supertype(lowered: RustExpr) -> RustExpr {
     let rendered = emit::emit_expr(&lowered);
-    if rendered.contains(".clone()") {
+    if rendered_expr_has_clone_recovery(&rendered) {
         lowered
     } else {
         apply_audited_clone_recovery(lowered)
@@ -17853,7 +17853,7 @@ fn source_argument_needs_clone_before_subtype_conversion(
         return false;
     };
     let rendered = emit::emit_expr(lowered);
-    if rendered.contains(".clone()") {
+    if rendered_expr_has_clone_recovery(&rendered) {
         return false;
     }
     let move_use = MoveUseContext::new(ctx);

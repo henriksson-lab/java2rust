@@ -7674,6 +7674,14 @@ That rerun has `cargo_check=ok`, `cargo_check_errors=0`, `parse_failures=0`,
 partial because erased-object fallback and borrow recovery still need the
 broader shared-fact cleanup outside this Base64 slice.
 
+2026-07-31 subtype clone-idempotence cleanup: source subtype argument
+conversion still decides when an owned subtype crossing an owned supertype slot
+needs clone recovery, but it no longer checks rendered `.clone()` spellings
+locally. The subtype path now uses the shared
+`rendered_expr_has_clone_recovery` predicate from `coercion.rs`, and the
+rendered-string centralization guard rejects reintroducing
+`rendered.contains(".clone()")` in `lower.rs`.
+
 ## Rerun Protocol
 
 After each fix:

@@ -31297,6 +31297,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(!lower_source.contains("strip_suffix(\".unwrap()\")"));
     assert!(!lower_source.contains("rendered.contains(\"__java_self\")"));
     assert!(!lower_source.contains("strip_suffix(\".clone()\")"));
+    assert!(!lower_source.contains("rendered.contains(\".clone()\")"));
     assert!(!lower_source.contains("fn self_field_replacement"));
     assert!(!lower_source.contains("fn parenthesize_borrowed_method_receiver"));
     assert!(
@@ -31473,15 +31474,13 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         lower_source.contains("force_shared_borrow_projection(packed)")
             || lower_source.contains("force_shared_borrow_projection(packed_vec)")
     );
-    assert!(
-        lower_source
-            .contains("let conversion_plan = plan_lowered_slot_conversion(&projected.actual, plan.slot, ctx.facts);")
-    );
+    assert!(lower_source.contains("apply_optional_receiver_slot_projection("));
+    assert!(lower_source.contains("optional_receiver_slot_plan("));
     assert!(conversion_source.contains("fn receiver_method_autoref_satisfies_optional_slot"));
     assert!(conversion_source.contains("fn receiver_method_autoref_satisfies_facade_slot"));
     assert!(!lower_source.contains("fn optional_receiver_method_autoref_satisfies_slot"));
     assert!(!lower_source.contains("fn receiver_method_autoref_satisfies_facade_slot"));
-    assert!(lower_source.contains("actual: LoweredType::Slot(element_shape)"));
+    assert!(lower_source.contains("optional_borrowed_receiver_slot_plan("));
     assert!(call_plan_source.contains("pub struct OptionalReceiverSlotPlan"));
     assert!(call_plan_source.contains("pub element_ownership: OwnershipShape"));
     assert!(call_plan_source.contains("pub fn optional_element_borrow_type"));
