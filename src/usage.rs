@@ -1647,14 +1647,22 @@ fn call_result_boundary_policy_with_context(
             });
             let boundary =
                 call_argument_boundary_policy(receiver.as_deref(), name, internal_methods).boundary;
+            let boundary = resolved_receiver_call_boundary(
+                boundary,
+                receiver_type.as_ref(),
+                resolved.as_ref(),
+            );
+            let boundary = modeled_receiver_call_boundary(
+                boundary,
+                receiver_type.as_ref(),
+                name,
+                args.len(),
+                semantic_facts,
+            );
             Some(CallResultBoundaryPolicy {
                 name: name.clone(),
                 arg_count: args.len(),
-                boundary: resolved_receiver_call_boundary(
-                    boundary,
-                    receiver_type.as_ref(),
-                    resolved.as_ref(),
-                ),
+                boundary,
                 receiver_type,
                 resolved: resolved.clone(),
             })
@@ -1829,6 +1837,13 @@ fn analyze_expr_with_context(
                 policy.boundary,
                 receiver_type.as_ref(),
                 resolved.as_ref(),
+            );
+            let call_boundary = modeled_receiver_call_boundary(
+                call_boundary,
+                receiver_type.as_ref(),
+                name,
+                args.len(),
+                semantic_facts,
             );
             record_trivial_accessor_call_use(
                 facts,
@@ -2703,6 +2718,58 @@ fn resolved_receiver_call_boundary(
         CallArgumentBoundary::KnownContentRead
     } else {
         boundary
+    }
+}
+
+fn modeled_receiver_call_boundary(
+    boundary: CallArgumentBoundary,
+    receiver_type: Option<&JavaType>,
+    name: &str,
+    arg_count: usize,
+    semantic_facts: &FactSet,
+) -> CallArgumentBoundary {
+    if boundary != CallArgumentBoundary::Unknown {
+        return boundary;
+    }
+    let Some(receiver_key) = external_receiver_type_key(receiver_type) else {
+        return boundary;
+    };
+    if semantic_facts
+        .external_api_effect_for_receiver_with_arity(Some(&receiver_key), name, Some(arg_count))
+        .is_some_and(|effect| {
+            effect.receiver_mutability == crate::facts::ReceiverMutabilityFact::ReadOnly
+        })
+    {
+        return CallArgumentBoundary::KnownContentRead;
+    }
+    if crate::external_packs::external_api_effect_for_receiver_with_arity(
+        Some(&receiver_key),
+        name,
+        Some(arg_count),
+    )
+    .is_some_and(|effect| {
+        effect.receiver_mutability == crate::facts::ReceiverMutabilityFact::ReadOnly
+    }) {
+        return CallArgumentBoundary::KnownContentRead;
+    }
+    let receiver_simple = receiver_key.rsplit('.').next().unwrap_or(&receiver_key);
+    if matches!(
+        receiver_simple,
+        "Math" | "StrictMath" | "Integer" | "Float" | "Double" | "String" | "Objects"
+    ) && crate::stdlib::known_external_method_return_type(Some(&receiver_key), name, arg_count)
+        .is_some()
+    {
+        return CallArgumentBoundary::KnownContentRead;
+    }
+    boundary
+}
+
+fn external_receiver_type_key(receiver_type: Option<&JavaType>) -> Option<String> {
+    match receiver_type? {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+            Some(crate::stdlib::canonical_external_receiver_type_key(name))
+        }
+        _ => None,
     }
 }
 

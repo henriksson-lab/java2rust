@@ -722,6 +722,26 @@ class JdkNumericAndFormatFacades {
         return Math.floor(value);
     }
 
+    static double trig(double value) {
+        return Math.sin(value) + Math.cos(value) + Math.tan(value);
+    }
+
+    static double inverse(double value) {
+        return Math.asin(value) + Math.acos(value) + Math.atan(value);
+    }
+
+    static double hyperbolic(double value) {
+        return Math.sinh(value) + Math.cosh(value) + Math.tanh(value);
+    }
+
+    static double shapedMore(double x, double y) {
+        return Math.cbrt(x) + Math.rint(x) + Math.signum(x) + Math.atan2(x, y) + Math.hypot(x, y);
+    }
+
+    static double angle(double value) {
+        return Math.toDegrees(value) + Math.toRadians(value);
+    }
+
     static double importedSqrt(double value) {
         return sqrt(value);
     }
@@ -816,6 +836,22 @@ class JdkNumericAndFormatFacades {
             && translation.rust.contains("(value as f64).log10()")
             && translation.rust.contains("(value as f64).ceil()")
             && translation.rust.contains("(value as f64).floor()")
+            && translation.rust.contains("(value as f64).sin()")
+            && translation.rust.contains("(value as f64).cos()")
+            && translation.rust.contains("(value as f64).tan()")
+            && translation.rust.contains("(value as f64).asin()")
+            && translation.rust.contains("(value as f64).acos()")
+            && translation.rust.contains("(value as f64).atan()")
+            && translation.rust.contains("(value as f64).sinh()")
+            && translation.rust.contains("(value as f64).cosh()")
+            && translation.rust.contains("(value as f64).tanh()")
+            && translation.rust.contains("(x as f64).cbrt()")
+            && translation.rust.contains("(x as f64).round_ties_even()")
+            && translation.rust.contains("(x as f64).signum()")
+            && translation.rust.contains("(x as f64).atan2(y as f64)")
+            && translation.rust.contains("(x as f64).hypot(y as f64)")
+            && translation.rust.contains("(value as f64).to_degrees()")
+            && translation.rust.contains("(value as f64).to_radians()")
             && translation.rust.contains("java_math_round_f64(value)")
             && translation.rust.contains("java_math_round_f32(value)")
             && translation.rust.contains("(value).wrapping_abs()")
@@ -846,6 +882,9 @@ class JdkNumericAndFormatFacades {
             && !translation.rust.contains("Math::log10")
             && !translation.rust.contains("Math::ceil")
             && !translation.rust.contains("Math::floor")
+            && !translation.rust.contains("Math::sin")
+            && !translation.rust.contains("Math::atan2")
+            && !translation.rust.contains("Math::hypot")
             && !translation.rust.contains("Math::round")
             && !translation.rust.contains("Math::to_int_exact")
             && !translation.rust.contains("pub struct Math")
@@ -882,6 +921,30 @@ mod generated_tests {
         assert_eq!(JdkNumericAndFormatFacades::log10(1000.0), 3.0);
         assert_eq!(JdkNumericAndFormatFacades::ceil(1.25), 2.0);
         assert_eq!(JdkNumericAndFormatFacades::floor(1.75), 1.0);
+        assert!((JdkNumericAndFormatFacades::trig(0.25)
+            - (0.25f64.sin() + 0.25f64.cos() + 0.25f64.tan()))
+        .abs()
+            < 1e-9);
+        assert!((JdkNumericAndFormatFacades::inverse(0.25)
+            - (0.25f64.asin() + 0.25f64.acos() + 0.25f64.atan()))
+        .abs()
+            < 1e-9);
+        assert!((JdkNumericAndFormatFacades::hyperbolic(0.25)
+            - (0.25f64.sinh() + 0.25f64.cosh() + 0.25f64.tanh()))
+        .abs()
+            < 1e-9);
+        assert!((JdkNumericAndFormatFacades::shaped_more(8.0, 6.0)
+            - (8.0f64.cbrt()
+                + 8.0f64.round_ties_even()
+                + 8.0f64.signum()
+                + 8.0f64.atan2(6.0)
+                + 8.0f64.hypot(6.0)))
+        .abs()
+            < 1e-9);
+        assert!((JdkNumericAndFormatFacades::angle(std::f64::consts::PI)
+            - (std::f64::consts::PI.to_degrees() + std::f64::consts::PI.to_radians()))
+        .abs()
+            < 1e-9);
         assert_eq!(JdkNumericAndFormatFacades::imported_sqrt(16.0), 4.0);
         assert_eq!(JdkNumericAndFormatFacades::rounded(-2.5), -2);
         assert_eq!(JdkNumericAndFormatFacades::rounded(-0.5), 0);
@@ -932,6 +995,10 @@ class ApacheFastMathUse {
     static double shaped(double value) {
         return FastMath.sqrt(value) + FastMath.pow(value, 2.0) + FastMath.ceil(value) + FastMath.floor(value);
     }
+
+    static double trig(double value) {
+        return FastMath.sin(value) + FastMath.cos(value) + FastMath.atan(value);
+    }
 }
 "#,
     );
@@ -947,6 +1014,9 @@ class ApacheFastMathUse {
                 .contains("(value as f64).powf(2f64 as f64)")
             && translation.rust.contains("(value as f64).ceil()")
             && translation.rust.contains("(value as f64).floor()")
+            && translation.rust.contains("(value as f64).sin()")
+            && translation.rust.contains("(value as f64).cos()")
+            && translation.rust.contains("(value as f64).atan()")
             && !translation.rust.contains("FastMath::")
             && !translation.rust.contains("fast_math.")
             && !translation

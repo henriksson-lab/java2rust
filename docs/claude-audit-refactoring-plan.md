@@ -163,6 +163,15 @@ Landed in this batch:
   existing `log` and `exp` paths. Receiverless static imports for those native
   Math methods use the same planner, and the broad JDK support generator no
   longer emits fallback `Math` surfaces for native-handled methods.
+- Additional floating `Math` methods `sin`, `cos`, `tan`, `asin`, `acos`,
+  `atan`, `sinh`, `cosh`, `tanh`, `cbrt`, `rint`, `signum`, `toRadians`,
+  `toDegrees`, `atan2`, and `hypot` now use shared native unary/binary f64
+  call-plan variants, so Apache Commons `FastMath` aliases get the same
+  lowering without new package-specific code.
+- Read-only modeled receiver calls now classify as known content reads in usage
+  facts, and declared non-null `String` returns keep owned native `String`
+  signatures instead of widening to erased `Any` because of nested unknown call
+  heuristics.
 - Apache Commons `FastMath` ownership is modelled as a `javalibs` native static
   owner alias to the existing JDK `Math` planner, so package-specific knowledge
   stays out of `stdlib.rs` while call sites reuse the same math projections.
@@ -531,7 +540,7 @@ Completion checklist for any audit marked `fixed locally`:
 | `0029` static field mutation invalid Rust | fixed locally | Moved to `claude_audits/done`; static `++`/`--` now route through storage setters for current and qualified source statics |
 | `0030` Java statics are thread-local | open | Static storage model |
 | `0031` stubbed constant census | partial | JDK and selected HTSJDK domain constants are explicit; unknown primitive/named external constants now fail loudly and status/summary reports include `stubbed_constants`; corpus reruns still need to prove the remaining count |
-| `0032` java.lang.Math mistranslated | partial | Round edge semantics, i32/i64 floorDiv/floorMod, common floating call-site projections (`sqrt`, `pow`, `log10`, `ceil`, `floor`), receiverless static imports, and native-method support pruning improved; broader overload/constant audit remains |
+| `0032` java.lang.Math mistranslated | partial | Round edge semantics, i32/i64 floorDiv/floorMod, common floating call-site projections (`sqrt`, `pow`, `log10`, `ceil`, `floor`, trig/inverse/hyperbolic/angle helpers, `cbrt`, `rint`, `signum`, `atan2`, `hypot`), receiverless static imports, and native-method support pruning improved; broader overload/constant audit remains |
 
 ## Parallel Work Split
 

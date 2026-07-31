@@ -433,8 +433,12 @@ pub enum NativeJavaInstanceMethod {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeJavaStaticMethod {
-    MathMax { primitive: PrimitiveType },
-    MathMin { primitive: PrimitiveType },
+    MathMax {
+        primitive: PrimitiveType,
+    },
+    MathMin {
+        primitive: PrimitiveType,
+    },
     MathLog,
     MathLog10,
     MathExp,
@@ -442,11 +446,27 @@ pub enum NativeJavaStaticMethod {
     MathPow,
     MathCeil,
     MathFloor,
-    MathRound { source: PrimitiveType },
-    MathAbs { source: PrimitiveType },
+    MathUnaryF64 {
+        java_name: &'static str,
+        rust_method: &'static str,
+    },
+    MathBinaryF64 {
+        java_name: &'static str,
+        rust_method: &'static str,
+    },
+    MathRound {
+        source: PrimitiveType,
+    },
+    MathAbs {
+        source: PrimitiveType,
+    },
     MathToIntExact,
-    MathFloorDiv { primitive: PrimitiveType },
-    MathFloorMod { primitive: PrimitiveType },
+    MathFloorDiv {
+        primitive: PrimitiveType,
+    },
+    MathFloorMod {
+        primitive: PrimitiveType,
+    },
     IntegerParseInt,
     FloatParseFloat,
     DoubleParseDouble,
@@ -567,7 +587,9 @@ pub fn native_java_call_lowered_type(target: &CallTargetPlan<'_>) -> Option<Lowe
                 | NativeJavaStaticMethod::MathSqrt
                 | NativeJavaStaticMethod::MathPow
                 | NativeJavaStaticMethod::MathCeil
-                | NativeJavaStaticMethod::MathFloor,
+                | NativeJavaStaticMethod::MathFloor
+                | NativeJavaStaticMethod::MathUnaryF64 { .. }
+                | NativeJavaStaticMethod::MathBinaryF64 { .. },
         } => Some(LoweredType::from_java(JavaType::Primitive(
             PrimitiveType::Double,
         ))),
@@ -609,7 +631,9 @@ pub fn native_java_call_lowered_type(target: &CallTargetPlan<'_>) -> Option<Lowe
                 | NativeJavaInstanceMethod::ObjectToString
                 | NativeJavaInstanceMethod::StringReplace
                 | NativeJavaInstanceMethod::StringReplaceFirst
-                | NativeJavaInstanceMethod::StringReplaceAll,
+                | NativeJavaInstanceMethod::StringReplaceAll
+                | NativeJavaInstanceMethod::DecimalFormatFormat
+                | NativeJavaInstanceMethod::MessageFormatFormat,
             ..
         }
         | CallTargetPlan::NativeJavaStatic {
@@ -3370,6 +3394,22 @@ fn plan_native_java_static_owner_call<'a>(
         ("Math", "pow") => NativeJavaStaticMethod::MathPow,
         ("Math", "ceil") => NativeJavaStaticMethod::MathCeil,
         ("Math", "floor") => NativeJavaStaticMethod::MathFloor,
+        ("Math", "sin") => math_unary_f64_method("sin", "sin"),
+        ("Math", "cos") => math_unary_f64_method("cos", "cos"),
+        ("Math", "tan") => math_unary_f64_method("tan", "tan"),
+        ("Math", "asin") => math_unary_f64_method("asin", "asin"),
+        ("Math", "acos") => math_unary_f64_method("acos", "acos"),
+        ("Math", "atan") => math_unary_f64_method("atan", "atan"),
+        ("Math", "sinh") => math_unary_f64_method("sinh", "sinh"),
+        ("Math", "cosh") => math_unary_f64_method("cosh", "cosh"),
+        ("Math", "tanh") => math_unary_f64_method("tanh", "tanh"),
+        ("Math", "cbrt") => math_unary_f64_method("cbrt", "cbrt"),
+        ("Math", "rint") => math_unary_f64_method("rint", "round_ties_even"),
+        ("Math", "signum") => math_unary_f64_method("signum", "signum"),
+        ("Math", "toRadians" | "to_radians") => math_unary_f64_method("toRadians", "to_radians"),
+        ("Math", "toDegrees" | "to_degrees") => math_unary_f64_method("toDegrees", "to_degrees"),
+        ("Math", "atan2") => math_binary_f64_method("atan2", "atan2"),
+        ("Math", "hypot") => math_binary_f64_method("hypot", "hypot"),
         ("Math", "round") => NativeJavaStaticMethod::MathRound {
             source: math_unary_overload_primitive(args, types, PrimitiveType::Double),
         },
@@ -3399,6 +3439,26 @@ fn plan_native_java_static_owner_call<'a>(
         _ => return None,
     };
     Some(CallTargetPlan::NativeJavaStatic { method })
+}
+
+fn math_unary_f64_method(
+    java_name: &'static str,
+    rust_method: &'static str,
+) -> NativeJavaStaticMethod {
+    NativeJavaStaticMethod::MathUnaryF64 {
+        java_name,
+        rust_method,
+    }
+}
+
+fn math_binary_f64_method(
+    java_name: &'static str,
+    rust_method: &'static str,
+) -> NativeJavaStaticMethod {
+    NativeJavaStaticMethod::MathBinaryF64 {
+        java_name,
+        rust_method,
+    }
 }
 
 fn math_binary_overload_primitive(args: Option<&[Expr]>, types: &TypeEnv) -> PrimitiveType {

@@ -7017,6 +7017,13 @@ modelled in `javalibs` as a native static owner alias to the existing JDK
 `Math.round(...)` now uses the JDK edge-safe floor/difference rule, and
 `Math.floorDiv(...)`/`Math.floorMod(...)` select i32/i64 helpers with
 `MIN_VALUE / -1` behavior handled explicitly. JDK
+native Math planning now also covers common f64 unary/binary helpers including
+trig, inverse trig, hyperbolic, angle conversion, `cbrt`, `rint`, `signum`,
+`atan2`, and `hypot`; Apache Commons `FastMath` keeps receiving those through
+the javalibs owner alias. Read-only modeled receiver calls classify as known
+content reads during usage analysis, and declared non-null `String` returns keep
+owned native `String` signatures instead of widening to erased `Any` from nested
+unknown-call heuristics. JDK
 `GZIPInputStream.GZIP_MAGIC` and AWT `Font.PLAIN/BOLD/ITALIC` now emit explicit
 Java-compatible values instead of primitive zero fallbacks. Literal
 `Pattern.compile(...)` static-final paths now preserve the pattern text and use

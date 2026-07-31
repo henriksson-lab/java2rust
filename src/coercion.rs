@@ -1936,6 +1936,18 @@ pub fn primitive_f64_method_projection(arg: RustExpr, method: &str) -> RustExpr 
     RustExpr::Raw(format!("({} as f64).{method}()", emit::emit_expr(&arg)))
 }
 
+pub fn primitive_f64_binary_method_projection(
+    left: RustExpr,
+    right: RustExpr,
+    method: &str,
+) -> RustExpr {
+    RustExpr::Raw(format!(
+        "({} as f64).{method}({} as f64)",
+        emit::emit_expr(&left),
+        emit::emit_expr(&right)
+    ))
+}
+
 pub fn math_pow_projection(base: RustExpr, exponent: RustExpr) -> RustExpr {
     RustExpr::Raw(format!(
         "({} as f64).powf({} as f64)",

@@ -12149,7 +12149,8 @@ fn method_usage_returns_unknown_call_result(
     declared_return: &JavaType,
     facts: &FactSet,
 ) -> bool {
-    (method_usage.returned_call_results.is_empty()
+    (!java_type_is_string_like_signature_type(declared_return)
+        && method_usage.returned_call_results.is_empty()
         && method_usage.call_sites.iter().any(|call_site| {
             call_site.result_returned && call_site.boundary == CallArgumentBoundary::Unknown
         }))
@@ -12161,6 +12162,15 @@ fn method_usage_returns_unknown_call_result(
                     facts,
                 )
         })
+}
+
+fn java_type_is_string_like_signature_type(java_ty: &JavaType) -> bool {
+    matches!(java_ty, JavaType::String)
+        || matches!(
+            java_ty,
+            JavaType::Named { name, .. } | JavaType::Unknown(name)
+                if crate::stdlib::canonical_external_receiver_type_key(name) == "String"
+        )
 }
 
 fn source_summary_bodyless_return_may_be_null(java_ty: &JavaType) -> bool {
@@ -12820,6 +12830,30 @@ fn constrained_return_shape(
     facts: &FactSet,
 ) -> Option<RustSlotShape> {
     let return_type = method_return_type_for_signature(method).unwrap_or(&method.return_type);
+    if java_type_is_string_like_signature_type(return_type)
+        && !constraints_require_nullable_storage(constraints)
+    {
+        let constraints = constraints
+            .iter()
+            .filter(|constraint| {
+                !matches!(
+                    constraint,
+                    SignatureConstraint::RequiredStorageNullability(
+                        NullabilityState::MaybeNull | NullabilityState::DefinitelyNull
+                    )
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut shape = apply_signature_constraints(
+            RustSlotShape::conservative(JavaType::String),
+            &constraints,
+        );
+        apply_required_dispatch(&mut shape, DispatchShape::Concrete);
+        apply_required_view(&mut shape, ViewShape::Native);
+        apply_required_ownership(&mut shape, OwnershipShape::Owned);
+        return Some(shape);
+    }
     if !java_type_is_erased_object_boundary(return_type)
         && !java_type_is_rust_crate_mapped_external(return_type, facts)
         && return_constraints_select_concrete_declared_value(ty, method, constraints, facts)
