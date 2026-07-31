@@ -82,6 +82,23 @@ pub enum StreamLambdaParamProjection {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamLambdaArgumentSlotPlan {
+    BorrowedStringView,
+    OwnedValue,
+    GenericSlotConversion,
+}
+
+pub fn stream_lambda_argument_slot_plan(slot: &RustSlotShape) -> StreamLambdaArgumentSlotPlan {
+    if crate::shape_projection::shape_is_borrowed_string_content(slot) {
+        StreamLambdaArgumentSlotPlan::BorrowedStringView
+    } else if crate::shape_projection::shape_is_owned(slot) {
+        StreamLambdaArgumentSlotPlan::OwnedValue
+    } else {
+        StreamLambdaArgumentSlotPlan::GenericSlotConversion
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OptionalReceiverProjection {
     Shared,
     Mutable,

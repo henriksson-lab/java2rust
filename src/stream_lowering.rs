@@ -1,14 +1,15 @@
 use crate::call_plan::{native_java_instance_receiver_type_hint, resolved_call_arg_target_type};
 use crate::coercion::{
     BorrowProjectionUse, IndexToUsizeProjection, LoweredExpr, SequenceIterationProjection,
-    StreamLambdaParamProjection, apply_borrowed_string_view_projection, apply_clone_projection,
-    borrowed_string_view_projection, current_receiver_method_call_projection,
-    ensure_borrow_projection_rendered, function_call_projection, len_i32_projection,
-    owner_associated_path_projection, receiver_method_call_projection,
-    render_borrowed_collection_flat_map, render_index_to_usize_projection,
-    render_indexed_access_projection, render_nullable_stream_map_body,
-    render_optional_non_null_filter_map, render_sequence_iteration_source,
-    render_stream_lambda_param_projection, self_associated_path_projection,
+    StreamLambdaArgumentSlotPlan, StreamLambdaParamProjection,
+    apply_borrowed_string_view_projection, apply_clone_projection, borrowed_string_view_projection,
+    current_receiver_method_call_projection, ensure_borrow_projection_rendered,
+    function_call_projection, len_i32_projection, owner_associated_path_projection,
+    receiver_method_call_projection, render_borrowed_collection_flat_map,
+    render_index_to_usize_projection, render_indexed_access_projection,
+    render_nullable_stream_map_body, render_optional_non_null_filter_map,
+    render_sequence_iteration_source, render_stream_lambda_param_projection,
+    self_associated_path_projection, stream_lambda_argument_slot_plan,
 };
 use crate::conversion_lowering::apply_lowered_slot_expr_conversion;
 use crate::conversion_plan::{
@@ -22,9 +23,7 @@ use crate::literal_lowering::literal_to_rust;
 use crate::method_reference_shape::method_reference_receiver_type_for_call_plan_with_facts;
 use crate::operator_lowering::{binary_op_to_rust, stream_unary_prefix};
 use crate::rust_ir::RustExpr;
-use crate::shape_projection::{
-    borrowed_string_content_shape, shape_is_borrowed_string_content, shape_is_owned,
-};
+use crate::shape_projection::borrowed_string_content_shape;
 use crate::signature::SignaturePlan;
 use crate::slot_render::rust_type_for_slot_with_facts;
 use crate::slot_shape::RustSlotShape;
@@ -63,23 +62,6 @@ fn rendered_stream_lambda_borrowed_item_expr(rendered: &str, param: &str) -> boo
 
 fn render_stream_lambda_clone_projection(rendered: &str) -> String {
     crate::emit::emit_expr(&apply_clone_projection(RustExpr::Raw(rendered.to_string())))
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StreamLambdaArgumentSlotPlan {
-    BorrowedStringView,
-    OwnedValue,
-    GenericSlotConversion,
-}
-
-fn stream_lambda_argument_slot_plan(slot: &RustSlotShape) -> StreamLambdaArgumentSlotPlan {
-    if shape_is_borrowed_string_content(slot) {
-        StreamLambdaArgumentSlotPlan::BorrowedStringView
-    } else if shape_is_owned(slot) {
-        StreamLambdaArgumentSlotPlan::OwnedValue
-    } else {
-        StreamLambdaArgumentSlotPlan::GenericSlotConversion
-    }
 }
 
 #[derive(Debug, Clone, Copy)]

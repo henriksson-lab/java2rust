@@ -36725,14 +36725,20 @@ fn stream_joining_delimiter_uses_slot_conversion_for_optional_string_field() {
 #[test]
 fn stream_lambda_argument_shapes_do_not_invent_string_fallbacks() {
     let source = fs::read_to_string("src/stream_lowering.rs").unwrap();
+    let coercion_source = fs::read_to_string("src/coercion.rs").unwrap();
     let slot_plan = source
-        .split("fn stream_lambda_argument_slot_plan")
+        .split("fn adapt_stream_lambda_arg_for_slot")
         .nth(1)
         .and_then(|tail| {
-            tail.split("fn render_stream_lambda_borrowed_str_arg")
+            tail.split("fn adapt_stream_lambda_arg_for_explicit_slot")
                 .next()
         })
-        .expect("stream lambda argument slot plan should be present");
+        .expect("stream lambda argument adapter should be present");
+    let coercion_slot_plan = coercion_source
+        .split("fn stream_lambda_argument_slot_plan")
+        .nth(1)
+        .and_then(|tail| tail.split("enum OptionalReceiverProjection").next())
+        .expect("shared stream lambda argument slot plan should be present");
     let adapter = source
         .split("fn adapt_stream_lambda_arg_for_slot")
         .nth(1)
@@ -36755,10 +36761,12 @@ fn stream_lambda_argument_shapes_do_not_invent_string_fallbacks() {
         })
         .expect("stream borrowed string arg helper should be present");
 
-    assert!(source.contains("enum StreamLambdaArgumentSlotPlan"));
-    assert!(slot_plan.contains("StreamLambdaArgumentSlotPlan::BorrowedStringView"));
-    assert!(slot_plan.contains("StreamLambdaArgumentSlotPlan::OwnedValue"));
-    assert!(slot_plan.contains("StreamLambdaArgumentSlotPlan::GenericSlotConversion"));
+    assert!(!source.contains("enum StreamLambdaArgumentSlotPlan"));
+    assert!(coercion_source.contains("enum StreamLambdaArgumentSlotPlan"));
+    assert!(coercion_slot_plan.contains("StreamLambdaArgumentSlotPlan::BorrowedStringView"));
+    assert!(coercion_slot_plan.contains("StreamLambdaArgumentSlotPlan::OwnedValue"));
+    assert!(coercion_slot_plan.contains("StreamLambdaArgumentSlotPlan::GenericSlotConversion"));
+    assert!(slot_plan.contains("stream_lambda_argument_slot_plan(slot)"));
     assert!(
         !adapter.contains("shape_is_borrowed_string_content"),
         "{adapter}"

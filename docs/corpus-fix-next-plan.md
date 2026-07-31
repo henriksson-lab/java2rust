@@ -1609,6 +1609,12 @@ Current remaining refactor priority from the parallel audit:
    regressions, `type_coercion::coercion_fuses_borrowed_collection_clone_recovery_into_terminal_collect`,
    `cargo check --tests --quiet`, `git diff --check`, and
    `cargo test stream --test idiom_gaps --quiet` all passed.
+   Follow-up cleanup: `StreamLambdaArgumentSlotPlan` and its slot classifier
+   now live in `coercion.rs`, so `stream_lowering.rs` consumes shared slot
+   policy while retaining stream-local closure capture recovery. Focused
+   verification: `stream_lambda_argument_shapes_do_not_invent_string_fallbacks`,
+   the stream lambda `charAt`/collector/map tests, fixture static-owner coverage,
+   `cargo check --tests --quiet`, and the 52-test stream filter passed.
 
 Current implementation note, 2026-07-23:
 
