@@ -465,6 +465,9 @@ Landed in this batch:
   optional elements now render through the shared `CallTargetPlan`/argument-plan
   path. The older method-reference fallback remains only for non-optional
   inputs where nullness has already been proven by shape.
+- Stream call-target rendering now centralizes the external-index-vs-facts
+  target planner choice in one `plan_stream_lambda_call_target` helper shared
+  by native stream lambda calls and method-reference call-plan lowering.
 - External field fact lookup for enum/static-field lowering now goes through
   `member_access_plan::external_field_type_for_owner`; `lower.rs` no longer
   probes external-pack field facts directly.

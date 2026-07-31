@@ -35813,6 +35813,19 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
     assert!(lowering_source.contains("receiver_method_call_projection"));
     assert!(stream_lowering_source.contains("current_receiver_method_call_projection"));
     assert!(stream_lowering_source.contains("self_associated_path_projection"));
+    assert!(stream_lowering_source.contains("fn plan_stream_lambda_call_target"));
+    assert_eq!(
+        stream_lowering_source
+            .matches("plan_call_target_with_external_index_and_arity")
+            .count(),
+        1
+    );
+    assert_eq!(
+        stream_lowering_source
+            .matches("plan_call_target_with_facts_and_arity")
+            .count(),
+        1
+    );
     assert!(!stream_lowering_source.contains("\"self.{}({rendered_args})\""));
     assert!(!stream_lowering_source.contains("\"Self::{}({rendered_args})\""));
     assert!(lowering_source.contains("typed_single_input_callback_projection"));

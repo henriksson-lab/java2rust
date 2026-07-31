@@ -176,6 +176,32 @@ impl Default for StreamRenderContext<'_> {
     }
 }
 
+fn plan_stream_lambda_call_target<'a>(
+    receiver: Option<&'a Expr>,
+    name: &'a str,
+    arg_count: usize,
+    resolved: Option<&'a crate::java_ir::ResolvedCall>,
+    facts: &FactSet,
+    external_index: Option<&ExternalFactLookupIndex<'_>>,
+    type_env: &crate::types::TypeEnv,
+) -> crate::call_plan::CallTargetPlan<'a> {
+    if let Some(external_index) = external_index {
+        crate::call_plan::plan_call_target_with_external_index_and_arity(
+            receiver,
+            name,
+            arg_count,
+            resolved,
+            facts,
+            external_index,
+            type_env,
+        )
+    } else {
+        crate::call_plan::plan_call_target_with_facts_and_arity(
+            receiver, name, arg_count, resolved, facts, type_env,
+        )
+    }
+}
+
 fn emit_stream_lambda_shared_native_call(
     receiver: &Expr,
     name: &str,
@@ -223,26 +249,15 @@ fn emit_stream_lambda_shared_native_call(
     } else {
         &typed_lambda_env
     };
-    let target = if let Some(external_index) = ctx.external_index {
-        crate::call_plan::plan_call_target_with_external_index_and_arity(
-            Some(receiver),
-            name,
-            args.len(),
-            resolved,
-            facts,
-            external_index,
-            type_env,
-        )
-    } else {
-        crate::call_plan::plan_call_target_with_facts_and_arity(
-            Some(receiver),
-            name,
-            args.len(),
-            resolved,
-            facts,
-            type_env,
-        )
-    };
+    let target = plan_stream_lambda_call_target(
+        Some(receiver),
+        name,
+        args.len(),
+        resolved,
+        facts,
+        ctx.external_index,
+        type_env,
+    );
     let precedence = match target {
         crate::call_plan::CallTargetPlan::NativeJavaStatic {
             method: crate::call_plan::NativeJavaStaticMethod::ObjectsEquals,
@@ -1423,26 +1438,15 @@ fn emit_stream_method_reference_body_through_call_plan(
         return Some(rendered);
     }
     let owner_expr = Expr::Var(target.to_string());
-    let target_plan = if let Some(external_index) = ctx.external_index {
-        crate::call_plan::plan_call_target_with_external_index_and_arity(
-            Some(&owner_expr),
-            method,
-            1,
-            None,
-            facts,
-            external_index,
-            &typed_lambda_env,
-        )
-    } else {
-        crate::call_plan::plan_call_target_with_facts_and_arity(
-            Some(&owner_expr),
-            method,
-            1,
-            None,
-            facts,
-            &typed_lambda_env,
-        )
-    };
+    let target_plan = plan_stream_lambda_call_target(
+        Some(&owner_expr),
+        method,
+        1,
+        None,
+        facts,
+        ctx.external_index,
+        &typed_lambda_env,
+    );
     let crate::call_plan::CallTargetPlan::NativeJavaStatic {
         method: native_method,
     } = target_plan
@@ -1515,26 +1519,15 @@ fn emit_stream_instance_method_reference_body_through_call_plan(
     let mut typed_lambda_env = typed_lambda_env.clone();
     typed_lambda_env.insert_local(param.to_string(), receiver_ty);
     let receiver_expr = Expr::Var(param.to_string());
-    let target_plan = if let Some(external_index) = ctx.external_index {
-        crate::call_plan::plan_call_target_with_external_index_and_arity(
-            Some(&receiver_expr),
-            method,
-            0,
-            None,
-            facts,
-            external_index,
-            &typed_lambda_env,
-        )
-    } else {
-        crate::call_plan::plan_call_target_with_facts_and_arity(
-            Some(&receiver_expr),
-            method,
-            0,
-            None,
-            facts,
-            &typed_lambda_env,
-        )
-    };
+    let target_plan = plan_stream_lambda_call_target(
+        Some(&receiver_expr),
+        method,
+        0,
+        None,
+        facts,
+        ctx.external_index,
+        &typed_lambda_env,
+    );
     let crate::call_plan::CallTargetPlan::NativeJavaInstance { .. } = target_plan else {
         return None;
     };
