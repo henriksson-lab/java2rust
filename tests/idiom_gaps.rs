@@ -21370,6 +21370,18 @@ class JavaArraysCompareUse {
     int doubles(double[] left, double[] right) {
         return Arrays.compare(left, right);
     }
+
+    int range(int[] left, int leftFrom, int leftTo, int[] right, int rightFrom, int rightTo) {
+        return Arrays.compare(left, leftFrom, leftTo, right, rightFrom, rightTo);
+    }
+
+    int badLeftRange(int[] left, int[] right) {
+        return Arrays.compare(left, 3, 1, right, 0, 1);
+    }
+
+    int badRightRange(int[] left, int[] right) {
+        return Arrays.compare(left, 0, 1, right, -1, 1);
+    }
 }
 "#,
     );
@@ -21403,6 +21415,10 @@ mod generated_tests {
         assert_eq!(fixture.names(&["a".to_string()], &["b".to_string()]), -1);
         assert_eq!(fixture.doubles(&[1.0, f64::NAN], &[1.0, 2.0]), 1);
         assert_eq!(fixture.doubles(&[-0.0], &[0.0]), -1);
+        assert_eq!(fixture.range(&[9, 1, 2, 8], 1, 3, &[7, 1, 3, 6], 1, 3), -1);
+        assert_eq!(fixture.range(&[9, 1, 2, 8], 1, 3, &[7, 1, 2, 6], 1, 3), 0);
+        assert!(std::panic::catch_unwind(|| fixture.bad_left_range(&[1, 2, 3], &[1, 2, 3])).is_err());
+        assert!(std::panic::catch_unwind(|| fixture.bad_right_range(&[1, 2, 3], &[1, 2, 3])).is_err());
     }
 }
 "#,

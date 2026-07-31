@@ -65,6 +65,10 @@ move its issue file from `claude_audits/` to
 `/home/mahogny/github/claude/new_java2rust/claude_audits/done`; partial fixes
 keep the audit file active and document what remains.
 
+2026-07-31 user instruction: keep this in the plan explicitly: move Claude
+audits to `/home/mahogny/github/claude/new_java2rust/claude_audits/done` once
+done.
+
 2026-07-30 constant-fact checkpoint: external field facts can now carry explicit
 Rust constant values from manifests via `value=...`, and built-in HTSJDK/VCF/SAM
 packs provide values for the corpus-visible integer, boolean, and double
@@ -7075,8 +7079,8 @@ Audit `0016` remains partial, not fixed: remaining Arrays helpers still need
 follow-up work, and broader facade fallibility remains open.
 `Arrays.copyOf(...)`, `Arrays.copyOfRange(...)`, `Arrays.toString(...)`,
 `Arrays.hashCode(...)`, whole/range `Arrays.binarySearch(...)`, whole/range
-`Arrays.fill(...)`, whole/range `Arrays.sort(...)`, and `Arrays.compare(...)`
-plus `Arrays.mismatch(...)` now lower through native projections with
+`Arrays.fill(...)`, whole/range `Arrays.sort(...)`, whole/range
+`Arrays.compare(...)`, plus `Arrays.mismatch(...)` now lower through native projections with
 Java-style default padding, formatting, hash seeding, search insertion-point
 encoding, mutation, lexicographic compare signs, and mismatch indexing.
 Apache Commons `FastMath` is

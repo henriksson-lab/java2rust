@@ -2368,6 +2368,25 @@ pub fn arrays_compare_projection(left: RustExpr, right: RustExpr) -> RustExpr {
     }
 }
 
+pub fn arrays_compare_range_projection(
+    left: RustExpr,
+    left_from: RustExpr,
+    left_to: RustExpr,
+    right: RustExpr,
+    right_from: RustExpr,
+    right_to: RustExpr,
+) -> RustExpr {
+    RustExpr::Raw(format!(
+        "{{ let __java_arrays_left = &{}; let __java_arrays_left_from = {}; let __java_arrays_left_to = {}; let __java_arrays_right = &{}; let __java_arrays_right_from = {}; let __java_arrays_right_to = {}; if __java_arrays_left_from > __java_arrays_left_to || __java_arrays_right_from > __java_arrays_right_to {{ panic!(\"Java IllegalArgumentException: fromIndex > toIndex\"); }} if __java_arrays_left_from < 0 || __java_arrays_left_to as usize > __java_arrays_left.len() || __java_arrays_right_from < 0 || __java_arrays_right_to as usize > __java_arrays_right.len() {{ panic!(\"Java ArrayIndexOutOfBoundsException\"); }} let __java_arrays_left_from = __java_arrays_left_from as usize; let __java_arrays_left_to = __java_arrays_left_to as usize; let __java_arrays_right_from = __java_arrays_right_from as usize; let __java_arrays_right_to = __java_arrays_right_to as usize; java_arrays_compare(&__java_arrays_left[__java_arrays_left_from..__java_arrays_left_to], &__java_arrays_right[__java_arrays_right_from..__java_arrays_right_to]) }}",
+        emit::emit_expr(&left),
+        emit::emit_expr(&left_from),
+        emit::emit_expr(&left_to),
+        emit::emit_expr(&right),
+        emit::emit_expr(&right_from),
+        emit::emit_expr(&right_to),
+    ))
+}
+
 pub fn arrays_mismatch_projection(left: RustExpr, right: RustExpr) -> RustExpr {
     RustExpr::Call {
         function: Box::new(RustExpr::Raw("java_arrays_mismatch".to_string())),

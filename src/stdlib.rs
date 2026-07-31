@@ -3228,9 +3228,12 @@ fn known_argument_sensitive_external_method_return_type(
         (Some("Arrays"), "equals", [JavaType::Array(_), JavaType::Array(_)]) => {
             Some(JavaType::Primitive(PrimitiveType::Boolean))
         }
-        (Some("Arrays"), "compare", [JavaType::Array(_), JavaType::Array(_)]) => {
-            Some(JavaType::Primitive(PrimitiveType::Int))
-        }
+        (
+            Some("Arrays"),
+            "compare",
+            [JavaType::Array(_), JavaType::Array(_)]
+            | [JavaType::Array(_), _, _, JavaType::Array(_), _, _],
+        ) => Some(JavaType::Primitive(PrimitiveType::Int)),
         (Some("Arrays"), "mismatch", [JavaType::Array(_), JavaType::Array(_)]) => {
             Some(JavaType::Primitive(PrimitiveType::Int))
         }
@@ -16605,7 +16608,7 @@ fn expr_uses_java_string_runtime_helpers(expr: &Expr) -> bool {
             ) || matches!(
                 (receiver.as_deref(), name.as_str(), args.len()),
                 (Some(Expr::Var(owner)), "hashCode" | "hash_code", 1)
-                    | (Some(Expr::Var(owner)), "compare", 2)
+                    | (Some(Expr::Var(owner)), "compare", 2 | 6)
                     | (Some(Expr::Var(owner)), "mismatch", 2)
                     if canonical_external_receiver_type_key(owner) == "Arrays"
             ) || matches!(
@@ -17288,7 +17291,7 @@ fn external_api_method_policy_provenance_with_builtin_packs(
     match (receiver_type, name, arg_count) {
         (Some("Arrays"), "asList" | "stream", _) => FactProvenance::BuiltinExternalModel,
         (Some("Arrays"), "equals", 2) => FactProvenance::BuiltinExternalModel,
-        (Some("Arrays"), "compare", 2) => FactProvenance::BuiltinExternalModel,
+        (Some("Arrays"), "compare", 2 | 6) => FactProvenance::BuiltinExternalModel,
         (Some("Arrays"), "mismatch", 2) => FactProvenance::BuiltinExternalModel,
         (Some("Arrays"), "binarySearch" | "binary_search", 2 | 4) => {
             FactProvenance::BuiltinExternalModel
@@ -17734,7 +17737,7 @@ pub fn external_api_return_nullability(
         }
         (Some("Arrays"), "asList" | "stream", _) => NullabilityState::DefinitelyNonNull,
         (Some("Arrays"), "equals", 2) => NullabilityState::DefinitelyNonNull,
-        (Some("Arrays"), "compare", 2) => NullabilityState::DefinitelyNonNull,
+        (Some("Arrays"), "compare", 2 | 6) => NullabilityState::DefinitelyNonNull,
         (Some("Arrays"), "mismatch", 2) => NullabilityState::DefinitelyNonNull,
         (Some("Arrays"), "binarySearch" | "binary_search", 2 | 4) => {
             NullabilityState::DefinitelyNonNull
@@ -17901,7 +17904,7 @@ fn static_utility_method_role(
         (Some("IntStream" | "LongStream" | "DoubleStream"), "sum", 0) => ExternalApiRole::Getter,
         (Some("Arrays"), "asList" | "stream", _) => ExternalApiRole::Getter,
         (Some("Arrays"), "equals", 2) => ExternalApiRole::BooleanGetter,
-        (Some("Arrays"), "compare", 2) => ExternalApiRole::Getter,
+        (Some("Arrays"), "compare", 2 | 6) => ExternalApiRole::Getter,
         (Some("Arrays"), "mismatch", 2) => ExternalApiRole::Getter,
         (Some("Arrays"), "binarySearch" | "binary_search", 2 | 4) => ExternalApiRole::Getter,
         (Some("Arrays"), "hashCode" | "hash_code", 1) => ExternalApiRole::Getter,

@@ -5,9 +5,9 @@ use crate::call_plan::{
 use crate::coercion::{
     JavaDisplayPlan, apply_java_display_plan, arrays_as_list_projection,
     arrays_binary_search_projection, arrays_binary_search_range_projection,
-    arrays_compare_projection, arrays_copy_of_projection, arrays_copy_of_range_projection,
-    arrays_equals_projection, arrays_hash_code_projection, arrays_mismatch_projection,
-    arrays_to_string_projection, collection_remove_if_projection,
+    arrays_compare_projection, arrays_compare_range_projection, arrays_copy_of_projection,
+    arrays_copy_of_range_projection, arrays_equals_projection, arrays_hash_code_projection,
+    arrays_mismatch_projection, arrays_to_string_projection, collection_remove_if_projection,
     collections_empty_list_projection, collections_empty_map_projection,
     collections_empty_set_projection, collections_empty_sorted_set_projection,
     collections_n_copies_projection, collections_singleton_list_projection,
@@ -681,11 +681,20 @@ fn apply_native_collection_static_method(
                 .first()
                 .cloned()
                 .unwrap_or_else(collections_empty_list_projection);
-            let right = args
-                .get(1)
-                .cloned()
-                .unwrap_or_else(collections_empty_list_projection);
-            arrays_compare_projection(left, right)
+            match args.as_slice() {
+                [_, right] => arrays_compare_projection(left, right.clone()),
+                [_, left_from, left_to, right, right_from, right_to] => {
+                    arrays_compare_range_projection(
+                        left,
+                        left_from.clone(),
+                        left_to.clone(),
+                        right.clone(),
+                        right_from.clone(),
+                        right_to.clone(),
+                    )
+                }
+                _ => arrays_compare_projection(left, collections_empty_list_projection()),
+            }
         }
         NativeCollectionStaticMethod::ArraysMismatch => {
             let left = args

@@ -71,6 +71,10 @@ the finished audit file into
 `/home/mahogny/github/claude/new_java2rust/claude_audits/done`; this move is
 part of the definition of done for the audit.
 
+2026-07-31 user instruction: add to the plan and keep enforcing that completed
+Claude audits are moved to
+`/home/mahogny/github/claude/new_java2rust/claude_audits/done` once done.
+
 ## Next Batch: Measurement And Unsupported Safety
 
 Goal: unmodelled behavior must be visible as a diagnostic, parseable Rust, or a
@@ -128,9 +132,9 @@ Landed in this batch:
   through native Rust slice binary-search projections with Java's negative
   insertion-point result instead of depending on a generated no-op `Arrays`
   facade.
-- `Arrays.compare(left, right)` now lowers through a native lexicographic
-  helper that returns Java-compatible sign values and handles floating `NaN`
-  plus signed zero ordering.
+- `Arrays.compare(...)` now lowers whole-array and subrange overloads through
+  a native lexicographic helper that returns Java-compatible sign values and
+  handles floating `NaN` plus signed zero ordering.
 - `Arrays.mismatch(left, right)` now lowers through the same Java element
   comparison helper, returning the first mismatch index or `-1` without a
   generated no-op `Arrays` facade.
