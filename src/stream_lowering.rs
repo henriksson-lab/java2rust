@@ -2168,39 +2168,13 @@ fn emit_stream_lambda_call_args_for_receiver(
             param_shape,
         ));
     };
-
-    let Some(slots) = crate::call_plan::external_call_arg_shapes(
-        receiver,
-        name,
-        args.len(),
-        facts,
-        &typed_lambda_env,
-    ) else {
-        return Some(
-            args.iter()
-                .zip(default_args)
-                .map(|(arg, rendered)| {
-                    recover_stream_lambda_borrowed_string_param_move(
-                        arg,
-                        rendered,
-                        param,
-                        locals,
-                        ctx,
-                        param_shape,
-                    )
-                })
-                .collect(),
-        );
-    };
     Some(
         args.iter()
             .zip(default_args)
-            .zip(slots.iter())
-            .map(|((arg, rendered), slot)| {
-                adapt_stream_lambda_arg_for_slot(
+            .map(|(arg, rendered)| {
+                recover_stream_lambda_borrowed_string_param_move(
                     arg,
                     rendered,
-                    slot,
                     param,
                     locals,
                     ctx,

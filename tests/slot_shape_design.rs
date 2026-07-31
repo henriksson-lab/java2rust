@@ -37010,6 +37010,16 @@ fn stream_lambda_argument_shapes_do_not_invent_string_fallbacks() {
         .expect("stream lambda slot projection helper should be present");
     assert!(slot_projection.contains("let default_facts;"));
     assert!(!slot_projection.contains("let facts = ctx.facts?;"));
+    let call_args = source
+        .split("fn emit_stream_lambda_call_args_for_receiver")
+        .nth(1)
+        .and_then(|tail| tail.split("fn adapt_stream_lambda_args_for_plan").next())
+        .expect("stream lambda call-argument helper should be present");
+    assert!(call_args.contains("plan_call_arguments_with_facts_and_args"));
+    assert!(
+        !call_args.contains("external_call_arg_shapes"),
+        "{call_args}"
+    );
     assert!(!source.contains("fn render_stream_lambda_optional_string_field_arg"));
 }
 

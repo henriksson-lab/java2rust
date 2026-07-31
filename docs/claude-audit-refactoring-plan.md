@@ -452,6 +452,11 @@ Landed in this batch:
   `ArgumentLoweringPlan` path. Interface-super default-call arguments now use
   the same shared argument lowering instead of a deleted local same-object
   helper.
+- Stream lambda receiver-call argument lowering now treats
+  `plan_call_arguments_with_facts_and_args` as authoritative for shaped/slotted
+  arguments. The old post-plan `external_call_arg_shapes` retry has been
+  removed, leaving only generic borrowed-parameter move recovery for genuinely
+  unshaped calls.
 - External field fact lookup for enum/static-field lowering now goes through
   `member_access_plan::external_field_type_for_owner`; `lower.rs` no longer
   probes external-pack field facts directly.
