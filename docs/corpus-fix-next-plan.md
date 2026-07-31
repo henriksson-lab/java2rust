@@ -7423,6 +7423,29 @@ names. Next step: unify simple/package-qualified source identities in
 representation/signature facts or add a representation divergence dump before
 attempting another local VCF fix.
 
+2026-07-31 source subtype argument conversion checkpoint: source-subtype
+arguments now use the shared argument adapter after clone recovery for ordinary
+shaped calls and current-receiver/self calls. This covers owned subtype values,
+borrowed supertype parameters, and borrowed downcast locals that need
+`clone().into()` for an owned source supertype parameter. Focused verification:
+`reused_source_subtype_argument_upcasts_after_clone_recovery`,
+`reused_source_subtype_owned_argument_upcasts_after_clone_recovery`,
+`borrowed_downcast_source_subtype_argument_upcasts_after_clone_recovery`,
+`borrowed_downcast_source_subtype_owned_argument_upcasts_after_clone_recovery`,
+`cargo fmt --check`, `cargo check --tests --quiet`, `git diff --check`,
+`bash -n scripts/translate-focused-package.sh`,
+`cargo build --release --quiet --bin new-java2rust`, and release-backed reduced
+VCF rerun `.tmp/corpus-rerun-20260731-vcf-subtype-arg-r3`. That rerun remains
+9/9 translated with 0 parse failures, 0 stubbed constants, and drops
+generated-Rust errors from 9 to 7. The
+`equals_excluding_description(that.clone())` rows now render
+`that.clone().into()` for `VCFFormatHeaderLine`/`VCFInfoHeaderLine` into
+`VCFCompoundHeaderLine`. Remaining reduced-VCF blockers are still the truthful
+runtime representation issue for concrete/concrete `instanceof` and the paired
+stale concrete downcast handover expressions in `VCFStandardHeaderLines`; do
+not lower these as a constant boolean because Java runtime subtype information
+has been lost in the current concrete superclass representation.
+
 ## Rerun Protocol
 
 After each fix:

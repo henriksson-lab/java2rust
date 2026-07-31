@@ -10431,10 +10431,30 @@ fn lower_same_object_call_args(
         .map(|(index, arg)| {
             ctx.signatures
                 .method_arg_shape_by_rust_name(current_type, rust_name, index)
-                .map(|shape| lower_expr_for_slot(arg, env, argument_slot(shape), ctx))
+                .map(|shape| lower_same_object_call_arg_with_shape(arg, env, shape, ctx))
                 .unwrap_or_else(|| lower_expr(arg, env, ctx))
         })
         .collect()
+}
+
+fn lower_same_object_call_arg_with_shape(
+    arg: &Expr,
+    env: &ShapeEnv,
+    shape: RustSlotShape,
+    ctx: LowerCtx,
+) -> RustExpr {
+    let actual_shape = infer_expr_shape_with_context(
+        arg,
+        env,
+        ExprShapeContext {
+            signatures: Some(ctx.signatures),
+            representations: Some(ctx.representations),
+            facts: Some(ctx.facts),
+        },
+    );
+    let lowered = lower_source_subtype_argument_as_actual(arg, env, &shape, &actual_shape, ctx)
+        .unwrap_or_else(|| lower_expr_for_slot(arg, env, argument_slot(shape.clone()), ctx));
+    adapt_reused_owned_argument(lowered, arg, &shape, Some(&actual_shape), env, ctx)
 }
 
 fn lower_accessor_field(
@@ -14019,6 +14039,9 @@ fn lower_args_with_plan(
                             ctx,
                         )
                     })
+                    .or_else(|| {
+                        lower_source_subtype_argument_as_actual(arg, env, shape, actual_shape, ctx)
+                    })
                     .unwrap_or_else(|| {
                         lower_expr_for_slot(arg, env, argument_slot(shape.clone()), ctx)
                     });
@@ -14492,6 +14515,9 @@ fn lower_argument_for_explicit_slot(
                         ctx,
                     )
                 })
+                .or_else(|| {
+                    lower_source_subtype_argument_as_actual(arg, env, &shape, &actual_shape, ctx)
+                })
                 .unwrap_or_else(|| {
                     lower_expr_for_slot(arg, env, argument_slot(shape.clone()), ctx)
                 });
@@ -14534,6 +14560,9 @@ fn lower_constructor_args_with_plan(
                         actual_shape,
                         ctx,
                     )
+                    .or_else(|| {
+                        lower_source_subtype_argument_as_actual(arg, env, &shape, actual_shape, ctx)
+                    })
                     .unwrap_or_else(|| {
                         lower_expr_for_slot(arg, env, argument_slot(shape.clone()), ctx)
                     });
@@ -17543,10 +17572,131 @@ fn adapt_reused_owned_argument(
     ) {
         return adapted;
     }
-    apply_clone_recovery_decision(
+    let recovered = apply_clone_recovery_decision(
         lowered,
         clone_recovery_decision_for_argument(source, target_shape, actual_shape, env, ctx),
+    );
+    adapt_source_subtype_to_supertype_argument(
+        recovered,
+        source,
+        actual_shape,
+        target_shape,
+        env,
+        ctx,
     )
+}
+
+fn lower_source_subtype_argument_as_actual(
+    arg: &Expr,
+    env: &ShapeEnv,
+    target_shape: &RustSlotShape,
+    actual_shape: &RustSlotShape,
+    ctx: LowerCtx,
+) -> Option<RustExpr> {
+    source_subtype_argument_conversion_available(actual_shape, target_shape, env, ctx)
+        .then(|| lower_expr(arg, env, ctx))
+}
+
+fn adapt_source_subtype_to_supertype_argument(
+    lowered: RustExpr,
+    source: &Expr,
+    actual_shape: Option<&RustSlotShape>,
+    target_shape: &RustSlotShape,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> RustExpr {
+    let Some(actual_shape) = actual_shape else {
+        return lowered;
+    };
+    let Some(actual_name) = concrete_java_type_name(&actual_shape.java_ty) else {
+        return lowered;
+    };
+    let Some(target_name) = concrete_java_type_name(&target_shape.java_ty) else {
+        return lowered;
+    };
+    if same_concrete_java_type_name(&actual_shape.java_ty, target_name) {
+        return lowered;
+    }
+    if !type_param_source_subtype_conversion_available(actual_name, target_name, env, ctx)
+        && !source_subtype_conversion_available(actual_name, target_name, ctx)
+    {
+        return lowered;
+    }
+    let lowered = if actual_shape.ownership == OwnershipShape::Owned
+        && source_argument_needs_clone_before_subtype_conversion(source, &lowered, ctx)
+    {
+        apply_audited_clone_recovery(lowered)
+    } else {
+        lowered
+    };
+    match (actual_shape.ownership, target_shape.ownership) {
+        (OwnershipShape::Owned, OwnershipShape::Owned) => into_projection(lowered),
+        (OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow, OwnershipShape::Owned) => {
+            into_projection(clone_source_subtype_value_for_owned_supertype(lowered))
+        }
+        (OwnershipShape::Owned, OwnershipShape::SharedBorrow) => ensure_borrow_projection(
+            into_projection(lowered),
+            None,
+            Some(target_shape),
+            BorrowProjectionUse::Argument,
+        ),
+        _ => lowered,
+    }
+}
+
+fn clone_source_subtype_value_for_owned_supertype(lowered: RustExpr) -> RustExpr {
+    let rendered = emit::emit_expr(&lowered);
+    if rendered.contains(".clone()") {
+        lowered
+    } else {
+        apply_audited_clone_recovery(lowered)
+    }
+}
+
+fn source_subtype_argument_conversion_available(
+    actual_shape: &RustSlotShape,
+    target_shape: &RustSlotShape,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> bool {
+    if actual_shape.ownership != OwnershipShape::Owned
+        || !matches!(
+            target_shape.ownership,
+            OwnershipShape::Owned | OwnershipShape::SharedBorrow
+        )
+    {
+        return false;
+    }
+    let Some(actual_name) = concrete_java_type_name(&actual_shape.java_ty) else {
+        return false;
+    };
+    let Some(target_name) = concrete_java_type_name(&target_shape.java_ty) else {
+        return false;
+    };
+    if same_concrete_java_type_name(&actual_shape.java_ty, target_name) {
+        return false;
+    }
+    type_param_source_subtype_conversion_available(actual_name, target_name, env, ctx)
+        || source_subtype_conversion_available(actual_name, target_name, ctx)
+}
+
+fn source_argument_needs_clone_before_subtype_conversion(
+    source: &Expr,
+    lowered: &RustExpr,
+    ctx: LowerCtx,
+) -> bool {
+    let Some(name) = move_recovery_source_name(source) else {
+        return false;
+    };
+    let rendered = emit::emit_expr(lowered);
+    if rendered.contains(".clone()") {
+        return false;
+    }
+    let move_use = MoveUseContext::new(ctx);
+    move_use.has_later_or_repeated_current_read(name)
+        || move_use
+            .binding_use_count(name)
+            .is_some_and(|use_count| use_count > 1)
 }
 
 fn adapt_reused_owned_optional_argument(

@@ -29,6 +29,11 @@ Keep the standing constraint: do not make algorithm changes that block future
 global semantic analysis. Prefer explicit keys, indices, compatibility shims,
 and divergence logs.
 
+Active workflow invariant: when an audit-backed item is actually done, move the
+corresponding `claude_audits/*.md` file to
+`/home/mahogny/github/claude/new_java2rust/claude_audits/done` in that same
+checkpoint. A code fix without that move is not a completed audit.
+
 Operating invariant: a Claude audit is not done until its issue file has been
 moved to `/home/mahogny/github/claude/new_java2rust/claude_audits/done`.
 Whenever an audit-backed fix is completed, move the corresponding
@@ -249,6 +254,18 @@ Landed in this batch:
   receivers. Reduced VCF rerun
   `.tmp/corpus-rerun-20260731-vcf-enum-hash-r2` reports
   `cargo_check_errors=9`, with enum `hash_code` errors gone.
+- 2026-07-31 source subtype argument checkpoint:
+  current-receiver and shaped call argument lowering now apply source
+  subtype-to-supertype conversions after clone recovery, including borrowed
+  downcast locals that must be cloned before flowing into an owned supertype
+  parameter. Focused regressions cover owned, borrowed, and Object-downcast
+  source-subtype arguments. Reduced VCF rerun
+  `.tmp/corpus-rerun-20260731-vcf-subtype-arg-r3` reports
+  `cargo_check_errors=7`, down from 9; the `equals_excluding_description`
+  subclass-to-`VCFCompoundHeaderLine` mismatch family is gone. Remaining VCF
+  errors are the concrete/concrete `instanceof` runtime-carrier problem and the
+  paired stale concrete downcast handover temporaries in
+  `VCFStandardHeaderLines`.
 
 1. Add a generated-Rust parse gate to focused corpus scripts.
    - Report parse failures separately from type-check errors.

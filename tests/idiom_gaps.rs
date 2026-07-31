@@ -9913,6 +9913,194 @@ class Standards<T extends CompoundLine> {
 }
 
 #[test]
+fn reused_source_subtype_argument_upcasts_after_clone_recovery() {
+    let source = r#"
+class HeaderLine {
+    String id;
+}
+
+class CompoundLine extends HeaderLine {
+    boolean same(CompoundLine other) {
+        return id == other.id;
+    }
+}
+
+class FormatLine extends CompoundLine {
+    String description;
+
+    boolean check(FormatLine that) {
+        return same(that) && description == that.description;
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("return self.same(&that.clone()/* TODO(translation): validate added clone */.into()) && self.description.as_ref() == that.description.as_ref();"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "reused_source_subtype_argument_upcasts_after_clone_recovery",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn reused_source_subtype_owned_argument_upcasts_after_clone_recovery() {
+    let source = r#"
+class HeaderLine {
+    String id;
+}
+
+class CompoundLine extends HeaderLine {
+}
+
+class FormatLine extends CompoundLine {
+    String description;
+
+    CompoundLine keep(CompoundLine other) {
+        return other;
+    }
+
+    boolean check(FormatLine that) {
+        return keep(that).id == id && description == that.description;
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("return self.keep(that.clone()/* TODO(translation): validate added clone */.into()).id.as_ref() == self.id.as_ref() && self.description.as_ref() == that.description.as_ref();"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "reused_source_subtype_owned_argument_upcasts_after_clone_recovery",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn borrowed_downcast_source_subtype_argument_upcasts_after_clone_recovery() {
+    let source = r#"
+class HeaderLine {
+    String id;
+}
+
+class CompoundLine extends HeaderLine {
+    boolean same(CompoundLine other) {
+        return id == other.id;
+    }
+}
+
+class FormatLine extends CompoundLine {
+    String description;
+
+    boolean check(Object o) {
+        FormatLine that = (FormatLine) o;
+        return same(that) && description == that.description;
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("return self.same(&that.clone()/* TODO(translation): validate added clone */.into()) && self.description.as_ref() == that.description.as_ref();"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "borrowed_downcast_source_subtype_argument_upcasts_after_clone_recovery",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn borrowed_downcast_source_subtype_owned_argument_upcasts_after_clone_recovery() {
+    let source = r#"
+class HeaderLine {
+    String id;
+}
+
+class CompoundLine extends HeaderLine {
+}
+
+class FormatLine extends CompoundLine {
+    String description;
+
+    CompoundLine keep(CompoundLine other) {
+        return other;
+    }
+
+    boolean check(Object o) {
+        FormatLine that = (FormatLine) o;
+        return keep(that).id == id && description == that.description;
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("return self.keep(that.clone()/* TODO(translation): validate added clone */.into()).id.as_ref() == self.id.as_ref() && self.description.as_ref() == that.description.as_ref();"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "borrowed_downcast_source_subtype_owned_argument_upcasts_after_clone_recovery",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn source_receiver_generic_result_upcasts_to_supertype_assignment_slot() {
     let source = r#"
 class HeaderLine {
