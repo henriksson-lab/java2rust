@@ -1702,6 +1702,12 @@ pub(crate) fn optional_element_slot_shape_with_facts(
     } else {
         element_shape.java_ty = element_ty;
     }
+    if matches!(element_shape.java_ty, JavaType::String)
+        && matches!(element_shape.ownership, OwnershipShape::SharedBorrow)
+        && matches!(element_shape.view, ViewShape::Str)
+    {
+        element_shape.dispatch = DispatchShape::Concrete;
+    }
     element_shape
 }
 

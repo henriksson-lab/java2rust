@@ -21306,7 +21306,7 @@ class ReceiverlessOverloadStringSlots {
     assert!(
         translation
             .rust
-            .contains("pub fn decode_string(s: Option<&str>)")
+            .contains("pub fn decode_string(s: Option<&String>)")
             && translation.rust.contains("Self::decode_string_int(s, 0)")
             && !translation.rust.contains("Self::decode_string_int(s.map")
             && !translation.rust.contains("downcast::<String>"),
@@ -21318,6 +21318,148 @@ class ReceiverlessOverloadStringSlots {
         "receiverless_overload_string_slots",
         vec![GeneratedCrateModule {
             name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn receiverless_source_overload_optional_string_beats_array_peer() {
+    let translation = translate_source(
+        r#"
+class ReceiverlessOverloadOptionalStringAgainstArray {
+    static byte[] decode(String s) throws Exception {
+        return decode(s, 0);
+    }
+
+    static byte[] decode(String s, int options) throws Exception {
+        if (s == null) {
+            return new byte[0];
+        }
+        return s.getBytes("US-ASCII");
+    }
+
+    static byte[] decode(byte[] source, int options) throws Exception {
+        return source;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn decode_string(s: Option<&String>)")
+            && translation.rust.contains("Self::decode_string_int(s, 0)")
+            && !translation.rust.contains("Self::decode_string_int(s.map")
+            && !translation
+                .rust
+                .contains("Self::decode_string_int(Box::new"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "receiverless_overload_optional_string_against_array",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn source_signature_beats_external_pack_for_iharder_base64_overload() {
+    let translation = translate_source(
+        r#"
+package net.sourceforge.iharder.base64;
+
+public class Base64 {
+    public static final int NO_OPTIONS = 0;
+
+    public static byte[] decode(String s) throws java.io.IOException {
+        return decode(s, NO_OPTIONS);
+    }
+
+    public static byte[] decode(String s, int options) throws java.io.IOException {
+        if (s == null) {
+            throw new NullPointerException("Input string was null.");
+        }
+        return s.getBytes("US-ASCII");
+    }
+
+    public static byte[] decode(byte[] source, int off, int len, int options) {
+        return source;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn decode_string(s: Option<String>)")
+            && translation
+                .rust
+                .contains("pub fn decode_string_int(s: Option<&String>, options: i32)")
+            && translation
+                .rust
+                .contains("Self::decode_string_int(s.as_ref(), Self::NO_OPTIONS)")
+            && !translation.rust.contains("Self::decode_string_int(s.map")
+            && !translation
+                .rust
+                .contains("Self::decode_string_int(Box::new"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_signature_beats_external_pack_for_iharder_base64_overload",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn source_signature_keeps_base64_decode_to_file_string_parameter() {
+    let translation = translate_source(
+        r#"
+package net.sourceforge.iharder.base64;
+
+public class Base64 {
+    private static final String PREFERRED_ENCODING = "US-ASCII";
+
+    public static void decodeToFile(String dataToDecode, String filename) throws java.io.IOException {
+        java.io.OutputStream out = null;
+        out.write(dataToDecode.getBytes(PREFERRED_ENCODING));
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn decode_to_file(data_to_decode: String, filename: String)")
+            && translation.rust.contains("data_to_decode.as_bytes()")
+            && !translation
+                .rust
+                .contains("data_to_decode: Box<dyn std::any::Any>")
+            && !translation
+                .rust
+                .contains("data_to_decode.as_ref().map(|value| value.as_str())"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "source_signature_base64_decode_to_file_string",
+        vec![GeneratedCrateModule {
+            name: "source_signature_base64_decode_to_file_string",
             rust: translation.rust,
             tests: "",
         }],
@@ -23592,7 +23734,7 @@ class ObjectStreamObjectShapes {
             .contains("pub fn read_object(&self) -> Result<Box<dyn std::any::Any>, JavaException>")
             && translation
                 .rust
-                .contains("pub fn write_int<T0>(&self, _arg0: T0) -> Result<(), JavaException>")
+                .contains("pub fn write_int(&self, _arg0: i32) -> Result<(), JavaException>")
             && translation.rust.contains(
                 "pub fn write_object<T0>(&self, _arg0: Option<T0>) -> Result<(), JavaException>"
             )
@@ -23609,6 +23751,106 @@ class ObjectStreamObjectShapes {
             && !translation.rust.contains("downcast::<Object>()"),
         "{}",
         translation.rust
+    );
+}
+
+#[test]
+fn object_output_stream_write_object_keeps_serializable_handoff() {
+    let translation = translate_source(
+        r#"
+import java.io.ObjectOutputStream;
+import java.io.Serializable;
+
+class ObjectOutputStreamSerializableHandoff {
+    void writeValue(ObjectOutputStream out, Serializable value) throws Exception {
+        out.writeObject(value);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("out.write_object(value)?;")
+            && !translation
+                .rust
+                .contains("value.as_ref().map(|value| value.as_str())")
+            && !translation.rust.contains(".as_str())?"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "object_output_stream_serializable_handoff",
+        vec![GeneratedCrateModule {
+            name: "object_output_stream_serializable_handoff",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn object_output_stream_write_object_keeps_fully_qualified_serializable_handoff() {
+    let translation = translate_source(
+        r#"
+class ObjectOutputStreamFullyQualifiedSerializableHandoff {
+    void writeValue(java.io.ObjectOutputStream out, java.io.Serializable value) throws Exception {
+        out.writeObject(value);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("out.write_object(value)?;")
+            && !translation
+                .rust
+                .contains("value.as_ref().map(|value| value.as_str())")
+            && !translation.rust.contains(".as_str())?"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "object_output_stream_fq_serializable_handoff",
+        vec![GeneratedCrateModule {
+            name: "object_output_stream_fq_serializable_handoff",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn object_output_stream_constructed_local_keeps_serializable_handoff() {
+    let translation = translate_source(
+        r#"
+class ObjectOutputStreamConstructedLocalSerializableHandoff {
+    void writeValue(java.io.OutputStream sink, java.io.Serializable value) throws Exception {
+        java.io.ObjectOutputStream out = null;
+        out = new java.io.ObjectOutputStream(sink);
+        out.writeObject(value);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("out.as_ref().unwrap().write_object(value)?;")
+            && !translation
+                .rust
+                .contains("value.as_ref().map(|value| value.as_str())")
+            && !translation.rust.contains(".as_str())?"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "object_output_stream_constructed_local_serializable_handoff",
+        vec![GeneratedCrateModule {
+            name: "object_output_stream_constructed_local_serializable_handoff",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 

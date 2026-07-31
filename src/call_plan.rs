@@ -4178,6 +4178,70 @@ pub fn resolved_call_arg_shapes(
         .collect()
 }
 
+fn resolved_call_signature_arg_shapes(
+    call: &ResolvedCall,
+    arg_count: usize,
+    signatures: &SignaturePlan,
+) -> Option<Vec<RustSlotShape>> {
+    let signature =
+        signatures.method_signature_by_rust_name(&call.declaring_type, &call.rust_name)?;
+    if signature.params.len() != arg_count {
+        return None;
+    }
+    Some(
+        signature
+            .params
+            .iter()
+            .map(|param| param.shape.clone())
+            .collect(),
+    )
+}
+
+fn resolved_call_signature_arg_shapes_by_args(
+    call: &ResolvedCall,
+    source_name: &str,
+    args: &[Expr],
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    types: &TypeEnv,
+) -> Option<Vec<RustSlotShape>> {
+    let arg_types = args
+        .iter()
+        .map(|arg| crate::types::infer_expr_type(arg, types))
+        .collect::<Vec<_>>();
+    let (_, signature) = signatures
+        .method_signature_by_base_name_and_arg_types_with_facts(
+            &call.declaring_type,
+            source_name,
+            &arg_types,
+            facts,
+        )
+        .or_else(|| {
+            signatures.method_signature_by_base_name_and_arg_types(
+                &call.declaring_type,
+                source_name,
+                &arg_types,
+            )
+        })
+        .or_else(|| {
+            signatures.method_signature_by_base_name_and_arity(
+                &call.declaring_type,
+                source_name,
+                args.len(),
+            )
+        })?;
+    if signature.params.len() != args.len() {
+        return None;
+    }
+    Some(
+        signature
+            .params
+            .iter()
+            .map(|param| param.shape.clone())
+            .collect(),
+    )
+}
+
 fn resolved_call_boundary_arg_shape(call: &ResolvedCall, index: usize) -> RustSlotShape {
     let java_ty = call
         .arg_target_types
@@ -4229,6 +4293,14 @@ pub fn plan_call_arguments_with_facts(
         {
             return ArgumentLoweringPlan::Shaped(shapes);
         }
+        if let Some(plan) =
+            facade_abi_call_arg_plan_for_resolved(call, name, arg_count, None, facts, types)
+        {
+            return plan;
+        }
+        if let Some(shapes) = resolved_call_signature_arg_shapes(call, arg_count, signatures) {
+            return ArgumentLoweringPlan::Shaped(shapes);
+        }
         if let Some(shapes) = external_call_arg_shapes_for_resolved(call, name, arg_count, facts) {
             return ArgumentLoweringPlan::Shaped(shapes);
         }
@@ -4268,6 +4340,14 @@ pub fn plan_call_arguments_with_facts_and_args(
             facade_abi_call_arg_plan_for_resolved(call, name, arg_count, Some(args), facts, types)
         {
             return plan;
+        }
+        if let Some(shapes) = resolved_call_signature_arg_shapes(call, arg_count, signatures) {
+            return ArgumentLoweringPlan::Shaped(shapes);
+        }
+        if let Some(shapes) =
+            resolved_call_signature_arg_shapes_by_args(call, name, args, signatures, facts, types)
+        {
+            return ArgumentLoweringPlan::Shaped(shapes);
         }
         if let Some(shapes) = external_call_arg_shapes_for_resolved(call, name, arg_count, facts) {
             return ArgumentLoweringPlan::Shaped(shapes);
@@ -5379,7 +5459,12 @@ fn external_argument_effect_allows_nullable_borrowed_slot(
             .as_deref()
             .map(crate::stdlib::canonical_external_receiver_type_key)
             .and_then(|receiver| receiver.rsplit('.').next().map(str::to_string))
-            .is_some_and(|simple| simple == "ObjectOutputStream")
+            .is_some_and(|simple| {
+                matches!(
+                    simple.as_str(),
+                    "ObjectOutputStream" | "JavaIoObjectOutputStream"
+                )
+            })
 }
 
 fn argument_shape_from_external_metadata(

@@ -704,6 +704,12 @@ pub fn apply_shape_coercion_plan(expr: RustExpr, plan: &ShapeCoercionPlan) -> Ru
             return apply_shape_coercion_plan(expr, &optional_unwrap_followup_plan(element_plan));
         }
         OptionalShapeCoercionPolicy::MapElement { element_plan, .. } => {
+            if optional_map_targets_borrowed_string_view(plan) {
+                let rendered_expr = emit::emit_expr(&expr);
+                return RustExpr::Raw(format!(
+                    "{rendered_expr}.as_ref().map(|value| value.as_str())"
+                ));
+            }
             let mapped_value =
                 apply_shape_coercion_plan(RustExpr::Var("value".to_string()), element_plan);
             return render_optional_element_projection(expr, mapped_value);
@@ -714,6 +720,18 @@ pub fn apply_shape_coercion_plan(expr: RustExpr, plan: &ShapeCoercionPlan) -> Ru
         return projected;
     }
     apply_coercions(expr, &plan.coercions())
+}
+
+fn optional_map_targets_borrowed_string_view(plan: &ShapeCoercionPlan) -> bool {
+    plan.actual
+        .optional_element_type()
+        .is_some_and(|element_ty| matches!(element_ty, JavaType::String))
+        && plan
+            .target
+            .optional_element_type()
+            .is_some_and(|element_ty| matches!(element_ty, JavaType::String))
+        && matches!(plan.target.ownership, OwnershipShape::SharedBorrow)
+        && matches!(plan.target.view, ViewShape::Str)
 }
 
 fn apply_borrowed_set_slice_view(expr: RustExpr, plan: &ShapeCoercionPlan) -> Option<RustExpr> {

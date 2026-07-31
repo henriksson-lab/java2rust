@@ -7615,6 +7615,29 @@ forwarding in the larger overload set still widening to
 path, one `String` parameter widened to `Box<dyn Any>` before `getBytes`, and
 residual byte-array move recovery.
 
+2026-07-31 source signature / object-stream handoff checkpoint: source
+signature argument slots now beat looser external-pack projections while
+explicit facade ABI plans keep precedence, declared source `String` parameters
+drop erased-object/slice pressure before signature solving, exact
+`JavaIoByteArrayInputStream(byte[])` constructor facts consume owned byte
+arrays through the shared slot conversion planner, and exact
+`JavaIoObjectOutputStream.writeObject(...)` calls preserve the actual
+serializable handoff shape instead of borrowing as a string. Focused
+verification covers
+`receiverless_source_overload_uses_selected_signature_arg_slots`,
+`receiverless_source_overload_optional_string_beats_array_peer`,
+`source_signature_beats_external_pack_for_iharder_base64_overload`,
+`source_signature_keeps_base64_decode_to_file_string_parameter`,
+`optional_owned_locals_consume_into_io_constructor_slots`,
+the three object-output-stream handoff fixtures, `cargo check --tests --quiet`,
+`git diff --check`, release build, and release-backed Base64 rerun
+`.tmp/corpus-fastqc-base64-single-after-source-string-and-writeobject-r1`.
+That rerun has `cargo_check=ok`, `cargo_check_errors=0`, `parse_failures=0`,
+`unsupported_statements=0`, `unsupported_expressions=0`,
+`invalid_pattern_files=0`, and `stubbed_constants=0`. Audit `0011` remains
+partial because erased-object fallback and borrow recovery still need the
+broader shared-fact cleanup outside this Base64 slice.
+
 ## Rerun Protocol
 
 After each fix:

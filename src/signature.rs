@@ -4501,7 +4501,29 @@ fn normalize_param_borrowed_slice_constraints(
     if param.is_varargs && java_varargs_erased_object_carrier_type(&param.ty) {
         return;
     }
+    if param.ty == JavaType::String {
+        normalize_declared_string_param_constraints(constraints);
+        return;
+    }
     normalize_borrowed_slice_param_constraints(constraints);
+}
+
+fn normalize_declared_string_param_constraints(constraints: &mut Vec<SignatureConstraint>) {
+    constraints.retain(|constraint| {
+        !matches!(
+            constraint,
+            SignatureConstraint::RequiredDispatch(DispatchShape::ErasedObject)
+                | SignatureConstraint::RequiredView(ViewShape::ErasedObjectView)
+                | SignatureConstraint::RequiredView(ViewShape::Slice)
+        )
+    });
+    push_unique_signature_constraints(
+        constraints,
+        &[
+            SignatureConstraint::RequiredDispatch(DispatchShape::Concrete),
+            SignatureConstraint::RequiredView(ViewShape::Native),
+        ],
+    );
 }
 
 fn borrowed_slice_param_rejects_constraint(

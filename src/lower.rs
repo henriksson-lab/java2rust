@@ -13893,7 +13893,7 @@ fn context_fallback_signature_for_signature(
             .map(|param| param.shape.clone())
             .collect(),
         receiver: signature.receiver,
-        arg_shapes_are_authoritative: false,
+        arg_shapes_are_authoritative: true,
     }
 }
 
@@ -13971,11 +13971,15 @@ fn apply_context_fallback_signature_arg_shapes(
     };
     match plan {
         ArgumentLoweringPlan::Unshaped { arg_count } if signature.arg_shapes.len() == arg_count => {
-            ArgumentLoweringPlan::Shaped(signature.arg_shapes.clone())
+            ArgumentLoweringPlan::Shaped(normalize_context_fallback_arg_shapes(
+                signature.arg_shapes.clone(),
+            ))
         }
         ArgumentLoweringPlan::Shaped(shapes) if signature.arg_shapes.len() == shapes.len() => {
             if signature.arg_shapes_are_authoritative {
-                return ArgumentLoweringPlan::Shaped(signature.arg_shapes.clone());
+                return ArgumentLoweringPlan::Shaped(normalize_context_fallback_arg_shapes(
+                    signature.arg_shapes.clone(),
+                ));
             }
             ArgumentLoweringPlan::Shaped(
                 shapes
@@ -13989,6 +13993,25 @@ fn apply_context_fallback_signature_arg_shapes(
         }
         plan => plan,
     }
+}
+
+fn normalize_context_fallback_arg_shapes(shapes: Vec<RustSlotShape>) -> Vec<RustSlotShape> {
+    shapes
+        .into_iter()
+        .map(normalize_context_fallback_arg_shape)
+        .collect()
+}
+
+fn normalize_context_fallback_arg_shape(mut shape: RustSlotShape) -> RustSlotShape {
+    if matches!(shape.ownership, OwnershipShape::SharedBorrow)
+        && matches!(shape.view, ViewShape::Str)
+        && (matches!(shape.java_ty, JavaType::String)
+            || crate::types::optional_element_type(&shape.java_ty)
+                .is_some_and(|ty| matches!(ty, JavaType::String)))
+    {
+        shape.dispatch = DispatchShape::Concrete;
+    }
+    shape
 }
 
 fn refine_shaped_arg_with_context_fallback_borrow(
@@ -14668,52 +14691,13 @@ fn lower_constructor_args_with_plan(
     ctx: LowerCtx,
 ) -> Vec<RustExpr> {
     match plan {
-        ArgumentLoweringPlan::Shaped(shapes) => {
-            let actual_shapes: Vec<RustSlotShape> = args
-                .iter()
-                .map(|arg| {
-                    infer_expr_shape_with_context(
-                        arg,
-                        env,
-                        ExprShapeContext {
-                            signatures: Some(ctx.signatures),
-                            representations: Some(ctx.representations),
-                            facts: Some(ctx.facts),
-                        },
-                    )
-                })
-                .collect();
-            args.iter()
-                .zip(shapes)
-                .enumerate()
-                .map(|(index, (arg, shape))| {
-                    let actual_shape = &actual_shapes[index];
-                    let lowered = lower_non_optional_argument_for_optional_target(
-                        arg,
-                        env,
-                        &shape,
-                        actual_shape,
-                        ctx,
-                    )
-                    .or_else(|| {
-                        lower_source_subtype_argument_as_actual(arg, env, &shape, actual_shape, ctx)
-                    })
-                    .or_else(|| {
-                        lower_optional_owned_argument_for_owned_target(
-                            arg,
-                            env,
-                            &shape,
-                            actual_shape,
-                            ctx,
-                        )
-                    })
-                    .unwrap_or_else(|| {
-                        lower_expr_for_slot(arg, env, argument_slot(shape.clone()), ctx)
-                    });
-                    adapt_reused_owned_argument(lowered, arg, &shape, Some(actual_shape), env, ctx)
-                })
-                .collect()
-        }
+        ArgumentLoweringPlan::Shaped(shapes) => args
+            .iter()
+            .zip(shapes)
+            .map(|(arg, shape)| {
+                lower_argument_for_explicit_slot(arg, env, argument_slot(shape), ctx)
+            })
+            .collect(),
         ArgumentLoweringPlan::Unshaped { .. } => {
             let shape_ctx = ExprShapeContext {
                 signatures: Some(ctx.signatures),
@@ -14837,6 +14821,17 @@ fn rewrite_optional_erased_borrowed_string_view_call_args(
     let mut rendered = emit::emit_expr(&lowered);
     let mut changed = false;
     for arg in args {
+        if let Expr::Var(name) = arg {
+            let erased_string_box =
+                format!("{name}.map(|value| Box::new(value.clone()) as Box<dyn std::any::Any>)");
+            if rendered.contains(&erased_string_box) {
+                rendered = rendered.replace(
+                    &erased_string_box,
+                    &format!("{name}.as_ref().map(|value| value.as_str())"),
+                );
+                changed = true;
+            }
+        }
         let Expr::Cast { ty, expr } = arg else {
             continue;
         };
@@ -15291,6 +15286,9 @@ fn lower_args_for_call_target(
     if let Some(parse_plan) = native_numeric_parse_argument_plan(target, args, env, ctx) {
         plan = parse_plan;
     }
+    if external_generic_facade_call_receiver_keeps_argument_shapes(target, call_receiver, env) {
+        return lower_external_generic_facade_args_with_actual_shapes(args, env, plan, ctx);
+    }
     if matches!(plan, ArgumentLoweringPlan::Unshaped { .. })
         && args.len() == 1
         && !call_target_uses_display_arguments(target, call_receiver, args, env, ctx)
@@ -15516,7 +15514,9 @@ fn emitted_source_resolved_call_argument_plan(
     ctx: LowerCtx,
 ) -> Option<ArgumentLoweringPlan> {
     let resolved = resolved?;
-    let owner = find_context_type_by_key(ctx.program, &resolved.declaring_type)?;
+    let owner = find_context_type_by_key(ctx.program, &resolved.declaring_type).or_else(|| {
+        find_context_type_by_key(ctx.support_local_type_program, &resolved.declaring_type)
+    })?;
     let method = resolved_source_method_for_call(owner, resolved, arg_count)?;
     let signature =
         method_signature_for_resolved_source_call(ctx.signatures, resolved, arg_count, ctx)
@@ -17185,7 +17185,9 @@ fn external_generic_facade_target_keeps_argument_shapes(
             crate::stdlib::canonical_external_receiver_type_key(name)
                 .rsplit('.')
                 .next()
-                .is_some_and(|simple| simple == "ObjectOutputStream")
+                .is_some_and(|simple| {
+                    matches!(simple, "ObjectOutputStream" | "JavaIoObjectOutputStream")
+                })
         }) {
             return true;
         }
@@ -17200,6 +17202,33 @@ fn external_generic_facade_target_keeps_argument_shapes(
             ctx.facts.external_library_pack_for_type(name).is_some()
                 || crate::external_packs::external_library_pack_for_type(name).is_some()
         })
+}
+
+fn external_generic_facade_call_receiver_keeps_argument_shapes(
+    target: &CallTargetPlan<'_>,
+    call_receiver: Option<&Expr>,
+    env: &ShapeEnv,
+) -> bool {
+    if !target
+        .rust_method_name()
+        .is_some_and(|method| matches!(method, "writeObject" | "write_object"))
+    {
+        return false;
+    }
+    let Some(receiver) = call_receiver else {
+        return false;
+    };
+    let receiver_ty = crate::types::infer_expr_type(receiver, env.type_env());
+    let receiver_ty =
+        crate::types::optional_element_type(&receiver_ty).unwrap_or_else(|| receiver_ty.clone());
+    concrete_java_type_name(&receiver_ty).is_some_and(|name| {
+        crate::stdlib::canonical_external_receiver_type_key(name)
+            .rsplit('.')
+            .next()
+            .is_some_and(|simple| {
+                matches!(simple, "ObjectOutputStream" | "JavaIoObjectOutputStream")
+            })
+    })
 }
 
 fn external_generic_facade_target_borrows_actual_argument_shapes(
@@ -23996,7 +24025,7 @@ fn source_context_resolved_static_method_fallback_signature(
         .filter_map(|member| match member {
             Member::Method(method)
                 if method.modifiers.contains(&Modifier::Static)
-                    && method.name == name
+                    && source_method_name_matches_lowered_name(method, name)
                     && method.params.len() == args.len() =>
             {
                 Some(method)
@@ -24151,8 +24180,10 @@ fn non_emitted_static_context_arg_shape(
     java_ty: &JavaType,
     is_varargs: bool,
 ) -> RustSlotShape {
-    if matches!(shape.ownership, OwnershipShape::Owned)
-        && source_context_reference_param_should_borrow(java_ty, is_varargs)
+    if source_context_reference_param_should_borrow(java_ty, is_varargs)
+        && (matches!(shape.ownership, OwnershipShape::Owned)
+            || (matches!(java_ty, JavaType::String)
+                && matches!(shape.ownership, OwnershipShape::SharedBorrow)))
     {
         shape = source_context_borrowed_param_shape(shape, java_ty);
         if !matches!(java_ty, JavaType::String) && !context_param_is_declared_java_object(java_ty) {
@@ -24196,7 +24227,7 @@ fn source_context_current_static_method_fallback_signature(
         .filter_map(|member| match member {
             Member::Method(method)
                 if method.modifiers.contains(&Modifier::Static)
-                    && method.name == name
+                    && source_method_name_matches_lowered_name(method, name)
                     && method.params.len() == args.len() =>
             {
                 Some(method)
@@ -24216,28 +24247,18 @@ fn source_context_current_static_method_fallback_signature(
         .iter()
         .map(|arg| infer_expr_shape_with_context(arg, env, shape_ctx).java_ty)
         .collect::<Vec<_>>();
-    if let Some((rust_name, signature)) = ctx
-        .signatures
-        .method_signature_by_base_name_and_arg_types_with_facts(
+    if let Some((signature_owner, rust_name, signature)) =
+        source_context_static_signature_by_name_and_args(
+            ctx.signatures,
             current_type,
+            &ty.name,
             name,
             &arg_types,
             ctx.facts,
         )
-        .or_else(|| {
-            ctx.signatures.method_signature_by_base_name_and_arg_types(
-                current_type,
-                name,
-                &arg_types,
-            )
-        })
-        .or_else(|| {
-            ctx.signatures
-                .method_signature_by_base_name_and_arity(current_type, name, args.len())
-        })
     {
         return Some(ContextFallbackMethodSignature {
-            owner: Some(current_type.to_string()),
+            owner: Some(signature_owner.to_string()),
             rust_name,
             arg_shapes: signature
                 .params
@@ -24255,12 +24276,14 @@ fn source_context_current_static_method_fallback_signature(
             .rust_name
             .clone()
             .unwrap_or_else(|| crate::parser::to_snake_case(&method.name));
-        if let Some(signature) = ctx
-            .signatures
-            .method_signature_by_rust_name(current_type, &rust_name)
-        {
+        if let Some((signature_owner, signature)) = source_context_static_signature_by_rust_name(
+            ctx.signatures,
+            current_type,
+            &ty.name,
+            &rust_name,
+        ) {
             return Some(ContextFallbackMethodSignature {
-                owner: Some(current_type.to_string()),
+                owner: Some(signature_owner.to_string()),
                 rust_name,
                 arg_shapes: signature
                     .params
@@ -24288,6 +24311,61 @@ fn source_context_current_static_method_fallback_signature(
         ));
     }
     None
+}
+
+fn source_context_static_signature_by_name_and_args<'a>(
+    signatures: &'a SignaturePlan,
+    current_type: &'a str,
+    source_type_name: &'a str,
+    name: &str,
+    arg_types: &[JavaType],
+    facts: &FactSet,
+) -> Option<(&'a str, String, &'a crate::signature::MethodSignaturePlan)> {
+    for owner in source_context_signature_owner_candidates(current_type, source_type_name) {
+        if let Some((rust_name, signature)) = signatures
+            .method_signature_by_base_name_and_arg_types_with_facts(owner, name, arg_types, facts)
+            .or_else(|| {
+                signatures.method_signature_by_base_name_and_arg_types(owner, name, arg_types)
+            })
+            .or_else(|| {
+                signatures.method_signature_by_base_name_and_arity(owner, name, arg_types.len())
+            })
+        {
+            return Some((owner, rust_name, signature));
+        }
+    }
+    None
+}
+
+fn source_context_static_signature_by_rust_name<'a>(
+    signatures: &'a SignaturePlan,
+    current_type: &'a str,
+    source_type_name: &'a str,
+    rust_name: &str,
+) -> Option<(&'a str, &'a crate::signature::MethodSignaturePlan)> {
+    for owner in source_context_signature_owner_candidates(current_type, source_type_name) {
+        if let Some(signature) = signatures.method_signature_by_rust_name(owner, rust_name) {
+            return Some((owner, signature));
+        }
+    }
+    None
+}
+
+fn source_context_signature_owner_candidates<'a>(
+    current_type: &'a str,
+    source_type_name: &'a str,
+) -> Vec<&'a str> {
+    if current_type == source_type_name {
+        vec![current_type]
+    } else {
+        vec![current_type, source_type_name]
+    }
+}
+
+fn source_method_name_matches_lowered_name(method: &MethodDecl, name: &str) -> bool {
+    method.name == name
+        || crate::parser::to_snake_case(&method.name) == name
+        || method_effective_rust_name(method) == name
 }
 
 fn unique_static_method_matching_known_arg_types<'a>(
@@ -24330,13 +24408,16 @@ fn method_params_known_arg_type_score(params: &[Param], arg_types: &[JavaType]) 
 }
 
 fn known_arg_type_param_match_score(arg_ty: &JavaType, param_ty: &JavaType) -> Option<usize> {
+    let arg_ty = crate::types::optional_element_type(arg_ty).unwrap_or_else(|| arg_ty.clone());
+    let param_ty =
+        crate::types::optional_element_type(param_ty).unwrap_or_else(|| param_ty.clone());
     if matches!(arg_ty, JavaType::Unknown(_)) {
         return Some(0);
     }
-    if same_concrete_java_type(arg_ty, param_ty) {
+    if same_concrete_java_type(&arg_ty, &param_ty) {
         return Some(2);
     }
-    if primitive_widening_arg_matches_param(arg_ty, param_ty) {
+    if primitive_widening_arg_matches_param(&arg_ty, &param_ty) {
         return Some(1);
     }
     None
@@ -24678,12 +24759,18 @@ fn context_type_key_matches(candidate: &str, query: &str) -> bool {
     {
         return true;
     }
-    let simple = candidate
+    let candidate_simple = candidate
         .rsplit(['.', '$'])
         .find(|segment| !segment.is_empty())
         .unwrap_or(candidate);
-    crate::stdlib::canonical_external_receiver_type_key(simple)
+    let query_simple = query
+        .rsplit(['.', '$'])
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(query);
+    crate::stdlib::canonical_external_receiver_type_key(candidate_simple)
         == crate::stdlib::canonical_external_receiver_type_key(query)
+        || crate::stdlib::canonical_external_receiver_type_key(candidate_simple)
+            == crate::stdlib::canonical_external_receiver_type_key(query_simple)
 }
 
 fn fallback_receiver_type_name_candidates(

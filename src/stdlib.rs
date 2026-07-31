@@ -14302,7 +14302,9 @@ fn external_facade_method_uses_nullable_generic_handoff(
         && crate::stdlib::canonical_external_receiver_type_key(receiver_key)
             .rsplit('.')
             .next()
-            .is_some_and(|simple| simple == "ObjectOutputStream")
+            .is_some_and(|simple| {
+                matches!(simple, "ObjectOutputStream" | "JavaIoObjectOutputStream")
+            })
 }
 
 fn external_facade_method_uses_generic_append_handoff(
@@ -14659,7 +14661,12 @@ fn external_facade_effect_allows_nullable_borrowed_slot(
             .as_deref()
             .map(crate::stdlib::canonical_external_receiver_type_key)
             .and_then(|receiver| receiver.rsplit('.').next().map(str::to_string))
-            .is_some_and(|simple| simple == "ObjectOutputStream")
+            .is_some_and(|simple| {
+                matches!(
+                    simple.as_str(),
+                    "ObjectOutputStream" | "JavaIoObjectOutputStream"
+                )
+            })
 }
 
 fn external_facade_argument_effect<'a>(

@@ -31157,12 +31157,41 @@ pub fn java_platform_constructor_argument_effect_for(
     if arg_count == 1
         && parameter_index == 0
         && [
+            "java.io.ByteArrayInputStream",
+            "ByteArrayInputStream",
+            "JavaIoByteArrayInputStream",
+        ]
+        .iter()
+        .any(|expected| crate::facts::external_type_name_matches(type_name, expected))
+    {
+        return Some(ExternalConstructorArgumentEffectFact {
+            type_name: type_name.to_string(),
+            arg_count,
+            parameter_index,
+            parameter_type: Some(JavaType::Array(Box::new(JavaType::Primitive(
+                PrimitiveType::Byte,
+            )))),
+            parameter_nullability: NullabilityState::DefinitelyNonNull,
+            argument_mutability: ReceiverMutabilityFact::ReadOnly,
+            alias_policy: ExternalArgumentAliasPolicy::Escapes,
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
+    if arg_count == 1
+        && parameter_index == 0
+        && [
             "java.io.BufferedInputStream",
+            "JavaIoBufferedInputStream",
             "java.io.DataInputStream",
+            "JavaIoDataInputStream",
             "java.io.ObjectInputStream",
+            "JavaIoObjectInputStream",
             "java.io.FilterInputStream",
+            "JavaIoFilterInputStream",
             "java.io.PushbackInputStream",
+            "JavaIoPushbackInputStream",
             "java.util.zip.GZIPInputStream",
+            "JavaUtilZipGZIPInputStream",
         ]
         .iter()
         .any(|expected| crate::facts::external_type_name_matches(type_name, expected))
@@ -31185,12 +31214,19 @@ pub fn java_platform_constructor_argument_effect_for(
         && parameter_index == 0
         && [
             "java.io.PrintStream",
+            "JavaIoPrintStream",
             "java.io.BufferedOutputStream",
+            "JavaIoBufferedOutputStream",
             "java.io.DataOutputStream",
+            "JavaIoDataOutputStream",
             "java.io.ObjectOutputStream",
+            "JavaIoObjectOutputStream",
             "java.io.FilterOutputStream",
+            "JavaIoFilterOutputStream",
             "java.util.zip.GZIPOutputStream",
+            "JavaUtilZipGZIPOutputStream",
             "java.util.zip.ZipOutputStream",
+            "JavaUtilZipZipOutputStream",
         ]
         .iter()
         .any(|expected| crate::facts::external_type_name_matches(type_name, expected))

@@ -29,20 +29,6 @@ Keep the standing constraint: do not make algorithm changes that block future
 global semantic analysis. Prefer explicit keys, indices, compatibility shims,
 and divergence logs.
 
-Latest user instruction: once a Claude audit is done, move its issue file to
-`/home/mahogny/github/claude/new_java2rust/claude_audits/done` as part of the
-same completed checkpoint.
-
-Current checkpoint rule: after implementing and verifying a Claude audit item,
-move its issue file from active `claude_audits/` into
-`/home/mahogny/github/claude/new_java2rust/claude_audits/done` before calling
-that audit done.
-
-Active workflow invariant: when an audit-backed item is actually done, move the
-corresponding `claude_audits/*.md` file to
-`/home/mahogny/github/claude/new_java2rust/claude_audits/done` in that same
-checkpoint. A code fix without that move is not a completed audit.
-
 Operating invariant: a Claude audit is not done until its issue file has been
 moved to `/home/mahogny/github/claude/new_java2rust/claude_audits/done`.
 Whenever an audit-backed fix is completed, move the corresponding
@@ -57,14 +43,6 @@ Claude audit has been fully implemented and focused verification has passed,
 move its issue file from `claude_audits/` to
 `/home/mahogny/github/claude/new_java2rust/claude_audits/done` in the same
 checkpoint as the implementation, plan-status update, and verification notes.
-
-2026-07-31 action: every audit-backed implementation checkpoint must include
-the corresponding move into
-`/home/mahogny/github/claude/new_java2rust/claude_audits/done` once that audit
-is actually done.
-
-2026-07-31 reminder: every completed Claude audit must be moved into
-`/home/mahogny/github/claude/new_java2rust/claude_audits/done` once done.
 
 Do not mark an audit row complete, describe an audit as closed, or commit an
 audit-closing checkpoint while its issue file still lives directly under
@@ -226,6 +204,15 @@ Landed in this batch:
   proof also keeps the exact `JavaIoInputStream -> InputStream` adapter alive
   through shared-support strip/merge. This narrows audit `0011` but does not
   close it.
+- Source signature argument slots now beat looser external-pack projections
+  while explicit facade ABI plans keep precedence; declared source `String`
+  parameters shed erased-object/slice pressure before signature solving; exact
+  `JavaIoByteArrayInputStream(byte[])` constructor facts and
+  `JavaIoObjectOutputStream.writeObject(...)` handoff facts route through the
+  shared argument-slot planner. Focused FastQC Base64 proof
+  `.tmp/corpus-fastqc-base64-single-after-source-string-and-writeobject-r1`
+  has `cargo_check=ok` and `cargo_check_errors=0`. This further narrows audit
+  `0011`, but the active audit file stays open.
 - Apache Commons `FastMath` ownership is modelled as a `javalibs` native static
   owner alias to the existing JDK `Math` planner, so package-specific knowledge
   stays out of `stdlib.rs` while call sites reuse the same math projections.
@@ -627,19 +614,12 @@ the fixes do not become more isolated rules.
 Completion checklist for any audit marked `fixed locally`:
 
 - Fresh-context reminder: an audit is not closed by code alone. Its issue file
-  must be moved to the `done` directory below as part of the same completed
-  checkpoint.
-- Required file move: once a Claude audit is implemented and focused
-  verification has passed, move its issue file from active `claude_audits/`
-  into `/home/mahogny/github/claude/new_java2rust/claude_audits/done`.
-- Move the corresponding issue file from `claude_audits/` to
-  `/home/mahogny/github/claude/new_java2rust/claude_audits/done`.
-- Keep the move in the same verified checkpoint as the implementation.
+  must be moved from active `claude_audits/` into
+  `/home/mahogny/github/claude/new_java2rust/claude_audits/done` as part of
+  the same verified checkpoint as the implementation.
 - Note the move in the plan row and, when committing, in the commit summary.
 - Do not move partial or exploratory audit files.
 - Treat the audit as still open if its file remains outside `claude_audits/done`.
-- Do not mark an audit row as fully done unless the issue file has also been
-  moved to `/home/mahogny/github/claude/new_java2rust/claude_audits/done`.
 - During batch work, include this file move in the same patch/commit that marks
   the audit fixed; otherwise leave the active audit file in place.
 
@@ -703,6 +683,10 @@ Run at each checkpoint:
 - focused audit repro tests for touched issues
 - `cargo test --test idiom_gaps --quiet` filters for changed idioms
 - `git diff --check`
+- For any audit item marked fixed, verify its `claude_audits/*.md` issue file
+  has been moved to
+  `/home/mahogny/github/claude/new_java2rust/claude_audits/done` in the same
+  checkpoint.
 
 Run at batch boundaries:
 
