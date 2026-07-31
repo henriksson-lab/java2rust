@@ -60,6 +60,11 @@ audit remains open.
 Do not mark or commit a Claude audit as complete if the corresponding issue file
 still sits in the active `claude_audits/` directory.
 
+Current operating rule: every checkpoint that fully closes a Claude audit must
+move its issue file from `claude_audits/` to
+`/home/mahogny/github/claude/new_java2rust/claude_audits/done`; partial fixes
+keep the audit file active and document what remains.
+
 2026-07-30 constant-fact checkpoint: external field facts can now carry explicit
 Rust constant values from manifests via `value=...`, and built-in HTSJDK/VCF/SAM
 packs provide values for the corpus-visible integer, boolean, and double

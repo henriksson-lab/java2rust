@@ -61,6 +61,11 @@ do not leave completed audit notes in the active `claude_audits/` directory.
 verification are done. Do not close or commit an audit as finished while its
 issue file remains in the active audit directory.
 
+Current operating rule: every implementation checkpoint that resolves a Claude
+audit must include the corresponding move from `claude_audits/` to
+`/home/mahogny/github/claude/new_java2rust/claude_audits/done`; if the audit is
+only partially addressed, leave the file active and record the remaining work.
+
 ## Next Batch: Measurement And Unsupported Safety
 
 Goal: unmodelled behavior must be visible as a diagnostic, parseable Rust, or a
