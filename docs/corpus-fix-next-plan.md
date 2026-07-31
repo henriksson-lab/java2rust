@@ -7080,7 +7080,7 @@ follow-up work, and broader facade fallibility remains open.
 `Arrays.copyOf(...)`, `Arrays.copyOfRange(...)`, `Arrays.toString(...)`,
 `Arrays.hashCode(...)`, whole/range `Arrays.binarySearch(...)`, whole/range
 `Arrays.fill(...)`, whole/range `Arrays.sort(...)`, whole/range
-`Arrays.compare(...)`, plus `Arrays.mismatch(...)` now lower through native projections with
+`Arrays.compare(...)`, plus whole/range `Arrays.mismatch(...)` now lower through native projections with
 Java-style default padding, formatting, hash seeding, search insertion-point
 encoding, mutation, lexicographic compare signs, and mismatch indexing.
 Apache Commons `FastMath` is
