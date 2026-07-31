@@ -5553,6 +5553,39 @@ class JavaIntegerArithmeticExceptionSemantics {
             return true;
         }
     }
+
+    int catchIfCondition(int value, int divisor) {
+        try {
+            if (value / divisor > 3) {
+                return 501;
+            }
+            return 502;
+        } catch (ArithmeticException ex) {
+            return 503;
+        }
+    }
+
+    int catchWhileCondition(int value, int divisor) {
+        try {
+            while (value / divisor > 3) {
+                return 511;
+            }
+            return 512;
+        } catch (ArithmeticException ex) {
+            return 513;
+        }
+    }
+
+    int catchForCondition(int value, int divisor) {
+        try {
+            for (int i = 0; value / divisor > i; i++) {
+                return 521;
+            }
+            return 522;
+        } catch (ArithmeticException ex) {
+            return 523;
+        }
+    }
 }
 "#,
     );
@@ -5603,6 +5636,14 @@ mod generated_tests {
         assert_eq!(fixture.catch_nested_add(8, 0), 401);
         assert!(!fixture.catch_nested_compare(7, 3));
         assert!(fixture.catch_nested_compare(8, 0));
+        assert_eq!(fixture.catch_if_condition(8, 2), 501);
+        assert_eq!(fixture.catch_if_condition(8, 3), 502);
+        assert_eq!(fixture.catch_if_condition(8, 0), 503);
+        assert_eq!(fixture.catch_while_condition(8, 2), 511);
+        assert_eq!(fixture.catch_while_condition(8, 3), 512);
+        assert_eq!(fixture.catch_while_condition(8, 0), 513);
+        assert_eq!(fixture.catch_for_condition(8, 2), 521);
+        assert_eq!(fixture.catch_for_condition(8, 0), 523);
         assert_eq!(fixture.catch_int_div(i32::MIN, -1), i32::MIN);
         assert_eq!(fixture.catch_int_rem(i32::MIN, -1), 0);
         assert_eq!(fixture.catch_long_div(i64::MIN, -1), i64::MIN);

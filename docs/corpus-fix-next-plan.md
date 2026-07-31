@@ -7751,6 +7751,21 @@ Audit `0003` remains partial because fallible arithmetic in non-slot contexts
 such as conditions, method arguments, array indexes, and ternary arms still
 needs a structured expression fallibility pass.
 
+2026-07-31 integer condition fallibility checkpoint: `if`, plain `while`,
+`do/while`, and `for` conditions now lower through the same condition-slot
+path plus result propagation policy used for returns and assignments. Checked
+integer div/rem in numeric comparison conditions now propagates with `?` inside
+try bodies and panics through the existing uncaught Java exception recovery
+outside result contexts. The expanded
+`java_integer_division_and_remainder_by_zero_raise_catchable_arithmetic_exception`
+generated fixture covers zero and nonzero div/rem in `if`, `while`, and `for`
+conditions. Focused verification covers that generated fixture,
+`java_integer_binary_ops_wrap_and_mask_shift_distance`,
+`operator_lowering_owns_binary_and_unary_rust_spelling`,
+`cargo fmt`, `cargo check --tests --quiet`, and `git diff --check`. Audit
+`0003` remains partial because method arguments, array indexes, ternary/logical
+arms, and a fuller expression fallibility model still need structured handling.
+
 ## Rerun Protocol
 
 After each fix:

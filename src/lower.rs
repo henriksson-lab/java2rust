@@ -5379,7 +5379,13 @@ fn lower_stmt(
                 return;
             }
             out.push(if_stmt(
-                lower_expr_for_slot(condition, env, condition_slot(), ctx),
+                lower_condition_expr_with_result_policy(
+                    condition,
+                    env,
+                    ctx,
+                    refinements,
+                    wrap_returns_in_ok,
+                ),
                 lower_block_with_refinements(
                     then_block,
                     &mut env.clone(),
@@ -5463,7 +5469,13 @@ fn lower_stmt(
                     later_read_names: Some(&loop_read_names),
                     ..ctx
                 };
-                let condition = lower_expr_for_slot(condition, env, condition_slot(), ctx);
+                let condition = lower_condition_expr_with_result_policy(
+                    condition,
+                    env,
+                    ctx,
+                    refinements,
+                    wrap_returns_in_ok,
+                );
                 let body = lower_block(body, &mut env.clone(), wrap_returns_in_ok, body_ctx);
                 if let Some(label) = label {
                     out.push(RustStmt::Loop {
@@ -5498,7 +5510,13 @@ fn lower_stmt(
             condition,
             label,
         } => {
-            let lowered_condition = lower_expr_for_slot(condition, env, condition_slot(), ctx);
+            let lowered_condition = lower_condition_expr_with_result_policy(
+                condition,
+                env,
+                ctx,
+                refinements,
+                wrap_returns_in_ok,
+            );
             let loop_read_names =
                 loop_carried_read_names_for_while(condition, body, ctx.later_read_names);
             let body_ctx = LowerCtx {
@@ -5552,9 +5570,15 @@ fn lower_stmt(
             for expr in lowered_updates {
                 loop_body.push(expr_stmt(expr));
             }
-            let condition = condition
-                .as_ref()
-                .map(|expr| lower_expr_for_slot(expr, env, condition_slot(), ctx));
+            let condition = condition.as_ref().map(|expr| {
+                lower_condition_expr_with_result_policy(
+                    expr,
+                    env,
+                    ctx,
+                    refinements,
+                    wrap_returns_in_ok,
+                )
+            });
             out.push(assemble_for_loop(condition, loop_body, label.clone()));
         }
         Stmt::EnhancedFor {
@@ -8457,6 +8481,18 @@ fn apply_result_propagation_policy(
     } else {
         unwrap_result_or_panic_uncaught_java_exception(lowered)
     }
+}
+
+fn lower_condition_expr_with_result_policy(
+    condition: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+    wrap_returns_in_ok: bool,
+) -> RustExpr {
+    let lowered =
+        lower_expr_for_slot_with_refinements(condition, env, condition_slot(), ctx, refinements);
+    apply_result_propagation_policy(lowered, condition, env, ctx, wrap_returns_in_ok)
 }
 
 fn lower_throw_expr_with_refinements(
