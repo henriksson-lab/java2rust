@@ -4305,6 +4305,19 @@ abstract class VCFCompoundHeaderLine {
             requirement: DispatchRequirementKind::NeedsUnknownRuntimeObject,
             provenance: FactProvenance::CorpusAnalysis,
         });
+    let effective = EffectiveFacts::new(&facts);
+    let source_ty = JavaType::Named {
+        name: "VCFCompoundHeaderLine".to_string(),
+        args: Vec::new(),
+    };
+    assert!(
+        !effective.has_object_representation_facts(&source_ty),
+        "parsed source should filter conflicting erased representation facts"
+    );
+    assert_eq!(
+        effective.object_representation_override_strategy_for(&source_ty),
+        None
+    );
 
     let translation = translate_source_with_facts(source, &facts);
     assert!(

@@ -260,11 +260,14 @@ impl<'a> EffectiveFacts<'a> {
     pub fn has_object_representation_facts(&self, java_ty: &JavaType) -> bool {
         self.object_safe_trait_fact_for(java_ty).is_some()
             || capability_type_name(java_ty).is_some_and(|type_name| {
-                self.facts
-                    .hierarchy_overrides
-                    .iter()
-                    .any(|override_fact| type_name_matches(&override_fact.type_name, type_name))
-                    || self.closed_hierarchy_fact_for_name(type_name).is_some()
+                self.facts.hierarchy_overrides.iter().any(|override_fact| {
+                    type_name_matches(&override_fact.type_name, type_name)
+                        && !erased_override_conflicts_with_parsed_source(
+                            override_fact,
+                            type_name,
+                            self.facts,
+                        )
+                }) || self.closed_hierarchy_fact_for_name(type_name).is_some()
             })
     }
 

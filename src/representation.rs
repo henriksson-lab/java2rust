@@ -1010,14 +1010,11 @@ fn explicit_erased_object_fact_type_name<'a>(
     let JavaType::Named { name, .. } = ty else {
         return None;
     };
-    facts
-        .hierarchy_overrides()
-        .iter()
-        .any(|override_fact| {
-            override_fact.type_name == *name
-                && override_fact.strategy == crate::facts::HierarchyStrategy::ErasedObject
-        })
-        .then_some(name.as_str())
+    matches!(
+        facts.object_representation_override_strategy_for(ty),
+        Some(crate::facts::HierarchyStrategy::ErasedObject)
+    )
+    .then_some(name.as_str())
 }
 
 pub fn representation_hierarchy_fact_policy(

@@ -1,11 +1,11 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use crate::effective_facts::EffectiveFacts;
 use crate::facts::{
     DispatchRequirementKind, FactProvenance, FactSet, HierarchyOverride, HierarchyStrategy,
     ObjectSafetyViolation,
 };
-use crate::java_ir::{JavaType, Member, Program, TypeDecl, TypeKind};
+use crate::java_ir::{Block, Expr, JavaType, Member, Program, Stmt, TypeDecl, TypeKind};
 use crate::usage::{BindingUse, BindingUseFacts, CallArgumentBoundary, UsageFacts};
 
 #[derive(Debug, Clone, Copy)]
@@ -29,6 +29,7 @@ pub struct ObjectStrategyPlan {
     pub strategy: ObjectRepresentation,
     pub requirements: Vec<DispatchRequirement>,
     pub direct_subtypes: Vec<String>,
+    pub source_methods_access_instance_fields: bool,
     pub rejected: Vec<RejectedObjectStrategy>,
     pub provenance: Vec<FactProvenance>,
     pub diagnostics: Vec<RepresentationDiagnostic>,
@@ -565,6 +566,7 @@ fn object_strategy_for_type_with_effective_facts_and_requirements(
         strategy,
         requirements,
         direct_subtypes: Vec::new(),
+        source_methods_access_instance_fields: type_methods_access_instance_fields(ty),
         rejected: Vec::new(),
         provenance: vec![FactProvenance::ParsedSource],
         diagnostics,
@@ -593,6 +595,229 @@ fn type_has_instance_fields(ty: &TypeDecl) -> bool {
             Member::Field(field) if !field.modifiers.contains(&crate::java_ir::Modifier::Static)
         )
     })
+}
+
+fn type_methods_access_instance_fields(ty: &TypeDecl) -> bool {
+    let field_names = ty
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            Member::Field(field)
+                if !field.modifiers.contains(&crate::java_ir::Modifier::Static) =>
+            {
+                Some(field.name.clone())
+            }
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    if field_names.is_empty() {
+        return false;
+    }
+    ty.members.iter().any(|member| match member {
+        Member::Method(method) => method
+            .body
+            .as_ref()
+            .is_some_and(|body| block_accesses_instance_field(body, &field_names)),
+        Member::Constructor(constructor) => constructor
+            .body
+            .as_ref()
+            .is_some_and(|body| block_accesses_instance_field(body, &field_names)),
+        _ => false,
+    })
+}
+
+fn block_accesses_instance_field(block: &Block, field_names: &HashSet<String>) -> bool {
+    block
+        .statements
+        .iter()
+        .any(|stmt| stmt_accesses_instance_field(stmt, field_names))
+}
+
+fn stmt_accesses_instance_field(stmt: &Stmt, field_names: &HashSet<String>) -> bool {
+    match stmt {
+        Stmt::VarDecl { initializer, .. } | Stmt::Return(initializer) => initializer
+            .as_ref()
+            .is_some_and(|expr| expr_accesses_instance_field(expr, field_names)),
+        Stmt::Assign { target, value } => {
+            expr_accesses_instance_field(target, field_names)
+                || expr_accesses_instance_field(value, field_names)
+        }
+        Stmt::Expr(expr) | Stmt::Throw(expr) => expr_accesses_instance_field(expr, field_names),
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            expr_accesses_instance_field(condition, field_names)
+                || block_accesses_instance_field(then_block, field_names)
+                || else_block
+                    .as_ref()
+                    .is_some_and(|block| block_accesses_instance_field(block, field_names))
+        }
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
+            expr_accesses_instance_field(condition, field_names)
+                || block_accesses_instance_field(body, field_names)
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            init.iter()
+                .any(|stmt| stmt_accesses_instance_field(stmt, field_names))
+                || condition
+                    .as_ref()
+                    .is_some_and(|expr| expr_accesses_instance_field(expr, field_names))
+                || update
+                    .iter()
+                    .any(|expr| expr_accesses_instance_field(expr, field_names))
+                || block_accesses_instance_field(body, field_names)
+        }
+        Stmt::EnhancedFor { iterable, body, .. } => {
+            expr_accesses_instance_field(iterable, field_names)
+                || block_accesses_instance_field(body, field_names)
+        }
+        Stmt::Switch { selector, cases } => {
+            expr_accesses_instance_field(selector, field_names)
+                || cases.iter().any(|case| {
+                    case.labels.iter().any(|label| match label {
+                        crate::java_ir::SwitchLabel::Expr(expr) => {
+                            expr_accesses_instance_field(expr, field_names)
+                        }
+                        crate::java_ir::SwitchLabel::Default => false,
+                    }) || case
+                        .statements
+                        .iter()
+                        .any(|stmt| stmt_accesses_instance_field(stmt, field_names))
+                })
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            resources
+                .iter()
+                .any(|stmt| stmt_accesses_instance_field(stmt, field_names))
+                || block_accesses_instance_field(body, field_names)
+                || catches
+                    .iter()
+                    .any(|catch| block_accesses_instance_field(&catch.body, field_names))
+                || finally_block
+                    .as_ref()
+                    .is_some_and(|block| block_accesses_instance_field(block, field_names))
+        }
+        Stmt::ConstructorInvocation { args, .. } => args
+            .iter()
+            .any(|expr| expr_accesses_instance_field(expr, field_names)),
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            block_accesses_instance_field(block, field_names)
+        }
+        Stmt::LocalType(_) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => false,
+    }
+}
+
+fn expr_accesses_instance_field(expr: &Expr, field_names: &HashSet<String>) -> bool {
+    match expr {
+        Expr::Var(name) => field_names.contains(name),
+        Expr::FieldAccess(receiver, field_name) => {
+            matches!(receiver.as_ref(), Expr::This) && field_names.contains(field_name)
+                || expr_accesses_instance_field(receiver, field_names)
+        }
+        Expr::ArrayAccess(array, index) => {
+            expr_accesses_instance_field(array, field_names)
+                || expr_accesses_instance_field(index, field_names)
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            dimensions
+                .iter()
+                .any(|expr| expr_accesses_instance_field(expr, field_names))
+                || initializer.as_ref().is_some_and(|items| {
+                    items
+                        .iter()
+                        .any(|expr| expr_accesses_instance_field(expr, field_names))
+                })
+        }
+        Expr::ArrayInitializer(items) => items
+            .iter()
+            .any(|expr| expr_accesses_instance_field(expr, field_names)),
+        Expr::Binary { left, right, .. } => {
+            expr_accesses_instance_field(left, field_names)
+                || expr_accesses_instance_field(right, field_names)
+        }
+        Expr::Unary { expr, .. } => expr_accesses_instance_field(expr, field_names),
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            expr_accesses_instance_field(condition, field_names)
+                || expr_accesses_instance_field(then_expr, field_names)
+                || expr_accesses_instance_field(else_expr, field_names)
+        }
+        Expr::Switch { selector, cases } => {
+            expr_accesses_instance_field(selector, field_names)
+                || cases.iter().any(|case| {
+                    case.labels.iter().any(|label| match label {
+                        crate::java_ir::SwitchLabel::Expr(expr) => {
+                            expr_accesses_instance_field(expr, field_names)
+                        }
+                        crate::java_ir::SwitchLabel::Default => false,
+                    }) || expr_accesses_instance_field(&case.value, field_names)
+                })
+        }
+        Expr::Call { receiver, args, .. } => {
+            receiver
+                .as_ref()
+                .is_some_and(|expr| expr_accesses_instance_field(expr, field_names))
+                || args
+                    .iter()
+                    .any(|expr| expr_accesses_instance_field(expr, field_names))
+        }
+        Expr::New { args, body, .. } => {
+            args.iter()
+                .any(|expr| expr_accesses_instance_field(expr, field_names))
+                || body.as_ref().is_some_and(|members| {
+                    members.iter().any(|member| match member {
+                        Member::Method(method) => method
+                            .body
+                            .as_ref()
+                            .is_some_and(|body| block_accesses_instance_field(body, field_names)),
+                        _ => false,
+                    })
+                })
+        }
+        Expr::Cast { expr, .. } | Expr::InstanceOf { expr, .. } => {
+            expr_accesses_instance_field(expr, field_names)
+        }
+        Expr::Lambda { body, .. } => match body {
+            crate::java_ir::LambdaBody::Expr(expr) => {
+                expr_accesses_instance_field(expr, field_names)
+            }
+            crate::java_ir::LambdaBody::Block(block) => {
+                block_accesses_instance_field(block, field_names)
+            }
+        },
+        Expr::Literal(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::MethodReference { .. }
+        | Expr::ClassLiteral(_)
+        | Expr::Unsupported { .. }
+        | Expr::Raw(_) => false,
+    }
 }
 
 pub fn rust_enum_variant_name_from_parsed_constant(name: &str) -> String {
@@ -877,6 +1102,7 @@ fn add_direct_subtype_to_strategy(
             strategy: ObjectRepresentation::ErasedObject,
             requirements: merged_dispatch_requirements(super_name, facts, usage_requirements),
             direct_subtypes: Vec::new(),
+            source_methods_access_instance_fields: false,
             rejected: Vec::new(),
             provenance: vec![FactProvenance::ConservativeFallback],
             diagnostics: Vec::new(),
@@ -1001,9 +1227,7 @@ fn apply_erased_object_requirement_fallback(strategy: &mut ObjectStrategyPlan) {
     if matches!(strategy.strategy, ObjectRepresentation::ErasedObject) {
         return;
     }
-    if matches!(strategy.strategy, ObjectRepresentation::ConcreteStruct)
-        && strategy.has_provenance(FactProvenance::ParsedSource)
-    {
+    if parsed_source_erased_fallback_should_remain_rejected(strategy) {
         strategy.rejected.push(RejectedObjectStrategy {
             strategy: ObjectRepresentation::ErasedObject,
             reason,
@@ -1021,6 +1245,23 @@ fn apply_erased_object_requirement_fallback(strategy: &mut ObjectStrategyPlan) {
         strategy.strategy = ObjectRepresentation::ErasedObject;
         strategy.add_provenance(FactProvenance::ConservativeFallback);
     }
+}
+
+fn parsed_source_erased_fallback_should_remain_rejected(strategy: &ObjectStrategyPlan) -> bool {
+    matches!(strategy.strategy, ObjectRepresentation::ConcreteStruct)
+        && strategy.has_provenance(FactProvenance::ParsedSource)
+        && (strategy.source_methods_access_instance_fields
+            || !source_runtime_case_split_needs_erased_carrier(strategy))
+}
+
+fn source_runtime_case_split_needs_erased_carrier(strategy: &ObjectStrategyPlan) -> bool {
+    !strategy.direct_subtypes.is_empty()
+        && strategy.requirements.iter().any(|requirement| {
+            matches!(
+                requirement,
+                DispatchRequirementKind::NeedsInstanceof | DispatchRequirementKind::NeedsDowncast
+            )
+        })
 }
 
 fn erased_object_requirement_reason(
@@ -1095,6 +1336,7 @@ fn apply_hierarchy_overrides_to_strategy_plan(
             strategy: representation,
             requirements: facts.dispatch_requirements_for(&policy.type_name),
             direct_subtypes: policy.direct_subtypes,
+            source_methods_access_instance_fields: false,
             rejected: Vec::new(),
             provenance: vec![policy.provenance],
             diagnostics: Vec::new(),

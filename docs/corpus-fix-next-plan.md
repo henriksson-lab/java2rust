@@ -7446,6 +7446,29 @@ stale concrete downcast handover expressions in `VCFStandardHeaderLines`; do
 not lower these as a constant boolean because Java runtime subtype information
 has been lost in the current concrete superclass representation.
 
+2026-07-31 source representation drift guard checkpoint: effective
+representation-fact queries now apply the same parsed-source erased-override
+filter as representation strategy selection, and usage-driven erased fallback
+for parsed concrete classes is blocked when methods access the class's own
+instance fields. Fieldless/open source supertypes can still use erased carriers
+for runtime `instanceof`/downcast case splits, so the focused
+`source_hierarchy_instanceof_repair_keeps_supertype_slot_adapted` fixture stays
+green. The source-field guards
+`source_class_fields_beat_external_erased_and_closed_facts` and
+`parsed_source_declared_peer_param_keeps_concrete_signature_under_erased_pressure`
+also stay green. Release-backed reduced VCF rerun
+`.tmp/corpus-rerun-20260731-vcf-after-field-access-carrier-guard-r1` translates
+9/9 files with 0 parse failures, `unsupported_statements=0`,
+`stubbed_constants=0`, and 7 generated-Rust errors. The intermediate
+`.tmp/corpus-rerun-20260731-vcf-after-representation-fact-filter-r1` exposed 14
+field-access errors on `Box<dyn Any>`; those are gone because
+`VCFCompoundHeaderLine` now emits as `pub struct VCFCompoundHeaderLine`.
+Remaining reduced-VCF blockers are back to the known `VCFHeaderLine`
+concrete/concrete `instanceof` and bogus `&VCFHeaderLine` repair handover rows.
+The durable next design step is a member-preserving runtime carrier for
+field-bearing source supertypes; until that exists, do not erase classes whose
+own methods require field access.
+
 ## Rerun Protocol
 
 After each fix:
@@ -7458,6 +7481,10 @@ After each fix:
 5. Rerun only the affected focused corpus first.
 6. Update `docs/current-corpus-issue-audit.md` with exact output directories and
    new counts.
+7. If the fix fully closes a Claude audit, move the corresponding
+   `claude_audits/*.md` file into
+   `/home/mahogny/github/claude/new_java2rust/claude_audits/done` in the same
+   checkpoint. Do not move partially addressed audits.
 
 ## Parallelization
 
