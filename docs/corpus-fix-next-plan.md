@@ -7264,6 +7264,26 @@ errors from 25 to 23. The generic `Standards<T>` clone-bound rows are gone;
 remaining top families are erased-carrier field/static-method access,
 `HashSet<Box<dyn Any>>` trait bounds, and two mismatched-type rows.
 
+2026-07-31 exact-super-cast checkpoint: early-return exact-type refinements now
+scan rejected `||` guards, so common Java `equals(Object)` guards such as
+`obj == null || getClass() != obj.getClass() || !super.equals(obj)` prove the
+post-guard runtime type. When a following erased-object cast names a superclass
+of that exact runtime type, local slot shaping uses the exact subtype borrowed
+view and lowers through `downcast_ref::<ExactSubtype>()` instead of consuming
+the object with `downcast::<ErasedSuper>()`. Focused verification passed with
+`combined_exact_class_guard_casts_erased_super_to_exact_borrowed_view`,
+`exact_class_guard_casts_erased_object_to_borrowed_view`,
+`rejected_instanceof_guard_casts_erased_object_to_borrowed_view`,
+`generic_source_map_storage_return_adds_clone_bound`, `cargo fmt --check`,
+`cargo check --tests --quiet`, `git diff --check`, and a release-backed VCF
+rerun:
+`.tmp/corpus-rerun-20260731-vcf-standard-bound-after-exact-super-cast-r1`.
+That rerun translates 9/9 files, has 0 parse failures,
+`unsupported_statements=0`, `stubbed_constants=0`, and reduces generated Rust
+errors from 23 to 19. The two `E0308` rows and borrowed `description` field
+rows are gone; remaining top families are erased-super field/static-method
+access and `HashSet<Box<dyn Any>>` trait bounds.
+
 ## 2026-07-30 Facade Correctness Note
 
 `StringBuilder`/`StringBuffer` now emit stateful JDK facade support instead of

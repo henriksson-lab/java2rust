@@ -1528,6 +1528,18 @@ accessor no longer fails on `Option<Standards<T>>::clone()`. Remaining top
 families are erased-carrier field/static-method access, `HashSet<Box<dyn Any>>`
 trait bounds, and two mismatched-type rows.
 
+Reduced HTSJDK VCF exact-super-cast follow-up:
+`.tmp/corpus-rerun-20260731-vcf-standard-bound-after-exact-super-cast-r1`
+translates the same 9-file subset, reports 0 parse failures,
+`unsupported_statements=0`, and `stubbed_constants=0`, and reduces generated
+Rust errors from `23` to `19`. Early-return refinements now scan rejected
+`||` guards such as `obj == null || getClass() != obj.getClass()`, and erased
+object casts to a refined superclass local lower through a borrowed exact
+subclass view. This closes the two `E0308` downcast mismatches and the borrowed
+`description` field rows from copied `equals(Object)` bodies. Remaining top
+families are erased-super field/static-method access and `HashSet<Box<dyn Any>>`
+trait bounds.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from

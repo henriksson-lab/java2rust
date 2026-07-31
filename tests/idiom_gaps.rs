@@ -7,8 +7,8 @@ use new_java2rust::facts::{
     DispatchRequirementFact, DispatchRequirementKind, ExternalApiArgumentEffectFact,
     ExternalApiEffectFact, ExternalApiRole, ExternalArgumentAliasPolicy, ExternalFfiHandoverFact,
     ExternalFfiHandoverSlot, ExternalFieldFact, ExternalFieldKind, FactProvenance, FactSet,
-    FieldKey, NullabilityState, OwnedRecoveryCapability, OwnedRecoveryCapabilityFact,
-    ReceiverMutabilityFact, TypeCapabilityOverride,
+    FieldKey, HierarchyOverride, HierarchyStrategy, NullabilityState, OwnedRecoveryCapability,
+    OwnedRecoveryCapabilityFact, ReceiverMutabilityFact, TypeCapabilityOverride,
 };
 use new_java2rust::java_ir::{JavaType, PrimitiveType};
 use new_java2rust::{
@@ -21626,6 +21626,57 @@ class ExactClassGuardCastsErasedObject {
 
     cargo_check_generated_modules(
         "exact_class_guard_casts_erased_object",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn combined_exact_class_guard_casts_erased_super_to_exact_borrowed_view() {
+    let mut facts = FactSet::default();
+    facts.hierarchy_overrides.push(HierarchyOverride {
+        type_name: "CombinedGuardErasedSuperLine".to_string(),
+        strategy: HierarchyStrategy::ErasedObject,
+        provenance: FactProvenance::UserOverride,
+    });
+    let translation = translate_source_with_facts(
+        r#"
+class CombinedGuardErasedSuperLine {
+    int id;
+
+    boolean sameBase(Object obj) {
+        return true;
+    }
+}
+
+class CombinedGuardExactLine extends CombinedGuardErasedSuperLine {
+    public boolean equals(Object obj) {
+        if (obj == null || getClass() != obj.getClass() || !super.sameBase(obj)) {
+            return false;
+        }
+        CombinedGuardErasedSuperLine other = (CombinedGuardErasedSuperLine) obj;
+        return other.id == id;
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "let other: &CombinedGuardExactLine = obj.as_ref().and_then(|value| value.downcast_ref::<CombinedGuardExactLine>()).expect(\"invalid Java cast\");"
+        ) && translation.rust.contains("return other.id == self.id;")
+            && !translation.rust.contains("downcast::<CombinedGuardErasedSuperLine>")
+            && !translation.rust.contains("*obj.unwrap().downcast"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "combined_exact_class_guard_casts_erased_super",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,

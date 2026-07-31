@@ -4878,9 +4878,11 @@ fn lower_stmt(
                 refine_local_plan_from_initializer(local_plan, initializer.as_ref(), env, ctx);
             local_plan =
                 own_uninitialized_optional_borrowed_local(local_plan, name, initializer, ctx);
-            if let Some(shape) =
-                exact_erased_object_cast_initializer_local_shape(initializer.as_ref(), refinements)
-            {
+            if let Some(shape) = exact_erased_object_cast_initializer_local_shape(
+                initializer.as_ref(),
+                ctx,
+                refinements,
+            ) {
                 local_plan.shape = shape;
             }
             if declared_typed_initializer_should_anchor_local_type(
@@ -6082,6 +6084,10 @@ fn exact_type_refinement_from_rejected_class_condition(
     let Expr::Binary { op, left, right } = condition else {
         return None;
     };
+    if *op == BinaryOp::Or {
+        return exact_type_refinement_from_rejected_class_condition(left, ctx)
+            .or_else(|| exact_type_refinement_from_rejected_class_condition(right, ctx));
+    }
     if *op != BinaryOp::Ne {
         return None;
     }
@@ -14610,14 +14616,15 @@ fn erased_java_simple_name(type_name: &str) -> &str {
 
 fn exact_erased_object_cast_initializer_local_shape(
     initializer: Option<&Expr>,
+    ctx: LowerCtx,
     refinements: &ExprRefinements,
 ) -> Option<RustSlotShape> {
     let (cast_ty, local_name) = exact_erased_object_cast_parts(initializer?)?;
     let exact_ty = refinements.exact_erased_object_locals.get(local_name)?;
-    if !same_concrete_java_type(cast_ty, exact_ty) {
+    if !cast_type_accepts_exact_refined_type(cast_ty, exact_ty, ctx) {
         return None;
     }
-    let mut shape = RustSlotShape::conservative(cast_ty.clone());
+    let mut shape = RustSlotShape::conservative(exact_ty.clone());
     shape.ownership = OwnershipShape::SharedBorrow;
     Some(shape)
 }
@@ -14631,17 +14638,17 @@ fn lower_exact_erased_object_cast_for_slot(
 ) -> Option<RustExpr> {
     let (cast_ty, local_name) = exact_erased_object_cast_parts(expr)?;
     let exact_ty = refinements.exact_erased_object_locals.get(local_name)?;
-    if !same_concrete_java_type(cast_ty, exact_ty) {
+    if !cast_type_accepts_exact_refined_type(cast_ty, exact_ty, ctx) {
         return None;
     }
     let target = slot_target_shape(slot)?;
     if target.ownership != OwnershipShape::SharedBorrow
-        || !cast_type_matches_borrowed_erased_object_target(cast_ty, &target.java_ty)
+        || !same_concrete_java_type(exact_ty, &target.java_ty)
     {
         return None;
     }
     let rust_type =
-        crate::slot_render::rust_name_for_java_named_type(concrete_java_type_name(cast_ty)?);
+        crate::slot_render::rust_name_for_java_named_type(concrete_java_type_name(exact_ty)?);
     Some(erased_object_borrowed_downcast_ref_projection(
         RustExpr::Var(local_name.to_string()),
         &rust_type,
@@ -14649,13 +14656,21 @@ fn lower_exact_erased_object_cast_for_slot(
     ))
 }
 
-fn cast_type_matches_borrowed_erased_object_target(
+fn cast_type_accepts_exact_refined_type(
     cast_ty: &JavaType,
-    target_ty: &JavaType,
+    exact_ty: &JavaType,
+    ctx: LowerCtx,
 ) -> bool {
-    same_concrete_java_type(cast_ty, target_ty)
-        || (matches!(target_ty, JavaType::String)
-            && same_concrete_java_type_name(cast_ty, "String"))
+    if same_concrete_java_type(cast_ty, exact_ty) {
+        return true;
+    }
+    let Some(exact_name) = concrete_java_type_name(exact_ty) else {
+        return false;
+    };
+    let Some(cast_name) = concrete_java_type_name(cast_ty) else {
+        return false;
+    };
+    source_or_jdk_subtype_reaches(exact_name, cast_name, ctx.support_local_type_program)
 }
 
 fn exact_erased_object_cast_parts(expr: &Expr) -> Option<(&JavaType, &str)> {
