@@ -461,6 +461,10 @@ Landed in this batch:
   `external_call_arg_shapes_for_resolved` after the shared planner either; the
   resolved external case is expected to arrive as a shaped
   `ArgumentLoweringPlan`.
+- Stream method references to `Objects::nonNull`/`Objects::isNull` over
+  optional elements now render through the shared `CallTargetPlan`/argument-plan
+  path. The older method-reference fallback remains only for non-optional
+  inputs where nullness has already been proven by shape.
 - External field fact lookup for enum/static-field lowering now goes through
   `member_access_plan::external_field_type_for_owner`; `lower.rs` no longer
   probes external-pack field facts directly.

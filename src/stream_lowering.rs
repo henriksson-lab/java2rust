@@ -1451,10 +1451,13 @@ fn emit_stream_method_reference_body_through_call_plan(
     };
     if matches!(
         native_method,
+        crate::call_plan::NativeJavaStaticMethod::ObjectsEquals
+    ) || (matches!(
+        native_method,
         crate::call_plan::NativeJavaStaticMethod::ObjectsNonNull
             | crate::call_plan::NativeJavaStaticMethod::ObjectsIsNull
-            | crate::call_plan::NativeJavaStaticMethod::ObjectsEquals
-    ) {
+    ) && param_shape.is_none_or(|shape| shape.optional_element_type().is_none()))
+    {
         return None;
     }
     let arg_exprs = vec![Expr::Var(param.to_string())];

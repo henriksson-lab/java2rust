@@ -36891,6 +36891,53 @@ fn stream_method_reference_uses_facade_abi_receiver_facts() {
 }
 
 #[test]
+fn stream_optional_objects_null_method_references_use_call_target_plan() {
+    let mut env = TypeEnv::new();
+    env.insert_local(
+        "values",
+        list_java_type(optional_java_type(JavaType::String)),
+    );
+    let facts = new_java2rust::stdlib::rust_stdlib_signature_facts();
+    let non_null = parse_expr("values.stream().map(Objects::nonNull).collect(Collectors.toList())");
+    let is_null = parse_expr("values.stream().map(Objects::isNull).collect(Collectors.toList())");
+
+    let non_null_plan = build_stream_plan(&non_null, &env, &facts).unwrap();
+    let non_null_lowered =
+        render_stream_plan(&non_null_plan, RustExpr::Var("values".to_string())).unwrap();
+    assert_eq!(
+        non_null_lowered.expr,
+        RustExpr::Raw(
+            "values.iter().map(|value: Option<&String>| value.is_some()).collect::<Vec<_>>()"
+                .to_string()
+        )
+    );
+
+    let is_null_plan = build_stream_plan(&is_null, &env, &facts).unwrap();
+    let is_null_lowered =
+        render_stream_plan(&is_null_plan, RustExpr::Var("values".to_string())).unwrap();
+    assert_eq!(
+        is_null_lowered.expr,
+        RustExpr::Raw(
+            "values.iter().map(|value: Option<&String>| value.is_none()).collect::<Vec<_>>()"
+                .to_string()
+        )
+    );
+
+    let stream_lowering_source = include_str!("../src/stream_lowering.rs");
+    let method_ref_call_plan = stream_lowering_source
+        .split("fn emit_stream_method_reference_body_through_call_plan")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn emit_stream_instance_method_reference_body_through_call_plan")
+                .next()
+        })
+        .expect("stream method-reference call-plan helper should be present");
+    assert!(method_ref_call_plan.contains("NativeJavaStaticMethod::ObjectsNonNull"));
+    assert!(method_ref_call_plan.contains("param_shape.is_none_or"));
+    assert!(method_ref_call_plan.contains("apply_call_target(&target_plan"));
+}
+
+#[test]
 fn stream_plan_lowers_collectors_joining_terminal() {
     let mut env = TypeEnv::new();
     env.insert_local("names", list_java_type(JavaType::String));
