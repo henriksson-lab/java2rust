@@ -81,6 +81,21 @@ impl ShapeEnv {
         self.bind_name(BindingKind::LoopVariable, name);
     }
 
+    pub fn insert_catch_param(&mut self, name: impl Into<String>, ty: JavaType) {
+        let name = name.into();
+        self.local_shapes
+            .insert(name.clone(), RustSlotShape::for_storage(ty.clone()));
+        self.types.insert_local(name.clone(), ty);
+        self.bind_name(BindingKind::CatchParam, name);
+    }
+
+    pub fn insert_catch_param_shape(&mut self, name: impl Into<String>, shape: RustSlotShape) {
+        let name = name.into();
+        self.types.insert_local(name.clone(), shape.java_ty.clone());
+        self.local_shapes.insert(name.clone(), shape);
+        self.bind_name(BindingKind::CatchParam, name);
+    }
+
     pub fn insert_static_type_alias(
         &mut self,
         alias: impl Into<String>,

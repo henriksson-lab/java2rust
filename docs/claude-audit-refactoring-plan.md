@@ -443,11 +443,12 @@ Landed in this batch:
 
 - `BindingId`/`BindingKind` now exist as explicit binding identity types.
   `ShapeEnv` assigns compatibility ids for fields, static fields, params,
-  locals, and enhanced-for loop variables while preserving the existing
-  name-keyed type/shape maps. `MoveUseContext` starts projecting its binding
-  use-count query through a `BindingId` before using the legacy name-keyed usage
-  facts, creating the migration path for CFG/liveness without changing lowering
-  behavior yet.
+  locals, catch params, and enhanced-for loop variables while preserving the
+  existing name-keyed type/shape maps. Catch-body lowering records catch
+  variables as `CatchParam` bindings. `MoveUseContext` starts projecting its
+  binding use-count query through a `BindingId` before using the legacy
+  name-keyed usage facts, creating the migration path for CFG/liveness without
+  changing lowering behavior yet.
 
 1. Introduce `BindingId`.
    - Cover params, locals, catch params, loop variables, and fields.
@@ -539,7 +540,7 @@ Completion checklist for any audit marked `fixed locally`:
 | `0003` integer arithmetic semantics | partial | Binary int/long overflow, shift-distance masking, and local integral update wrapping fixed; divide-by-zero exception integration remains |
 | `0004` string concat absorbs arithmetic | fixed locally | Moved to `claude_audits/done`; Rust IR shape tags prevent recurrence |
 | `0005` unsigned right shift | fixed locally | Moved to `claude_audits/done`; arithmetic slice should add shift-distance masking |
-| `0006` move analysis fragmented | partial | CallableAnalysis present; BindingId compatibility ids are attached to ShapeEnv and MoveUseContext use-count projection; CFG/liveness still open |
+| `0006` move analysis fragmented | partial | CallableAnalysis present; BindingId compatibility ids are attached to ShapeEnv for params, locals, catch params, loop variables, fields, and static fields, plus MoveUseContext use-count projection; CFG/liveness still open |
 | `0007` opaque Rust strings | open | Slot/facade generalization, shape tags |
 | `0008` inference does not reach lowering | open | CallableAnalysis |
 | `0009` overload identity collapse | open | Java callable signature identity |

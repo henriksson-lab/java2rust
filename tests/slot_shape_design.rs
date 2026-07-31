@@ -10428,6 +10428,7 @@ class Uses {
     assert!(lower_source.contains(".receiver_expr()"));
     assert!(lower_source.contains("fn lower_enhanced_for_stmt"));
     assert!(lower_source.contains("loop_env.insert_local_shape"));
+    assert!(lower_source.contains("catch_env.insert_catch_param"));
 }
 
 #[test]
@@ -27437,6 +27438,17 @@ class EnvUse {
     assert_eq!(
         env.binding_id("item").map(|binding| binding.kind),
         Some(BindingKind::LoopVariable)
+    );
+    env.insert_catch_param_shape(
+        "ex",
+        RustSlotShape::for_storage(JavaType::Named {
+            name: "JavaException".to_string(),
+            args: Vec::new(),
+        }),
+    );
+    assert_eq!(
+        env.binding_id("ex").map(|binding| binding.kind),
+        Some(BindingKind::CatchParam)
     );
 }
 

@@ -8115,7 +8115,7 @@ fn lower_try_stmt(
                 .enumerate()
                 .map(|(clause_index, catch)| {
                     let mut catch_env = env.clone();
-                    catch_env.insert_local(
+                    catch_env.insert_catch_param(
                         catch.name.clone(),
                         JavaType::Named {
                             name: "JavaException".to_string(),
@@ -8165,7 +8165,7 @@ fn lower_try_stmt(
         .enumerate()
         .map(|(clause_index, catch)| {
             let mut catch_env = env.clone();
-            catch_env.insert_local(
+            catch_env.insert_catch_param(
                 catch.name.clone(),
                 JavaType::Named {
                     name: "JavaException".to_string(),

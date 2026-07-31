@@ -1165,10 +1165,11 @@ their Rust `panic!` spellings. Lowering still owns when those Java fallback
 paths are selected.
 
 Binding identity first slice: `BindingId` and `BindingKind` now provide a typed
-compatibility identity for params, locals, enhanced-for loop variables, fields,
-and static fields in `ShapeEnv`. Existing maps remain name-keyed, but
-`MoveUseContext` now projects binding use-count requests through `BindingId`
-before falling back to legacy usage facts. This is intentionally
+compatibility identity for params, locals, catch params, enhanced-for loop
+variables, fields, and static fields in `ShapeEnv`. Existing maps remain
+name-keyed, but catch-body lowering records catch variables as `CatchParam`
+bindings and `MoveUseContext` now projects binding use-count requests through
+`BindingId` before falling back to legacy usage facts. This is intentionally
 behavior-preserving groundwork for the planned per-callable CFG/liveness pass.
 Focused coverage: `expr_shape_owns_environment_setup_from_signature_plan`.
 Optional receiver borrowed-carrier follow-up: call-target receiver adaptation no
