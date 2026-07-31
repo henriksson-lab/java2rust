@@ -3453,6 +3453,36 @@ fn callable_analysis_shell_reaches_lowering_context() {
     assert!(binding_facts_helper.contains("current_method_decl"));
     assert!(binding_facts_helper.contains("JavaCallableKey::source_method"));
     assert!(binding_facts_helper.contains("method_usage_by_java_key"));
+    let call_plan_source = include_str!("../src/call_plan.rs");
+    let resolved_arg_shape_helper = call_plan_source
+        .split("fn resolved_call_signature_arg_shapes_by_java_key")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn resolved_call_signature_arg_shapes_by_args")
+                .next()
+        })
+        .expect("resolved Java-key arg-shape helper should be present");
+    assert!(resolved_arg_shape_helper.contains("JavaCallableKey"));
+    assert!(resolved_arg_shape_helper.contains("erased_type_name"));
+    assert!(resolved_arg_shape_helper.contains("method_signature_by_java_key"));
+    let resolved_with_facts = call_plan_source
+        .split("pub fn plan_call_arguments_with_facts(")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub fn plan_call_arguments_with_facts_and_args")
+                .next()
+        })
+        .expect("resolved call argument planner should be present");
+    assert!(resolved_with_facts.contains("resolved_call_signature_arg_shapes_by_java_key"));
+    let resolved_with_args = call_plan_source
+        .split("pub fn plan_call_arguments_with_facts_and_args(")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn explicit_facade_arg_slots_for_resolved")
+                .next()
+        })
+        .expect("resolved call argument planner with args should be present");
+    assert!(resolved_with_args.contains("resolved_call_signature_arg_shapes_by_java_key"));
 }
 
 #[test]

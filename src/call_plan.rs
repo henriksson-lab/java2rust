@@ -13,6 +13,7 @@ use crate::facts::{
 use crate::java_ir::{
     CallKind, Expr, JavaType, LambdaBody, PrimitiveType, ResolvedCall, ResolvedConstructor,
 };
+use crate::java_signature::{JavaCallableKey, JavaCallableKind, JavaCallableStaticness};
 use crate::representation::RepresentationPlan;
 use crate::shape_projection::{
     apply_borrowed_sequence_content_projection, apply_borrowed_string_content_projection,
@@ -4200,6 +4201,42 @@ fn resolved_call_signature_arg_shapes(
     )
 }
 
+fn resolved_call_signature_arg_shapes_by_java_key(
+    call: &ResolvedCall,
+    source_name: &str,
+    arg_count: usize,
+    signatures: &SignaturePlan,
+) -> Option<Vec<RustSlotShape>> {
+    if call.arg_target_types.len() != arg_count {
+        return None;
+    }
+    let key = JavaCallableKey {
+        owner: call.declaring_type.clone(),
+        java_name: source_name.to_string(),
+        erased_param_types: call
+            .arg_target_types
+            .iter()
+            .map(|ty| crate::java_signature::erased_type_name(ty, false))
+            .collect(),
+        kind: JavaCallableKind::Method,
+        staticness: match call.kind {
+            CallKind::Static => JavaCallableStaticness::Static,
+            CallKind::Instance => JavaCallableStaticness::Instance,
+        },
+    };
+    let signature = signatures.method_signature_by_java_key(&key)?;
+    if signature.params.len() != arg_count {
+        return None;
+    }
+    Some(
+        signature
+            .params
+            .iter()
+            .map(|param| param.shape.clone())
+            .collect(),
+    )
+}
+
 fn resolved_call_signature_arg_shapes_by_args(
     call: &ResolvedCall,
     source_name: &str,
@@ -4301,6 +4338,11 @@ pub fn plan_call_arguments_with_facts(
         {
             return plan;
         }
+        if let Some(shapes) =
+            resolved_call_signature_arg_shapes_by_java_key(call, name, arg_count, signatures)
+        {
+            return ArgumentLoweringPlan::Shaped(shapes);
+        }
         if let Some(shapes) = resolved_call_signature_arg_shapes(call, arg_count, signatures) {
             return ArgumentLoweringPlan::Shaped(shapes);
         }
@@ -4343,6 +4385,11 @@ pub fn plan_call_arguments_with_facts_and_args(
             facade_abi_call_arg_plan_for_resolved(call, name, arg_count, Some(args), facts, types)
         {
             return plan;
+        }
+        if let Some(shapes) =
+            resolved_call_signature_arg_shapes_by_java_key(call, name, arg_count, signatures)
+        {
+            return ArgumentLoweringPlan::Shaped(shapes);
         }
         if let Some(shapes) = resolved_call_signature_arg_shapes(call, arg_count, signatures) {
             return ArgumentLoweringPlan::Shaped(shapes);
