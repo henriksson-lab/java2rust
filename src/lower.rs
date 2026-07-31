@@ -1439,6 +1439,7 @@ fn source_supertype_conversion_impls_for_type(ty: &TypeDecl, ctx: LowerCtx) -> V
     let mut impls = Vec::new();
     let mut current = ty.extends.as_deref();
     let mut visited = HashSet::new();
+    let mut emitted_targets = BTreeSet::new();
     while let Some(super_name) = current {
         let Some(super_ty) = find_type_decl_by_name(ctx.support_local_type_program, super_name)
             .or_else(|| find_type_decl_by_name(ctx.source_summary_type_program, super_name))
@@ -1448,7 +1449,9 @@ fn source_supertype_conversion_impls_for_type(ty: &TypeDecl, ctx: LowerCtx) -> V
         if !visited.insert(super_ty.name.clone()) {
             break;
         }
+        let target_key = source_supertype_conversion_target_key(super_ty, ctx.representations);
         if source_supertype_conversion_target_is_emitted(super_ty, ctx)
+            && emitted_targets.insert(target_key)
             && let Some(item) = source_supertype_conversion_impl_for_pair(
                 ty,
                 super_ty,
@@ -1462,6 +1465,24 @@ fn source_supertype_conversion_impls_for_type(ty: &TypeDecl, ctx: LowerCtx) -> V
         current = super_ty.extends.as_deref();
     }
     impls
+}
+
+fn source_supertype_conversion_target_key(
+    super_ty: &TypeDecl,
+    representations: &RepresentationPlan,
+) -> String {
+    let super_ty_java = JavaType::Named {
+        name: super_ty.name.clone(),
+        args: Vec::new(),
+    };
+    match representations.dispatch_for(&super_ty_java) {
+        DispatchShape::ErasedObject => "Box<dyn std::any::Any>".to_string(),
+        DispatchShape::ClosedEnum { enum_name } => format!("closed-enum:{enum_name}"),
+        _ => format!(
+            "concrete:{}",
+            crate::slot_render::rust_name_for_java_named_type(&super_ty.name)
+        ),
+    }
 }
 
 fn source_external_supertype_conversion_impls_for_type(

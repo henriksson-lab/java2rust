@@ -101,6 +101,16 @@ generated-Rust errors reduced from 33 to 28. Audit `0031` remains open because
 the full stubbed-constant census/reporting requirement is broader than this VCF
 subset fix.
 
+2026-07-31 erased-super conversion checkpoint: source-super conversion impls
+now dedupe by normalized Rust target, so two Java supertypes that both lower to
+`Box<dyn Any>` no longer produce conflicting `From<Child>` impls. Reduced
+VCFStandardHeaderLines proof:
+`.tmp/corpus-rerun-20260731-vcf-standard-bound-after-erased-from-dedupe-r1`
+has generated-Rust errors reduced from 28 to 26 with the duplicate
+`VCFInfoHeaderLine`/`VCFFormatHeaderLine` erased conversion rows gone. This is a
+partial `0011`-inspired fix only; member-bearing erased carrier access remains
+the hard open representation problem.
+
 2026-07-30 map-get ABI cleanup checkpoint: `HashMap.get` return adaptation no
 longer reconstructs map value type and optional-borrow target shape inside
 `lower.rs`. The lowered expression now uses `native_collection_lowered_type` and

@@ -4,11 +4,11 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use new_java2rust::facts::{
-    ExternalApiArgumentEffectFact, ExternalApiEffectFact, ExternalApiRole,
-    ExternalArgumentAliasPolicy, ExternalFfiHandoverFact, ExternalFfiHandoverSlot,
-    ExternalFieldFact, ExternalFieldKind, FactProvenance, FactSet, FieldKey, NullabilityState,
-    OwnedRecoveryCapability, OwnedRecoveryCapabilityFact, ReceiverMutabilityFact,
-    TypeCapabilityOverride,
+    DispatchRequirementFact, DispatchRequirementKind, ExternalApiArgumentEffectFact,
+    ExternalApiEffectFact, ExternalApiRole, ExternalArgumentAliasPolicy, ExternalFfiHandoverFact,
+    ExternalFfiHandoverSlot, ExternalFieldFact, ExternalFieldKind, FactProvenance, FactSet,
+    FieldKey, NullabilityState, OwnedRecoveryCapability, OwnedRecoveryCapabilityFact,
+    ReceiverMutabilityFact, TypeCapabilityOverride,
 };
 use new_java2rust::java_ir::{JavaType, PrimitiveType};
 use new_java2rust::{
@@ -9636,6 +9636,60 @@ class Box<T extends HeaderLine> {
             && !translation.rust.contains("HeaderLine::set_source(&mut {"),
         "{}",
         translation.rust
+    );
+}
+
+#[test]
+fn erased_source_super_alias_conversions_are_deduplicated_by_rust_target() {
+    let source = r#"
+class BaseLine {
+}
+
+class MidLine extends BaseLine {
+}
+
+class LeafLine extends MidLine {
+}
+
+class ErasedSourceSuperAliasConversionUse {
+    Object erased(LeafLine line) {
+        return line;
+    }
+}
+"#;
+    let mut facts = FactSet::default();
+    facts
+        .dispatch_requirement_facts
+        .push(DispatchRequirementFact {
+            type_name: "BaseLine".to_string(),
+            requirement: DispatchRequirementKind::NeedsUnknownRuntimeObject,
+            provenance: FactProvenance::UserOverride,
+        });
+    facts
+        .dispatch_requirement_facts
+        .push(DispatchRequirementFact {
+            type_name: "MidLine".to_string(),
+            requirement: DispatchRequirementKind::NeedsUnknownRuntimeObject,
+            provenance: FactProvenance::UserOverride,
+        });
+    let translation = translate_source_with_facts(source, &facts);
+
+    assert!(
+        translation.rust.contains("impl From<LeafLine> for MidLine")
+            && !translation
+                .rust
+                .contains("impl From<LeafLine> for BaseLine"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "erased_source_super_alias_conversions",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
