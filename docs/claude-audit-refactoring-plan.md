@@ -238,6 +238,13 @@ Landed in this batch:
 - Local integral `++`/`--` update expressions now use primitive-aware wrapping
   projections, including the Java char/u16 wraparound path, instead of Rust
   `+= 1`/`-= 1` in debug builds.
+- Checked integer division/remainder fallibility now has a shared lowering
+  context policy for argument lowering. Shaped and unshaped call arguments use
+  the same `Result` propagation versus uncaught-panic decision as returns,
+  locals, assignments, and conditions, so native/facade call arguments in
+  catchable `try` scopes no longer hardcode `?` outside the shared policy.
+  This narrows audit `0003`; keep the audit active until array-index contexts
+  and the fuller unchecked-exception propagation model are covered.
 - One-dimensional array compound assignments with side-effecting indices now
   hoist the Java index once, save the old element value before evaluating the
   RHS, and reuse the shared numeric binary/narrowing planners for writeback.

@@ -256,6 +256,13 @@ struct LowerCtx<'a> {
     current_stmt_read_counts: Option<&'a std::collections::HashMap<String, usize>>,
     exclusive_terminal_branch_read_names: Option<&'a std::collections::HashSet<String>>,
     preinitialized_try_capture_names: Option<&'a std::collections::HashSet<String>>,
+    result_propagation_mode: ResultPropagationMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResultPropagationMode {
+    UncaughtPanic,
+    Propagate,
 }
 
 pub fn lower_program(program: &Program, diagnostics: DiagnosticBag) -> LoweredProgram {
@@ -378,6 +385,7 @@ pub fn lower_program_with_semantic_plans_and_support_context(
         current_stmt_read_counts: None,
         exclusive_terminal_branch_read_names: None,
         preinitialized_try_capture_names: None,
+        result_propagation_mode: ResultPropagationMode::UncaughtPanic,
     };
     let mut file = RustFile::default();
     if exceptions.support.emit_support_item {
@@ -4871,6 +4879,7 @@ fn lower_block_with_refinements(
         preinitialized_try_capture_names_for_block(&block.statements);
     let block_ctx = LowerCtx {
         preinitialized_try_capture_names: Some(&preinitialized_try_capture_names),
+        result_propagation_mode: result_propagation_mode_for_block(wrap_returns_in_ok),
         ..ctx
     };
     let mut body = Vec::new();
@@ -4927,6 +4936,7 @@ fn lower_lambda_block_with_result_carrier(
         preinitialized_try_capture_names_for_block(&block.statements);
     let block_ctx = LowerCtx {
         preinitialized_try_capture_names: Some(&preinitialized_try_capture_names),
+        result_propagation_mode: result_propagation_mode_for_block(wrap_returns_in_ok),
         ..ctx
     };
     let mut body = Vec::new();
@@ -4958,6 +4968,14 @@ fn lower_lambda_block_with_result_carrier(
         }
     }
     body
+}
+
+fn result_propagation_mode_for_block(wrap_returns_in_ok: bool) -> ResultPropagationMode {
+    if wrap_returns_in_ok {
+        ResultPropagationMode::Propagate
+    } else {
+        ResultPropagationMode::UncaughtPanic
+    }
 }
 
 fn statement_suffix_read_names(statements: &[Stmt]) -> HashSet<String> {
@@ -8523,6 +8541,21 @@ fn apply_result_propagation_policy(
     } else {
         unwrap_result_or_panic_uncaught_java_exception(lowered)
     }
+}
+
+fn apply_result_propagation_policy_from_ctx(
+    lowered: RustExpr,
+    expr: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> RustExpr {
+    apply_result_propagation_policy(
+        lowered,
+        expr,
+        env,
+        ctx,
+        ctx.result_propagation_mode == ResultPropagationMode::Propagate,
+    )
 }
 
 fn lower_condition_expr_with_result_policy(
@@ -15218,9 +15251,11 @@ fn lower_argument_for_explicit_slot(
                 .unwrap_or_else(|| {
                     lower_expr_for_slot(arg, env, argument_slot(shape.clone()), ctx)
                 });
+        let lowered = apply_result_propagation_policy_from_ctx(lowered, arg, env, ctx);
         return adapt_reused_owned_argument(lowered, arg, &shape, Some(&actual_shape), env, ctx);
     }
-    lower_expr_for_slot(arg, env, slot, ctx)
+    let lowered = lower_expr_for_slot(arg, env, slot, ctx);
+    apply_result_propagation_policy_from_ctx(lowered, arg, env, ctx)
 }
 
 fn lower_constructor_args_with_plan(
@@ -15309,10 +15344,8 @@ fn lower_unshaped_argument(arg: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> RustExp
     if let Some(current_self) = lower_current_self_cast_unshaped_argument(arg, ctx) {
         return current_self;
     }
-    let mut lowered = lower_expr(arg, env, ctx);
-    if slot_expr_needs_result_propagation(arg, env, ctx) {
-        lowered = propagate_result_projection(lowered);
-    }
+    let mut lowered =
+        apply_result_propagation_policy_from_ctx(lower_expr(arg, env, ctx), arg, env, ctx);
     let shape = infer_expr_shape_with_context(
         arg,
         env,

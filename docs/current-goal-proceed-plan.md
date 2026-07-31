@@ -13,6 +13,12 @@ Primary evidence files:
 - `docs/corpus-fix-next-plan.md`
 - `docs/proceed-from-current-fastqc-abstract-plan-2026-07-23.md`
 
+Audit closeout invariant: when a Claude audit issue is genuinely done, move its
+issue file from `claude_audits/` to
+`/home/mahogny/github/claude/new_java2rust/claude_audits/done` in the same
+checkpoint as the implementation, focused verification, and plan update. Partial
+or inspiration-only audits stay active until fully closed.
+
 Top todo:
 
 - Decision: Rust stdlib/core/alloc behavior should be inferred from Rust

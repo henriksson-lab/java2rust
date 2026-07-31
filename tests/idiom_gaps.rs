@@ -5692,6 +5692,52 @@ mod generated_tests {
 }
 
 #[test]
+fn java_integer_result_propagation_in_call_arguments_uses_context_policy() {
+    let translation = translate_source(
+        r#"
+class JavaIntegerCallArgumentExceptionSemantics {
+    int plainCallArg(int value, int divisor) {
+        return Math.abs(value / divisor);
+    }
+
+    int catchCallArg(int value, int divisor) {
+        try {
+            return Math.abs(value / divisor);
+        } catch (ArithmeticException ex) {
+            return 561;
+        }
+    }
+
+    int catchNestedCallArg(int value, int divisor) {
+        try {
+            return Math.abs(1 + value / divisor);
+        } catch (ArithmeticException ex) {
+            return 571;
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("pub fn plain_call_arg")
+            && translation
+                .rust
+                .contains("unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))")
+            && translation.rust.contains("pub fn catch_call_arg")
+            && translation
+                .rust
+                .contains("Err(ex) if ex.is_instance(&[\"ArithmeticException\"])")
+            && translation
+                .rust
+                .contains("Ok((__java_left).wrapping_add(__java_right))")
+            && !translation.rust.contains("value / divisor"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn java_local_update_expressions_wrap_for_integral_primitives() {
     let translation = translate_source(
         r#"
