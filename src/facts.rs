@@ -1809,6 +1809,34 @@ impl FactSet {
         .or_else(|| self.find_external_api_effect(None, method_name, arg_count, None))
     }
 
+    pub fn external_api_effect_for_receiver_with_arity_or_rust_name(
+        &self,
+        receiver_type: Option<&str>,
+        method_name: &str,
+        arg_count: Option<usize>,
+    ) -> Option<&ExternalApiEffectFact> {
+        self.external_api_effect_for_receiver_with_arity(receiver_type, method_name, arg_count)
+            .or_else(|| {
+                receiver_type.and_then(|receiver_type| {
+                    self.external_crate_api_mapping_facts
+                        .iter()
+                        .rev()
+                        .filter(|mapping| {
+                            mapping.rust_name == method_name
+                                && (mapping.arg_count == arg_count || mapping.arg_count.is_none())
+                                && external_type_name_matches(&mapping.receiver_type, receiver_type)
+                        })
+                        .find_map(|mapping| {
+                            self.external_api_effect_for_receiver_with_arity(
+                                Some(&mapping.receiver_type),
+                                &mapping.method_name,
+                                arg_count.or(mapping.arg_count),
+                            )
+                        })
+                })
+            })
+    }
+
     pub fn external_api_effect_for_call(
         &self,
         receiver_type: Option<&str>,

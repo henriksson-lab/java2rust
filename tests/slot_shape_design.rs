@@ -22735,6 +22735,33 @@ class FallibleCalls {
 }
 
 #[test]
+fn external_callable_fallibility_uses_rust_name_mapping() {
+    let parsed = parse_external_pack_manifest(
+        r#"
+        external-pack dep.io dep.io rust-crate-mapping mapped target=dep_io
+        external-pack-api dep.io dep.io.Reader readRecord mapped getter read-only definitely-non-null args=0 return=dep.io.Record throws=DepIoError rust=read_record
+        "#,
+    );
+    assert!(parsed.diagnostics.is_empty());
+
+    let key = new_java2rust::usage::CallableKey::ExternalMethod {
+        receiver_type: Some("dep.io.Reader".to_string()),
+        method_name: "read_record".to_string(),
+        arg_count: 0,
+    };
+    let mut nodes = HashSet::new();
+    nodes.insert(key.clone());
+    let graph = new_java2rust::usage::CallGraph {
+        nodes,
+        edges: Vec::new(),
+    };
+
+    let fallibility = plan_program_fallibility(&graph, &parsed.facts);
+
+    assert!(fallibility.returns_result(&key));
+}
+
+#[test]
 fn program_exception_plan_uses_callable_fallibility_fixpoint() {
     let parsed = parse_java_source(
         r#"

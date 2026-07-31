@@ -928,15 +928,13 @@ fn callable_checked_exception_types(callee: &CallableKey, facts: &FactSet) -> Ve
             method_name,
             arg_count,
         } => facts
-            .external_api_effect_facts
-            .iter()
-            .filter(|fact| {
-                fact.method_name == *method_name
-                    && fact.arg_count == Some(*arg_count)
-                    && fact.receiver_type.as_ref() == receiver_type.as_ref()
-            })
-            .flat_map(|fact| fact.thrown.clone())
-            .collect(),
+            .external_api_effect_for_receiver_with_arity_or_rust_name(
+                receiver_type.as_deref(),
+                method_name,
+                Some(*arg_count),
+            )
+            .map(|fact| fact.thrown.clone())
+            .unwrap_or_default(),
         CallableKey::ExternalConstructor { .. }
         | CallableKey::Lambda { .. }
         | CallableKey::AnonymousMethod { .. } => Vec::new(),
