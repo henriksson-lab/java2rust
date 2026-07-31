@@ -1010,11 +1010,40 @@ fn string_from_bytes_constructor_expr(args: Vec<RustExpr>) -> RustExpr {
 }
 
 fn apply_native_collection_new_target(
-    _target: &NewTargetPlan,
+    target: &NewTargetPlan,
     native_collection: NativeCollectionNewTarget,
     mut args: Vec<RustExpr>,
-    _facts: &FactSet,
+    facts: &FactSet,
 ) -> RustExpr {
+    if native_collection_new_target_kind(native_collection)
+        == crate::stdlib::JavaCollectionKind::Set
+        && crate::slot_render::java_set_uses_hash_free_carrier(&target.owner_shape.java_ty, facts)
+    {
+        return match native_collection {
+            NativeCollectionNewTarget::Empty { .. } => {
+                native_collection_empty_new_projection(crate::stdlib::JavaCollectionKind::List)
+            }
+            NativeCollectionNewTarget::WithCapacity { .. } => {
+                let capacity = args
+                    .pop()
+                    .unwrap_or_else(|| RustExpr::Literal("0".to_string()));
+                native_collection_with_capacity_projection(
+                    crate::stdlib::JavaCollectionKind::List,
+                    capacity,
+                )
+            }
+            NativeCollectionNewTarget::FromSource { .. } => args.pop().unwrap_or_else(|| {
+                native_collection_default_constructor_projection(
+                    crate::stdlib::JavaCollectionKind::List,
+                )
+            }),
+            NativeCollectionNewTarget::FromSingleArg { .. } => args.pop().unwrap_or_else(|| {
+                native_collection_default_constructor_projection(
+                    crate::stdlib::JavaCollectionKind::List,
+                )
+            }),
+        };
+    }
     match native_collection {
         NativeCollectionNewTarget::Empty { kind } => native_collection_empty_new_projection(kind),
         NativeCollectionNewTarget::WithCapacity { kind } => {
@@ -1030,5 +1059,16 @@ fn apply_native_collection_new_target(
         NativeCollectionNewTarget::FromSingleArg { kind } => args
             .pop()
             .unwrap_or_else(|| native_collection_default_constructor_projection(kind)),
+    }
+}
+
+fn native_collection_new_target_kind(
+    target: NativeCollectionNewTarget,
+) -> crate::stdlib::JavaCollectionKind {
+    match target {
+        NativeCollectionNewTarget::Empty { kind }
+        | NativeCollectionNewTarget::WithCapacity { kind }
+        | NativeCollectionNewTarget::FromSource { kind }
+        | NativeCollectionNewTarget::FromSingleArg { kind } => kind,
     }
 }

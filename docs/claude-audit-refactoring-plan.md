@@ -29,6 +29,9 @@ Keep the standing constraint: do not make algorithm changes that block future
 global semantic analysis. Prefer explicit keys, indices, compatibility shims,
 and divergence logs.
 
+Operating invariant: a Claude audit is not done until its issue file has been
+moved to `/home/mahogny/github/claude/new_java2rust/claude_audits/done`.
+
 ## Audit File Definition Of Done
 
 Audit file housekeeping is part of the work, not a later cleanup step. Once a

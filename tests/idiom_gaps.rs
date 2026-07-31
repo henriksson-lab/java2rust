@@ -21736,6 +21736,51 @@ class ErasedStaticHelper {
 }
 
 #[test]
+fn erased_object_set_uses_hash_free_vec_carrier() {
+    let mut facts = FactSet::default();
+    facts.hierarchy_overrides.push(HierarchyOverride {
+        type_name: "HeaderLine".to_string(),
+        strategy: HierarchyStrategy::ErasedObject,
+        provenance: FactProvenance::UserOverride,
+    });
+    let translation = translate_source_with_facts(
+        r#"
+class HeaderLine {}
+class FormatLine extends HeaderLine {}
+class ErasedSetUse {
+    void addLine(java.util.Set<HeaderLine> lines, FormatLine line) {
+        lines.add(line);
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub type HeaderLine = Box<dyn std::any::Any>;")
+            && translation
+                .rust
+                .contains("lines: &mut Vec<Box<dyn std::any::Any>>")
+            && translation.rust.contains("lines.push(")
+            && !translation.rust.contains("HashSet<HeaderLine>")
+            && !translation.rust.contains("HashSet<Box<dyn std::any::Any>>")
+            && !translation.rust.contains("lines.insert("),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "erased_object_set_hash_free_vec_carrier",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn string_value_of_static_owner_uses_native_jdk_projection() {
     let translation = translate_source(
         r#"

@@ -85,6 +85,7 @@ pub enum NativeJavaRustTypePolicy {
 pub enum NativeSequenceContainer {
     Vec,
     HashSet,
+    HashFreeSet,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -578,12 +579,17 @@ pub fn native_java_rust_type_policy_with_effective_facts(
                 };
             }
             crate::stdlib::JavaCollectionKind::Set => {
+                let element_ty = args
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(erased_object_java_type);
                 return NativeJavaRustTypePolicy::Sequence {
-                    container: NativeSequenceContainer::HashSet,
-                    element_ty: args
-                        .first()
-                        .cloned()
-                        .unwrap_or_else(erased_object_java_type),
+                    container: if java_set_element_uses_hash_free_carrier(&element_ty, facts) {
+                        NativeSequenceContainer::HashFreeSet
+                    } else {
+                        NativeSequenceContainer::HashSet
+                    },
+                    element_ty,
                 };
             }
             crate::stdlib::JavaCollectionKind::Map if args.len() == 2 => {}
@@ -1001,6 +1007,7 @@ pub fn render_native_java_rust_type_policy_with_effective_facts(
             let element_ty = rust_type_for_java_generic_arg_with_effective_facts(element_ty, facts);
             match container {
                 NativeSequenceContainer::Vec => RustType::Vec(Box::new(element_ty)),
+                NativeSequenceContainer::HashFreeSet => RustType::Vec(Box::new(element_ty)),
                 NativeSequenceContainer::HashSet => RustType::Raw(format!(
                     "std::collections::HashSet<{}>",
                     crate::emit::emit_type(&element_ty)
@@ -1018,4 +1025,41 @@ pub fn render_native_java_rust_type_policy_with_effective_facts(
             unreachable!("arrays are handled by sequence_element_type")
         }
     }
+}
+
+pub fn java_set_uses_hash_free_carrier(ty: &JavaType, facts: &FactSet) -> bool {
+    let effective_facts = EffectiveFacts::new(facts);
+    java_set_uses_hash_free_carrier_with_effective_facts(ty, &effective_facts)
+}
+
+pub fn java_set_uses_hash_free_carrier_with_effective_facts(
+    ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+) -> bool {
+    let JavaType::Named { args, .. } = ty else {
+        return false;
+    };
+    if crate::stdlib::java_collection_kind_for_type(ty)
+        != Some(crate::stdlib::JavaCollectionKind::Set)
+    {
+        return false;
+    }
+    let element_ty = args
+        .first()
+        .cloned()
+        .unwrap_or_else(erased_object_java_type);
+    java_set_element_uses_hash_free_carrier(&element_ty, facts)
+}
+
+fn java_set_element_uses_hash_free_carrier(
+    element_ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+) -> bool {
+    let representation_policy =
+        crate::signature::signature_boundary_representation_policy_with_effective_facts(
+            element_ty, facts,
+        );
+    representation_policy.preserve_object_representation
+        && !external_final_facade_should_keep_named_type(element_ty, facts)
+        && !crate::javalibs::generic_facade_interface_erases_to_named_rust_type(element_ty)
 }

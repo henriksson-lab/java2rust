@@ -16706,6 +16706,19 @@ fn apply_call_target_with_lower_context(
     args: Vec<RustExpr>,
     ctx: LowerCtx,
 ) -> RustExpr {
+    if let CallTargetPlan::NativeCollectionMethod {
+        method: NativeCollectionMethod::SetInsert,
+        receiver_ty: Some(receiver_ty),
+        ..
+    } = target
+        && crate::slot_render::java_set_uses_hash_free_carrier(receiver_ty, ctx.facts)
+    {
+        return receiver_method_call_projection_exact(
+            lowered_receiver.expect("native collection target must provide receiver"),
+            "push",
+            args,
+        );
+    }
     if ctx.current_method.is_some() && matches!(ctx.current_receiver, Some(ReceiverPlan::None)) {
         let current_static_self_name = match target {
             CallTargetPlan::StaticOwner { owner, rust_name } if owner == "Self" => {

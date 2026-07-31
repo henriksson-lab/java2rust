@@ -65,6 +65,9 @@ move its issue file from `claude_audits/` to
 `/home/mahogny/github/claude/new_java2rust/claude_audits/done`; partial fixes
 keep the audit file active and document what remains.
 
+Short form: no audit is closed until the corresponding file is in
+`/home/mahogny/github/claude/new_java2rust/claude_audits/done`.
+
 2026-07-31 user instruction: keep this in the plan explicitly: move Claude
 audits to `/home/mahogny/github/claude/new_java2rust/claude_audits/done` once
 done.
@@ -7348,6 +7351,24 @@ drops generated-Rust errors from 19 to 17. The previous
 top families are erased-carrier field access on `Box<dyn Any>` (`name`,
 `line_type`, `type_`, `count`, `count_type`) and `HashSet<Box<dyn Any>>`
 `Eq`/`Hash` trait bounds. This is partial `0011` work only.
+
+2026-07-31 erased-set carrier investigation checkpoint: explicit erased-object
+facts now make Java `Set<T>` choose a hash-free `Vec<T>` carrier when `T`
+lowers to `Box<dyn Any>`, and `Set.add(...)` lowers through the same native
+collection call plan to `push(...)`. Focused verification:
+`erased_object_set_uses_hash_free_vec_carrier`, `cargo fmt --check`,
+`cargo check --tests --quiet`, `git diff --check`, and release-backed reduced
+VCF rerun
+`.tmp/corpus-rerun-20260731-vcf-standard-bound-after-hash-free-erased-set-r4`.
+The VCF rerun is intentionally recorded as no-improvement evidence: it remains
+9/9 translated, 0 parse failures, 0 stubbed constants, and 17 generated-Rust
+errors. The remaining `HashSet<Box<dyn Any>>` rows come from per-file HTSJDK
+VCF external facts such as `VCFHeader.getMetaDataInInputOrder -> Set<VCFHeaderLine>`
+being planned before the assembled source crate reveals `VCFHeaderLine` as an
+erased alias. Next fix should carry source-summary representation/carrier facts
+across focused-package translation, or add an explicit facade collection-carrier
+fact for that external return. Do not solve this with another simple-name
+`VCFHeaderLine` rule in `stdlib.rs`.
 
 ## Rerun Protocol
 
