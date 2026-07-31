@@ -15771,6 +15771,67 @@ class DefaultMapperImpl implements DefaultMapper {
 }
 
 #[test]
+fn interface_super_default_call_dispatches_to_named_default_body() {
+    let translation = translate_source(
+        r#"
+interface NamedGreeter {
+    String name();
+
+    default String greet() {
+        return "hi " + name();
+    }
+}
+
+interface OtherGreeter {
+    default String greet() {
+        return "other";
+    }
+}
+
+class InterfaceSuperGreeter implements NamedGreeter, OtherGreeter {
+    public String name() {
+        return "named";
+    }
+
+    public String greet() {
+        return NamedGreeter.super.greet();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("return NamedGreeter::__java_default_greet(self);")
+            && !translation.rust.contains("NamedGreeter.super")
+            && !translation.rust.contains("super.greet"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "interface_super_default_call",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_interface_super_selects_named_default() {
+        let greeter = InterfaceSuperGreeter {};
+        assert_eq!(greeter.greet(), "hi named");
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
 fn abstract_class_methods_with_nonvoid_returns_emit_diverging_placeholders() {
     let translation = translate_source(
         r#"

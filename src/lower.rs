@@ -1189,11 +1189,31 @@ fn interface_default_trait_method_item(
         .as_ref()
         .map(|body| lower_block(body, &mut env, wrap_returns_in_ok, method_ctx))
         .unwrap_or_default();
-    format!(
+    let default_body = format!(
         "{} {{\n{}    }}",
         signature.trim_end_matches(';'),
         emit::emit_statements(&body, 2)
+    );
+    let helper_signature =
+        interface_default_helper_signature(&signature, &crate::parser::to_snake_case(&method.name));
+    let helper_body = format!(
+        "{} {{\n{}    }}",
+        helper_signature.trim_end_matches(';'),
+        emit::emit_statements(&body, 2)
+    );
+    format!("{default_body}\n{helper_body}")
+}
+
+fn interface_default_helper_signature(signature: &str, rust_name: &str) -> String {
+    signature.replacen(
+        &format!("fn {rust_name}"),
+        &format!("fn {}", interface_default_helper_name(rust_name)),
+        1,
     )
+}
+
+fn interface_default_helper_name(rust_name: &str) -> String {
+    format!("__java_default_{rust_name}")
 }
 
 fn static_storage_items_for_type(ty: &TypeDecl, ctx: LowerCtx) -> Vec<String> {
@@ -10789,6 +10809,11 @@ fn lower_expr_with_refinements(
                 return RustExpr::Raw(format!(
                     "JavaClass::<{rust_type}>::for_name({current_type:?})"
                 ));
+            }
+            if let Some(expr) =
+                lower_interface_super_default_call(receiver.as_deref(), name, args, env, ctx)
+            {
+                return expr;
             }
             if let Some(expr) =
                 lower_jdk_input_stream_super_read_call(receiver.as_deref(), name, args, env, ctx)
@@ -20912,6 +20937,96 @@ fn signature_field_shape_for_member(
         .flatten()
         .next()
         .cloned()
+}
+
+fn lower_interface_super_default_call(
+    receiver: Option<&Expr>,
+    name: &str,
+    args: &[Expr],
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<RustExpr> {
+    let Some(Expr::FieldAccess(owner, field)) = receiver else {
+        return None;
+    };
+    if field != "super" {
+        return None;
+    }
+    let Expr::Var(interface_name) = owner.as_ref() else {
+        return None;
+    };
+    let current_type = ctx.current_type?;
+    let current_decl = find_type_decl_by_name(ctx.program, current_type)
+        .or_else(|| find_type_decl_by_name(ctx.support_local_type_program, current_type))
+        .or_else(|| find_type_decl_by_name(ctx.source_summary_type_program, current_type))?;
+    if !current_decl.implements.iter().any(|implemented| {
+        same_concrete_java_type_name(&JavaType::Unknown(implemented.clone()), interface_name)
+    }) {
+        return None;
+    }
+    let interface_decl = find_type_decl_by_name(ctx.program, interface_name)
+        .or_else(|| find_type_decl_by_name(ctx.support_local_type_program, interface_name))
+        .or_else(|| find_type_decl_by_name(ctx.source_summary_type_program, interface_name))?;
+    if interface_decl.kind != TypeKind::Interface
+        || !interface_decl.members.iter().any(|member| {
+            matches!(member, Member::Method(method) if method.name == name && method.body.is_some())
+        })
+    {
+        return None;
+    }
+
+    let rust_name = crate::parser::to_snake_case(name);
+    let trait_name = interface_trait_rust_name(interface_name, ctx)
+        .unwrap_or_else(|| crate::slot_render::rust_name_for_java_named_type(interface_name));
+    let lowered_args = lower_interface_super_call_args(interface_name, &rust_name, args, env, ctx);
+    let mut rendered_args = Vec::with_capacity(lowered_args.len() + 1);
+    rendered_args.push("self".to_string());
+    rendered_args.extend(lowered_args.iter().map(crate::emit::emit_expr));
+    let helper_name = interface_default_helper_name(&rust_name);
+    Some(RustExpr::Raw(format!(
+        "{trait_name}::{helper_name}({})",
+        rendered_args.join(", ")
+    )))
+}
+
+fn interface_trait_rust_name(interface_name: &str, ctx: LowerCtx) -> Option<String> {
+    let java_ty = JavaType::Named {
+        name: interface_name.to_string(),
+        args: Vec::new(),
+    };
+    ctx.representations
+        .type_representation(interface_name)
+        .and_then(|representation| match &representation.representation {
+            crate::representation::ObjectRepresentation::DynTrait { trait_name } => Some(
+                crate::slot_render::rust_name_for_java_named_type(trait_name),
+            ),
+            _ => None,
+        })
+        .or_else(|| match ctx.representations.dispatch_for(&java_ty) {
+            DispatchShape::DynTrait { trait_name }
+            | DispatchShape::BoxedDynTrait { trait_name } => Some(
+                crate::slot_render::rust_name_for_java_named_type(&trait_name),
+            ),
+            _ => None,
+        })
+}
+
+fn lower_interface_super_call_args(
+    interface_name: &str,
+    rust_name: &str,
+    args: &[Expr],
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Vec<RustExpr> {
+    args.iter()
+        .enumerate()
+        .map(|(index, arg)| {
+            ctx.signatures
+                .method_arg_shape_by_rust_name(interface_name, rust_name, index)
+                .map(|shape| lower_same_object_call_arg_with_shape(arg, env, shape, ctx))
+                .unwrap_or_else(|| lower_expr(arg, env, ctx))
+        })
+        .collect()
 }
 
 fn lower_static_initialized_singleton_field_for_slot(

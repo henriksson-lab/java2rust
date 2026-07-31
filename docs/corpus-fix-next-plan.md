@@ -7701,6 +7701,23 @@ Audit `0026` remains partial because non-array assignment places with
 side-effecting receivers, multi-level ragged array receivers, and full
 array-store exception ordering are still outside this localized slice.
 
+2026-07-31 interface-super default checkpoint: tree-sitter's qualified
+`Iface.super.method(...)` method invocation shape is now preserved by the parser
+as an explicit `.super` receiver, and lowering recognizes direct interface
+default-body calls only after checking the current type directly implements the
+named interface and that the named interface method has a parsed default body.
+Interface trait emission now adds hidden `__java_default_*` helpers for default
+method bodies, so explicit Java interface-super calls bypass Rust trait override
+dispatch instead of recursing through the implementing method. Focused
+verification covers
+`interface_super_default_call_dispatches_to_named_default_body`,
+`interface_default_method_body_is_emitted_and_inherited`,
+`interface_default_generic_method_preserves_type_params`,
+`abstract_class_gets_inherent_stubs_for_unimplemented_interface_methods`,
+`cargo fmt --check`, and `cargo check --tests --quiet`. Audit `0025` remains
+partial because conflicting defaults, indirect interface-super qualification,
+and private/static interface members are still open.
+
 ## Rerun Protocol
 
 After each fix:

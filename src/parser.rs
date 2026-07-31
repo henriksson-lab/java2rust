@@ -2080,9 +2080,26 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
         }
         "switch_expression" => parse_switch_expr_node(node, source),
         "method_invocation" => {
-            let receiver = node
-                .child_by_field_name("object")
-                .map(|object| Box::new(parse_expr_node(object, source)));
+            let receiver = node.child_by_field_name("object").map(|object| {
+                let mut receiver = if object.kind() == "identifier" {
+                    let ident = text(object, source);
+                    if ident
+                        .chars()
+                        .next()
+                        .is_some_and(|ch| ch.is_ascii_uppercase())
+                    {
+                        Expr::Var(ident.to_string())
+                    } else {
+                        parse_expr_node(object, source)
+                    }
+                } else {
+                    parse_expr_node(object, source)
+                };
+                if text(node, source).contains(".super.") {
+                    receiver = Expr::FieldAccess(Box::new(receiver), "super".to_string());
+                }
+                Box::new(receiver)
+            });
             Expr::Call {
                 receiver,
                 name: field_text(node, "name", source).unwrap_or_else(|| "unknown".to_string()),
