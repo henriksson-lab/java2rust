@@ -21289,6 +21289,26 @@ class JavaArraysBinarySearchUse {
     int missing(int[] values, int key) {
         return Arrays.binarySearch(values, key);
     }
+
+    int rangeFound(int[] values, int from, int to, int key) {
+        return Arrays.binarySearch(values, from, to, key);
+    }
+
+    int rangeMissing(int[] values, int from, int to, int key) {
+        return Arrays.binarySearch(values, from, to, key);
+    }
+
+    int badRangeOrder(int[] values) {
+        return Arrays.binarySearch(values, 3, 1, 4);
+    }
+
+    int badRangeStart(int[] values) {
+        return Arrays.binarySearch(values, -1, 2, 4);
+    }
+
+    int badRangePastEnd(int[] values) {
+        return Arrays.binarySearch(values, 1, 5, 4);
+    }
 }
 "#,
     );
@@ -21320,6 +21340,11 @@ mod generated_tests {
         assert_eq!(fixture.missing(&[1, 3, 5, 7], 4), -3);
         assert_eq!(fixture.missing(&[1, 3, 5, 7], 0), -1);
         assert_eq!(fixture.missing(&[1, 3, 5, 7], 9), -5);
+        assert_eq!(fixture.range_found(&[1, 3, 5, 7, 9], 1, 4, 5), 2);
+        assert_eq!(fixture.range_missing(&[1, 3, 5, 7, 9], 1, 4, 4), -3);
+        assert!(std::panic::catch_unwind(|| fixture.bad_range_order(&[1, 3, 5, 7])).is_err());
+        assert!(std::panic::catch_unwind(|| fixture.bad_range_start(&[1, 3, 5, 7])).is_err());
+        assert!(std::panic::catch_unwind(|| fixture.bad_range_past_end(&[1, 3, 5, 7])).is_err());
     }
 }
 "#,
