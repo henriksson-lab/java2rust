@@ -981,13 +981,20 @@ fn closed_enum_rejection_reason(
 }
 
 fn apply_erased_object_requirement_fallback(strategy: &mut ObjectStrategyPlan) {
-    let Some(reason) = erased_object_requirement_reason(&strategy.requirements) else {
+    let Some(reason) = erased_object_requirement_reason(
+        &strategy.strategy,
+        &strategy.requirements,
+        &strategy.direct_subtypes,
+    ) else {
         return;
     };
     if matches!(strategy.strategy, ObjectRepresentation::ErasedObject) {
         return;
     }
-    if matches!(strategy.strategy, ObjectRepresentation::DynTrait { .. }) {
+    if matches!(
+        strategy.strategy,
+        ObjectRepresentation::DynTrait { .. } | ObjectRepresentation::ConcreteStruct
+    ) {
         strategy.rejected.push(RejectedObjectStrategy {
             strategy: strategy.strategy.clone(),
             reason,
@@ -997,7 +1004,25 @@ fn apply_erased_object_requirement_fallback(strategy: &mut ObjectStrategyPlan) {
     }
 }
 
-fn erased_object_requirement_reason(requirements: &[DispatchRequirement]) -> Option<String> {
+fn erased_object_requirement_reason(
+    strategy: &ObjectRepresentation,
+    requirements: &[DispatchRequirement],
+    direct_subtypes: &[String],
+) -> Option<String> {
+    if matches!(strategy, ObjectRepresentation::ConcreteStruct)
+        && !direct_subtypes.is_empty()
+        && requirements.iter().any(|requirement| {
+            matches!(
+                requirement,
+                DispatchRequirementKind::NeedsInstanceof | DispatchRequirementKind::NeedsDowncast
+            )
+        })
+    {
+        return Some(
+            "open runtime case-split requirement needs erased object fallback when closed enum is unavailable"
+                .to_string(),
+        );
+    }
     if requirements
         .iter()
         .any(|requirement| *requirement == DispatchRequirementKind::NeedsUnknownRuntimeObject)

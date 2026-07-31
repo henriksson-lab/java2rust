@@ -46,6 +46,7 @@ use crate::coercion::{
     constructor_self_field_projection, constructor_self_field_replacement,
     deref_borrowed_projection, ensure_borrow_projection,
     erased_object_borrowed_downcast_ref_projection, erased_object_box_projection,
+    erased_object_sequence_iter_cloned_projection,
     exception_self_as_supertype_facade_boundary_projection,
     explicit_java_facade_cast_placeholder_projection, force_shared_borrow_projection,
     function_call_projection, if_err_panic_uncaught_java_exception_stmt,
@@ -133,7 +134,7 @@ use crate::item_assembly::{
     delegating_constructor_return_body, impl_item_for_type_with_support_context,
     is_static_final_field, method_function_shell_with_facts_exception_plan_and_support_contexts,
     raw_item, rust_use_name_for_source_type, static_storage_initial_fallback_value,
-    struct_item_for_type_with_facts_and_support_context,
+    struct_item_for_type_with_facts_and_support_context, with_type_param_marker_field_values,
 };
 use crate::java_ir::Member as Jm;
 use crate::java_ir::*;
@@ -500,7 +501,7 @@ fn collect_source_object_to_string_fallback_items(
                 name: ty.name.clone(),
                 args: Vec::new(),
             }),
-            DispatchShape::ClosedEnum { .. }
+            DispatchShape::ClosedEnum { .. } | DispatchShape::ErasedObject
         )
     {
         let rust_name = crate::slot_render::rust_name_for_java_named_type(&ty.name);
@@ -842,6 +843,15 @@ fn lower_type(
         ctx.facts,
         ctx.exceptions,
     ) {
+        if let Some(bound_item) = source_class_bound_trait_item_for_type(
+            ctx.support_local_type_program,
+            ty,
+            ctx.signatures,
+            ctx.facts,
+            ctx.exceptions,
+        ) {
+            file.items.push(raw_item(bound_item));
+        }
         file.items.push(raw_item(item));
         if matches!(ty.kind, TypeKind::Enum) {
             let functions = ty
@@ -1519,6 +1529,17 @@ fn source_supertype_conversion_impl_for_pair(
         return (sub_name != enum_name).then(|| {
             format!(
                 "impl From<{sub_name}> for {enum_name} {{\n    fn from(value: {sub_name}) -> Self {{\n        {enum_name}::{sub_name}(value)\n    }}\n}}"
+            )
+        });
+    }
+    if matches!(
+        representations.dispatch_for(&super_ty_java),
+        DispatchShape::ErasedObject
+    ) {
+        let super_name = crate::slot_render::rust_name_for_java_named_type(&super_ty.name);
+        return (sub_name != super_name).then(|| {
+            format!(
+                "impl From<{sub_name}> for {super_name} {{\n    fn from(value: {sub_name}) -> Self {{\n        Box::new(value) as {super_name}\n    }}\n}}"
             )
         });
     }
@@ -2372,7 +2393,7 @@ fn constructor_field_plans_with_body_local_decls(
         ty: None,
         value: Some(RustExpr::StructLit {
             name: crate::slot_render::rust_name_for_java_named_type(&ty.name),
-            fields,
+            fields: with_type_param_marker_field_values(ty, fields),
         }),
     }];
 
@@ -2451,7 +2472,7 @@ fn constructor_field_plans_with_trailing_body_ordered(
         ty: None,
         value: Some(RustExpr::StructLit {
             name: crate::slot_render::rust_name_for_java_named_type(&ty.name),
-            fields,
+            fields: with_type_param_marker_field_values(ty, fields),
         }),
     }];
     if let Some(assignment_order) = assignment_order.as_ref() {
@@ -3973,7 +3994,7 @@ fn super_no_arg_constructor_with_trailing_body(
         ty: None,
         value: Some(RustExpr::StructLit {
             name: crate::slot_render::rust_name_for_java_named_type(&ty.name),
-            fields,
+            fields: with_type_param_marker_field_values(ty, fields),
         }),
     });
     body.extend(lower_delegated_constructor_trailing_stmts(
@@ -9900,11 +9921,20 @@ fn lower_enhanced_for_stmt(
             ctx.representations,
             element_ty.clone(),
         );
-        if matches!(element_shape.dispatch, DispatchShape::ClosedEnum { .. }) {
+        if matches!(
+            element_shape.dispatch,
+            DispatchShape::ClosedEnum { .. } | DispatchShape::ErasedObject
+        ) {
             loop_env.insert_local_shape(var_name.to_string(), element_shape);
-            let iterator = sequence_iter_cloned_projection(lower_enhanced_for_iterable_expr(
-                iterable, env, ctx,
-            ));
+            let lowered_iterable = lower_enhanced_for_iterable_expr(iterable, env, ctx);
+            let iterator = if matches!(
+                loop_env.local_shape(var_name).map(|shape| &shape.dispatch),
+                Some(DispatchShape::ErasedObject)
+            ) {
+                erased_object_sequence_iter_cloned_projection(lowered_iterable)
+            } else {
+                sequence_iter_cloned_projection(lowered_iterable)
+            };
             return render_enhanced_for_iterator(
                 &format!("mut {var_name}"),
                 &iterator,

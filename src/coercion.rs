@@ -2191,6 +2191,13 @@ pub fn sequence_iter_cloned_projection(receiver: RustExpr) -> RustExpr {
     RustExpr::Raw(format!("{}.iter().cloned()", emit::emit_expr(&receiver)))
 }
 
+pub fn erased_object_sequence_iter_cloned_projection(receiver: RustExpr) -> RustExpr {
+    RustExpr::Raw(format!(
+        "{}.iter().map(|value| java_clone_erased_object_ref(value))",
+        emit::emit_expr(&receiver)
+    ))
+}
+
 pub fn sequence_iter_copied_projection(receiver: RustExpr) -> RustExpr {
     RustExpr::Raw(format!("{}.iter().copied()", emit::emit_expr(&receiver)))
 }

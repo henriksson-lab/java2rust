@@ -7035,6 +7035,23 @@ values. Do not land just the object-model demotion alone: without sequence
 element rendering and owned enhanced-for carriers, it trades the current
 diagnostic for method/clone/downcast compile failures.
 
+2026-07-31 VCF open-hierarchy implementation checkpoint: the reduced
+`source_hierarchy_instanceof_repair_keeps_supertype_slot_adapted` probe now
+passes as a normal idiom test. Open concrete source-hierarchy roots with
+runtime `instanceof`/downcast requirements and known direct subtypes can fall
+back to erased-object carriers; generic collection arguments honor that
+representation; enhanced-for assigned loop variables over erased carriers
+iterate owned cloned erased values; erased-object source aliases do not receive
+invalid inherent fallback impls; source-subtype conversion into an erased
+supertype boxes the subtype value; and generic source structs whose fields do
+not mention their type parameters receive a hidden `PhantomData` marker that
+constructors initialize. Focused verification:
+`source_hierarchy_instanceof_repair_keeps_supertype_slot_adapted`,
+`object_model_records_rejected_closed_enum_when_runtime_case_split_lacks_proof`,
+`object_model_selects_closed_enum_for_proven_closed_class_runtime_split`,
+`source_generic_class_bound_method_call_uses_bound_surface`, and
+`cargo check --tests --quiet`.
+
 2026-07-31 fact-backed initializer checkpoint: declared external locals whose
 initializer has a planned typed return now anchor through a general erased-type
 identity predicate in signature/lowering instead of the former

@@ -9916,7 +9916,6 @@ class PatternLineUse {
 }
 
 #[test]
-#[ignore = "tracks remaining VCF source hierarchy instanceof/downcast repair slot gap"]
 fn source_hierarchy_instanceof_repair_keeps_supertype_slot_adapted() {
     let source = r#"
 class HeaderLine {

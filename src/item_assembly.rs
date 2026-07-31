@@ -8,7 +8,7 @@ use crate::exception_plan::MethodExceptionPlan;
 use crate::facts::FactSet;
 use crate::java_ir::{
     BinaryOp, ConstructorDecl, Expr, FieldDecl, JavaType, Literal, Member, MethodDecl, Modifier,
-    PrimitiveType, Program, Stmt, TypeDecl,
+    PrimitiveType, Program, Stmt, TypeDecl, TypeKind,
 };
 use crate::rust_ir::{
     RustAssociatedConst, RustExpr, RustField, RustFunction, RustImpl, RustItem, RustParam,
@@ -313,8 +313,25 @@ pub fn constructor_function_shell_with_facts_and_support_contexts(
 pub fn constructor_return_body(ty: &TypeDecl, fields: Vec<(String, RustExpr)>) -> Vec<RustStmt> {
     vec![RustStmt::Return(Some(RustExpr::StructLit {
         name: rust_use_name_for_source_type(ty),
-        fields: reorder_struct_literal_moves_after_reads(fields),
+        fields: reorder_struct_literal_moves_after_reads(with_type_param_marker_field_values(
+            ty, fields,
+        )),
     }))]
+}
+
+pub fn with_type_param_marker_field_values(
+    ty: &TypeDecl,
+    mut fields: Vec<(String, RustExpr)>,
+) -> Vec<(String, RustExpr)> {
+    if source_type_needs_type_param_marker_field(ty)
+        && fields.iter().all(|(name, _)| name != "__marker")
+    {
+        fields.push((
+            "__marker".to_string(),
+            RustExpr::Raw("std::marker::PhantomData".to_string()),
+        ));
+    }
+    fields
 }
 
 fn function_type_params_with_optional_lifetime_and_support_contexts(
@@ -708,7 +725,30 @@ fn struct_fields_for_type(
     );
     let mut seen = HashSet::new();
     fields.retain(|field| seen.insert(field.name.clone()));
+    if source_type_needs_type_param_marker_field(ty)
+        && fields.iter().all(|field| field.name != "__marker")
+    {
+        fields.push(RustField {
+            name: "__marker".to_string(),
+            ty: RustType::Raw(type_param_marker_type(&ty.type_params)),
+            is_pub: false,
+            is_pub_crate: false,
+        });
+    }
     fields
+}
+
+fn source_type_needs_type_param_marker_field(ty: &TypeDecl) -> bool {
+    !ty.type_params.is_empty() && matches!(ty.kind, TypeKind::Class | TypeKind::Record)
+}
+
+fn type_param_marker_type(type_params: &[String]) -> String {
+    let return_type = if type_params.len() == 1 {
+        type_params[0].clone()
+    } else {
+        format!("({})", type_params.join(", "))
+    };
+    format!("std::marker::PhantomData<fn() -> {return_type}>")
 }
 
 fn rust_type_for_instance_field(

@@ -78,6 +78,12 @@ This is part of audit definition-of-done: do not mark an audit row complete,
 or describe it as closed in a checkpoint, until the issue file has been moved
 there.
 
+Current checkpoint action: whenever a fix fully resolves a `claude_audits/*.md`
+issue, include the file move to
+`/home/mahogny/github/claude/new_java2rust/claude_audits/done` in the same
+patch/commit as the implementation and focused verification notes. Partial
+audit work must stay in the active `claude_audits/` directory.
+
 ## Next Batch: Measurement And Unsupported Safety
 
 Goal: unmodelled behavior must be visible as a diagnostic, parseable Rust, or a

@@ -925,6 +925,12 @@ fn rust_type_for_java_generic_arg_with_effective_facts(
     {
         return RustType::Named(rust_name_for_java_named_type(name));
     }
+    if matches!(
+        facts.object_representation_override_strategy_for(ty),
+        Some(HierarchyStrategy::ErasedObject)
+    ) {
+        return erased_object_rust_type();
+    }
     rust_type_for_java_type_with_effective_facts(ty, facts)
 }
 
