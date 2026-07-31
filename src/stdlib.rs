@@ -15573,8 +15573,13 @@ fn static_constant_impl_lines(
                 (rust_type, value)
             };
             let mut lines = vec![format!("    pub const {field}: {rust_type} = {value};")];
-            if owner == "System" && field == "IN" {
-                lines.push(format!("    pub const r#in: {rust_type} = {value};"));
+            if owner == "System" {
+                match field.as_str() {
+                    "OUT" => lines.push(format!("    pub const out: {rust_type} = {value};")),
+                    "ERR" => lines.push(format!("    pub const err: {rust_type} = {value};")),
+                    "IN" => lines.push(format!("    pub const r#in: {rust_type} = {value};")),
+                    _ => {}
+                }
             }
             Some(lines.join("\n"))
         })
@@ -15722,6 +15727,9 @@ fn known_jdk_static_constant_value(owner: &str, field: &str) -> Option<&'static 
         ("Double", "NEGATIVE_INFINITY") => Some("f64::NEG_INFINITY"),
         ("Math", "PI") => Some("std::f64::consts::PI"),
         ("Math", "E") => Some("std::f64::consts::E"),
+        ("Locale" | "JavaUtilLocale", "ENGLISH" | "US") => Some("Locale"),
+        ("System", "OUT" | "ERR") => Some("PrintStream"),
+        ("System", "IN") => Some("InputStream"),
         ("GZIPInputStream", "GZIP_MAGIC") => Some("0x8b1f"),
         ("Font" | "JavaAwtFont", "PLAIN") => Some("0"),
         ("Font" | "JavaAwtFont", "BOLD") => Some("1"),

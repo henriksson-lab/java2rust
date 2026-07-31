@@ -16439,6 +16439,45 @@ class SystemPrintStreamStatements {
 }
 
 #[test]
+fn system_err_static_constant_emits_typed_surface() {
+    let translation = translate_source(
+        r#"
+import java.io.PrintStream;
+
+class SystemErrStaticConstantUse {
+    PrintStream stream() {
+        return System.err;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub const ERR: PrintStream = PrintStream;")
+            && translation
+                .rust
+                .contains("pub const err: PrintStream = PrintStream;")
+            && translation.rust.contains("return System::err;")
+            && !translation
+                .rust
+                .contains("external static constant System.ERR"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "system_err_static_constant",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn java_exception_logging_surface_compiles_without_system_err_value() {
     let translation = translate_source(
         r#"
@@ -25088,7 +25127,10 @@ class UsesLocaleUs {
         translation
             .rust
             .contains("impl Locale {\n    pub const US: Locale = Locale;")
-            && translation.rust.contains("return Locale::US;"),
+            && translation.rust.contains("return Locale::US;")
+            && !translation
+                .rust
+                .contains("external static constant Locale.US"),
         "{}",
         translation.rust
     );

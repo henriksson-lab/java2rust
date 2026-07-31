@@ -5187,6 +5187,29 @@ fn htsjdk_vcf_pack_models_header_getters_and_mutators() {
         .external_api_effect_for_receiver(Some("VCFHeaderVersion"), "getVersionString")
         .expect("VCFHeaderVersion version-string getter should be modeled by the pack");
     assert_eq!(version_string.return_type, Some(JavaType::String));
+
+    for field_name in ["VCF4_0", "VCF4_2", "VCF4_3"] {
+        let field = facts
+            .external_field_for("VCFHeaderVersion", field_name)
+            .unwrap_or_else(|| panic!("VCFHeaderVersion.{field_name} should be pack-modeled"));
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(field.field_kind, ExternalFieldKind::EnumVariant);
+        assert_eq!(
+            field.field_type,
+            Some(JavaType::Named {
+                name: "VCFHeaderVersion".to_string(),
+                args: Vec::new(),
+            })
+        );
+
+        let value = facts
+            .external_field_value_for("VCFHeaderVersion", field_name)
+            .unwrap_or_else(|| {
+                panic!("VCFHeaderVersion.{field_name} should have a pack-owned value")
+            });
+        assert_eq!(value.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(value.rust_value, "VCFHeaderVersion");
+    }
 }
 
 #[test]

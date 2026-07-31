@@ -89,6 +89,18 @@ The same counter is now present per file in translator `status.tsv` and
 named/reference external static constants now use the same loud initializer
 policy unless an explicit value fact or enum-variant fact owns the value.
 
+2026-07-31 static-constant value checkpoint: JDK value-object constants now cover
+`Locale.US`, `Locale.ENGLISH`, and `System.out/err/in`, with lowercase
+`System::out`/`System::err`/`System::r#in` aliases emitted when Java field
+spelling reaches Rust. The HTSJDK VCF pack now declares
+`VCFHeaderVersion.VCF4_0`, `VCF4_2`, and `VCF4_3` as typed enum-like field
+values. Reduced VCFStandardHeaderLines proof:
+`.tmp/corpus-rerun-20260731-vcf-standard-bound-after-static-constant-values-r1`
+has `stubbed_constants=0`, invalid-pattern files reduced from 5 to 3, and
+generated-Rust errors reduced from 33 to 28. Audit `0031` remains open because
+the full stubbed-constant census/reporting requirement is broader than this VCF
+subset fix.
+
 2026-07-30 map-get ABI cleanup checkpoint: `HashMap.get` return adaptation no
 longer reconstructs map value type and optional-borrow target shape inside
 `lower.rs`. The lowered expression now uses `native_collection_lowered_type` and

@@ -20377,6 +20377,48 @@ const VCF_MODELED_FIELDS: &[ExternalPackModeledField] = &[
         "VCFCompoundHeaderLine.SupportedHeaderLineType",
         ExternalFieldKind::EnumVariant,
     ),
+    modeled_semantic_field_typed_value_kind(
+        "htsjdk.variant.vcf.VCFHeaderVersion",
+        "VCF4_0",
+        "htsjdk.variant.vcf.VCFHeaderVersion",
+        "VCFHeaderVersion",
+        ExternalFieldKind::EnumVariant,
+    ),
+    modeled_semantic_field_typed_value_kind(
+        "VCFHeaderVersion",
+        "VCF4_0",
+        "VCFHeaderVersion",
+        "VCFHeaderVersion",
+        ExternalFieldKind::EnumVariant,
+    ),
+    modeled_semantic_field_typed_value_kind(
+        "htsjdk.variant.vcf.VCFHeaderVersion",
+        "VCF4_2",
+        "htsjdk.variant.vcf.VCFHeaderVersion",
+        "VCFHeaderVersion",
+        ExternalFieldKind::EnumVariant,
+    ),
+    modeled_semantic_field_typed_value_kind(
+        "VCFHeaderVersion",
+        "VCF4_2",
+        "VCFHeaderVersion",
+        "VCFHeaderVersion",
+        ExternalFieldKind::EnumVariant,
+    ),
+    modeled_semantic_field_typed_value_kind(
+        "htsjdk.variant.vcf.VCFHeaderVersion",
+        "VCF4_3",
+        "htsjdk.variant.vcf.VCFHeaderVersion",
+        "VCFHeaderVersion",
+        ExternalFieldKind::EnumVariant,
+    ),
+    modeled_semantic_field_typed_value_kind(
+        "VCFHeaderVersion",
+        "VCF4_3",
+        "VCFHeaderVersion",
+        "VCFHeaderVersion",
+        ExternalFieldKind::EnumVariant,
+    ),
     modeled_semantic_field(
         "htsjdk.variant.variantcontext.writer.VariantContextWriterBuilder",
         "OutputType",
@@ -27609,6 +27651,23 @@ const fn modeled_semantic_field_typed_value(
         field_type: Some(field_type),
         field_value: Some(field_value),
         field_kind: ExternalFieldKind::StaticFinal,
+        coverage: ExternalApiCoverage::Semantic,
+    }
+}
+
+const fn modeled_semantic_field_typed_value_kind(
+    type_name: &'static str,
+    field_name: &'static str,
+    field_type: &'static str,
+    field_value: &'static str,
+    field_kind: ExternalFieldKind,
+) -> ExternalPackModeledField {
+    ExternalPackModeledField {
+        type_name,
+        field_name,
+        field_type: Some(field_type),
+        field_value: Some(field_value),
+        field_kind,
         coverage: ExternalApiCoverage::Semantic,
     }
 }
