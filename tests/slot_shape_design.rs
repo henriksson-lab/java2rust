@@ -32747,6 +32747,62 @@ fn stdlib_signature_facts_drive_math_max_owned_arg_shapes() {
 }
 
 #[test]
+fn stdlib_known_math_return_fallback_uses_argument_types() {
+    let math = JavaType::Named {
+        name: "Math".to_string(),
+        args: Vec::new(),
+    };
+    let strict_math = JavaType::Named {
+        name: "StrictMath".to_string(),
+        args: Vec::new(),
+    };
+
+    assert_eq!(
+        new_java2rust::stdlib::known_external_method_return_type_for_call(
+            Some(&math),
+            "round",
+            &[JavaType::Primitive(PrimitiveType::Float)],
+        ),
+        Some(JavaType::Primitive(PrimitiveType::Int))
+    );
+    assert_eq!(
+        new_java2rust::stdlib::known_external_method_return_type_for_call(
+            Some(&math),
+            "round",
+            &[JavaType::Primitive(PrimitiveType::Double)],
+        ),
+        Some(JavaType::Primitive(PrimitiveType::Long))
+    );
+    assert_eq!(
+        new_java2rust::stdlib::known_external_method_return_type_for_call(
+            Some(&strict_math),
+            "round",
+            &[JavaType::Primitive(PrimitiveType::Float)],
+        ),
+        Some(JavaType::Primitive(PrimitiveType::Int))
+    );
+    assert_eq!(
+        new_java2rust::stdlib::known_external_method_return_type_for_call(
+            Some(&math),
+            "abs",
+            &[JavaType::Primitive(PrimitiveType::Long)],
+        ),
+        Some(JavaType::Primitive(PrimitiveType::Long))
+    );
+    assert_eq!(
+        new_java2rust::stdlib::known_external_method_return_type_for_call(
+            Some(&math),
+            "floorMod",
+            &[
+                JavaType::Primitive(PrimitiveType::Long),
+                JavaType::Primitive(PrimitiveType::Int),
+            ],
+        ),
+        Some(JavaType::Primitive(PrimitiveType::Int))
+    );
+}
+
+#[test]
 fn stdlib_signature_facts_drive_jdk_file_exists_zero_arg_shape() {
     let facts = new_java2rust::stdlib::rust_stdlib_signature_facts();
     let signatures = SignaturePlan::default();

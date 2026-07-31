@@ -954,15 +954,29 @@ pub fn external_call_lowered_type_from_static_owner_plan_with_external_index(
                 })
                 .and_then(external_effect_lowered_type)
                 .or_else(|| {
-                    crate::stdlib::known_external_method_return_type(Some(&owner), name, args.len())
-                        .map(|return_ty| {
-                            known_external_call_lowered_type(
-                                Some(&owner),
-                                name,
-                                args.len(),
-                                return_ty,
-                            )
-                        })
+                    let receiver_ty = JavaType::Named {
+                        name: owner.clone(),
+                        args: Vec::new(),
+                    };
+                    let arg_types = args
+                        .iter()
+                        .map(|arg| infer_expr_type(arg, types))
+                        .collect::<Vec<_>>();
+                    crate::stdlib::known_external_method_return_type_for_call(
+                        Some(&receiver_ty),
+                        name,
+                        &arg_types,
+                    )
+                    .or_else(|| {
+                        crate::stdlib::known_external_method_return_type(
+                            Some(&owner),
+                            name,
+                            args.len(),
+                        )
+                    })
+                    .map(|return_ty| {
+                        known_external_call_lowered_type(Some(&owner), name, args.len(), return_ty)
+                    })
                 })
         })
 }

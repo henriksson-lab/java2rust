@@ -7075,6 +7075,15 @@ boundary. Focused JDK regressions now emit declared source `String` params for
 `Box<dyn Any>` plus `downcast::<String>()`. Audit `0011` remains partial because
 broader erased-object fallback and unmodelled external surfaces remain open.
 
+2026-07-31 Math fallback return checkpoint: stdlib fallback return selection
+now has an argument-sensitive Math/StrictMath overload policy for calls that
+reach fallback typing instead of the native planner directly. This preserves
+`round(float) -> int`, `round(double) -> long`, `abs(long) -> long`, and
+`floorMod(long,int) -> int` when lowered-type inference has actual argument
+types available. Audit `0032` remains partial because the broader external
+effect lookup still needs parameter-pattern callable-key selection for
+non-Math manifests and user facts.
+
 ## 2026-07-30 Facade Correctness Note
 
 `StringBuilder`/`StringBuffer` now emit stateful JDK facade support instead of

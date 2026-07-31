@@ -5437,7 +5437,7 @@ fn wrap_optional_assignment_value_if_needed(
         .unwrap_or_else(|| actual_shape_for_slot_expr(value, env, shape_ctx));
     let planned_actual = preferred_planned_or_external_call_result_shape(value, env, ctx);
     let actual = planned_actual.unwrap_or(inferred_actual);
-    let already_optional_result = known_external_call_result_shape_from_syntax(value, ctx)
+    let already_optional_result = known_external_call_result_shape_from_syntax(value, env, ctx)
         .is_some_and(|shape| shape.optional_element_type().is_some());
     planned_optional_assignment_value_for_target(
         lowered_value,
@@ -16170,7 +16170,7 @@ fn preferred_planned_or_external_call_result_shape(
 ) -> Option<RustSlotShape> {
     let planned = planned_method_call_return_shape(expr, env, ctx);
     let external = external_call_expr_result_shape(expr, env, ctx)
-        .or_else(|| known_external_call_result_shape_from_syntax(expr, ctx));
+        .or_else(|| known_external_call_result_shape_from_syntax(expr, env, ctx));
     match (planned, external) {
         (Some(_planned), Some(external)) if external.optional_element_type().is_some() => {
             Some(external)
@@ -16182,6 +16182,7 @@ fn preferred_planned_or_external_call_result_shape(
 
 fn known_external_call_result_shape_from_syntax(
     expr: &Expr,
+    env: &ShapeEnv,
     _ctx: LowerCtx,
 ) -> Option<RustSlotShape> {
     let Expr::Call {
@@ -16212,20 +16213,30 @@ fn known_external_call_result_shape_from_syntax(
     [name.to_string(), crate::parser::to_snake_case(name)]
         .into_iter()
         .find_map(|method| {
-            crate::stdlib::known_external_method_return_type(Some(&owner), &method, args.len()).map(
-                |return_ty| {
-                    let lowered = known_external_call_lowered_type(
-                        Some(&owner),
-                        &method,
-                        args.len(),
-                        return_ty,
-                    );
-                    lowered
-                        .java_ty()
-                        .map(fallback_local_shape_from_declared_type)
-                        .unwrap_or_else(|| value_shape(JavaType::Unknown("Object".to_string())))
-                },
+            let receiver_ty = JavaType::Named {
+                name: owner.clone(),
+                args: Vec::new(),
+            };
+            let arg_types = args
+                .iter()
+                .map(|arg| crate::types::infer_expr_type(arg, env.type_env()))
+                .collect::<Vec<_>>();
+            crate::stdlib::known_external_method_return_type_for_call(
+                Some(&receiver_ty),
+                &method,
+                &arg_types,
             )
+            .or_else(|| {
+                crate::stdlib::known_external_method_return_type(Some(&owner), &method, args.len())
+            })
+            .map(|return_ty| {
+                let lowered =
+                    known_external_call_lowered_type(Some(&owner), &method, args.len(), return_ty);
+                lowered
+                    .java_ty()
+                    .map(fallback_local_shape_from_declared_type)
+                    .unwrap_or_else(|| value_shape(JavaType::Unknown("Object".to_string())))
+            })
         })
 }
 

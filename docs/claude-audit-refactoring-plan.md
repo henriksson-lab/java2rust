@@ -625,7 +625,7 @@ Completion checklist for any audit marked `fixed locally`:
 | `0029` static field mutation invalid Rust | fixed locally | Moved to `claude_audits/done`; static `++`/`--` now route through storage setters for current and qualified source statics |
 | `0030` Java statics are thread-local | open | Static storage model |
 | `0031` stubbed constant census | partial | JDK and selected HTSJDK domain constants are explicit; unknown primitive/named external constants now fail loudly and status/summary reports include `stubbed_constants`; corpus reruns still need to prove the remaining count |
-| `0032` java.lang.Math mistranslated | partial | Round edge semantics, i32/i64 floorDiv/floorMod including `floorMod(long,int) -> int`, common floating call-site projections (`sqrt`, `pow`, `log10`, `ceil`, `floor`, trig/inverse/hyperbolic/angle helpers, `cbrt`, `rint`, `signum`, `atan2`, `hypot`), receiverless static imports, `StrictMath` aliasing, and native-method support pruning improved; fallback return-fact overload precision remains |
+| `0032` java.lang.Math mistranslated | partial | Round edge semantics, i32/i64 floorDiv/floorMod including `floorMod(long,int) -> int`, common floating call-site projections (`sqrt`, `pow`, `log10`, `ceil`, `floor`, trig/inverse/hyperbolic/angle helpers, `cbrt`, `rint`, `signum`, `atan2`, `hypot`), receiverless static imports, `StrictMath` aliasing, and native-method support pruning improved; Math fallback return selection now uses actual argument types for overloads such as `round(float) -> int`, `round(double) -> long`, `abs(long) -> long`, and `floorMod(long,int) -> int`; broader parameter-specific external effect lookup by callable key remains |
 
 ## Parallel Work Split
 

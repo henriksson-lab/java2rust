@@ -3075,6 +3075,11 @@ fn known_argument_sensitive_external_method_return_type(
 ) -> Option<JavaType> {
     let receiver_key = receiver_type.and_then(external_receiver_type_key);
     if let Some(return_type) =
+        known_math_argument_sensitive_return_type(receiver_key.as_deref(), name, arg_types)
+    {
+        return Some(return_type);
+    }
+    if let Some(return_type) =
         crate::javalibs::broad_utils_dynamic_return_type(receiver_key.as_deref(), name, arg_types)
     {
         return Some(return_type);
@@ -3267,6 +3272,98 @@ fn known_argument_sensitive_external_method_return_type(
         {
             matching_primitive_array_type(left, right)
         }
+        _ => None,
+    }
+}
+
+fn known_math_argument_sensitive_return_type(
+    receiver_key: Option<&str>,
+    name: &str,
+    arg_types: &[JavaType],
+) -> Option<JavaType> {
+    let owner = receiver_key?;
+    if !canonical_owner_is_native_math_alias(owner) {
+        return None;
+    }
+    let primitive = match (name, arg_types) {
+        ("round", [arg]) => match math_overload_primitive(arg)? {
+            PrimitiveType::Float => PrimitiveType::Int,
+            PrimitiveType::Double => PrimitiveType::Long,
+            _ => return None,
+        },
+        ("abs", [arg]) => math_unary_integral_promoted_primitive(arg)?,
+        ("max" | "min", [left, right]) => math_binary_numeric_promoted_primitive(left, right)?,
+        ("floorDiv" | "floor_div", [left, right]) => math_floor_div_return_primitive(left, right)?,
+        ("floorMod" | "floor_mod", [left, right]) => math_floor_mod_return_primitive(left, right)?,
+        _ => return None,
+    };
+    Some(JavaType::Primitive(primitive))
+}
+
+fn math_overload_primitive(java_ty: &JavaType) -> Option<PrimitiveType> {
+    match java_ty {
+        JavaType::Primitive(primitive) => Some(*primitive),
+        _ => None,
+    }
+}
+
+fn math_unary_integral_promoted_primitive(java_ty: &JavaType) -> Option<PrimitiveType> {
+    match math_overload_primitive(java_ty)? {
+        PrimitiveType::Double => Some(PrimitiveType::Double),
+        PrimitiveType::Float => Some(PrimitiveType::Float),
+        PrimitiveType::Long => Some(PrimitiveType::Long),
+        PrimitiveType::Int | PrimitiveType::Short | PrimitiveType::Byte | PrimitiveType::Char => {
+            Some(PrimitiveType::Int)
+        }
+        PrimitiveType::Boolean => None,
+    }
+}
+
+fn math_binary_numeric_promoted_primitive(
+    left: &JavaType,
+    right: &JavaType,
+) -> Option<PrimitiveType> {
+    let left = math_unary_integral_promoted_primitive(left)?;
+    let right = math_unary_integral_promoted_primitive(right)?;
+    Some(
+        match (math_primitive_rank(left), math_primitive_rank(right)) {
+            (4, _) | (_, 4) => PrimitiveType::Double,
+            (3, _) | (_, 3) => PrimitiveType::Float,
+            (2, _) | (_, 2) => PrimitiveType::Long,
+            _ => PrimitiveType::Int,
+        },
+    )
+}
+
+fn math_primitive_rank(primitive: PrimitiveType) -> u8 {
+    match primitive {
+        PrimitiveType::Double => 4,
+        PrimitiveType::Float => 3,
+        PrimitiveType::Long => 2,
+        PrimitiveType::Int | PrimitiveType::Short | PrimitiveType::Byte | PrimitiveType::Char => 1,
+        PrimitiveType::Boolean => 0,
+    }
+}
+
+fn math_floor_div_return_primitive(left: &JavaType, right: &JavaType) -> Option<PrimitiveType> {
+    let left = math_overload_primitive(left)?;
+    let right = math_overload_primitive(right)?;
+    match (left, right) {
+        (PrimitiveType::Long, PrimitiveType::Int | PrimitiveType::Long) => {
+            Some(PrimitiveType::Long)
+        }
+        (PrimitiveType::Int, PrimitiveType::Int) => Some(PrimitiveType::Int),
+        _ => None,
+    }
+}
+
+fn math_floor_mod_return_primitive(left: &JavaType, right: &JavaType) -> Option<PrimitiveType> {
+    let left = math_overload_primitive(left)?;
+    let right = math_overload_primitive(right)?;
+    match (left, right) {
+        (PrimitiveType::Long, PrimitiveType::Int) => Some(PrimitiveType::Int),
+        (PrimitiveType::Long, PrimitiveType::Long) => Some(PrimitiveType::Long),
+        (PrimitiveType::Int, PrimitiveType::Int) => Some(PrimitiveType::Int),
         _ => None,
     }
 }
