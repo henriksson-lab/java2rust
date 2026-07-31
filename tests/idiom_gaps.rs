@@ -27486,7 +27486,7 @@ class NestedStaticOuterOwner {
 }
 
 #[test]
-fn static_initializer_block_reports_unsupported_member_diagnostic() {
+fn static_initializer_block_lowers_to_class_init_function() {
     let translation = translate_source(
         r#"
 class StaticInitializerUnsupportedDiagnostic {
@@ -27503,15 +27503,16 @@ class StaticInitializerUnsupportedDiagnostic {
 "#,
     );
 
-    assert!(translation.diagnostics.has_code("unsupported_member"));
     assert!(
-        translation
-            .diagnostics
-            .iter()
-            .any(|message| message.message.contains("static_initializer")),
-        "{:?}",
-        translation.diagnostics
+        !translation.diagnostics.has_code("unsupported_member"),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
     );
+    assert!(translation.rust.contains("pub fn __java_class_init()"));
+    assert!(translation.rust.contains("Self::__set_static_value(0);"));
+    assert!(translation.rust.contains("Self::__set_static_value(3);"));
+    assert!(translation.rust.contains("Self::__java_class_init();"));
 }
 
 #[test]

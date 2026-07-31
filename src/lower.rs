@@ -256,6 +256,10 @@ struct LowerCtx<'a> {
     current_stmt_read_counts: Option<&'a std::collections::HashMap<String, usize>>,
     exclusive_terminal_branch_read_names: Option<&'a std::collections::HashSet<String>>,
     preinitialized_try_capture_names: Option<&'a std::collections::HashSet<String>>,
+    /// Backward liveness for the callable body being lowered. Authoritative for
+    /// "which names can be read after this point"; the legacy textual-suffix
+    /// scan is used only where this has no entry for a statement.
+    liveness: Option<&'a crate::liveness::LivenessAnalysis>,
     result_propagation_mode: ResultPropagationMode,
 }
 
@@ -355,7 +359,7 @@ pub fn lower_program_with_semantic_plans_and_support_context(
         &mut diagnostics,
     );
     let call_graph = crate::usage::build_call_graph_with_facts(support_local_type_program, facts);
-    let fallibility = plan_program_fallibility(&call_graph, facts);
+    let fallibility = plan_program_fallibility(support_local_type_program, &call_graph, facts);
     let exceptions =
         plan_program_exceptions_with_fallibility(support_local_type_program, facts, &fallibility);
     let callable_analysis =
@@ -382,6 +386,7 @@ pub fn lower_program_with_semantic_plans_and_support_context(
         context_sources_are_emitted,
         catch_future_use_names: None,
         later_read_names: None,
+        liveness: None,
         later_mutated_names: None,
         current_stmt_read_counts: None,
         exclusive_terminal_branch_read_names: None,
@@ -1227,6 +1232,18 @@ fn interface_default_helper_name(rust_name: &str) -> String {
 }
 
 fn static_storage_items_for_type(ty: &TypeDecl, ctx: LowerCtx) -> Vec<String> {
+    let mut items = Vec::new();
+    if !ty.static_init_blocks.is_empty() {
+        items.push(format!(
+            "std::thread_local! {{\n    static {}: std::cell::Cell<bool> = const {{ std::cell::Cell::new(false) }};\n}}",
+            class_init_guard_symbol_name(ty)
+        ));
+    }
+    items.extend(static_storage_field_items_for_type(ty, ctx));
+    items
+}
+
+fn static_storage_field_items_for_type(ty: &TypeDecl, ctx: LowerCtx) -> Vec<String> {
     ty.members
         .iter()
         .filter_map(|member| {
@@ -1250,7 +1267,8 @@ fn static_storage_items_for_type(ty: &TypeDecl, ctx: LowerCtx) -> Vec<String> {
 }
 
 fn static_storage_accessor_functions_for_type(ty: &TypeDecl, ctx: LowerCtx) -> Vec<RustFunction> {
-    ty.members
+    let mut functions: Vec<RustFunction> = ty
+        .members
         .iter()
         .filter_map(|member| {
             let Member::Field(field) = member else {
@@ -1264,7 +1282,114 @@ fn static_storage_accessor_functions_for_type(ty: &TypeDecl, ctx: LowerCtx) -> V
             Some(static_storage_accessors_for_field(ty, field, ctx))
         })
         .flatten()
-        .collect()
+        .collect();
+    if let Some(class_init) = class_init_function_for_type(ty, ctx) {
+        // Every storage getter must trigger class initialization first, so a
+        // `static { ... }` block is observed no matter which static is read.
+        for function in &mut functions {
+            if function.name.starts_with("__static_") {
+                function
+                    .body
+                    .insert(0, RustStmt::Raw(format!("{CLASS_INIT_NAME}();")));
+            }
+        }
+        functions.push(class_init);
+    }
+    functions
+}
+
+const CLASS_INIT_NAME: &str = "Self::__java_class_init";
+
+fn class_init_guard_symbol_name(ty: &TypeDecl) -> String {
+    // Reuse the field-storage naming so the guard cannot collide with a real
+    // static named `java_class_init_done`.
+    static_storage_symbol_name(ty, "__java_class_init_done")
+}
+
+/// Java runs static field initializers and `static { ... }` blocks once per
+/// class, in textual order (JLS 12.4.2). The per-field storage is otherwise
+/// initialized lazily, which cannot express a block that assigns other fields,
+/// so types carrying a static block get an explicit initializer function.
+///
+/// Emitted only for types that actually declare a static block, so types
+/// without one keep the existing lazy behaviour untouched.
+fn class_init_function_for_type(ty: &TypeDecl, ctx: LowerCtx) -> Option<RustFunction> {
+    if ty.static_init_blocks.is_empty() {
+        return None;
+    }
+    let guard = class_init_guard_symbol_name(ty);
+    let mut body = vec![RustStmt::Raw(format!(
+        // Set the flag before running the body: a static read re-entered from
+        // within initialization must see the current value rather than recurse,
+        // which is also what Java does during circular initialization.
+        "if {guard}.with(|done| done.replace(true)) {{ return; }}"
+    ))];
+    let mut env = crate::expr_shape::shape_env_for_type(ty, ctx.signatures);
+    let type_ctx = LowerCtx {
+        current_type: Some(&ty.name),
+        ..ctx
+    };
+    let mut next_block = 0usize;
+    for (index, member) in ty.members.iter().enumerate() {
+        push_static_init_blocks_before(ty, index, &mut next_block, &mut env, &mut body, type_ctx);
+        let Member::Field(field) = member else {
+            continue;
+        };
+        if !field.modifiers.contains(&Modifier::Static)
+            || crate::item_assembly::static_final_field_has_associated_const(ty, field)
+            || field.initializer.is_none()
+        {
+            continue;
+        }
+        let shape = ctx.signatures.required_field_shape(&ty.name, &field.name);
+        let initial = static_storage_initial_value_expr(ty, field, &shape, type_ctx);
+        body.push(RustStmt::Raw(format!(
+            "Self::__set_static_{}({});",
+            crate::parser::to_snake_case(&field.name),
+            emit::emit_expr(&initial)
+        )));
+    }
+    push_static_init_blocks_before(
+        ty,
+        ty.members.len(),
+        &mut next_block,
+        &mut env,
+        &mut body,
+        type_ctx,
+    );
+    // Any block recorded past the final member index (defensive against a
+    // position we did not anticipate) still has to run.
+    while next_block < ty.static_init_blocks.len() {
+        let block = &ty.static_init_blocks[next_block];
+        body.extend(lower_block(&block.block, &mut env, false, type_ctx));
+        next_block += 1;
+    }
+    Some(RustFunction {
+        name: "__java_class_init".to_string(),
+        type_params: Vec::new(),
+        params: Vec::new(),
+        return_type: None,
+        body,
+        is_pub: true,
+        receiver: None,
+    })
+}
+
+fn push_static_init_blocks_before(
+    ty: &TypeDecl,
+    member_index: usize,
+    next_block: &mut usize,
+    env: &mut crate::expr_shape::ShapeEnv,
+    body: &mut Vec<RustStmt>,
+    ctx: LowerCtx,
+) {
+    while let Some(block) = ty.static_init_blocks.get(*next_block) {
+        if block.member_index > member_index {
+            break;
+        }
+        body.extend(lower_block(&block.block, env, false, ctx));
+        *next_block += 1;
+    }
 }
 
 fn static_storage_accessors_for_field(
@@ -2189,7 +2314,7 @@ fn lower_implicit_default_constructor(
         type_params: Vec::new(),
         params: Vec::new(),
         return_type: Some(RustType::Named(rust_use_name_for_source_type(ty))),
-        body: constructor_return_body(ty, fields),
+        body: prepend_class_init_for_type(ty, constructor_return_body(ty, fields)),
         is_pub: true,
         receiver: None,
     }
@@ -2242,7 +2367,12 @@ fn lower_constructor(
     if let Some(body) = &ctor.body
         && let Some(function) = lower_delegating_constructor(ty, ctor, body, &env, constructor_ctx)
     {
-        return apply_representation_aware_constructor_signature(function, ty, ctor, ctx);
+        return apply_representation_aware_constructor_signature(
+            prepend_class_init_for_constructor(ty, function),
+            ty,
+            ctor,
+            ctx,
+        );
     }
     if let Some(body) = &ctor.body
         && let Some((fields, prefix, trailing, render_env, returns_result)) =
@@ -2267,7 +2397,12 @@ fn lower_constructor(
         if returns_result {
             function.return_type = Some(exception_result_type(RustType::Named(ty.name.clone())));
         }
-        return apply_representation_aware_constructor_signature(function, ty, ctor, ctx);
+        return apply_representation_aware_constructor_signature(
+            prepend_class_init_for_constructor(ty, function),
+            ty,
+            ctor,
+            ctx,
+        );
     }
     if let Some(body) = &ctor.body {
         for stmt in &body.statements {
@@ -2327,7 +2462,24 @@ fn lower_constructor(
         ctx.facts,
         &source_bound_support_programs(ctx),
     );
-    apply_representation_aware_constructor_signature(function, ty, ctor, ctx)
+    apply_representation_aware_constructor_signature(
+        prepend_class_init_for_constructor(ty, function),
+        ty,
+        ctor,
+        ctx,
+    )
+}
+
+fn prepend_class_init_for_constructor(ty: &TypeDecl, mut function: RustFunction) -> RustFunction {
+    function.body = prepend_class_init_for_type(ty, function.body);
+    function
+}
+
+fn prepend_class_init_for_type(ty: &TypeDecl, mut body: Vec<RustStmt>) -> Vec<RustStmt> {
+    if !ty.static_init_blocks.is_empty() {
+        body.insert(0, RustStmt::Raw(format!("{CLASS_INIT_NAME}();")));
+    }
+    body
 }
 
 fn apply_representation_aware_constructor_signature(
@@ -4616,7 +4768,12 @@ fn lower_method_with_exception_owner(
     ctx: LowerCtx,
 ) -> RustFunction {
     let method_signature = ctx.signatures.required_method_signature(ty, method);
+    let liveness = method
+        .body
+        .as_ref()
+        .map(crate::liveness::LivenessAnalysis::for_body);
     let method_ctx = LowerCtx {
+        liveness: liveness.as_ref(),
         current_type: Some(&ty.name),
         current_method: Some(&method.name),
         current_method_decl: Some(method),
@@ -4688,6 +4845,9 @@ fn lower_method_with_exception_owner(
         })
     {
         body.push(return_stmt(None, true));
+    }
+    if method.modifiers.contains(&Modifier::Static) {
+        body = prepend_class_init_for_type(ty, body);
     }
     prepend_assigned_parameter_shadows(method, &mut body);
     let mut function = method_function_shell_with_facts_exception_plan_and_support_contexts(
@@ -4894,8 +5054,26 @@ fn lower_block_with_refinements(
         map_entry_locals: refinements.map_entry_locals.clone(),
     };
     for (index, stmt) in block.statements.iter().enumerate() {
-        let mut later_read_names = statement_suffix_read_names(&block.statements[index + 1..]);
+        // Prefer the solved liveness result. It already accounts for loop back
+        // edges, `break`/`continue`, switch fallthrough and exception edges, so
+        // no per-loop-shape patching is needed. The textual-suffix scan remains
+        // only for statements the analysis has no entry for (synthesized nodes).
+        let mut later_read_names = match ctx
+            .liveness
+            .and_then(|liveness| liveness.live_out_for(stmt))
+        {
+            Some(live_out) => live_out.clone(),
+            None => {
+                let mut names = statement_suffix_read_names(&block.statements[index + 1..]);
+                if let Some(inherited_later_read_names) = block_ctx.later_read_names {
+                    names.extend(inherited_later_read_names.iter().cloned());
+                }
+                names
+            }
+        };
         if let Some(inherited_later_read_names) = block_ctx.later_read_names {
+            // A block lowered inside a larger construct (a lambda body inlined
+            // into a loop, for instance) still inherits its enclosing context.
             later_read_names.extend(inherited_later_read_names.iter().cloned());
         }
         let mut later_mutated_names =
@@ -9552,6 +9730,13 @@ fn collect_stmt_read_names(statements: &[Stmt], names: &mut std::collections::Ha
     }
 }
 
+pub fn collect_expr_read_names_for_liveness(
+    expr: &Expr,
+    names: &mut std::collections::HashSet<String>,
+) {
+    collect_expr_read_names(expr, names);
+}
+
 fn collect_expr_read_names(expr: &Expr, names: &mut std::collections::HashSet<String>) {
     match expr {
         Expr::Var(name) => {
@@ -10438,6 +10623,38 @@ fn lower_iterable_for_each_stmt(
     env: &ShapeEnv,
     ctx: LowerCtx,
 ) -> Option<RustStmt> {
+    // `forEach` becomes a real loop, so the lambda body needs the same
+    // back-edge liveness as any other loop body. It is nested in an expression,
+    // so the enclosing body's statement walk never reached it.
+    let empty_live = std::collections::HashSet::new();
+    let lambda_liveness = match body {
+        LambdaBody::Block(block) => Some(crate::liveness::LivenessAnalysis::for_loop_body(
+            block,
+            param_names,
+            ctx.later_read_names.unwrap_or(&empty_live),
+        )),
+        LambdaBody::Expr(_) => None,
+    };
+    let mut lambda_carried;
+    let ctx = match body {
+        LambdaBody::Expr(expr) => {
+            // A single-expression body still re-executes, so its reads are
+            // carried; there are no inner statements to analyze.
+            lambda_carried = ctx.later_read_names.cloned().unwrap_or_default();
+            crate::lower::collect_expr_read_names_for_liveness(expr, &mut lambda_carried);
+            for param_name in param_names {
+                lambda_carried.remove(param_name);
+            }
+            LowerCtx {
+                later_read_names: Some(&lambda_carried),
+                ..ctx
+            }
+        }
+        LambdaBody::Block(_) => LowerCtx {
+            liveness: lambda_liveness.as_ref(),
+            ..ctx
+        },
+    };
     let mut loop_env = env.clone();
     let param_shapes = map_for_each_lambda_param_shapes(receiver, param_names.len(), env)
         .unwrap_or_else(|| {
@@ -27479,7 +27696,16 @@ fn lower_block_for_body(
 ) -> Vec<RustStmt> {
     let mut out = Vec::new();
     for (index, stmt) in block.statements.iter().enumerate() {
-        let mut later_read_names = statement_suffix_read_names(&block.statements[index + 1..]);
+        // Same rule as the main block walker: the solved liveness result wins,
+        // and the textual-suffix scan is only a fallback for statements the
+        // analysis never saw (switch plans and other synthesized nodes).
+        let mut later_read_names = match ctx
+            .liveness
+            .and_then(|liveness| liveness.live_out_for(stmt))
+        {
+            Some(live_out) => live_out.clone(),
+            None => statement_suffix_read_names(&block.statements[index + 1..]),
+        };
         if let Some(inherited_later_read_names) = ctx.later_read_names {
             later_read_names.extend(inherited_later_read_names.iter().cloned());
         }

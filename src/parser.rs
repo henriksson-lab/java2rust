@@ -519,10 +519,19 @@ fn parse_class_decl(
         .unwrap_or_default();
 
     let mut members = Vec::new();
+    let mut static_init_blocks = Vec::new();
     if let Some(body) = node.child_by_field_name("body") {
         for child in named_children(body) {
             match child.kind() {
                 "field_declaration" => members.extend(parse_field_decl(child, source)),
+                "static_initializer" => {
+                    // Record the position so class initialization can run field
+                    // initializers and static blocks in textual order.
+                    static_init_blocks.push(crate::java_ir::StaticInitBlock {
+                        member_index: members.len(),
+                        block: parse_static_initializer_block(child, source, diagnostics),
+                    });
+                }
                 "constructor_declaration" => {
                     members.push(Member::Constructor(parse_constructor_decl(
                         child,
@@ -579,6 +588,7 @@ fn parse_class_decl(
         implements,
         permits: parse_permits(node, source),
         members,
+        static_init_blocks,
         span: span(node),
     }
 }
@@ -650,6 +660,7 @@ fn parse_interface_decl(
     }
 
     TypeDecl {
+        static_init_blocks: Vec::new(),
         kind: TypeKind::Interface,
         name: field_text(node, "name", source).unwrap_or_else(|| "Unknown".to_string()),
         type_params: parse_type_parameter_names(node, source),
@@ -677,6 +688,7 @@ fn parse_enum_decl(
     }
 
     TypeDecl {
+        static_init_blocks: Vec::new(),
         kind: TypeKind::Enum,
         name,
         type_params: Vec::new(),
@@ -780,6 +792,7 @@ fn parse_record_decl(
     }
 
     TypeDecl {
+        static_init_blocks: Vec::new(),
         kind: TypeKind::Record,
         name,
         type_params: parse_type_parameter_names(node, source),
@@ -975,6 +988,7 @@ fn parse_annotation_type_decl(
     }
 
     TypeDecl {
+        static_init_blocks: Vec::new(),
         kind: TypeKind::Interface,
         name: field_text(node, "name", source).unwrap_or_else(|| "Unknown".to_string()),
         type_params: Vec::new(),
@@ -1213,6 +1227,21 @@ fn parse_throws(node: tree_sitter::Node, source: &str) -> Vec<JavaType> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// A `static_initializer` node wraps a single `block`; lower that block's
+/// statements. Falls back to the node itself so a malformed tree still yields
+/// whatever statements are present rather than silently dropping them.
+fn parse_static_initializer_block(
+    node: tree_sitter::Node,
+    source: &str,
+    diagnostics: &mut DiagnosticBag,
+) -> Block {
+    let block = named_children(node)
+        .into_iter()
+        .find(|child| child.kind() == "block")
+        .unwrap_or(node);
+    parse_block_like(block, source, diagnostics)
 }
 
 fn parse_block_like(

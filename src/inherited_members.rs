@@ -451,6 +451,7 @@ mod tests {
 
     fn class(name: &str, extends: Option<&str>, members: Vec<Member>) -> TypeDecl {
         TypeDecl {
+            static_init_blocks: Vec::new(),
             kind: TypeKind::Class,
             name: name.to_string(),
             type_params: Vec::new(),

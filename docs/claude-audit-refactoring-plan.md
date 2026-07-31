@@ -16,9 +16,13 @@ Several audit findings are already fixed in the current checkout:
   `>>>=` now survive parsing and lower through unsigned carrier casts.
 - `0014-labelled-statements-are-silently-deleted.md`: labelled loops and
   labelled blocks are preserved and lowered.
+- `0001-loop-back-edge-invisible-to-move-analysis.md`: method/body lowering now
+  consumes a shared liveness result for live-out reads, so LoopMove-style
+  repeated owned consumes across a loop back edge receive clone recovery.
 - `0015-static-initializer-blocks-are-silently-dropped.md`: static initializer
-  blocks are at least surfaced as unsupported members instead of being silently
-  dropped.
+  blocks are parsed into the Java IR and lowered through a guarded
+  `__java_class_init()` that preserves textual ordering for static field
+  initializers and `static {}` blocks.
 
 Those fixes reduce the silent-wrong-output risk, but the audit set still points
 to a larger refactor: make omissions measurable, then route call, borrow,
@@ -315,6 +319,24 @@ Landed in this batch:
   errors are the concrete/concrete `instanceof` runtime-carrier problem and the
   paired stale concrete downcast handover temporaries in
   `VCFStandardHeaderLines`.
+- Static initializer blocks now carry member-position metadata in `TypeDecl` and
+  lower through `__java_class_init()`. Static storage getters, constructors, and
+  static methods trigger class initialization before active use. Focused parser,
+  idiom, and design regressions cover parse retention, initializer order, and
+  active-use triggers. Audit `0015` is closed and moved to `claude_audits/done`.
+- Loop lowering now prefers `LivenessAnalysis::live_out_for(stmt)` over the
+  textual suffix scan when deciding clone recovery, and `forEach` lambda bodies
+  that lower to loops get their own loop liveness result. The focused
+  LoopMove-style regression passes. Audit `0001` is closed and moved to
+  `claude_audits/done`; the broader `0006` BindingId/CFG cleanup remains open.
+- Fallibility planning now equalizes source override sets in
+  `plan_program_fallibility`, with focused coverage for interface/implementation
+  signature agreement. This narrows audit `0010`, but the audit remains active
+  because lowering still has compatibility fallibility probes that must either
+  be retired or checked against the solved relation.
+- `RejectTraitObject` projection now preserves already-concrete dispatch shapes
+  instead of erasing them to `Box<dyn Any>`. This narrows audit `0011`, but does
+  not close the fallback-design issue for genuinely unmodelled externals.
 
 1. Add a generated-Rust parse gate to focused corpus scripts.
    - Report parse failures separately from type-check errors.
@@ -700,21 +722,21 @@ Completion checklist for any audit marked `fixed locally`:
 
 | Audit | Status | Plan owner |
 |---|---:|---|
-| `0001` loop back edges invisible | partial | Basic loop-carried read compatibility covers the LoopMove-style repeated consume; full CFG/liveness with labelled/switch/exception edges still open |
+| `0001` loop back edges invisible | done | Closed by shared liveness use in the block walkers; remaining BindingId/CFG/query-surface work belongs to `0006` |
 | `0002` object aliasing/clones | open | Clone discipline, then object representation |
 | `0003` integer arithmetic semantics | partial | Binary int/long overflow, shift-distance masking, local integral update wrapping, direct int/long `/`/`%` zero-divisor lowering to catchable `ArithmeticException`, nested numeric/comparison/logical/ternary composition around fallible div/rem, fallible control-flow conditions, method arguments, and array indexes are fixed; the fuller unchecked-exception propagation model remains open |
 | `0004` string concat absorbs arithmetic | fixed locally | Moved to `claude_audits/done`; Rust IR shape tags prevent recurrence |
 | `0005` unsigned right shift | fixed locally | Moved to `claude_audits/done`; arithmetic slice should add shift-distance masking |
-| `0006` move analysis fragmented | partial | CallableAnalysis present; BindingId compatibility ids are attached to ShapeEnv for params, locals, catch params, loop variables, fields, and static fields, plus MoveUseContext use-count projection; CFG/liveness still open |
+| `0006` move analysis fragmented | partial | CallableAnalysis present and a statement/name-keyed liveness result now covers loop back edges, but optional name-keyed sets and suffix-scan fallbacks remain; BindingId-backed global liveness/query unification still open |
 | `0007` opaque Rust strings | open | Slot/facade generalization, shape tags |
 | `0008` inference does not reach lowering | open | CallableAnalysis |
 | `0009` overload identity collapse | open | Java callable signature identity; focused inherited-overload/override probe is covered by `overloaded_override_preserves_child_body_and_inherited_overload`, current-callable binding facts now prefer `methods_by_java_key`, fact-aware resolved call-argument planning tries Java keys before Rust-name signatures, and receiverless `forEach` lambda calls select overload targets through resolved/signature facts before snake-case fallback; broader downstream matching/rendering audit remains open |
-| `0010` fallibility disagrees | partial | Callable fallibility fixpoint exists and now seeds from checked/unchecked thrown facts, including external facade Rust-name mappings; lowering-side source/external receiver propagation checks consult that relation before fallback probes; remaining migration is to make all call-site `?` insertion read the solved relation or emit explicit divergence diagnostics |
+| `0010` fallibility disagrees | partial | Callable fallibility fixpoint exists, seeds from checked/unchecked thrown facts including external facade Rust-name mappings, and now equalizes override sets; remaining migration is to make every call-site `?` insertion read the solved relation or emit explicit divergence diagnostics |
 | `0011` dyn Any fallback cascades | partial | Opaque external shims; generic/static typed facade fallbacks are now loud; external constructor argument facts now participate in signature inference, so modeled constructors such as `StringTokenizer(String,...)` and `ZipEntry(String)` no longer force declared source `String` params through `Box<dyn Any>`/`downcast::<String>()`; declared locals initialized by fact-backed typed external producers now anchor through a generic return-type identity rule instead of an AWT-specific `Graphics/createGraphics` escape hatch; field-accessing parsed source supertypes with runtime case-split pressure now use companion hierarchy carriers instead of erasure; reduced VCFStandardHeaderLines now cargo-checks cleanly after exact downcast locals/source peer params stay concrete and weak erased-object facade returns upgrade from typed facade impl signatures, but broader erased-object fallback remains open |
 | `0012` invalid unsupported diagnostics | fixed locally | Moved to `claude_audits/done` |
 | `0013` nested downcast names | fixed locally | Moved to `claude_audits/done` |
 | `0014` labelled statements deleted | fixed locally | Moved to `claude_audits/done`; CFG liveness still needs labelled edges |
-| `0015` static initializer blocks dropped | partial | Loud diagnostic now; full class-init later |
+| `0015` static initializer blocks dropped | done | Parsed as `TypeDecl::static_init_blocks` and lowered through guarded textual-order class initialization triggered by static getters, constructors, and static methods |
 | `0016` no-op JDK facades | partial | `StringBuilder`/`StringBuffer`, literal `Pattern`/`Matcher`, `StringTokenizer`, `ZipEntry`, and `BitSet.get` paths are stateful; `Arrays.copyOf/copyOfRange/toString/fill/sort/hashCode/deepHashCode` and common `Math`/`StrictMath` calls lower natively without dead fallback support; Apache `FastMath` uses a javalibs owner alias to the Math planner; broader JDK facade fallibility and remaining no-op utility surfaces remain open |
 | `0017` generic bounds dropped | partial | Method/constructor type parameters now emit as structured Rust function generics, ordinary source method/constructor bounds that resolve to emitted source interfaces/classes emit Rust bounds, analysis-only context bounds are suppressed to avoid missing Rust traits, and raw trait signatures preserve method generics/bounds with object-safe `where Self: Sized`; multi-bounds, external/JDK bound projection, and full typed type parsing remain open |
 | `0018` compile metric blind spots | partial | Parse gate and coverage counters |

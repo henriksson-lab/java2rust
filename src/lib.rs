@@ -32,6 +32,7 @@ pub mod java_signature;
 pub mod javalibs;
 pub mod lattice;
 pub mod literal_lowering;
+pub mod liveness;
 pub mod loop_lowering;
 pub mod loop_plan;
 pub mod lower;

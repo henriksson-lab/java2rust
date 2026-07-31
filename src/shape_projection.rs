@@ -325,8 +325,19 @@ pub fn dispatch_requirement_projection_policy(
             DispatchRequirementKind::NeedsBorrowedTraitView,
             DispatchRequirementProjectionRole::Param,
         ) => Some(source_dispatch.clone()),
-        (DispatchRequirementKind::NeedsUnknownRuntimeObject, _)
-        | (DispatchRequirementKind::RejectTraitObject, _) => Some(DispatchShape::ErasedObject),
+        (DispatchRequirementKind::NeedsUnknownRuntimeObject, _) => {
+            Some(DispatchShape::ErasedObject)
+        }
+        // Rejecting a *trait object* does not require erasing to `Box<dyn Any>`:
+        // a concrete type is not a trait object to begin with. Erasing a
+        // concrete receiver produced `Box<dyn Any>` bindings whose every method
+        // call then failed to compile, which was the largest error class in the
+        // corpora. Keep concrete receivers concrete and erase only genuinely
+        // polymorphic ones.
+        (DispatchRequirementKind::RejectTraitObject, _) => Some(match source_dispatch {
+            DispatchShape::Concrete => DispatchShape::Concrete,
+            _ => DispatchShape::ErasedObject,
+        }),
         _ => None,
     };
     DispatchRequirementProjectionPolicy {

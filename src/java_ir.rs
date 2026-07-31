@@ -25,7 +25,19 @@ pub struct TypeDecl {
     pub implements: Vec<String>,
     pub permits: Vec<String>,
     pub members: Vec<Member>,
+    pub static_init_blocks: Vec<StaticInitBlock>,
     pub span: Span,
+}
+
+/// A `static { ... }` initializer block, with the position it occupied among the
+/// type's members. Java runs static field initializers and static blocks in
+/// textual order (JLS 12.4.2), so class initialization needs the position, not
+/// just the block.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StaticInitBlock {
+    /// Number of members already declared before this block appeared.
+    pub member_index: usize,
+    pub block: Block,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

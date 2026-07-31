@@ -4786,6 +4786,7 @@ fn unsupported_lowering_policy_owns_compile_error_placeholders() {
     );
     assert_eq!(
         plan_unsupported_member(&Member::Type(new_java2rust::java_ir::TypeDecl {
+            static_init_blocks: Vec::new(),
             kind: new_java2rust::java_ir::TypeKind::Class,
             name: "Nested".to_string(),
             type_params: Vec::new(),
@@ -19416,6 +19417,84 @@ fn lower_orchestrator_does_not_render_default_slot_values() {
 }
 
 #[test]
+fn static_initializer_blocks_lower_in_order_and_trigger_from_active_uses() {
+    let parsed = parse_java_source(
+        r#"
+class StaticInitAudit {
+    static int a = 1;
+    static { a = 5; }
+    static int b = a * 2;
+
+    StaticInitAudit() {}
+
+    static int readStatic() {
+        return b;
+    }
+
+    int readInstance() {
+        return b;
+    }
+}
+"#,
+    );
+    assert_eq!(parsed.program.types[0].static_init_blocks.len(), 1);
+    assert_eq!(
+        parsed.program.types[0].static_init_blocks[0].member_index,
+        1
+    );
+
+    let translation = translate_source(
+        r#"
+class StaticInitAudit {
+    static int a = 1;
+    static { a = 5; }
+    static int b = a * 2;
+
+    StaticInitAudit() {}
+
+    static int readStatic() {
+        return b;
+    }
+
+    int readInstance() {
+        return b;
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_code("unsupported_member"),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    assert!(translation.rust.contains("pub fn __java_class_init()"));
+    assert!(translation.rust.contains("Self::__set_static_a(1);"));
+    assert!(translation.rust.contains("Self::__set_static_a(5);"));
+    assert!(
+        translation
+            .rust
+            .contains("Self::__set_static_b(Self::__static_a() * 2);")
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn new() -> StaticInitAudit {\n        Self::__java_class_init();")
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn read_static() -> i32 {\n        Self::__java_class_init();")
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn __static_b() -> i32 {\n        Self::__java_class_init();")
+    );
+}
+
+#[test]
 fn lowering_consumes_solved_plans_without_choosing_shape_axes() {
     let lowering_sources = [
         include_str!("../src/access_lowering.rs"),
@@ -22795,7 +22874,7 @@ class FallibleCalls {
         provenance: FactProvenance::ParsedSource,
     });
 
-    let fallibility = plan_program_fallibility(&graph, &facts);
+    let fallibility = plan_program_fallibility(&resolved.program, &graph, &facts);
     let entry = new_java2rust::usage::CallableKey::Method {
         type_name: "FallibleCalls".to_string(),
         method_name: "entry".to_string(),
@@ -22808,6 +22887,46 @@ class FallibleCalls {
     assert!(fallibility.returns_result(&leaf));
     assert!(fallibility.returns_result(&entry));
     assert!(fallibility.solve_iterations() >= 2);
+}
+
+#[test]
+fn loop_liveness_keeps_owned_value_live_across_back_edge() {
+    let translation = translate_source(
+        r#"
+class LoopLivenessAudit {
+    String last = "";
+
+    void add(String value) {
+        last = value;
+    }
+
+    void run(String value, int n) {
+        while (n > 0) {
+            add(value);
+            n--;
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("self.add(value.clone()"),
+        "{}",
+        translation.rust
+    );
+    let lower_source = include_str!("../src/lower.rs");
+    let liveness_source = include_str!("../src/liveness.rs");
+    assert!(lower_source.contains("liveness: Option<&'a crate::liveness::LivenessAnalysis>"));
+    assert!(lower_source.contains("LivenessAnalysis::for_body"));
+    assert!(liveness_source.contains("pub fn live_out_for"));
+    assert!(liveness_source.contains("fn loop_fixpoint"));
 }
 
 #[test]
@@ -22837,7 +22956,11 @@ fn external_callable_fallibility_uses_rust_name_mapping() {
         edges: Vec::new(),
     };
 
-    let fallibility = plan_program_fallibility(&graph, &parsed.facts);
+    let fallibility = plan_program_fallibility(
+        &new_java2rust::java_ir::Program::default(),
+        &graph,
+        &parsed.facts,
+    );
 
     assert!(fallibility.returns_result(&key));
     assert!(
@@ -22873,7 +22996,7 @@ class FallibleCalls {
         thrown: vec![JavaType::Unknown("IllegalStateException".to_string())],
         provenance: FactProvenance::ParsedSource,
     });
-    let fallibility = plan_program_fallibility(&graph, &facts);
+    let fallibility = plan_program_fallibility(&resolved.program, &graph, &facts);
     let exceptions = new_java2rust::exception_plan::plan_program_exceptions_with_fallibility(
         &resolved.program,
         &facts,
@@ -22899,6 +23022,54 @@ class FallibleCalls {
 
     assert!(exceptions.method_plan(ty, entry).wrap_returns_in_result);
     assert!(exceptions.method_plan(ty, leaf).wrap_returns_in_result);
+}
+
+#[test]
+fn callable_fallibility_equalizes_override_sets() {
+    let parsed = parse_java_source(
+        r#"
+interface FallibleIface {
+    String read();
+}
+
+class FallibleImpl implements FallibleIface {
+    public String read() {
+        return "ok";
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let graph = new_java2rust::usage::build_call_graph(&resolved.program);
+    let mut facts = FactSet::default();
+    facts.method_effect_facts.push(MethodEffectFact {
+        method: FactMethodKey {
+            type_name: "FallibleImpl".to_string(),
+            method_name: "read".to_string(),
+        },
+        receiver_mutability: ReceiverMutabilityFact::Unknown,
+        return_nullability: NullabilityState::Unknown,
+        thrown: vec![JavaType::Unknown("IllegalStateException".to_string())],
+        provenance: FactProvenance::ParsedSource,
+    });
+
+    let fallibility = plan_program_fallibility(&resolved.program, &graph, &facts);
+    let interface_key = new_java2rust::usage::CallableKey::Method {
+        type_name: "FallibleIface".to_string(),
+        method_name: "read".to_string(),
+    };
+    let impl_key = new_java2rust::usage::CallableKey::Method {
+        type_name: "FallibleImpl".to_string(),
+        method_name: "read".to_string(),
+    };
+
+    assert!(fallibility.returns_result(&impl_key));
+    assert!(fallibility.returns_result(&interface_key));
+    assert!(fallibility.callable(&interface_key).is_some_and(|entry| {
+        entry
+            .reasons
+            .contains(&new_java2rust::exception_plan::FallibilityReason::PropagatedFromOverride)
+    }));
 }
 
 #[test]

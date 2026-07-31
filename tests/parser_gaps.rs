@@ -573,7 +573,7 @@ fn parses_gatk_empty_statement_without_raw_fallback() {
 }
 
 #[test]
-fn static_initializer_block_surfaces_as_unsupported_member() {
+fn static_initializer_block_is_parsed_as_type_initializer() {
     let parsed = parse_java_source(
         r#"
 class StaticInitializerUnsupportedMember {
@@ -591,11 +591,18 @@ class StaticInitializerUnsupportedMember {
     );
     let fallbacks = collect_program_fallbacks(&parsed.program);
 
-    assert!(
-        fallbacks
-            .iter()
-            .any(|fallback| fallback.contains("static_initializer")),
-        "{fallbacks:?}"
+    assert!(fallbacks.is_empty(), "{fallbacks:?}");
+    assert_eq!(parsed.program.types[0].static_init_blocks.len(), 1);
+    assert_eq!(
+        parsed.program.types[0].static_init_blocks[0].member_index,
+        1
+    );
+    assert_eq!(
+        parsed.program.types[0].static_init_blocks[0]
+            .block
+            .statements
+            .len(),
+        1
     );
 }
 

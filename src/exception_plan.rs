@@ -2,7 +2,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::facts::FactSet;
 use crate::java_ir::{
-    BinaryOp, Block, CatchClause, Expr, JavaType, Member, MethodDecl, Program, Stmt, TypeDecl,
+    BinaryOp, Block, CatchClause, Expr, JavaType, Member, MethodDecl, Modifier, Program, Stmt,
+    TypeDecl,
 };
 use crate::java_signature::source_method_rust_name;
 use crate::usage::{CallGraph, CallableKey};
@@ -51,6 +52,9 @@ pub struct CallableFallibility {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FallibilityReason {
+    /// Equalized across an override set: a trait method and its implementations
+    /// must share one Rust signature.
+    PropagatedFromOverride,
     MethodThrowFact,
     ExternalThrowFact,
     PropagatedFromCallee,
@@ -446,7 +450,11 @@ pub fn plan_program_exceptions_with_fallibility(
     }
 }
 
-pub fn plan_program_fallibility(call_graph: &CallGraph, facts: &FactSet) -> ProgramFallibilityPlan {
+pub fn plan_program_fallibility(
+    program: &Program,
+    call_graph: &CallGraph,
+    facts: &FactSet,
+) -> ProgramFallibilityPlan {
     let mut callables = call_graph
         .nodes
         .iter()
@@ -456,6 +464,7 @@ pub fn plan_program_fallibility(call_graph: &CallGraph, facts: &FactSet) -> Prog
             (key, fallibility)
         })
         .collect::<HashMap<_, _>>();
+    let override_groups = override_groups_for_program(program);
     let mut solve_iterations = 0usize;
     loop {
         solve_iterations += 1;
@@ -477,6 +486,29 @@ pub fn plan_program_fallibility(call_graph: &CallGraph, facts: &FactSet) -> Prog
                 changed = true;
             }
         }
+        // A trait method and every implementation of it must share one Rust
+        // signature, so fallibility has to be equalized across each override
+        // set: if any implementation can throw, the declaration and all its
+        // siblings must return `Result` too. Without this a call through an
+        // interface cannot propagate, and the forwarding impl fails to compile.
+        for group in &override_groups {
+            if !group
+                .iter()
+                .any(|key| callables.get(key).is_some_and(|f| f.returns_result))
+            {
+                continue;
+            }
+            for key in group {
+                let entry = callables.entry(key.clone()).or_default();
+                if !entry.returns_result {
+                    entry.returns_result = true;
+                    entry
+                        .reasons
+                        .push(FallibilityReason::PropagatedFromOverride);
+                    changed = true;
+                }
+            }
+        }
         if !changed {
             break;
         }
@@ -484,6 +516,101 @@ pub fn plan_program_fallibility(call_graph: &CallGraph, facts: &FactSet) -> Prog
     ProgramFallibilityPlan {
         callables,
         solve_iterations,
+    }
+}
+
+/// Groups each declared method with the supertype method it overrides or
+/// implements, so fallibility can be equalized across the group.
+fn override_groups_for_program(program: &Program) -> Vec<Vec<CallableKey>> {
+    let mut types = Vec::new();
+    for ty in &program.types {
+        collect_type_decls(ty, &mut types);
+    }
+    let by_name = types
+        .iter()
+        .map(|ty| (ty.name.as_str(), *ty))
+        .collect::<HashMap<_, _>>();
+    let mut groups: HashMap<(String, String), Vec<CallableKey>> = HashMap::new();
+    for ty in &types {
+        for member in &ty.members {
+            let Member::Method(method) = member else {
+                continue;
+            };
+            if method.modifiers.contains(&Modifier::Static) {
+                continue;
+            }
+            for supertype in supertype_names_declaring_method(ty, method, &by_name) {
+                let entry = groups
+                    .entry((supertype.clone(), method.name.clone()))
+                    .or_default();
+                let declaring = CallableKey::Method {
+                    type_name: supertype,
+                    method_name: method.name.clone(),
+                };
+                if !entry.contains(&declaring) {
+                    entry.push(declaring);
+                }
+                let implementing = CallableKey::Method {
+                    type_name: ty.name.clone(),
+                    method_name: method.name.clone(),
+                };
+                if !entry.contains(&implementing) {
+                    entry.push(implementing);
+                }
+            }
+        }
+    }
+    groups
+        .into_values()
+        .filter(|group| group.len() > 1)
+        .collect()
+}
+
+/// Transitive supertypes of `ty` that declare a method matching `method` by
+/// name and parameter count.
+fn supertype_names_declaring_method(
+    ty: &TypeDecl,
+    method: &MethodDecl,
+    by_name: &HashMap<&str, &TypeDecl>,
+) -> Vec<String> {
+    let mut matches = Vec::new();
+    let mut pending = ty
+        .extends
+        .iter()
+        .cloned()
+        .chain(ty.implements.iter().cloned())
+        .collect::<Vec<_>>();
+    let mut seen = std::collections::HashSet::new();
+    while let Some(name) = pending.pop() {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        let Some(supertype) = by_name.get(name.as_str()) else {
+            continue;
+        };
+        let declares = supertype.members.iter().any(|member| match member {
+            Member::Method(candidate) => {
+                candidate.name == method.name
+                    && candidate.params.len() == method.params.len()
+                    && !candidate.modifiers.contains(&Modifier::Static)
+            }
+            _ => false,
+        });
+        if declares {
+            matches.push(name.clone());
+        }
+        pending.extend(supertype.extends.iter().cloned());
+        pending.extend(supertype.implements.iter().cloned());
+    }
+    matches
+}
+
+fn collect_type_decls<'a>(ty: &'a TypeDecl, out: &mut Vec<&'a TypeDecl>) {
+    out.push(ty);
+    for member in &ty.members {
+        if let Member::Type(nested) = member {
+            collect_type_decls(nested, out);
+        }
     }
 }
 

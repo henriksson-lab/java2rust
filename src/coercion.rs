@@ -3081,10 +3081,18 @@ pub fn unwrap_result_or_panic_uncaught_java_exception(expr: RustExpr) -> RustExp
         return expr;
     }
     let rendered = emit::emit_expr(&expr);
+    // Already recovered: re-applying would splice a second copy into the `{:?}`
+    // of the recovery text this function previously appended.
+    if rendered.ends_with(panic_recovery) {
+        return RustExpr::Raw(rendered);
+    }
     if let Some(rendered) = rendered.strip_suffix('?') {
         return RustExpr::Raw(format!("{rendered}{panic_recovery}"));
     }
-    if let Some(index) = first_rust_try_operator_index(&rendered).or_else(|| rendered.find('?')) {
+    // Only a genuine `?` operator counts. `first_rust_try_operator_index` skips
+    // string and char literals; a plain `find('?')` fallback would defeat that
+    // and corrupt format specifiers such as `{:?}`.
+    if let Some(index) = first_rust_try_operator_index(&rendered) {
         let mut recovered = String::with_capacity(rendered.len() + panic_recovery.len());
         recovered.push_str(&rendered[..index]);
         recovered.push_str(panic_recovery);
@@ -3105,7 +3113,6 @@ fn recover_nested_result_try_operator(expr: RustExpr, recovery: &str) -> Option<
     match expr {
         RustExpr::Raw(raw) => raw.trim_end().strip_suffix('?').map(|without_try| {
             first_rust_try_operator_index(without_try)
-                .or_else(|| without_try.find('?'))
                 .map(|index| {
                     let mut recovered = String::with_capacity(without_try.len() + recovery.len());
                     recovered.push_str(&without_try[..index]);

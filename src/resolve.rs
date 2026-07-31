@@ -6542,6 +6542,7 @@ impl CaptureAnalyzer {
 
     fn analyze_anonymous_class(&mut self, ty: &JavaType, members: &[Member], ctx: &CaptureContext) {
         let synthetic = TypeDecl {
+            static_init_blocks: Vec::new(),
             kind: crate::java_ir::TypeKind::Class,
             name: "Anonymous".to_string(),
             type_params: Vec::new(),
