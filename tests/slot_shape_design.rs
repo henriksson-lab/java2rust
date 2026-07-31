@@ -21,9 +21,10 @@ use new_java2rust::call_plan::{
     optional_borrowed_receiver_slot_plan, optional_receiver_slot_plan, plan_call_arguments,
     plan_call_arguments_with_facts, plan_call_arguments_with_facts_and_args,
     plan_call_exception_propagation, plan_call_expr, plan_call_statement, plan_call_target,
-    plan_call_target_with_facts, plan_call_target_with_facts_and_arity, plan_constructor_arguments,
-    plan_new_target, plan_new_target_with_facts, plan_trivial_accessor_call,
-    resolved_call_arg_shapes, resolved_constructor_arg_shapes,
+    plan_call_target_with_external_index_and_args, plan_call_target_with_facts,
+    plan_call_target_with_facts_and_arity, plan_constructor_arguments, plan_new_target,
+    plan_new_target_with_facts, plan_trivial_accessor_call, resolved_call_arg_shapes,
+    resolved_constructor_arg_shapes,
 };
 use new_java2rust::coercion::{
     Coercion, OptionalReceiverProjection, RenderedMutableAliasProjection,
@@ -256,7 +257,7 @@ use new_java2rust::statement_render::{
 use new_java2rust::stdlib::{
     class_literal_token_plan, is_borrowed_string_view_method, is_content_read_method,
     is_owned_string_result_method, java_class_support_item, java_platform_facade_support_item,
-    program_uses_java_platform_facades,
+    java_string_split_support_item, program_uses_java_platform_facades,
 };
 use new_java2rust::stream::{
     FilterPlan, FlatMapPlan, StreamOp, StreamSourceIteration, build_stream_plan,
@@ -4329,6 +4330,16 @@ class PlatformBoundaryUse {
     assert!(support.contains("impl From<&File> for std::path::PathBuf"));
     assert!(support.contains("impl AsRef<std::path::Path> for Path"));
     assert!(support.contains("impl From<&Path> for std::path::PathBuf"));
+    assert!(!support.contains("JavaArraysDeepToStringElement"));
+    assert!(!support.contains("JavaArraysDeepEqualsElement"));
+    assert!(!support.contains("JavaArraysDeepHashElement"));
+
+    let RustItem::Raw(string_runtime_support) = java_string_split_support_item() else {
+        panic!("expected raw Java string runtime support item");
+    };
+    assert!(string_runtime_support.contains("JavaArraysDeepToStringElement"));
+    assert!(string_runtime_support.contains("JavaArraysDeepEqualsElement"));
+    assert!(string_runtime_support.contains("JavaArraysDeepHashElement"));
 
     let RustItem::Raw(ioutils_support) = broad_ioutils_support_item() else {
         panic!("expected raw Broad IOUtils support item");
@@ -32629,6 +32640,61 @@ fn stdlib_signature_facts_drive_math_max_owned_arg_shapes() {
             }
         ),
         "Math.pow should use native math rendering instead of generated facade support: {target:?}"
+    );
+
+    let external_index = facts.external_lookup_index();
+    let long_int_args = vec![
+        Expr::Var("left_long".to_string()),
+        Expr::Var("right".to_string()),
+    ];
+    types.insert_local("left_long", JavaType::Primitive(PrimitiveType::Long));
+    let floor_mod_target = plan_call_target_with_external_index_and_args(
+        Some(&receiver),
+        "floorMod",
+        &long_int_args,
+        None,
+        &facts,
+        &external_index,
+        &types,
+    );
+    assert!(
+        matches!(
+            floor_mod_target,
+            CallTargetPlan::NativeJavaStatic {
+                method: NativeJavaStaticMethod::MathFloorMod {
+                    primitive: PrimitiveType::Long,
+                    return_primitive: PrimitiveType::Int,
+                },
+            }
+        ),
+        "Math.floorMod(long,int) should keep Java's int return overload: {floor_mod_target:?}"
+    );
+    assert_eq!(
+        new_java2rust::call_plan::native_java_call_lowered_type(&floor_mod_target),
+        Some(LoweredType::from_java(JavaType::Primitive(
+            PrimitiveType::Int
+        )))
+    );
+
+    let long_long_args = vec![
+        Expr::Var("left_long".to_string()),
+        Expr::Var("right_long".to_string()),
+    ];
+    types.insert_local("right_long", JavaType::Primitive(PrimitiveType::Long));
+    let floor_div_target = plan_call_target_with_external_index_and_args(
+        Some(&receiver),
+        "floorDiv",
+        &long_long_args,
+        None,
+        &facts,
+        &external_index,
+        &types,
+    );
+    assert_eq!(
+        new_java2rust::call_plan::native_java_call_lowered_type(&floor_div_target),
+        Some(LoweredType::from_java(JavaType::Primitive(
+            PrimitiveType::Long
+        )))
     );
 }
 

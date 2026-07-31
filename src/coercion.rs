@@ -2055,12 +2055,12 @@ pub fn math_floor_div_projection(
     right: RustExpr,
     primitive: PrimitiveType,
 ) -> RustExpr {
-    let helper = match primitive {
-        PrimitiveType::Long => "java_math_floor_div_i64",
-        _ => "java_math_floor_div_i32",
+    let (helper, suffix) = match primitive {
+        PrimitiveType::Long => ("java_math_floor_div_i64", " as i64"),
+        _ => ("java_math_floor_div_i32", " as i32"),
     };
     RustExpr::Raw(format!(
-        "{helper}({}, {})",
+        "{helper}({}{suffix}, {}{suffix})",
         emit::emit_expr(&left),
         emit::emit_expr(&right)
     ))
@@ -2070,16 +2070,22 @@ pub fn math_floor_mod_projection(
     left: RustExpr,
     right: RustExpr,
     primitive: PrimitiveType,
+    return_primitive: PrimitiveType,
 ) -> RustExpr {
-    let helper = match primitive {
-        PrimitiveType::Long => "java_math_floor_mod_i64",
-        _ => "java_math_floor_mod_i32",
+    let (helper, suffix) = match primitive {
+        PrimitiveType::Long => ("java_math_floor_mod_i64", " as i64"),
+        _ => ("java_math_floor_mod_i32", " as i32"),
     };
-    RustExpr::Raw(format!(
-        "{helper}({}, {})",
+    let call = format!(
+        "{helper}({}{suffix}, {}{suffix})",
         emit::emit_expr(&left),
         emit::emit_expr(&right)
-    ))
+    );
+    if primitive == PrimitiveType::Long && return_primitive == PrimitiveType::Int {
+        RustExpr::Raw(format!("({call}) as i32"))
+    } else {
+        RustExpr::Raw(call)
+    }
 }
 
 pub fn len_i32_projection(expr: RustExpr) -> RustExpr {

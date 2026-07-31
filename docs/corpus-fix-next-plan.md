@@ -7095,7 +7095,11 @@ modelled in `javalibs` as a native static owner alias to the existing JDK
 native Math planning now also covers common f64 unary/binary helpers including
 trig, inverse trig, hyperbolic, angle conversion, `cbrt`, `rint`, `signum`,
 `atan2`, and `hypot`; Apache Commons `FastMath` keeps receiving those through
-the javalibs owner alias. Read-only modeled receiver calls classify as known
+the javalibs owner alias, and common `StrictMath` calls now use the same native
+Math plan. `Math.floorMod(long,int)` keeps Java's `int` return overload while
+evaluating through the long helper, and platform support no longer duplicates
+the recursive `JavaArraysDeep*` helpers owned by string/Arrays runtime support.
+Read-only modeled receiver calls classify as known
 content reads during usage analysis, and declared non-null `String` returns keep
 owned native `String` signatures instead of widening to erased `Any` from nested
 unknown-call heuristics. JDK

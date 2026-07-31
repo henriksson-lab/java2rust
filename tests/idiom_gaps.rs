@@ -847,6 +847,10 @@ class JdkNumericAndFormatFacades {
         return Math.floorMod(left, right);
     }
 
+    static int floorModLongInt(long left, int right) {
+        return Math.floorMod(left, right);
+    }
+
     static void collect() {
         System.gc();
     }
@@ -900,16 +904,19 @@ class JdkNumericAndFormatFacades {
             && translation.rust.contains("return value as i32;")
             && translation
                 .rust
-                .contains("java_math_floor_div_i32(left, right)")
+                .contains("java_math_floor_div_i32(left as i32, right as i32)")
             && translation
                 .rust
-                .contains("java_math_floor_mod_i32(left, right)")
+                .contains("java_math_floor_mod_i32(left as i32, right as i32)")
             && translation
                 .rust
-                .contains("java_math_floor_div_i64(left, right)")
+                .contains("java_math_floor_div_i64(left as i64, right as i64)")
             && translation
                 .rust
-                .contains("java_math_floor_mod_i64(left, right)")
+                .contains("java_math_floor_mod_i64(left as i64, right as i64)")
+            && translation
+                .rust
+                .contains("(java_math_floor_mod_i64(left as i64, right as i64)) as i32")
             && translation.rust.contains("pub fn collect() {\n    }")
             && translation.rust.contains("value.to_string()")
             && !translation.rust.contains("Math::log")
@@ -1000,6 +1007,8 @@ mod generated_tests {
         assert_eq!(JdkNumericAndFormatFacades::floor_mod(i32::MIN, -1), 0);
         assert_eq!(JdkNumericAndFormatFacades::floor_div_long(-7, 2), -4);
         assert_eq!(JdkNumericAndFormatFacades::floor_mod_long(-7, 2), 1);
+        assert_eq!(JdkNumericAndFormatFacades::floor_mod_long_int(-7, 2), 1);
+        assert_eq!(JdkNumericAndFormatFacades::floor_mod_long_int(7, -2), -1);
         assert_eq!(JdkNumericAndFormatFacades::floor_div_long(i64::MIN, -1), i64::MIN);
         assert_eq!(JdkNumericAndFormatFacades::floor_mod_long(i64::MIN, -1), 0);
         assert!(JdkNumericAndFormatFacades::render(1.25).starts_with("v="));
@@ -1069,6 +1078,90 @@ class ApacheFastMathUse {
             name: "fixture",
             rust: translation.rust,
             tests: "",
+        }],
+    );
+}
+
+#[test]
+fn strict_math_common_calls_use_native_math_alias() {
+    let translation = translate_source(
+        r#"
+class StrictMathCommonUse {
+    static double shaped(double value) {
+        return StrictMath.sqrt(value) + StrictMath.pow(value, 2.0) + StrictMath.rint(value);
+    }
+
+    static long rounded(double value) {
+        return StrictMath.round(value);
+    }
+
+    static int roundedFloat(float value) {
+        return StrictMath.round(value);
+    }
+
+    static int floorDiv(int left, int right) {
+        return StrictMath.floorDiv(left, right);
+    }
+
+    static int floorMod(int left, int right) {
+        return StrictMath.floorMod(left, right);
+    }
+
+    static double maxDouble(double left, double right) {
+        return StrictMath.max(left, right);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("(value as f64).sqrt()")
+            && translation
+                .rust
+                .contains("(value as f64).powf(2f64 as f64)")
+            && translation
+                .rust
+                .contains("(value as f64).round_ties_even()")
+            && translation.rust.contains("java_math_round_f64(value)")
+            && translation.rust.contains("java_math_round_f32(value)")
+            && translation
+                .rust
+                .contains("java_math_floor_div_i32(left as i32, right as i32)")
+            && translation
+                .rust
+                .contains("java_math_floor_mod_i32(left as i32, right as i32)")
+            && translation.rust.contains("java_math_max_f64(left, right)")
+            && !translation.rust.contains("StrictMath::sqrt")
+            && !translation.rust.contains("StrictMath::pow")
+            && !translation.rust.contains("StrictMath::round")
+            && !translation.rust.contains("StrictMath::floor_div")
+            && !translation.rust.contains("pub fn sqrt")
+            && !translation.rust.contains("pub fn pow"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "strict_math_common_use",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn strict_math_common_calls_run() {
+        assert_eq!(StrictMathCommonUse::shaped(4.0), 2.0 + 16.0 + 4.0);
+        assert_eq!(StrictMathCommonUse::rounded(-2.5), -2);
+        assert_eq!(StrictMathCommonUse::rounded_float(-2.5), -2);
+        assert_eq!(StrictMathCommonUse::floor_div(-7, 2), -4);
+        assert_eq!(StrictMathCommonUse::floor_mod(7, -2), -1);
+        assert!(StrictMathCommonUse::max_double(f64::NAN, 1.0).is_nan());
+    }
+}
+"#,
         }],
     );
 }

@@ -608,7 +608,12 @@ pub fn rust_stdlib_signature_facts() -> FactSet {
             FacadeSlot::Owned,
         ),
     ]);
-    for owner in ["Math", "java.lang.Math"] {
+    for owner in [
+        "Math",
+        "java.lang.Math",
+        "StrictMath",
+        "java.lang.StrictMath",
+    ] {
         facts.facade_abi_facts.extend([
             rust_stdlib_static_abi(
                 owner,
@@ -2174,27 +2179,13 @@ pub fn known_external_method_return_type(
             Some(owner),
             "abs" | "ceil" | "floor" | "log" | "log10" | "exp" | "sqrt" | "random",
             0 | 1,
-        ) if canonical_external_receiver_type_key(owner)
-            .rsplit('.')
-            .next()
-            .is_some_and(|simple| simple == "Math") =>
-        {
+        ) if canonical_owner_is_native_math_alias(owner) => {
             Some(JavaType::Primitive(PrimitiveType::Double))
         }
-        (Some(owner), "pow", 2)
-            if canonical_external_receiver_type_key(owner)
-                .rsplit('.')
-                .next()
-                .is_some_and(|simple| simple == "Math") =>
-        {
+        (Some(owner), "pow", 2) if canonical_owner_is_native_math_alias(owner) => {
             Some(JavaType::Primitive(PrimitiveType::Double))
         }
-        (Some(owner), "round", 1)
-            if canonical_external_receiver_type_key(owner)
-                .rsplit('.')
-                .next()
-                .is_some_and(|simple| simple == "Math") =>
-        {
+        (Some(owner), "round", 1) if canonical_owner_is_native_math_alias(owner) => {
             Some(JavaType::Primitive(PrimitiveType::Long))
         }
         (Some(owner), "isNaN" | "is_na_n", 1)
@@ -5643,138 +5634,6 @@ pub fn java_arrays_to_string<T: std::fmt::Display, V: AsRef<[T]>>(values: V) -> 
         .collect::<Vec<_>>()
         .join(", ");
     format!("[{body}]")
-}
-
-pub trait JavaArraysDeepToStringElement {
-    fn java_arrays_deep_to_string(&self) -> String;
-}
-
-pub fn java_arrays_deep_to_string<T: JavaArraysDeepToStringElement, V: AsRef<[T]>>(
-    values: V,
-) -> String {
-    let body = values
-        .as_ref()
-        .iter()
-        .map(JavaArraysDeepToStringElement::java_arrays_deep_to_string)
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("[{body}]")
-}
-
-macro_rules! impl_java_arrays_deep_to_string_display {
-    ($($ty:ty),* $(,)?) => {
-        $(
-            impl JavaArraysDeepToStringElement for $ty {
-                fn java_arrays_deep_to_string(&self) -> String {
-                    self.to_string()
-                }
-            }
-        )*
-    };
-}
-
-impl_java_arrays_deep_to_string_display!(bool, i8, i16, i32, i64, char, f32, f64, String, &str);
-
-impl<T: JavaArraysDeepToStringElement> JavaArraysDeepToStringElement for Vec<T> {
-    fn java_arrays_deep_to_string(&self) -> String {
-        java_arrays_deep_to_string(self)
-    }
-}
-
-impl<T: JavaArraysDeepToStringElement> JavaArraysDeepToStringElement for Option<T> {
-    fn java_arrays_deep_to_string(&self) -> String {
-        self.as_ref()
-            .map(JavaArraysDeepToStringElement::java_arrays_deep_to_string)
-            .unwrap_or_else(|| "null".to_string())
-    }
-}
-
-pub trait JavaArraysDeepEqualsElement {
-    fn java_arrays_deep_equals(&self, other: &Self) -> bool;
-}
-
-pub fn java_arrays_deep_equals<T: JavaArraysDeepEqualsElement, L: AsRef<[T]>, R: AsRef<[T]>>(
-    left: L,
-    right: R,
-) -> bool {
-    let left = left.as_ref();
-    let right = right.as_ref();
-    left.len() == right.len()
-        && left
-            .iter()
-            .zip(right.iter())
-            .all(|(left, right)| left.java_arrays_deep_equals(right))
-}
-
-macro_rules! impl_java_arrays_deep_equals_compare {
-    ($($ty:ty),* $(,)?) => {
-        $(
-            impl JavaArraysDeepEqualsElement for $ty {
-                fn java_arrays_deep_equals(&self, other: &Self) -> bool {
-                    self.java_arrays_compare(other) == 0
-                }
-            }
-        )*
-    };
-}
-
-impl_java_arrays_deep_equals_compare!(bool, i8, i16, i32, i64, char, f32, f64, String, &str);
-
-impl<T: JavaArraysDeepEqualsElement> JavaArraysDeepEqualsElement for Vec<T> {
-    fn java_arrays_deep_equals(&self, other: &Self) -> bool {
-        java_arrays_deep_equals(self, other)
-    }
-}
-
-impl<T: JavaArraysDeepEqualsElement> JavaArraysDeepEqualsElement for Option<T> {
-    fn java_arrays_deep_equals(&self, other: &Self) -> bool {
-        match (self, other) {
-            (None, None) => true,
-            (Some(left), Some(right)) => left.java_arrays_deep_equals(right),
-            _ => false,
-        }
-    }
-}
-
-pub trait JavaArraysDeepHashElement {
-    fn java_arrays_deep_hash_code(&self) -> i32;
-}
-
-pub fn java_arrays_deep_hash_code<T: JavaArraysDeepHashElement, V: AsRef<[T]>>(
-    value: V,
-) -> i32 {
-    value.as_ref().iter().fold(1i32, |hash, element| {
-        hash.wrapping_mul(31)
-            .wrapping_add(element.java_arrays_deep_hash_code())
-    })
-}
-
-macro_rules! impl_java_arrays_deep_hash_leaf {
-    ($($ty:ty),* $(,)?) => {
-        $(
-            impl JavaArraysDeepHashElement for $ty {
-                fn java_arrays_deep_hash_code(&self) -> i32 {
-                    self.java_arrays_hash_code()
-                }
-            }
-        )*
-    };
-}
-
-impl_java_arrays_deep_hash_leaf!(bool, i8, i16, i32, i64, char, f32, f64, String, &str);
-
-impl<T: JavaArraysDeepHashElement> JavaArraysDeepHashElement for Vec<T> {
-    fn java_arrays_deep_hash_code(&self) -> i32 {
-        java_arrays_deep_hash_code(self)
-    }
-}
-
-impl<T: JavaArraysDeepHashElement> JavaArraysDeepHashElement for Option<T> {
-    fn java_arrays_deep_hash_code(&self) -> i32 {
-        self.as_ref()
-            .map(JavaArraysDeepHashElement::java_arrays_deep_hash_code)
-            .unwrap_or(0)
-    }
 }
 
 pub mod logger {
@@ -14262,6 +14121,16 @@ fn is_native_lowered_math_static_method(owner: &str, method: &str, arg_count: us
     )
 }
 
+fn canonical_owner_is_native_math_alias(owner: &str) -> bool {
+    let owner_key = canonical_external_receiver_type_key(owner);
+    let owner_key =
+        crate::javalibs::native_java_static_owner_alias(&owner_key).unwrap_or(&owner_key);
+    owner_key
+        .rsplit('.')
+        .next()
+        .is_some_and(|simple| simple == "Math")
+}
+
 fn is_allowed_builtin_external_from_impl(from: &str, to: &str) -> bool {
     matches!(
         (from, to),
@@ -16893,7 +16762,7 @@ fn expr_uses_java_string_runtime_helpers(expr: &Expr) -> bool {
             ) || matches!(
                 (receiver.as_deref(), name.as_str(), args.len()),
                 (Some(Expr::Var(owner)), "floorDiv" | "floor_div" | "floorMod" | "floor_mod", 2)
-                    if canonical_external_receiver_type_key(owner) == "Math"
+                    if canonical_owner_is_native_math_alias(owner)
             ) || matches!(
                 (receiver.as_deref(), name.as_str(), args.len()),
                 (Some(Expr::Var(owner)), "equals", 2 | 6)
@@ -16907,11 +16776,11 @@ fn expr_uses_java_string_runtime_helpers(expr: &Expr) -> bool {
             ) || matches!(
                 (receiver.as_deref(), name.as_str(), args.len()),
                 (Some(Expr::Var(owner)), "round" | "abs", 1)
-                    if canonical_external_receiver_type_key(owner) == "Math"
+                    if canonical_owner_is_native_math_alias(owner)
             ) || matches!(
                 (receiver.as_deref(), name.as_str(), args.len()),
                 (Some(Expr::Var(owner)), "max" | "min", 2)
-                    if canonical_external_receiver_type_key(owner) == "Math"
+                    if canonical_owner_is_native_math_alias(owner)
             );
             uses_runtime_helper
                 || receiver

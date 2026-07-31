@@ -214,7 +214,10 @@ pub fn native_java_static_owner_alias(receiver_type: &str) -> Option<&'static st
         "FastMath"
         | "fast_math"
         | "OrgApacheCommonsMath3UtilFastMath"
-        | "org.apache.commons.math3.util.FastMath" => Some("Math"),
+        | "org.apache.commons.math3.util.FastMath"
+        | "StrictMath"
+        | "strict_math"
+        | "java.lang.StrictMath" => Some("Math"),
         _ => None,
     }
 }

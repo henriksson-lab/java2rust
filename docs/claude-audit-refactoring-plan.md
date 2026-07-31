@@ -201,6 +201,14 @@ Landed in this batch:
 - `Math.floorDiv` and `Math.floorMod` now carry overload shape and lower to
   i32/i64 helpers as appropriate, with Java-compatible `MIN_VALUE / -1`
   behavior instead of Rust debug overflow.
+- `Math.floorMod(long,int)` now preserves Java's `int` return overload while
+  evaluating through the long-width helper, including explicit Rust operand
+  casts for mixed-width calls.
+- `StrictMath` common numeric calls now use the same native Math owner alias as
+  other static math facades, while `StrictMath.IEEEremainder` remains an
+  explicit support method.
+- Java platform support no longer duplicates the recursive `JavaArraysDeep*`
+  helper definitions owned by the string/Arrays runtime support item.
 - Common floating `Math` methods `sqrt`, `pow`, `log10`, `ceil`, and `floor`
   now lower through the native static-call planner at call sites, alongside the
   existing `log` and `exp` paths. Receiverless static imports for those native
@@ -601,7 +609,7 @@ Completion checklist for any audit marked `fixed locally`:
 | `0013` nested downcast names | fixed locally | Moved to `claude_audits/done` |
 | `0014` labelled statements deleted | fixed locally | Moved to `claude_audits/done`; CFG liveness still needs labelled edges |
 | `0015` static initializer blocks dropped | partial | Loud diagnostic now; full class-init later |
-| `0016` no-op JDK facades | partial | `StringBuilder`/`StringBuffer` and literal `Pattern`/`Matcher` paths are stateful; `Arrays.copyOf/copyOfRange/toString/fill/sort/hashCode` and common `Math` calls lower natively without dead `Math` fallback support; Apache `FastMath` uses a javalibs owner alias to the Math planner; remaining Arrays helpers and broader facade fallibility still open |
+| `0016` no-op JDK facades | partial | `StringBuilder`/`StringBuffer` and literal `Pattern`/`Matcher` paths are stateful; `Arrays.copyOf/copyOfRange/toString/fill/sort/hashCode/deepHashCode` and common `Math`/`StrictMath` calls lower natively without dead fallback support; Apache `FastMath` uses a javalibs owner alias to the Math planner; stateful utility facades such as `StringTokenizer`, `ZipEntry`, and `BitSet` remain open |
 | `0017` generic bounds dropped | partial | Method/constructor type parameters now emit as structured Rust function generics, ordinary source method/constructor bounds that resolve to emitted source interfaces/classes emit Rust bounds, analysis-only context bounds are suppressed to avoid missing Rust traits, and raw trait signatures preserve method generics/bounds with object-safe `where Self: Sized`; multi-bounds, external/JDK bound projection, and full typed type parsing remain open |
 | `0018` compile metric blind spots | partial | Parse gate and coverage counters |
 | `0019` raw Java expression fallback | fixed locally | Moved to `claude_audits/done`; simple switch expressions now lower to Rust `match` |
@@ -617,7 +625,7 @@ Completion checklist for any audit marked `fixed locally`:
 | `0029` static field mutation invalid Rust | fixed locally | Moved to `claude_audits/done`; static `++`/`--` now route through storage setters for current and qualified source statics |
 | `0030` Java statics are thread-local | open | Static storage model |
 | `0031` stubbed constant census | partial | JDK and selected HTSJDK domain constants are explicit; unknown primitive/named external constants now fail loudly and status/summary reports include `stubbed_constants`; corpus reruns still need to prove the remaining count |
-| `0032` java.lang.Math mistranslated | partial | Round edge semantics, i32/i64 floorDiv/floorMod, common floating call-site projections (`sqrt`, `pow`, `log10`, `ceil`, `floor`, trig/inverse/hyperbolic/angle helpers, `cbrt`, `rint`, `signum`, `atan2`, `hypot`), receiverless static imports, and native-method support pruning improved; broader overload/constant audit remains |
+| `0032` java.lang.Math mistranslated | partial | Round edge semantics, i32/i64 floorDiv/floorMod including `floorMod(long,int) -> int`, common floating call-site projections (`sqrt`, `pow`, `log10`, `ceil`, `floor`, trig/inverse/hyperbolic/angle helpers, `cbrt`, `rint`, `signum`, `atan2`, `hypot`), receiverless static imports, `StrictMath` aliasing, and native-method support pruning improved; fallback return-fact overload precision remains |
 
 ## Parallel Work Split
 

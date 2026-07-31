@@ -473,6 +473,7 @@ pub enum NativeJavaStaticMethod {
     },
     MathFloorMod {
         primitive: PrimitiveType,
+        return_primitive: PrimitiveType,
     },
     IntegerParseInt,
     FloatParseFloat,
@@ -555,8 +556,13 @@ pub fn native_java_call_lowered_type(target: &CallTargetPlan<'_>) -> Option<Lowe
                     source: PrimitiveType::Float,
                 }
                 | NativeJavaStaticMethod::MathToIntExact
-                | NativeJavaStaticMethod::MathFloorDiv { .. }
-                | NativeJavaStaticMethod::MathFloorMod { .. },
+                | NativeJavaStaticMethod::MathFloorDiv {
+                    primitive: PrimitiveType::Int,
+                }
+                | NativeJavaStaticMethod::MathFloorMod {
+                    return_primitive: PrimitiveType::Int,
+                    ..
+                },
         }
         | CallTargetPlan::NativeJavaInstance {
             method:
@@ -575,6 +581,23 @@ pub fn native_java_call_lowered_type(target: &CallTargetPlan<'_>) -> Option<Lowe
         ))),
         CallTargetPlan::NativeJavaStatic {
             method: NativeJavaStaticMethod::MathRound { .. },
+        } => Some(LoweredType::from_java(JavaType::Primitive(
+            PrimitiveType::Long,
+        ))),
+        CallTargetPlan::NativeJavaStatic {
+            method:
+                NativeJavaStaticMethod::MathFloorDiv {
+                    primitive: PrimitiveType::Long,
+                },
+        } => Some(LoweredType::from_java(JavaType::Primitive(
+            PrimitiveType::Long,
+        ))),
+        CallTargetPlan::NativeJavaStatic {
+            method:
+                NativeJavaStaticMethod::MathFloorMod {
+                    return_primitive: PrimitiveType::Long,
+                    ..
+                },
         } => Some(LoweredType::from_java(JavaType::Primitive(
             PrimitiveType::Long,
         ))),
@@ -3466,9 +3489,7 @@ fn plan_native_java_static_owner_call<'a>(
         ("Math", "floorDiv" | "floor_div") => NativeJavaStaticMethod::MathFloorDiv {
             primitive: math_binary_overload_primitive(args, types),
         },
-        ("Math", "floorMod" | "floor_mod") => NativeJavaStaticMethod::MathFloorMod {
-            primitive: math_binary_overload_primitive(args, types),
-        },
+        ("Math", "floorMod" | "floor_mod") => math_floor_mod_method(args, types),
         ("Integer", "parseInt" | "parse_int") => NativeJavaStaticMethod::IntegerParseInt,
         ("Float", "parseFloat" | "parse_float") => NativeJavaStaticMethod::FloatParseFloat,
         ("Double", "parseDouble" | "parse_double") => NativeJavaStaticMethod::DoubleParseDouble,
@@ -3504,6 +3525,27 @@ fn math_binary_f64_method(
     NativeJavaStaticMethod::MathBinaryF64 {
         java_name,
         rust_method,
+    }
+}
+
+fn math_floor_mod_method(args: Option<&[Expr]>, types: &TypeEnv) -> NativeJavaStaticMethod {
+    let left = args
+        .and_then(|args| args.first())
+        .and_then(|expr| expr_numeric_primitive(expr, types));
+    let right = args
+        .and_then(|args| args.get(1))
+        .and_then(|expr| expr_numeric_primitive(expr, types));
+    let primitive = numeric_binary_overload_primitive(left, right, PrimitiveType::Int);
+    let return_primitive = if matches!(left, Some(PrimitiveType::Long))
+        && !matches!(right, Some(PrimitiveType::Long))
+    {
+        PrimitiveType::Int
+    } else {
+        primitive
+    };
+    NativeJavaStaticMethod::MathFloorMod {
+        primitive,
+        return_primitive,
     }
 }
 
