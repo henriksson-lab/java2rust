@@ -3483,6 +3483,16 @@ fn callable_analysis_shell_reaches_lowering_context() {
         })
         .expect("resolved call argument planner with args should be present");
     assert!(resolved_with_args.contains("resolved_call_signature_arg_shapes_by_java_key"));
+    let for_each_lambda_body = lower_source
+        .split("fn lower_for_each_lambda_body_expr")
+        .nth(1)
+        .and_then(|tail| tail.split("fn lower_accessor_field").next())
+        .expect("forEach lambda body lowerer should be present");
+    assert!(for_each_lambda_body.contains("resolved.rust_name.clone()"));
+    assert!(for_each_lambda_body.contains("plan_call_arguments_with_facts_and_args"));
+    assert!(for_each_lambda_body.contains("lower_args_with_plan"));
+    assert!(!lower_source.contains("fn lower_same_object_call_args"));
+    assert!(!lower_source.contains("fn lower_same_object_call_arg_with_shape"));
 }
 
 #[test]
@@ -37106,6 +37116,38 @@ class IntStreamRangeForEach {
     );
     assert!(
         !translation.rust.contains("(0..limit).iter()"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn for_each_lambda_receiverless_call_uses_resolved_overload_target() {
+    let translation = translate_source(
+        r#"
+class ForEachLambdaResolvedOverload {
+    int sum;
+
+    void add(int value) {
+        sum += value;
+    }
+
+    void add(String value) {
+        sum += value.length();
+    }
+
+    int run(int limit) {
+        IntStream.range(0, limit).forEach(i -> add(i));
+        return sum;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("for i in 0..limit")
+            && translation.rust.contains("self.add_int(i);")
+            && !translation.rust.contains("self.add(i);"),
         "{}",
         translation.rust
     );

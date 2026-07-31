@@ -446,6 +446,12 @@ Landed in this batch:
   erased target parameter types before consulting legacy Rust-name signatures.
   This keeps overloaded argument slot selection tied to the selected Java
   declaration when the call name is available.
+- `forEach` lambda receiverless call lowering now uses resolved overload names
+  when available, falls back to signature argument-type selection when lambda
+  calls are unresolved, and lowers arguments through the shared
+  `ArgumentLoweringPlan` path. Interface-super default-call arguments now use
+  the same shared argument lowering instead of a deleted local same-object
+  helper.
 - External field fact lookup for enum/static-field lowering now goes through
   `member_access_plan::external_field_type_for_owner`; `lower.rs` no longer
   probes external-pack field facts directly.
@@ -683,7 +689,7 @@ Completion checklist for any audit marked `fixed locally`:
 | `0006` move analysis fragmented | partial | CallableAnalysis present; BindingId compatibility ids are attached to ShapeEnv for params, locals, catch params, loop variables, fields, and static fields, plus MoveUseContext use-count projection; CFG/liveness still open |
 | `0007` opaque Rust strings | open | Slot/facade generalization, shape tags |
 | `0008` inference does not reach lowering | open | CallableAnalysis |
-| `0009` overload identity collapse | open | Java callable signature identity; focused inherited-overload/override probe is covered by `overloaded_override_preserves_child_body_and_inherited_overload`, current-callable binding facts now prefer `methods_by_java_key`, and fact-aware resolved call-argument planning tries Java keys before Rust-name signatures; broader downstream matching/rendering audit remains open |
+| `0009` overload identity collapse | open | Java callable signature identity; focused inherited-overload/override probe is covered by `overloaded_override_preserves_child_body_and_inherited_overload`, current-callable binding facts now prefer `methods_by_java_key`, fact-aware resolved call-argument planning tries Java keys before Rust-name signatures, and receiverless `forEach` lambda calls select overload targets through resolved/signature facts before snake-case fallback; broader downstream matching/rendering audit remains open |
 | `0010` fallibility disagrees | partial | Callable fallibility fixpoint exists and now seeds from checked/unchecked thrown facts, including external facade Rust-name mappings; lowering-side source/external receiver propagation checks consult that relation before fallback probes; remaining migration is to make all call-site `?` insertion read the solved relation or emit explicit divergence diagnostics |
 | `0011` dyn Any fallback cascades | partial | Opaque external shims; generic/static typed facade fallbacks are now loud; external constructor argument facts now participate in signature inference, so modeled constructors such as `StringTokenizer(String,...)` and `ZipEntry(String)` no longer force declared source `String` params through `Box<dyn Any>`/`downcast::<String>()`; declared locals initialized by fact-backed typed external producers now anchor through a generic return-type identity rule instead of an AWT-specific `Graphics/createGraphics` escape hatch; field-accessing parsed source supertypes with runtime case-split pressure now use companion hierarchy carriers instead of erasure; reduced VCFStandardHeaderLines now cargo-checks cleanly after exact downcast locals/source peer params stay concrete and weak erased-object facade returns upgrade from typed facade impl signatures, but broader erased-object fallback remains open |
 | `0012` invalid unsupported diagnostics | fixed locally | Moved to `claude_audits/done` |

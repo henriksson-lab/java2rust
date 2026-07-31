@@ -10761,54 +10761,66 @@ fn lower_for_each_lambda_body_expr(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -
         receiver: None,
         name,
         args,
-        ..
+        resolved,
     } = expr
     else {
         return lower_expr(expr, env, ctx);
     };
-    let rust_name = crate::parser::to_snake_case(name);
-    let rust_args = lower_same_object_call_args(&rust_name, args, env, ctx);
-    receiver_method_call_projection_exact(RustExpr::Var("self".to_string()), &rust_name, rust_args)
-}
-
-fn lower_same_object_call_args(
-    rust_name: &str,
-    args: &[Expr],
-    env: &ShapeEnv,
-    ctx: LowerCtx,
-) -> Vec<RustExpr> {
-    let Some(current_type) = ctx.current_type else {
-        return args.iter().map(|arg| lower_expr(arg, env, ctx)).collect();
-    };
-    args.iter()
-        .enumerate()
-        .map(|(index, arg)| {
-            ctx.signatures
-                .method_arg_shape_by_rust_name(current_type, rust_name, index)
-                .map(|shape| lower_same_object_call_arg_with_shape(arg, env, shape, ctx))
-                .unwrap_or_else(|| lower_expr(arg, env, ctx))
-        })
-        .collect()
-}
-
-fn lower_same_object_call_arg_with_shape(
-    arg: &Expr,
-    env: &ShapeEnv,
-    shape: RustSlotShape,
-    ctx: LowerCtx,
-) -> RustExpr {
-    let actual_shape = infer_expr_shape_with_context(
-        arg,
-        env,
-        ExprShapeContext {
+    let fallback_signature = ctx.current_type.and_then(|current_type| {
+        let shape_ctx = ExprShapeContext {
             signatures: Some(ctx.signatures),
             representations: Some(ctx.representations),
             facts: Some(ctx.facts),
-        },
-    );
-    let lowered = lower_source_subtype_argument_as_actual(arg, env, &shape, &actual_shape, ctx)
-        .unwrap_or_else(|| lower_expr_for_slot(arg, env, argument_slot(shape.clone()), ctx));
-    adapt_reused_owned_argument(lowered, arg, &shape, Some(&actual_shape), env, ctx)
+        };
+        let arg_types = args
+            .iter()
+            .map(|arg| infer_expr_shape_with_context(arg, env, shape_ctx).java_ty)
+            .collect::<Vec<_>>();
+        ctx.signatures
+            .method_signature_by_base_name_and_arg_types_with_facts(
+                current_type,
+                name,
+                &arg_types,
+                ctx.facts,
+            )
+            .or_else(|| {
+                ctx.signatures.method_signature_by_base_name_and_arg_types(
+                    current_type,
+                    name,
+                    &arg_types,
+                )
+            })
+    });
+    let rust_name = fallback_signature
+        .as_ref()
+        .map(|(rust_name, _)| rust_name.clone())
+        .or_else(|| resolved.as_ref().map(|resolved| resolved.rust_name.clone()))
+        .unwrap_or_else(|| crate::parser::to_snake_case(name));
+    let arg_plan = fallback_signature
+        .as_ref()
+        .filter(|(_, signature)| signature.params.len() == args.len())
+        .map(|(_, signature)| {
+            ArgumentLoweringPlan::Shaped(
+                signature
+                    .params
+                    .iter()
+                    .map(|param| param.shape.clone())
+                    .collect(),
+            )
+        })
+        .unwrap_or_else(|| {
+            plan_call_arguments_with_facts_and_args(
+                None,
+                name,
+                resolved.as_ref(),
+                args,
+                ctx.signatures,
+                ctx.facts,
+                env.type_env(),
+            )
+        });
+    let rust_args = lower_args_with_plan(args, env, arg_plan, ctx);
+    receiver_method_call_projection_exact(RustExpr::Var("self".to_string()), &rust_name, rust_args)
 }
 
 fn lower_accessor_field(
@@ -21314,15 +21326,23 @@ fn lower_interface_super_call_args(
     env: &ShapeEnv,
     ctx: LowerCtx,
 ) -> Vec<RustExpr> {
-    args.iter()
-        .enumerate()
-        .map(|(index, arg)| {
-            ctx.signatures
-                .method_arg_shape_by_rust_name(interface_name, rust_name, index)
-                .map(|shape| lower_same_object_call_arg_with_shape(arg, env, shape, ctx))
-                .unwrap_or_else(|| lower_expr(arg, env, ctx))
+    let plan = ctx
+        .signatures
+        .method_signature_by_rust_name(interface_name, rust_name)
+        .filter(|signature| signature.params.len() == args.len())
+        .map(|signature| {
+            ArgumentLoweringPlan::Shaped(
+                signature
+                    .params
+                    .iter()
+                    .map(|param| param.shape.clone())
+                    .collect(),
+            )
         })
-        .collect()
+        .unwrap_or(ArgumentLoweringPlan::Unshaped {
+            arg_count: args.len(),
+        });
+    lower_args_with_plan(args, env, plan, ctx)
 }
 
 fn lower_static_initialized_singleton_field_for_slot(
