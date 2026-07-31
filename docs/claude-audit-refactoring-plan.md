@@ -242,6 +242,13 @@ Landed in this batch:
   `cargo_check_errors=12`. Remaining VCF blockers are concrete/concrete
   `instanceof`, stale concrete downcast handover temporaries, enum `hash_code`,
   and subclass-to-super concrete argument conversion.
+- 2026-07-31 source enum hash checkpoint:
+  source enum instance `hashCode()` now routes through the existing
+  `java_value_hash_code` projection even when the enum also has external-pack
+  facts, using expression-shape facts to recognize optional enum field
+  receivers. Reduced VCF rerun
+  `.tmp/corpus-rerun-20260731-vcf-enum-hash-r2` reports
+  `cargo_check_errors=9`, with enum `hash_code` errors gone.
 
 1. Add a generated-Rust parse gate to focused corpus scripts.
    - Report parse failures separately from type-check errors.

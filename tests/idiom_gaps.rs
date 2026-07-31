@@ -5,9 +5,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use new_java2rust::facts::{
     DispatchRequirementFact, DispatchRequirementKind, ExternalApiArgumentEffectFact,
-    ExternalApiEffectFact, ExternalApiRole, ExternalArgumentAliasPolicy, ExternalFfiHandoverFact,
-    ExternalFfiHandoverSlot, ExternalFieldFact, ExternalFieldKind, FactProvenance, FactSet,
-    FieldKey, HierarchyOverride, HierarchyStrategy, NullabilityState, OwnedRecoveryCapability,
+    ExternalApiCoverage, ExternalApiEffectFact, ExternalApiRole, ExternalArgumentAliasPolicy,
+    ExternalFfiHandoverFact, ExternalFfiHandoverSlot, ExternalFieldFact, ExternalFieldKind,
+    ExternalLibraryMode, ExternalLibraryPackFact, FactProvenance, FactSet, FieldKey,
+    HierarchyOverride, HierarchyStrategy, NullabilityState, OwnedRecoveryCapability,
     OwnedRecoveryCapabilityFact, ReceiverMutabilityFact, TypeCapabilityOverride,
 };
 use new_java2rust::java_ir::{JavaType, PrimitiveType};
@@ -19578,6 +19579,54 @@ class SourceEnumHashCodeJavaApi {
         "source_enum_hash_code_java_api",
         vec![GeneratedCrateModule {
             name: "source_enum_hash_code_java_api",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn external_pack_owned_source_enum_hash_code_lowers_to_java_value_hash_helper() {
+    let source = r#"
+class ExternalPackOwnedSourceEnumHashCodeJavaApi {
+    enum Kind {
+        ALPHA,
+        BETA
+    }
+
+    private Kind kind;
+
+    int hash() {
+        return kind.hashCode();
+    }
+}
+"#;
+    let mut facts = FactSet::default();
+    facts.external_library_packs.push(ExternalLibraryPackFact {
+        pack_name: "fixture".to_string(),
+        package_prefix: "ExternalPackOwnedSourceEnumHashCodeJavaApi.Kind".to_string(),
+        mode: ExternalLibraryMode::ExternalFactModel,
+        coverage: ExternalApiCoverage::Declared,
+        rust_target: None,
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+
+    let translation = translate_source_with_facts(source, &facts);
+    assert!(
+        translation
+            .rust
+            .contains("java_value_hash_code(&self.kind.as_ref().unwrap())")
+            && !translation
+                .rust
+                .contains(".kind.as_ref().unwrap().hash_code("),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "external_pack_owned_source_enum_hash_code_java_api",
+        vec![GeneratedCrateModule {
+            name: "external_pack_owned_source_enum_hash_code_java_api",
             rust: translation.rust,
             tests: "",
         }],

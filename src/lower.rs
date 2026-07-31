@@ -52,13 +52,14 @@ use crate::coercion::{
     function_call_projection, if_err_panic_uncaught_java_exception_stmt,
     instanceof_pattern_downcast_ref_projection, into_projection, iterator_next_expect_projection,
     java_integral_literal_char, java_primitive_update_expression_projection,
-    java_primitive_updated_value_projection, java_update_expression_projection, len_i32_projection,
-    literal_slot_plan, logical_not_projection, map_get_expect_projection,
-    map_get_mut_expect_projection, map_get_projection, normalize_map_key_borrow_projection,
-    normalize_reused_clone_for_borrowed_argument, optional_clone_recovery_owned_element_projection,
-    optional_copied_expect_projection, outer_this_field_projection, owned_map_keys_set_projection,
-    owner_associated_path_projection, parenthesize_borrowed_method_receiver,
-    print_macro_projection, project_optional_element_borrow_carrier, project_optional_receiver,
+    java_primitive_updated_value_projection, java_update_expression_projection,
+    java_value_hash_code_projection, len_i32_projection, literal_slot_plan, logical_not_projection,
+    map_get_expect_projection, map_get_mut_expect_projection, map_get_projection,
+    normalize_map_key_borrow_projection, normalize_reused_clone_for_borrowed_argument,
+    optional_clone_recovery_owned_element_projection, optional_copied_expect_projection,
+    outer_this_field_projection, owned_map_keys_set_projection, owner_associated_path_projection,
+    parenthesize_borrowed_method_receiver, print_macro_projection,
+    project_optional_element_borrow_carrier, project_optional_receiver,
     project_optional_sequence_receiver, propagate_result_projection,
     qualified_static_storage_accessor_projection, qualified_static_storage_setter_path_projection,
     reborrow_optional_mut_projection, receiver_method_call_projection_exact,
@@ -12127,12 +12128,31 @@ fn lower_source_java_enum_type_api_call(
 ) -> Option<RustExpr> {
     let receiver = receiver?;
     let owner = source_java_enum_static_owner_from_expr(receiver, env, ctx)
-        .or_else(|| source_type_name_from_expr(receiver, env, ctx))?;
+        .or_else(|| source_type_name_from_expr(receiver, env, ctx))
+        .or_else(|| source_java_enum_receiver_type_name(receiver, env, ctx))?;
     if !matches_source_java_enum_type(&owner, ctx) {
         return None;
     }
     let rust_owner = crate::slot_render::rust_name_for_java_named_type(&owner);
     match (name, args) {
+        ("hashCode" | "hash_code", []) => {
+            let lowered_receiver = lower_expr_with_refinements(receiver, env, ctx, refinements);
+            let receiver_shape = infer_expr_shape_with_context(
+                receiver,
+                env,
+                ExprShapeContext {
+                    signatures: Some(ctx.signatures),
+                    representations: Some(ctx.representations),
+                    facts: Some(ctx.facts),
+                },
+            );
+            let hash_receiver = if receiver_shape.optional_element_type().is_some() {
+                unwrap_optional_shared_value(lowered_receiver)
+            } else {
+                lowered_receiver
+            };
+            Some(java_value_hash_code_projection(hash_receiver))
+        }
         ("values", []) => Some(RustExpr::Raw(format!("{rust_owner}::values()"))),
         ("valueOf" | "value_of", [arg]) => {
             let arg = lower_expr_for_slot_with_refinements(
@@ -12149,6 +12169,29 @@ fn lower_source_java_enum_type_api_call(
         }
         _ => None,
     }
+}
+
+fn source_java_enum_receiver_type_name(
+    receiver: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<String> {
+    let receiver_shape = infer_expr_shape_with_context(
+        receiver,
+        env,
+        ExprShapeContext {
+            signatures: Some(ctx.signatures),
+            representations: Some(ctx.representations),
+            facts: Some(ctx.facts),
+        },
+    );
+    let receiver_ty = receiver_shape
+        .optional_element_type()
+        .unwrap_or(receiver_shape.java_ty);
+    let JavaType::Named { name, .. } = receiver_ty else {
+        return None;
+    };
+    matches_source_java_enum_type(&name, ctx).then_some(name)
 }
 
 fn source_java_enum_static_owner_from_expr(
