@@ -256,6 +256,11 @@ Landed in this batch:
   shared uncaught-Java-exception panic recovery. This also reduces audit `0010`
   drift, but `0003` and `0010` remain active until the broader fallibility model
   is unified.
+- Callable fallibility fixpoint seeding now treats any modeled source/external
+  thrown exception as fallible, including unchecked `RuntimeException`-style
+  facts. This removes the core `0010` mismatch where call-site lowering emitted
+  `?` for an unchecked throw fact while signature/exception planning kept the
+  caller/callee as plain-returning methods.
 - One-dimensional array compound assignments with side-effecting indices now
   hoist the Java index once, save the old element value before evaluating the
   RHS, and reuse the shared numeric binary/narrowing planners for writeback.
@@ -655,14 +660,14 @@ Completion checklist for any audit marked `fixed locally`:
 |---|---:|---|
 | `0001` loop back edges invisible | partial | Basic loop-carried read compatibility covers the LoopMove-style repeated consume; full CFG/liveness with labelled/switch/exception edges still open |
 | `0002` object aliasing/clones | open | Clone discipline, then object representation |
-| `0003` integer arithmetic semantics | partial | Binary int/long overflow, shift-distance masking, local integral update wrapping, direct int/long `/`/`%` zero-divisor lowering to catchable `ArithmeticException`, nested numeric/comparison/logical/ternary composition around fallible div/rem, and fallible control-flow conditions are fixed; fallible arithmetic in method arguments, array indexes, and a fuller unchecked-exception propagation model remain open |
+| `0003` integer arithmetic semantics | partial | Binary int/long overflow, shift-distance masking, local integral update wrapping, direct int/long `/`/`%` zero-divisor lowering to catchable `ArithmeticException`, nested numeric/comparison/logical/ternary composition around fallible div/rem, fallible control-flow conditions, method arguments, and array indexes are fixed; the fuller unchecked-exception propagation model remains open |
 | `0004` string concat absorbs arithmetic | fixed locally | Moved to `claude_audits/done`; Rust IR shape tags prevent recurrence |
 | `0005` unsigned right shift | fixed locally | Moved to `claude_audits/done`; arithmetic slice should add shift-distance masking |
 | `0006` move analysis fragmented | partial | CallableAnalysis present; BindingId compatibility ids are attached to ShapeEnv for params, locals, catch params, loop variables, fields, and static fields, plus MoveUseContext use-count projection; CFG/liveness still open |
 | `0007` opaque Rust strings | open | Slot/facade generalization, shape tags |
 | `0008` inference does not reach lowering | open | CallableAnalysis |
 | `0009` overload identity collapse | open | Java callable signature identity; focused inherited-overload/override probe is covered by `overloaded_override_preserves_child_body_and_inherited_overload`, but broader downstream matching/rendering audit remains open |
-| `0010` fallibility disagrees | open | Callable fallibility plan |
+| `0010` fallibility disagrees | partial | Callable fallibility fixpoint exists and now seeds from checked and unchecked thrown facts; remaining migration is to make all call-site `?` insertion read the solved relation or emit explicit divergence diagnostics |
 | `0011` dyn Any fallback cascades | partial | Opaque external shims; generic/static typed facade fallbacks are now loud; external constructor argument facts now participate in signature inference, so modeled constructors such as `StringTokenizer(String,...)` and `ZipEntry(String)` no longer force declared source `String` params through `Box<dyn Any>`/`downcast::<String>()`; declared locals initialized by fact-backed typed external producers now anchor through a generic return-type identity rule instead of an AWT-specific `Graphics/createGraphics` escape hatch; field-accessing parsed source supertypes with runtime case-split pressure now use companion hierarchy carriers instead of erasure; reduced VCFStandardHeaderLines now cargo-checks cleanly after exact downcast locals/source peer params stay concrete and weak erased-object facade returns upgrade from typed facade impl signatures, but broader erased-object fallback remains open |
 | `0012` invalid unsupported diagnostics | fixed locally | Moved to `claude_audits/done` |
 | `0013` nested downcast names | fixed locally | Moved to `claude_audits/done` |

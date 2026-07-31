@@ -22836,6 +22836,47 @@ class FallibleCalls {
 }
 
 #[test]
+fn callable_fallibility_uses_unchecked_method_throw_facts() {
+    let mut facts = FactSet::default();
+    facts.method_effect_facts.push(MethodEffectFact {
+        method: FactMethodKey {
+            type_name: "UncheckedFallibleCalls".to_string(),
+            method_name: "increment".to_string(),
+        },
+        receiver_mutability: ReceiverMutabilityFact::Unknown,
+        return_nullability: NullabilityState::Unknown,
+        thrown: vec![JavaType::Unknown("RuntimeException".to_string())],
+        provenance: FactProvenance::UserOverride,
+    });
+    let translation = translate_source_with_facts(
+        r#"
+class UncheckedFallibleCalls {
+    double compute(double value) {
+        increment();
+        return value;
+    }
+
+    void increment() {
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn compute(&self, value: f64) -> Result<f64, JavaException>")
+            && translation.rust.contains("self.increment()?;")
+            && translation
+                .rust
+                .contains("pub fn increment(&self) -> Result<(), JavaException>"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn cast_wrapped_fallible_source_call_uses_inner_result_propagation() {
     let mut facts = FactSet::default();
     facts.method_effect_facts.push(MethodEffectFact {
