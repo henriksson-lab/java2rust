@@ -704,6 +704,23 @@ pub fn external_call_lowered_type(
     )
 }
 
+pub fn external_receiver_overload_is_modeled(
+    external_index: &ExternalFactLookupIndex<'_>,
+    receiver_key: &str,
+    name: &str,
+    arg_count: usize,
+) -> bool {
+    external_index
+        .external_api_effect_for_receiver_with_arity(Some(receiver_key), name, Some(arg_count))
+        .is_some()
+        || crate::external_packs::external_api_effect_for_receiver_with_arity(
+            Some(receiver_key),
+            name,
+            Some(arg_count),
+        )
+        .is_some()
+}
+
 pub fn external_call_lowered_type_with_external_index(
     receiver: Option<&Expr>,
     name: &str,

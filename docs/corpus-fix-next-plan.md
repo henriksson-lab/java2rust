@@ -1469,6 +1469,14 @@ Immediate std/core/alloc signature-fact migration queue:
    only re-states a Rust function signature, replace it with the fact-backed
    slot plan and delete or mark the branch as a temporary compatibility bridge.
 
+Shared call-planning cleanup: external receiver overload retargeting in
+`lower.rs` no longer probes external API effect facts directly. The lowerer now
+asks `call_plan::external_receiver_overload_is_modeled`, preserving the
+external-index plus platform fallback behavior while keeping fact selection
+behind the call-planning surface. Focused coverage:
+`semantic_facts_own_nullability_and_external_api_heuristics_before_lowering`
+and `external_method_support_uses_arity_names_for_overloaded_facades`.
+
 Current remaining refactor priority from the parallel audit:
 
 1. Extend the new call-boundary receiver ABI plan to optional receivers.

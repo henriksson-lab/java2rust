@@ -260,6 +260,10 @@ Landed in this batch:
 - The lower-local call exception-propagation wrapper now asks source-call
   fallibility through the shared analysis before delegating to legacy
   external/unresolved call planning.
+- Lowering no longer performs direct external API effect lookup when retargeting
+  external receiver overload names. It delegates the modeled-overload query to
+  `call_plan`, keeping the lowerer on the shared call-planning surface while
+  preserving the existing external-index and platform-fallback behavior.
 - Source-method usage lookups used by signature solving now read
   `UsageFacts::source_method_usage`, backed by `JavaCallableKey`, for concrete
   method declarations. This prevents same-name overloads from sharing

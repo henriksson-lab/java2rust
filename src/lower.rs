@@ -22,8 +22,9 @@ use crate::call_plan::{
     external_call_returns_rust_result_with_external_index,
     external_constructor_arg_shapes_with_args, external_constructor_returns_rust_result,
     external_method_rust_name, external_receiver_call_return_type_with_external_index,
-    facade_abi_argument_plan_for_rust_method_name, facade_abi_argument_plan_for_rust_path,
-    facade_receiver_slot_plan, known_external_call_lowered_type, native_collection_lowered_type,
+    external_receiver_overload_is_modeled, facade_abi_argument_plan_for_rust_method_name,
+    facade_abi_argument_plan_for_rust_path, facade_receiver_slot_plan,
+    known_external_call_lowered_type, native_collection_lowered_type,
     non_self_trivial_accessor_target, optional_borrowed_receiver_slot_plan,
     optional_receiver_slot_plan, plan_call_arguments, plan_call_arguments_with_facts_and_args,
     plan_call_exception_propagation_with_external_index, plan_call_expr_with_external_index,
@@ -18362,17 +18363,7 @@ fn retarget_external_receiver_overload_name<'a>(
     let Some(receiver_key) = receiver_external_type_key(receiver, env, ctx) else {
         return target;
     };
-    if ctx
-        .external_index
-        .external_api_effect_for_receiver_with_arity(Some(&receiver_key), name, Some(arg_count))
-        .is_none()
-        && crate::external_packs::external_api_effect_for_receiver_with_arity(
-            Some(&receiver_key),
-            name,
-            Some(arg_count),
-        )
-        .is_none()
-    {
+    if !external_receiver_overload_is_modeled(ctx.external_index, &receiver_key, name, arg_count) {
         return target;
     }
     let external_name = external_method_rust_name(&receiver_key, name, arg_count, ctx.facts);
