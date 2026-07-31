@@ -4468,7 +4468,12 @@ pub fn canonical_external_receiver_type_key(name: &str) -> String {
 
 fn is_known_java_platform_output_stream_receiver(receiver: &str) -> bool {
     let canonical = canonical_external_receiver_type_key(receiver);
-    let simple = canonical.rsplit('.').next().unwrap_or(&canonical);
+    let simple = canonical
+        .rsplit('.')
+        .next()
+        .unwrap_or(&canonical)
+        .trim_start_matches("JavaIo")
+        .trim_start_matches("JavaUtilZip");
     matches!(
         simple,
         "OutputStream"
@@ -7957,7 +7962,9 @@ impl ExternalApiFacadeSupport {
         match java_type {
             JavaType::Named { name, args } => {
                 if !local_types.contains(&canonical_external_receiver_type_key(name)) {
-                    self.add_opaque_type(rust_name_for_java_named_type(name));
+                    let rust_name = rust_name_for_java_named_type(name);
+                    self.add_opaque_type(rust_name.clone());
+                    self.add_java_platform_output_stream_overload_methods(name, &rust_name);
                 }
                 for arg in args {
                     self.add_declared_java_type(arg, local_types);
@@ -9845,6 +9852,25 @@ impl ExternalApiFacadeSupport {
         }
     }
 
+    fn add_java_platform_output_stream_overload_methods(
+        &mut self,
+        java_name: &str,
+        rust_name: &str,
+    ) {
+        if !is_known_java_platform_output_stream_receiver(java_name)
+            && !is_known_java_platform_output_stream_receiver(rust_name)
+        {
+            return;
+        }
+        for method in [
+            "    pub fn write_1(&self, _arg0: &[i8]) -> Result<(), JavaException> { unimplemented!(\"java.io.OutputStream.write is not modelled\") }",
+            "    pub fn write_int(&self, _arg0: i32) -> Result<(), JavaException> { unimplemented!(\"java.io.OutputStream.write is not modelled\") }",
+            "    pub fn write_3(&self, _arg0: &[i8], _arg1: i32, _arg2: i32) -> Result<(), JavaException> { unimplemented!(\"java.io.OutputStream.write is not modelled\") }",
+        ] {
+            self.add_method(rust_name.to_string(), method.to_string());
+        }
+    }
+
     fn add_method(&mut self, owner: String, method: String) {
         if is_awt_platform_facade_owner(&owner) {
             return;
@@ -10361,6 +10387,7 @@ impl ExternalApiFacadeSupport {
         for (from, to) in [
             ("InputStream", "java.io.InputStream"),
             ("java.io.InputStream", "InputStream"),
+            ("JavaIoInputStream", "InputStream"),
             ("OutputStream", "java.io.OutputStream"),
             ("java.io.OutputStream", "OutputStream"),
             ("FileInputStream", "java.io.InputStream"),
@@ -10383,7 +10410,10 @@ impl ExternalApiFacadeSupport {
             let from_key = canonical_external_receiver_type_key(from);
             let to_key = canonical_external_receiver_type_key(to);
             if (local_types.contains(&from_key)
-                && !matches!(from, "InputStream" | "OutputStream" | "java.io.InputStream"))
+                && !matches!(
+                    from,
+                    "InputStream" | "OutputStream" | "java.io.InputStream" | "JavaIoInputStream"
+                ))
                 || (local_types.contains(&to_key) && !is_builtin_external_facade_type(&to_key))
             {
                 continue;

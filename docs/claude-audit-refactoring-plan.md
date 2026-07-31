@@ -219,6 +219,13 @@ Landed in this batch:
   facts, and declared non-null `String` returns keep owned native `String`
   signatures instead of widening to erased `Any` because of nested unknown call
   heuristics.
+- External constructor argument facts now participate in actual-binding-type
+  source parameter inference for JDK `File`/`FileOutputStream` overloads, and
+  owned optional arguments/returns can unwrap through the shared slot conversion
+  planner before applying external facade `.into()` adapters. Focused Base64
+  proof also keeps the exact `JavaIoInputStream -> InputStream` adapter alive
+  through shared-support strip/merge. This narrows audit `0011` but does not
+  close it.
 - Apache Commons `FastMath` ownership is modelled as a `javalibs` native static
   owner alias to the existing JDK `Math` planner, so package-specific knowledge
   stays out of `stdlib.rs` while call sites reuse the same math projections.

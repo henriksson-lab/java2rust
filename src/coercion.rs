@@ -4121,6 +4121,22 @@ fn apply_borrowed_element_adapter(
 ) -> RustExpr {
     let adapted = match (&policy.carrier, &policy.recovery) {
         (_, BorrowedElementRecoveryPolicy::BorrowElement) => expr,
+        (
+            BorrowedElementCarrier::Option,
+            BorrowedElementRecoveryPolicy::CloneElements {
+                policy: clone_policy,
+            },
+        ) if policy.element_shape.ownership == OwnershipShape::Owned => {
+            apply_owned_option_clone_adapter(expr, clone_policy)
+        }
+        (
+            BorrowedElementCarrier::Option,
+            BorrowedElementRecoveryPolicy::CloneElements {
+                policy: clone_policy,
+            },
+        ) if borrowed_element_is_sequence_slice(&policy.element_shape) => {
+            apply_borrowed_option_slice_clone_adapter(expr, clone_policy)
+        }
         (BorrowedElementCarrier::Option, BorrowedElementRecoveryPolicy::StringViewToOwned) => {
             RustExpr::MethodCall {
                 receiver: Box::new(expr),
@@ -4333,6 +4349,38 @@ fn apply_borrowed_option_clone_adapter(expr: RustExpr, policy: &CloneRecoveryPol
             render_clone_recovery_policy(policy)
         )),
     }
+}
+
+fn apply_owned_option_clone_adapter(expr: RustExpr, policy: &CloneRecoveryPolicy) -> RustExpr {
+    match policy {
+        CloneRecoveryPolicy::ProvenCloneCapability { .. } => RustExpr::MethodCall {
+            receiver: Box::new(expr),
+            method: "clone".to_string(),
+            args: Vec::new(),
+        },
+        CloneRecoveryPolicy::AuditRequired => RustExpr::Raw(format!(
+            "{}.clone(){}",
+            emit::emit_expr(&expr),
+            render_clone_recovery_policy(policy)
+        )),
+    }
+}
+
+fn borrowed_element_is_sequence_slice(element_shape: &RustSlotShape) -> bool {
+    matches!(element_shape.java_ty, crate::java_ir::JavaType::Array(_))
+        && element_shape.ownership == OwnershipShape::SharedBorrow
+        && element_shape.view == ViewShape::Slice
+}
+
+fn apply_borrowed_option_slice_clone_adapter(
+    expr: RustExpr,
+    policy: &CloneRecoveryPolicy,
+) -> RustExpr {
+    let rendered = emit::emit_expr(&expr);
+    RustExpr::Raw(format!(
+        "{rendered}.map(|value| value.to_vec()){}",
+        render_clone_recovery_policy(policy)
+    ))
 }
 
 fn apply_borrowed_vec_clone_adapter(expr: RustExpr, policy: &CloneRecoveryPolicy) -> RustExpr {

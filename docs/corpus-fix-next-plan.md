@@ -7590,6 +7590,31 @@ Focused verification covers
 one `Option<&[i8]>.cloned()` call, one `Box<dyn Any>.as_bytes` call, and one
 missing `InputStream: From<JavaIoInputStream>` conversion.
 
+2026-07-31 optional slot/facade adapter checkpoint: constructor argument facts
+now use actual binding types for JDK `File`/`FileOutputStream` string overloads,
+JDK input-stream wrapper constructors declare typed `java.io.InputStream`
+slots, source overload fallback signatures selected from the signature table
+are authoritative for argument slots, owned `Option<T>` arguments can be
+consumed or clone-recovered into owned target slots through the shared slot
+conversion planner, and shared-support merging restores the builtin
+`JavaIoInputStream -> InputStream` adapter after per-module support stripping.
+Focused verification covers
+`file_constructor_only_string_params_stay_string_slots`,
+`receiverless_source_overload_uses_selected_signature_arg_slots`,
+`optional_owned_locals_consume_into_io_constructor_slots`,
+`shared_support_merger_does_not_let_local_alias_override_existing_shared_type`,
+`cargo fmt --check`, `cargo check --tests --quiet`, `git diff --check`, and
+release-backed Base64 reruns
+`.tmp/corpus-fastqc-base64-single-after-optional-slot-r1` and
+`.tmp/corpus-fastqc-base64-single-after-shared-adapter-r1`. The latest run has
+`parse_failures=0`, `unsupported_statements=0`, `unsupported_expressions=0`,
+`stubbed_constants=0`, `invalid_pattern_files=0`, and generated-Rust errors
+reduced from `10` to `6`. Remaining Base64 families are optional `String`
+forwarding in the larger overload set still widening to
+`Option<Box<dyn Any>>`, optional `Vec<i8>` constructor consumption in one object
+path, one `String` parameter widened to `Box<dyn Any>` before `getBytes`, and
+residual byte-array move recovery.
+
 ## Rerun Protocol
 
 After each fix:

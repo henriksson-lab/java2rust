@@ -807,6 +807,7 @@ def builtin_from_impls(selected: set[str]) -> list[tuple[str, str, str]]:
             "FileInputStream",
             "FilterInputStream",
             "GZIPInputStream",
+            "JavaIoInputStream",
             "ObjectInputStream",
             "PushbackInputStream",
             "SequenceInputStream",

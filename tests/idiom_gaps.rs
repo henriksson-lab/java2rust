@@ -21248,6 +21248,125 @@ class JavaAssertStatementUse {
 }
 
 #[test]
+fn file_constructor_only_string_params_stay_string_slots() {
+    let translation = translate_source(
+        r#"
+class FileConvenienceStringParams {
+    static void write(String filename, String text) throws Exception {
+        java.io.File file = new java.io.File(filename);
+        java.io.FileOutputStream out = new java.io.FileOutputStream(filename);
+        out.write(text.getBytes("US-ASCII"));
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn write(filename: String, text: &str)")
+            && !translation
+                .rust
+                .contains("filename: Box<dyn std::any::Any>")
+            && !translation.rust.contains("text: Box<dyn std::any::Any>")
+            && !translation.rust.contains("downcast::<String>"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "file_convenience_string_params",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn receiverless_source_overload_uses_selected_signature_arg_slots() {
+    let translation = translate_source(
+        r#"
+class ReceiverlessOverloadStringSlots {
+    static int decode(String s) throws Exception {
+        return decode(s, 0);
+    }
+
+    static int decode(String s, int options) throws Exception {
+        if (s == null) {
+            return options;
+        }
+        return s.length() + options;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn decode_string(s: Option<&str>)")
+            && translation.rust.contains("Self::decode_string_int(s, 0)")
+            && !translation.rust.contains("Self::decode_string_int(s.map")
+            && !translation.rust.contains("downcast::<String>"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "receiverless_overload_string_slots",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn optional_owned_locals_consume_into_io_constructor_slots() {
+    let translation = translate_source(
+        r#"
+class OptionalOwnedIoConstructorSlots {
+    static java.io.InputStream wrap(byte[] bytes, boolean zipped) throws Exception {
+        java.io.ByteArrayInputStream bais = null;
+        bais = new java.io.ByteArrayInputStream(bytes);
+        if (zipped) {
+            return new java.util.zip.GZIPInputStream(bais);
+        }
+        return bais;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("JavaIoByteArrayInputStream::new(bytes)")
+            && translation
+                .rust
+                .contains("GZIPInputStream::new(bais.clone()")
+            && translation.rust.contains(".expect(\"Java null receiver\")")
+            && translation
+                .rust
+                .contains("impl From<JavaIoInputStream> for InputStream"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "optional_owned_io_constructor_slots",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn optional_source_receiver_uses_mut_projection_for_mutating_context_fallback() {
     let translation = translate_source(
         r#"

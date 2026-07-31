@@ -10461,6 +10461,15 @@ pub fn external_argument_binding_constraints(
             *arg_index,
             facts,
         )
+        .or_else(|| {
+            external_constructor_argument_effect_for_actual_binding_type(
+                receiver_type.as_ref(),
+                name,
+                *arg_count,
+                *arg_index,
+                &binding.java_ty,
+            )
+        })
         .map(|effect| {
             external_constructor_argument_effect_constraints_for_binding(&effect, &binding.java_ty)
         })
@@ -10731,6 +10740,15 @@ fn unknown_boundary_is_fully_modeled_by_external_argument_effects(
                         *arg_index,
                         facts,
                     )
+                    .or_else(|| {
+                        external_constructor_argument_effect_for_actual_binding_type(
+                            receiver_type.as_ref(),
+                            name,
+                            *arg_count,
+                            *arg_index,
+                            &binding.java_ty,
+                        )
+                    })
                     .is_none()
                     && native_collection_argument_constraints_for_binding(
                         receiver_type.as_ref(),
@@ -10780,6 +10798,25 @@ fn external_constructor_argument_effect_for_call_arg(
                 arg_index,
             )
         })
+}
+
+fn external_constructor_argument_effect_for_actual_binding_type(
+    receiver_type: Option<&JavaType>,
+    name: &str,
+    arg_count: usize,
+    arg_index: usize,
+    binding_java_ty: &JavaType,
+) -> Option<crate::facts::ExternalConstructorArgumentEffectFact> {
+    if name != "new" {
+        return None;
+    }
+    let receiver_type = receiver_type.and_then(external_api_receiver_type_key)?;
+    crate::external_packs::java_platform_constructor_argument_effect_for_actual_arg(
+        &receiver_type,
+        arg_count,
+        arg_index,
+        binding_java_ty,
+    )
 }
 
 fn external_constructor_argument_effect_constraints_for_binding(

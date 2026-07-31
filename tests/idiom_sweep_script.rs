@@ -925,6 +925,9 @@ pub struct Base64;
 #[derive(Clone, Debug, Default)]
 pub struct ZipOutputStream;
 
+#[derive(Clone, Debug, Default)]
+pub struct JavaIoInputStream;
+
 pub struct ZipUser;
 "#,
     )
@@ -935,12 +938,12 @@ pub struct ZipUser;
     let conflicts = dir.join("conflicts.tsv");
     fs::write(
         &shared_support,
-        "#[derive(Clone, Debug, Default)]\npub struct Base64OutputStream;\n#[derive(Clone, Debug, Default)]\npub struct OutputStream;\n#[derive(Clone, Debug, Default)]\npub struct ZipOutputStream;\npub type OutputStream = Base64OutputStream;\n",
+        "#[derive(Clone, Debug, Default)]\npub struct Base64OutputStream;\n#[derive(Clone, Debug, Default)]\npub struct InputStream;\n#[derive(Clone, Debug, Default)]\npub struct OutputStream;\n#[derive(Clone, Debug, Default)]\npub struct ZipOutputStream;\npub type OutputStream = Base64OutputStream;\n",
     )
     .unwrap();
     fs::write(
         &shared_types,
-        "Base64OutputStream\nOutputStream\nZipOutputStream\n",
+        "Base64OutputStream\nInputStream\nJavaIoInputStream\nOutputStream\nZipOutputStream\n",
     )
     .unwrap();
     let script =
@@ -969,6 +972,10 @@ pub struct ZipUser;
     assert!(shared.contains("pub struct OutputStream;"), "{shared}");
     assert!(
         shared.contains("impl From<ZipOutputStream> for OutputStream"),
+        "{shared}"
+    );
+    assert!(
+        shared.contains("impl From<JavaIoInputStream> for InputStream"),
         "{shared}"
     );
     assert!(

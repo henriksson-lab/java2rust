@@ -14159,6 +14159,15 @@ fn lower_args_with_plan(
                     .or_else(|| {
                         lower_source_subtype_argument_as_actual(arg, env, shape, actual_shape, ctx)
                     })
+                    .or_else(|| {
+                        lower_optional_owned_argument_for_owned_target(
+                            arg,
+                            env,
+                            shape,
+                            actual_shape,
+                            ctx,
+                        )
+                    })
                     .unwrap_or_else(|| {
                         lower_expr_for_slot(arg, env, argument_slot(shape.clone()), ctx)
                     });
@@ -14635,6 +14644,15 @@ fn lower_argument_for_explicit_slot(
                 .or_else(|| {
                     lower_source_subtype_argument_as_actual(arg, env, &shape, &actual_shape, ctx)
                 })
+                .or_else(|| {
+                    lower_optional_owned_argument_for_owned_target(
+                        arg,
+                        env,
+                        &shape,
+                        &actual_shape,
+                        ctx,
+                    )
+                })
                 .unwrap_or_else(|| {
                     lower_expr_for_slot(arg, env, argument_slot(shape.clone()), ctx)
                 });
@@ -14679,6 +14697,15 @@ fn lower_constructor_args_with_plan(
                     )
                     .or_else(|| {
                         lower_source_subtype_argument_as_actual(arg, env, &shape, actual_shape, ctx)
+                    })
+                    .or_else(|| {
+                        lower_optional_owned_argument_for_owned_target(
+                            arg,
+                            env,
+                            &shape,
+                            actual_shape,
+                            ctx,
+                        )
                     })
                     .unwrap_or_else(|| {
                         lower_expr_for_slot(arg, env, argument_slot(shape.clone()), ctx)
@@ -17535,6 +17562,48 @@ fn lower_optional_argument_for_borrowed_target(
         RustExpr::Raw(rendered) => Some(RustExpr::Raw(format!("Some(&{rendered})"))),
         _ => None,
     }
+}
+
+fn lower_optional_owned_argument_for_owned_target(
+    arg: &Expr,
+    env: &ShapeEnv,
+    target_shape: &RustSlotShape,
+    actual_shape: &RustSlotShape,
+    ctx: LowerCtx,
+) -> Option<RustExpr> {
+    if target_shape.optional_element_type().is_some() || !shape_is_owned(target_shape) {
+        return None;
+    }
+    let element_ty = actual_shape.optional_element_type()?;
+    if actual_shape.ownership != OwnershipShape::Owned {
+        return None;
+    }
+    let element_shape =
+        optional_element_slot_shape_with_facts(actual_shape, element_ty.clone(), ctx.facts);
+    if !borrowed_element_target_matches_element(target_shape, &element_shape, ctx.facts) {
+        return None;
+    }
+    let slot = argument_slot(target_shape.clone());
+    let unwrap_plan =
+        reused_optional_unwrap_plan_for_slot(actual_shape, element_ty, &slot, true, ctx.facts)?;
+    let lowered = lower_expr_with_refinements(arg, env, ctx, &ExprRefinements::default());
+    let lowered = if actual_shape.ownership == OwnershipShape::Owned
+        && move_recovery_source_name(arg)
+            .is_some_and(|name| MoveUseContext::new(ctx).has_later_or_repeated_current_read(name))
+    {
+        apply_clone_projection(lowered)
+    } else {
+        lowered
+    };
+    let lowered = apply_reused_optional_unwrap(lowered, &unwrap_plan);
+    let plan = plan_lowered_slot_conversion(&lowered.actual, slot.clone(), ctx.facts);
+    let converted = apply_lowered_slot_expr_conversion(lowered, &plan);
+    Some(apply_expr_to_slot_via_plan(
+        converted,
+        element_shape,
+        &slot,
+        ctx.facts,
+    ))
 }
 
 fn lower_current_instance_field_for_borrowed_dyn_argument(
@@ -22912,7 +22981,7 @@ fn lower_reused_optional_unwrap_for_slot(
     }
     let unwrap_plan = reused_optional_unwrap_plan_for_slot(
         actual,
-        element_shape.java_ty,
+        element_shape.java_ty.clone(),
         slot,
         matches!(slot, Slot::Return(_)),
         ctx.facts,
@@ -22920,6 +22989,7 @@ fn lower_reused_optional_unwrap_for_slot(
     let lowered = apply_reused_optional_unwrap(lowered, &unwrap_plan);
     let plan = plan_lowered_slot_conversion(&lowered.actual, slot.clone(), ctx.facts);
     let converted = apply_lowered_slot_expr_conversion(lowered, &plan);
+    let converted = apply_expr_to_slot_via_plan(converted, element_shape, slot, ctx.facts);
     Some(apply_source_type_param_optional_unwrap_result_upcast(
         converted, actual, slot, env, ctx,
     ))
@@ -24175,7 +24245,7 @@ fn source_context_current_static_method_fallback_signature(
                 .map(|param| param.shape.clone())
                 .collect(),
             receiver: signature.receiver,
-            arg_shapes_are_authoritative: false,
+            arg_shapes_are_authoritative: true,
         });
     }
     if let Some(method) =
@@ -24198,7 +24268,7 @@ fn source_context_current_static_method_fallback_signature(
                     .map(|param| param.shape.clone())
                     .collect(),
                 receiver: signature.receiver,
-                arg_shapes_are_authoritative: false,
+                arg_shapes_are_authoritative: true,
             });
         }
         return Some(ContextFallbackMethodSignature {

@@ -31157,6 +31157,33 @@ pub fn java_platform_constructor_argument_effect_for(
     if arg_count == 1
         && parameter_index == 0
         && [
+            "java.io.BufferedInputStream",
+            "java.io.DataInputStream",
+            "java.io.ObjectInputStream",
+            "java.io.FilterInputStream",
+            "java.io.PushbackInputStream",
+            "java.util.zip.GZIPInputStream",
+        ]
+        .iter()
+        .any(|expected| crate::facts::external_type_name_matches(type_name, expected))
+    {
+        return Some(ExternalConstructorArgumentEffectFact {
+            type_name: type_name.to_string(),
+            arg_count,
+            parameter_index,
+            parameter_type: Some(JavaType::Named {
+                name: "java.io.InputStream".to_string(),
+                args: Vec::new(),
+            }),
+            parameter_nullability: NullabilityState::DefinitelyNonNull,
+            argument_mutability: ReceiverMutabilityFact::ReadOnly,
+            alias_policy: ExternalArgumentAliasPolicy::Escapes,
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
+    if arg_count == 1
+        && parameter_index == 0
+        && [
             "java.io.PrintStream",
             "java.io.BufferedOutputStream",
             "java.io.DataOutputStream",
@@ -31505,6 +31532,12 @@ fn java_platform_conversion_adapters() -> Vec<ExternalConversionAdapterFact> {
         },
         ExternalConversionAdapterFact {
             from_type: "java.io.InputStream".to_string(),
+            to_type: "InputStream".to_string(),
+            kind: ExternalConversionAdapterKind::Into,
+            provenance: FactProvenance::BuiltinExternalModel,
+        },
+        ExternalConversionAdapterFact {
+            from_type: "JavaIoInputStream".to_string(),
             to_type: "InputStream".to_string(),
             kind: ExternalConversionAdapterKind::Into,
             provenance: FactProvenance::BuiltinExternalModel,
