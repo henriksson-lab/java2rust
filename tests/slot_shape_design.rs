@@ -4751,6 +4751,30 @@ fn unsupported_lowering_policy_owns_compile_error_placeholders() {
 }
 
 #[test]
+fn unsupported_compile_error_literals_are_centralized() {
+    let allowed_files = ["src/unsupported.rs", "src/main.rs", "src/stdlib.rs"];
+    for entry in std::fs::read_dir("src").unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+        let rendered_path = path.to_string_lossy().replace('\\', "/");
+        if allowed_files
+            .iter()
+            .any(|allowed| rendered_path.ends_with(allowed))
+        {
+            continue;
+        }
+        let source = fs::read_to_string(&path).unwrap();
+        assert!(
+            !source.contains("compile_error!("),
+            "direct compile_error! producer should route through src/unsupported.rs: {rendered_path}"
+        );
+    }
+}
+
+#[test]
 fn class_literal_tokens_are_planned_before_lowering() {
     let plan = class_literal_token_plan(&JavaType::String, &FactSet::default());
     assert_eq!(

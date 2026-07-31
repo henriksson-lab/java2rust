@@ -64,6 +64,10 @@ fn render_stream_lambda_clone_projection(rendered: &str) -> String {
     crate::emit::emit_expr(&apply_clone_projection(RustExpr::Raw(rendered.to_string())))
 }
 
+fn stream_compile_error_expr(message: &str) -> String {
+    crate::emit::emit_expr(&crate::unsupported::compile_error_expr(message))
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct StreamRenderContext<'a> {
     env: Option<&'a ShapeEnv>,
@@ -329,8 +333,7 @@ fn emit_stream_lambda_body_with_locals_prec(
         Expr::Binary {
             op: BinaryOp::UShr, ..
         } => (
-            "compile_error!(\"unsupported Java unsigned right shift in stream lambda\")"
-                .to_string(),
+            stream_compile_error_expr("unsupported Java unsigned right shift in stream lambda"),
             12,
         ),
         Expr::Binary { op, left, right } => {
@@ -797,7 +800,7 @@ fn render_stream_source_range(
         ctx,
         None,
     )
-    .unwrap_or_else(|| "compile_error!(\"unsupported Arrays.stream range start\")".to_string());
+    .unwrap_or_else(|| stream_compile_error_expr("unsupported Arrays.stream range start"));
     let to = emit_stream_lambda_body_with_locals(
         to,
         "__java_unused_stream_bound",
@@ -806,7 +809,7 @@ fn render_stream_source_range(
         ctx,
         None,
     )
-    .unwrap_or_else(|| "compile_error!(\"unsupported Arrays.stream range end\")".to_string());
+    .unwrap_or_else(|| stream_compile_error_expr("unsupported Arrays.stream range end"));
     format!(
         "{{ let __java_arrays_source = &{source}; let __java_arrays_from = {from}; let __java_arrays_to = {to}; if __java_arrays_from > __java_arrays_to {{ panic!(\"Java IllegalArgumentException: fromIndex > toIndex\"); }} if __java_arrays_from < 0 || __java_arrays_to as usize > __java_arrays_source.len() {{ panic!(\"Java ArrayIndexOutOfBoundsException\"); }} let __java_arrays_from = __java_arrays_from as usize; let __java_arrays_to = __java_arrays_to as usize; &__java_arrays_source[__java_arrays_from..__java_arrays_to] }}"
     )

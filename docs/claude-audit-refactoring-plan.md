@@ -66,6 +66,12 @@ Landed in this batch:
   `src/slot_render.rs`, and `src/call_lowering.rs` route through the shared
   escaped `unsupported::compile_error_*` helpers. Focused regressions cover
   quoted and backslash-containing diagnostic text.
+- Follow-up source audit moved the remaining unsupported-expression
+  `compile_error!` producers in `src/conversion_lowering.rs`,
+  `src/stream_lowering.rs`, and `src/expr_render.rs` through the same helpers.
+  A source-inspection regression now allows direct `compile_error!` literals
+  only in `src/unsupported.rs`, the batch metric scanner, and typed
+  static-constant sentinel fallback generation.
 - Generated-Rust parse-failure scanning now lives in
   `scripts/focused-parse-failures.sh`, with fast helper coverage and an
   end-to-end focused-package wrapper test proving parse failures increment

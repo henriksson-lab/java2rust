@@ -97,8 +97,8 @@ pub fn apply_reused_optional_unwrap(
         ReusedOptionalUnwrapProjection::BorrowElement { ownership } => {
             crate::coercion::project_optional_element_borrow_carrier(option_expr, ownership)
                 .unwrap_or_else(|| {
-                    RustExpr::Raw(
-                        "compile_error!(\"unsupported optional element projection\")".to_string(),
+                    crate::unsupported::compile_error_expr(
+                        "unsupported optional element projection",
                     )
                 })
         }
