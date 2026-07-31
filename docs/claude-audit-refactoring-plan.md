@@ -457,6 +457,10 @@ Landed in this batch:
   arguments. The old post-plan `external_call_arg_shapes` retry has been
   removed, leaving only generic borrowed-parameter move recovery for genuinely
   unshaped calls.
+- Stream lambda argument adaptation no longer retries
+  `external_call_arg_shapes_for_resolved` after the shared planner either; the
+  resolved external case is expected to arrive as a shaped
+  `ArgumentLoweringPlan`.
 - External field fact lookup for enum/static-field lowering now goes through
   `member_access_plan::external_field_type_for_owner`; `lower.rs` no longer
   probes external-pack field facts directly.

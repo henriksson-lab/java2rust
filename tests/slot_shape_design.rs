@@ -37020,6 +37020,10 @@ fn stream_lambda_argument_shapes_do_not_invent_string_fallbacks() {
         !call_args.contains("external_call_arg_shapes"),
         "{call_args}"
     );
+    assert!(
+        !source.contains("external_call_arg_shapes_for_resolved"),
+        "{source}"
+    );
     assert!(!source.contains("fn render_stream_lambda_optional_string_field_arg"));
 }
 

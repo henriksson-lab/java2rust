@@ -2266,29 +2266,6 @@ fn emit_stream_lambda_call_args_for_resolved(
                     })
                     .or_else(|| {
                         resolved
-                            .and_then(|resolved| {
-                                crate::call_plan::external_call_arg_shapes_for_resolved(
-                                    resolved,
-                                    name,
-                                    args.len(),
-                                    ctx.facts.unwrap_or(&FactSet::default()),
-                                )
-                            })
-                            .and_then(|shapes| shapes.get(index).cloned())
-                            .map(|slot| {
-                                adapt_stream_lambda_arg_for_slot(
-                                    arg,
-                                    rendered.clone(),
-                                    &slot,
-                                    param,
-                                    locals,
-                                    ctx,
-                                    param_shape,
-                                )
-                            })
-                    })
-                    .or_else(|| {
-                        resolved
                             .and_then(|resolved| resolved_call_arg_target_type(resolved, index))
                             .map(|target| {
                                 let slot = storage_shape_for_java_type(target.clone());
