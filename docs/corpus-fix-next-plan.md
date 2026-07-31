@@ -1615,6 +1615,13 @@ Current remaining refactor priority from the parallel audit:
    verification: `stream_lambda_argument_shapes_do_not_invent_string_fallbacks`,
    the stream lambda `charAt`/collector/map tests, fixture static-owner coverage,
    `cargo check --tests --quiet`, and the 52-test stream filter passed.
+   Next stream lambda cleanup: shaped lambda call arguments now attempt shared
+   slot conversion first for borrowed string, owned, and generic slots. Stream
+   lowering only keeps fallback borrowed-string view spelling and closure-capture
+   owned-value recovery, which still depends on lambda binding context rather
+   than ordinary call slot semantics. Focused verification repeated the stream
+   lambda slot-shape/design tests, the owned-index idiom fixture, static-owner
+   fixture coverage, `cargo check --tests --quiet`, and `git diff --check`.
 
 Current implementation note, 2026-07-23:
 

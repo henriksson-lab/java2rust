@@ -36750,7 +36750,7 @@ fn stream_lambda_argument_shapes_do_not_invent_string_fallbacks() {
     let actual_shape = source
         .split("fn stream_lambda_arg_actual_shape")
         .nth(1)
-        .and_then(|tail| tail.split("fn render_stream_lambda_owned_arg").next())
+        .and_then(|tail| tail.split("fn recover_stream_lambda_owned_arg_move").next())
         .expect("stream lambda argument actual-shape helper should be present");
     let borrowed_arg = source
         .split("fn render_stream_lambda_borrowed_str_arg")
@@ -36767,6 +36767,9 @@ fn stream_lambda_argument_shapes_do_not_invent_string_fallbacks() {
     assert!(coercion_slot_plan.contains("StreamLambdaArgumentSlotPlan::OwnedValue"));
     assert!(coercion_slot_plan.contains("StreamLambdaArgumentSlotPlan::GenericSlotConversion"));
     assert!(slot_plan.contains("stream_lambda_argument_slot_plan(slot)"));
+    assert!(slot_plan.contains("let planned = render_stream_lambda_arg_to_slot_through_plan"));
+    assert!(slot_plan.contains("planned.unwrap_or(rendered)"));
+    assert!(slot_plan.contains("recover_stream_lambda_owned_arg_move"));
     assert!(
         !adapter.contains("shape_is_borrowed_string_content"),
         "{adapter}"

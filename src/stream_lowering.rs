@@ -2391,25 +2391,24 @@ fn adapt_stream_lambda_arg_for_slot(
     ctx: StreamRenderContext<'_>,
     param_shape: Option<&RustSlotShape>,
 ) -> String {
-    let adapted = match stream_lambda_argument_slot_plan(slot) {
-        StreamLambdaArgumentSlotPlan::BorrowedStringView => {
+    let slot_plan = stream_lambda_argument_slot_plan(slot);
+    let planned = render_stream_lambda_arg_to_slot_through_plan(
+        arg,
+        &rendered,
+        slot,
+        param,
+        locals,
+        ctx,
+        param_shape,
+    );
+    let adapted = match slot_plan {
+        StreamLambdaArgumentSlotPlan::BorrowedStringView => planned.unwrap_or_else(|| {
             render_stream_lambda_borrowed_str_arg(arg, rendered, param, locals, ctx, param_shape)
-        }
+        }),
         StreamLambdaArgumentSlotPlan::OwnedValue => {
-            render_stream_lambda_owned_arg(arg, rendered, param, locals)
+            recover_stream_lambda_owned_arg_move(arg, planned.unwrap_or(rendered), param, locals)
         }
-        StreamLambdaArgumentSlotPlan::GenericSlotConversion => {
-            render_stream_lambda_arg_to_slot_through_plan(
-                arg,
-                &rendered,
-                slot,
-                param,
-                locals,
-                ctx,
-                param_shape,
-            )
-            .unwrap_or(rendered)
-        }
+        StreamLambdaArgumentSlotPlan::GenericSlotConversion => planned.unwrap_or(rendered),
     };
     recover_stream_lambda_borrowed_string_param_move(arg, adapted, param, locals, ctx, param_shape)
 }
@@ -2565,7 +2564,7 @@ fn stream_lambda_arg_actual_shape(
     }
 }
 
-fn render_stream_lambda_owned_arg(
+fn recover_stream_lambda_owned_arg_move(
     arg: &Expr,
     rendered: String,
     param: &str,
