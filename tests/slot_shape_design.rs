@@ -29919,6 +29919,7 @@ fn semantic_facts_own_nullability_and_external_api_heuristics_before_lowering() 
     assert!(!signature_source.contains("stmt_mutates_self"));
     assert!(!lower_source.contains("field_nullability_for"));
     assert!(!lower_source.contains("external_api_effect_for"));
+    assert!(!lower_source.contains("external_constructor_for("));
     assert!(!lower_source.contains("external_field_for"));
     assert!(!lower_source.contains("starts_with(\"set\")"));
     assert!(!lower_source.contains("starts_with(\"get\")"));

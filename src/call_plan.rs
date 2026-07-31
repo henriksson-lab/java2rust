@@ -721,6 +721,14 @@ pub fn external_receiver_overload_is_modeled(
         .is_some()
 }
 
+pub fn external_constructor_is_modeled(facts: &FactSet, type_name: &str, arg_count: usize) -> bool {
+    let arg_types = vec![JavaType::Unknown("_".to_string()); arg_count];
+    facts
+        .external_constructor_for(type_name, &arg_types)
+        .is_some()
+        || crate::external_packs::external_constructor_for(type_name, &arg_types).is_some()
+}
+
 pub fn external_call_lowered_type_with_external_index(
     receiver: Option<&Expr>,
     name: &str,

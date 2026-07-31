@@ -1480,6 +1480,10 @@ Field-fact follow-up: enum/static-field lowering now asks
 `member_access_plan::external_field_type_for_owner` for external field types
 instead of querying `external_packs::external_field_for` in `lower.rs`; the same
 semantic-facts guard now rejects direct lowerer field-fact probes.
+Constructor-fact follow-up: concrete-slot external constructor lowering now
+asks `call_plan::external_constructor_is_modeled` for modeled-constructor
+support instead of constructing local unknown argument facts and checking
+external packs directly in `lower.rs`.
 
 Current remaining refactor priority from the parallel audit:
 

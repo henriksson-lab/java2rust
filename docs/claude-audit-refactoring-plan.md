@@ -327,6 +327,9 @@ Landed in this batch:
 - External field fact lookup for enum/static-field lowering now goes through
   `member_access_plan::external_field_type_for_owner`; `lower.rs` no longer
   probes external-pack field facts directly.
+- External constructor support checks for concrete-slot lowering now go through
+  `call_plan::external_constructor_is_modeled`; `lower.rs` no longer probes
+  external constructor facts directly.
 
 1. Add a `CallableAnalysis` shell.
    - Introduce `src/callable_analysis.rs`.
