@@ -4181,6 +4181,56 @@ class InfoLine extends HeaderLine {}
 }
 
 #[test]
+fn open_field_bearing_source_runtime_case_split_uses_companion_carrier_dispatch() {
+    let parsed = parse_java_source(
+        r#"
+class HeaderLine {
+    String name;
+
+    String key() {
+        return name;
+    }
+}
+
+final class FormatLine extends HeaderLine {}
+final class InfoLine extends HeaderLine {}
+
+class UseLine {
+    boolean isFormat(HeaderLine line) {
+        return line instanceof FormatLine;
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let facts = resolved.facts.clone();
+
+    let representations = plan_representations(&resolved.program, &facts);
+    let representation = representations.type_representation("HeaderLine").unwrap();
+
+    assert_eq!(
+        representation.representation,
+        ObjectRepresentation::SourceHierarchyCarrier {
+            carrier_name: "HeaderLineValue".to_string(),
+            variants: vec![
+                "HeaderLine".to_string(),
+                "FormatLine".to_string(),
+                "InfoLine".to_string()
+            ],
+        }
+    );
+    assert_eq!(
+        representations.dispatch_for(&JavaType::Named {
+            name: "HeaderLine".to_string(),
+            args: Vec::new(),
+        }),
+        DispatchShape::ClosedEnum {
+            enum_name: "HeaderLineValue".to_string()
+        }
+    );
+}
+
+#[test]
 fn source_class_fields_beat_external_erased_and_closed_facts() {
     let parsed = parse_java_source(
         r#"

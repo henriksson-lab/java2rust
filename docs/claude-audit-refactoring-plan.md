@@ -29,6 +29,11 @@ Keep the standing constraint: do not make algorithm changes that block future
 global semantic analysis. Prefer explicit keys, indices, compatibility shims,
 and divergence logs.
 
+Current checkpoint rule: after implementing and verifying a Claude audit item,
+move its issue file from active `claude_audits/` into
+`/home/mahogny/github/claude/new_java2rust/claude_audits/done` before calling
+that audit done.
+
 Active workflow invariant: when an audit-backed item is actually done, move the
 corresponding `claude_audits/*.md` file to
 `/home/mahogny/github/claude/new_java2rust/claude_audits/done` in that same
@@ -632,7 +637,7 @@ Completion checklist for any audit marked `fixed locally`:
 | `0008` inference does not reach lowering | open | CallableAnalysis |
 | `0009` overload identity collapse | open | Java callable signature identity; focused inherited-overload/override probe is covered by `overloaded_override_preserves_child_body_and_inherited_overload`, but broader downstream matching/rendering audit remains open |
 | `0010` fallibility disagrees | open | Callable fallibility plan |
-| `0011` dyn Any fallback cascades | partial | Opaque external shims; generic/static typed facade fallbacks are now loud; external constructor argument facts now participate in signature inference, so modeled constructors such as `StringTokenizer(String,...)` and `ZipEntry(String)` no longer force declared source `String` params through `Box<dyn Any>`/`downcast::<String>()`; declared locals initialized by fact-backed typed external producers now anchor through a generic return-type identity rule instead of an AWT-specific `Graphics/createGraphics` escape hatch; broader erased-object fallback remains |
+| `0011` dyn Any fallback cascades | partial | Opaque external shims; generic/static typed facade fallbacks are now loud; external constructor argument facts now participate in signature inference, so modeled constructors such as `StringTokenizer(String,...)` and `ZipEntry(String)` no longer force declared source `String` params through `Box<dyn Any>`/`downcast::<String>()`; declared locals initialized by fact-backed typed external producers now anchor through a generic return-type identity rule instead of an AWT-specific `Graphics/createGraphics` escape hatch; field-accessing parsed source supertypes with runtime case-split pressure now use companion hierarchy carriers instead of erasure, but external/source-summary return slots and broader erased-object fallback remain |
 | `0012` invalid unsupported diagnostics | fixed locally | Moved to `claude_audits/done` |
 | `0013` nested downcast names | fixed locally | Moved to `claude_audits/done` |
 | `0014` labelled statements deleted | fixed locally | Moved to `claude_audits/done`; CFG liveness still needs labelled edges |

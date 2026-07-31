@@ -7479,6 +7479,29 @@ Do not satisfy this by casting `&VCFHeaderLine` to `&VCFFormatHeaderLine`; the
 next real fix must provide a carrier that preserves Java runtime subtype
 identity while still exposing superclass members and source field methods.
 
+2026-07-31 source hierarchy companion-carrier checkpoint: field-accessing
+parsed source classes with runtime case-split pressure now keep their concrete
+struct emission and receive a companion closed-enum dispatch carrier over the
+root plus known transitive descendants, e.g. `HeaderLine` plus
+`HeaderLineValue`. Slot rendering, casts, `instanceof`, and source-supertype
+conversion reuse the existing closed-enum plans, while `lower_type` appends the
+companion carrier after emitting the normal source struct/methods. Focused
+verification covers the representation selection with
+`open_field_bearing_source_runtime_case_split_uses_companion_carrier_dispatch`
+and the generated repair loops with
+`source_hierarchy_instanceof_repair_keeps_supertype_slot_adapted`,
+`sealed_source_hierarchy_instanceof_repair_uses_closed_enum_runtime_carrier`,
+and `sealed_source_hierarchy_instanceof_pattern_binds_closed_enum_payload`.
+Release-backed reduced VCF rerun
+`.tmp/corpus-rerun-20260731-vcf-after-transitive-source-hierarchy-carrier-r1`
+translates 9/9 files with 0 parse failures, `unsupported_statements=0`,
+`stubbed_constants=0`, and 0 invalid-pattern files. Generated-Rust errors are
+38 because carrier dispatch has now reached `instanceof`/casts, but external
+return/source-summary slots such as `VCFHeader.getMetaDataInInputOrder()` still
+produce concrete `VCFHeaderLine`; remaining compile families also include
+`VCFCompoundHeaderLine` erased-field comparisons and generic `T` wrapping into
+`VCFHeaderLineValue`.
+
 ## Rerun Protocol
 
 After each fix:

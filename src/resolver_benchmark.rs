@@ -3270,7 +3270,8 @@ fn collect_object_representation_counts_for_program(
                 report.object_dyn_trait_representations += 1;
             }
             crate::representation::ObjectRepresentation::JavaEnum { .. }
-            | crate::representation::ObjectRepresentation::ClosedEnum { .. } => {
+            | crate::representation::ObjectRepresentation::ClosedEnum { .. }
+            | crate::representation::ObjectRepresentation::SourceHierarchyCarrier { .. } => {
                 report.object_closed_enum_representations += 1;
             }
             crate::representation::ObjectRepresentation::ErasedObject => {

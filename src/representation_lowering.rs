@@ -139,21 +139,47 @@ pub fn type_emission_for_with_facts_and_exceptions(
         ObjectRepresentation::ClosedEnum {
             enum_name,
             variants,
-        } => {
-            let variants = variants
-                .iter()
-                .map(|variant| format!("    {variant}({variant}),"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            RepresentationTypeEmission::RawRustItem(format!(
-                "#[derive(Clone, PartialEq)]\npub enum {enum_name} {{\n{variants}\n}}"
-            ))
+        } => RepresentationTypeEmission::RawRustItem(closed_enum_carrier_item(enum_name, variants)),
+        ObjectRepresentation::SourceHierarchyCarrier { .. } => {
+            RepresentationTypeEmission::LowerAsConcreteStruct
         }
         ObjectRepresentation::ErasedObject => RepresentationTypeEmission::RawRustItem(format!(
             "pub type {} = Box<dyn std::any::Any>;",
             ty.name
         )),
     }
+}
+
+pub fn source_hierarchy_carrier_item_for_type(
+    representations: &RepresentationPlan,
+    ty: &TypeDecl,
+) -> Option<String> {
+    let representation = representations.type_representation(&ty.name)?;
+    let ObjectRepresentation::SourceHierarchyCarrier {
+        carrier_name,
+        variants,
+    } = &representation.representation
+    else {
+        return None;
+    };
+    Some(source_hierarchy_carrier_item(carrier_name, variants))
+}
+
+fn closed_enum_carrier_item(enum_name: &str, variants: &[String]) -> String {
+    carrier_enum_item("#[derive(Clone, PartialEq)]", enum_name, variants)
+}
+
+fn source_hierarchy_carrier_item(enum_name: &str, variants: &[String]) -> String {
+    carrier_enum_item("#[derive(Clone)]", enum_name, variants)
+}
+
+fn carrier_enum_item(derive: &str, enum_name: &str, variants: &[String]) -> String {
+    let variants = variants
+        .iter()
+        .map(|variant| format!("    {variant}({variant}),"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{derive}\npub enum {enum_name} {{\n{variants}\n}}")
 }
 
 fn java_enum_payload_accessor_methods(ty: &TypeDecl, variants: &[String]) -> String {

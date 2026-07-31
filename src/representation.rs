@@ -109,8 +109,65 @@ pub fn plan_representations(program: &Program, facts: &FactSet) -> Representatio
     for edge in object_plan.hierarchy_edges {
         record_hierarchy_edge(&mut plan, edge);
     }
+    expand_source_hierarchy_carrier_variants(&mut plan);
     collect_anonymous_erased_boundary_representations(program, &effective_facts, &mut plan);
     plan
+}
+
+fn expand_source_hierarchy_carrier_variants(plan: &mut RepresentationPlan) {
+    let roots = plan
+        .types
+        .iter()
+        .filter_map(|(name, representation)| {
+            matches!(
+                representation.representation,
+                ObjectRepresentation::SourceHierarchyCarrier { .. }
+            )
+            .then_some(name.clone())
+        })
+        .collect::<Vec<_>>();
+    for root in roots {
+        let variants = source_hierarchy_carrier_variants_for_root(plan, &root);
+        if let Some(entry) = plan.types.get_mut(&root)
+            && let ObjectRepresentation::SourceHierarchyCarrier {
+                variants: existing, ..
+            } = &mut entry.representation
+        {
+            *existing = variants;
+        }
+    }
+}
+
+fn source_hierarchy_carrier_variants_for_root(
+    plan: &RepresentationPlan,
+    root: &str,
+) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut names = Vec::new();
+    collect_source_hierarchy_carrier_variants(plan, root, &mut seen, &mut names);
+    names
+        .into_iter()
+        .map(|name| crate::slot_render::rust_name_for_java_named_type(&name))
+        .collect()
+}
+
+fn collect_source_hierarchy_carrier_variants(
+    plan: &RepresentationPlan,
+    type_name: &str,
+    seen: &mut BTreeSet<String>,
+    names: &mut Vec<String>,
+) {
+    if !seen.insert(type_name.to_string()) {
+        return;
+    }
+    names.push(type_name.to_string());
+    let direct_subtypes = plan
+        .type_representation(type_name)
+        .map(|entry| entry.direct_subtypes.clone())
+        .unwrap_or_default();
+    for subtype in direct_subtypes {
+        collect_source_hierarchy_carrier_variants(plan, &subtype, seen, names);
+    }
 }
 
 fn representation_for_strategy_with_external_final_facade_policy(
@@ -301,6 +358,11 @@ pub fn representation_dispatch_policy(
         ObjectRepresentation::ClosedEnum { enum_name, .. } => DispatchShape::ClosedEnum {
             enum_name: crate::slot_render::rust_name_for_java_named_type(enum_name),
         },
+        ObjectRepresentation::SourceHierarchyCarrier { carrier_name, .. } => {
+            DispatchShape::ClosedEnum {
+                enum_name: crate::slot_render::rust_name_for_java_named_type(carrier_name),
+            }
+        }
         ObjectRepresentation::ErasedObject => DispatchShape::ErasedObject,
     };
     RepresentationDispatchPolicy {

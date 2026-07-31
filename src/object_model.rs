@@ -162,6 +162,10 @@ pub enum ObjectRepresentation {
         enum_name: String,
         variants: Vec<String>,
     },
+    SourceHierarchyCarrier {
+        carrier_name: String,
+        variants: Vec<String>,
+    },
     ErasedObject,
 }
 
@@ -972,6 +976,7 @@ pub fn object_hierarchy_edge_representation_policy(
     let represented = matches!(
         representation,
         ObjectRepresentation::ClosedEnum { .. }
+            | ObjectRepresentation::SourceHierarchyCarrier { .. }
             | ObjectRepresentation::DynTrait { .. }
             | ObjectRepresentation::ErasedObject
     );
@@ -1138,7 +1143,8 @@ fn apply_closed_enum_strategy_selection(facts: &EffectiveFacts<'_>, plan: &mut O
                     reason: closed_enum_requirement_rejection_reason(&strategy.root),
                 });
             } else {
-                strategy.strategy = representation;
+                strategy.strategy =
+                    source_hierarchy_carrier_strategy_if_needed(strategy, representation);
                 if let Some(provenance) = policy.provenance {
                     strategy.add_provenance(provenance);
                 }
@@ -1228,6 +1234,15 @@ fn apply_erased_object_requirement_fallback(strategy: &mut ObjectStrategyPlan) {
         return;
     }
     if parsed_source_erased_fallback_should_remain_rejected(strategy) {
+        if let Some(carrier) = open_source_hierarchy_carrier_fallback(strategy) {
+            strategy.rejected.push(RejectedObjectStrategy {
+                strategy: ObjectRepresentation::ErasedObject,
+                reason,
+            });
+            strategy.strategy = carrier;
+            strategy.add_provenance(FactProvenance::ConservativeFallback);
+            return;
+        }
         strategy.rejected.push(RejectedObjectStrategy {
             strategy: ObjectRepresentation::ErasedObject,
             reason,
@@ -1245,6 +1260,63 @@ fn apply_erased_object_requirement_fallback(strategy: &mut ObjectStrategyPlan) {
         strategy.strategy = ObjectRepresentation::ErasedObject;
         strategy.add_provenance(FactProvenance::ConservativeFallback);
     }
+}
+
+fn open_source_hierarchy_carrier_fallback(
+    strategy: &ObjectStrategyPlan,
+) -> Option<ObjectRepresentation> {
+    if !(matches!(strategy.strategy, ObjectRepresentation::ConcreteStruct)
+        && strategy.has_provenance(FactProvenance::ParsedSource)
+        && strategy.source_methods_access_instance_fields
+        && source_runtime_case_split_needs_erased_carrier(strategy))
+    {
+        return None;
+    }
+    Some(ObjectRepresentation::SourceHierarchyCarrier {
+        carrier_name: format!("{}Value", strategy.root),
+        variants: source_hierarchy_carrier_variant_names(strategy),
+    })
+}
+
+fn source_hierarchy_carrier_strategy_if_needed(
+    strategy: &ObjectStrategyPlan,
+    representation: ObjectRepresentation,
+) -> ObjectRepresentation {
+    let ObjectRepresentation::ClosedEnum {
+        enum_name,
+        mut variants,
+    } = representation
+    else {
+        return representation;
+    };
+    if !(strategy.has_provenance(FactProvenance::ParsedSource)
+        && matches!(strategy.strategy, ObjectRepresentation::ConcreteStruct)
+        && strategy.source_methods_access_instance_fields)
+    {
+        return ObjectRepresentation::ClosedEnum {
+            enum_name,
+            variants,
+        };
+    }
+    for variant in source_hierarchy_carrier_variant_names(strategy)
+        .into_iter()
+        .rev()
+    {
+        if !variants.iter().any(|existing| existing == &variant) {
+            variants.insert(0, variant);
+        }
+    }
+    ObjectRepresentation::SourceHierarchyCarrier {
+        carrier_name: enum_name,
+        variants,
+    }
+}
+
+fn source_hierarchy_carrier_variant_names(strategy: &ObjectStrategyPlan) -> Vec<String> {
+    std::iter::once(strategy.root.as_str())
+        .chain(strategy.direct_subtypes.iter().map(String::as_str))
+        .map(crate::slot_render::rust_name_for_java_named_type)
+        .collect()
 }
 
 fn parsed_source_erased_fallback_should_remain_rejected(strategy: &ObjectStrategyPlan) -> bool {
@@ -1688,7 +1760,8 @@ fn closed_enum_inference_policy_with_effective_facts_and_requirements(
         }
         ObjectRepresentation::ConcreteStruct
         | ObjectRepresentation::JavaEnum { .. }
-        | ObjectRepresentation::ClosedEnum { .. } => None,
+        | ObjectRepresentation::ClosedEnum { .. }
+        | ObjectRepresentation::SourceHierarchyCarrier { .. } => None,
     });
     let provenance = representation
         .is_some()

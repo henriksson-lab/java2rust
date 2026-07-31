@@ -214,6 +214,7 @@ use crate::{
         boxed_dyn_trait_clone_impl, dyn_trait_anonymous_impl,
         raw_type_item_for_program_with_facts_and_exceptions,
         source_class_bound_trait_impl_emissions_for_type, source_class_bound_trait_item_for_type,
+        source_hierarchy_carrier_item_for_type,
         trait_impl_emissions_for_type_with_facts_and_exceptions, trait_method_exception_plan,
         trait_method_receiver_plan, trait_method_return_shape_plan,
         trait_method_signature_with_receiver_and_return_shape,
@@ -498,13 +499,7 @@ fn collect_source_object_to_string_fallback_items(
 ) {
     if matches!(ty.kind, TypeKind::Class | TypeKind::Record)
         && !generic_source_type_has_primary_inherent_impl(ty)
-        && !matches!(
-            ctx.representations.dispatch_for(&JavaType::Named {
-                name: ty.name.clone(),
-                args: Vec::new(),
-            }),
-            DispatchShape::ClosedEnum { .. } | DispatchShape::ErasedObject
-        )
+        && !source_type_lowers_as_replacement_dispatch_item(ty, ctx)
     {
         let rust_name = crate::slot_render::rust_name_for_java_named_type(&ty.name);
         let rust_use_name = rust_use_name_for_source_type(ty);
@@ -551,6 +546,18 @@ fn generic_source_type_has_primary_inherent_impl(ty: &TypeDecl) -> bool {
             .members
             .iter()
             .any(|member| matches!(member, Member::Constructor(_) | Member::Method(_)))
+}
+
+fn source_type_lowers_as_replacement_dispatch_item(ty: &TypeDecl, ctx: LowerCtx) -> bool {
+    ctx.representations
+        .type_representation(&ty.name)
+        .is_some_and(|entry| {
+            matches!(
+                entry.representation,
+                crate::representation::ObjectRepresentation::ClosedEnum { .. }
+                    | crate::representation::ObjectRepresentation::ErasedObject
+            )
+        })
 }
 
 fn source_object_fallback_impl_header(ty: &TypeDecl) -> String {
@@ -969,6 +976,9 @@ fn lower_type(
         file.items.push(raw_item(item));
     }
     for item in source_external_supertype_conversion_impls_for_type(ty, ctx) {
+        file.items.push(raw_item(item));
+    }
+    if let Some(item) = source_hierarchy_carrier_item_for_type(ctx.representations, ty) {
         file.items.push(raw_item(item));
     }
 }
