@@ -9896,6 +9896,10 @@ fn local_shape_constraints_with_usage_and_effective_facts(
     constraints.extend(
         signature_capability_policy_with_effective_facts(java_ty, effective_facts).constraints,
     );
+    push_unique_signature_constraints(
+        &mut constraints,
+        &declared_local_jdk_iterator_constraints(java_ty),
+    );
     if let Some(binding) = usage.and_then(|usage| usage.bindings.get(name)) {
         push_unique_signature_constraints(
             &mut constraints,
@@ -9953,6 +9957,23 @@ fn local_shape_constraints_with_usage_and_effective_facts(
         );
     }
     constraints
+}
+
+fn declared_local_jdk_iterator_constraints(java_ty: &JavaType) -> Vec<SignatureConstraint> {
+    let name = match java_ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => name,
+        _ => return Vec::new(),
+    };
+    if !matches!(
+        crate::stdlib::canonical_external_receiver_type_key(name).as_str(),
+        "Iterator" | "java.util.Iterator" | "JavaIterator"
+    ) {
+        return Vec::new();
+    }
+    vec![
+        SignatureConstraint::RequiredDispatch(DispatchShape::Concrete),
+        SignatureConstraint::RequiredView(ViewShape::Native),
+    ]
 }
 
 fn native_map_get_final_facade_value_binding_constraints(

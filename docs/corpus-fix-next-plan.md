@@ -775,6 +775,13 @@ from `347` to `345`. The old missing `get_raw_path` and
 `for_each_remaining` rows are gone; the iterator site now exposes the adjacent
 method-reference owner issue as unresolved `intervalList::add`.
 
+2026-07-31 Iterator local-shape follow-up: declared local
+`Iterator<T>`/`java.util.Iterator<T>` slots now get concrete native signature
+constraints, keeping `Iterator i = input.iterator()` as `JavaIterator<T>`
+instead of falling back to `Box<dyn Any>`. Focused coverage:
+`java_list_iterator_cursor_uses_platform_facade` and
+`signature_planning_keeps_declared_iterator_locals_native`.
+
 2026-07-30 HTSJDK Log warning support: the samtools-util external pack now
 declares `htsjdk.samtools.util.Log.warn(String)` / `Log.warn(String)` as a
 read-only side-effect API with a borrowed string argument, plus modeled API

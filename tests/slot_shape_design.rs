@@ -5573,6 +5573,13 @@ class Use {
 }
 
 #[test]
+fn signature_planning_keeps_declared_iterator_locals_native() {
+    let signature_source = include_str!("../src/signature.rs");
+    assert!(signature_source.contains("declared_local_jdk_iterator_constraints"));
+    assert!(signature_source.contains("\"Iterator\" | \"java.util.Iterator\" | \"JavaIterator\""));
+}
+
+#[test]
 fn signature_plan_marks_final_native_map_receiver_mutation_local_mutable() {
     let parsed = parse_java_source(
         r#"
