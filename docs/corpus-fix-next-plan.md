@@ -333,6 +333,14 @@ rendering the expression and comparing text. Focused coverage:
 Remaining cleanup targets are map-get display/null projection paths and the
 legacy raw `Some(...)` unwrapping bridge.
 
+2026-07-31 optional construction bridge cleanup: optional assignment rewraps
+now call a structural `unwrap_some_expr` helper that extracts
+`RustExpr::Call(Some, [value])` directly before falling back to raw
+`Some(...)` parsing for legacy raw carriers. Focused coverage:
+`optional_some_unwrap_prefers_structured_expr_before_raw_fallback` and
+`optional_assignment_rewrap_uses_optional_construction_plan`. The remaining raw
+bridge is now explicitly limited to `RustExpr::Raw` optional carriers.
+
 2026-07-30 weak builder build fallback cleanup: external builder `build()`
 surfaces with no modeled return type now use a named unmodelled result shim when
 the inferred product name is too weak to trust, e.g. `TBuilderBuildResult`

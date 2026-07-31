@@ -12,7 +12,7 @@ use new_java2rust::coercion::{
     ownership_coercion_fallback_message_policy, parenthesize_borrowed_method_receiver,
     plan_coercion, plan_coercion_with_facts, plan_shape_coercion, plan_shape_coercion_with_facts,
     render_index_to_usize_projection, render_instanceof_check,
-    rust_expr_is_constructed_optional_value, rust_primitive_type_name_policy,
+    rust_expr_is_constructed_optional_value, rust_primitive_type_name_policy, unwrap_some_expr,
 };
 use new_java2rust::conversion_lowering::{
     adapt_optional_assignment_value_for_target, apply_lowered_slot_expr_conversion,
@@ -129,6 +129,28 @@ fn rust_get_projection_counts_as_existing_optional_carrier() {
             args: Vec::new(),
         }
     ));
+}
+
+#[test]
+fn optional_some_unwrap_prefers_structured_expr_before_raw_fallback() {
+    let structured = RustExpr::Call {
+        function: Box::new(RustExpr::Var("Some".to_string())),
+        args: vec![RustExpr::Unary {
+            op: "&".to_string(),
+            expr: Box::new(RustExpr::Var("value".to_string())),
+        }],
+    };
+    assert_eq!(
+        unwrap_some_expr(&structured),
+        Some(RustExpr::Unary {
+            op: "&".to_string(),
+            expr: Box::new(RustExpr::Var("value".to_string())),
+        })
+    );
+    assert_eq!(
+        unwrap_some_expr(&RustExpr::Raw("Some(value.clone())".to_string())),
+        Some(RustExpr::Raw("value.clone()".to_string()))
+    );
 }
 
 #[test]

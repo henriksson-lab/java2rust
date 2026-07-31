@@ -116,7 +116,7 @@ pub fn adapt_optional_assignment_value_for_target(
     already_optional_result: bool,
 ) -> RustExpr {
     if already_optional_result {
-        if let Some(inner) = crate::coercion::unwrap_rendered_some_expr(&lowered_value) {
+        if let Some(inner) = crate::coercion::unwrap_some_expr(&lowered_value) {
             return inner;
         }
     }
@@ -126,7 +126,7 @@ pub fn adapt_optional_assignment_value_for_target(
     if rust_expr_is_none_value(&lowered_value) {
         return lowered_value;
     }
-    if let Some(inner) = crate::coercion::unwrap_rendered_some_expr(&lowered_value) {
+    if let Some(inner) = crate::coercion::unwrap_some_expr(&lowered_value) {
         return construct_preconverted_optional_value_for_target(inner, preconverted_some_plan);
     }
     apply_slot_expr_conversion(lowered_value, &conversion_plan)

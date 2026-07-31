@@ -389,6 +389,10 @@ Landed in this batch:
   `ReusedOptionalUnwrapPlan` and `conversion_lowering` renderer before slot
   conversion, so `lower.rs` no longer chooses the `.expect(...)`/element-borrow
   spelling locally for this path.
+- Optional assignment rewraps now unwrap structured `RustExpr::Call(Some, ...)`
+  values before falling back to raw `Some(...)` parsing, so the shared optional
+  construction path no longer depends on rendered text for ordinary optional
+  carriers.
 
 1. Expand rust signature facts.
    - Prefer function signature facts over tailored call rules whenever the same

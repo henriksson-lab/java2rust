@@ -846,7 +846,23 @@ pub fn normalize_optional_constructed_string_view_expr(expr: RustExpr) -> RustEx
 }
 
 pub fn unwrap_rendered_some_expr(expr: &RustExpr) -> Option<RustExpr> {
-    let rendered = emit::emit_expr(expr);
+    unwrap_some_expr(expr)
+}
+
+pub fn unwrap_some_expr(expr: &RustExpr) -> Option<RustExpr> {
+    match expr {
+        RustExpr::Call { function, args }
+            if matches!(function.as_ref(), RustExpr::Var(name) if name == "Some")
+                && args.len() == 1 =>
+        {
+            args.first().cloned()
+        }
+        RustExpr::Raw(raw) => unwrap_rendered_some_raw_expr(raw),
+        _ => None,
+    }
+}
+
+fn unwrap_rendered_some_raw_expr(rendered: &str) -> Option<RustExpr> {
     rendered
         .strip_prefix("Some(")
         .and_then(|inner| inner.strip_suffix(')'))
