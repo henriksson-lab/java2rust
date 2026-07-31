@@ -10252,12 +10252,14 @@ fn internal_object_binding_is_shared_borrow_safe(
             BindingUse::PassedToCall {
                 name,
                 receiver_type,
+                arg_count,
                 arg_index,
                 boundary: CallArgumentBoundary::Unknown,
             } => {
                 if !external_call_argument_is_readonly_borrow_safe(
                     receiver_type.as_ref(),
                     name,
+                    *arg_count,
                     *arg_index,
                     &binding.java_ty,
                     facts,
@@ -10295,6 +10297,7 @@ fn external_receiver_call_is_readonly(java_ty: &JavaType, name: &str, facts: &Fa
 fn external_call_argument_is_readonly_borrow_safe(
     receiver_type: Option<&JavaType>,
     name: &str,
+    arg_count: usize,
     arg_index: usize,
     binding_java_ty: &JavaType,
     facts: &FactSet,
@@ -10302,6 +10305,16 @@ fn external_call_argument_is_readonly_borrow_safe(
     if let Some(effect) =
         external_api_argument_effect_for_call_arg(receiver_type, name, arg_index, facts)
     {
+        return effect.argument_mutability != ReceiverMutabilityFact::MutatesReceiver
+            && effect.alias_policy != ExternalArgumentAliasPolicy::Escapes;
+    }
+    if let Some(effect) = external_constructor_argument_effect_for_call_arg(
+        receiver_type,
+        name,
+        arg_count,
+        arg_index,
+        facts,
+    ) {
         return effect.argument_mutability != ReceiverMutabilityFact::MutatesReceiver
             && effect.alias_policy != ExternalArgumentAliasPolicy::Escapes;
     }
@@ -10341,6 +10354,7 @@ pub fn external_argument_binding_constraints(
         let BindingUse::PassedToCall {
             name,
             receiver_type,
+            arg_count,
             arg_index,
             boundary,
         } = usage
@@ -10356,8 +10370,20 @@ pub fn external_argument_binding_constraints(
             *arg_index,
             facts,
         );
+        let constructor_constraints = external_constructor_argument_effect_for_call_arg(
+            receiver_type.as_ref(),
+            name,
+            *arg_count,
+            *arg_index,
+            facts,
+        )
+        .map(|effect| {
+            external_constructor_argument_effect_constraints_for_binding(&effect, &binding.java_ty)
+        })
+        .unwrap_or_default();
         if *boundary == CallArgumentBoundary::Unknown
             && effect.is_none()
+            && constructor_constraints.is_empty()
             && !unknown_external_argument_default_non_null_applies(
                 receiver_type.as_ref(),
                 name,
@@ -10378,6 +10404,8 @@ pub fn external_argument_binding_constraints(
                     facts,
                 ),
             );
+        } else if !constructor_constraints.is_empty() {
+            push_unique_signature_constraints(&mut constraints, &constructor_constraints);
         } else {
             // External reference/callback parameters default to non-null unless
             // explicit facts or observed null call sites prove a nullable slot.
@@ -10419,6 +10447,7 @@ fn facade_abi_argument_binding_constraints(
         let BindingUse::PassedToCall {
             name,
             receiver_type,
+            arg_count: _,
             arg_index,
             boundary,
         } = usage
@@ -10502,6 +10531,7 @@ fn unknown_boundary_is_fully_modeled_by_external_argument_effects(
             BindingUse::PassedToCall {
                 name,
                 receiver_type,
+                arg_count,
                 arg_index,
                 boundary: CallArgumentBoundary::Unknown,
             } => {
@@ -10513,6 +10543,14 @@ fn unknown_boundary_is_fully_modeled_by_external_argument_effects(
                     facts,
                 )
                 .is_none()
+                    && external_constructor_argument_effect_for_call_arg(
+                        receiver_type.as_ref(),
+                        name,
+                        *arg_count,
+                        *arg_index,
+                        facts,
+                    )
+                    .is_none()
                 {
                     return false;
                 }
@@ -10529,6 +10567,96 @@ fn unknown_boundary_is_fully_modeled_by_external_argument_effects(
         }
     }
     saw_unknown
+}
+
+fn external_constructor_argument_effect_for_call_arg(
+    receiver_type: Option<&JavaType>,
+    name: &str,
+    arg_count: usize,
+    arg_index: usize,
+    facts: &FactSet,
+) -> Option<crate::facts::ExternalConstructorArgumentEffectFact> {
+    if name != "new" {
+        return None;
+    }
+    let receiver_type = receiver_type.and_then(external_api_receiver_type_key)?;
+    facts
+        .external_constructor_argument_effect_for(&receiver_type, arg_count, arg_index)
+        .cloned()
+        .or_else(|| {
+            crate::external_packs::java_platform_constructor_argument_effect_for(
+                &receiver_type,
+                arg_count,
+                arg_index,
+            )
+        })
+}
+
+fn external_constructor_argument_effect_constraints_for_binding(
+    effect: &crate::facts::ExternalConstructorArgumentEffectFact,
+    binding_java_ty: &JavaType,
+) -> Vec<SignatureConstraint> {
+    let mut constraints = Vec::new();
+    constraints.push(SignatureConstraint::RequiredStorageNullability(
+        external_parameter_nullability_policy(effect.parameter_nullability),
+    ));
+    if let Some(parameter_ty) = &effect.parameter_type {
+        match effect.alias_policy {
+            ExternalArgumentAliasPolicy::Borrowed if parameter_ty == &JavaType::String => {
+                constraints.push(SignatureConstraint::RequiredOwnership(
+                    OwnershipShape::SharedBorrow,
+                ));
+                constraints.push(SignatureConstraint::RequiredDispatch(
+                    DispatchShape::Concrete,
+                ));
+                constraints.push(SignatureConstraint::RequiredView(ViewShape::Str));
+            }
+            ExternalArgumentAliasPolicy::Borrowed if matches!(parameter_ty, JavaType::Array(_)) => {
+                constraints.push(SignatureConstraint::RequiredOwnership(
+                    OwnershipShape::SharedBorrow,
+                ));
+                constraints.push(SignatureConstraint::RequiredView(ViewShape::Slice));
+            }
+            ExternalArgumentAliasPolicy::Borrowed
+                if !matches!(parameter_ty, JavaType::Primitive(_) | JavaType::Void) =>
+            {
+                constraints.push(SignatureConstraint::RequiredOwnership(
+                    OwnershipShape::SharedBorrow,
+                ));
+            }
+            ExternalArgumentAliasPolicy::NoAlias | ExternalArgumentAliasPolicy::Escapes
+                if !matches!(parameter_ty, JavaType::Primitive(_) | JavaType::Void) =>
+            {
+                constraints.push(SignatureConstraint::RequiredOwnership(
+                    OwnershipShape::Owned,
+                ));
+            }
+            ExternalArgumentAliasPolicy::Unknown
+            | ExternalArgumentAliasPolicy::Borrowed
+            | ExternalArgumentAliasPolicy::NoAlias
+            | ExternalArgumentAliasPolicy::Escapes => {}
+        }
+        if java_types_have_same_signature_boundary_identity(parameter_ty, binding_java_ty)
+            && !is_declared_java_object_type(parameter_ty)
+        {
+            constraints.push(SignatureConstraint::RequiredDispatch(
+                DispatchShape::Concrete,
+            ));
+            constraints.push(SignatureConstraint::RequiredView(ViewShape::Native));
+        }
+    }
+    if effect.argument_mutability == ReceiverMutabilityFact::MutatesReceiver
+        && effect
+            .parameter_type
+            .as_ref()
+            .is_none_or(|java_ty| !matches!(java_ty, JavaType::Primitive(_) | JavaType::Void))
+    {
+        constraints.push(SignatureConstraint::RequiredOwnership(
+            OwnershipShape::MutableBorrow,
+        ));
+        constraints.push(SignatureConstraint::MutableBinding);
+    }
+    constraints
 }
 
 fn external_api_argument_effect_for_call_arg<'a>(
@@ -10571,7 +10699,11 @@ fn external_argument_effect_constraints_for_binding(
     if effect.parameter_type.as_ref().is_some_and(|parameter_ty| {
         java_types_have_same_signature_boundary_identity(parameter_ty, binding_java_ty)
             && !is_declared_java_object_type(parameter_ty)
-            && !matches!(parameter_ty, JavaType::String)
+            && (!matches!(parameter_ty, JavaType::String)
+                || matches!(
+                    effect.alias_policy,
+                    ExternalArgumentAliasPolicy::NoAlias | ExternalArgumentAliasPolicy::Escapes
+                ))
     }) {
         push_unique_signature_constraints(
             &mut constraints,

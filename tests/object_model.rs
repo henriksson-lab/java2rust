@@ -654,6 +654,7 @@ interface RejectedReceiver {}
                             uses: vec![BindingUse::PassedToCall {
                                 name: "read".to_string(),
                                 receiver_type: None,
+                                arg_count: 1,
                                 arg_index: 0,
                                 boundary: CallArgumentBoundary::InternalSameType,
                             }],
@@ -670,6 +671,7 @@ interface RejectedReceiver {}
                             uses: vec![BindingUse::PassedToCall {
                                 name: "external".to_string(),
                                 receiver_type: None,
+                                arg_count: 1,
                                 arg_index: 0,
                                 boundary: CallArgumentBoundary::Unknown,
                             }],

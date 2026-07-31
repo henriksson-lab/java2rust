@@ -23027,6 +23027,7 @@ fn binding_boundary_policy_owns_binding_use_boundary_classification() {
         uses: vec![BindingUse::PassedToCall {
             name: "external".to_string(),
             receiver_type: None,
+            arg_count: 1,
             arg_index: 0,
             boundary: CallArgumentBoundary::Unknown,
         }],
@@ -23045,6 +23046,7 @@ fn binding_boundary_policy_owns_binding_use_boundary_classification() {
             BindingUse::PassedToCall {
                 name: "external".to_string(),
                 receiver_type: None,
+                arg_count: 1,
                 arg_index: 0,
                 boundary: CallArgumentBoundary::Unknown,
             },
@@ -23088,6 +23090,7 @@ fn external_argument_constraints_default_unknown_slots_to_non_null() {
         uses: vec![BindingUse::PassedToCall {
             name: "new".to_string(),
             receiver_type: None,
+            arg_count: 7,
             arg_index: 6,
             boundary: CallArgumentBoundary::Unknown,
         }],
@@ -23103,6 +23106,49 @@ fn external_argument_constraints_default_unknown_slots_to_non_null() {
 }
 
 #[test]
+fn external_constructor_argument_facts_shape_source_bindings() {
+    let binding = BindingUseFacts {
+        name: "text".to_string(),
+        java_ty: JavaType::String,
+        uses: vec![BindingUse::PassedToCall {
+            name: "new".to_string(),
+            receiver_type: Some(JavaType::Named {
+                name: "java.util.StringTokenizer".to_string(),
+                args: Vec::new(),
+            }),
+            arg_count: 2,
+            arg_index: 0,
+            boundary: CallArgumentBoundary::Unknown,
+        }],
+    };
+
+    let constraints = external_argument_binding_constraints(&binding, &FactSet::default());
+
+    assert!(
+        constraints.contains(&SignatureConstraint::RequiredOwnership(
+            OwnershipShape::Owned
+        ))
+    );
+    assert!(constraints.contains(&SignatureConstraint::RequiredDispatch(
+        DispatchShape::Concrete
+    )));
+    assert!(constraints.contains(&SignatureConstraint::RequiredView(ViewShape::Native)));
+    assert!(
+        constraints.contains(&SignatureConstraint::RequiredStorageNullability(
+            NullabilityState::DefinitelyNonNull
+        ))
+    );
+    assert!(
+        !constraints.contains(&SignatureConstraint::RequiredDispatch(
+            DispatchShape::ErasedObject
+        ))
+    );
+    assert!(!constraints.contains(&SignatureConstraint::RequiredView(
+        ViewShape::ErasedObjectView
+    )));
+}
+
+#[test]
 fn external_argument_unknown_nullability_fact_keeps_non_null_default() {
     let binding = BindingUseFacts {
         name: "callback".to_string(),
@@ -23113,6 +23159,7 @@ fn external_argument_unknown_nullability_fact_keeps_non_null_default() {
         uses: vec![BindingUse::PassedToCall {
             name: "new".to_string(),
             receiver_type: None,
+            arg_count: 7,
             arg_index: 6,
             boundary: CallArgumentBoundary::Unknown,
         }],
@@ -23155,6 +23202,7 @@ fn external_argument_nullable_fact_overrides_non_null_default() {
         uses: vec![BindingUse::PassedToCall {
             name: "new".to_string(),
             receiver_type: None,
+            arg_count: 7,
             arg_index: 6,
             boundary: CallArgumentBoundary::Unknown,
         }],

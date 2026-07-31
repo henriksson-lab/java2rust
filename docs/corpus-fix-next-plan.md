@@ -7065,6 +7065,16 @@ verification:
 `corpus_spark_rdd_pipeline_keeps_stream_lowering_at_noop_spark_boundary` and
 `generic_facade_interface_slot_erases_arguments_without_any_handoff`.
 
+2026-07-31 constructor argument signature checkpoint: external constructor
+argument facts now feed the same source binding signature inference path as
+ordinary external API argument facts. `BindingUse::PassedToCall` records
+argument arity, so modeled unresolved constructors can select precise
+constructor facts instead of treating the source binding as an unknown external
+boundary. Focused JDK regressions now emit declared source `String` params for
+`StringTokenizer(String, ...)` and `ZipEntry(String)` callers instead of
+`Box<dyn Any>` plus `downcast::<String>()`. Audit `0011` remains partial because
+broader erased-object fallback and unmodelled external surfaces remain open.
+
 ## 2026-07-30 Facade Correctness Note
 
 `StringBuilder`/`StringBuffer` now emit stateful JDK facade support instead of

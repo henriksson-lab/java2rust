@@ -127,6 +127,7 @@ pub enum BindingUse {
     PassedToCall {
         name: String,
         receiver_type: Option<JavaType>,
+        arg_count: usize,
         arg_index: usize,
         boundary: CallArgumentBoundary,
     },
@@ -156,6 +157,7 @@ pub enum FieldUse {
         field_name: String,
         name: String,
         receiver_type: Option<JavaType>,
+        arg_count: usize,
         arg_index: usize,
         boundary: CallArgumentBoundary,
     },
@@ -1565,6 +1567,7 @@ fn analyze_stmt(
                     arg,
                     "constructor",
                     None,
+                    args.len(),
                     arg_index,
                     policy.boundary,
                 );
@@ -1908,6 +1911,7 @@ fn analyze_expr_with_context(
                     arg,
                     name,
                     receiver_type.clone(),
+                    args.len(),
                     arg_index,
                     arg_boundary,
                 );
@@ -2103,6 +2107,7 @@ fn analyze_expr_with_context(
                     arg,
                     "new",
                     Some(ty.clone()),
+                    args.len(),
                     arg_index,
                     constructor_argument_boundary_policy(resolved.as_ref(), arg_index),
                 );
@@ -2311,6 +2316,7 @@ fn record_call_arg_use(
     arg: &Expr,
     call_name: &str,
     receiver_type: Option<JavaType>,
+    arg_count: usize,
     arg_index: usize,
     boundary: CallArgumentBoundary,
 ) {
@@ -2319,6 +2325,7 @@ fn record_call_arg_use(
             field_name,
             name: call_name.to_string(),
             receiver_type,
+            arg_count,
             arg_index,
             boundary,
         });
@@ -2330,6 +2337,7 @@ fn record_call_arg_use(
                 field_name: name.clone(),
                 name: call_name.to_string(),
                 receiver_type,
+                arg_count,
                 arg_index,
                 boundary,
             });
@@ -2340,6 +2348,7 @@ fn record_call_arg_use(
             BindingUse::PassedToCall {
                 name: call_name.to_string(),
                 receiver_type,
+                arg_count,
                 arg_index,
                 boundary,
             },
@@ -2349,6 +2358,7 @@ fn record_call_arg_use(
                 field_name: field_name.clone(),
                 name: call_name.to_string(),
                 receiver_type,
+                arg_count,
                 arg_index,
                 boundary,
             });

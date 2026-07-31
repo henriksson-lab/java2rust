@@ -604,7 +604,7 @@ Completion checklist for any audit marked `fixed locally`:
 | `0008` inference does not reach lowering | open | CallableAnalysis |
 | `0009` overload identity collapse | open | Java callable signature identity |
 | `0010` fallibility disagrees | open | Callable fallibility plan |
-| `0011` dyn Any fallback cascades | partial | Opaque external shims; generic/static typed facade fallbacks are now loud, broader erased-object fallback remains |
+| `0011` dyn Any fallback cascades | partial | Opaque external shims; generic/static typed facade fallbacks are now loud; external constructor argument facts now participate in signature inference, so modeled constructors such as `StringTokenizer(String,...)` and `ZipEntry(String)` no longer force declared source `String` params through `Box<dyn Any>`/`downcast::<String>()`; broader erased-object fallback remains |
 | `0012` invalid unsupported diagnostics | fixed locally | Moved to `claude_audits/done` |
 | `0013` nested downcast names | fixed locally | Moved to `claude_audits/done` |
 | `0014` labelled statements deleted | fixed locally | Moved to `claude_audits/done`; CFG liveness still needs labelled edges |

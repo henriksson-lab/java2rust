@@ -660,6 +660,13 @@ class JavaStringTokenizerUse {
             && translation
                 .rust
                 .contains("let first: char = tokenizer.next_token().chars().nth(0 as usize)")
+            && translation
+                .rust
+                .contains("pub fn count(text: String) -> i32")
+            && !translation
+                .rust
+                .contains("pub fn count(text: Box<dyn std::any::Any>)")
+            && !translation.rust.contains("downcast::<String>()")
             && !translation.rust.contains("downcast::<StringTokenizer>")
             && !translation.rust.contains("has_more_tokens() { ()")
             && !translation.rust.contains("next_token() -> ()"),
@@ -679,8 +686,8 @@ mod generated_tests {
 
     #[test]
     fn tokenizer_counts_and_advances() {
-        assert_eq!(JavaStringTokenizerUse::count(Box::new("a|x|z".to_string())), 4);
-        assert_eq!(JavaStringTokenizerUse::count(Box::new("x||y".to_string())), 3);
+        assert_eq!(JavaStringTokenizerUse::count("a|x|z".to_string()), 4);
+        assert_eq!(JavaStringTokenizerUse::count("x||y".to_string()), 3);
     }
 }
 "#,
@@ -11519,7 +11526,14 @@ class ZipEntryStateUse {
     assert!(
         translation.rust.contains("ZipEntry::new_1(")
             && translation.rust.contains(".get_name()")
-            && translation.rust.contains(".is_directory()"),
+            && translation.rust.contains(".is_directory()")
+            && translation
+                .rust
+                .contains("pub fn name(value: String) -> Result<String, JavaException>")
+            && translation
+                .rust
+                .contains("pub fn directory(value: String) -> Result<bool, JavaException>")
+            && !translation.rust.contains("downcast::<String>()"),
         "{}",
         translation.rust
     );
@@ -11537,11 +11551,11 @@ mod generated_tests {
     #[test]
     fn zip_entry_keeps_name_state() {
         assert_eq!(
-            ZipEntryStateUse::name(Box::new("folder/file.txt".to_string())).unwrap(),
+            ZipEntryStateUse::name("folder/file.txt".to_string()).unwrap(),
             "folder/file.txt".to_string()
         );
-        assert!(ZipEntryStateUse::directory(Box::new("folder/".to_string())).unwrap());
-        assert!(!ZipEntryStateUse::directory(Box::new("folder/file.txt".to_string())).unwrap());
+        assert!(ZipEntryStateUse::directory("folder/".to_string()).unwrap());
+        assert!(!ZipEntryStateUse::directory("folder/file.txt".to_string()).unwrap());
     }
 }
 "#,
@@ -17702,6 +17716,7 @@ fn corpus_ffi_owned_handle_transfer_requires_explicit_handover() {
                 name: "NativeConsumer".to_string(),
                 args: Vec::new(),
             }),
+            arg_count: 1,
             arg_index: 0,
             boundary: new_java2rust::usage::CallArgumentBoundary::Unknown,
         }],
