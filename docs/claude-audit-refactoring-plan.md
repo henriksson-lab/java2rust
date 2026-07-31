@@ -46,6 +46,8 @@ fix, regression/focused verification, audit-status update, and the corresponding
 `claude_audits/<issue>.md` move into
 `/home/mahogny/github/claude/new_java2rust/claude_audits/done` before it is
 committed. If any of those pieces is missing, keep the audit open.
+During review, treat an audit marked done while its file still lives directly
+under `claude_audits/` as incomplete work to fix before the checkpoint lands.
 
 Operational reminder: when an audit issue is done, move the issue file into
 `/home/mahogny/github/claude/new_java2rust/claude_audits/done` immediately;

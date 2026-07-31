@@ -10432,13 +10432,20 @@ fn lower_expr_with_refinements(
                 context_fallback_signature.as_ref(),
                 ctx.facts,
             );
-            let arg_plan = apply_dyn_trait_borrowed_return_arg_shapes(
-                arg_plan,
-                receiver.as_deref(),
-                env,
-                ctx,
-                fallback_signature.as_ref(),
-            );
+            let arg_plan = if context_fallback_signature
+                .as_ref()
+                .is_some_and(|signature| signature.arg_shapes_are_authoritative)
+            {
+                arg_plan
+            } else {
+                apply_dyn_trait_borrowed_return_arg_shapes(
+                    arg_plan,
+                    receiver.as_deref(),
+                    env,
+                    ctx,
+                    fallback_signature.as_ref(),
+                )
+            };
             let arg_plan = apply_static_fallback_reference_arg_shapes(
                 arg_plan,
                 receiver.as_deref(),
@@ -14543,7 +14550,9 @@ fn lower_args_for_call_target(
     {
         plan = facade_plan;
     }
-    if let Some(source_plan) = emitted_source_resolved_call_argument_plan(resolved, args.len(), ctx)
+    if matches!(plan, ArgumentLoweringPlan::Unshaped { .. })
+        && let Some(source_plan) =
+            emitted_source_resolved_call_argument_plan(resolved, args.len(), ctx)
     {
         plan = source_plan;
     }
@@ -14785,6 +14794,16 @@ fn emitted_source_resolved_call_argument_plan(
     let signature =
         method_signature_for_resolved_source_call(ctx.signatures, resolved, arg_count, ctx)
             .unwrap_or_else(|| ctx.signatures.required_method_signature(owner, method));
+    if owner.kind == TypeKind::Interface {
+        return Some(ArgumentLoweringPlan::Shaped(
+            crate::representation_lowering::trait_method_param_shape_plan(
+                owner,
+                method,
+                ctx.program,
+                ctx.signatures,
+            ),
+        ));
+    }
     Some(ArgumentLoweringPlan::Shaped(
         signature
             .params
@@ -15032,6 +15051,11 @@ fn call_target_signature_arg_plan(
         ),
         _ => return None,
     };
+    if let Some(shapes) =
+        interface_trait_argument_shapes_for_call_owner(owner_key, rust_name, args.len(), ctx)
+    {
+        return Some(ArgumentLoweringPlan::Shaped(shapes));
+    }
     let signature =
         method_signature_for_owner_aliases(ctx.signatures, owner_key, rust_name, args.len())?;
     if signature.params.len() != args.len() {
@@ -15044,6 +15068,43 @@ fn call_target_signature_arg_plan(
             .map(|param| param.shape.clone())
             .collect(),
     ))
+}
+
+fn interface_trait_argument_shapes_for_call_owner(
+    owner_key: &str,
+    rust_name: &str,
+    arg_count: usize,
+    ctx: LowerCtx,
+) -> Option<Vec<RustSlotShape>> {
+    let owner = find_context_type_by_key(ctx.program, owner_key)
+        .or_else(|| find_context_type_by_key(ctx.support_local_type_program, owner_key))
+        .or_else(|| find_context_type_by_key(ctx.source_summary_type_program, owner_key))?;
+    if owner.kind != TypeKind::Interface {
+        return None;
+    }
+    let method = owner.members.iter().find_map(|member| match member {
+        Member::Method(method)
+            if method.params.len() == arg_count
+                && method_effective_rust_name(method) == rust_name =>
+        {
+            Some(method)
+        }
+        Member::Method(method)
+            if method.params.len() == arg_count
+                && method_rust_name_matches_resolved(method, rust_name) =>
+        {
+            Some(method)
+        }
+        _ => None,
+    })?;
+    Some(
+        crate::representation_lowering::trait_method_param_shape_plan(
+            owner,
+            method,
+            ctx.program,
+            ctx.signatures,
+        ),
+    )
 }
 
 fn emitted_call_target_signature_arg_plan(
@@ -15095,8 +15156,10 @@ fn method_signature_for_owner_aliases<'a>(
 }
 
 fn receiver_signature_owner(receiver: &Expr, env: &ShapeEnv) -> Option<String> {
-    concrete_java_type_name(&crate::types::infer_expr_type(receiver, env.type_env()))
-        .map(ToOwned::to_owned)
+    let receiver_ty = crate::types::infer_expr_type(receiver, env.type_env());
+    let receiver_ty =
+        crate::types::optional_element_type(&receiver_ty).unwrap_or_else(|| receiver_ty.clone());
+    concrete_java_type_name(&receiver_ty).map(ToOwned::to_owned)
 }
 
 fn external_facade_preserving_call_clones_leading_arg(target: &CallTargetPlan<'_>) -> bool {
@@ -21764,8 +21827,11 @@ fn source_method_call_returns_result_with_exception_plan(
         return true;
     }
     if let Some(receiver_name) = receiver.and_then(|receiver| {
-        receiver_shape_java_type(receiver, env)
-            .and_then(|ty| concrete_java_type_name(ty).map(str::to_string))
+        receiver_shape_java_type(receiver, env).and_then(|ty| {
+            let element_ty = crate::types::optional_element_type(ty);
+            let ty = element_ty.as_ref().unwrap_or(ty);
+            concrete_java_type_name(ty).map(str::to_string)
+        })
     }) && source_method_named_returns_result_with_exception_plan(
         &receiver_name,
         name,
@@ -23425,7 +23491,8 @@ fn source_context_receiver_method_fallback_signature(
                 .or_else(|| find_context_type_by_key(ctx.support_local_type_program, &owner))
                 .or_else(|| find_context_type_by_key(ctx.source_summary_type_program, &owner))
         } else {
-            find_context_type_by_key(ctx.support_local_type_program, &owner)
+            find_context_type_by_key(ctx.program, &owner)
+                .or_else(|| find_context_type_by_key(ctx.support_local_type_program, &owner))
                 .or_else(|| find_context_type_by_key(ctx.source_summary_type_program, &owner))
         };
         let Some(ty) = ty else {
@@ -23475,23 +23542,29 @@ fn source_context_receiver_method_fallback_signature(
                 .unwrap_or(signature);
             let owner_is_emitted = static_context_owner_is_emitted(&owner, ctx)
                 || static_context_owner_is_emitted(&ty.name, ctx);
+            let arg_shapes = if ty.kind == TypeKind::Interface {
+                crate::representation_lowering::trait_method_param_shape_plan(
+                    ty,
+                    method,
+                    ctx.program,
+                    ctx.signatures,
+                )
+            } else if owner_is_emitted {
+                effective_signature
+                    .params
+                    .iter()
+                    .map(|param| param.shape.clone())
+                    .collect()
+            } else {
+                source_context_param_shapes(method, ctx)
+                    .into_iter()
+                    .zip(effective_signature.params.iter())
+                    .map(|(_, solved)| non_emitted_static_context_arg_shape_from_param_plan(solved))
+                    .collect()
+            };
             return Some(ContextFallbackMethodSignature {
                 rust_name,
-                arg_shapes: if owner_is_emitted {
-                    effective_signature
-                        .params
-                        .iter()
-                        .map(|param| param.shape.clone())
-                        .collect()
-                } else {
-                    source_context_param_shapes(method, ctx)
-                        .into_iter()
-                        .zip(effective_signature.params.iter())
-                        .map(|(_, solved)| {
-                            non_emitted_static_context_arg_shape_from_param_plan(solved)
-                        })
-                        .collect()
-                },
+                arg_shapes,
                 receiver: effective_signature.receiver,
                 arg_shapes_are_authoritative: true,
             });
@@ -23502,9 +23575,15 @@ fn source_context_receiver_method_fallback_signature(
                 .rust_name
                 .clone()
                 .unwrap_or_else(|| crate::parser::to_snake_case(&method.name));
-            return Some(ContextFallbackMethodSignature {
-                rust_name,
-                arg_shapes: method
+            let arg_shapes = if ty.kind == TypeKind::Interface {
+                crate::representation_lowering::trait_method_param_shape_plan(
+                    ty,
+                    method,
+                    ctx.program,
+                    ctx.signatures,
+                )
+            } else {
+                method
                     .params
                     .iter()
                     .map(|param| {
@@ -23514,7 +23593,11 @@ fn source_context_receiver_method_fallback_signature(
                             receiver_uses_dyn_trait_slots,
                         )
                     })
-                    .collect(),
+                    .collect()
+            };
+            return Some(ContextFallbackMethodSignature {
+                rust_name,
+                arg_shapes,
                 receiver: ReceiverPlan::Shared,
                 arg_shapes_are_authoritative: true,
             });
@@ -23621,6 +23704,7 @@ fn fallback_receiver_type_name_candidates(
     candidates.retain(|candidate| {
         ctx.signatures
             .has_method_signature_by_base_name_accepting_arity(candidate, name, arg_count)
+            || find_context_type_by_key(ctx.program, candidate).is_some()
             || find_context_type_by_key(ctx.support_local_type_program, candidate).is_some()
             || find_context_type_by_key(ctx.source_summary_type_program, candidate).is_some()
     });
@@ -24459,8 +24543,14 @@ fn lower_source_receiver_call_expr_for_slot(
                 .map(|shape| optional_borrow_slot_lowered_type(LoweredType::Slot(Box::new(shape))))
         })
         .or_else(|| source_trivial_accessor_getter_lowered_type(expr, env, ctx))?;
-    let expr = lower_expr_with_refinements(expr, env, ctx, refinements);
-    Some(crate::coercion::LoweredExpr { expr, actual })
+    let mut lowered = lower_expr_with_refinements(expr, env, ctx, refinements);
+    if slot_expr_needs_result_propagation(expr, env, ctx) {
+        lowered = propagate_result_projection(lowered);
+    }
+    Some(crate::coercion::LoweredExpr {
+        expr: lowered,
+        actual,
+    })
 }
 
 fn lower_java_object_to_string_call_expr_for_slot(

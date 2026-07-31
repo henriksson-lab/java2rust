@@ -547,11 +547,13 @@ fn source_class_bound_trait_method_signature(
         ReceiverPlan::Mutable => "&mut self".to_string(),
         ReceiverPlan::Shared | ReceiverPlan::None => "&self".to_string(),
     });
-    params.extend(signature.params.iter().map(|param| {
+    let param_shapes = trait_method_param_shape_plan(ty, method, program, signatures);
+    params.extend(signature.params.iter().enumerate().map(|(index, param)| {
+        let shape = param_shapes.get(index).unwrap_or(&param.shape);
         format!(
             "{}: {}",
             param.name,
-            emit_type(&rust_type_for_slot_with_facts(&param.shape, facts))
+            emit_type(&rust_type_for_slot_with_facts(shape, facts))
         )
     }));
     let return_type = source_class_bound_trait_method_return_type(method, facts, exceptions)
@@ -1243,11 +1245,13 @@ pub(crate) fn trait_method_signature_with_receiver_and_return_shape(
             ReceiverPlan::Shared | ReceiverPlan::None => "&self".to_string(),
         });
     }
-    params.extend(signature.params.iter().map(|param| {
+    let param_shapes = trait_method_param_shape_plan(ty, method, program, signatures);
+    params.extend(signature.params.iter().enumerate().map(|(index, param)| {
+        let shape = param_shapes.get(index).unwrap_or(&param.shape);
         format!(
             "{}: {}",
             param.name,
-            emit_type(&rust_type_for_slot_with_facts(&param.shape, facts))
+            emit_type(&rust_type_for_slot_with_facts(shape, facts))
         )
     }));
     let return_type = trait_method_return_type_with_exception_plan(
@@ -1348,6 +1352,82 @@ pub(crate) fn trait_method_return_shape_plan(
         }
     }
     Some(interface_shape)
+}
+
+pub(crate) fn trait_method_param_shape_plan(
+    interface: &TypeDecl,
+    interface_method: &MethodDecl,
+    program: &Program,
+    signatures: &SignaturePlan,
+) -> Vec<RustSlotShape> {
+    let interface_signature = signatures.required_method_signature(interface, interface_method);
+    let mut param_shapes = interface_signature
+        .params
+        .iter()
+        .map(|param| param.shape.clone())
+        .collect::<Vec<_>>();
+    if interface.kind != TypeKind::Interface {
+        return param_shapes;
+    }
+    for implementor in program.types.iter().filter(|ty| {
+        ty.kind == TypeKind::Class
+            && ty
+                .implements
+                .iter()
+                .any(|implemented| implemented == &interface.name)
+    }) {
+        let Some(implementation) = implementing_method_candidates(implementor, interface_method)
+            .into_iter()
+            .find(|candidate| {
+                trait_impl_method_compatibility_error(interface_method, candidate).is_none()
+            })
+        else {
+            continue;
+        };
+        let implementation_signature =
+            signatures.required_method_signature(implementor, implementation);
+        for (index, implementation_param) in implementation_signature.params.iter().enumerate() {
+            let Some(interface_shape) = param_shapes.get_mut(index) else {
+                continue;
+            };
+            if trait_param_shape_should_widen_to_implementation(
+                interface_shape,
+                &implementation_param.shape,
+            ) {
+                *interface_shape = implementation_param.shape.clone();
+            } else if let Some(declared_param) = implementation.params.get(index)
+                && trait_param_shape_should_widen_to_declared_source_param(
+                    interface_shape,
+                    declared_param,
+                )
+            {
+                *interface_shape = RustSlotShape::for_storage(declared_param.ty.clone());
+            }
+        }
+    }
+    param_shapes
+}
+
+fn trait_param_shape_should_widen_to_implementation(
+    interface_shape: &RustSlotShape,
+    implementation_shape: &RustSlotShape,
+) -> bool {
+    interface_shape.ownership == OwnershipShape::SharedBorrow
+        && implementation_shape.ownership == OwnershipShape::Owned
+        && interface_shape.java_ty == implementation_shape.java_ty
+}
+
+fn trait_param_shape_should_widen_to_declared_source_param(
+    interface_shape: &RustSlotShape,
+    implementation_param: &crate::java_ir::Param,
+) -> bool {
+    interface_shape.ownership == OwnershipShape::SharedBorrow
+        && interface_shape.java_ty == implementation_param.ty
+        && !matches!(
+            implementation_param.ty,
+            JavaType::String | JavaType::Array(_) | JavaType::Primitive(_) | JavaType::Void
+        )
+        && crate::stdlib::java_collection_kind_for_type(&implementation_param.ty).is_none()
 }
 
 fn trait_return_shape_should_widen_to_implementation(

@@ -57,6 +57,8 @@ finishes one of them, the same patch/commit should move that exact file from
 `claude_audits/` into
 `/home/mahogny/github/claude/new_java2rust/claude_audits/done`; otherwise the
 audit remains open.
+Do not mark or commit a Claude audit as complete if the corresponding issue file
+still sits in the active `claude_audits/` directory.
 
 2026-07-30 constant-fact checkpoint: external field facts can now carry explicit
 Rust constant values from manifests via `value=...`, and built-in HTSJDK/VCF/SAM
@@ -3181,6 +3183,17 @@ Acceptance:
 - The fixture emits a complete trait impl without missing methods.
 - Spark/DISQ focused invalid-pattern count decreases or generated Rust errors
   move to a different family.
+
+2026-07-31 checkpoint: source-interface trait signatures and source call
+argument lowering now share `trait_method_param_shape_plan`, so a visible
+implementation can widen an interface parameter from `&T` to owned `T` when the
+implementation signature requires ownership. Optional field-backed interface
+receivers are unwrapped for source fallibility/owner lookup, and authoritative
+context/interface argument shapes are no longer overwritten by the legacy
+dyn-trait borrowed-return heuristic. Focused verification:
+`cargo test corpus_spark_interface_receiver_delegation_widens_owned_return_slots --test idiom_gaps -- --exact`
+and
+`cargo test corpus_spark_rdd_pipeline_keeps_stream_lowering_at_noop_spark_boundary --test idiom_gaps -- --exact`.
 
 ### 6. GenomicsDB Overload And Handoff Cleanup
 
