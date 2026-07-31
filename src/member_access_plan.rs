@@ -1,4 +1,4 @@
-use crate::facts::{ExternalLibraryMode, FactSet};
+use crate::facts::{ExternalFieldFact, ExternalLibraryMode, FactSet};
 use crate::java_ir::{Expr, JavaType};
 use crate::rust_ir::RustType;
 use crate::shape_projection::project_java_value_shape;
@@ -113,15 +113,9 @@ fn external_instance_field_type(
 ) -> Option<JavaType> {
     let receiver_ty = crate::types::infer_expr_type(receiver, env);
     let receiver_name = external_field_receiver_name(&receiver_ty)?;
-    facts
-        .external_field_for(&receiver_name, member)
+    external_field_fact_for_owner(&receiver_name, member, facts)
         .filter(|fact| fact.field_kind == crate::facts::ExternalFieldKind::InstanceField)
-        .and_then(|fact| fact.field_type.clone())
-        .or_else(|| {
-            crate::external_packs::external_field_for(&receiver_name, member)
-                .filter(|fact| fact.field_kind == crate::facts::ExternalFieldKind::InstanceField)
-                .and_then(|fact| fact.field_type)
-        })
+        .and_then(|fact| fact.field_type)
 }
 
 fn external_field_receiver_name(receiver_ty: &JavaType) -> Option<String> {
@@ -233,20 +227,7 @@ fn external_static_constant_type(
     facts: &FactSet,
 ) -> Option<JavaType> {
     let receiver_name = static_receiver_java_name(receiver)?;
-    facts
-        .external_field_for(&receiver_name, member)
-        .and_then(|fact| fact.field_type.clone())
-        .or_else(|| {
-            crate::external_packs::external_field_for(&receiver_name, member)
-                .and_then(|fact| fact.field_type)
-        })
-        .or_else(|| {
-            let receiver_type = JavaType::Named {
-                name: receiver_name.clone(),
-                args: Vec::new(),
-            };
-            crate::stdlib::known_external_field_type_for_receiver(&receiver_type, member)
-        })
+    external_field_type_for_owner(&receiver_name, member, facts)
 }
 
 fn external_static_constant_rust_owner(
@@ -256,17 +237,13 @@ fn external_static_constant_rust_owner(
     facts: &FactSet,
 ) -> Option<String> {
     let receiver_name = static_receiver_java_name(receiver)?;
-    if let Some(owner) = facts
-        .external_field_for(&receiver_name, member)
-        .and_then(|fact| external_crate_mapped_type_owner(&fact.field.type_name, facts))
-        .or_else(|| {
-            crate::external_packs::external_field_for(&receiver_name, member).and_then(|fact| {
-                external_crate_mapped_type_owner(&fact.field.type_name, facts).or_else(|| {
-                    external_crate_mapped_type_owner(
-                        &fact.field.type_name,
-                        &fact_set_for_builtin_pack_lookup(),
-                    )
-                })
+    if let Some(owner) =
+        external_field_fact_for_owner(&receiver_name, member, facts).and_then(|fact| {
+            external_crate_mapped_type_owner(&fact.field.type_name, facts).or_else(|| {
+                external_crate_mapped_type_owner(
+                    &fact.field.type_name,
+                    &fact_set_for_builtin_pack_lookup(),
+                )
             })
         })
     {
@@ -280,20 +257,38 @@ fn external_static_constant_rust_owner(
             _ => None,
         };
     }
-    if facts.external_field_for(&receiver_name, member).is_some()
-        || crate::external_packs::external_field_for(&receiver_name, member).is_some()
-        || {
-            let receiver_type = JavaType::Named {
-                name: receiver_name.clone(),
-                args: Vec::new(),
-            };
-            crate::stdlib::known_external_field_type_for_receiver(&receiver_type, member).is_some()
-        }
-    {
+    if external_field_type_for_owner(&receiver_name, member, facts).is_some() {
         let owner = receiver_name.rsplit('.').next().unwrap_or(&receiver_name);
         return static_constant_rust_owner_from_name(owner);
     }
     None
+}
+
+pub fn external_field_fact_for_owner(
+    owner: &str,
+    field: &str,
+    facts: &FactSet,
+) -> Option<ExternalFieldFact> {
+    facts
+        .external_field_for(owner, field)
+        .cloned()
+        .or_else(|| crate::external_packs::external_field_for(owner, field))
+}
+
+pub fn external_field_type_for_owner(
+    owner: &str,
+    field: &str,
+    facts: &FactSet,
+) -> Option<JavaType> {
+    external_field_fact_for_owner(owner, field, facts)
+        .and_then(|fact| fact.field_type)
+        .or_else(|| {
+            let receiver_type = JavaType::Named {
+                name: owner.to_string(),
+                args: Vec::new(),
+            };
+            crate::stdlib::known_external_field_type_for_receiver(&receiver_type, field)
+        })
 }
 
 fn external_crate_mapped_type_owner(type_name: &str, facts: &FactSet) -> Option<String> {

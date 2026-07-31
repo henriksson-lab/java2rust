@@ -1476,6 +1476,10 @@ external-index plus platform fallback behavior while keeping fact selection
 behind the call-planning surface. Focused coverage:
 `semantic_facts_own_nullability_and_external_api_heuristics_before_lowering`
 and `external_method_support_uses_arity_names_for_overloaded_facades`.
+Field-fact follow-up: enum/static-field lowering now asks
+`member_access_plan::external_field_type_for_owner` for external field types
+instead of querying `external_packs::external_field_for` in `lower.rs`; the same
+semantic-facts guard now rejects direct lowerer field-fact probes.
 
 Current remaining refactor priority from the parallel audit:
 

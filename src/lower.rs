@@ -7727,13 +7727,8 @@ fn lower_switch_case_label_expr(
 }
 
 fn external_enum_constant_label_matches(facts: &FactSet, owner: &str, label: &str) -> bool {
-    facts
-        .external_field_for(owner, label)
-        .and_then(|fact| fact.field_type.as_ref())
-        .is_some_and(|field_type| external_enum_constant_field_type_matches(owner, field_type))
-        || crate::external_packs::external_field_for(owner, label)
-            .and_then(|fact| fact.field_type)
-            .is_some_and(|field_type| external_enum_constant_field_type_matches(owner, &field_type))
+    crate::member_access_plan::external_field_type_for_owner(owner, label, facts)
+        .is_some_and(|field_type| external_enum_constant_field_type_matches(owner, &field_type))
 }
 
 fn external_enum_constant_field_type_matches(owner: &str, field_type: &JavaType) -> bool {
@@ -12761,20 +12756,8 @@ fn numeric_static_field_java_type(
         .type_env()
         .static_type_alias(receiver_name)
         .unwrap_or(receiver_name);
-    let java_ty = ctx
-        .facts
-        .external_field_for(owner, field)
-        .and_then(|fact| fact.field_type.clone())
-        .or_else(|| {
-            crate::external_packs::external_field_for(owner, field).and_then(|fact| fact.field_type)
-        })
-        .or_else(|| {
-            let receiver_ty = JavaType::Named {
-                name: owner.to_string(),
-                args: Vec::new(),
-            };
-            crate::stdlib::known_external_field_type_for_receiver(&receiver_ty, field)
-        })?;
+    let java_ty =
+        crate::member_access_plan::external_field_type_for_owner(owner, field, ctx.facts)?;
     if matches!(
         java_ty,
         JavaType::Primitive(primitive) if crate::types::is_numeric_primitive_type(primitive)

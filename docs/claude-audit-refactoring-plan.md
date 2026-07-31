@@ -66,6 +66,11 @@ audit must include the corresponding move from `claude_audits/` to
 `/home/mahogny/github/claude/new_java2rust/claude_audits/done`; if the audit is
 only partially addressed, leave the file active and record the remaining work.
 
+2026-07-31 latest reminder: after an audit is fully fixed and verified, move
+the finished audit file into
+`/home/mahogny/github/claude/new_java2rust/claude_audits/done`; this move is
+part of the definition of done for the audit.
+
 ## Next Batch: Measurement And Unsupported Safety
 
 Goal: unmodelled behavior must be visible as a diagnostic, parseable Rust, or a
@@ -319,6 +324,9 @@ Landed in this batch:
   `(owner, rust_name)` compatibility lookup.
 - Resolved source varargs lowering now asks the same Java-key source-signature
   helper before falling back to the legacy `(owner, rust_name)` signature map.
+- External field fact lookup for enum/static-field lowering now goes through
+  `member_access_plan::external_field_type_for_owner`; `lower.rs` no longer
+  probes external-pack field facts directly.
 
 1. Add a `CallableAnalysis` shell.
    - Introduce `src/callable_analysis.rs`.
