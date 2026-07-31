@@ -660,6 +660,7 @@ class JavaStringTokenizerUse {
             && translation
                 .rust
                 .contains("let first: char = tokenizer.next_token().chars().nth(0 as usize)")
+            && !translation.rust.contains("downcast::<StringTokenizer>")
             && !translation.rust.contains("has_more_tokens() { ()")
             && !translation.rust.contains("next_token() -> ()"),
         "{}",
@@ -671,7 +672,18 @@ class JavaStringTokenizerUse {
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn tokenizer_counts_and_advances() {
+        assert_eq!(JavaStringTokenizerUse::count(Box::new("a|x|z".to_string())), 4);
+        assert_eq!(JavaStringTokenizerUse::count(Box::new("x||y".to_string())), 3);
+    }
+}
+"#,
         }],
     );
 }
@@ -1830,7 +1842,9 @@ class JdkBitSetBooleanFacade {
     );
 
     assert!(
-        translation.rust.contains("return !false;") && !translation.rust.contains(".get(index)"),
+        translation.rust.contains("return !bits.get(index);")
+            && !translation.rust.contains("return !false;")
+            && !translation.rust.contains("downcast::<BitSet>"),
         "{}",
         translation.rust
     );
@@ -1840,7 +1854,20 @@ class JdkBitSetBooleanFacade {
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn bitset_get_reflects_state() {
+        let mut bits = BitSet::new_1(4);
+        bits.set(2);
+        assert!(!JdkBitSetBooleanFacade::missing(&bits, 2));
+        assert!(JdkBitSetBooleanFacade::missing(&bits, 3));
+    }
+}
+"#,
         }],
     );
 }
@@ -11437,7 +11464,7 @@ class ConstructorInitializedLocalReceiver {
                 .contains("let entries: Enumeration = zip_file.entries()?;")
             && translation
                 .rust
-                .contains("let stream: InputStream = zip_file.get_input_stream(ZipEntry::new())?;")
+                .contains("let stream: InputStream = zip_file.get_input_stream(ZipEntry::new_0())?;")
             && translation.rust.contains("zip_file.close()?;")
             && translation
                 .rust
@@ -11462,8 +11489,59 @@ mod generated_tests {
 
     #[test]
     fn typechecks_constructor_initialized_local_receiver() {
-        let fixture = ConstructorInitializedLocalReceiver { zip_file: Some(ZipFile) };
+        let fixture = ConstructorInitializedLocalReceiver { zip_file: Some(Box::new(ZipFile)) };
         fixture.r#use(File::new("archive.zip")).unwrap();
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn zip_entry_facade_preserves_name_and_directory_state() {
+    let translation = translate_source(
+        r#"
+import java.util.zip.ZipEntry;
+
+class ZipEntryStateUse {
+    static String name(String value) {
+        return new ZipEntry(value).getName();
+    }
+
+    static boolean directory(String value) {
+        return new ZipEntry(value).isDirectory();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("ZipEntry::new_1(")
+            && translation.rust.contains(".get_name()")
+            && translation.rust.contains(".is_directory()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "zip_entry_state_facade",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn zip_entry_keeps_name_state() {
+        assert_eq!(
+            ZipEntryStateUse::name(Box::new("folder/file.txt".to_string())).unwrap(),
+            "folder/file.txt".to_string()
+        );
+        assert!(ZipEntryStateUse::directory(Box::new("folder/".to_string())).unwrap());
+        assert!(!ZipEntryStateUse::directory(Box::new("folder/file.txt".to_string())).unwrap());
     }
 }
 "#,

@@ -6373,8 +6373,14 @@ pub fn method_param_shape_constraints(
     );
     push_unique_signature_constraints(
         &mut constraints,
-        &internal_exact_final_erased_facade_constraints(&param.ty, facts),
+        &java_platform_facade_concrete_native_constraints(&param.ty),
     );
+    if !declared_java_platform_facade_type(&param.ty) {
+        push_unique_signature_constraints(
+            &mut constraints,
+            &internal_exact_final_erased_facade_constraints(&param.ty, facts),
+        );
+    }
     if boundary_kind.is_none() {
         constraints.extend(
             method_param_borrowed_content_policy_with_facts(ty, method, param, usage, facts)
@@ -9900,6 +9906,10 @@ fn local_shape_constraints_with_usage_and_effective_facts(
         &mut constraints,
         &declared_local_jdk_iterator_constraints(java_ty),
     );
+    push_unique_signature_constraints(
+        &mut constraints,
+        &declared_local_java_platform_facade_constraints(java_ty),
+    );
     if let Some(binding) = usage.and_then(|usage| usage.bindings.get(name)) {
         push_unique_signature_constraints(
             &mut constraints,
@@ -9939,6 +9949,7 @@ fn local_shape_constraints_with_usage_and_effective_facts(
     if let Some(kind) = usage
         .and_then(|usage| usage.bindings.get(name))
         .and_then(|binding| binding_boundary_policy(binding).kind)
+        .filter(|_| !declared_java_platform_facade_type(java_ty))
         .filter(|_| !modeled_native_map_get_final_facade_value)
     {
         constraints.extend(
@@ -9957,6 +9968,38 @@ fn local_shape_constraints_with_usage_and_effective_facts(
         );
     }
     constraints
+}
+
+fn declared_local_java_platform_facade_constraints(java_ty: &JavaType) -> Vec<SignatureConstraint> {
+    if !declared_java_platform_facade_type(java_ty) {
+        return Vec::new();
+    }
+    let mut constraints = java_platform_facade_concrete_native_constraints(java_ty);
+    constraints.push(SignatureConstraint::RequiredOwnership(
+        OwnershipShape::Owned,
+    ));
+    constraints
+}
+
+fn java_platform_facade_concrete_native_constraints(
+    java_ty: &JavaType,
+) -> Vec<SignatureConstraint> {
+    if !declared_java_platform_facade_type(java_ty) {
+        return Vec::new();
+    }
+    vec![
+        SignatureConstraint::RequiredDispatch(DispatchShape::Concrete),
+        SignatureConstraint::RequiredView(ViewShape::Native),
+    ]
+}
+
+fn declared_java_platform_facade_type(java_ty: &JavaType) -> bool {
+    match java_ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+            crate::stdlib::is_java_platform_facade_type_name(name)
+        }
+        _ => false,
+    }
 }
 
 fn declared_local_jdk_iterator_constraints(java_ty: &JavaType) -> Vec<SignatureConstraint> {

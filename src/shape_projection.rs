@@ -78,6 +78,8 @@ pub fn value_shape_for_java_type(
     let mut shape = RustSlotShape::conservative(java_ty.clone());
     let dispatch = if java_type_is_erased_object_boundary(&java_ty) {
         DispatchShape::ErasedObject
+    } else if java_type_is_known_platform_facade(&java_ty) {
+        DispatchShape::Concrete
     } else {
         representations.dispatch_for(&java_ty)
     };
@@ -94,7 +96,8 @@ pub fn project_java_value_shape(
     }
     let mut shape = RustSlotShape::conservative(java_ty);
     if java_type_is_erased_object_boundary(&shape.java_ty)
-        || matches!(shape.java_ty, JavaType::Unknown(_) | JavaType::Wildcard(_))
+        || (matches!(shape.java_ty, JavaType::Unknown(_) | JavaType::Wildcard(_))
+            && !java_type_is_known_platform_facade(&shape.java_ty))
     {
         apply_dispatch_projection(&mut shape, DispatchShape::ErasedObject);
     }
@@ -107,6 +110,15 @@ fn java_type_is_erased_object_boundary(java_ty: &JavaType) -> bool {
         JavaType::Named { name, .. } | JavaType::Unknown(name)
             if name == "Object" || name == "java.lang.Object"
     ) || matches!(java_ty, JavaType::Wildcard(_))
+}
+
+fn java_type_is_known_platform_facade(java_ty: &JavaType) -> bool {
+    match java_ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+            crate::stdlib::is_java_platform_facade_type_name(name)
+        }
+        _ => false,
+    }
 }
 
 pub fn borrowed_string_content_shape() -> RustSlotShape {

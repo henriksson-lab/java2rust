@@ -3832,7 +3832,7 @@ fn constructor_rust_name(
 fn java_mutable_string_buffer_constructor_uses_arity_name(type_name: &str) -> bool {
     matches!(
         crate::stdlib::canonical_external_receiver_type_key(type_name).as_str(),
-        "StringBuilder" | "StringBuffer"
+        "StringBuilder" | "StringBuffer" | "StringTokenizer" | "BitSet" | "ZipEntry"
     )
 }
 

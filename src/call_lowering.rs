@@ -233,7 +233,9 @@ fn apply_native_java_instance_method(
         NativeJavaInstanceMethod::StringEndsWith => {
             receiver_method_call_projection(receiver, "ends_with", args)
         }
-        NativeJavaInstanceMethod::BitSetGet => RustExpr::Raw("false".to_string()),
+        NativeJavaInstanceMethod::BitSetGet => {
+            receiver_method_call_projection(receiver, "get", args)
+        }
         NativeJavaInstanceMethod::FileExists => file_exists_projection(receiver),
         NativeJavaInstanceMethod::ReaderReady => RustExpr::Raw("true".to_string()),
         NativeJavaInstanceMethod::BufferPut => {

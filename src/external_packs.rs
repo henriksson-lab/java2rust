@@ -30814,6 +30814,65 @@ pub fn java_platform_constructor_argument_effect_for(
     arg_count: usize,
     parameter_index: usize,
 ) -> Option<ExternalConstructorArgumentEffectFact> {
+    if crate::facts::external_type_name_matches(type_name, "java.util.StringTokenizer") {
+        match (arg_count, parameter_index) {
+            (1..=3, 0) | (2..=3, 1) => {
+                return Some(ExternalConstructorArgumentEffectFact {
+                    type_name: type_name.to_string(),
+                    arg_count,
+                    parameter_index,
+                    parameter_type: Some(JavaType::String),
+                    parameter_nullability: NullabilityState::DefinitelyNonNull,
+                    argument_mutability: ReceiverMutabilityFact::ReadOnly,
+                    alias_policy: ExternalArgumentAliasPolicy::NoAlias,
+                    provenance: FactProvenance::BuiltinExternalModel,
+                });
+            }
+            (3, 2) => {
+                return Some(ExternalConstructorArgumentEffectFact {
+                    type_name: type_name.to_string(),
+                    arg_count,
+                    parameter_index,
+                    parameter_type: Some(JavaType::Primitive(PrimitiveType::Boolean)),
+                    parameter_nullability: NullabilityState::DefinitelyNonNull,
+                    argument_mutability: ReceiverMutabilityFact::ReadOnly,
+                    alias_policy: ExternalArgumentAliasPolicy::NoAlias,
+                    provenance: FactProvenance::BuiltinExternalModel,
+                });
+            }
+            _ => {}
+        }
+    }
+    if crate::facts::external_type_name_matches(type_name, "java.util.BitSet")
+        && arg_count == 1
+        && parameter_index == 0
+    {
+        return Some(ExternalConstructorArgumentEffectFact {
+            type_name: type_name.to_string(),
+            arg_count,
+            parameter_index,
+            parameter_type: Some(JavaType::Primitive(PrimitiveType::Int)),
+            parameter_nullability: NullabilityState::DefinitelyNonNull,
+            argument_mutability: ReceiverMutabilityFact::ReadOnly,
+            alias_policy: ExternalArgumentAliasPolicy::NoAlias,
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
+    if crate::facts::external_type_name_matches(type_name, "java.util.zip.ZipEntry")
+        && arg_count == 1
+        && parameter_index == 0
+    {
+        return Some(ExternalConstructorArgumentEffectFact {
+            type_name: type_name.to_string(),
+            arg_count,
+            parameter_index,
+            parameter_type: Some(JavaType::String),
+            parameter_nullability: NullabilityState::DefinitelyNonNull,
+            argument_mutability: ReceiverMutabilityFact::ReadOnly,
+            alias_policy: ExternalArgumentAliasPolicy::NoAlias,
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
     if arg_count == 1
         && parameter_index == 0
         && [

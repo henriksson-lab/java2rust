@@ -4176,6 +4176,18 @@ pub fn canonical_external_receiver_type_key(name: &str) -> String {
         "access_mode" => "AccessMode",
         "posix_file_permission" => "PosixFilePermission",
         "arrays" | "java.util.Arrays" | "JavaUtilArrays" | "java_util_arrays" => "Arrays",
+        "bit_set" | "java.util.BitSet" | "JavaUtilBitSet" | "java_util_bit_set" => "BitSet",
+        "string_tokenizer"
+        | "java.util.StringTokenizer"
+        | "JavaUtilStringTokenizer"
+        | "java_util_string_tokenizer" => "StringTokenizer",
+        "zip_entry"
+        | "java.util.zip.ZipEntry"
+        | "JavaUtilZipZipEntry"
+        | "java_util_zip_zip_entry" => "ZipEntry",
+        "zip_file" | "java.util.zip.ZipFile" | "JavaUtilZipZipFile" | "java_util_zip_zip_file" => {
+            "ZipFile"
+        }
         "math_arrays" => "MathArrays",
         "array_utils" => "ArrayUtils",
         "beta" => "Beta",
@@ -4966,19 +4978,31 @@ impl JarEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
-pub struct ZipEntry;
+pub struct ZipEntry {
+    name: String,
+}
 
 impl ZipEntry {
     pub fn new() -> ZipEntry {
-        ZipEntry
+        ZipEntry::new_0()
+    }
+
+    pub fn new_0() -> ZipEntry {
+        ZipEntry {
+            name: String::new(),
+        }
+    }
+
+    pub fn new_1<S: Into<String>>(name: S) -> ZipEntry {
+        ZipEntry { name: name.into() }
     }
 
     pub fn is_directory(&self) -> Result<bool, JavaException> {
-        Ok(false)
+        Ok(self.name.ends_with('/'))
     }
 
     pub fn get_name(&self) -> Result<String, JavaException> {
-        Ok(String::new())
+        Ok(self.name.clone())
     }
 }
 
@@ -5020,7 +5044,7 @@ impl Enumeration {
     }
 
     pub fn next_element(&self) -> Result<ZipEntry, JavaException> {
-        Ok(ZipEntry)
+        Ok(ZipEntry::new())
     }
 }
 
@@ -5103,6 +5127,104 @@ impl Eq for AtomicInteger {}
 impl std::hash::Hash for AtomicInteger {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         std::hash::Hash::hash(&self.value.get(), state);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct BitSet {
+    bits: Vec<bool>,
+}
+
+impl BitSet {
+    pub fn new_0() -> BitSet {
+        BitSet { bits: Vec::new() }
+    }
+
+    pub fn new_1(size: i32) -> BitSet {
+        BitSet {
+            bits: vec![false; size.max(0) as usize],
+        }
+    }
+
+    pub fn get(&self, index: i32) -> bool {
+        index >= 0
+            && self
+                .bits
+                .get(index as usize)
+                .copied()
+                .unwrap_or(false)
+    }
+
+    pub fn set(&mut self, index: i32) {
+        if index < 0 {
+            panic!("Java IndexOutOfBoundsException");
+        }
+        let index = index as usize;
+        if index >= self.bits.len() {
+            self.bits.resize(index + 1, false);
+        }
+        self.bits[index] = true;
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct StringTokenizer {
+    tokens: Vec<String>,
+    index: usize,
+}
+
+impl StringTokenizer {
+    pub fn new_1<S: Into<String>>(text: S) -> StringTokenizer {
+        StringTokenizer::new_3(text, " \t\n\r\u{000c}".to_string(), false)
+    }
+
+    pub fn new_2<S: Into<String>, D: Into<String>>(text: S, delimiters: D) -> StringTokenizer {
+        StringTokenizer::new_3(text, delimiters, false)
+    }
+
+    pub fn new_3<S: Into<String>, D: Into<String>>(
+        text: S,
+        delimiters: D,
+        return_delimiters: bool,
+    ) -> StringTokenizer {
+        let text = text.into();
+        let delimiters = delimiters.into();
+        let mut tokens = Vec::new();
+        let mut current = String::new();
+        for ch in text.chars() {
+            if delimiters.contains(ch) {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+                if return_delimiters {
+                    tokens.push(ch.to_string());
+                }
+            } else {
+                current.push(ch);
+            }
+        }
+        if !current.is_empty() {
+            tokens.push(current);
+        }
+        StringTokenizer { tokens, index: 0 }
+    }
+
+    pub fn count_tokens(&self) -> i32 {
+        self.tokens.len().saturating_sub(self.index) as i32
+    }
+
+    pub fn has_more_tokens(&self) -> bool {
+        self.index < self.tokens.len()
+    }
+
+    pub fn next_token(&mut self) -> String {
+        let token = self
+            .tokens
+            .get(self.index)
+            .expect("Java NoSuchElementException")
+            .clone();
+        self.index += 1;
+        token
     }
 }
 
@@ -14060,6 +14182,7 @@ fn is_builtin_external_facade_type(name: &str) -> bool {
             | "Stream"
             | "StringBuffer"
             | "StringBuilder"
+            | "StringTokenizer"
             | "Class"
             | "JavaClass"
             | "Pattern"
@@ -14080,6 +14203,7 @@ fn is_builtin_external_facade_type(name: &str) -> bool {
             | "AttributesName"
             | "Enumeration"
             | "AtomicInteger"
+            | "BitSet"
             | "ClassLoader"
             | "Locale"
             | "BufferedImage"
@@ -15698,6 +15822,7 @@ pub fn program_uses_java_platform_facades(program: &Program) -> bool {
                 | "JarFile"
                 | "JarEntry"
                 | "ZipEntry"
+                | "ZipFile"
                 | "Manifest"
                 | "Attributes"
                 | "AttributesName"
@@ -15705,11 +15830,13 @@ pub fn program_uses_java_platform_facades(program: &Program) -> bool {
                 | "Iterator"
                 | "StringBuffer"
                 | "StringBuilder"
+                | "StringTokenizer"
                 | "Pattern"
                 | "Matcher"
                 | "JavaUtilRegexPattern"
                 | "JavaUtilRegexMatcher"
                 | "AtomicInteger"
+                | "BitSet"
                 | "ClassLoader"
                 | "BufferedImage"
                 | "Graphics"
@@ -15730,6 +15857,7 @@ pub fn program_uses_java_platform_facades(program: &Program) -> bool {
                 | "java.util.jar.JarFile"
                 | "java.util.jar.JarEntry"
                 | "java.util.zip.ZipEntry"
+                | "java.util.zip.ZipFile"
                 | "java.util.jar.Manifest"
                 | "java.util.jar.Attributes"
                 | "java.util.jar.Attributes.Name"
@@ -15737,9 +15865,11 @@ pub fn program_uses_java_platform_facades(program: &Program) -> bool {
                 | "java.util.Iterator"
                 | "java.lang.StringBuffer"
                 | "java.lang.StringBuilder"
+                | "java.util.StringTokenizer"
                 | "java.util.regex.Pattern"
                 | "java.util.regex.Matcher"
                 | "java.util.concurrent.atomic.AtomicInteger"
+                | "java.util.BitSet"
                 | "java.lang.ClassLoader"
                 | "java.awt.image.BufferedImage"
                 | "java.awt.Graphics"
@@ -16067,6 +16197,7 @@ pub fn is_java_platform_facade_type_name(name: &str) -> bool {
             | "JarFile"
             | "JarEntry"
             | "ZipEntry"
+            | "ZipFile"
             | "Manifest"
             | "Attributes"
             | "AttributesName"
@@ -16074,11 +16205,13 @@ pub fn is_java_platform_facade_type_name(name: &str) -> bool {
             | "Iterator"
             | "StringBuffer"
             | "StringBuilder"
+            | "StringTokenizer"
             | "Pattern"
             | "Matcher"
             | "JavaUtilRegexPattern"
             | "JavaUtilRegexMatcher"
             | "AtomicInteger"
+            | "BitSet"
             | "ClassLoader"
             | "Serializable"
             | "BufferedImage"

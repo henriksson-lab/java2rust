@@ -7075,8 +7075,9 @@ arity names for these overloaded constructors, so generated calls should use
 StringBuilder/StringBuffer/Appendable shape tests pass, including a generated
 runtime assertion for `"ok!"`.
 
-Audit `0016` remains partial, not fixed: remaining Arrays helpers still need
-follow-up work, and broader facade fallibility remains open.
+Audit `0016` remains partial, not fixed: `StringTokenizer`, `ZipEntry`, and
+`BitSet.get` now have focused stateful facade coverage, but broader facade
+fallibility and remaining no-op utility surfaces remain open.
 `Arrays.copyOf(...)`, `Arrays.copyOfRange(...)`, `Arrays.toString(...)`,
 `Arrays.deepToString(...)`, `Arrays.deepEquals(...)`, `Arrays.deepHashCode(...)`,
 `Arrays.hashCode(...)`, whole/range
