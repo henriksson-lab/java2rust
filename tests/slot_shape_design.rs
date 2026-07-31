@@ -11198,6 +11198,80 @@ class InternalMutableArrayArgument {
 }
 
 #[test]
+fn nullable_array_param_mutation_uses_optional_mutable_borrow_slot() {
+    let source = r#"
+class NullableArrayParamMutation {
+    static int fill(byte[] destination) {
+        if (destination == null) {
+            return 0;
+        }
+        destination[0] = 7;
+        return destination[0];
+    }
+
+    static int run() {
+        byte[] buffer = null;
+        buffer = new byte[2];
+        int n = fill(buffer);
+        return buffer[0] + n;
+    }
+}
+"#;
+    let parsed = parse_java_source(source);
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let semantic = new_java2rust::semantic_analysis::analyze_program(
+        &resolved.program,
+        &resolved.facts,
+        &FactSet::default(),
+    );
+    let representations = plan_representations(&resolved.program, &semantic.facts);
+    let signatures = new_java2rust::signature::solve_signatures_with_facts(
+        &resolved.program,
+        &representations,
+        &semantic.usage,
+        &semantic.facts,
+    );
+    let signature = signatures
+        .method_signature_by_rust_name("NullableArrayParamMutation", "fill")
+        .expect("fill signature should be planned");
+    let destination = signature
+        .params
+        .iter()
+        .find(|param| param.name == "destination")
+        .expect("destination param should be planned");
+    assert_eq!(
+        destination.shape.optional_element_type(),
+        Some(JavaType::Array(Box::new(JavaType::Primitive(
+            PrimitiveType::Byte
+        ))))
+    );
+    assert_eq!(destination.shape.ownership, OwnershipShape::MutableBorrow);
+    assert_eq!(destination.shape.view, ViewShape::Slice);
+
+    let translation = translate_source_with_facts(source, &semantic.facts);
+    assert!(
+        translation
+            .rust
+            .contains("let mut buffer: Option<Vec<i8>> = None"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("fill(buffer.as_deref_mut())")
+            || translation
+                .rust
+                .contains("fill(buffer.as_mut().map(|value| value.as_mut_slice()))"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("fill(buffer.unwrap()"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn facade_abi_fact_selects_receiver_call_shape_before_crate_mapping() {
     let hdf5_receiver = Expr::Var("hdf5".to_string());
     let mut hdf5_types = TypeEnv::new();

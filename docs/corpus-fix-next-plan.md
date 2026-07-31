@@ -70,7 +70,8 @@ Short form: no audit is closed until the corresponding file is in
 
 2026-07-31 user instruction: keep this in the plan explicitly: move Claude
 audits to `/home/mahogny/github/claude/new_java2rust/claude_audits/done` once
-done.
+done. Treat that file move as part of the completed checkpoint, not as optional
+cleanup.
 
 2026-07-30 constant-fact checkpoint: external field facts can now carry explicit
 Rust constant values from manifests via `value=...`, and built-in HTSJDK/VCF/SAM
@@ -7539,6 +7540,20 @@ That rerun translates 9/9 files with 0 parse failures,
 and `cargo_check=ok` with 0 generated-Rust errors. The generated erased-object
 trait now exposes `get_v_c_f_header_version(&self) -> VCFHeaderVersion`.
 Audit `0011` still remains partial, so its issue file must stay active.
+
+2026-07-31 optional sequence storage/projection guard checkpoint: null-initialized
+array locals whose later uses need optional borrowed slices now keep owned
+optional storage (`Option<Vec<T>>`) and project to mutable borrowed slices at
+call sites instead of storing `Option<&Vec<T>>`. Focused verification covers
+`nullable_array_param_mutation_uses_optional_mutable_borrow_slot`. A minimized
+FastQC-style nullable `String[]` field fixture,
+`OptionalStringArrayFieldViews.java`, now pins `.length` and indexed reads
+through the shared optional sequence receiver projection, with focused
+verification via
+`optional_string_array_field_length_and_index_use_sequence_projection`. The
+parallel FastQC audit found the old `self.read_paths.length` evidence only in
+stale `.tmp` artifacts; current refreshed FastQC output already unwraps the
+optional sequence receiver before length/index operations.
 
 ## Rerun Protocol
 

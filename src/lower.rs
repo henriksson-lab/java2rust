@@ -5647,12 +5647,18 @@ fn own_uninitialized_optional_borrowed_local(
     initializer: &Option<Expr>,
     ctx: LowerCtx,
 ) -> LocalPlan {
-    if initializer.is_none()
+    if initializer
+        .as_ref()
+        .is_none_or(|expr| matches!(expr, Expr::Literal(Literal::Null)))
         && local_plan.shape.optional_element_type().is_some()
-        && local_plan.shape.ownership == OwnershipShape::SharedBorrow
+        && matches!(
+            local_plan.shape.ownership,
+            OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+        )
         && !current_callable_binding_is_returned(name, ctx)
     {
         local_plan.shape.ownership = OwnershipShape::Owned;
+        local_plan.shape.view = ViewShape::Native;
     }
     local_plan
 }

@@ -11201,6 +11201,9 @@ fn local_constraints_select_concrete_borrowed_value(constraints: &[SignatureCons
             OwnershipShape::SharedBorrow,
         ))
         && !constraints.contains(&SignatureConstraint::RequiredOwnership(
+            OwnershipShape::MutableBorrow,
+        ))
+        && !constraints.contains(&SignatureConstraint::RequiredOwnership(
             OwnershipShape::Owned,
         ))
         && !constraints.contains(&SignatureConstraint::StorageSlot)

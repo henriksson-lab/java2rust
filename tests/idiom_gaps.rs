@@ -4116,6 +4116,38 @@ fn indexed_string_array_reads_clone_only_for_owned_slots() {
 }
 
 #[test]
+fn optional_string_array_field_length_and_index_use_sequence_projection() {
+    let translation = translate_source(&idiom_gap("OptionalStringArrayFieldViews.java"));
+
+    assert!(
+        !translation.rust.contains("self.read_paths.length")
+            && !translation.rust.contains("self.rdf_paths.length")
+            && !translation.rust.contains("self.read_paths[")
+            && !translation.rust.contains("self.rdf_paths[")
+            && translation
+                .rust
+                .contains("self.read_paths.as_ref().expect(\"Java null receiver\").len()")
+            && translation
+                .rust
+                .contains("self.read_paths.as_ref().expect(\"Java null receiver\")[")
+            && translation
+                .rust
+                .contains("self.rdf_paths.as_ref().expect(\"Java null receiver\")["),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "optional-string-array-field-views",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn indexed_string_array_into_optional_borrowed_string_arg_borrows_element() {
     let translation = translate_source(
         r#"
