@@ -131,6 +131,9 @@ Landed in this batch:
 - `Arrays.compare(left, right)` now lowers through a native lexicographic
   helper that returns Java-compatible sign values and handles floating `NaN`
   plus signed zero ordering.
+- `Arrays.mismatch(left, right)` now lowers through the same Java element
+  comparison helper, returning the first mismatch index or `-1` without a
+  generated no-op `Arrays` facade.
 - Native `Arrays.copyOf`, `Arrays.copyOfRange`, range `Arrays.fill`, and range
   `Arrays.sort` projections now reject Java-invalid negative, reversed, or
   out-of-bounds ranges with explicit runtime panics instead of clamping or

@@ -2368,6 +2368,13 @@ pub fn arrays_compare_projection(left: RustExpr, right: RustExpr) -> RustExpr {
     }
 }
 
+pub fn arrays_mismatch_projection(left: RustExpr, right: RustExpr) -> RustExpr {
+    RustExpr::Call {
+        function: Box::new(RustExpr::Raw("java_arrays_mismatch".to_string())),
+        args: vec![left, right],
+    }
+}
+
 pub fn arrays_copy_of_projection(source: RustExpr, len: RustExpr) -> RustExpr {
     RustExpr::Raw(format!(
         "{{ let __java_arrays_source = &{}; let __java_arrays_len = {}; if __java_arrays_len < 0 {{ panic!(\"Java NegativeArraySizeException\"); }} let __java_arrays_len = __java_arrays_len as usize; let mut __java_arrays_out = __java_arrays_source.iter().cloned().take(__java_arrays_len).collect::<Vec<_>>(); __java_arrays_out.resize(__java_arrays_len, Default::default()); __java_arrays_out }}",

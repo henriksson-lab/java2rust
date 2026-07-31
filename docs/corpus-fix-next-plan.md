@@ -7076,9 +7076,9 @@ follow-up work, and broader facade fallibility remains open.
 `Arrays.copyOf(...)`, `Arrays.copyOfRange(...)`, `Arrays.toString(...)`,
 `Arrays.hashCode(...)`, whole/range `Arrays.binarySearch(...)`, whole/range
 `Arrays.fill(...)`, whole/range `Arrays.sort(...)`, and `Arrays.compare(...)`
-now lower through native
-projections with Java-style default padding, formatting, hash seeding,
-search insertion-point encoding, mutation, and lexicographic compare signs.
+plus `Arrays.mismatch(...)` now lower through native projections with
+Java-style default padding, formatting, hash seeding, search insertion-point
+encoding, mutation, lexicographic compare signs, and mismatch indexing.
 Apache Commons `FastMath` is
 modelled in `javalibs` as a native static owner alias to the existing JDK
 `Math` planner, keeping package-specific ownership outside `stdlib.rs`.

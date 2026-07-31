@@ -30609,6 +30609,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(native_collection_static_source.contains("arrays_binary_search_projection"));
     assert!(call_source.contains("arrays_binary_search_range_projection"));
     assert!(call_source.contains("arrays_compare_projection(left, right)"));
+    assert!(call_source.contains("arrays_mismatch_projection(left, right)"));
     assert!(call_source.contains("collections_singleton_map_projection(key, value)"));
     assert!(coercion_source.contains("pub fn collections_n_copies_projection"));
     assert!(!call_source.contains("{{ let _ = {}; }}"));

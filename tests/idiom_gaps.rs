@@ -21411,6 +21411,59 @@ mod generated_tests {
 }
 
 #[test]
+fn java_arrays_mismatch_lowers_as_static_platform_mismatch_projection() {
+    let translation = translate_source(
+        r#"
+import java.util.Arrays;
+
+class JavaArraysMismatchUse {
+    int ints(int[] left, int[] right) {
+        return Arrays.mismatch(left, right);
+    }
+
+    int doubles(double[] left, double[] right) {
+        return Arrays.mismatch(left, right);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("java_arrays_mismatch(left, right)")
+            && !translation.rust.contains("Arrays::mismatch")
+            && !translation.rust.contains("JavaUtilArrays::mismatch"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "java_arrays_mismatch_use",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn returns_first_java_mismatch_or_minus_one() {
+        let fixture = JavaArraysMismatchUse {};
+        assert_eq!(fixture.ints(&[1, 2], &[1, 2]), -1);
+        assert_eq!(fixture.ints(&[1, 2], &[1, 3]), 1);
+        assert_eq!(fixture.ints(&[1, 2], &[1, 2, 3]), 2);
+        assert_eq!(fixture.doubles(&[1.0, f64::NAN], &[1.0, f64::NAN]), -1);
+        assert_eq!(fixture.doubles(&[-0.0], &[0.0]), 0);
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
 fn java_arrays_hash_code_lowers_as_static_platform_hash_projection() {
     let translation = translate_source(
         r#"

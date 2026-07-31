@@ -3231,6 +3231,9 @@ fn known_argument_sensitive_external_method_return_type(
         (Some("Arrays"), "compare", [JavaType::Array(_), JavaType::Array(_)]) => {
             Some(JavaType::Primitive(PrimitiveType::Int))
         }
+        (Some("Arrays"), "mismatch", [JavaType::Array(_), JavaType::Array(_)]) => {
+            Some(JavaType::Primitive(PrimitiveType::Int))
+        }
         (
             Some("Arrays"),
             "binarySearch" | "binary_search",
@@ -5705,6 +5708,24 @@ pub fn java_arrays_compare<T: JavaArraysCompareElement, L: AsRef<[T]>, R: AsRef<
         std::cmp::Ordering::Less => -1,
         std::cmp::Ordering::Equal => 0,
         std::cmp::Ordering::Greater => 1,
+    }
+}
+
+pub fn java_arrays_mismatch<T: JavaArraysCompareElement, L: AsRef<[T]>, R: AsRef<[T]>>(
+    left: L,
+    right: R,
+) -> i32 {
+    let left = left.as_ref();
+    let right = right.as_ref();
+    for (index, (left_item, right_item)) in left.iter().zip(right.iter()).enumerate() {
+        if left_item.java_arrays_compare(right_item) != 0 {
+            return index as i32;
+        }
+    }
+    if left.len() == right.len() {
+        -1
+    } else {
+        left.len().min(right.len()) as i32
     }
 }
 
@@ -16585,6 +16606,7 @@ fn expr_uses_java_string_runtime_helpers(expr: &Expr) -> bool {
                 (receiver.as_deref(), name.as_str(), args.len()),
                 (Some(Expr::Var(owner)), "hashCode" | "hash_code", 1)
                     | (Some(Expr::Var(owner)), "compare", 2)
+                    | (Some(Expr::Var(owner)), "mismatch", 2)
                     if canonical_external_receiver_type_key(owner) == "Arrays"
             ) || matches!(
                 (receiver.as_deref(), name.as_str(), args.len()),
@@ -17267,6 +17289,7 @@ fn external_api_method_policy_provenance_with_builtin_packs(
         (Some("Arrays"), "asList" | "stream", _) => FactProvenance::BuiltinExternalModel,
         (Some("Arrays"), "equals", 2) => FactProvenance::BuiltinExternalModel,
         (Some("Arrays"), "compare", 2) => FactProvenance::BuiltinExternalModel,
+        (Some("Arrays"), "mismatch", 2) => FactProvenance::BuiltinExternalModel,
         (Some("Arrays"), "binarySearch" | "binary_search", 2 | 4) => {
             FactProvenance::BuiltinExternalModel
         }
@@ -17712,6 +17735,7 @@ pub fn external_api_return_nullability(
         (Some("Arrays"), "asList" | "stream", _) => NullabilityState::DefinitelyNonNull,
         (Some("Arrays"), "equals", 2) => NullabilityState::DefinitelyNonNull,
         (Some("Arrays"), "compare", 2) => NullabilityState::DefinitelyNonNull,
+        (Some("Arrays"), "mismatch", 2) => NullabilityState::DefinitelyNonNull,
         (Some("Arrays"), "binarySearch" | "binary_search", 2 | 4) => {
             NullabilityState::DefinitelyNonNull
         }
@@ -17878,6 +17902,7 @@ fn static_utility_method_role(
         (Some("Arrays"), "asList" | "stream", _) => ExternalApiRole::Getter,
         (Some("Arrays"), "equals", 2) => ExternalApiRole::BooleanGetter,
         (Some("Arrays"), "compare", 2) => ExternalApiRole::Getter,
+        (Some("Arrays"), "mismatch", 2) => ExternalApiRole::Getter,
         (Some("Arrays"), "binarySearch" | "binary_search", 2 | 4) => ExternalApiRole::Getter,
         (Some("Arrays"), "hashCode" | "hash_code", 1) => ExternalApiRole::Getter,
         (Some("Arrays"), "toString" | "to_string", 1) => ExternalApiRole::Getter,
