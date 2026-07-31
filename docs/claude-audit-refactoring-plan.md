@@ -36,6 +36,10 @@ Whenever an audit-backed fix is completed, move the corresponding
 the code, tests, and plan update. Do not leave completed audit files in the
 active audit directory.
 
+Standing closeout checklist: every audit-closing batch must include the audit
+file move to `claude_audits/done/` before commit; partial or inspiration-only
+audit files remain in `claude_audits/` until their full issue is verified.
+
 ## Audit File Definition Of Done
 
 Audit file housekeeping is part of the work, not a later cleanup step. Once a
