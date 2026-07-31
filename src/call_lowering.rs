@@ -7,9 +7,9 @@ use crate::coercion::{
     arrays_binary_search_projection, arrays_binary_search_range_projection,
     arrays_compare_projection, arrays_compare_range_projection, arrays_copy_of_projection,
     arrays_copy_of_range_projection, arrays_deep_equals_projection,
-    arrays_deep_to_string_projection, arrays_equals_projection, arrays_equals_range_projection,
-    arrays_hash_code_projection, arrays_mismatch_projection, arrays_mismatch_range_projection,
-    arrays_to_string_projection, collection_remove_if_projection,
+    arrays_deep_hash_code_projection, arrays_deep_to_string_projection, arrays_equals_projection,
+    arrays_equals_range_projection, arrays_hash_code_projection, arrays_mismatch_projection,
+    arrays_mismatch_range_projection, arrays_to_string_projection, collection_remove_if_projection,
     collections_empty_list_projection, collections_empty_map_projection,
     collections_empty_set_projection, collections_empty_sorted_set_projection,
     collections_n_copies_projection, collections_singleton_list_projection,
@@ -743,6 +743,11 @@ fn apply_native_collection_static_method(
             .cloned()
             .map(arrays_hash_code_projection)
             .unwrap_or_else(|| RustExpr::Literal("0".to_string())),
+        NativeCollectionStaticMethod::ArraysDeepHashCode => args
+            .first()
+            .cloned()
+            .map(arrays_deep_hash_code_projection)
+            .unwrap_or_else(|| RustExpr::Literal("1".to_string())),
         NativeCollectionStaticMethod::ArraysCopyOf => {
             let source = args
                 .first()

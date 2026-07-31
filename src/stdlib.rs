@@ -3257,6 +3257,9 @@ fn known_argument_sensitive_external_method_return_type(
         (Some("Arrays"), "hashCode" | "hash_code", [JavaType::Array(_)]) => {
             Some(JavaType::Primitive(PrimitiveType::Int))
         }
+        (Some("Arrays"), "deepHashCode" | "deep_hash_code", [JavaType::Array(_)]) => {
+            Some(JavaType::Primitive(PrimitiveType::Int))
+        }
         (Some("Arrays"), "toString" | "to_string", [JavaType::Array(_)]) => Some(JavaType::String),
         (Some("Arrays"), "deepToString" | "deep_to_string", [JavaType::Array(_)]) => {
             Some(JavaType::String)
@@ -5733,6 +5736,47 @@ impl<T: JavaArraysDeepEqualsElement> JavaArraysDeepEqualsElement for Option<T> {
     }
 }
 
+pub trait JavaArraysDeepHashElement {
+    fn java_arrays_deep_hash_code(&self) -> i32;
+}
+
+pub fn java_arrays_deep_hash_code<T: JavaArraysDeepHashElement, V: AsRef<[T]>>(
+    value: V,
+) -> i32 {
+    value.as_ref().iter().fold(1i32, |hash, element| {
+        hash.wrapping_mul(31)
+            .wrapping_add(element.java_arrays_deep_hash_code())
+    })
+}
+
+macro_rules! impl_java_arrays_deep_hash_leaf {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl JavaArraysDeepHashElement for $ty {
+                fn java_arrays_deep_hash_code(&self) -> i32 {
+                    self.java_arrays_hash_code()
+                }
+            }
+        )*
+    };
+}
+
+impl_java_arrays_deep_hash_leaf!(bool, i8, i16, i32, i64, char, f32, f64, String, &str);
+
+impl<T: JavaArraysDeepHashElement> JavaArraysDeepHashElement for Vec<T> {
+    fn java_arrays_deep_hash_code(&self) -> i32 {
+        java_arrays_deep_hash_code(self)
+    }
+}
+
+impl<T: JavaArraysDeepHashElement> JavaArraysDeepHashElement for Option<T> {
+    fn java_arrays_deep_hash_code(&self) -> i32 {
+        self.as_ref()
+            .map(JavaArraysDeepHashElement::java_arrays_deep_hash_code)
+            .unwrap_or(0)
+    }
+}
+
 pub mod logger {
     pub fn info<M: std::fmt::Display>(_message: M) {}
     pub fn warn<M: std::fmt::Display>(_message: M) {}
@@ -5885,6 +5929,47 @@ impl<T: JavaArraysDeepEqualsElement> JavaArraysDeepEqualsElement for Option<T> {
             (Some(left), Some(right)) => left.java_arrays_deep_equals(right),
             _ => false,
         }
+    }
+}
+
+pub trait JavaArraysDeepHashElement {
+    fn java_arrays_deep_hash_code(&self) -> i32;
+}
+
+pub fn java_arrays_deep_hash_code<T: JavaArraysDeepHashElement, V: AsRef<[T]>>(
+    value: V,
+) -> i32 {
+    value.as_ref().iter().fold(1i32, |hash, element| {
+        hash.wrapping_mul(31)
+            .wrapping_add(element.java_arrays_deep_hash_code())
+    })
+}
+
+macro_rules! impl_java_arrays_deep_hash_leaf {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl JavaArraysDeepHashElement for $ty {
+                fn java_arrays_deep_hash_code(&self) -> i32 {
+                    self.java_arrays_hash_code()
+                }
+            }
+        )*
+    };
+}
+
+impl_java_arrays_deep_hash_leaf!(bool, i8, i16, i32, i64, char, f32, f64, String, &str);
+
+impl<T: JavaArraysDeepHashElement> JavaArraysDeepHashElement for Vec<T> {
+    fn java_arrays_deep_hash_code(&self) -> i32 {
+        java_arrays_deep_hash_code(self)
+    }
+}
+
+impl<T: JavaArraysDeepHashElement> JavaArraysDeepHashElement for Option<T> {
+    fn java_arrays_deep_hash_code(&self) -> i32 {
+        self.as_ref()
+            .map(JavaArraysDeepHashElement::java_arrays_deep_hash_code)
+            .unwrap_or(0)
     }
 }
 
@@ -16814,6 +16899,7 @@ fn expr_uses_java_string_runtime_helpers(expr: &Expr) -> bool {
                 (Some(Expr::Var(owner)), "equals", 2 | 6)
                     | (Some(Expr::Var(owner)), "deepEquals" | "deep_equals", 2)
                     | (Some(Expr::Var(owner)), "hashCode" | "hash_code", 1)
+                    | (Some(Expr::Var(owner)), "deepHashCode" | "deep_hash_code", 1)
                     | (Some(Expr::Var(owner)), "deepToString" | "deep_to_string", 1)
                     | (Some(Expr::Var(owner)), "compare", 2 | 6)
                     | (Some(Expr::Var(owner)), "mismatch", 2 | 6)
@@ -17505,6 +17591,9 @@ fn external_api_method_policy_provenance_with_builtin_packs(
             FactProvenance::BuiltinExternalModel
         }
         (Some("Arrays"), "hashCode" | "hash_code", 1) => FactProvenance::BuiltinExternalModel,
+        (Some("Arrays"), "deepHashCode" | "deep_hash_code", 1) => {
+            FactProvenance::BuiltinExternalModel
+        }
         (Some("Arrays"), "toString" | "to_string", 1) => FactProvenance::BuiltinExternalModel,
         (Some("Arrays"), "deepToString" | "deep_to_string", 1) => {
             FactProvenance::BuiltinExternalModel
@@ -17957,6 +18046,9 @@ pub fn external_api_return_nullability(
             NullabilityState::DefinitelyNonNull
         }
         (Some("Arrays"), "hashCode" | "hash_code", 1) => NullabilityState::DefinitelyNonNull,
+        (Some("Arrays"), "deepHashCode" | "deep_hash_code", 1) => {
+            NullabilityState::DefinitelyNonNull
+        }
         (Some("Arrays"), "toString" | "to_string", 1) => NullabilityState::DefinitelyNonNull,
         (Some("Arrays"), "deepToString" | "deep_to_string", 1) => {
             NullabilityState::DefinitelyNonNull
@@ -18126,6 +18218,7 @@ fn static_utility_method_role(
         (Some("Arrays"), "mismatch", 2 | 6) => ExternalApiRole::Getter,
         (Some("Arrays"), "binarySearch" | "binary_search", 2 | 4) => ExternalApiRole::Getter,
         (Some("Arrays"), "hashCode" | "hash_code", 1) => ExternalApiRole::Getter,
+        (Some("Arrays"), "deepHashCode" | "deep_hash_code", 1) => ExternalApiRole::Getter,
         (Some("Arrays"), "toString" | "to_string", 1) => ExternalApiRole::Getter,
         (Some("Arrays"), "deepToString" | "deep_to_string", 1) => ExternalApiRole::Getter,
         (Some("Arrays"), "copyOf", 2) => ExternalApiRole::Getter,

@@ -126,6 +126,9 @@ Landed in this batch:
 - `Arrays.deepEquals(...)` now lowers nested array carriers through a distinct
   recursive equality helper, preserving the shallow/deep distinction from
   ordinary `Arrays.equals(...)`.
+- `Arrays.deepHashCode(...)` now lowers nested array carriers through a
+  recursive Java-seeded hash helper, matching deep traversal without a generated
+  no-op `Arrays` facade.
 - `Arrays.stream(array, from, to)` now carries explicit source-range facts in
   stream planning and renders Java range checks before iterating the selected
   slice.

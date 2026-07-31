@@ -2344,6 +2344,13 @@ pub fn arrays_deep_equals_projection(left: RustExpr, right: RustExpr) -> RustExp
     }
 }
 
+pub fn arrays_deep_hash_code_projection(source: RustExpr) -> RustExpr {
+    RustExpr::Call {
+        function: Box::new(RustExpr::Raw("java_arrays_deep_hash_code".to_string())),
+        args: vec![source],
+    }
+}
+
 pub fn arrays_equals_range_projection(
     left: RustExpr,
     left_from: RustExpr,

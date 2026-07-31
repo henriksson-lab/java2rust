@@ -30614,6 +30614,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(call_source.contains("arrays_mismatch_projection(left, right.clone())"));
     assert!(call_source.contains("arrays_mismatch_range_projection"));
     assert!(call_source.contains("arrays_deep_equals_projection"));
+    assert!(call_source.contains("arrays_deep_hash_code_projection"));
     assert!(call_source.contains("arrays_deep_to_string_projection"));
     assert!(call_source.contains("collections_singleton_map_projection(key, value)"));
     assert!(coercion_source.contains("pub fn collections_n_copies_projection"));

@@ -21782,6 +21782,67 @@ mod generated_tests {
 }
 
 #[test]
+fn java_arrays_deep_hash_code_lowers_nested_arrays() {
+    let translation = translate_source(
+        r#"
+import java.util.Arrays;
+
+class JavaArraysDeepHashCodeUse {
+    int names(String[][] values) {
+        return Arrays.deepHashCode(values);
+    }
+
+    int cubes(String[][][] values) {
+        return Arrays.deepHashCode(values);
+    }
+
+    int empty(String[][] values) {
+        return Arrays.deepHashCode(values);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("java_arrays_deep_hash_code(values)")
+            && !translation.rust.contains("Arrays::deep_hash_code")
+            && !translation.rust.contains("JavaUtilArrays::deep_hash_code"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "java_arrays_deep_hash_code_use",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn hashes_nested_arrays_recursively() {
+        let fixture = JavaArraysDeepHashCodeUse {};
+        assert_eq!(
+            fixture.names(&[
+                vec!["a".to_string(), "b".to_string()],
+                vec!["c".to_string()]
+            ]),
+            127137
+        );
+        assert_eq!(fixture.cubes(&[vec![vec!["x".to_string()], vec![]]]), 5674);
+        assert_eq!(fixture.empty(&[]), 1);
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
 fn java_arrays_fill_lowers_whole_and_range_mutations() {
     let translation = translate_source(
         r#"
