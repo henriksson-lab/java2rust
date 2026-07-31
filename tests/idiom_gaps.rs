@@ -21171,12 +21171,28 @@ class JavaArraysEqualsUse {
     boolean same(double[] left, double[] right) {
         return Arrays.equals(left, right);
     }
+
+    boolean ints(int[] left, int[] right) {
+        return Arrays.equals(left, right);
+    }
+
+    boolean range(int[] left, int leftFrom, int leftTo, int[] right, int rightFrom, int rightTo) {
+        return Arrays.equals(left, leftFrom, leftTo, right, rightFrom, rightTo);
+    }
+
+    boolean badLeftRange(int[] left, int[] right) {
+        return Arrays.equals(left, 3, 1, right, 0, 1);
+    }
+
+    boolean badRightRange(int[] left, int[] right) {
+        return Arrays.equals(left, 0, 1, right, -1, 1);
+    }
 }
 "#,
     );
 
     assert!(
-        translation.rust.contains("return left == right;")
+        translation.rust.contains("java_arrays_equals(left, right)")
             && !translation.rust.contains("arrays ==")
             && !translation.rust.contains("Arrays::equals")
             && !translation.rust.contains("arrays.equals"),
@@ -21184,12 +21200,30 @@ class JavaArraysEqualsUse {
         translation.rust
     );
 
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "java_arrays_equals_use",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn uses_java_array_equality() {
+        let fixture = JavaArraysEqualsUse {};
+        assert!(fixture.same(&[1.0, f64::NAN], &[1.0, f64::NAN]));
+        assert!(!fixture.same(&[-0.0], &[0.0]));
+        assert!(fixture.ints(&[1, 2], &[1, 2]));
+        assert!(!fixture.ints(&[1, 2], &[1, 3]));
+        assert!(fixture.range(&[9, 1, 2, 8], 1, 3, &[7, 1, 2, 6], 1, 3));
+        assert!(!fixture.range(&[9, 1, 2, 8], 1, 3, &[7, 1, 3, 6], 1, 3));
+        assert!(std::panic::catch_unwind(|| fixture.bad_left_range(&[1, 2, 3], &[1, 2, 3])).is_err());
+        assert!(std::panic::catch_unwind(|| fixture.bad_right_range(&[1, 2, 3], &[1, 2, 3])).is_err());
+    }
+}
+"#,
         }],
     );
 }

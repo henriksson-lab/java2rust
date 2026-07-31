@@ -125,6 +125,9 @@ Landed in this batch:
   as native mutating Rust operations, and `java.util.Arrays`/`JavaUtilArrays`
   canonicalize to the builtin `Arrays` identity so facade support does not
   synthesize duplicate no-op overloads.
+- `Arrays.equals(...)` now lowers whole-array and subrange overloads through a
+  Java-compatible array equality helper instead of plain Rust `==`, preserving
+  floating `NaN` equality and signed zero distinction.
 - `Arrays.sort(...)` now plans both whole-array and subrange statement
   overloads as native mutating Rust operations, with signature mutation
   detection marking the target array for both arities.

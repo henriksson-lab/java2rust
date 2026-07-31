@@ -30605,7 +30605,8 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(!native_collection_static_source.contains("vec![{value}]"));
     assert!(!native_collection_static_source.contains("vec![{value}; {count} as usize]"));
     assert!(call_source.contains("arrays_as_list_projection(args)"));
-    assert!(call_source.contains("arrays_equals_projection(left, right)"));
+    assert!(call_source.contains("arrays_equals_projection(left, right.clone())"));
+    assert!(call_source.contains("arrays_equals_range_projection"));
     assert!(native_collection_static_source.contains("arrays_binary_search_projection"));
     assert!(call_source.contains("arrays_binary_search_range_projection"));
     assert!(call_source.contains("arrays_compare_projection(left, right.clone())"));
