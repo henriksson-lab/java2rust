@@ -9064,6 +9064,70 @@ class Holder {
 }
 
 #[test]
+fn overloaded_override_preserves_child_body_and_inherited_overload() {
+    let translation = translate_source(
+        r#"
+class BaseOverloadIdentity {
+    int f(int a, int b) {
+        return f(a) - f(b);
+    }
+
+    int f(int a) {
+        return a;
+    }
+}
+
+class ChildOverloadIdentity extends BaseOverloadIdentity {
+    int f(int a) {
+        return a * 2;
+    }
+
+    int one() {
+        return f(1);
+    }
+
+    int two() {
+        return f(3, 1);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn f_int_int(&self, a: i32, b: i32) -> i32")
+            && translation.rust.contains("pub fn f(&self, a: i32) -> i32")
+            && translation.rust.contains("return (a).wrapping_mul(2);")
+            && translation.rust.contains("return self.f(1);")
+            && translation.rust.contains("return self.f_int_int(3, 1);"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "overloaded_override_identity",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inherited_and_overridden_overloads_dispatch_by_signature() {
+        let child = ChildOverloadIdentity {};
+        assert_eq!(child.one(), 2);
+        assert_eq!(child.two(), 4);
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
 fn inherited_receiverless_instance_call_uses_current_override_signature_name() {
     let source = r#"
 import java.util.Map;

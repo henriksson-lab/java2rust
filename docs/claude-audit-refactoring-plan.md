@@ -614,7 +614,7 @@ Completion checklist for any audit marked `fixed locally`:
 | `0006` move analysis fragmented | partial | CallableAnalysis present; BindingId compatibility ids are attached to ShapeEnv for params, locals, catch params, loop variables, fields, and static fields, plus MoveUseContext use-count projection; CFG/liveness still open |
 | `0007` opaque Rust strings | open | Slot/facade generalization, shape tags |
 | `0008` inference does not reach lowering | open | CallableAnalysis |
-| `0009` overload identity collapse | open | Java callable signature identity |
+| `0009` overload identity collapse | open | Java callable signature identity; focused inherited-overload/override probe is covered by `overloaded_override_preserves_child_body_and_inherited_overload`, but broader downstream matching/rendering audit remains open |
 | `0010` fallibility disagrees | open | Callable fallibility plan |
 | `0011` dyn Any fallback cascades | partial | Opaque external shims; generic/static typed facade fallbacks are now loud; external constructor argument facts now participate in signature inference, so modeled constructors such as `StringTokenizer(String,...)` and `ZipEntry(String)` no longer force declared source `String` params through `Box<dyn Any>`/`downcast::<String>()`; declared locals initialized by fact-backed typed external producers now anchor through a generic return-type identity rule instead of an AWT-specific `Graphics/createGraphics` escape hatch; broader erased-object fallback remains |
 | `0012` invalid unsupported diagnostics | fixed locally | Moved to `claude_audits/done` |
