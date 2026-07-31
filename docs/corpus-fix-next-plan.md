@@ -7402,6 +7402,27 @@ drops generated-Rust errors from 16 to 15. The isolated `T may not live long
 enough` family is gone; the remaining top family is erased-carrier field access
 on `Box<dyn Any>` for source-backed VCF header-line supertypes.
 
+2026-07-31 source-backed erased-representation checkpoint: object-model tests
+now pin that parsed/source-backed classes are not replaced by external-pack
+erased overrides, and abstract closed source classes with concrete instance
+fields stay concrete instead of collapsing to `Box<dyn Any>`. The HTSJDK VCF
+pack no longer marks abstract `VCFCompoundHeaderLine` as final or as an erased
+external object. Focused verification:
+`external_erased_override_does_not_replace_parsed_source_type`,
+`abstract_closed_source_class_with_instance_fields_stays_concrete`,
+`source_class_fields_beat_external_erased_and_closed_facts`, `cargo fmt
+--check`, `cargo check --tests --quiet`, `git diff --check`, and release-backed
+reduced VCF rerun
+`.tmp/corpus-rerun-20260731-vcf-standard-bound-after-vcf-compound-pack-correction-r1`.
+That rerun remains 9/9 translated, 0 parse failures, 0 stubbed constants, and
+15 generated-Rust errors. Direct translation of the real
+`VCFCompoundHeaderLine.java` still emits
+`pub type VCFCompoundHeaderLine = Box<dyn std::any::Any>` even though signature
+constraints report concrete field slots for both simple and package-qualified
+names. Next step: unify simple/package-qualified source identities in
+representation/signature facts or add a representation divergence dump before
+attempting another local VCF fix.
+
 ## Rerun Protocol
 
 After each fix:

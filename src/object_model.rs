@@ -530,6 +530,7 @@ fn object_strategy_for_type_with_effective_facts_and_requirements(
     let (strategy, diagnostics) = match ty.kind {
         TypeKind::Class
             if ty.modifiers.contains(&crate::java_ir::Modifier::Abstract)
+                && !type_has_instance_fields(ty)
                 && facts.closed_hierarchy_fact_for_name(&ty.name) == Some(true) =>
         {
             (ObjectRepresentation::ErasedObject, Vec::new())
@@ -583,6 +584,15 @@ pub fn java_enum_variant_names(ty: &TypeDecl) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+fn type_has_instance_fields(ty: &TypeDecl) -> bool {
+    ty.members.iter().any(|member| {
+        matches!(
+            member,
+            Member::Field(field) if !field.modifiers.contains(&crate::java_ir::Modifier::Static)
+        )
+    })
 }
 
 pub fn rust_enum_variant_name_from_parsed_constant(name: &str) -> String {
@@ -1068,6 +1078,9 @@ fn apply_hierarchy_overrides_to_strategy_plan(
             strategy.rejected.clear();
             continue;
         }
+        if external_pack_override_should_not_insert_beside_parsed_source(override_fact, plan) {
+            continue;
+        }
         plan.insert_strategy(ObjectStrategyPlan {
             root: policy.type_name.clone(),
             strategy: representation,
@@ -1086,6 +1099,20 @@ fn external_pack_override_should_not_replace_parsed_source(
 ) -> bool {
     override_fact.provenance == FactProvenance::ExternalLibraryPack
         && strategy.has_provenance(FactProvenance::ParsedSource)
+}
+
+fn external_pack_override_should_not_insert_beside_parsed_source(
+    override_fact: &HierarchyOverride,
+    plan: &ObjectModelPlan,
+) -> bool {
+    override_fact.provenance == FactProvenance::ExternalLibraryPack
+        && plan.strategies.values().any(|strategy| {
+            strategy.has_provenance(FactProvenance::ParsedSource)
+                && crate::facts::external_type_name_matches(
+                    &override_fact.type_name,
+                    &strategy.root,
+                )
+        })
 }
 
 fn object_hierarchy_context_for_strategy_plan(plan: &ObjectModelPlan) -> ObjectHierarchyContext {

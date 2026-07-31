@@ -4068,6 +4068,155 @@ class VariantLikeTool extends FrameworkBase<Payload> {}
 }
 
 #[test]
+fn external_erased_override_does_not_replace_parsed_source_type() {
+    let parsed = parse_java_source(
+        r#"
+class VCFHeaderLine {
+    String name;
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let mut facts = resolved.facts.clone();
+    facts.hierarchy_overrides.push(HierarchyOverride {
+        type_name: "htsjdk.variant.vcf.VCFHeaderLine".to_string(),
+        strategy: HierarchyStrategy::ErasedObject,
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+
+    let representations = plan_representations(&resolved.program, &facts);
+
+    assert_eq!(
+        representations
+            .type_representation("VCFHeaderLine")
+            .unwrap()
+            .representation,
+        ObjectRepresentation::ConcreteStruct
+    );
+}
+
+#[test]
+fn abstract_closed_source_class_with_instance_fields_stays_concrete() {
+    let parsed = parse_java_source(
+        r#"
+abstract class HeaderLine {
+    String name;
+}
+
+class InfoLine extends HeaderLine {}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let mut facts = resolved.facts.clone();
+    facts.closed_hierarchy_facts.push(ClosedHierarchyFact {
+        type_name: "HeaderLine".to_string(),
+        closed: true,
+        provenance: FactProvenance::CorpusAnalysis,
+    });
+
+    let representations = plan_representations(&resolved.program, &facts);
+
+    assert_eq!(
+        representations
+            .type_representation("HeaderLine")
+            .unwrap()
+            .representation,
+        ObjectRepresentation::ConcreteStruct
+    );
+}
+
+#[test]
+fn source_class_fields_beat_external_erased_and_closed_facts() {
+    let parsed = parse_java_source(
+        r#"
+abstract class VCFCompoundHeaderLine {
+    String name;
+}
+
+class VCFInfoHeaderLine extends VCFCompoundHeaderLine {}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let mut facts = resolved.facts.clone();
+    facts.closed_hierarchy_facts.push(ClosedHierarchyFact {
+        type_name: "htsjdk.variant.vcf.VCFCompoundHeaderLine".to_string(),
+        closed: true,
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts.hierarchy_overrides.push(HierarchyOverride {
+        type_name: "htsjdk.variant.vcf.VCFCompoundHeaderLine".to_string(),
+        strategy: HierarchyStrategy::ErasedObject,
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts.hierarchy_overrides.push(HierarchyOverride {
+        type_name: "VCFCompoundHeaderLine".to_string(),
+        strategy: HierarchyStrategy::ErasedObject,
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+
+    let representations = plan_representations(&resolved.program, &facts);
+
+    assert_eq!(
+        representations
+            .type_representation("VCFCompoundHeaderLine")
+            .unwrap()
+            .representation,
+        ObjectRepresentation::ConcreteStruct
+    );
+
+    let pack_facts = new_java2rust::external_packs::htsjdk_vcf_pack_facts();
+    let mut combined_pack_facts = resolved.facts.clone();
+    combined_pack_facts.extend_from(pack_facts);
+    let pack_representations = plan_representations(&resolved.program, &combined_pack_facts);
+    assert_eq!(
+        pack_representations
+            .type_representation("VCFCompoundHeaderLine")
+            .unwrap()
+            .representation,
+        ObjectRepresentation::ConcreteStruct
+    );
+
+    let semantic = analyze_program(
+        &resolved.program,
+        &combined_pack_facts,
+        &combined_pack_facts,
+    );
+    let semantic_representations = plan_representations(&resolved.program, &semantic.facts);
+    assert_eq!(
+        semantic_representations
+            .type_representation("VCFCompoundHeaderLine")
+            .unwrap()
+            .representation,
+        ObjectRepresentation::ConcreteStruct
+    );
+
+    let translation = translate_source_with_facts(
+        r#"
+abstract class VCFCompoundHeaderLine {
+    String name;
+}
+
+class VCFInfoHeaderLine extends VCFCompoundHeaderLine {}
+"#,
+        &combined_pack_facts,
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub struct VCFCompoundHeaderLine"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("pub type VCFCompoundHeaderLine = Box<dyn std::any::Any>"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn unsupported_lowering_policy_owns_compile_error_placeholders() {
     let statement_policy =
         unsupported_statement_message_policy(UnsupportedStatementLowering::LocalTypeDeclaration);
