@@ -8030,14 +8030,27 @@ impl ExternalApiFacadeSupport {
                 let Some(rust_type) = static_constant_rust_type(&inherited.field_type) else {
                     continue;
                 };
+                let field_value = facts
+                    .external_field_value_for(&inherited.declaring_type, &inherited.field_name)
+                    .map(|fact| fact.rust_value.clone())
+                    .or_else(|| {
+                        crate::external_packs::external_field_value_for(
+                            &inherited.declaring_type,
+                            &inherited.field_name,
+                        )
+                        .map(|fact| fact.rust_value)
+                    });
                 let constant = StaticConstantFact {
                     field_type: inherited.field_type.clone(),
-                    field_value: None,
+                    field_value,
                     field_kind: ExternalFieldKind::StaticFinal,
                     alias_owner: None,
                 };
+                let declaring_owner = rust_name_for_java_named_type(
+                    &canonical_external_receiver_type_key(&inherited.declaring_type),
+                );
                 let Some(value) = static_constant_default_value(
-                    &owner,
+                    &declaring_owner,
                     &inherited.field_name,
                     Some(&constant),
                     &inherited.field_type,
@@ -16684,6 +16697,9 @@ fn java_type_uses_java_platform_facade(ty: &JavaType) -> bool {
 }
 
 pub fn is_java_platform_facade_type_name(name: &str) -> bool {
+    if is_known_java_platform_stream_type_name(name) {
+        return true;
+    }
     matches!(
         crate::stdlib::canonical_external_receiver_type_key(name).as_str(),
         "Path"

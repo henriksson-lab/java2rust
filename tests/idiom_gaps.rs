@@ -21107,6 +21107,112 @@ class OptionalResourceFacadeUpcastMoveUse {
 }
 
 #[test]
+fn fully_qualified_optional_byte_array_output_stream_stays_typed() {
+    let translation = translate_source(
+        r#"
+class FullyQualifiedOptionalByteArrayOutputStreamUse {
+    byte[] run() throws Exception {
+        java.io.ByteArrayOutputStream baos = null;
+        baos = new java.io.ByteArrayOutputStream();
+        if (baos != null) {
+            baos.close();
+        }
+        return baos.toByteArray();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let mut baos: Option<JavaIoByteArrayOutputStream> = None")
+            && translation.rust.contains("baos.as_ref().unwrap().close()?")
+            && translation
+                .rust
+                .contains("baos.as_ref().unwrap().to_byte_array()")
+            && !translation.rust.contains("Option<Box<dyn std::any::Any>>")
+            && !translation
+                .rust
+                .contains("downcast::<JavaIoByteArrayOutputStream>"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "fully_qualified_optional_byte_array_output_stream",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn nested_jdk_stream_subclasses_keep_overload_surfaces_compileable() {
+    let translation = translate_source(
+        r#"
+import java.io.FilterInputStream;
+import java.io.FilterOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
+
+class Base64 {
+    static class InputStream extends FilterInputStream {
+        InputStream(java.io.InputStream input) {
+            super(input);
+        }
+
+        public int read() throws java.io.IOException {
+            return 1;
+        }
+
+        public int read(byte[] dest, int off, int len) throws java.io.IOException {
+            return read();
+        }
+    }
+
+    static class OutputStream extends FilterOutputStream {
+        OutputStream(java.io.OutputStream output) {
+            super(output);
+        }
+
+        public void write(int value) throws java.io.IOException {
+        }
+
+        public void write(byte[] bytes, int off, int len) throws java.io.IOException {
+            write(bytes[off]);
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("pub struct Base64InputStream")
+            && translation.rust.contains("pub struct Base64OutputStream")
+            && !translation
+                .rust
+                .contains("pub type OutputStream = Base64OutputStream")
+            && !translation
+                .rust
+                .contains("impl From<Base64OutputStream> for OutputStream"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "nested_jdk_stream_subclasses",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn optional_source_receiver_uses_mut_projection_for_mutating_context_fallback() {
     let translation = translate_source(
         r#"

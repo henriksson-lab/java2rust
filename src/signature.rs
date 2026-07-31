@@ -6025,6 +6025,10 @@ fn collect_type_signatures(
             .get(&field_key)
             .cloned()
             .unwrap_or_else(field_shape_constraints);
+        push_unique_signature_constraints(
+            &mut external_constraints,
+            &java_platform_facade_concrete_native_constraints(&inherited.field_type),
+        );
         if let Some(nullability) = inherited.field_nullability {
             external_constraints.push(SignatureConstraint::RequiredStorageNullability(nullability));
         }
@@ -6393,6 +6397,10 @@ pub fn method_param_shape_constraints(
     push_unique_signature_constraints(
         &mut constraints,
         &java_platform_facade_concrete_native_constraints(&param.ty),
+    );
+    push_unique_signature_constraints(
+        &mut constraints,
+        &java_platform_facade_subclass_concrete_native_constraints(&param.ty, facts),
     );
     if !declared_java_platform_facade_type(&param.ty) {
         push_unique_signature_constraints(
@@ -7238,6 +7246,14 @@ pub fn constructor_param_shape_constraints(
             &source_binding_nullability_constraints(body, &param.name),
         );
     }
+    push_unique_signature_constraints(
+        &mut constraints,
+        &java_platform_facade_concrete_native_constraints(&param.ty),
+    );
+    push_unique_signature_constraints(
+        &mut constraints,
+        &java_platform_facade_subclass_concrete_native_constraints(&param.ty, facts),
+    );
     if boundary_kind.is_none() {
         constraints.extend(
             constructor_param_borrowed_content_policy_with_facts(ty, ctor, param, usage, facts)
@@ -10016,6 +10032,26 @@ fn java_platform_facade_concrete_native_constraints(
     java_ty: &JavaType,
 ) -> Vec<SignatureConstraint> {
     if !declared_java_platform_facade_type(java_ty) {
+        return Vec::new();
+    }
+    vec![
+        SignatureConstraint::RequiredDispatch(DispatchShape::Concrete),
+        SignatureConstraint::RequiredView(ViewShape::Native),
+    ]
+}
+
+fn java_platform_facade_subclass_concrete_native_constraints(
+    java_ty: &JavaType,
+    facts: &FactSet,
+) -> Vec<SignatureConstraint> {
+    if declared_java_platform_facade_type(java_ty) {
+        return Vec::new();
+    }
+    if !facts
+        .reachable_hierarchy_edges_for_type(java_ty)
+        .iter()
+        .any(|edge| crate::stdlib::is_java_platform_facade_type_name(&edge.super_name))
+    {
         return Vec::new();
     }
     vec![

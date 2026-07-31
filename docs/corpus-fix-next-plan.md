@@ -7555,6 +7555,26 @@ parallel FastQC audit found the old `self.read_paths.length` evidence only in
 stale `.tmp` artifacts; current refreshed FastQC output already unwraps the
 optional sequence receiver before length/index operations.
 
+2026-07-31 JDK stream facade/subclass checkpoint: exact Java platform stream
+types now participate in the shared platform-facade predicate, so nullable
+locals such as `java.io.ByteArrayOutputStream baos = null` keep concrete
+`Option<JavaIoByteArrayOutputStream>` storage instead of falling back to
+`Option<Box<dyn Any>>`. Source nested classes named `InputStream`/`OutputStream`
+no longer emit simple `pub type` aliases that shadow JDK facade names, and
+receiverless or `this` calls now retarget to directly declared source overload
+names before inherited external stream facts. Source classes extending platform
+facades stay concrete in representation planning, inherited platform fields get
+concrete/native signature constraints, inherited static constants evaluate
+through their declaring external owner, and constructor/method params whose
+types are platform facades or platform-facade subclasses keep concrete/native
+slots. Focused verification covers
+`fully_qualified_optional_byte_array_output_stream_stays_typed`,
+`nested_jdk_stream_subclasses_keep_overload_surfaces_compileable`,
+`input_stream_read_byte_array_uses_three_arg_overload_with_full_buffer`,
+`emitted_jdk_stream_subclass_gets_query_backed_inherited_close_surface`, and
+`cargo check --tests --quiet`. This is further `0011` representation/facade
+work, but audit `0011` remains partial and its issue file must stay active.
+
 ## Rerun Protocol
 
 After each fix:

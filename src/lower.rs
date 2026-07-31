@@ -1870,7 +1870,7 @@ fn lower_find_type_decl<'a>(program: &'a Program, type_name: &str) -> Option<&'a
 fn nested_type_simple_alias_item(nested: &TypeDecl) -> Option<String> {
     let simple = nested.name.rsplit('.').next().unwrap_or(&nested.name);
     let alias = upper_camel_type_name_from_static_receiver(simple);
-    if alias == "Builder" {
+    if alias == "Builder" || crate::stdlib::is_java_platform_facade_type_name(&alias) {
         return None;
     }
     let target = crate::slot_render::rust_name_for_java_named_type(&nested.name);
@@ -11026,6 +11026,14 @@ fn lower_expr_with_refinements(
                 env,
                 ctx,
             );
+            let target = retarget_source_declared_overload_name(
+                target,
+                receiver.as_deref(),
+                name,
+                args.len(),
+                env,
+                ctx,
+            );
             let target = retarget_receiverless_current_static_call(
                 target,
                 context_fallback_signature.as_ref(),
@@ -19094,6 +19102,124 @@ fn retarget_external_receiver_overload_name<'a>(
     }
 }
 
+fn retarget_source_declared_overload_name<'a>(
+    target: CallTargetPlan<'a>,
+    receiver: Option<&'a Expr>,
+    name: &str,
+    arg_count: usize,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> CallTargetPlan<'a> {
+    let owner = match receiver {
+        Some(receiver) if is_this_receiver_expr(receiver) => ctx.current_type.map(str::to_string),
+        Some(receiver) => source_receiver_type_name(receiver, env, ctx),
+        None => ctx.current_type.map(str::to_string),
+    };
+    let Some(owner) = owner else {
+        return target;
+    };
+    let Some(rust_name) = source_declared_instance_method_rust_name(&owner, name, arg_count, ctx)
+    else {
+        return target;
+    };
+    if receiver.is_none()
+        && target
+            .rust_method_name()
+            .is_some_and(|current| current != rust_name)
+    {
+        return CallTargetPlan::FallbackSelf { rust_name };
+    }
+    match target {
+        CallTargetPlan::FallbackSelf { rust_name: current }
+            if receiver.is_none() && current != rust_name =>
+        {
+            CallTargetPlan::FallbackSelf { rust_name }
+        }
+        CallTargetPlan::InstanceSelf { rust_name: current }
+            if receiver.is_none() && current != rust_name =>
+        {
+            CallTargetPlan::FallbackSelf { rust_name }
+        }
+        CallTargetPlan::FallbackFree { rust_name: current }
+            if receiver.is_none() && current != rust_name =>
+        {
+            CallTargetPlan::FallbackSelf { rust_name }
+        }
+        CallTargetPlan::FallbackReceiver {
+            receiver,
+            rust_name: current,
+        } if current != rust_name => CallTargetPlan::FallbackReceiver {
+            receiver,
+            rust_name,
+        },
+        CallTargetPlan::InstanceReceiver {
+            receiver,
+            rust_name: current,
+        } if current != rust_name => CallTargetPlan::FallbackReceiver {
+            receiver,
+            rust_name,
+        },
+        target => target,
+    }
+}
+
+fn source_declared_instance_method_rust_name(
+    owner: &str,
+    name: &str,
+    arg_count: usize,
+    ctx: LowerCtx,
+) -> Option<String> {
+    let owner_ty = find_context_type_by_key(ctx.program, owner)
+        .or_else(|| find_context_type_by_key(ctx.support_local_type_program, owner))
+        .or_else(|| find_context_type_by_key(ctx.source_summary_type_program, owner))
+        .or_else(|| find_context_type_by_rust_name(ctx.program, owner))
+        .or_else(|| find_context_type_by_rust_name(ctx.support_local_type_program, owner))
+        .or_else(|| find_context_type_by_rust_name(ctx.source_summary_type_program, owner))?;
+    let mut matches = owner_ty
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            Member::Method(method)
+                if method.name == name
+                    && method.params.len() == arg_count
+                    && !method.modifiers.contains(&Modifier::Static) =>
+            {
+                Some(method_effective_rust_name(method))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    matches.sort();
+    matches.dedup();
+    match matches.as_slice() {
+        [rust_name] => Some(rust_name.clone()),
+        _ => None,
+    }
+}
+
+fn find_context_type_by_rust_name<'a>(
+    program: &'a Program,
+    rust_name: &str,
+) -> Option<&'a TypeDecl> {
+    program
+        .types
+        .iter()
+        .find_map(|ty| find_context_type_by_rust_name_in_type(ty, rust_name))
+}
+
+fn find_context_type_by_rust_name_in_type<'a>(
+    ty: &'a TypeDecl,
+    rust_name: &str,
+) -> Option<&'a TypeDecl> {
+    if crate::slot_render::rust_name_for_java_named_type(&ty.name) == rust_name {
+        return Some(ty);
+    }
+    ty.members.iter().find_map(|member| match member {
+        Member::Type(nested) => find_context_type_by_rust_name_in_type(nested, rust_name),
+        _ => None,
+    })
+}
+
 fn receiver_external_type_key(receiver: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> Option<String> {
     let shape = infer_expr_shape_with_context(
         receiver,
@@ -25837,6 +25963,14 @@ fn lower_external_call_expr_for_slot(
     );
     let target = retarget_java_logging_facade_call(target, receiver.as_deref(), name);
     let target = retarget_external_receiver_overload_name(
+        target,
+        receiver.as_deref(),
+        name,
+        args.len(),
+        env,
+        ctx,
+    );
+    let target = retarget_source_declared_overload_name(
         target,
         receiver.as_deref(),
         name,

@@ -1549,6 +1549,21 @@ subclass view. This closes the two `E0308` downcast mismatches and the borrowed
 families are erased-super field/static-method access and `HashSet<Box<dyn Any>>`
 trait bounds.
 
+Focused FastQC Base64 JDK-stream follow-up:
+`.tmp/corpus-fastqc-base64-single-after-jdk-stream-facade-subclass-r1`
+translates the one-file Base64 slice with 0 translate failures, 0 parse
+failures, `stubbed_constants=0`, and generated-Rust errors reduced from `53`
+to `16` versus
+`.tmp/corpus-fastqc-base64-single-after-nullable-array-storage-release-r1`.
+Exact nullable JDK stream locals now stay concrete, nested source
+`InputStream`/`OutputStream` aliases no longer shadow platform facades, source
+stream subclasses stay concrete, and inherited stream field/constant/overload
+facts are applied through shared signature and call retarget paths. Remaining
+top families are 5 unsupported Java `assert` statements, 6 remaining invalid
+downcast patterns, 1 `Option<&[i8]>.cloned()` mismatch, 1
+`Box<dyn Any>.as_bytes` call, and 1 missing `InputStream:
+From<JavaIoInputStream>` conversion.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from

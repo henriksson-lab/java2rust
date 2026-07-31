@@ -633,6 +633,8 @@ Completion checklist for any audit marked `fixed locally`:
 - Treat the audit as still open if its file remains outside `claude_audits/done`.
 - Do not mark an audit row as fully done unless the issue file has also been
   moved to `/home/mahogny/github/claude/new_java2rust/claude_audits/done`.
+- During batch work, include this file move in the same patch/commit that marks
+  the audit fixed; otherwise leave the active audit file in place.
 
 | Audit | Status | Plan owner |
 |---|---:|---|

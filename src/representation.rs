@@ -109,9 +109,45 @@ pub fn plan_representations(program: &Program, facts: &FactSet) -> Representatio
     for edge in object_plan.hierarchy_edges {
         record_hierarchy_edge(&mut plan, edge);
     }
+    keep_source_platform_facade_subclasses_concrete(program, &mut plan);
     expand_source_hierarchy_carrier_variants(&mut plan);
     collect_anonymous_erased_boundary_representations(program, &effective_facts, &mut plan);
     plan
+}
+
+fn keep_source_platform_facade_subclasses_concrete(
+    program: &Program,
+    plan: &mut RepresentationPlan,
+) {
+    for ty in &program.types {
+        keep_source_platform_facade_subclass_concrete(ty, plan);
+    }
+}
+
+fn keep_source_platform_facade_subclass_concrete(ty: &TypeDecl, plan: &mut RepresentationPlan) {
+    if ty
+        .extends
+        .as_deref()
+        .is_some_and(crate::stdlib::is_java_platform_facade_type_name)
+    {
+        plan.types.insert(
+            ty.name.clone(),
+            TypeRepresentation {
+                java_name: ty.name.clone(),
+                representation: ObjectRepresentation::ConcreteStruct,
+                provenance: RepresentationProvenance::CorpusAnalysis,
+                direct_subtypes: plan
+                    .type_representation(&ty.name)
+                    .map(|entry| entry.direct_subtypes.clone())
+                    .unwrap_or_default(),
+            },
+        );
+    }
+    for member in &ty.members {
+        if let Member::Type(nested) = member {
+            keep_source_platform_facade_subclass_concrete(nested, plan);
+        }
+    }
 }
 
 fn expand_source_hierarchy_carrier_variants(plan: &mut RepresentationPlan) {
