@@ -5395,6 +5395,12 @@ class JavaIntegerBinarySemantics {
     int unsignedShiftInt(int value, int count) {
         return value >>> count;
     }
+
+    int hashStyle(int value) {
+        int result = 1;
+        result = 31 * result + value;
+        return result;
+    }
 }
 "#,
     );
@@ -5405,6 +5411,7 @@ class JavaIntegerBinarySemantics {
             && translation.rust.contains(".wrapping_div(")
             && translation.rust.contains(".wrapping_shl(")
             && translation.rust.contains(".wrapping_shr(")
+            && translation.rust.contains("(31i32).wrapping_mul(result)")
             && !translation.rust.contains("value << count")
             && !translation.rust.contains("value >> count"),
         "{}",

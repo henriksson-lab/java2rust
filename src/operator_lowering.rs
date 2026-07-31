@@ -171,7 +171,10 @@ fn lower_java_integer_binary_expr(
         BinaryOp::Shr => "wrapping_shr",
         _ => return None,
     };
-    let left = crate::emit::emit_expr(&apply_coercions(left.clone(), &plan.left));
+    let left = integer_wrapping_receiver_text(
+        crate::emit::emit_expr(&apply_coercions(left.clone(), &plan.left)),
+        plan.promoted,
+    );
     let right = crate::emit::emit_expr(&apply_coercions(right.clone(), &plan.right));
     if matches!(op, BinaryOp::Shl | BinaryOp::Shr) {
         return Some(RustExpr::Raw(format!(
@@ -179,6 +182,17 @@ fn lower_java_integer_binary_expr(
         )));
     }
     Some(RustExpr::Raw(format!("({left}).{method}({right})")))
+}
+
+fn integer_wrapping_receiver_text(rendered: String, primitive: PrimitiveType) -> String {
+    if !rendered.chars().all(|ch| ch.is_ascii_digit()) {
+        return rendered;
+    }
+    match primitive {
+        PrimitiveType::Long => format!("{rendered}i64"),
+        PrimitiveType::Int => format!("{rendered}i32"),
+        _ => rendered,
+    }
 }
 
 pub fn lower_unsigned_right_shift_expr(

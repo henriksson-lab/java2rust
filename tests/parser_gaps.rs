@@ -544,6 +544,27 @@ fn parses_gatk_line_comment_in_switch_without_raw_fallback() {
 }
 
 #[test]
+fn parses_line_comments_between_block_statements_without_fallback() {
+    let parsed = parse_java_source(
+        r#"
+class LineCommentBetweenStatements {
+    int hash(int value) {
+        int result = 1;
+        // comment between ordinary block statements
+        result = 31 * result + value;
+        return result;
+    }
+}
+"#,
+    );
+    let fallbacks = collect_program_fallbacks(&parsed.program);
+    let body = method_body(&parsed.program.types[0], "hash");
+
+    assert!(fallbacks.is_empty(), "{fallbacks:?}");
+    assert_eq!(body.statements.len(), 3, "{:?}", body.statements);
+}
+
+#[test]
 fn parses_gatk_empty_statement_without_raw_fallback() {
     let parsed = parse_java_source(&parser_gap("GatkEmptyStatement.java"));
     let fallbacks = collect_program_fallbacks(&parsed.program);

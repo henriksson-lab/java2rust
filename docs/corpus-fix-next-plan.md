@@ -7052,6 +7052,25 @@ constructors initialize. Focused verification:
 `source_generic_class_bound_method_call_uses_bound_surface`, and
 `cargo check --tests --quiet`.
 
+2026-07-31 reduced VCF rerun after open-hierarchy carrier checkpoint:
+`.tmp/corpus-rerun-20260731-vcf-standard-bound-after-open-erased-carriers-r1`
+translates 9/9 files, reports 5 invalid-pattern files, and fails generated
+Rust with 62 errors. The old unsupported concrete/concrete `instanceof` rows
+are gone; the newly exposed top family was 16 ambiguous integer
+`wrapping_mul` calls from Java hash-code expressions. Integer wrapping
+lowering now suffixes literal method receivers with the promoted Rust integer
+type, and ordinary block parsing skips line/block comments the same way switch
+groups already did. Follow-up rerun
+`.tmp/corpus-rerun-20260731-vcf-standard-bound-after-line-comment-skip-r1`
+translates 9/9 files, has `unsupported_statements=0`, and reduces generated
+Rust errors to 42. Focused verification:
+`java_integer_binary_ops_wrap_and_mask_shift_distance`,
+`cargo test line_comment --test parser_gaps -- --nocapture`,
+`cargo check --tests --quiet`, and release-backed reduced VCF reruns. Remaining
+top families are erased-carrier field/method access, duplicate erased
+`From<T> for Box<dyn Any>` impls, missing StringBuffer/Pattern helper support,
+modeled static constants, and one cast-parentheses row.
+
 2026-07-31 fact-backed initializer checkpoint: declared external locals whose
 initializer has a planned typed return now anchor through a general erased-type
 identity predicate in signature/lowering instead of the former

@@ -1223,10 +1223,13 @@ fn parse_block_like(
     let mut statements = Vec::new();
     for child in named_children(node) {
         match child.kind() {
+            "line_comment" | "block_comment" => {}
             kind if is_empty_statement_kind(kind) => {}
             "statement" => {
                 if let Some(stmt) = first_named_child(child) {
-                    if !is_empty_statement_kind(stmt.kind()) {
+                    if !matches!(stmt.kind(), "line_comment" | "block_comment")
+                        && !is_empty_statement_kind(stmt.kind())
+                    {
                         statements.extend(parse_stmt_nodes(stmt, source, diagnostics));
                     }
                 }
@@ -1273,6 +1276,7 @@ fn parse_stmt_nodes(
     diagnostics: &mut DiagnosticBag,
 ) -> Vec<Stmt> {
     match node.kind() {
+        "line_comment" | "block_comment" => Vec::new(),
         "local_variable_declaration" => parse_local_var_decls(node, source),
         _ => vec![parse_stmt_node(node, source, diagnostics)],
     }
@@ -1280,6 +1284,7 @@ fn parse_stmt_nodes(
 
 fn parse_stmt_node(node: tree_sitter::Node, source: &str, diagnostics: &mut DiagnosticBag) -> Stmt {
     match node.kind() {
+        "line_comment" | "block_comment" => Stmt::Block(Block::default()),
         kind if is_empty_statement_kind(kind) => Stmt::Block(Block::default()),
         "block" => Stmt::Block(parse_block_like(node, source, diagnostics)),
         "local_variable_declaration" => parse_local_var_decl(node, source),
