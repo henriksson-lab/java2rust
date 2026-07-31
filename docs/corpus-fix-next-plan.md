@@ -7469,6 +7469,16 @@ The durable next design step is a member-preserving runtime carrier for
 field-bearing source supertypes; until that exists, do not erase classes whose
 own methods require field access.
 
+2026-07-31 source hierarchy carrier diagnostic checkpoint: concrete source
+supertype-to-subtype `instanceof` planning now reports
+`unsupported_instanceof_source_hierarchy_runtime_carrier` when hierarchy facts
+prove the target is a subtype but both slots are still concrete structs. This
+pins the remaining `VCFHeaderLine -> VCFFormatHeaderLine`/`VCFInfoHeaderLine`
+case as missing representation machinery, not as a generic unsupported shape.
+Do not satisfy this by casting `&VCFHeaderLine` to `&VCFFormatHeaderLine`; the
+next real fix must provide a carrier that preserves Java runtime subtype
+identity while still exposing superclass members and source field methods.
+
 ## Rerun Protocol
 
 After each fix:

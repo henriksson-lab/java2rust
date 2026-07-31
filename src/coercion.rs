@@ -3989,6 +3989,14 @@ pub fn instanceof_fallback_message_policy(
                 "unsupported Java instanceof shape: actual={actual_dispatch:?}, target={target_dispatch:?}"
             ),
         },
+        InstanceOfFallbackPolicy::SourceHierarchyRuntimeCarrierRequired { actual, target } => {
+            UnsupportedCoercionMessagePolicy {
+                code: "unsupported_instanceof_source_hierarchy_runtime_carrier",
+                message: format!(
+                    "unsupported Java instanceof check from source supertype {actual:?} to subtype {target:?}: a member-preserving runtime carrier is required"
+                ),
+            }
+        }
         InstanceOfFallbackPolicy::PrimitiveTarget { java_ty } => UnsupportedCoercionMessagePolicy {
             code: "unsupported_instanceof_primitive_target",
             message: format!(

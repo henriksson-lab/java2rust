@@ -329,6 +329,7 @@ pub fn cast_and_instanceof_planning_boundary() -> CastAndInstanceOfPlanningBound
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstanceOfFallbackPolicy {
     CompileError,
+    SourceHierarchyRuntimeCarrierRequired { actual: JavaType, target: JavaType },
     PrimitiveTarget { java_ty: JavaType },
     RawOrWildcardTarget { java_ty: JavaType },
     MissingRuntimeTarget { java_ty: JavaType },
@@ -2590,6 +2591,14 @@ fn instanceof_fallback_diagnostic(
                 "unsupported Java instanceof shape: actual={actual_dispatch:?}, target={target_dispatch:?}"
             ),
         },
+        InstanceOfFallbackPolicy::SourceHierarchyRuntimeCarrierRequired { actual, target } => {
+            ConversionDiagnostic {
+                code: "unsupported_instanceof_source_hierarchy_runtime_carrier",
+                message: format!(
+                    "unsupported Java instanceof check from source supertype {actual:?} to subtype {target:?}: a member-preserving runtime carrier is required"
+                ),
+            }
+        }
         InstanceOfFallbackPolicy::PrimitiveTarget { java_ty } => ConversionDiagnostic {
             code: "unsupported_instanceof_primitive_target",
             message: format!(
@@ -2787,6 +2796,20 @@ pub fn plan_instanceof_check_with_facts(
         }
         (DispatchShape::Concrete, DispatchShape::Concrete) if actual.java_ty == target.java_ty => {
             return InstanceOfCheck::AlwaysTrue;
+        }
+        (DispatchShape::Concrete, DispatchShape::Concrete)
+            if facts
+                .hierarchy_subtype_policy(&target.java_ty, &actual.java_ty)
+                .reaches =>
+        {
+            return unsupported_instanceof_check(
+                actual,
+                target,
+                InstanceOfFallbackPolicy::SourceHierarchyRuntimeCarrierRequired {
+                    actual: actual.java_ty.clone(),
+                    target: target.java_ty.clone(),
+                },
+            );
         }
         (DispatchShape::ErasedObject, DispatchShape::DynTrait { trait_name }) => {
             return unsupported_instanceof_check(

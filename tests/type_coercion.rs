@@ -3363,6 +3363,61 @@ fn coercion_owns_instanceof_fallback_policy() {
 }
 
 #[test]
+fn concrete_source_supertype_instanceof_subtype_requires_runtime_carrier() {
+    let actual_ty = JavaType::Named {
+        name: "HeaderLine".to_string(),
+        args: Vec::new(),
+    };
+    let target_ty = JavaType::Named {
+        name: "FormatLine".to_string(),
+        args: Vec::new(),
+    };
+    let mut facts = FactSet::default();
+    facts
+        .type_capability_overrides
+        .push(TypeCapabilityOverride {
+            type_name: "FormatLine".to_string(),
+            copy: None,
+            clone: None,
+            string_like: None,
+            sequence_like: None,
+            implements: Vec::new(),
+            extends: Some(JavaType::Named {
+                name: "HeaderLine".to_string(),
+                args: Vec::new(),
+            }),
+            final_type: None,
+            object_safe_trait: None,
+            provenance: FactProvenance::ParsedSource,
+        });
+    let actual = RustSlotShape::conservative(actual_ty.clone());
+    let target = RustSlotShape::conservative(target_ty.clone());
+
+    let check = plan_instanceof_check_with_facts(&actual, &target, &facts);
+
+    assert_eq!(
+        check,
+        InstanceOfCheck::Unsupported {
+            actual_dispatch: DispatchShape::Concrete,
+            target_dispatch: DispatchShape::Concrete,
+            policy: InstanceOfFallbackPolicy::SourceHierarchyRuntimeCarrierRequired {
+                actual: actual_ty,
+                target: target_ty,
+            },
+        }
+    );
+    assert_eq!(
+        check.unsupported_diagnostics(),
+        vec![ConversionDiagnostic {
+            code: "unsupported_instanceof_source_hierarchy_runtime_carrier",
+            message:
+                "unsupported Java instanceof check from source supertype Named { name: \"HeaderLine\", args: [] } to subtype Named { name: \"FormatLine\", args: [] }: a member-preserving runtime carrier is required"
+                    .to_string(),
+        }]
+    );
+}
+
+#[test]
 fn coercion_names_missing_runtime_targets_for_dispatch_downcasts() {
     let mut actual = RustSlotShape::conservative(JavaType::Named {
         name: "Animal".to_string(),
