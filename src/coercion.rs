@@ -2361,6 +2361,14 @@ pub fn arrays_binary_search_range_projection(
     ))
 }
 
+pub fn arrays_compare_projection(left: RustExpr, right: RustExpr) -> RustExpr {
+    RustExpr::Raw(format!(
+        "{{ match {}.cmp(&{}) {{ std::cmp::Ordering::Less => -1, std::cmp::Ordering::Equal => 0, std::cmp::Ordering::Greater => 1 }} }}",
+        emit::emit_expr(&left),
+        emit::emit_expr(&right),
+    ))
+}
+
 pub fn arrays_copy_of_projection(source: RustExpr, len: RustExpr) -> RustExpr {
     RustExpr::Raw(format!(
         "{{ let __java_arrays_source = &{}; let __java_arrays_len = {}; if __java_arrays_len < 0 {{ panic!(\"Java NegativeArraySizeException\"); }} let __java_arrays_len = __java_arrays_len as usize; let mut __java_arrays_out = __java_arrays_source.iter().cloned().take(__java_arrays_len).collect::<Vec<_>>(); __java_arrays_out.resize(__java_arrays_len, Default::default()); __java_arrays_out }}",

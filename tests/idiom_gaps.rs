@@ -21353,6 +21353,60 @@ mod generated_tests {
 }
 
 #[test]
+fn java_arrays_compare_lowers_as_static_platform_lexicographic_projection() {
+    let translation = translate_source(
+        r#"
+import java.util.Arrays;
+
+class JavaArraysCompareUse {
+    int ints(int[] left, int[] right) {
+        return Arrays.compare(left, right);
+    }
+
+    int names(String[] left, String[] right) {
+        return Arrays.compare(left, right);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("std::cmp::Ordering::Less => -1")
+            && translation.rust.contains("std::cmp::Ordering::Equal => 0")
+            && translation
+                .rust
+                .contains("std::cmp::Ordering::Greater => 1")
+            && !translation.rust.contains("Arrays::compare")
+            && !translation.rust.contains("JavaUtilArrays::compare"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "java_arrays_compare_use",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn compares_arrays_lexicographically() {
+        let fixture = JavaArraysCompareUse {};
+        assert_eq!(fixture.ints(&[1, 2], &[1, 3]), -1);
+        assert_eq!(fixture.ints(&[1, 2], &[1, 2]), 0);
+        assert_eq!(fixture.ints(&[1, 3], &[1, 2]), 1);
+        assert_eq!(fixture.names(&["a".to_string()], &["b".to_string()]), -1);
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
 fn java_arrays_hash_code_lowers_as_static_platform_hash_projection() {
     let translation = translate_source(
         r#"

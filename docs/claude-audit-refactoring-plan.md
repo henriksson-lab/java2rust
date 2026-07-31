@@ -128,6 +128,8 @@ Landed in this batch:
   through native Rust slice binary-search projections with Java's negative
   insertion-point result instead of depending on a generated no-op `Arrays`
   facade.
+- `Arrays.compare(left, right)` now lowers through a native Rust lexicographic
+  slice comparison projection that returns Java-compatible sign values.
 - Native `Arrays.copyOf`, `Arrays.copyOfRange`, range `Arrays.fill`, and range
   `Arrays.sort` projections now reject Java-invalid negative, reversed, or
   out-of-bounds ranges with explicit runtime panics instead of clamping or

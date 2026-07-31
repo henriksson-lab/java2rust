@@ -7075,9 +7075,10 @@ Audit `0016` remains partial, not fixed: remaining Arrays helpers still need
 follow-up work, and broader facade fallibility remains open.
 `Arrays.copyOf(...)`, `Arrays.copyOfRange(...)`, `Arrays.toString(...)`,
 `Arrays.hashCode(...)`, whole/range `Arrays.binarySearch(...)`, whole/range
-`Arrays.fill(...)`, and whole/range `Arrays.sort(...)` now lower through native
+`Arrays.fill(...)`, whole/range `Arrays.sort(...)`, and `Arrays.compare(...)`
+now lower through native
 projections with Java-style default padding, formatting, hash seeding,
-search insertion-point encoding, and mutation.
+search insertion-point encoding, mutation, and lexicographic compare signs.
 Apache Commons `FastMath` is
 modelled in `javalibs` as a native static owner alias to the existing JDK
 `Math` planner, keeping package-specific ownership outside `stdlib.rs`.
