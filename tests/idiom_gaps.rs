@@ -11548,11 +11548,12 @@ class TypedExternalGetterUse {
     let translation = translate_source_with_facts(source, &facts);
 
     assert!(
-        translation.rust.contains(
-            "pub fn get_meta_data_in_input_order(&self) -> std::collections::HashSet<VCFHeaderLine>"
-        ) && translation
+        translation
             .rust
-            .contains("pub fn get_sequence_dictionary(&self) -> SAMSequenceDictionary")
+            .contains("pub fn get_meta_data_in_input_order(&self) -> Vec<Box<dyn std::any::Any>>")
+            && translation
+                .rust
+                .contains("pub fn get_sequence_dictionary(&self) -> SAMSequenceDictionary")
             && !translation
                 .rust
                 .contains("pub fn get_meta_data_in_input_order(&self) -> ()")
@@ -11572,13 +11573,13 @@ class TypedExternalGetterUse {
 #[cfg(test)]
 mod generated_tests {
     use super::*;
-    use std::collections::HashSet;
 
     #[test]
     fn typechecks_typed_external_getters() {
         let fixture = TypedExternalGetterUse {};
-        let _: HashSet<VCFHeaderLine> = fixture.lines(&VCFHeader);
-        let _: SAMSequenceDictionary = fixture.dictionary(&VCFHeader);
+        let header: Box<dyn std::any::Any> = Box::new(VCFHeader);
+        let _: Vec<Box<dyn std::any::Any>> = fixture.lines(&header);
+        let _: SAMSequenceDictionary = fixture.dictionary(&header);
     }
 }
 "#,

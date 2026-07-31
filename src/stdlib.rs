@@ -12497,12 +12497,10 @@ fn external_facade_return_type_with_facts(java_type: &JavaType, facts: &FactSet)
                 .unwrap_or_else(|| "Box<dyn std::any::Any>".to_string());
             format!("Vec<{element}>")
         }
-        JavaType::Named { name, args } if matches!(name.as_str(), "Set" | "HashSet") => {
-            let element = args
-                .first()
-                .map(|arg| external_facade_return_type_with_facts(arg, facts))
-                .unwrap_or_else(|| "Box<dyn std::any::Any>".to_string());
-            format!("std::collections::HashSet<{element}>")
+        JavaType::Named { name, .. } if matches!(name.as_str(), "Set" | "HashSet") => {
+            crate::emit::emit_type(&crate::slot_render::rust_type_for_java_type_with_facts(
+                java_type, facts,
+            ))
         }
         JavaType::Named { name, args }
             if matches!(name.as_str(), "Map" | "HashMap" | "LinkedHashMap") =>

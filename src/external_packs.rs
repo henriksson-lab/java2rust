@@ -5510,8 +5510,6 @@ const VCF_TYPE_CAPABILITIES: &[ExternalPackTypeCapability] = &[
     cloneable_final_capability("VCFFileReader"),
     cloneable_final_capability("htsjdk.variant.vcf.VCFSimpleHeaderLine"),
     cloneable_final_capability("VCFSimpleHeaderLine"),
-    cloneable_final_capability("htsjdk.variant.vcf.VCFHeaderLine"),
-    cloneable_final_capability("VCFHeaderLine"),
     cloneable_final_capability("htsjdk.variant.vcf.VCFInfoHeaderLine"),
     cloneable_final_capability("VCFInfoHeaderLine"),
     cloneable_final_capability("htsjdk.variant.vcf.VCFFormatHeaderLine"),

@@ -7370,6 +7370,25 @@ across focused-package translation, or add an explicit facade collection-carrier
 fact for that external return. Do not solve this with another simple-name
 `VCFHeaderLine` rule in `stdlib.rs`.
 
+2026-07-31 HTSJDK VCF header-line carrier checkpoint: the VCF pack no longer
+marks `VCFHeaderLine` as a final external facade, matching the Java source and
+allowing the existing erased-set carrier policy to apply to
+`Set<VCFHeaderLine>` returns. External facade support now renders Java Set
+returns through the shared slot-render policy instead of its local
+`Set -> HashSet` branch. Focused verification:
+`external_pack_typed_set_and_dictionary_getters_shape_facade_returns`,
+`erased_object_set_uses_hash_free_vec_carrier`, `cargo fmt --check`,
+`cargo check --tests --quiet`, `git diff --check`, and release-backed reduced
+VCF rerun
+`.tmp/corpus-rerun-20260731-vcf-standard-bound-after-vcf-headerline-carrier-r5`.
+That rerun remains 9/9 translated, 0 parse failures, 0 stubbed constants, and
+drops generated-Rust errors from 17 to 16. The previous
+`HashSet<Box<dyn Any>>` insert/Eq/Hash family is gone; generated
+`VCFStandardHeaderLines` now uses `Vec<VCFHeaderLine>` and `push(...)`.
+Remaining top families are erased-carrier field access on `Box<dyn Any>` plus
+one generic `T: 'static` bound needed where a generic header line is boxed into
+the erased carrier.
+
 ## Rerun Protocol
 
 After each fix:
