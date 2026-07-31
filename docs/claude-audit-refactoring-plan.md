@@ -51,6 +51,12 @@ Operational reminder: when an audit issue is done, move the issue file into
 `/home/mahogny/github/claude/new_java2rust/claude_audits/done` immediately;
 do not leave completed audit notes in the active `claude_audits/` directory.
 
+2026-07-31 user reminder: every completed Claude audit must be moved out of
+`claude_audits/` and into
+`/home/mahogny/github/claude/new_java2rust/claude_audits/done` once the fix and
+verification are done. Do not close or commit an audit as finished while its
+issue file remains in the active audit directory.
+
 ## Next Batch: Measurement And Unsupported Safety
 
 Goal: unmodelled behavior must be visible as a diagnostic, parseable Rust, or a

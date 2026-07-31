@@ -20,6 +20,19 @@ pub fn facade_sequence_element_type(java_ty: &JavaType) -> Option<JavaType> {
     }
 }
 
+pub fn generic_facade_interface_erases_to_named_rust_type(java_ty: &JavaType) -> bool {
+    let JavaType::Named { name, args } = java_ty else {
+        return false;
+    };
+    if args.is_empty() {
+        return false;
+    }
+    matches!(
+        crate::stdlib::canonical_external_receiver_type_key(name).as_str(),
+        "Comparator" | "java.util.Comparator" | "Comparable" | "java.lang.Comparable"
+    )
+}
+
 pub fn broad_ioutils_support_item() -> crate::rust_ir::RustItem {
     crate::rust_ir::RustItem::Raw(
         r#"pub struct IOUtils;

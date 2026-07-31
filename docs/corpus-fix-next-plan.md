@@ -6972,6 +6972,17 @@ module. Focused verification passed:
 `stdlib_owns_known_jdk_content_method_facts`, `cargo fmt --check`,
 `cargo check --quiet`, and `git diff --check`.
 
+2026-07-31 generic facade interface checkpoint: Java generic facade interfaces
+whose Rust support shell is intentionally monomorphic, currently
+`Comparator<T>`/`Comparable<T>`, now erase Java type arguments at Rust ABI
+rendering boundaries instead of drifting between `Comparator<T>` support
+signatures and `Box<dyn Any>` local slots. This keeps Spark/DISQ noop-boundary
+pipelines opaque while preserving callback typing and lets
+`VCFHeader.getVCFRecordComparator()` flow into `Option<Comparator>`. Focused
+verification:
+`corpus_spark_rdd_pipeline_keeps_stream_lowering_at_noop_spark_boundary` and
+`generic_facade_interface_slot_erases_arguments_without_any_handoff`.
+
 ## 2026-07-30 Facade Correctness Note
 
 `StringBuilder`/`StringBuffer` now emit stateful JDK facade support instead of

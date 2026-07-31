@@ -6706,6 +6706,9 @@ fn signature_object_representation_fact_constraints_with_effective_facts(
     if crate::stdlib::java_collection_kind_for_type(java_ty).is_some() {
         return Vec::new();
     }
+    if crate::javalibs::generic_facade_interface_erases_to_named_rust_type(java_ty) {
+        return Vec::new();
+    }
     let Some(override_fact) = signature_object_representation_override_fact_for(java_ty, facts)
     else {
         return Vec::new();

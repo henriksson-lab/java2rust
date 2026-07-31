@@ -382,6 +382,29 @@ fn rust_crate_mapped_external_slots_render_facade_type_identity() {
 }
 
 #[test]
+fn generic_facade_interface_slot_erases_arguments_without_any_handoff() {
+    let comparator_ty = JavaType::Named {
+        name: "Comparator".to_string(),
+        args: vec![JavaType::Named {
+            name: "VariantContext".to_string(),
+            args: Vec::new(),
+        }],
+    };
+    let mut shape = RustSlotShape::for_storage(optional_java_type(comparator_ty.clone()));
+    shape.dispatch = DispatchShape::ErasedObject;
+    shape.view = ViewShape::ErasedObjectView;
+
+    assert_eq!(
+        rust_type_for_java_type_with_facts(&comparator_ty, &FactSet::default()),
+        RustType::Named("Comparator".to_string())
+    );
+    assert_eq!(
+        rust_type_for_slot_with_facts(&shape, &FactSet::default()),
+        RustType::Option(Box::new(RustType::Named("Comparator".to_string())))
+    );
+}
+
+#[test]
 fn rust_crate_mapped_static_external_owners_render_facade_paths() {
     let facts = parse_external_pack_manifest(
         r#"

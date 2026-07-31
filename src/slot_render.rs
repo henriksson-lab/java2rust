@@ -190,6 +190,13 @@ pub fn slot_value_rust_type_policy_with_effective_facts(
                 slot_dispatch_rust_type_policy(shape)
             }
         }
+        (_, DispatchShape::ErasedObject, java_ty)
+            if crate::javalibs::generic_facade_interface_erases_to_named_rust_type(java_ty) =>
+        {
+            SlotValueRustTypePolicy::ConcreteDispatch {
+                java_ty: java_ty.clone(),
+            }
+        }
         _ => slot_dispatch_rust_type_policy(shape),
     }
 }
@@ -271,6 +278,10 @@ pub fn render_slot_value_rust_type_policy_with_effective_facts(
             {
                 ty
             } else if erased_facade_concrete_dispatch_should_keep_named_type(java_ty, facts)
+                && let JavaType::Named { name, .. } = java_ty
+            {
+                RustType::Named(rust_name_for_java_named_type(name))
+            } else if crate::javalibs::generic_facade_interface_erases_to_named_rust_type(java_ty)
                 && let JavaType::Named { name, .. } = java_ty
             {
                 RustType::Named(rust_name_for_java_named_type(name))
@@ -526,6 +537,7 @@ pub fn native_java_rust_type_policy_with_effective_facts(
         facts.object_representation_override_strategy_for(ty),
         Some(HierarchyStrategy::ErasedObject)
     ) && !external_final_facade_should_keep_named_type(ty, facts)
+        && !crate::javalibs::generic_facade_interface_erases_to_named_rust_type(ty)
         && crate::stdlib::java_collection_kind_for_type(ty).is_none()
     {
         return NativeJavaRustTypePolicy::Direct {
@@ -533,6 +545,13 @@ pub fn native_java_rust_type_policy_with_effective_facts(
         };
     }
     if external_final_facade_should_keep_named_type(ty, facts)
+        && let JavaType::Named { name, .. } = ty
+    {
+        return NativeJavaRustTypePolicy::Direct {
+            ty: RustType::Named(rust_name_for_java_named_type(name)),
+        };
+    }
+    if crate::javalibs::generic_facade_interface_erases_to_named_rust_type(ty)
         && let JavaType::Named { name, .. } = ty
     {
         return NativeJavaRustTypePolicy::Direct {
