@@ -22739,10 +22739,15 @@ fn external_callable_fallibility_uses_rust_name_mapping() {
     let parsed = parse_external_pack_manifest(
         r#"
         external-pack dep.io dep.io rust-crate-mapping mapped target=dep_io
-        external-pack-api dep.io dep.io.Reader readRecord mapped getter read-only definitely-non-null args=0 return=dep.io.Record throws=DepIoError rust=read_record
+        external-pack-exception dep.io dep.io.DepIoError checked
+        external-pack-api dep.io dep.io.Reader readRecord mapped getter read-only definitely-non-null args=0 return=dep.io.Record throws=dep.io.DepIoError rust=read_record
         "#,
     );
-    assert!(parsed.diagnostics.is_empty());
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "manifest parse should be clean: {:?}",
+        parsed.diagnostics
+    );
 
     let key = new_java2rust::usage::CallableKey::ExternalMethod {
         receiver_type: Some("dep.io.Reader".to_string()),
@@ -22759,6 +22764,14 @@ fn external_callable_fallibility_uses_rust_name_mapping() {
     let fallibility = plan_program_fallibility(&graph, &parsed.facts);
 
     assert!(fallibility.returns_result(&key));
+    assert!(
+        new_java2rust::call_plan::external_call_has_thrown_effect_for_receiver(
+            &parsed.facts,
+            "dep.io.Reader",
+            "read_record",
+            0,
+        )
+    );
 }
 
 #[test]

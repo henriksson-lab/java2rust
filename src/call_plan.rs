@@ -1296,9 +1296,12 @@ pub fn external_call_has_thrown_effect_for_receiver(
     name: &str,
     arg_count: usize,
 ) -> bool {
-    let external_index = facts.external_lookup_index();
-    external_index
-        .external_api_effect_for_receiver_with_arity(Some(receiver_name), name, Some(arg_count))
+    facts
+        .external_api_effect_for_receiver_with_arity_or_rust_name(
+            Some(receiver_name),
+            name,
+            Some(arg_count),
+        )
         .is_some_and(|effect| facts.thrown_types_include_checked_exception(&effect.thrown))
 }
 

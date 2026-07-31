@@ -265,6 +265,10 @@ Landed in this batch:
   their Java API effect facts before seeding the fixpoint or extracting checked
   exception types. This keeps `rust=...` external-pack names from splitting
   throw facts away from the solved callable relation.
+- Lowering-side call exception propagation now checks the solved callable
+  fallibility relation for external receiver calls before falling back to direct
+  fact probes, and the fallback external thrown helper uses the same
+  rust-name-aware API effect lookup.
 - One-dimensional array compound assignments with side-effecting indices now
   hoist the Java index once, save the old element value before evaluating the
   RHS, and reuse the shared numeric binary/narrowing planners for writeback.
@@ -671,7 +675,7 @@ Completion checklist for any audit marked `fixed locally`:
 | `0007` opaque Rust strings | open | Slot/facade generalization, shape tags |
 | `0008` inference does not reach lowering | open | CallableAnalysis |
 | `0009` overload identity collapse | open | Java callable signature identity; focused inherited-overload/override probe is covered by `overloaded_override_preserves_child_body_and_inherited_overload`, but broader downstream matching/rendering audit remains open |
-| `0010` fallibility disagrees | partial | Callable fallibility fixpoint exists and now seeds from checked/unchecked thrown facts, including external facade Rust-name mappings; remaining migration is to make all call-site `?` insertion read the solved relation or emit explicit divergence diagnostics |
+| `0010` fallibility disagrees | partial | Callable fallibility fixpoint exists and now seeds from checked/unchecked thrown facts, including external facade Rust-name mappings; lowering-side source/external receiver propagation checks consult that relation before fallback probes; remaining migration is to make all call-site `?` insertion read the solved relation or emit explicit divergence diagnostics |
 | `0011` dyn Any fallback cascades | partial | Opaque external shims; generic/static typed facade fallbacks are now loud; external constructor argument facts now participate in signature inference, so modeled constructors such as `StringTokenizer(String,...)` and `ZipEntry(String)` no longer force declared source `String` params through `Box<dyn Any>`/`downcast::<String>()`; declared locals initialized by fact-backed typed external producers now anchor through a generic return-type identity rule instead of an AWT-specific `Graphics/createGraphics` escape hatch; field-accessing parsed source supertypes with runtime case-split pressure now use companion hierarchy carriers instead of erasure; reduced VCFStandardHeaderLines now cargo-checks cleanly after exact downcast locals/source peer params stay concrete and weak erased-object facade returns upgrade from typed facade impl signatures, but broader erased-object fallback remains open |
 | `0012` invalid unsupported diagnostics | fixed locally | Moved to `claude_audits/done` |
 | `0013` nested downcast names | fixed locally | Moved to `claude_audits/done` |

@@ -17427,6 +17427,17 @@ fn plan_call_exception_propagation_with_lower_context(
     ) {
         return CallExceptionPropagationPlan::PropagateResult;
     }
+    if let Some(receiver_type) = receiver
+        .and_then(|receiver| receiver_shape_java_type(receiver, env))
+        .and_then(external_receiver_name_from_shape_type)
+        && ctx.callable_analysis.external_method_returns_result(
+            Some(receiver_type),
+            name,
+            args.len(),
+        )
+    {
+        return CallExceptionPropagationPlan::PropagateResult;
+    }
     plan_call_exception_propagation_with_external_index(
         receiver,
         name,
@@ -23449,6 +23460,12 @@ fn slot_expr_needs_result_propagation_from_shape_env(
     let Some(receiver_name) = external_receiver_name_from_shape_type(receiver_ty) else {
         return false;
     };
+    if ctx
+        .callable_analysis
+        .external_method_returns_result(Some(receiver_name), name, arg_count)
+    {
+        return true;
+    }
     let key = CallableKey::method(
         receiver_name.to_string(),
         name.to_string(),
