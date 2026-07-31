@@ -111,6 +111,17 @@ has generated-Rust errors reduced from 28 to 26 with the duplicate
 partial `0011`-inspired fix only; member-bearing erased carrier access remains
 the hard open representation problem.
 
+2026-07-31 local erased-alias support checkpoint: external facade support
+generation now consumes the representation plan and suppresses inherent impls
+only for local/source owners that emit as erased aliases. This removes the
+invalid `impl VCFCompoundHeaderLine` support block while preserving external
+facade support for pack-owned erased types such as `VariantContext` and
+`VCFHeaderVersion`. Reduced VCFStandardHeaderLines proof:
+`.tmp/corpus-rerun-20260731-vcf-standard-bound-after-local-erased-alias-impl-guard-r1`
+has generated-Rust errors reduced from 26 to 25. Audit `0011` remains open:
+field/member access on `Box<dyn Any>` and `HashSet<Box<dyn Any>>` trait bounds
+still need a representation obligation fix rather than broad alias suppression.
+
 2026-07-30 map-get ABI cleanup checkpoint: `HashMap.get` return adaptation no
 longer reconstructs map value type and optional-borrow target shape inside
 `lower.rs`. The lowered expression now uses `native_collection_lowered_type` and

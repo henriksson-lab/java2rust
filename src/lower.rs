@@ -415,6 +415,7 @@ pub fn lower_program_with_semantic_plans_and_support_context(
         facts,
         support_local_type_program,
         source_summary_type_program,
+        representations,
     );
     let declared_support_owners = support_item_declared_type_names(&facade_support_items);
     file.items.extend(facade_support_items);

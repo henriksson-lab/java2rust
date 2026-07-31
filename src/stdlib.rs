@@ -12,6 +12,7 @@ use crate::java_ir::{
     BinaryOp, Block, Expr, FieldDecl, JavaType, Literal, Member, MethodDecl, Modifier,
     PrimitiveType, Program, Stmt, SwitchLabel, TypeDecl, TypeKind, WildcardBound,
 };
+use crate::representation::{ObjectRepresentation, RepresentationPlan};
 use crate::shape_projection::{
     apply_borrowed_sequence_content_projection, apply_borrowed_string_content_projection,
 };
@@ -6557,6 +6558,7 @@ pub fn external_api_facade_support_items(
         facts,
         program,
         &Program::default(),
+        &RepresentationPlan::default(),
     )
 }
 
@@ -6565,6 +6567,7 @@ pub fn external_api_facade_support_items_with_local_type_program(
     facts: &FactSet,
     local_type_program: &Program,
     source_summary_type_program: &Program,
+    representations: &RepresentationPlan,
 ) -> Vec<crate::rust_ir::RustItem> {
     let local_types = local_type_keys_for_program(local_type_program);
     let emitted_local_types = local_type_keys_for_program(program);
@@ -6579,6 +6582,7 @@ pub fn external_api_facade_support_items_with_local_type_program(
     let imported_static_owner_calls = collect_imported_static_owner_calls(program);
 
     let mut support = ExternalApiFacadeSupport::default();
+    support.add_erased_source_alias_owners(representations, &declared_external_type_exclusions);
     support.add_emitted_source_method_signatures(local_type_program);
     if !std::ptr::eq(program, local_type_program) {
         support.add_emitted_source_method_signatures(program);
@@ -6941,6 +6945,7 @@ struct ExternalApiFacadeSupport {
     erased_object_methods: BTreeMap<String, ExternalErasedObjectMethod>,
     erased_object_method_conflicts: BTreeSet<String>,
     emitted_source_methods: BTreeSet<(String, String, usize)>,
+    erased_source_alias_owners: BTreeSet<String>,
 }
 
 fn is_awt_platform_facade_owner(owner: &str) -> bool {
@@ -7022,6 +7027,24 @@ fn find_source_type_decl_in_type<'a>(ty: &'a TypeDecl, type_name: &str) -> Optio
 }
 
 impl ExternalApiFacadeSupport {
+    fn add_erased_source_alias_owners(
+        &mut self,
+        representations: &RepresentationPlan,
+        local_types: &BTreeSet<String>,
+    ) {
+        for representation in representations.type_representations() {
+            if matches!(
+                representation.representation,
+                ObjectRepresentation::ErasedObject
+            ) && local_types.contains(&canonical_external_receiver_type_key(
+                &representation.java_name,
+            )) {
+                self.erased_source_alias_owners
+                    .insert(rust_name_for_java_named_type(&representation.java_name));
+            }
+        }
+    }
+
     fn add_emitted_source_method_signatures(&mut self, program: &Program) {
         for ty in &program.types {
             self.add_emitted_source_method_signatures_from_type(program, ty, None);
@@ -9674,6 +9697,9 @@ impl ExternalApiFacadeSupport {
             return;
         }
         if !valid_external_facade_type_ident(&owner) {
+            return;
+        }
+        if self.erased_source_alias_owners.contains(&owner) {
             return;
         }
         let method = self.upgrade_known_weak_opaque_method(&owner, method);

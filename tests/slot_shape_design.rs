@@ -26099,6 +26099,7 @@ class Base64 {
         &facts,
         &parsed.program,
         &new_java2rust::java_ir::Program::default(),
+        &new_java2rust::representation::RepresentationPlan::default(),
     );
     let rendered = new_java2rust::emit::emit_file(&new_java2rust::rust_ir::RustFile { items });
 
@@ -26181,6 +26182,7 @@ class VCFHeaderLineCaller {
         &facts,
         &local.program,
         &new_java2rust::java_ir::Program::default(),
+        &new_java2rust::representation::RepresentationPlan::default(),
     );
     let rendered = new_java2rust::emit::emit_file(&new_java2rust::rust_ir::RustFile { items });
 
@@ -26191,6 +26193,52 @@ class VCFHeaderLineCaller {
     assert!(
         !rendered.contains("impl VCFCompoundHeaderLine {\n    pub fn to_string(&self) -> String"),
         "{rendered}"
+    );
+}
+
+#[test]
+fn erased_source_alias_owner_suppresses_external_facade_inherent_impl() {
+    let parsed = parse_java_source(
+        r#"
+class ErasedBase {
+}
+
+class ErasedAliasCaller {
+    Object cls(ErasedBase value) {
+        return value.getClass();
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let mut facts = resolved.facts.clone();
+    facts
+        .dispatch_requirement_facts
+        .push(DispatchRequirementFact {
+            type_name: "ErasedBase".to_string(),
+            requirement: DispatchRequirementKind::NeedsUnknownRuntimeObject,
+            provenance: FactProvenance::UserOverride,
+        });
+    let representations = plan_representations(&resolved.program, &facts);
+    assert!(matches!(
+        representations
+            .type_representation("ErasedBase")
+            .map(|representation| &representation.representation),
+        Some(ObjectRepresentation::ErasedObject)
+    ));
+
+    let items = new_java2rust::stdlib::external_api_facade_support_items_with_local_type_program(
+        &resolved.program,
+        &facts,
+        &resolved.program,
+        &new_java2rust::java_ir::Program::default(),
+        &representations,
+    );
+    let rendered = new_java2rust::emit::emit_file(&new_java2rust::rust_ir::RustFile { items });
+
+    assert!(
+        !rendered.contains("impl ErasedBase {"),
+        "erased source aliases must not receive inherent facade impls:\n{rendered}"
     );
 }
 
