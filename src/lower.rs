@@ -6,6 +6,7 @@ use crate::array_lowering::{
     borrowed_array2_temporary_for_slot, ragged_array_outer_creation_projection, render_array_expr,
 };
 use crate::array_plan::plan_array_expr;
+use crate::binding_id::BindingId;
 use crate::call_lowering::{
     apply_call_target, apply_class_literal_token, apply_collection_remove_if,
     apply_native_collection_extend, apply_new_target_with_facts,
@@ -17122,7 +17123,7 @@ impl<'a> MoveUseContext<'a> {
     }
 
     fn binding_use_count(&self, name: &str) -> Option<usize> {
-        current_callable_binding_use_count(name, self.ctx)
+        current_callable_binding_use_count_for_id(&BindingId::compatibility_local(name), self.ctx)
     }
 }
 
@@ -17501,7 +17502,11 @@ fn known_named_clone_recovery(target_shape: &RustSlotShape) -> bool {
     matches!(target_shape.java_ty, JavaType::Named { .. })
 }
 
-fn current_callable_binding_use_count(name: &str, ctx: LowerCtx) -> Option<usize> {
+fn current_callable_binding_use_count_for_id(
+    binding_id: &BindingId,
+    ctx: LowerCtx,
+) -> Option<usize> {
+    let name = binding_id.name();
     let current_type = ctx.current_type?;
     if let Some(current_method) = ctx.current_method {
         let exact_key = UsageMethodKey {

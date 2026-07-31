@@ -6,6 +6,7 @@ use new_java2rust::access_lowering::{
 };
 use new_java2rust::array_lowering::render_array_expr;
 use new_java2rust::array_plan::{ArrayExprPlan, plan_array_expr};
+use new_java2rust::binding_id::BindingKind;
 use new_java2rust::call_lowering::{
     apply_call_target, apply_class_literal_token, apply_new_target, apply_new_target_with_facts,
 };
@@ -27306,10 +27307,13 @@ fn shape_env_records_declared_locals_as_storage_shapes() {
     env.insert_local("name", JavaType::String);
 
     let shape = env.local_shape("name").unwrap();
+    let binding = env.binding_id("name").unwrap();
     assert_eq!(shape.java_ty, JavaType::String);
     assert_eq!(shape.ownership, OwnershipShape::Owned);
     assert_eq!(shape.view, ViewShape::Native);
     assert_eq!(shape.mutability, MutabilityShape::Mutable);
+    assert_eq!(binding.kind, BindingKind::Local);
+    assert_eq!(binding.name(), "name");
 }
 
 #[test]
@@ -27377,19 +27381,37 @@ class EnvUse {
         constructor_env.local_shape("field"),
         Some(&constructor_signature.params[0].shape)
     );
+    assert_eq!(
+        constructor_env
+            .binding_id("field")
+            .map(|binding| binding.kind),
+        Some(BindingKind::Param)
+    );
     let method_env = shape_env_for_method(ty, method, method_signature, &signatures);
     assert_eq!(
         method_env.local_shape("input"),
         Some(&method_signature.params[0].shape)
     );
     assert_eq!(
+        method_env.binding_id("input").map(|binding| binding.kind),
+        Some(BindingKind::Param)
+    );
+    assert_eq!(
         method_env.field_shape("field"),
         signatures.field_shape("EnvUse", "field")
+    );
+    assert_eq!(
+        method_env.binding_id("field").map(|binding| binding.kind),
+        Some(BindingKind::Field)
     );
     let static_env = shape_env_for_method(ty, static_method, static_signature, &signatures);
     assert_eq!(
         static_env.local_shape("value"),
         Some(&static_signature.params[0].shape)
+    );
+    assert_eq!(
+        static_env.binding_id("value").map(|binding| binding.kind),
+        Some(BindingKind::Param)
     );
     assert_eq!(static_env.field_shape("field"), None);
 
@@ -27406,6 +27428,15 @@ class EnvUse {
     assert_eq!(
         env.local_shape("local"),
         signatures.local_shape(&method_signature.locals, "local")
+    );
+    assert_eq!(
+        env.binding_id("local").map(|binding| binding.kind),
+        Some(BindingKind::Local)
+    );
+    env.insert_loop_variable_shape("item", RustSlotShape::conservative(JavaType::String));
+    assert_eq!(
+        env.binding_id("item").map(|binding| binding.kind),
+        Some(BindingKind::LoopVariable)
     );
 }
 

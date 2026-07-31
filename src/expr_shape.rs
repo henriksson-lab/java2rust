@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+use crate::binding_id::{BindingId, BindingKind};
 use crate::facts::FactSet;
 use crate::java_ir::{Expr, JavaType, Member, MethodDecl, Modifier, Stmt, TypeDecl};
 use crate::representation::RepresentationPlan;
@@ -27,6 +28,8 @@ pub struct ShapeEnv {
     static_storage_field_names: HashMap<String, String>,
     type_static_storage_field_names: HashMap<(String, String), String>,
     instance_field_names: HashSet<String>,
+    binding_ids: HashMap<String, BindingId>,
+    binding_occurrences: HashMap<(BindingKind, String), usize>,
     local_plan_occurrences: Rc<RefCell<HashMap<(String, String), usize>>>,
 }
 
@@ -43,7 +46,8 @@ impl ShapeEnv {
         let name = name.into();
         self.local_shapes
             .insert(name.clone(), RustSlotShape::for_storage(ty.clone()));
-        self.types.insert_local(name, ty);
+        self.types.insert_local(name.clone(), ty);
+        self.bind_name(BindingKind::Local, name);
     }
 
     pub fn insert_field(&mut self, name: impl Into<String>, ty: JavaType) {
@@ -53,12 +57,28 @@ impl ShapeEnv {
         self.types.insert_field(name.clone(), ty);
         self.instance_field_names
             .insert(crate::parser::to_snake_case(&name));
+        self.bind_name(BindingKind::Field, name);
     }
 
     pub fn insert_local_shape(&mut self, name: impl Into<String>, shape: RustSlotShape) {
         let name = name.into();
         self.types.insert_local(name.clone(), shape.java_ty.clone());
-        self.local_shapes.insert(name, shape);
+        self.local_shapes.insert(name.clone(), shape);
+        self.bind_name(BindingKind::Local, name);
+    }
+
+    pub fn insert_param_shape(&mut self, name: impl Into<String>, shape: RustSlotShape) {
+        let name = name.into();
+        self.types.insert_local(name.clone(), shape.java_ty.clone());
+        self.local_shapes.insert(name.clone(), shape);
+        self.bind_name(BindingKind::Param, name);
+    }
+
+    pub fn insert_loop_variable_shape(&mut self, name: impl Into<String>, shape: RustSlotShape) {
+        let name = name.into();
+        self.types.insert_local(name.clone(), shape.java_ty.clone());
+        self.local_shapes.insert(name.clone(), shape);
+        self.bind_name(BindingKind::LoopVariable, name);
     }
 
     pub fn insert_static_type_alias(
@@ -92,6 +112,9 @@ impl ShapeEnv {
         self.field_shapes.insert(alias, shape);
         self.instance_field_names
             .insert(crate::parser::to_snake_case(&name));
+        let binding = self.bind_name(BindingKind::Field, name.clone());
+        let alias = crate::parser::to_snake_case(&name);
+        self.binding_ids.insert(alias, binding);
     }
 
     pub fn insert_type_field_shape(
@@ -157,6 +180,8 @@ impl ShapeEnv {
         self.types
             .insert_field(alias.clone(), shape.java_ty.clone());
         self.field_shapes.insert(alias.clone(), shape);
+        let binding = self.bind_name(BindingKind::StaticField, name.clone());
+        self.binding_ids.insert(alias.clone(), binding);
         self.static_field_names.insert(name.clone(), name.clone());
         self.static_field_names.insert(alias, name);
     }
@@ -193,9 +218,24 @@ impl ShapeEnv {
         self.types
             .insert_field(alias.clone(), shape.java_ty.clone());
         self.field_shapes.insert(alias.clone(), shape);
+        let binding = self.bind_name(BindingKind::StaticField, name.clone());
+        self.binding_ids.insert(alias.clone(), binding);
         self.static_storage_field_names
             .insert(name.clone(), name.clone());
         self.static_storage_field_names.insert(alias, name);
+    }
+
+    pub fn binding_id(&self, name: &str) -> Option<&BindingId> {
+        self.binding_ids.get(name)
+    }
+
+    fn bind_name(&mut self, kind: BindingKind, name: String) -> BindingId {
+        let key = (kind, name.clone());
+        let occurrence = self.binding_occurrences.entry(key).or_insert(0);
+        let id = BindingId::new(kind, name.clone(), *occurrence);
+        *occurrence += 1;
+        self.binding_ids.insert(name, id.clone());
+        id
     }
 
     pub fn local_type(&self, name: &str) -> Option<&JavaType> {
@@ -651,7 +691,7 @@ pub fn learn_stmt_shapes(
         }
         Stmt::EnhancedFor { var_name, .. } => {
             let shape = signatures.required_local_shape(locals, var_name);
-            env.insert_local_shape(var_name.clone(), shape);
+            env.insert_loop_variable_shape(var_name.clone(), shape);
         }
         Stmt::Try {
             resources, body, ..
@@ -682,7 +722,7 @@ fn local_shape_for_declared_type<'a>(
 
 fn insert_param_shapes(env: &mut ShapeEnv, params: &[ParamPlan]) {
     for param in params {
-        env.insert_local_shape(param.name.clone(), param.shape.clone());
+        env.insert_param_shape(param.name.clone(), param.shape.clone());
     }
 }
 
