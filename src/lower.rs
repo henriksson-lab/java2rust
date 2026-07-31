@@ -11877,6 +11877,18 @@ fn lower_ordered_array_index_assignment_value_expr(
     refinements: &ExprRefinements,
     assignment_slot: Slot,
 ) -> Option<RustExpr> {
+    if let Some(expr) = lower_ordered_array2_index_assignment_value_expr(
+        target,
+        value,
+        array,
+        index,
+        env,
+        ctx,
+        refinements,
+        assignment_slot.clone(),
+    ) {
+        return Some(expr);
+    }
     if !array_assignment_receiver_is_simple(array)
         || !array_assignment_receiver_is_one_dimensional(array, env)
         || !expr_has_assignment_order_side_effect(index)
@@ -11941,6 +11953,18 @@ fn lower_ordered_array_index_assignment_stmt(
     let Expr::ArrayAccess(array, index) = target else {
         return None;
     };
+    if let Some(stmt) = lower_ordered_array2_index_assignment_stmt(
+        target,
+        value,
+        array,
+        index,
+        env,
+        ctx,
+        refinements,
+        assignment_slot.clone(),
+    ) {
+        return Some(stmt);
+    }
     if !array_assignment_receiver_is_simple(array) || !expr_has_assignment_order_side_effect(index)
     {
         return None;
@@ -11976,6 +12000,148 @@ fn lower_ordered_array_index_assignment_stmt(
     Some(RustStmt::Raw(format!(
         "{{\n    let __java_assignment_index = {};\n    {} = {};\n}}",
         emit::emit_expr(&lowered_index),
+        emit::emit_expr(&lowered_target),
+        emit::emit_expr(&assigned_value),
+    )))
+}
+
+fn lower_ordered_array2_index_assignment_value_expr(
+    target: &Expr,
+    value: &Expr,
+    array: &Expr,
+    index: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+    assignment_slot: Slot,
+) -> Option<RustExpr> {
+    let Expr::ArrayAccess(outer_array, outer_index) = array else {
+        return None;
+    };
+    if !array_assignment_receiver_is_simple(outer_array)
+        || ndarray_element_type_after_optional(&crate::types::infer_expr_type(
+            outer_array,
+            env.type_env(),
+        ))
+        .is_none()
+        || (!expr_has_assignment_order_side_effect(outer_index)
+            && !expr_has_assignment_order_side_effect(index))
+    {
+        return None;
+    }
+    let row_index = lower_expr_for_slot(outer_index, env, index_slot(), ctx);
+    let col_index = lower_expr_for_slot(index, env, index_slot(), ctx);
+    let row_temp = RustExpr::Raw("__java_assignment_row".to_string());
+    let col_temp = RustExpr::Raw("__java_assignment_col".to_string());
+    let lowered_target = array2_index_projection(
+        lower_write_sequence_receiver(outer_array, env, ctx, refinements),
+        row_temp.clone(),
+        col_temp.clone(),
+    );
+    if let Some((old_value_stmt, assigned_value)) = lower_ordered_array_compound_assignment_value(
+        target,
+        value,
+        lowered_target.clone(),
+        env,
+        ctx,
+        refinements,
+        &assignment_slot,
+    ) {
+        let assigned_readback = array2_index_projection(
+            lower_read_sequence_receiver(outer_array, env, ctx, refinements),
+            row_temp,
+            col_temp,
+        );
+        return Some(RustExpr::Raw(format!(
+            "{{ let __java_assignment_row = {}; let __java_assignment_col = {}; {}; {} = {}; {} }}",
+            emit::emit_expr(&row_index),
+            emit::emit_expr(&col_index),
+            old_value_stmt,
+            emit::emit_expr(&lowered_target),
+            emit::emit_expr(&assigned_value),
+            emit::emit_expr(&assigned_readback),
+        )));
+    }
+    let lowered_value =
+        lower_assignment_value_for_slot(target, value, env, &assignment_slot, ctx, refinements);
+    let lowered_value =
+        adapt_reused_owned_value_for_slot(lowered_value, value, &assignment_slot, env, ctx);
+    let assigned_value =
+        wrap_optional_assignment_value_if_needed(value, env, assignment_slot, lowered_value, ctx);
+    let assigned_readback = array2_index_projection(
+        lower_read_sequence_receiver(outer_array, env, ctx, refinements),
+        row_temp,
+        col_temp,
+    );
+    Some(RustExpr::Raw(format!(
+        "{{ let __java_assignment_row = {}; let __java_assignment_col = {}; {} = {}; {} }}",
+        emit::emit_expr(&row_index),
+        emit::emit_expr(&col_index),
+        emit::emit_expr(&lowered_target),
+        emit::emit_expr(&assigned_value),
+        emit::emit_expr(&assigned_readback),
+    )))
+}
+
+fn lower_ordered_array2_index_assignment_stmt(
+    target: &Expr,
+    value: &Expr,
+    array: &Expr,
+    index: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+    assignment_slot: Slot,
+) -> Option<RustStmt> {
+    let Expr::ArrayAccess(outer_array, outer_index) = array else {
+        return None;
+    };
+    if !array_assignment_receiver_is_simple(outer_array)
+        || ndarray_element_type_after_optional(&crate::types::infer_expr_type(
+            outer_array,
+            env.type_env(),
+        ))
+        .is_none()
+        || (!expr_has_assignment_order_side_effect(outer_index)
+            && !expr_has_assignment_order_side_effect(index))
+    {
+        return None;
+    }
+    let row_index = lower_expr_for_slot(outer_index, env, index_slot(), ctx);
+    let col_index = lower_expr_for_slot(index, env, index_slot(), ctx);
+    let lowered_target = array2_index_projection(
+        lower_write_sequence_receiver(outer_array, env, ctx, refinements),
+        RustExpr::Raw("__java_assignment_row".to_string()),
+        RustExpr::Raw("__java_assignment_col".to_string()),
+    );
+    if let Some((old_value_stmt, assigned_value)) = lower_ordered_array_compound_assignment_value(
+        target,
+        value,
+        lowered_target.clone(),
+        env,
+        ctx,
+        refinements,
+        &assignment_slot,
+    ) {
+        return Some(RustStmt::Raw(format!(
+            "{{\n    let __java_assignment_row = {};\n    let __java_assignment_col = {};\n    {};\n    {} = {};\n}}",
+            emit::emit_expr(&row_index),
+            emit::emit_expr(&col_index),
+            old_value_stmt,
+            emit::emit_expr(&lowered_target),
+            emit::emit_expr(&assigned_value),
+        )));
+    }
+    let lowered_value =
+        lower_assignment_value_for_slot(target, value, env, &assignment_slot, ctx, refinements);
+    let lowered_value =
+        adapt_reused_owned_value_for_slot(lowered_value, value, &assignment_slot, env, ctx);
+    let assigned_value =
+        wrap_optional_assignment_value_if_needed(value, env, assignment_slot, lowered_value, ctx);
+    Some(RustStmt::Raw(format!(
+        "{{\n    let __java_assignment_row = {};\n    let __java_assignment_col = {};\n    {} = {};\n}}",
+        emit::emit_expr(&row_index),
+        emit::emit_expr(&col_index),
         emit::emit_expr(&lowered_target),
         emit::emit_expr(&assigned_value),
     )))

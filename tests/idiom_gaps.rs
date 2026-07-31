@@ -8793,6 +8793,121 @@ mod generated_tests {
 }
 
 #[test]
+fn ndarray_assignment_with_side_effecting_indices_preserves_java_order() {
+    let translation = translate_source(
+        r#"
+class AssignmentOrderNdarrayIndex {
+    double stmt(double[][] values) {
+        int row = 0;
+        int col = 0;
+        values[row++][col++] = row + col;
+        return values[0][0];
+    }
+
+    double expr(double[][] values) {
+        int row = 0;
+        int col = 0;
+        return (values[row++][col++] = row + col);
+    }
+
+    double compound(double[][] values) {
+        int row = 0;
+        int col = 0;
+        values[row++][col++] += row + col;
+        return values[0][0];
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "let __java_assignment_row = { let __java_old_value = row; row = (row).wrapping_add(1); __java_old_value } as usize;"
+        ) && translation.rust.contains(
+            "let __java_assignment_col = { let __java_old_value = col; col = (col).wrapping_add(1); __java_old_value } as usize;"
+        ) && translation
+            .rust
+            .contains("values[[__java_assignment_row, __java_assignment_col]] = (row).wrapping_add(col) as f64;")
+            && translation.rust.contains(
+                "let __java_assignment_old = values[[__java_assignment_row, __java_assignment_col]];"
+            )
+            && !translation.rust.contains("values[[{ let __java_old_value = row;"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "assignment_order_ndarray_index",
+        vec![
+            GeneratedCrateModule {
+                name: "ndarray",
+                rust: r#"
+use std::ops::{Index, IndexMut};
+
+pub struct Array2<T> {
+    cols: usize,
+    values: Vec<T>,
+}
+
+impl<T: Clone> Array2<T> {
+    pub fn from_elem(shape: (usize, usize), value: T) -> Self {
+        Self {
+            cols: shape.1,
+            values: vec![value; shape.0 * shape.1],
+        }
+    }
+
+    pub fn fill(&mut self, value: T) {
+        self.values.fill(value);
+    }
+}
+
+impl<T> Index<[usize; 2]> for Array2<T> {
+    type Output = T;
+
+    fn index(&self, index: [usize; 2]) -> &Self::Output {
+        &self.values[index[0] * self.cols + index[1]]
+    }
+}
+
+impl<T> IndexMut<[usize; 2]> for Array2<T> {
+    fn index_mut(&mut self, index: [usize; 2]) -> &mut Self::Output {
+        &mut self.values[index[0] * self.cols + index[1]]
+    }
+}
+"#
+                .to_string(),
+                tests: "",
+            },
+            GeneratedCrateModule {
+                name: "fixture",
+                rust: format!("use crate::ndarray;\n{}", translation.rust),
+                tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn ndarray_assignment_indices_run_before_rhs() {
+        let fixture = AssignmentOrderNdarrayIndex {};
+        let mut values = ndarray::Array2::from_elem((2, 2), 0.0);
+        assert_eq!(fixture.stmt(&mut values), 2.0);
+        assert_eq!(values[[0, 0]], 2.0);
+        values.fill(0.0);
+        assert_eq!(fixture.expr(&mut values), 2.0);
+        assert_eq!(values[[0, 0]], 2.0);
+        values.fill(10.0);
+        assert_eq!(fixture.compound(&mut values), 12.0);
+        assert_eq!(values[[0, 0]], 12.0);
+    }
+}
+"#,
+            },
+        ],
+    );
+}
+
+#[test]
 fn chained_array_assignment_expression_returns_assigned_value() {
     let translation = translate_source(
         r#"
