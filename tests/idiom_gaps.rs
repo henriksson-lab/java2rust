@@ -441,6 +441,43 @@ class JavaIteratorCursorOverList {
 }
 
 #[test]
+fn loop_body_reuses_owned_value_with_back_edge_clone() {
+    let translation = translate_source(
+        r#"
+class LoopMove {
+    private String last = "";
+
+    void add(String s) {
+        last = s;
+    }
+
+    void run(String value, int n) {
+        for (int i = 0; i < n; i++) {
+            add(value);
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("self.add(value.clone()/* TODO(translation): validate added clone */);"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "loop_body_reuses_owned_value_with_back_edge_clone",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn iterator_foreachremaining_bound_receiver_method_reference_compiles() {
     let translation = translate_source(
         r#"

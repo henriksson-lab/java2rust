@@ -1172,6 +1172,15 @@ bindings and `MoveUseContext` now projects binding use-count requests through
 `BindingId` before falling back to legacy usage facts. This is intentionally
 behavior-preserving groundwork for the planned per-callable CFG/liveness pass.
 Focused coverage: `expr_shape_owns_environment_setup_from_signature_plan`.
+
+Loop back-edge compatibility slice: `while`, `do while`, and `for` body lowering
+now carry loop condition/body/update reads through the existing later-read query
+so values consumed in each iteration are cloned instead of moved on the first
+iteration. `for` initializer declarations are removed from this loop-carried set
+so cursor locals such as `Iterator i = ...` are not treated as outer values.
+Focused coverage: `loop_body_reuses_owned_value_with_back_edge_clone`. This
+does not close the planned CFG/liveness work: labelled control flow, switch
+fallthrough, exception/finally edges, and true `BindingId` program points remain.
 Optional receiver borrowed-carrier follow-up: call-target receiver adaptation no
 longer projects already-borrowed optional receivers inline. The shared optional
 receiver slot-plan adapter now handles `OptionalElementBorrow` receivers,

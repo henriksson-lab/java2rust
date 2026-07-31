@@ -4686,6 +4686,118 @@ fn statement_suffix_mutated_names(statements: &[Stmt]) -> HashSet<String> {
     names
 }
 
+fn loop_carried_read_names_for_while(
+    condition: &Expr,
+    body: &Block,
+    inherited_later_read_names: Option<&HashSet<String>>,
+) -> HashSet<String> {
+    let mut names = loop_carried_read_names_for_block(body, inherited_later_read_names);
+    collect_expr_read_names(condition, &mut names);
+    remove_block_declared_names(body, &mut names);
+    names
+}
+
+fn loop_carried_read_names_for_for(
+    init: &[Stmt],
+    condition: Option<&Expr>,
+    update: &[Expr],
+    body: &Block,
+    inherited_later_read_names: Option<&HashSet<String>>,
+) -> HashSet<String> {
+    let mut names = loop_carried_read_names_for_block(body, inherited_later_read_names);
+    if let Some(condition) = condition {
+        collect_expr_read_names(condition, &mut names);
+    }
+    for expr in update {
+        collect_expr_read_names(expr, &mut names);
+    }
+    for stmt in init {
+        collect_stmt_declared_names(stmt, &mut names);
+    }
+    remove_block_declared_names(body, &mut names);
+    names
+}
+
+fn loop_carried_read_names_for_block(
+    body: &Block,
+    inherited_later_read_names: Option<&HashSet<String>>,
+) -> HashSet<String> {
+    let mut names = statement_suffix_read_names(&body.statements);
+    if let Some(inherited_later_read_names) = inherited_later_read_names {
+        names.extend(inherited_later_read_names.iter().cloned());
+    }
+    remove_block_declared_names(body, &mut names);
+    names
+}
+
+fn remove_block_declared_names(block: &Block, names: &mut HashSet<String>) {
+    for stmt in &block.statements {
+        collect_stmt_declared_names(stmt, names);
+    }
+}
+
+fn collect_stmt_declared_names(stmt: &Stmt, names: &mut HashSet<String>) {
+    match stmt {
+        Stmt::VarDecl { name, .. } => {
+            names.remove(name);
+        }
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            remove_block_declared_names(block, names);
+        }
+        Stmt::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            remove_block_declared_names(then_block, names);
+            if let Some(else_block) = else_block {
+                remove_block_declared_names(else_block, names);
+            }
+        }
+        Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::For { body, .. } => {
+            remove_block_declared_names(body, names);
+        }
+        Stmt::EnhancedFor { var_name, body, .. } => {
+            names.remove(var_name);
+            remove_block_declared_names(body, names);
+        }
+        Stmt::Switch { cases, .. } => {
+            for case in cases {
+                for stmt in &case.statements {
+                    collect_stmt_declared_names(stmt, names);
+                }
+            }
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            for resource in resources {
+                collect_stmt_declared_names(resource, names);
+            }
+            remove_block_declared_names(body, names);
+            for catch in catches {
+                names.remove(&catch.name);
+                remove_block_declared_names(&catch.body, names);
+            }
+            if let Some(finally_block) = finally_block {
+                remove_block_declared_names(finally_block, names);
+            }
+        }
+        Stmt::Assign { .. }
+        | Stmt::Expr(_)
+        | Stmt::Return(_)
+        | Stmt::Break(_)
+        | Stmt::Continue(_)
+        | Stmt::Throw(_)
+        | Stmt::LocalType(_)
+        | Stmt::ConstructorInvocation { .. }
+        | Stmt::Unsupported(_) => {}
+    }
+}
+
 fn statement_read_counts(stmt: &Stmt) -> HashMap<String, usize> {
     let mut counts = HashMap::new();
     collect_stmt_read_counts(stmt, &mut counts);
@@ -5038,8 +5150,14 @@ fn lower_stmt(
                 ));
             }
             WhileStmtPlan::Plain { condition, body } => {
+                let loop_read_names =
+                    loop_carried_read_names_for_while(condition, body, ctx.later_read_names);
+                let body_ctx = LowerCtx {
+                    later_read_names: Some(&loop_read_names),
+                    ..ctx
+                };
                 let condition = lower_expr_for_slot(condition, env, condition_slot(), ctx);
-                let body = lower_block(body, &mut env.clone(), wrap_returns_in_ok, ctx);
+                let body = lower_block(body, &mut env.clone(), wrap_returns_in_ok, body_ctx);
                 if let Some(label) = label {
                     out.push(RustStmt::Loop {
                         label: Some(label.clone()),
@@ -5057,7 +5175,15 @@ fn lower_stmt(
             }
             WhileStmtPlan::Infinite { body } => out.push(RustStmt::Loop {
                 label: label.clone(),
-                body: lower_block(body, &mut env.clone(), wrap_returns_in_ok, ctx),
+                body: {
+                    let loop_read_names =
+                        loop_carried_read_names_for_block(body, ctx.later_read_names);
+                    let body_ctx = LowerCtx {
+                        later_read_names: Some(&loop_read_names),
+                        ..ctx
+                    };
+                    lower_block(body, &mut env.clone(), wrap_returns_in_ok, body_ctx)
+                },
             }),
         },
         Stmt::DoWhile {
@@ -5065,8 +5191,14 @@ fn lower_stmt(
             condition,
             label,
         } => {
-            let mut loop_body = lower_block(body, &mut env.clone(), wrap_returns_in_ok, ctx);
             let lowered_condition = lower_expr_for_slot(condition, env, condition_slot(), ctx);
+            let loop_read_names =
+                loop_carried_read_names_for_while(condition, body, ctx.later_read_names);
+            let body_ctx = LowerCtx {
+                later_read_names: Some(&loop_read_names),
+                ..ctx
+            };
+            let mut loop_body = lower_block(body, &mut env.clone(), wrap_returns_in_ok, body_ctx);
             loop_body.push(if_stmt(
                 logical_not_projection(lowered_condition),
                 vec![break_stmt(label.clone())],
@@ -5090,11 +5222,22 @@ fn lower_stmt(
                     learn_stmt_shapes(init_stmt, env, ctx.current_local_shapes, ctx.signatures);
                 }
             }
+            let loop_read_names = loop_carried_read_names_for_for(
+                init,
+                condition.as_ref(),
+                update,
+                body,
+                ctx.later_read_names,
+            );
+            let body_ctx = LowerCtx {
+                later_read_names: Some(&loop_read_names),
+                ..ctx
+            };
             let mut loop_body =
-                lower_block_for_body(body, update, &mut env.clone(), wrap_returns_in_ok, ctx);
+                lower_block_for_body(body, update, &mut env.clone(), wrap_returns_in_ok, body_ctx);
             let lowered_updates = update
                 .iter()
-                .map(|expr| lower_expr_with_refinements(expr, env, ctx, refinements))
+                .map(|expr| lower_expr_with_refinements(expr, env, body_ctx, refinements))
                 .collect::<Vec<_>>();
             if let Some(label) = label {
                 rewrite_labelled_continue_with_updates(&mut loop_body, label, &lowered_updates);
@@ -25589,8 +25732,15 @@ fn lower_block_for_body(
 ) -> Vec<RustStmt> {
     let mut out = Vec::new();
     for (index, stmt) in block.statements.iter().enumerate() {
-        let later_read_names = statement_suffix_read_names(&block.statements[index + 1..]);
-        let later_mutated_names = statement_suffix_mutated_names(&block.statements[index + 1..]);
+        let mut later_read_names = statement_suffix_read_names(&block.statements[index + 1..]);
+        if let Some(inherited_later_read_names) = ctx.later_read_names {
+            later_read_names.extend(inherited_later_read_names.iter().cloned());
+        }
+        let mut later_mutated_names =
+            statement_suffix_mutated_names(&block.statements[index + 1..]);
+        if let Some(inherited_later_mutated_names) = ctx.later_mutated_names {
+            later_mutated_names.extend(inherited_later_mutated_names.iter().cloned());
+        }
         let current_stmt_read_counts = statement_read_counts(stmt);
         let stmt_ctx = LowerCtx {
             later_read_names: Some(&later_read_names),

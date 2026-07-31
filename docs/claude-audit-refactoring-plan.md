@@ -449,6 +449,11 @@ Landed in this batch:
   binding use-count query through a `BindingId` before using the legacy
   name-keyed usage facts, creating the migration path for CFG/liveness without
   changing lowering behavior yet.
+- Loop-body lowering now threads loop-carried read names through the existing
+  later-read query for `while`, `do while`, and `for` bodies, including the
+  `claude_audits/repro/LoopMove.java` shape where an owned value is consumed on
+  every iteration. This is still a compatibility approximation, not the planned
+  per-callable CFG/liveness result.
 
 1. Introduce `BindingId`.
    - Cover params, locals, catch params, loop variables, and fields.
@@ -535,7 +540,7 @@ Completion checklist for any audit marked `fixed locally`:
 
 | Audit | Status | Plan owner |
 |---|---:|---|
-| `0001` loop back edges invisible | open | Binding/CFG |
+| `0001` loop back edges invisible | partial | Basic loop-carried read compatibility covers the LoopMove-style repeated consume; full CFG/liveness with labelled/switch/exception edges still open |
 | `0002` object aliasing/clones | open | Clone discipline, then object representation |
 | `0003` integer arithmetic semantics | partial | Binary int/long overflow, shift-distance masking, and local integral update wrapping fixed; divide-by-zero exception integration remains |
 | `0004` string concat absorbs arithmetic | fixed locally | Moved to `claude_audits/done`; Rust IR shape tags prevent recurrence |
