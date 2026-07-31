@@ -5586,6 +5586,33 @@ class JavaIntegerArithmeticExceptionSemantics {
             return 523;
         }
     }
+
+    int catchLogicalCondition(int value, int divisor) {
+        try {
+            if (value / divisor > 3 && value > 0) {
+                return 531;
+            }
+            return 532;
+        } catch (ArithmeticException ex) {
+            return 533;
+        }
+    }
+
+    int catchTernaryBranch(boolean useDiv, int value, int divisor) {
+        try {
+            return useDiv ? value / divisor : 7;
+        } catch (ArithmeticException ex) {
+            return 541;
+        }
+    }
+
+    int catchTernaryCondition(int value, int divisor) {
+        try {
+            return value / divisor > 3 ? 551 : 552;
+        } catch (ArithmeticException ex) {
+            return 553;
+        }
+    }
 }
 "#,
     );
@@ -5644,6 +5671,15 @@ mod generated_tests {
         assert_eq!(fixture.catch_while_condition(8, 0), 513);
         assert_eq!(fixture.catch_for_condition(8, 2), 521);
         assert_eq!(fixture.catch_for_condition(8, 0), 523);
+        assert_eq!(fixture.catch_logical_condition(8, 2), 531);
+        assert_eq!(fixture.catch_logical_condition(8, 3), 532);
+        assert_eq!(fixture.catch_logical_condition(8, 0), 533);
+        assert_eq!(fixture.catch_ternary_branch(true, 8, 2), 4);
+        assert_eq!(fixture.catch_ternary_branch(true, 8, 0), 541);
+        assert_eq!(fixture.catch_ternary_branch(false, 8, 0), 7);
+        assert_eq!(fixture.catch_ternary_condition(8, 2), 551);
+        assert_eq!(fixture.catch_ternary_condition(8, 3), 552);
+        assert_eq!(fixture.catch_ternary_condition(8, 0), 553);
         assert_eq!(fixture.catch_int_div(i32::MIN, -1), i32::MIN);
         assert_eq!(fixture.catch_int_rem(i32::MIN, -1), 0);
         assert_eq!(fixture.catch_long_div(i64::MIN, -1), i64::MIN);

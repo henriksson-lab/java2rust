@@ -7766,6 +7766,22 @@ conditions. Focused verification covers that generated fixture,
 `0003` remains partial because method arguments, array indexes, ternary/logical
 arms, and a fuller expression fallibility model still need structured handling.
 
+2026-07-31 logical/ternary integer fallibility checkpoint: boolean `&&`/`||`
+expressions with fallible checked-arithmetic sides now lower to result blocks
+that preserve Java short-circuit behavior, and slot-aware ternary expressions
+now propagate fallible conditions or selected branches without evaluating the
+unchosen branch. The expanded
+`java_integer_division_and_remainder_by_zero_raise_catchable_arithmetic_exception`
+generated fixture covers catchable arithmetic in logical conditions, ternary
+branches, ternary conditions, and an unchosen zero-divisor ternary branch.
+Focused verification covers that generated fixture,
+`java_integer_binary_ops_wrap_and_mask_shift_distance`,
+`operator_lowering_owns_binary_and_unary_rust_spelling`,
+`cargo fmt`, `cargo check --tests --quiet`, and `git diff --check`. Audit
+`0003` remains partial because fallible arithmetic in method arguments, array
+indexes, and a fuller unchecked-exception propagation model still need
+structured handling.
+
 ## Rerun Protocol
 
 After each fix:

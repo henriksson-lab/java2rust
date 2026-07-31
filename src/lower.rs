@@ -6297,6 +6297,48 @@ fn lower_numeric_binary_expr_with_fallible_operands(
     )))
 }
 
+fn lower_logical_binary_expr_with_fallible_operands(
+    op: BinaryOp,
+    left: &Expr,
+    right: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    if !matches!(op, BinaryOp::And | BinaryOp::Or) {
+        return None;
+    }
+    let left_needs_result = slot_expr_needs_result_propagation(left, env, ctx);
+    let right_needs_result = slot_expr_needs_result_propagation(right, env, ctx);
+    if !left_needs_result && !right_needs_result {
+        return None;
+    }
+    let left_value =
+        lower_expr_for_slot_with_refinements(left, env, condition_slot(), ctx, refinements);
+    let left_value = if left_needs_result {
+        propagate_result_projection(left_value)
+    } else {
+        left_value
+    };
+    let right_value =
+        lower_expr_for_slot_with_refinements(right, env, condition_slot(), ctx, refinements);
+    let right_value = if right_needs_result {
+        propagate_result_projection(right_value)
+    } else {
+        right_value
+    };
+    let left = emit::emit_expr(&left_value);
+    let right = emit::emit_expr(&right_value);
+    let body = match op {
+        BinaryOp::And => format!("if !__java_left {{ Ok(false) }} else {{ Ok({right}) }}"),
+        BinaryOp::Or => format!("if __java_left {{ Ok(true) }} else {{ Ok({right}) }}"),
+        _ => unreachable!("checked above"),
+    };
+    Some(RustExpr::Raw(format!(
+        "{{ let __java_left: bool = {left}; {body} }}"
+    )))
+}
+
 fn lower_nullable_assignment_condition_value(
     value: &Expr,
     env: &ShapeEnv,
@@ -11894,6 +11936,11 @@ fn lower_binary_expr(
     if is_null_literal(left)
         && let Some(expr) =
             lower_null_comparison_expr_for_shape(op, right, true, env, ctx, refinements)
+    {
+        return expr;
+    }
+    if let Some(expr) =
+        lower_logical_binary_expr_with_fallible_operands(op, left, right, env, ctx, refinements)
     {
         return expr;
     }
@@ -23263,6 +23310,16 @@ fn slot_expr_needs_result_propagation(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx
         return slot_expr_needs_result_propagation(left, env, ctx)
             || slot_expr_needs_result_propagation(right, env, ctx);
     }
+    if let Expr::Ternary {
+        condition,
+        then_expr,
+        else_expr,
+    } = expr
+    {
+        return slot_expr_needs_result_propagation(condition, env, ctx)
+            || slot_expr_needs_result_propagation(then_expr, env, ctx)
+            || slot_expr_needs_result_propagation(else_expr, env, ctx);
+    }
     let Expr::Call {
         receiver,
         name,
@@ -26845,6 +26902,19 @@ fn lower_ternary_expr_for_slot(
     refinements: &ExprRefinements,
 ) -> RustExpr {
     let (then_refinements, else_refinements) = branch_refinements(condition, refinements);
+    if let Some(expr) = lower_fallible_ternary_expr_for_slot(
+        condition,
+        then_expr,
+        else_expr,
+        env,
+        slot.clone(),
+        ctx,
+        refinements,
+        &then_refinements,
+        &else_refinements,
+    ) {
+        return expr;
+    }
     if matches!(slot, Slot::StringConcatSegment | Slot::DisplaySegment)
         && let Some((tested_expr, then_branch_non_null)) =
             ternary_condition_non_null_branch_expr(condition)
@@ -27006,6 +27076,52 @@ fn lower_ternary_expr_for_slot(
         lower_expr_for_slot_with_refinements(then_expr, env, slot.clone(), ctx, &then_refinements),
         lower_expr_for_slot_with_refinements(else_expr, env, slot, ctx, &else_refinements),
     )
+}
+
+fn lower_fallible_ternary_expr_for_slot(
+    condition: &Expr,
+    then_expr: &Expr,
+    else_expr: &Expr,
+    env: &ShapeEnv,
+    slot: Slot,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+    then_refinements: &ExprRefinements,
+    else_refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    let condition_needs_result = slot_expr_needs_result_propagation(condition, env, ctx);
+    let then_needs_result = slot_expr_needs_result_propagation(then_expr, env, ctx);
+    let else_needs_result = slot_expr_needs_result_propagation(else_expr, env, ctx);
+    if !condition_needs_result && !then_needs_result && !else_needs_result {
+        return None;
+    }
+    let condition_value =
+        lower_expr_for_slot_with_refinements(condition, env, condition_slot(), ctx, refinements);
+    let condition_value = if condition_needs_result {
+        propagate_result_projection(condition_value)
+    } else {
+        condition_value
+    };
+    let then_value =
+        lower_expr_for_slot_with_refinements(then_expr, env, slot.clone(), ctx, then_refinements);
+    let then_value = if then_needs_result {
+        propagate_result_projection(then_value)
+    } else {
+        then_value
+    };
+    let else_value =
+        lower_expr_for_slot_with_refinements(else_expr, env, slot, ctx, else_refinements);
+    let else_value = if else_needs_result {
+        propagate_result_projection(else_value)
+    } else {
+        else_value
+    };
+    Some(RustExpr::Raw(format!(
+        "{{ if {} {{ Ok({}) }} else {{ Ok({}) }} }}",
+        emit::emit_expr(&condition_value),
+        emit::emit_expr(&then_value),
+        emit::emit_expr(&else_value)
+    )))
 }
 
 fn lower_present_expr_for_optional_target(
