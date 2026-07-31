@@ -29,6 +29,10 @@ Keep the standing constraint: do not make algorithm changes that block future
 global semantic analysis. Prefer explicit keys, indices, compatibility shims,
 and divergence logs.
 
+Latest user instruction: once a Claude audit is done, move its issue file to
+`/home/mahogny/github/claude/new_java2rust/claude_audits/done` as part of the
+same completed checkpoint.
+
 Current checkpoint rule: after implementing and verifying a Claude audit item,
 move its issue file from active `claude_audits/` into
 `/home/mahogny/github/claude/new_java2rust/claude_audits/done` before calling

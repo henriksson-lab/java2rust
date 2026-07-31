@@ -46,9 +46,12 @@ use crate::coercion::{
 use crate::facts::FactSet;
 use crate::facts::ReceiverAbi;
 use crate::java_ir::{Expr, JavaType, LambdaBody, PrimitiveType};
+use crate::representation::RepresentationPlan;
 use crate::rust_ir::RustExpr;
 use crate::shape_projection::shape_is_erased_object_boundary;
-use crate::slot_render::rust_type_for_slot_with_facts;
+use crate::slot_render::{
+    rust_type_for_slot_with_facts, rust_type_for_slot_with_facts_and_representations,
+};
 use crate::stream_lowering::{StreamLambdaValue, emit_stream_lambda_body};
 
 pub fn apply_call_target(
@@ -935,8 +938,32 @@ pub fn apply_new_target_with_facts(
     args: Vec<RustExpr>,
     facts: &FactSet,
 ) -> RustExpr {
+    apply_new_target_with_optional_representations(target, args, facts, None)
+}
+
+pub fn apply_new_target_with_facts_and_representations(
+    target: &NewTargetPlan,
+    args: Vec<RustExpr>,
+    facts: &FactSet,
+    representations: &RepresentationPlan,
+) -> RustExpr {
+    apply_new_target_with_optional_representations(target, args, facts, Some(representations))
+}
+
+fn apply_new_target_with_optional_representations(
+    target: &NewTargetPlan,
+    args: Vec<RustExpr>,
+    facts: &FactSet,
+    representations: Option<&RepresentationPlan>,
+) -> RustExpr {
     if let Some(native_collection) = target.native_collection {
-        return apply_native_collection_new_target(target, native_collection, args, facts);
+        return apply_native_collection_new_target(
+            target,
+            native_collection,
+            args,
+            facts,
+            representations,
+        );
     }
     if let Some(external_crate) = &target.external_crate {
         return function_call_projection(
@@ -948,8 +975,17 @@ pub fn apply_new_target_with_facts(
             args,
         );
     }
-    let owner_type =
-        crate::emit::emit_type(&rust_type_for_slot_with_facts(&target.owner_shape, facts));
+    let owner_type = crate::emit::emit_type(
+        &representations
+            .map(|representations| {
+                rust_type_for_slot_with_facts_and_representations(
+                    &target.owner_shape,
+                    facts,
+                    representations,
+                )
+            })
+            .unwrap_or_else(|| rust_type_for_slot_with_facts(&target.owner_shape, facts)),
+    );
     if target.rust_name == "new"
         && args.len() == 1
         && boxed_primitive_constructor_owner(&target.owner_shape.java_ty)
@@ -1014,10 +1050,24 @@ fn apply_native_collection_new_target(
     native_collection: NativeCollectionNewTarget,
     mut args: Vec<RustExpr>,
     facts: &FactSet,
+    representations: Option<&RepresentationPlan>,
 ) -> RustExpr {
     if native_collection_new_target_kind(native_collection)
         == crate::stdlib::JavaCollectionKind::Set
-        && crate::slot_render::java_set_uses_hash_free_carrier(&target.owner_shape.java_ty, facts)
+        && representations
+            .map(|representations| {
+                crate::slot_render::java_set_uses_hash_free_carrier_with_representations(
+                    &target.owner_shape.java_ty,
+                    facts,
+                    representations,
+                )
+            })
+            .unwrap_or_else(|| {
+                crate::slot_render::java_set_uses_hash_free_carrier(
+                    &target.owner_shape.java_ty,
+                    facts,
+                )
+            })
     {
         return match native_collection {
             NativeCollectionNewTarget::Empty { .. } => {

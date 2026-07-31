@@ -4486,10 +4486,15 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
         Coercion::WrapClosedEnum {
             enum_name,
             variant_name,
-        } => RustExpr::Raw(format!(
-            "{enum_name}::{variant_name}({})",
-            emit::emit_expr(&expr)
-        )),
+        } => {
+            let rendered = emit::emit_expr(&expr);
+            if java_type_param_variant_name(variant_name) {
+                let root_variant = enum_name.strip_suffix("Value").unwrap_or(enum_name);
+                RustExpr::Raw(format!("{enum_name}::{root_variant}({rendered}.into())"))
+            } else {
+                RustExpr::Raw(format!("{enum_name}::{variant_name}({rendered})"))
+            }
+        }
         Coercion::BorrowDynTrait { trait_name } => borrow_as_dyn_trait(expr, trait_name),
         Coercion::BorrowBoxedDynTrait { trait_name } => RustExpr::Raw(format!(
             "{}.as_ref() as &dyn {trait_name}",
@@ -4611,6 +4616,10 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
             apply_unsupported_ownership_coercion(expr, *actual_ownership, *target_ownership, policy)
         }
     }
+}
+
+fn java_type_param_variant_name(name: &str) -> bool {
+    name.len() == 1 && name.chars().all(|ch| ch.is_ascii_uppercase())
 }
 
 fn render_option_some(expr: RustExpr) -> RustExpr {

@@ -7502,6 +7502,27 @@ produce concrete `VCFHeaderLine`; remaining compile families also include
 `VCFCompoundHeaderLine` erased-field comparisons and generic `T` wrapping into
 `VCFHeaderLineValue`.
 
+2026-07-31 carrier-aware collection signature checkpoint: external facade
+support, source method return/parameter signatures, constructor parameter
+signatures, local declarations, native collection constructors, and `Set.add`
+now consult representation-aware Java collection rendering when a `Set<T>`
+element type has non-concrete dispatch. Generic type-parameter wrapping into a
+carrier enum uses the carrier root variant plus the existing `Into<Root>` bound
+instead of inventing a `Carrier::T(...)` variant, and source hierarchy carriers
+still emit subtype-to-root `From` impls for those generic bounds. Focused
+verification: `source_hierarchy_companion_carrier_set_locals_lower_as_vec`,
+`external_set_return_uses_source_hierarchy_companion_carrier_element`,
+`source_hierarchy_instanceof`, `cargo fmt --check`,
+`cargo check --tests --quiet`, and release-backed reduced VCF rerun
+`.tmp/corpus-rerun-20260731-vcf-after-carrier-aware-local-set-r5`. That rerun
+keeps 9/9 translated, 0 parse failures, 0 invalid-pattern files, and
+`stubbed_constants=0`; generated-Rust errors remain 36, but the
+`repair_standard_header_lines` accumulator now consistently renders as
+`Vec<VCFHeaderLineValue>` with `Vec::with_capacity(...)` and `push(...)`.
+Remaining top families are `Box<dyn Any>` field access/comparison and clone
+capability gaps, so audit `0011` remains partial and its issue file must stay
+active.
+
 ## Rerun Protocol
 
 After each fix:

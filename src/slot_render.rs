@@ -1,6 +1,7 @@
 use crate::effective_facts::EffectiveFacts;
 use crate::facts::{DispatchRequirementKind, ExternalLibraryMode, FactSet, HierarchyStrategy};
 use crate::java_ir::{JavaType, PrimitiveType, WildcardBound};
+use crate::representation::RepresentationPlan;
 use crate::rust_ir::{RustExpr, RustType};
 use crate::slot_shape::{DispatchShape, OwnershipShape, RustSlotShape, ViewShape};
 use crate::types::optional_element_type;
@@ -112,6 +113,47 @@ pub fn erased_object_rust_type() -> RustType {
 pub fn rust_type_for_slot_with_facts(shape: &RustSlotShape, facts: &FactSet) -> RustType {
     let effective_facts = EffectiveFacts::new(facts);
     rust_type_for_slot_with_effective_facts(shape, &effective_facts)
+}
+
+pub fn rust_type_for_slot_with_facts_and_representations(
+    shape: &RustSlotShape,
+    facts: &FactSet,
+    representations: &RepresentationPlan,
+) -> RustType {
+    if let Some(element_ty) = shape.optional_element_type() {
+        let mut element_shape = shape.clone();
+        element_shape.java_ty = element_ty;
+        element_shape.type_identity =
+            crate::slot_shape::TypeIdentity::from_java_type(element_shape.java_ty.clone());
+        return RustType::Option(Box::new(rust_type_for_slot_with_facts_and_representations(
+            &element_shape,
+            facts,
+            representations,
+        )));
+    }
+
+    let viewed = match (&shape.view, &shape.dispatch) {
+        (ViewShape::Str, _) => return rust_type_for_slot_with_facts(shape, facts),
+        (ViewShape::Slice, _) => return rust_type_for_slot_with_facts(shape, facts),
+        (_, DispatchShape::Concrete) => rust_type_for_java_type_with_facts_and_representations(
+            &shape.java_ty,
+            facts,
+            representations,
+        ),
+        _ => rust_type_for_slot_with_facts(shape, facts),
+    };
+
+    match shape.ownership {
+        OwnershipShape::Owned | OwnershipShape::CopyValue => viewed,
+        OwnershipShape::SharedBorrow => RustType::Ref {
+            mutable: false,
+            inner: Box::new(viewed),
+        },
+        OwnershipShape::MutableBorrow => RustType::Ref {
+            mutable: true,
+            inner: Box::new(viewed),
+        },
+    }
 }
 
 pub fn rust_type_for_slot_with_effective_facts(
@@ -505,6 +547,63 @@ pub fn rust_type_for_java_type(ty: &JavaType) -> RustType {
 
 pub fn rust_type_for_java_type_with_facts(ty: &JavaType, facts: &FactSet) -> RustType {
     let effective_facts = EffectiveFacts::new(facts);
+    rust_type_for_java_type_with_effective_facts(ty, &effective_facts)
+}
+
+pub fn rust_type_for_java_type_with_facts_and_representations(
+    ty: &JavaType,
+    facts: &FactSet,
+    representations: &RepresentationPlan,
+) -> RustType {
+    let effective_facts = EffectiveFacts::new(facts);
+    if let JavaType::Named { name, args } = ty
+        && (!args.is_empty() || raw_java_collection_erasure_name(name))
+        && let Some(kind) = crate::stdlib::java_collection_kind_for_type(ty)
+    {
+        match kind {
+            crate::stdlib::JavaCollectionKind::List => {
+                let element_ty = args
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(erased_object_java_type);
+                return RustType::Vec(Box::new(
+                    rust_type_for_java_generic_arg_with_representations(
+                        &element_ty,
+                        &effective_facts,
+                        representations,
+                    ),
+                ));
+            }
+            crate::stdlib::JavaCollectionKind::Set => {
+                let element_ty = args
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(erased_object_java_type);
+                let element_rust = rust_type_for_java_generic_arg_with_representations(
+                    &element_ty,
+                    &effective_facts,
+                    representations,
+                );
+                if java_set_element_uses_hash_free_carrier_with_representations(
+                    Some(&element_ty),
+                    &effective_facts,
+                    representations,
+                ) {
+                    return RustType::Vec(Box::new(element_rust));
+                }
+                return RustType::Raw(format!(
+                    "std::collections::HashSet<{}>",
+                    crate::emit::emit_type(&element_rust)
+                ));
+            }
+            crate::stdlib::JavaCollectionKind::Map => {}
+        }
+    }
+
+    if let Some(dispatch_ty) = rust_type_for_representation_dispatch(ty, representations) {
+        return dispatch_ty;
+    }
+
     rust_type_for_java_type_with_effective_facts(ty, &effective_facts)
 }
 
@@ -940,6 +1039,32 @@ fn rust_type_for_java_generic_arg_with_effective_facts(
     rust_type_for_java_type_with_effective_facts(ty, facts)
 }
 
+fn rust_type_for_java_generic_arg_with_representations(
+    ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+    representations: &RepresentationPlan,
+) -> RustType {
+    if let Some(dispatch_ty) = rust_type_for_representation_dispatch(ty, representations) {
+        return dispatch_ty;
+    }
+    rust_type_for_java_generic_arg_with_effective_facts(ty, facts)
+}
+
+fn rust_type_for_representation_dispatch(
+    ty: &JavaType,
+    representations: &RepresentationPlan,
+) -> Option<RustType> {
+    match representations.dispatch_for(ty) {
+        DispatchShape::ClosedEnum { enum_name } => Some(RustType::Named(enum_name)),
+        DispatchShape::ErasedObject => Some(erased_object_rust_type()),
+        DispatchShape::BoxedDynTrait { trait_name } => {
+            Some(RustType::Raw(format!("Box<dyn {trait_name}>")))
+        }
+        DispatchShape::DynTrait { trait_name } => Some(RustType::Raw(format!("dyn {trait_name}"))),
+        DispatchShape::Concrete => None,
+    }
+}
+
 fn closed_runtime_case_split_enum_name(
     ty: &JavaType,
     facts: &EffectiveFacts<'_>,
@@ -1032,6 +1157,20 @@ pub fn java_set_uses_hash_free_carrier(ty: &JavaType, facts: &FactSet) -> bool {
     java_set_uses_hash_free_carrier_with_effective_facts(ty, &effective_facts)
 }
 
+pub fn java_set_uses_hash_free_carrier_with_representations(
+    ty: &JavaType,
+    facts: &FactSet,
+    representations: &RepresentationPlan,
+) -> bool {
+    let effective_facts = EffectiveFacts::new(facts);
+    java_set_uses_hash_free_carrier_with_effective_facts(ty, &effective_facts)
+        || java_set_element_uses_hash_free_carrier_with_representations(
+            java_set_element_type_or_erased(ty).as_ref(),
+            &effective_facts,
+            representations,
+        )
+}
+
 pub fn java_set_uses_hash_free_carrier_with_effective_facts(
     ty: &JavaType,
     facts: &EffectiveFacts<'_>,
@@ -1051,6 +1190,22 @@ pub fn java_set_uses_hash_free_carrier_with_effective_facts(
     java_set_element_uses_hash_free_carrier(&element_ty, facts)
 }
 
+fn java_set_element_type_or_erased(ty: &JavaType) -> Option<JavaType> {
+    let JavaType::Named { args, .. } = ty else {
+        return None;
+    };
+    if crate::stdlib::java_collection_kind_for_type(ty)
+        != Some(crate::stdlib::JavaCollectionKind::Set)
+    {
+        return None;
+    }
+    Some(
+        args.first()
+            .cloned()
+            .unwrap_or_else(erased_object_java_type),
+    )
+}
+
 fn java_set_element_uses_hash_free_carrier(
     element_ty: &JavaType,
     facts: &EffectiveFacts<'_>,
@@ -1062,4 +1217,22 @@ fn java_set_element_uses_hash_free_carrier(
     representation_policy.preserve_object_representation
         && !external_final_facade_should_keep_named_type(element_ty, facts)
         && !crate::javalibs::generic_facade_interface_erases_to_named_rust_type(element_ty)
+}
+
+fn java_set_element_uses_hash_free_carrier_with_representations(
+    element_ty: Option<&JavaType>,
+    facts: &EffectiveFacts<'_>,
+    representations: &RepresentationPlan,
+) -> bool {
+    let Some(element_ty) = element_ty else {
+        return false;
+    };
+    java_set_element_uses_hash_free_carrier(element_ty, facts)
+        || matches!(
+            representations.dispatch_for(element_ty),
+            DispatchShape::ClosedEnum { .. }
+                | DispatchShape::ErasedObject
+                | DispatchShape::BoxedDynTrait { .. }
+                | DispatchShape::DynTrait { .. }
+        )
 }

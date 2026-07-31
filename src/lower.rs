@@ -9,7 +9,7 @@ use crate::array_plan::plan_array_expr;
 use crate::binding_id::BindingId;
 use crate::call_lowering::{
     apply_call_target, apply_class_literal_token, apply_collection_remove_if,
-    apply_native_collection_extend, apply_new_target_with_facts,
+    apply_native_collection_extend, apply_new_target_with_facts_and_representations,
 };
 use crate::call_plan::{
     ArgumentLoweringPlan, CallExceptionPropagationPlan, CallExprPlan, CallStatementPlan,
@@ -176,7 +176,7 @@ use crate::slot_shape::{DispatchShape, MutabilityShape, ViewShape};
 use crate::slot_shape::{OwnershipShape, RustSlotShape};
 use crate::statement_render::{
     assignment_stmt, break_stmt, continue_stmt, expr_stmt, if_stmt,
-    local_let_stmt_with_facts_and_type_annotation, raw_stmt, render_block_stmt,
+    local_let_stmt_with_facts_representations_and_type_annotation, raw_stmt, render_block_stmt,
     render_enhanced_for, render_enhanced_for_iterator, while_stmt,
 };
 use crate::stdlib::{
@@ -1685,11 +1685,33 @@ fn source_supertype_conversion_impl_for_pair(
         args: Vec::new(),
     };
     if let DispatchShape::ClosedEnum { enum_name } = representations.dispatch_for(&super_ty_java) {
-        return (sub_name != enum_name).then(|| {
-            format!(
-                "impl From<{sub_name}> for {enum_name} {{\n    fn from(value: {sub_name}) -> Self {{\n        {enum_name}::{sub_name}(value)\n    }}\n}}"
+        if sub_name == enum_name {
+            return None;
+        }
+        let mut impls = vec![format!(
+            "impl From<{sub_name}> for {enum_name} {{\n    fn from(value: {sub_name}) -> Self {{\n        {enum_name}::{sub_name}(value)\n    }}\n}}"
+        )];
+        let super_name = crate::slot_render::rust_name_for_java_named_type(&super_ty.name);
+        if sub_name != super_name
+            && matches!(
+                representations.representation_for(&super_ty_java),
+                crate::representation::ObjectRepresentation::SourceHierarchyCarrier { .. }
             )
-        });
+        {
+            let fields = source_instance_field_names_for_conversion(
+                super_ty,
+                support_program,
+                source_summary_program,
+            )
+            .into_iter()
+            .map(|name| format!("            {name}: value.{name},"))
+            .collect::<Vec<_>>()
+            .join("\n");
+            impls.push(format!(
+                "impl From<{sub_name}> for {super_name} {{\n    fn from(value: {sub_name}) -> Self {{\n        {super_name} {{\n{fields}\n        }}\n    }}\n}}"
+            ));
+        }
+        return Some(impls.join("\n\n"));
     }
     if matches!(
         representations.dispatch_for(&super_ty_java),
@@ -2188,7 +2210,7 @@ fn lower_constructor(
     if let Some(body) = &ctor.body
         && let Some(function) = lower_delegating_constructor(ty, ctor, body, &env, constructor_ctx)
     {
-        return function;
+        return apply_representation_aware_constructor_signature(function, ty, ctor, ctx);
     }
     if let Some(body) = &ctor.body
         && let Some((fields, prefix, trailing, render_env, returns_result)) =
@@ -2213,7 +2235,7 @@ fn lower_constructor(
         if returns_result {
             function.return_type = Some(exception_result_type(RustType::Named(ty.name.clone())));
         }
-        return function;
+        return apply_representation_aware_constructor_signature(function, ty, ctor, ctx);
     }
     if let Some(body) = &ctor.body {
         for stmt in &body.statements {
@@ -2265,14 +2287,42 @@ fn lower_constructor(
         )
     };
 
-    constructor_function_shell_with_facts_and_support_contexts(
+    let function = constructor_function_shell_with_facts_and_support_contexts(
         ty,
         ctor,
         ctx.signatures,
         body,
         ctx.facts,
         &source_bound_support_programs(ctx),
-    )
+    );
+    apply_representation_aware_constructor_signature(function, ty, ctor, ctx)
+}
+
+fn apply_representation_aware_constructor_signature(
+    mut function: RustFunction,
+    ty: &TypeDecl,
+    ctor: &ConstructorDecl,
+    ctx: LowerCtx,
+) -> RustFunction {
+    let constructor_signature = ctx.signatures.required_constructor_signature(ty, ctor);
+    for (param, param_plan) in function
+        .params
+        .iter_mut()
+        .zip(constructor_signature.params.iter())
+    {
+        let representation_aware_param =
+            crate::slot_render::rust_type_for_slot_with_facts_and_representations(
+                &param_plan.shape,
+                ctx.facts,
+                ctx.representations,
+            );
+        if representation_aware_param
+            != crate::slot_render::rust_type_for_slot_with_facts(&param_plan.shape, ctx.facts)
+        {
+            param.ty = representation_aware_param;
+        }
+    }
+    function
 }
 
 fn lower_constructor_field_value_plan(
@@ -4607,7 +4657,7 @@ fn lower_method_with_exception_owner(
         body.push(return_stmt(None, true));
     }
     prepend_assigned_parameter_shadows(method, &mut body);
-    method_function_shell_with_facts_exception_plan_and_support_contexts(
+    let mut function = method_function_shell_with_facts_exception_plan_and_support_contexts(
         ty,
         method,
         ctx.signatures,
@@ -4615,7 +4665,42 @@ fn lower_method_with_exception_owner(
         ctx.facts,
         exception_plan,
         &source_bound_support_programs(ctx),
-    )
+    );
+    if let Some(return_shape) = method_signature.return_shape.as_ref() {
+        let representation_aware_return =
+            crate::slot_render::rust_type_for_slot_with_facts_and_representations(
+                return_shape,
+                ctx.facts,
+                ctx.representations,
+            );
+        if representation_aware_return
+            != crate::slot_render::rust_type_for_slot_with_facts(return_shape, ctx.facts)
+        {
+            function.return_type = Some(if exception_plan.wrap_returns_in_result {
+                exception_result_type(representation_aware_return)
+            } else {
+                representation_aware_return
+            });
+        }
+    }
+    for (param, param_plan) in function
+        .params
+        .iter_mut()
+        .zip(method_signature.params.iter())
+    {
+        let representation_aware_param =
+            crate::slot_render::rust_type_for_slot_with_facts_and_representations(
+                &param_plan.shape,
+                ctx.facts,
+                ctx.representations,
+            );
+        if representation_aware_param
+            != crate::slot_render::rust_type_for_slot_with_facts(&param_plan.shape, ctx.facts)
+        {
+            param.ty = representation_aware_param;
+        }
+    }
+    function
 }
 
 fn lower_inherited_method(
@@ -5071,17 +5156,20 @@ fn lower_stmt(
             if let Some(initializer) = lowered_initializer.as_mut() {
                 hoist_borrowed_string_temporaries_in_initializer(name, initializer, out);
             }
-            out.push(local_let_stmt_with_facts_and_type_annotation(
-                &local_plan,
-                lowered_initializer,
-                ctx.facts,
-                local_decl_should_annotate_type(
-                    &local_plan.java_ty,
-                    initializer.as_ref(),
-                    env,
-                    ctx,
+            out.push(
+                local_let_stmt_with_facts_representations_and_type_annotation(
+                    &local_plan,
+                    lowered_initializer,
+                    ctx.facts,
+                    ctx.representations,
+                    local_decl_should_annotate_type(
+                        &local_plan.java_ty,
+                        initializer.as_ref(),
+                        env,
+                        ctx,
+                    ),
                 ),
-            ));
+            );
             let env_shape =
                 local_env_shape_from_initializer(&local_plan.shape, initializer.as_ref(), env, ctx)
                     .unwrap_or_else(|| local_plan.shape.clone());
@@ -11125,7 +11213,12 @@ fn lower_expr_with_refinements(
                 )
             };
             let rust_args = lower_constructor_args_with_plan(args, env, constructor_arg_plan, ctx);
-            let mut lowered = apply_new_target_with_facts(&target, rust_args, ctx.facts);
+            let mut lowered = apply_new_target_with_facts_and_representations(
+                &target,
+                rust_args,
+                ctx.facts,
+                ctx.representations,
+            );
             if external_constructor_returns_rust_result(ty, args.len(), ctx.facts) {
                 lowered = propagate_result_projection(lowered);
             }
@@ -16793,7 +16886,11 @@ fn apply_call_target_with_lower_context(
         receiver_ty: Some(receiver_ty),
         ..
     } = target
-        && crate::slot_render::java_set_uses_hash_free_carrier(receiver_ty, ctx.facts)
+        && crate::slot_render::java_set_uses_hash_free_carrier_with_representations(
+            receiver_ty,
+            ctx.facts,
+            ctx.representations,
+        )
     {
         return receiver_method_call_projection_exact(
             lowered_receiver.expect("native collection target must provide receiver"),

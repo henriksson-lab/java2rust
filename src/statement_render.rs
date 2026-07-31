@@ -1,7 +1,10 @@
 use crate::facts::FactSet;
+use crate::representation::RepresentationPlan;
 use crate::rust_ir::{RustExpr, RustStmt};
 use crate::signature::LocalPlan;
-use crate::slot_render::rust_type_for_slot_with_facts;
+use crate::slot_render::{
+    rust_type_for_slot_with_facts, rust_type_for_slot_with_facts_and_representations,
+};
 
 pub fn local_let_stmt(local: &LocalPlan, value: Option<RustExpr>) -> RustStmt {
     local_let_stmt_with_facts(local, value, &FactSet::default())
@@ -25,6 +28,23 @@ pub fn local_let_stmt_with_facts_and_type_annotation(
         mutable: local.binding_mutable,
         name: local.name.clone(),
         ty: annotate_type.then(|| rust_type_for_slot_with_facts(&local.shape, facts)),
+        value,
+    }
+}
+
+pub fn local_let_stmt_with_facts_representations_and_type_annotation(
+    local: &LocalPlan,
+    value: Option<RustExpr>,
+    facts: &FactSet,
+    representations: &RepresentationPlan,
+    annotate_type: bool,
+) -> RustStmt {
+    RustStmt::Let {
+        mutable: local.binding_mutable,
+        name: local.name.clone(),
+        ty: annotate_type.then(|| {
+            rust_type_for_slot_with_facts_and_representations(&local.shape, facts, representations)
+        }),
         value,
     }
 }

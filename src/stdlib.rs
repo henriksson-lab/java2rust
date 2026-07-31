@@ -20,7 +20,7 @@ use crate::slot_render::{
     dyn_trait_rust_path, rust_name_for_java_named_type, rust_type_for_java_type_with_facts,
     rust_type_for_slot_with_facts,
 };
-use crate::slot_shape::{MutabilityShape, OwnershipShape, RustSlotShape};
+use crate::slot_shape::{DispatchShape, MutabilityShape, OwnershipShape, RustSlotShape};
 use crate::types::{
     raw_generic_type_head, raw_rust_option_inner, raw_rust_result_args, raw_rust_type_is_option,
     raw_rust_type_is_result,
@@ -6668,6 +6668,7 @@ pub fn external_api_facade_support_items_with_local_type_program(
     support.add_used_external_constructors(facts, &used_constructors, &local_types);
     support.add_used_external_api_facts(
         facts,
+        representations,
         &used_calls,
         &local_types,
         &source_summary_types,
@@ -6676,6 +6677,7 @@ pub fn external_api_facade_support_items_with_local_type_program(
     );
     support.add_builtin_used_external_api_facts(
         facts,
+        representations,
         &used_calls,
         &local_types,
         &source_summary_types,
@@ -6709,7 +6711,7 @@ pub fn external_api_facade_support_items_with_local_type_program(
     support.add_builder_surface_from_used_calls(facts, &used_calls);
     support.add_display_context_return_hint_surfaces(facts, &display_return_hints);
     support.add_external_field_surfaces(facts, &local_types);
-    support.add_static_external_api_facts_for_surface_types(facts);
+    support.add_static_external_api_facts_for_surface_types(facts, representations);
     support.add_external_dyn_trait_surfaces(facts, &declared_external_type_exclusions);
     support.add_external_conversion_surfaces(facts, &local_types);
     support.suppress_rust_crate_mapped_external_types(facts);
@@ -8109,6 +8111,7 @@ impl ExternalApiFacadeSupport {
     fn add_used_external_api_facts(
         &mut self,
         facts: &FactSet,
+        representations: &RepresentationPlan,
         used_calls: &BTreeMap<String, BTreeSet<usize>>,
         local_types: &BTreeSet<String>,
         source_summary_types: &BTreeSet<String>,
@@ -8222,6 +8225,7 @@ impl ExternalApiFacadeSupport {
                 let (mut return_rust, mut unmodelled_value_return) = self
                     .external_api_fact_return_surface(
                         facts,
+                        representations,
                         &receiver_key,
                         &fact.method_name,
                         &rust_method,
@@ -8310,6 +8314,7 @@ impl ExternalApiFacadeSupport {
     fn add_builtin_used_external_api_facts(
         &mut self,
         facts: &FactSet,
+        representations: &RepresentationPlan,
         used_calls: &BTreeMap<String, BTreeSet<usize>>,
         local_types: &BTreeSet<String>,
         source_summary_types: &BTreeSet<String>,
@@ -8383,6 +8388,7 @@ impl ExternalApiFacadeSupport {
                     let (return_rust, unmodelled_value_return) = self
                         .external_api_fact_return_surface(
                             facts,
+                            representations,
                             &receiver_key,
                             &fact.method_name,
                             &rust_method,
@@ -8454,7 +8460,11 @@ impl ExternalApiFacadeSupport {
         }
     }
 
-    fn add_static_external_api_facts_for_surface_types(&mut self, facts: &FactSet) {
+    fn add_static_external_api_facts_for_surface_types(
+        &mut self,
+        facts: &FactSet,
+        representations: &RepresentationPlan,
+    ) {
         let surface_types = self.opaque_types.iter().cloned().collect::<BTreeSet<_>>();
         let mut merged_facts = facts.clone();
         merged_facts.extend_from(crate::external_packs::builtin_external_library_packs());
@@ -8496,6 +8506,7 @@ impl ExternalApiFacadeSupport {
                 );
                 let (return_rust, unmodelled_value_return) = self.external_api_fact_return_surface(
                     &merged_facts,
+                    representations,
                     &receiver_key,
                     &fact.method_name,
                     &rust_method,
@@ -8521,6 +8532,7 @@ impl ExternalApiFacadeSupport {
     fn external_api_fact_return_surface(
         &mut self,
         facts: &FactSet,
+        representations: &RepresentationPlan,
         receiver_key: &str,
         java_method: &str,
         rust_method: &str,
@@ -8530,8 +8542,9 @@ impl ExternalApiFacadeSupport {
         if let Some(return_type) = &fact.return_type {
             self.add_java_type(return_type);
             return (
-                external_facade_method_return_type_with_facts(
+                external_facade_method_return_type_with_facts_and_representations(
                     facts,
+                    representations,
                     Some(receiver_key),
                     java_method,
                     Some(arg_count),
@@ -12648,6 +12661,40 @@ fn external_facade_method_return_type_with_facts(
     external_facade_wrap_result_for_effects(facts, receiver_type, method_name, arg_count, rendered)
 }
 
+fn external_facade_method_return_type_with_facts_and_representations(
+    facts: &FactSet,
+    representations: &RepresentationPlan,
+    receiver_type: Option<&str>,
+    method_name: &str,
+    arg_count: Option<usize>,
+    java_type: &JavaType,
+    nullability: NullabilityState,
+) -> String {
+    let rendered = if let Some(return_type) = external_facade_method_abi_return_type_with_facts(
+        facts,
+        receiver_type,
+        method_name,
+        arg_count,
+        java_type,
+    ) {
+        normalize_external_facade_return_type_text(&return_type)
+    } else if let Some(rust_return) =
+        facts.external_rust_return_type_for_receiver(receiver_type, method_name, arg_count)
+    {
+        normalize_external_facade_return_type_text(&rust_return.rust_type_name)
+    } else {
+        normalize_external_facade_return_type_text(
+            &external_facade_return_type_with_facts_representations_and_nullability(
+                facts,
+                representations,
+                java_type,
+                nullability,
+            ),
+        )
+    };
+    external_facade_wrap_result_for_effects(facts, receiver_type, method_name, arg_count, rendered)
+}
+
 fn external_facade_wrap_result_for_effects(
     facts: &FactSet,
     receiver_type: Option<&str>,
@@ -12926,6 +12973,113 @@ fn external_facade_return_type_with_facts_and_nullability(
         format!("Option<{rendered}>")
     } else {
         rendered
+    }
+}
+
+fn external_facade_return_type_with_representations(
+    java_type: &JavaType,
+    facts: &FactSet,
+    representations: &RepresentationPlan,
+) -> String {
+    if let Some(rust_type) = external_opaque_final_facade_return_type(java_type, facts) {
+        return rust_type;
+    }
+    if let Some(dispatch_type) = representation_dispatch_return_type(java_type, representations) {
+        return dispatch_type;
+    }
+    if let Some(rust_type) = external_typed_erased_facade_return_type(java_type, facts) {
+        return rust_type;
+    }
+    match java_type {
+        JavaType::Named { name, args } if matches!(name.as_str(), "List" | "Collection") => {
+            let element = args
+                .first()
+                .map(|arg| {
+                    external_facade_return_type_with_representations(arg, facts, representations)
+                })
+                .unwrap_or_else(|| "Box<dyn std::any::Any>".to_string());
+            format!("Vec<{element}>")
+        }
+        JavaType::Named { name, args } if matches!(name.as_str(), "Set" | "HashSet") => {
+            let element_ty = args.first();
+            let element = element_ty
+                .map(|arg| {
+                    external_facade_return_type_with_representations(arg, facts, representations)
+                })
+                .unwrap_or_else(|| "Box<dyn std::any::Any>".to_string());
+            if element_ty.is_some_and(|arg| {
+                representation_dispatch_return_type(arg, representations).is_some()
+            }) || crate::slot_render::java_set_uses_hash_free_carrier(java_type, facts)
+            {
+                format!("Vec<{element}>")
+            } else {
+                format!("std::collections::HashSet<{element}>")
+            }
+        }
+        JavaType::Named { name, args }
+            if matches!(name.as_str(), "Map" | "HashMap" | "LinkedHashMap") =>
+        {
+            let key = args
+                .first()
+                .map(|arg| {
+                    external_facade_return_type_with_representations(arg, facts, representations)
+                })
+                .unwrap_or_else(|| "String".to_string());
+            let value = args
+                .get(1)
+                .map(|arg| {
+                    external_facade_return_type_with_representations(arg, facts, representations)
+                })
+                .unwrap_or_else(|| "Box<dyn std::any::Any>".to_string());
+            format!("std::collections::HashMap<{key}, {value}>")
+        }
+        JavaType::Named { name, args } if matches!(name.as_str(), "Iterable") => {
+            let element = args
+                .first()
+                .map(|arg| {
+                    external_facade_return_type_with_representations(arg, facts, representations)
+                })
+                .unwrap_or_else(|| "Box<dyn std::any::Any>".to_string());
+            format!("Vec<{element}>")
+        }
+        JavaType::Named { name, args } => {
+            external_facade_crate_mapped_return_type(name, args, facts)
+                .unwrap_or_else(|| external_facade_return_type_with_facts(java_type, facts))
+        }
+        _ => external_facade_return_type_with_facts(java_type, facts),
+    }
+}
+
+fn external_facade_return_type_with_facts_representations_and_nullability(
+    facts: &FactSet,
+    representations: &RepresentationPlan,
+    java_type: &JavaType,
+    nullability: NullabilityState,
+) -> String {
+    let rendered =
+        external_facade_return_type_with_representations(java_type, facts, representations);
+    if rendered != "()"
+        && matches!(
+            nullability,
+            NullabilityState::MaybeNull | NullabilityState::DefinitelyNull
+        )
+    {
+        format!("Option<{rendered}>")
+    } else {
+        rendered
+    }
+}
+
+fn representation_dispatch_return_type(
+    java_type: &JavaType,
+    representations: &RepresentationPlan,
+) -> Option<String> {
+    match representations.dispatch_for(java_type) {
+        DispatchShape::ClosedEnum { enum_name } => Some(enum_name),
+        DispatchShape::ErasedObject => Some("Box<dyn std::any::Any>".to_string()),
+        DispatchShape::BoxedDynTrait { trait_name } => Some(format!("Box<dyn {trait_name}>")),
+        DispatchShape::DynTrait { trait_name } => Some(format!("dyn {trait_name}")),
+        DispatchShape::Concrete => None,
     }
 }
 

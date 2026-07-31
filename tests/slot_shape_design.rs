@@ -4231,6 +4231,113 @@ class UseLine {
 }
 
 #[test]
+fn external_set_return_uses_source_hierarchy_companion_carrier_element() {
+    let parsed = parse_java_source(
+        r#"
+import htsjdk.variant.vcf.VCFHeader;
+
+class VCFHeaderLine {
+    String name;
+
+    String key() {
+        return name;
+    }
+}
+
+class VCFCompoundHeaderLine extends VCFHeaderLine {}
+class VCFFormatHeaderLine extends VCFCompoundHeaderLine {}
+class VCFInfoHeaderLine extends VCFCompoundHeaderLine {}
+
+class UseHeader {
+    void scan(VCFHeader header) {
+        for (VCFHeaderLine line : header.getMetaDataInInputOrder()) {
+            if (line instanceof VCFFormatHeaderLine) {
+                line.key();
+            }
+        }
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let mut facts = resolved.facts.clone();
+    facts.extend_from(new_java2rust::external_packs::htsjdk_vcf_pack_facts());
+    let representations = plan_representations(&resolved.program, &facts);
+    let items = new_java2rust::stdlib::external_api_facade_support_items_with_local_type_program(
+        &resolved.program,
+        &facts,
+        &resolved.program,
+        &new_java2rust::java_ir::Program::default(),
+        &representations,
+    );
+    let rendered = new_java2rust::emit::emit_file(&new_java2rust::rust_ir::RustFile { items });
+
+    assert!(
+        rendered.contains(
+            "pub fn get_meta_data_in_input_order(&self) -> Vec<VCFHeaderLineValue>"
+        ) && !rendered.contains(
+            "pub fn get_meta_data_in_input_order(&self) -> std::collections::HashSet<VCFHeaderLine>"
+        ),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn source_hierarchy_companion_carrier_set_locals_lower_as_vec() {
+    let parsed = parse_java_source(
+        r#"
+import java.util.HashSet;
+import java.util.Set;
+
+class HeaderLine {
+    String name;
+
+    String key() {
+        return name;
+    }
+}
+
+final class FormatLine extends HeaderLine {}
+final class InfoLine extends HeaderLine {}
+
+class UseHeader {
+    Set<HeaderLine> scan() {
+        Set<HeaderLine> newLines = new HashSet<HeaderLine>();
+        HeaderLine line = new FormatLine();
+        newLines.add(line);
+        return newLines;
+    }
+
+    boolean isFormat(HeaderLine line) {
+        return line instanceof FormatLine;
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let facts = resolved.facts.clone();
+    let usage = analyze_usage(&resolved.program);
+    let representations = plan_representations(&resolved.program, &facts);
+    let signatures = solve_signatures(&resolved.program, &representations, &usage);
+    let lowered = lower_program_with_plans(
+        &resolved.program,
+        resolved.diagnostics,
+        &facts,
+        &usage,
+        &representations,
+        &signatures,
+    );
+    let rust = emit::emit_file(&lowered.file);
+
+    assert!(
+        rust.contains("let mut new_lines: Vec<HeaderLineValue> = Vec::new();")
+            && rust.contains("new_lines.push(")
+            && !rust.contains("std::collections::HashSet<HeaderLine>"),
+        "{rust}"
+    );
+}
+
+#[test]
 fn source_class_fields_beat_external_erased_and_closed_facts() {
     let parsed = parse_java_source(
         r#"
