@@ -21686,6 +21686,56 @@ class CombinedGuardExactLine extends CombinedGuardErasedSuperLine {
 }
 
 #[test]
+fn erased_source_static_methods_lower_as_free_helpers() {
+    let mut facts = FactSet::default();
+    facts.hierarchy_overrides.push(HierarchyOverride {
+        type_name: "ErasedStaticHelper".to_string(),
+        strategy: HierarchyStrategy::ErasedObject,
+        provenance: FactProvenance::UserOverride,
+    });
+    let translation = translate_source_with_facts(
+        r#"
+class ErasedStaticHelper {
+    static int encode(int value) {
+        return value + 1;
+    }
+
+    static int call(int value) {
+        return encode(value);
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub type ErasedStaticHelper = Box<dyn std::any::Any>;")
+            && translation
+                .rust
+                .contains("pub fn erased_static_helper_encode(value: i32) -> i32")
+            && translation
+                .rust
+                .contains("pub fn erased_static_helper_call(value: i32) -> i32")
+            && translation
+                .rust
+                .contains("return erased_static_helper_encode(value);")
+            && !translation.rust.contains("ErasedStaticHelper::encode"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "erased_source_static_methods_free_helpers",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn string_value_of_static_owner_uses_native_jdk_projection() {
     let translation = translate_source(
         r#"

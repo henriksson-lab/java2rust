@@ -746,7 +746,7 @@ strip_shared_support_items() {
         copy_depth -= gsub(/\}/, "}")
         next
       }
-      if ($0 ~ /^impl([[:space:]]*<[^{}]+>)?[[:space:]]+.*[[:space:]]+for[[:space:]]+[A-Za-z_][A-Za-z0-9_]*(<.*>)?[[:space:]]*\{/) {
+      if ($0 ~ /^impl([[:space:]]*<[^{}]+>)?[[:space:]]+.*[[:space:]]+for[[:space:]]+&?([[:space:]]*)?[A-Za-z_][A-Za-z0-9_]*(<.*>)?[[:space:]]*\{/) {
         impl_trait_raw = $0
         sub(/^impl([[:space:]]*<[^{}]+>)?[[:space:]]+/, "", impl_trait_raw)
         sub(/[[:space:]]+for[[:space:]].*/, "", impl_trait_raw)

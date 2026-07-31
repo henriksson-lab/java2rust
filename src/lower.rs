@@ -854,6 +854,17 @@ fn lower_type(
             file.items.push(raw_item(bound_item));
         }
         file.items.push(raw_item(item));
+        let erased_static_functions = erased_source_static_free_functions(program, ty, ctx);
+        if !erased_static_functions.is_empty() {
+            file.items
+                .push(RustItem::Raw(erased_source_static_trait_item(
+                    ty,
+                    &erased_static_functions,
+                )));
+            for function in erased_static_functions {
+                file.items.push(RustItem::Function(function));
+            }
+        }
         if matches!(ty.kind, TypeKind::Enum) {
             let functions = ty
                 .members
@@ -961,6 +972,117 @@ fn lower_type(
     }
 }
 
+fn erased_source_static_free_functions(
+    program: &Program,
+    ty: &TypeDecl,
+    ctx: LowerCtx,
+) -> Vec<RustFunction> {
+    if !source_type_lowers_as_erased_object_alias(ty, ctx) {
+        return Vec::new();
+    }
+    ty.members
+        .iter()
+        .filter_map(|member| match member {
+            Member::Method(method) if method.modifiers.contains(&Modifier::Static) => {
+                let mut function = lower_method(program, ty, method, ctx);
+                function.name = erased_source_static_free_function_name(
+                    &ty.name,
+                    &crate::java_signature::source_method_rust_name(method),
+                );
+                function.receiver = None;
+                Some(function)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn source_type_lowers_as_erased_object_alias(ty: &TypeDecl, ctx: LowerCtx) -> bool {
+    ctx.representations
+        .type_representation(&ty.name)
+        .is_some_and(|entry| {
+            matches!(
+                entry.representation,
+                crate::representation::ObjectRepresentation::ErasedObject
+            )
+        })
+}
+
+fn erased_source_static_free_function_name(owner: &str, rust_name: &str) -> String {
+    format!(
+        "{}_{}",
+        crate::parser::to_snake_case(&crate::slot_render::rust_name_for_java_named_type(owner)),
+        rust_name
+    )
+}
+
+fn erased_source_static_trait_item(ty: &TypeDecl, functions: &[RustFunction]) -> String {
+    let trait_name = erased_source_static_trait_name(&ty.name);
+    let owner_name = crate::slot_render::rust_name_for_java_named_type(&ty.name);
+    let mut out = format!("pub trait {trait_name} {{\n");
+    for function in functions {
+        let mut trait_function = function.clone();
+        trait_function.name = erased_source_static_original_rust_name(&ty.name, &function.name)
+            .unwrap_or_else(|| function.name.clone());
+        trait_function.is_pub = false;
+        let mut rendered = crate::emit::emit_file(&RustFile {
+            items: vec![RustItem::Function(trait_function)],
+        });
+        rendered =
+            rewrite_erased_source_static_helper_calls_for_trait(owner_name.as_str(), rendered);
+        for line in rendered.trim_end().lines() {
+            out.push_str("    ");
+            out.push_str(line);
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+    out.push_str("}\n\n");
+    out.push_str(&format!("impl {trait_name} for {owner_name} {{}}\n"));
+    out
+}
+
+fn rewrite_erased_source_static_helper_calls_for_trait(
+    owner: &str,
+    mut rendered: String,
+) -> String {
+    let prefix = format!("{}_", crate::parser::to_snake_case(owner));
+    while let Some(start) = rendered.find(&prefix) {
+        let name_start = start + prefix.len();
+        let Some(paren_offset) = rendered[name_start..].find('(') else {
+            break;
+        };
+        let name_end = name_start + paren_offset;
+        let rust_name = &rendered[name_start..name_end];
+        if rust_name
+            .chars()
+            .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+        {
+            rendered.replace_range(start..name_start, "Self::");
+        } else {
+            break;
+        }
+    }
+    rendered
+}
+
+fn erased_source_static_original_rust_name(owner: &str, helper_name: &str) -> Option<String> {
+    let prefix = format!(
+        "{}_",
+        crate::parser::to_snake_case(&crate::slot_render::rust_name_for_java_named_type(owner))
+    );
+    helper_name
+        .strip_prefix(&prefix)
+        .map(std::string::ToString::to_string)
+}
+
+fn erased_source_static_trait_name(owner: &str) -> String {
+    format!(
+        "{}ErasedStatic",
+        crate::slot_render::rust_name_for_java_named_type(owner)
+    )
+}
+
 fn raw_interface_trait_item_with_default_methods(
     ty: &TypeDecl,
     program: &Program,
@@ -1033,7 +1155,11 @@ fn interface_default_trait_method_item(
         current_type: Some(&ty.name),
         current_method: Some(&method.name),
         current_constructor: None,
-        current_receiver: Some(method_signature.receiver),
+        current_receiver: Some(if method.modifiers.contains(&Modifier::Static) {
+            ReceiverPlan::None
+        } else {
+            method_signature.receiver
+        }),
         current_return_shape: method_signature.return_shape.as_ref(),
         current_local_shapes: method_signature.locals.as_slice(),
         ..ctx
@@ -9424,7 +9550,7 @@ fn plan_call_expr_with_lower_context<'a>(
     ctx: LowerCtx<'_>,
     env: &ShapeEnv,
 ) -> CallExprPlan<'a> {
-    plan_call_expr_with_external_index(
+    let plan = plan_call_expr_with_external_index(
         receiver,
         name,
         args,
@@ -9432,7 +9558,164 @@ fn plan_call_expr_with_lower_context<'a>(
         ctx.facts,
         ctx.external_index,
         env.type_env(),
-    )
+    );
+    retarget_erased_source_static_call_to_free_function(plan, receiver, resolved, ctx, env)
+}
+
+fn retarget_erased_source_static_call_to_free_function<'a>(
+    plan: CallExprPlan<'a>,
+    receiver: Option<&'a Expr>,
+    resolved: Option<&ResolvedCall>,
+    ctx: LowerCtx<'_>,
+    env: &ShapeEnv,
+) -> CallExprPlan<'a> {
+    let Some((owner_key, rust_name)) =
+        erased_source_static_call_owner_and_rust_name(&plan, receiver, resolved, ctx, env)
+    else {
+        return plan;
+    };
+    let Some(owner_ty) = find_context_type_by_key(ctx.program, &owner_key) else {
+        return plan;
+    };
+    if !source_type_lowers_as_erased_object_alias(owner_ty, ctx) {
+        return plan;
+    }
+    match plan {
+        CallExprPlan::Target(
+            CallTargetPlan::StaticOwner { .. }
+            | CallTargetPlan::StaticSelf { .. }
+            | CallTargetPlan::FallbackFree { .. }
+            | CallTargetPlan::FallbackSelf { .. },
+        ) => CallExprPlan::Target(CallTargetPlan::FallbackFree {
+            rust_name: erased_source_static_free_function_name(&owner_key, &rust_name),
+        }),
+        _ => plan,
+    }
+}
+
+fn retarget_erased_source_static_context_fallback_to_free_function<'a>(
+    plan: CallExprPlan<'a>,
+    signature: Option<&ContextFallbackMethodSignature>,
+    ctx: LowerCtx<'_>,
+) -> CallExprPlan<'a> {
+    let Some(signature) = signature else {
+        return plan;
+    };
+    if signature.receiver != ReceiverPlan::None {
+        return plan;
+    }
+    let Some(owner) = signature.owner.as_deref() else {
+        return plan;
+    };
+    let Some(owner_ty) = find_context_type_by_key(ctx.program, owner) else {
+        return plan;
+    };
+    if !source_type_lowers_as_erased_object_alias(owner_ty, ctx) {
+        return plan;
+    }
+    match plan {
+        CallExprPlan::Target(
+            CallTargetPlan::StaticOwner { .. }
+            | CallTargetPlan::StaticSelf { .. }
+            | CallTargetPlan::FallbackFree { .. }
+            | CallTargetPlan::FallbackSelf { .. },
+        ) => CallExprPlan::Target(CallTargetPlan::FallbackFree {
+            rust_name: erased_source_static_free_function_name(owner, &signature.rust_name),
+        }),
+        _ => plan,
+    }
+}
+
+fn retarget_erased_source_static_context_fallback_target_to_free_function<'a>(
+    target: CallTargetPlan<'a>,
+    signature: Option<&ContextFallbackMethodSignature>,
+    ctx: LowerCtx<'_>,
+) -> CallTargetPlan<'a> {
+    let Some(signature) = signature else {
+        return target;
+    };
+    if signature.receiver != ReceiverPlan::None {
+        return target;
+    }
+    let Some(owner) = signature.owner.as_deref() else {
+        return target;
+    };
+    let Some(owner_ty) = find_context_type_by_key(ctx.program, owner) else {
+        return target;
+    };
+    if !source_type_lowers_as_erased_object_alias(owner_ty, ctx) {
+        return target;
+    }
+    match target {
+        CallTargetPlan::StaticOwner { .. }
+        | CallTargetPlan::StaticSelf { .. }
+        | CallTargetPlan::FallbackFree { .. }
+        | CallTargetPlan::FallbackSelf { .. } => CallTargetPlan::FallbackFree {
+            rust_name: erased_source_static_free_function_name(owner, &signature.rust_name),
+        },
+        target => target,
+    }
+}
+
+fn erased_source_static_call_owner_and_rust_name<'a>(
+    plan: &'a CallExprPlan<'a>,
+    receiver: Option<&'a Expr>,
+    resolved: Option<&'a ResolvedCall>,
+    ctx: LowerCtx<'_>,
+    env: &ShapeEnv,
+) -> Option<(String, String)> {
+    if let Some(receiver_owner) = explicit_source_static_receiver_type(receiver, env, ctx)
+        && let Some(rust_name) = static_call_plan_rust_name(plan)
+    {
+        return Some((receiver_owner, rust_name.to_string()));
+    }
+    if receiver.is_none()
+        && let Some(current_type) = ctx.current_type
+        && let Some(rust_name) = static_call_plan_rust_name(plan)
+    {
+        return Some((current_type.to_string(), rust_name.to_string()));
+    }
+    let resolved = resolved?;
+    if resolved.kind != CallKind::Static {
+        return None;
+    }
+    let owner_key = if resolved.declaring_type == "Self" {
+        ctx.current_type.unwrap_or(resolved.declaring_type.as_str())
+    } else {
+        resolved.declaring_type.as_str()
+    };
+    Some((owner_key.to_string(), resolved.rust_name.clone()))
+}
+
+fn explicit_source_static_receiver_type(
+    receiver: Option<&Expr>,
+    env: &ShapeEnv,
+    ctx: LowerCtx<'_>,
+) -> Option<String> {
+    let Some(Expr::Var(receiver_name)) = receiver else {
+        return None;
+    };
+    if env.type_env().local_type(receiver_name).is_some()
+        || env.type_env().field_type(receiver_name).is_some()
+    {
+        return None;
+    }
+    if let Some(owner) = env.type_env().static_type_alias(receiver_name)
+        && find_context_type_by_key(ctx.program, owner).is_some()
+    {
+        return Some(owner.to_string());
+    }
+    find_context_type_by_key(ctx.program, receiver_name).map(|_| receiver_name.to_string())
+}
+
+fn static_call_plan_rust_name<'a>(plan: &'a CallExprPlan<'a>) -> Option<&'a str> {
+    match plan {
+        CallExprPlan::Target(CallTargetPlan::StaticOwner { rust_name, .. }) => Some(rust_name),
+        CallExprPlan::Target(CallTargetPlan::StaticSelf { rust_name }) => Some(*rust_name),
+        CallExprPlan::Target(CallTargetPlan::FallbackFree { rust_name }) => Some(rust_name),
+        CallExprPlan::Target(CallTargetPlan::FallbackSelf { rust_name }) => Some(rust_name),
+        _ => None,
+    }
 }
 
 fn native_collection_extend_needs_self_read_temp(
@@ -10550,6 +10833,18 @@ fn lower_expr_with_refinements(
             let plan = apply_fallback_receiver_rust_name(plan, fallback_rust_name.clone());
             let plan = apply_fallback_self_rust_name(plan, fallback_rust_name.clone());
             let plan = apply_fallback_static_owner_rust_name(plan, fallback_rust_name);
+            let plan = retarget_erased_source_static_context_fallback_to_free_function(
+                plan,
+                context_fallback_signature.as_ref(),
+                ctx,
+            );
+            let plan = retarget_erased_source_static_call_to_free_function(
+                plan,
+                receiver.as_deref(),
+                resolved.as_ref(),
+                ctx,
+                env,
+            );
             let plan = retarget_native_java_string_call_from_shape(
                 plan,
                 receiver.as_deref(),
@@ -10609,6 +10904,11 @@ fn lower_expr_with_refinements(
             let target = retarget_receiverless_current_static_call(
                 target,
                 context_fallback_signature.as_ref(),
+            );
+            let target = retarget_erased_source_static_context_fallback_target_to_free_function(
+                target,
+                context_fallback_signature.as_ref(),
+                ctx,
             );
             let target = retarget_receiverless_resolved_static_owner_call(
                 target,
@@ -13354,6 +13654,7 @@ fn static_owner_expr_candidates(receiver: &Expr, env: &ShapeEnv) -> Vec<String> 
 
 #[derive(Debug, Clone)]
 struct ContextFallbackMethodSignature {
+    owner: Option<String>,
     rust_name: String,
     arg_shapes: Vec<RustSlotShape>,
     receiver: ReceiverPlan,
@@ -13379,6 +13680,7 @@ fn context_fallback_signature_for_method(
         })
     {
         return ContextFallbackMethodSignature {
+            owner: Some(owner.to_string()),
             rust_name,
             arg_shapes: signature
                 .params
@@ -13390,6 +13692,7 @@ fn context_fallback_signature_for_method(
         };
     }
     ContextFallbackMethodSignature {
+        owner: Some(owner.to_string()),
         rust_name,
         arg_shapes: source_context_param_shapes(method, ctx),
         receiver: ReceiverPlan::Shared,
@@ -13402,6 +13705,7 @@ fn context_fallback_signature_for_signature(
     signature: &crate::signature::MethodSignaturePlan,
 ) -> ContextFallbackMethodSignature {
     ContextFallbackMethodSignature {
+        owner: None,
         rust_name,
         arg_shapes: signature
             .params
@@ -16402,11 +16706,32 @@ fn apply_call_target_with_lower_context(
     args: Vec<RustExpr>,
     ctx: LowerCtx,
 ) -> RustExpr {
-    if ctx.current_method.is_some()
-        && matches!(ctx.current_receiver, Some(ReceiverPlan::None))
-        && let CallTargetPlan::FallbackSelf { rust_name } = target
-    {
-        return function_call_projection(self_associated_path_projection(rust_name), args);
+    if ctx.current_method.is_some() && matches!(ctx.current_receiver, Some(ReceiverPlan::None)) {
+        let current_static_self_name = match target {
+            CallTargetPlan::StaticOwner { owner, rust_name } if owner == "Self" => {
+                Some(rust_name.as_str())
+            }
+            CallTargetPlan::StaticSelf { rust_name } => Some(*rust_name),
+            CallTargetPlan::FallbackSelf { rust_name } => Some(rust_name.as_str()),
+            _ => None,
+        };
+        if let Some(rust_name) = current_static_self_name {
+            if let Some(current_type) = ctx.current_type
+                && let Some(owner_ty) = find_context_type_by_key(ctx.program, current_type)
+                && source_type_lowers_as_erased_object_alias(owner_ty, ctx)
+            {
+                return function_call_projection(
+                    RustExpr::Var(erased_source_static_free_function_name(
+                        current_type,
+                        rust_name,
+                    )),
+                    args,
+                );
+            }
+            if matches!(target, CallTargetPlan::FallbackSelf { .. }) {
+                return function_call_projection(self_associated_path_projection(rust_name), args);
+            }
+        }
     }
     apply_call_target(target, lowered_receiver, args)
 }
@@ -23056,6 +23381,7 @@ fn source_context_static_method_fallback_signature(
                 })
             {
                 return Some(ContextFallbackMethodSignature {
+                    owner: Some(owner.clone()),
                     rust_name,
                     arg_shapes: non_emitted_static_context_arg_shapes_from_signature(signature),
                     receiver: signature.receiver,
@@ -23095,6 +23421,7 @@ fn source_context_static_method_fallback_signature(
             })
         {
             return Some(ContextFallbackMethodSignature {
+                owner: Some(owner.clone()),
                 rust_name,
                 arg_shapes: declared_method
                     .map(|method| non_emitted_static_context_arg_shapes_for_method(method, ctx))
@@ -23113,6 +23440,7 @@ fn source_context_static_method_fallback_signature(
             .clone()
             .unwrap_or_else(|| crate::parser::to_snake_case(&method.name));
         return Some(ContextFallbackMethodSignature {
+            owner: Some(owner.clone()),
             rust_name: rust_name.clone(),
             arg_shapes: non_emitted_static_context_arg_shapes_for_method(method, ctx),
             receiver: ctx
@@ -23207,6 +23535,7 @@ fn source_context_resolved_static_method_fallback_signature(
         })
     {
         return Some(ContextFallbackMethodSignature {
+            owner: Some(owner.to_string()),
             rust_name,
             arg_shapes: if owner_is_emitted {
                 signature
@@ -23393,6 +23722,7 @@ fn source_context_current_static_method_fallback_signature(
         })
     {
         return Some(ContextFallbackMethodSignature {
+            owner: Some(current_type.to_string()),
             rust_name,
             arg_shapes: signature
                 .params
@@ -23415,6 +23745,7 @@ fn source_context_current_static_method_fallback_signature(
             .method_signature_by_rust_name(current_type, &rust_name)
         {
             return Some(ContextFallbackMethodSignature {
+                owner: Some(current_type.to_string()),
                 rust_name,
                 arg_shapes: signature
                     .params
@@ -23426,6 +23757,7 @@ fn source_context_current_static_method_fallback_signature(
             });
         }
         return Some(ContextFallbackMethodSignature {
+            owner: Some(current_type.to_string()),
             rust_name,
             arg_shapes: source_context_param_shapes(method, ctx),
             receiver: ReceiverPlan::Shared,
@@ -23734,6 +24066,7 @@ fn source_context_receiver_method_fallback_signature(
                     .collect()
             };
             return Some(ContextFallbackMethodSignature {
+                owner: Some(owner.clone()),
                 rust_name,
                 arg_shapes,
                 receiver: effective_signature.receiver,
@@ -23767,6 +24100,7 @@ fn source_context_receiver_method_fallback_signature(
                     .collect()
             };
             return Some(ContextFallbackMethodSignature {
+                owner: Some(owner.clone()),
                 rust_name,
                 arg_shapes,
                 receiver: ReceiverPlan::Shared,
@@ -25149,6 +25483,18 @@ fn lower_external_call_expr_for_slot(
     let plan = apply_fallback_receiver_rust_name(plan, fallback_rust_name.clone());
     let plan = apply_fallback_self_rust_name(plan, fallback_rust_name.clone());
     let plan = apply_fallback_static_owner_rust_name(plan, fallback_rust_name);
+    let plan = retarget_erased_source_static_context_fallback_to_free_function(
+        plan,
+        context_fallback_signature.as_ref(),
+        ctx,
+    );
+    let plan = retarget_erased_source_static_call_to_free_function(
+        plan,
+        receiver.as_deref(),
+        resolved.as_ref(),
+        ctx,
+        env,
+    );
     let target = match plan {
         CallExprPlan::Target(target) => target,
         CallExprPlan::TrivialAccessorGetter { receiver, .. }
@@ -25181,6 +25527,11 @@ fn lower_external_call_expr_for_slot(
     );
     let target =
         retarget_receiverless_current_static_call(target, context_fallback_signature.as_ref());
+    let target = retarget_erased_source_static_context_fallback_target_to_free_function(
+        target,
+        context_fallback_signature.as_ref(),
+        ctx,
+    );
     let target = retarget_receiverless_resolved_static_owner_call(
         target,
         receiver.as_deref(),

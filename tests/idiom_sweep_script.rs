@@ -214,6 +214,18 @@ fn focused_package_shared_support_stripper_keeps_from_impls_from_module_local_ty
 }
 
 #[test]
+fn focused_package_shared_support_stripper_keeps_reference_trait_impl_targets() {
+    let script_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/translate-focused-package.sh");
+    let script = fs::read_to_string(script_path).unwrap();
+
+    assert!(
+        script.contains("for[[:space:]]+&?([[:space:]]*)?[A-Za-z_]"),
+        "{script}"
+    );
+}
+
+#[test]
 fn focused_package_module_type_extractor_strips_trait_bounds() {
     let script_path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/translate-focused-package.sh");

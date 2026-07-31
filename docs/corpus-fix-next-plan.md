@@ -7331,6 +7331,24 @@ lightweight stateful `Pattern`/`Matcher` facades for `matcher(...)`,
 around caught `Appendable.append` paths is fixed by catch-aware call-graph
 propagation and checked-only fallibility seeds.
 
+2026-07-31 reduced VCF erased-static checkpoint: source types that lower to
+erased aliases now emit static method free helpers for receiverless calls inside
+the source type and an owner-specific trait shim for legal cross-module
+`Alias::static_method(...)` calls. The focused-package support stripper also
+keeps borrowed trait impl targets such as `impl JavaAppendValue for &String`,
+so stateful `StringBuilder.append(...)` support survives when helper bodies are
+exposed. Focused verification:
+`erased_source_static_methods_lower_as_free_helpers`,
+`focused_package_shared_support_stripper_keeps_reference_trait_impl_targets`,
+`cargo check --tests --quiet`, and release-backed reduced VCF rerun
+`.tmp/corpus-rerun-20260731-vcf-standard-bound-after-erased-static-trait-r3`.
+That rerun stays at 9/9 translated, 0 parse failures, 0 stubbed constants, and
+drops generated-Rust errors from 19 to 17. The previous
+`VCFHeaderLine::to_string_encoding_map` associated-item rows are gone. Remaining
+top families are erased-carrier field access on `Box<dyn Any>` (`name`,
+`line_type`, `type_`, `count`, `count_type`) and `HashSet<Box<dyn Any>>`
+`Eq`/`Hash` trait bounds. This is partial `0011` work only.
+
 ## Rerun Protocol
 
 After each fix:

@@ -37,6 +37,9 @@ move its issue file from `claude_audits/` to
 `/home/mahogny/github/claude/new_java2rust/claude_audits/done` in the same
 checkpoint as the implementation, plan-status update, and verification notes.
 
+2026-07-31 reminder: every completed Claude audit must be moved into
+`/home/mahogny/github/claude/new_java2rust/claude_audits/done` once done.
+
 Do not mark an audit row complete, describe an audit as closed, or commit an
 audit-closing checkpoint while its issue file still lives directly under
 `claude_audits/`. Leave partial, exploratory, or inspiration-only audit files in

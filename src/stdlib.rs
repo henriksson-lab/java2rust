@@ -4642,21 +4642,73 @@ pub trait JavaAppendValue {
     fn into_java_append_string(self) -> String;
 }
 
-macro_rules! impl_java_append_value_display {
-    ($($ty:ty),* $(,)?) => {
-        $(
-            impl JavaAppendValue for $ty {
-                fn into_java_append_string(self) -> String {
-                    self.to_string()
-                }
-            }
-        )*
-    };
+impl JavaAppendValue for bool {
+    fn into_java_append_string(self) -> String { self.to_string() }
 }
 
-impl_java_append_value_display!(
-    bool, char, i8, i16, i32, i64, isize, u8, u16, u32, u64, usize, f32, f64, String, &String, &str
-);
+impl JavaAppendValue for char {
+    fn into_java_append_string(self) -> String { self.to_string() }
+}
+
+impl JavaAppendValue for i8 {
+    fn into_java_append_string(self) -> String { self.to_string() }
+}
+
+impl JavaAppendValue for i16 {
+    fn into_java_append_string(self) -> String { self.to_string() }
+}
+
+impl JavaAppendValue for i32 {
+    fn into_java_append_string(self) -> String { self.to_string() }
+}
+
+impl JavaAppendValue for i64 {
+    fn into_java_append_string(self) -> String { self.to_string() }
+}
+
+impl JavaAppendValue for isize {
+    fn into_java_append_string(self) -> String { self.to_string() }
+}
+
+impl JavaAppendValue for u8 {
+    fn into_java_append_string(self) -> String { self.to_string() }
+}
+
+impl JavaAppendValue for u16 {
+    fn into_java_append_string(self) -> String { self.to_string() }
+}
+
+impl JavaAppendValue for u32 {
+    fn into_java_append_string(self) -> String { self.to_string() }
+}
+
+impl JavaAppendValue for u64 {
+    fn into_java_append_string(self) -> String { self.to_string() }
+}
+
+impl JavaAppendValue for usize {
+    fn into_java_append_string(self) -> String { self.to_string() }
+}
+
+impl JavaAppendValue for f32 {
+    fn into_java_append_string(self) -> String { self.to_string() }
+}
+
+impl JavaAppendValue for f64 {
+    fn into_java_append_string(self) -> String { self.to_string() }
+}
+
+impl JavaAppendValue for String {
+    fn into_java_append_string(self) -> String { self }
+}
+
+impl JavaAppendValue for &String {
+    fn into_java_append_string(self) -> String { self.clone() }
+}
+
+impl JavaAppendValue for &str {
+    fn into_java_append_string(self) -> String { self.to_string() }
+}
 
 impl JavaAppendValue for Vec<char> {
     fn into_java_append_string(self) -> String {
