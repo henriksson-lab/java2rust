@@ -5738,6 +5738,50 @@ class JavaIntegerCallArgumentExceptionSemantics {
 }
 
 #[test]
+fn java_integer_result_propagation_in_array_indexes_uses_context_policy() {
+    let translation = translate_source(
+        r#"
+class JavaIntegerArrayIndexExceptionSemantics {
+    int plainArrayIndex(int[] values, int value, int divisor) {
+        return values[value / divisor];
+    }
+
+    int catchArrayIndex(int[] values, int value, int divisor) {
+        try {
+            return values[value / divisor];
+        } catch (ArithmeticException ex) {
+            return 601;
+        }
+    }
+
+    void catchArrayAssign(int[] values, int value, int divisor) {
+        try {
+            values[value / divisor] = 7;
+        } catch (ArithmeticException ex) {
+            values[0] = 602;
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("pub fn plain_array_index")
+            && translation.rust.contains("pub fn catch_array_index")
+            && translation.rust.contains("pub fn catch_array_assign")
+            && translation
+                .rust
+                .contains("unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))")
+            && translation
+                .rust
+                .contains("Err(ex) if ex.is_instance(&[\"ArithmeticException\"])")
+            && !translation.rust.contains("value / divisor"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn java_local_update_expressions_wrap_for_integral_primitives() {
     let translation = translate_source(
         r#"

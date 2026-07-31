@@ -8558,6 +8558,15 @@ fn apply_result_propagation_policy_from_ctx(
     )
 }
 
+fn lower_index_expr(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> RustExpr {
+    apply_result_propagation_policy_from_ctx(
+        lower_expr_for_slot(expr, env, index_slot(), ctx),
+        expr,
+        env,
+        ctx,
+    )
+}
+
 fn lower_condition_expr_with_result_policy(
     condition: &Expr,
     env: &ShapeEnv,
@@ -12174,7 +12183,7 @@ fn lower_ordered_array_index_assignment_value_expr(
     {
         return None;
     }
-    let lowered_index = lower_expr_for_slot(index, env, index_slot(), ctx);
+    let lowered_index = lower_index_expr(index, env, ctx);
     let temp_index = RustExpr::Raw("__java_assignment_index".to_string());
     let lowered_target = indexed_expr(
         lower_write_sequence_receiver(array, env, ctx, refinements),
@@ -12260,7 +12269,7 @@ fn lower_ordered_array_index_assignment_stmt(
     {
         return None;
     }
-    let lowered_index = lower_expr_for_slot(index, env, index_slot(), ctx);
+    let lowered_index = lower_index_expr(index, env, ctx);
     let lowered_target = indexed_expr(
         lower_write_sequence_receiver(array, env, ctx, refinements),
         RustExpr::Raw("__java_assignment_index".to_string()),
@@ -12314,7 +12323,7 @@ fn lower_ordered_array_receiver_assignment_value_expr(
         return None;
     }
     let lowered_receiver = lower_write_sequence_receiver(array, env, ctx, refinements);
-    let lowered_index = lower_expr_for_slot(index, env, index_slot(), ctx);
+    let lowered_index = lower_index_expr(index, env, ctx);
     let receiver_temp = RustExpr::Raw("__java_assignment_receiver".to_string());
     let index_temp = RustExpr::Raw("__java_assignment_index".to_string());
     let lowered_target = indexed_expr(receiver_temp.clone(), index_temp.clone());
@@ -12373,7 +12382,7 @@ fn lower_ordered_array_receiver_assignment_stmt(
         return None;
     }
     let lowered_receiver = lower_write_sequence_receiver(array, env, ctx, refinements);
-    let lowered_index = lower_expr_for_slot(index, env, index_slot(), ctx);
+    let lowered_index = lower_index_expr(index, env, ctx);
     let lowered_target = indexed_expr(
         RustExpr::Raw("__java_assignment_receiver".to_string()),
         RustExpr::Raw("__java_assignment_index".to_string()),
@@ -12435,8 +12444,8 @@ fn lower_ordered_array2_index_assignment_value_expr(
     {
         return None;
     }
-    let row_index = lower_expr_for_slot(outer_index, env, index_slot(), ctx);
-    let col_index = lower_expr_for_slot(index, env, index_slot(), ctx);
+    let row_index = lower_index_expr(outer_index, env, ctx);
+    let col_index = lower_index_expr(index, env, ctx);
     let row_temp = RustExpr::Raw("__java_assignment_row".to_string());
     let col_temp = RustExpr::Raw("__java_assignment_col".to_string());
     let lowered_target = array2_index_projection(
@@ -12513,8 +12522,8 @@ fn lower_ordered_array2_index_assignment_stmt(
     {
         return None;
     }
-    let row_index = lower_expr_for_slot(outer_index, env, index_slot(), ctx);
-    let col_index = lower_expr_for_slot(index, env, index_slot(), ctx);
+    let row_index = lower_index_expr(outer_index, env, ctx);
+    let col_index = lower_index_expr(index, env, ctx);
     let lowered_target = array2_index_projection(
         lower_write_sequence_receiver(outer_array, env, ctx, refinements),
         RustExpr::Raw("__java_assignment_row".to_string()),
@@ -12707,13 +12716,13 @@ fn lower_array_assignment_target_expr(
     {
         return array2_index_projection(
             lower_write_sequence_receiver(outer_array, env, ctx, refinements),
-            lower_expr_for_slot(outer_index, env, index_slot(), ctx),
-            lower_expr_for_slot(index, env, index_slot(), ctx),
+            lower_index_expr(outer_index, env, ctx),
+            lower_index_expr(index, env, ctx),
         );
     }
     indexed_expr(
         lower_write_sequence_receiver(array, env, ctx, refinements),
-        lower_expr_for_slot(index, env, index_slot(), ctx),
+        lower_index_expr(index, env, ctx),
     )
 }
 
@@ -21545,7 +21554,7 @@ fn lower_ragged_array_creation_for_slot(
     {
         return None;
     }
-    let len = lower_expr_for_slot(&dimensions[0], env, index_slot(), ctx);
+    let len = lower_index_expr(&dimensions[0], env, ctx);
     Some(ragged_array_outer_creation_projection(len))
 }
 
@@ -21570,15 +21579,15 @@ fn lower_array_access_expr(
             return indexed_expr(
                 indexed_expr(
                     lower_read_sequence_receiver(outer_array, env, ctx, refinements),
-                    lower_expr_for_slot(outer_index, env, index_slot(), ctx),
+                    lower_index_expr(outer_index, env, ctx),
                 ),
-                lower_expr_for_slot(index, env, index_slot(), ctx),
+                lower_index_expr(index, env, ctx),
             );
         }
         return array2_index_projection(
             lower_read_sequence_receiver(outer_array, env, ctx, refinements),
-            lower_expr_for_slot(outer_index, env, index_slot(), ctx),
-            lower_expr_for_slot(index, env, index_slot(), ctx),
+            lower_index_expr(outer_index, env, ctx),
+            lower_index_expr(index, env, ctx),
         );
     }
 
@@ -21588,13 +21597,13 @@ fn lower_array_access_expr(
         if two_dimensional_array_expr_uses_nested_slice(array, env, ctx) {
             return indexed_expr(
                 lower_read_sequence_receiver(array, env, ctx, refinements),
-                lower_expr_for_slot(index, env, index_slot(), ctx),
+                lower_index_expr(index, env, ctx),
             );
         }
         let row_expr = receiver_method_call_projection_exact(
             lower_read_sequence_receiver(array, env, ctx, refinements),
             "row",
-            vec![lower_expr_for_slot(index, env, index_slot(), ctx)],
+            vec![lower_index_expr(index, env, ctx)],
         );
         return to_owned_sequence_projection(
             row_expr,
@@ -21607,10 +21616,7 @@ fn lower_array_access_expr(
     let lowered_array = lower_sequence_get_array_access_receiver(array, env, ctx, refinements)
         .unwrap_or_else(|| lower_read_sequence_receiver(array, env, ctx, refinements));
 
-    indexed_expr(
-        lowered_array,
-        lower_expr_for_slot(index, env, index_slot(), ctx),
-    )
+    indexed_expr(lowered_array, lower_index_expr(index, env, ctx))
 }
 
 fn lower_primitive_casted_array_access(
@@ -21631,10 +21637,7 @@ fn lower_primitive_casted_array_access(
     }
     let lowered_array = lower_sequence_get_array_access_receiver(inner, env, ctx, refinements)
         .unwrap_or_else(|| lower_read_sequence_receiver(inner, env, ctx, refinements));
-    let indexed = indexed_expr(
-        lowered_array,
-        lower_expr_for_slot(index, env, index_slot(), ctx),
-    );
+    let indexed = indexed_expr(lowered_array, lower_index_expr(index, env, ctx));
     Some(RustExpr::Cast {
         expr: Box::new(indexed),
         ty: crate::coercion::rust_primitive_type_name_policy(*target)
@@ -21876,7 +21879,7 @@ fn lower_sequence_get_array_access_receiver(
             false,
         );
     }
-    let index_expr = lower_expr_for_slot(&args[0], env, index_slot(), ctx);
+    let index_expr = lower_index_expr(&args[0], env, ctx);
     Some(sequence_get_expect_projection(receiver_expr, index_expr))
 }
 
@@ -21895,7 +21898,7 @@ fn lower_array2_row_replacement_stmt(
     ))?;
     Some(array2_row_mut_assign_stmt(
         lower_expr(array, env, ctx),
-        lower_expr_for_slot(index, env, index_slot(), ctx),
+        lower_index_expr(index, env, ctx),
         lower_array2_row_replacement_value_expr(value, env, ctx),
     ))
 }
@@ -25562,7 +25565,7 @@ fn lower_sequence_get_call_expr_for_slot(
             false,
         );
     }
-    let index_expr = lower_expr_for_slot(&args[0], env, index_slot(), ctx);
+    let index_expr = lower_index_expr(&args[0], env, ctx);
     let get_expr = sequence_get_expect_projection(receiver_expr, index_expr);
     let actual =
         borrowed_sequence_element_shape_with_facts(element_ty, ctx.facts, ctx.representations);

@@ -243,8 +243,13 @@ Landed in this batch:
   the same `Result` propagation versus uncaught-panic decision as returns,
   locals, assignments, and conditions, so native/facade call arguments in
   catchable `try` scopes no longer hardcode `?` outside the shared policy.
-  This narrows audit `0003`; keep the audit active until array-index contexts
-  and the fuller unchecked-exception propagation model are covered.
+  This narrows audit `0003`; keep the audit active until the fuller
+  unchecked-exception propagation model is covered.
+- Java index-slot lowering now uses the same shared result-propagation policy.
+  Array reads, writes, ordered assignment temporaries, ndarray row/column
+  access, and sequence `.get(index)` projections no longer lower integer
+  divide/remainder inside indexes as uncaught raw Rust operations. This further
+  narrows audit `0003`, but does not close it.
 - One-dimensional array compound assignments with side-effecting indices now
   hoist the Java index once, save the old element value before evaluating the
   RHS, and reuse the shared numeric binary/narrowing planners for writeback.
