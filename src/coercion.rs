@@ -2969,6 +2969,91 @@ pub fn rewrite_downcast_expect_message(
     }
 }
 
+pub fn rewrite_optional_erased_borrowed_string_view_call_args(
+    lowered: RustExpr,
+    optional_string_locals: &[String],
+    erased_string_cast_locals: &[String],
+) -> RustExpr {
+    let mut rendered = emit::emit_expr(&lowered);
+    let mut changed = false;
+    for name in optional_string_locals {
+        let erased_string_box =
+            format!("{name}.map(|value| Box::new(value.clone()) as Box<dyn std::any::Any>)");
+        if rendered.contains(&erased_string_box) {
+            rendered = rendered.replace(
+                &erased_string_box,
+                &format!("{name}.as_ref().map(|value| value.as_str())"),
+            );
+            changed = true;
+        }
+    }
+    for name in erased_string_cast_locals {
+        let consuming_view =
+            format!("{name}.unwrap().downcast::<String>().expect(\"invalid Java cast\").as_str()");
+        if rendered.contains(&consuming_view) {
+            rendered = rendered.replace(
+                &consuming_view,
+                &format!(
+                    "{name}.as_ref().and_then(|value| value.downcast_ref::<String>()).expect(\"invalid Java cast\").as_str()"
+                ),
+            );
+            changed = true;
+        }
+    }
+    if let Some(rewritten) = rewrite_rendered_optional_erased_string_views(&rendered) {
+        rendered = rewritten;
+        changed = true;
+    }
+    if changed {
+        RustExpr::Raw(rendered)
+    } else {
+        lowered
+    }
+}
+
+fn rewrite_rendered_optional_erased_string_views(rendered: &str) -> Option<String> {
+    const SUFFIX: &str = ".unwrap().downcast::<String>().expect(\"invalid Java cast\").as_str()";
+    let mut out = String::with_capacity(rendered.len());
+    let mut rest = rendered;
+    let mut changed = false;
+    while let Some(pos) = rest.find(SUFFIX) {
+        let prefix = &rest[..pos];
+        let local_start = prefix
+            .char_indices()
+            .rev()
+            .find_map(|(index, ch)| (!rust_ident_char(ch)).then_some(index + ch.len_utf8()))
+            .unwrap_or(0);
+        let local_name = &prefix[local_start..];
+        if local_name.is_empty()
+            || !local_name
+                .chars()
+                .next()
+                .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+        {
+            out.push_str(prefix);
+            out.push_str(SUFFIX);
+            rest = &rest[pos + SUFFIX.len()..];
+            continue;
+        }
+        out.push_str(&prefix[..local_start]);
+        out.push_str(&format!(
+            "{local_name}.as_ref().and_then(|value| value.downcast_ref::<String>()).expect(\"invalid Java cast\").as_str()"
+        ));
+        rest = &rest[pos + SUFFIX.len()..];
+        changed = true;
+    }
+    if changed {
+        out.push_str(rest);
+        Some(out)
+    } else {
+        None
+    }
+}
+
+fn rust_ident_char(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
+}
+
 pub fn deref_borrowed_projection(expr: RustExpr) -> RustExpr {
     RustExpr::Raw(format!("*{}", emit::emit_expr(&expr)))
 }

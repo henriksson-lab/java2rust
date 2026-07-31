@@ -1586,6 +1586,11 @@ Current remaining refactor priority from the parallel audit:
    spelling (`*item`, `**item`, and receiver-parenthesized forms) now goes
    through `coercion::StreamLambdaParamProjection`, leaving stream lowering to
    choose the semantic lambda value shape.
+   Latest ordinary-call cleanup: optional-erased-string borrowed-view call
+   rewrites now live in `coercion::rewrite_optional_erased_borrowed_string_view_call_args`;
+   `lower.rs` only identifies source argument candidates. This keeps the
+   rendered `.as_ref().map(|value| value.as_str())` and optional erased
+   downcast recovery policy with the other slot/coercion projections.
 
 Current implementation note, 2026-07-23:
 
