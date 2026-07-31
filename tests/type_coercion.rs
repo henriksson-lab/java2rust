@@ -8,11 +8,12 @@ use new_java2rust::coercion::{
     apply_syntax_coercion_plan, borrowed_element_recovery_fallback_message_policy,
     borrowed_string_view_projection, collapse_redundant_shared_borrow_projection,
     dispatch_coercion_fallback_message_policy, instanceof_fallback_message_policy,
-    java_integral_literal_char, literal_slot_plan, normalize_map_key_borrow_projection,
-    ownership_coercion_fallback_message_policy, parenthesize_borrowed_method_receiver,
-    plan_coercion, plan_coercion_with_facts, plan_shape_coercion, plan_shape_coercion_with_facts,
-    render_index_to_usize_projection, render_instanceof_check,
-    rust_expr_is_constructed_optional_value, rust_primitive_type_name_policy, unwrap_some_expr,
+    instanceof_pattern_downcast_ref_projection, java_integral_literal_char, literal_slot_plan,
+    normalize_map_key_borrow_projection, ownership_coercion_fallback_message_policy,
+    parenthesize_borrowed_method_receiver, plan_coercion, plan_coercion_with_facts,
+    plan_shape_coercion, plan_shape_coercion_with_facts, render_index_to_usize_projection,
+    render_instanceof_check, rust_expr_is_constructed_optional_value,
+    rust_primitive_type_name_policy, unwrap_some_expr,
 };
 use new_java2rust::conversion_lowering::{
     adapt_optional_assignment_value_for_target, apply_lowered_slot_expr_conversion,
@@ -3034,6 +3035,12 @@ fn coercion_owns_dyn_boxed_dyn_and_erased_instanceof_predicates() {
         RustExpr::Raw("animal.as_any().is::<Dog>()".to_string())
     );
     assert_eq!(
+        instanceof_pattern_downcast_ref_projection(RustExpr::Var("animal".to_string()), &dyn_check),
+        Some(RustExpr::Raw(
+            "animal.as_any().downcast_ref::<Dog>()".to_string()
+        ))
+    );
+    assert_eq!(
         boxed_check,
         InstanceOfCheck::BoxedDynTraitType {
             target_type: "Dog".to_string(),
@@ -3042,6 +3049,15 @@ fn coercion_owns_dyn_boxed_dyn_and_erased_instanceof_predicates() {
     assert_eq!(
         render_instanceof_check(RustExpr::Var("animal".to_string()), &boxed_check),
         RustExpr::Raw("animal.as_ref().as_any().is::<Dog>()".to_string())
+    );
+    assert_eq!(
+        instanceof_pattern_downcast_ref_projection(
+            RustExpr::Var("animal".to_string()),
+            &boxed_check
+        ),
+        Some(RustExpr::Raw(
+            "animal.as_ref().as_any().downcast_ref::<Dog>()".to_string()
+        ))
     );
     assert_eq!(
         erased_check,
@@ -3054,6 +3070,13 @@ fn coercion_owns_dyn_boxed_dyn_and_erased_instanceof_predicates() {
         RustExpr::Raw("object.is::<Dog>()".to_string())
     );
     assert_eq!(
+        instanceof_pattern_downcast_ref_projection(
+            RustExpr::Var("object".to_string()),
+            &erased_check
+        ),
+        Some(RustExpr::Raw("object.downcast_ref::<Dog>()".to_string()))
+    );
+    assert_eq!(
         optional_erased_check,
         InstanceOfCheck::OptionalErasedObjectType {
             target_type: "Dog".to_string(),
@@ -3062,6 +3085,15 @@ fn coercion_owns_dyn_boxed_dyn_and_erased_instanceof_predicates() {
     assert_eq!(
         render_instanceof_check(RustExpr::Var("object".to_string()), &optional_erased_check),
         RustExpr::Raw("object.as_ref().is_some_and(|value| value.is::<Dog>())".to_string())
+    );
+    assert_eq!(
+        instanceof_pattern_downcast_ref_projection(
+            RustExpr::Var("object".to_string()),
+            &optional_erased_check
+        ),
+        Some(RustExpr::Raw(
+            "object.as_ref().and_then(|value| value.downcast_ref::<Dog>())".to_string()
+        ))
     );
 }
 

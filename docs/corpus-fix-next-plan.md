@@ -7030,6 +7030,16 @@ idiom_gaps --quiet` and `cargo test instanceof --test parser_tree_sitter
 its blocker is concrete source-hierarchy runtime `instanceof` and repair-call
 slot adaptation, not parser pattern binding.
 
+2026-07-31 source-interface pattern checkpoint: pattern binding now asks the
+shared `InstanceOfCheck` plan for its runtime downcast projection, so source
+interface slots represented as dyn/boxed dyn traits bind through
+`as_any().downcast_ref::<T>()` instead of being rejected by the old
+erased-object-only lowering branch. Focused verification passed with
+`coercion_owns_dyn_boxed_dyn_and_erased_instanceof_predicates` and
+`instanceof_pattern_variable_on_source_interface_uses_trait_downcast_plan`.
+Audit `0021` remains partial; record/guarded pattern forms and open concrete
+source-hierarchy carriers still need separate work.
+
 2026-07-30 sealed source-hierarchy checkpoint: proven closed source class
 hierarchies with enhanced-for `instanceof` now feed usage-derived dispatch
 requirements into representation planning and type rendering. Assigned

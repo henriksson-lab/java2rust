@@ -3240,6 +3240,55 @@ class InstanceofPatternVariableAndChain {
 }
 
 #[test]
+fn instanceof_pattern_variable_on_source_interface_uses_trait_downcast_plan() {
+    let translation = translate_source(
+        r#"
+interface Animal {
+    int size();
+}
+
+class Dog implements Animal {
+    public int size() {
+        return 4;
+    }
+}
+
+class InstanceofPatternVariableSourceInterface {
+    int run(Animal animal) {
+        if (animal instanceof Dog dog) {
+            return dog.size();
+        }
+        return 0;
+    }
+}
+"#,
+    );
+
+    assert!(
+        (translation
+            .rust
+            .contains("animal.as_any().downcast_ref::<Dog>()")
+            || translation
+                .rust
+                .contains("animal.as_ref().as_any().downcast_ref::<Dog>()"))
+            && translation.rust.contains("if let Some(dog) =")
+            && translation.rust.contains("return dog.size();")
+            && !translation.rust.contains("unsupported Java instanceof"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "instanceof_pattern_source_interface",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn erased_object_raw_list_instanceof_uses_vec_erasure_runtime_target() {
     let translation = translate_source(
         r#"

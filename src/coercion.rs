@@ -3901,6 +3901,40 @@ pub fn render_instanceof_check(expr: RustExpr, check: &InstanceOfCheck) -> RustE
     }
 }
 
+pub fn instanceof_pattern_downcast_ref_projection(
+    expr: RustExpr,
+    check: &InstanceOfCheck,
+) -> Option<RustExpr> {
+    let rendered = parenthesize_cast_method_receiver(&emit::emit_expr(&expr));
+    match check {
+        InstanceOfCheck::DynTraitType { target_type } => {
+            let target_type = normalize_downcast_target_type(target_type);
+            Some(RustExpr::Raw(format!(
+                "{rendered}.as_any().downcast_ref::<{target_type}>()"
+            )))
+        }
+        InstanceOfCheck::BoxedDynTraitType { target_type } => {
+            let target_type = normalize_downcast_target_type(target_type);
+            Some(RustExpr::Raw(format!(
+                "{rendered}.as_ref().as_any().downcast_ref::<{target_type}>()"
+            )))
+        }
+        InstanceOfCheck::ErasedObjectType { target_type } => {
+            let target_type = normalize_downcast_target_type(target_type);
+            Some(RustExpr::Raw(format!(
+                "{rendered}.downcast_ref::<{target_type}>()"
+            )))
+        }
+        InstanceOfCheck::OptionalErasedObjectType { target_type } => {
+            let target_type = normalize_downcast_target_type(target_type);
+            Some(RustExpr::Raw(format!(
+                "{rendered}.as_ref().and_then(|value| value.downcast_ref::<{target_type}>())"
+            )))
+        }
+        _ => None,
+    }
+}
+
 impl InstanceOfCheck {
     pub fn diagnostics(&self) -> Vec<CoercionDiagnostic> {
         match self {

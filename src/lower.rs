@@ -48,12 +48,12 @@ use crate::coercion::{
     erased_object_borrowed_downcast_ref_projection, erased_object_box_projection,
     exception_self_as_supertype_facade_boundary_projection,
     explicit_java_facade_cast_placeholder_projection, force_shared_borrow_projection,
-    function_call_projection, if_err_panic_uncaught_java_exception_stmt, into_projection,
-    iterator_next_expect_projection, java_integral_literal_char,
-    java_primitive_update_expression_projection, java_primitive_updated_value_projection,
-    java_update_expression_projection, len_i32_projection, literal_slot_plan,
-    logical_not_projection, map_get_expect_projection, map_get_mut_expect_projection,
-    map_get_projection, normalize_map_key_borrow_projection,
+    function_call_projection, if_err_panic_uncaught_java_exception_stmt,
+    instanceof_pattern_downcast_ref_projection, into_projection, iterator_next_expect_projection,
+    java_integral_literal_char, java_primitive_update_expression_projection,
+    java_primitive_updated_value_projection, java_update_expression_projection, len_i32_projection,
+    literal_slot_plan, logical_not_projection, map_get_expect_projection,
+    map_get_mut_expect_projection, map_get_projection, normalize_map_key_borrow_projection,
     normalize_reused_clone_for_borrowed_argument, optional_clone_recovery_owned_element_projection,
     optional_copied_expect_projection, outer_this_field_projection, owned_map_keys_set_projection,
     owner_associated_path_projection, parenthesize_borrowed_method_receiver,
@@ -88,17 +88,17 @@ use crate::conversion_lowering::{
     apply_reused_optional_unwrap, apply_slot_expr_conversion, construct_optional_value_for_target,
 };
 use crate::conversion_plan::{
-    CloneRecoveryPolicy, DispatchCoercionPolicy, InstanceOfCheck, LoweredType,
-    OptionalPresentConstructionSource, ReturnValuePlan, Slot, SlotConversionPlan,
-    actual_shape_for_slot_expr, actual_shape_for_slot_expr_with_slot, argument_slot,
-    assignment_statement_plan_for_target, assignment_value_plan_for_shape,
-    assignment_value_plan_for_target, borrowed_element_target_matches_element, condition_slot,
-    index_slot, optional_element_slot_shape_with_facts,
-    optional_present_construction_plan_for_actual, optional_slot_construction_plan_for_actual,
-    plan_cast_conversion_from_actual, plan_instanceof, plan_lowered_slot_conversion,
-    plan_slot_conversion, preconverted_optional_slot_construction_plan,
-    receiver_method_autoref_satisfies_facade_slot, receiver_method_autoref_satisfies_optional_slot,
-    return_value_plan, reused_optional_unwrap_plan_for_slot,
+    CloneRecoveryPolicy, DispatchCoercionPolicy, LoweredType, OptionalPresentConstructionSource,
+    ReturnValuePlan, Slot, SlotConversionPlan, actual_shape_for_slot_expr,
+    actual_shape_for_slot_expr_with_slot, argument_slot, assignment_statement_plan_for_target,
+    assignment_value_plan_for_shape, assignment_value_plan_for_target,
+    borrowed_element_target_matches_element, condition_slot, index_slot,
+    optional_element_slot_shape_with_facts, optional_present_construction_plan_for_actual,
+    optional_slot_construction_plan_for_actual, plan_cast_conversion_from_actual, plan_instanceof,
+    plan_lowered_slot_conversion, plan_slot_conversion,
+    preconverted_optional_slot_construction_plan, receiver_method_autoref_satisfies_facade_slot,
+    receiver_method_autoref_satisfies_optional_slot, return_value_plan,
+    reused_optional_unwrap_plan_for_slot,
 };
 use crate::diagnostics::DiagnosticBag;
 use crate::emit;
@@ -6173,10 +6173,9 @@ fn lower_instanceof_pattern_if_stmt(
                 facts: Some(then_ctx.facts),
             },
         );
-        let InstanceOfCheck::ErasedObjectType { target_type } = plan.check else {
-            return None;
-        };
         let lowered_source = lower_expr_with_refinements(expr, env, then_ctx, then_refinements);
+        let downcast_source =
+            instanceof_pattern_downcast_ref_projection(lowered_source, &plan.check)?;
         let mut pattern_env = env.clone();
         pattern_env.insert_local_shape(binding.clone(), instanceof_pattern_binding_shape(ty));
         let right_condition = lower_expr_for_slot(right, &pattern_env, condition_slot(), then_ctx);
@@ -6204,10 +6203,9 @@ fn lower_instanceof_pattern_if_stmt(
             format!(" else {{\n{}}}", emit::emit_statements(&else_body, 1))
         };
         return Some(RustStmt::Raw(format!(
-            "if let Some({}) = {}.downcast_ref::<{}>() {{\n    if {} {{\n{}}}{}\n}}{}",
+            "if let Some({}) = {} {{\n    if {} {{\n{}}}{}\n}}{}",
             crate::parser::to_snake_case(binding),
-            emit::emit_expr(&lowered_source),
-            target_type,
+            emit::emit_expr(&downcast_source),
             emit::emit_expr(&right_condition),
             emit::emit_statements(&then_body, 2),
             else_rendered,
@@ -6236,10 +6234,8 @@ fn lower_instanceof_pattern_if_stmt(
             facts: Some(then_ctx.facts),
         },
     );
-    let InstanceOfCheck::ErasedObjectType { target_type } = plan.check else {
-        return None;
-    };
     let lowered_source = lower_expr_with_refinements(expr, env, then_ctx, then_refinements);
+    let downcast_source = instanceof_pattern_downcast_ref_projection(lowered_source, &plan.check)?;
     let mut then_env = env.clone();
     then_env.insert_local_shape(binding.clone(), instanceof_pattern_binding_shape(ty));
     let then_body = lower_block_with_refinements(
@@ -6261,10 +6257,9 @@ fn lower_instanceof_pattern_if_stmt(
         })
         .unwrap_or_default();
     Some(RustStmt::Raw(format!(
-        "if let Some({}) = {}.downcast_ref::<{}>() {{\n{}}}{}",
+        "if let Some({}) = {} {{\n{}}}{}",
         crate::parser::to_snake_case(binding),
-        emit::emit_expr(&lowered_source),
-        target_type,
+        emit::emit_expr(&downcast_source),
         emit::emit_statements(&then_body, 1),
         if else_body.is_empty() {
             String::new()
