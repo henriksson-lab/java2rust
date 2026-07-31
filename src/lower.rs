@@ -241,6 +241,7 @@ struct LowerCtx<'a> {
     signatures: &'a SignaturePlan,
     current_type: Option<&'a str>,
     current_method: Option<&'a str>,
+    current_method_decl: Option<&'a MethodDecl>,
     current_constructor: Option<&'a str>,
     current_receiver: Option<ReceiverPlan>,
     current_local_shapes: &'a [LocalPlan],
@@ -370,6 +371,7 @@ pub fn lower_program_with_semantic_plans_and_support_context(
         signatures,
         current_type: None,
         current_method: None,
+        current_method_decl: None,
         current_constructor: None,
         current_receiver: None,
         current_local_shapes: &[],
@@ -1173,6 +1175,7 @@ fn interface_default_trait_method_item(
     let method_ctx = LowerCtx {
         current_type: Some(&ty.name),
         current_method: Some(&method.name),
+        current_method_decl: Some(method),
         current_constructor: None,
         current_receiver: Some(if method.modifiers.contains(&Modifier::Static) {
             ReceiverPlan::None
@@ -2155,6 +2158,7 @@ fn lower_implicit_default_constructor(
     let constructor_ctx = LowerCtx {
         current_type: Some(&ty.name),
         current_method: None,
+        current_method_decl: None,
         current_constructor: Some("new"),
         current_receiver: None,
         current_local_shapes: &[],
@@ -2223,6 +2227,7 @@ fn lower_constructor(
     let constructor_ctx = LowerCtx {
         current_type: Some(&ty.name),
         current_method: None,
+        current_method_decl: None,
         current_constructor: Some(ctor.rust_name.as_deref().unwrap_or("new")),
         current_receiver: None,
         current_local_shapes: constructor_signature.locals.as_slice(),
@@ -4615,6 +4620,7 @@ fn lower_method_with_exception_owner(
     let method_ctx = LowerCtx {
         current_type: Some(&ty.name),
         current_method: Some(&method.name),
+        current_method_decl: Some(method),
         current_constructor: None,
         current_receiver: Some(method_signature.receiver),
         current_return_shape: method_signature.return_shape.as_ref(),
@@ -19019,6 +19025,18 @@ fn current_callable_binding_use_count_for_id(
 ) -> Option<usize> {
     let name = binding_id.name();
     let current_type = ctx.current_type?;
+    if let Some(method) = ctx.current_method_decl {
+        let java_key =
+            crate::java_signature::JavaCallableKey::source_method(current_type.to_string(), method);
+        if let Some(count) = ctx
+            .callable_analysis
+            .method_usage_by_java_key(&java_key)
+            .and_then(|method| method.bindings.get(name))
+            .map(|binding| binding.uses.len())
+        {
+            return Some(count);
+        }
+    }
     if let Some(current_method) = ctx.current_method {
         let exact_key = UsageMethodKey {
             type_name: current_type.to_string(),
@@ -19086,6 +19104,17 @@ fn current_callable_binding_facts<'a>(
     ctx: LowerCtx<'a>,
 ) -> Option<&'a BindingUseFacts> {
     let current_type = ctx.current_type?;
+    if let Some(method) = ctx.current_method_decl {
+        let java_key =
+            crate::java_signature::JavaCallableKey::source_method(current_type.to_string(), method);
+        if let Some(binding) = ctx
+            .callable_analysis
+            .method_usage_by_java_key(&java_key)
+            .and_then(|method| method.bindings.get(name))
+        {
+            return Some(binding);
+        }
+    }
     if let Some(current_method) = ctx.current_method {
         let exact_key = UsageMethodKey {
             type_name: current_type.to_string(),

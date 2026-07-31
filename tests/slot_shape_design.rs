@@ -3374,6 +3374,7 @@ fn callable_analysis_shell_reaches_lowering_context() {
     assert!(analysis_source.contains("pub fn external_method_returns_result("));
     assert!(analysis_source.contains("JavaCallableKey"));
     assert!(lower_source.contains("callable_analysis: &'a CallableAnalysis<'a>"));
+    assert!(lower_source.contains("current_method_decl: Option<&'a MethodDecl>"));
     assert!(
         lower_source.contains("let call_graph = crate::usage::build_call_graph")
             && lower_source.contains("let fallibility = plan_program_fallibility")
@@ -3430,6 +3431,28 @@ fn callable_analysis_shell_reaches_lowering_context() {
             "if source_method_call_returns_result_with_exception_plan(\n        receiver,"
         )
     );
+    let binding_use_count_helper = lower_source
+        .split("fn current_callable_binding_use_count_for_id")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn current_callable_binding_has_later_read")
+                .next()
+        })
+        .expect("current callable use-count helper should be present");
+    assert!(binding_use_count_helper.contains("current_method_decl"));
+    assert!(binding_use_count_helper.contains("JavaCallableKey::source_method"));
+    assert!(binding_use_count_helper.contains("method_usage_by_java_key"));
+    let binding_facts_helper = lower_source
+        .split("fn current_callable_binding_facts")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn current_callable_binding_recovery_shape")
+                .next()
+        })
+        .expect("current callable binding facts helper should be present");
+    assert!(binding_facts_helper.contains("current_method_decl"));
+    assert!(binding_facts_helper.contains("JavaCallableKey::source_method"));
+    assert!(binding_facts_helper.contains("method_usage_by_java_key"));
 }
 
 #[test]
