@@ -110,10 +110,11 @@ fn rust_impl_params_for_source_type(ty: &TypeDecl, support_program: &Program) ->
             }
             if let Some(Some(JavaType::Named { name: bound, .. })) = ty.type_param_bounds.get(index)
             {
-                bounds.extend(source_type_param_into_supertype_bounds(
-                    bound,
-                    support_program,
-                ));
+                let into_bounds = source_type_param_into_supertype_bounds(bound, support_program);
+                if !into_bounds.is_empty() {
+                    bounds.extend(into_bounds);
+                    bounds.push("'static".to_string());
+                }
             }
             if bounds.is_empty() {
                 name.clone()

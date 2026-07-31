@@ -4933,6 +4933,32 @@ interface Mapper {
 }
 
 #[test]
+fn generic_source_supertype_into_bound_gets_static_for_erased_boxing() {
+    let translation = translate_source(
+        r#"
+class Base {}
+class Mid extends Base {}
+
+class GenericStandards<T extends Mid> {
+    java.util.List<Base> lines;
+
+    void add(T line) {
+        lines.add(line);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("impl<T: MidBound + Into<Base> + 'static> GenericStandards<T>"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn representation_lowering_renders_trait_signatures_with_facts() {
     let parsed = parse_java_source(
         r#"

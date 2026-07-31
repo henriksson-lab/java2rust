@@ -7389,6 +7389,19 @@ Remaining top families are erased-carrier field access on `Box<dyn Any>` plus
 one generic `T: 'static` bound needed where a generic header line is boxed into
 the erased carrier.
 
+2026-07-31 generic erased-boxing lifetime checkpoint: source type parameters
+that receive generated `Into<SourceSuper>` bounds now also receive a `'static`
+bound, matching the Rust requirement for values boxed into owned erased-object
+carriers by the supertype conversion path. Focused verification:
+`generic_source_supertype_into_bound_gets_static_for_erased_boxing`,
+`cargo fmt --check`, `cargo check --tests --quiet`, `git diff --check`, and
+release-backed reduced VCF rerun
+`.tmp/corpus-rerun-20260731-vcf-standard-bound-after-generic-static-bound-r1`.
+That rerun remains 9/9 translated, 0 parse failures, 0 stubbed constants, and
+drops generated-Rust errors from 16 to 15. The isolated `T may not live long
+enough` family is gone; the remaining top family is erased-carrier field access
+on `Box<dyn Any>` for source-backed VCF header-line supertypes.
+
 ## Rerun Protocol
 
 After each fix:
