@@ -3234,6 +3234,11 @@ fn known_argument_sensitive_external_method_return_type(
         ) => Some(JavaType::Primitive(PrimitiveType::Boolean)),
         (
             Some("Arrays"),
+            "deepEquals" | "deep_equals",
+            [JavaType::Array(_), JavaType::Array(_)],
+        ) => Some(JavaType::Primitive(PrimitiveType::Boolean)),
+        (
+            Some("Arrays"),
             "compare",
             [JavaType::Array(_), JavaType::Array(_)]
             | [JavaType::Array(_), _, _, JavaType::Array(_), _, _],
@@ -5681,6 +5686,53 @@ impl<T: JavaArraysDeepToStringElement> JavaArraysDeepToStringElement for Option<
     }
 }
 
+pub trait JavaArraysDeepEqualsElement {
+    fn java_arrays_deep_equals(&self, other: &Self) -> bool;
+}
+
+pub fn java_arrays_deep_equals<T: JavaArraysDeepEqualsElement, L: AsRef<[T]>, R: AsRef<[T]>>(
+    left: L,
+    right: R,
+) -> bool {
+    let left = left.as_ref();
+    let right = right.as_ref();
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right.iter())
+            .all(|(left, right)| left.java_arrays_deep_equals(right))
+}
+
+macro_rules! impl_java_arrays_deep_equals_compare {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl JavaArraysDeepEqualsElement for $ty {
+                fn java_arrays_deep_equals(&self, other: &Self) -> bool {
+                    self.java_arrays_compare(other) == 0
+                }
+            }
+        )*
+    };
+}
+
+impl_java_arrays_deep_equals_compare!(bool, i8, i16, i32, i64, char, f32, f64, String, &str);
+
+impl<T: JavaArraysDeepEqualsElement> JavaArraysDeepEqualsElement for Vec<T> {
+    fn java_arrays_deep_equals(&self, other: &Self) -> bool {
+        java_arrays_deep_equals(self, other)
+    }
+}
+
+impl<T: JavaArraysDeepEqualsElement> JavaArraysDeepEqualsElement for Option<T> {
+    fn java_arrays_deep_equals(&self, other: &Self) -> bool {
+        match (self, other) {
+            (None, None) => true,
+            (Some(left), Some(right)) => left.java_arrays_deep_equals(right),
+            _ => false,
+        }
+    }
+}
+
 pub mod logger {
     pub fn info<M: std::fmt::Display>(_message: M) {}
     pub fn warn<M: std::fmt::Display>(_message: M) {}
@@ -5786,6 +5838,53 @@ impl<T: JavaArraysDeepToStringElement> JavaArraysDeepToStringElement for Option<
         self.as_ref()
             .map(JavaArraysDeepToStringElement::java_arrays_deep_to_string)
             .unwrap_or_else(|| "null".to_string())
+    }
+}
+
+pub trait JavaArraysDeepEqualsElement {
+    fn java_arrays_deep_equals(&self, other: &Self) -> bool;
+}
+
+pub fn java_arrays_deep_equals<T: JavaArraysDeepEqualsElement, L: AsRef<[T]>, R: AsRef<[T]>>(
+    left: L,
+    right: R,
+) -> bool {
+    let left = left.as_ref();
+    let right = right.as_ref();
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right.iter())
+            .all(|(left, right)| left.java_arrays_deep_equals(right))
+}
+
+macro_rules! impl_java_arrays_deep_equals_compare {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl JavaArraysDeepEqualsElement for $ty {
+                fn java_arrays_deep_equals(&self, other: &Self) -> bool {
+                    self.java_arrays_compare(other) == 0
+                }
+            }
+        )*
+    };
+}
+
+impl_java_arrays_deep_equals_compare!(bool, i8, i16, i32, i64, char, f32, f64, String, &str);
+
+impl<T: JavaArraysDeepEqualsElement> JavaArraysDeepEqualsElement for Vec<T> {
+    fn java_arrays_deep_equals(&self, other: &Self) -> bool {
+        java_arrays_deep_equals(self, other)
+    }
+}
+
+impl<T: JavaArraysDeepEqualsElement> JavaArraysDeepEqualsElement for Option<T> {
+    fn java_arrays_deep_equals(&self, other: &Self) -> bool {
+        match (self, other) {
+            (None, None) => true,
+            (Some(left), Some(right)) => left.java_arrays_deep_equals(right),
+            _ => false,
+        }
     }
 }
 
@@ -16713,6 +16812,7 @@ fn expr_uses_java_string_runtime_helpers(expr: &Expr) -> bool {
             ) || matches!(
                 (receiver.as_deref(), name.as_str(), args.len()),
                 (Some(Expr::Var(owner)), "equals", 2 | 6)
+                    | (Some(Expr::Var(owner)), "deepEquals" | "deep_equals", 2)
                     | (Some(Expr::Var(owner)), "hashCode" | "hash_code", 1)
                     | (Some(Expr::Var(owner)), "deepToString" | "deep_to_string", 1)
                     | (Some(Expr::Var(owner)), "compare", 2 | 6)
@@ -17398,6 +17498,7 @@ fn external_api_method_policy_provenance_with_builtin_packs(
     match (receiver_type, name, arg_count) {
         (Some("Arrays"), "asList" | "stream", _) => FactProvenance::BuiltinExternalModel,
         (Some("Arrays"), "equals", 2 | 6) => FactProvenance::BuiltinExternalModel,
+        (Some("Arrays"), "deepEquals" | "deep_equals", 2) => FactProvenance::BuiltinExternalModel,
         (Some("Arrays"), "compare", 2 | 6) => FactProvenance::BuiltinExternalModel,
         (Some("Arrays"), "mismatch", 2 | 6) => FactProvenance::BuiltinExternalModel,
         (Some("Arrays"), "binarySearch" | "binary_search", 2 | 4) => {
@@ -17849,6 +17950,7 @@ pub fn external_api_return_nullability(
         }
         (Some("Arrays"), "asList" | "stream", _) => NullabilityState::DefinitelyNonNull,
         (Some("Arrays"), "equals", 2 | 6) => NullabilityState::DefinitelyNonNull,
+        (Some("Arrays"), "deepEquals" | "deep_equals", 2) => NullabilityState::DefinitelyNonNull,
         (Some("Arrays"), "compare", 2 | 6) => NullabilityState::DefinitelyNonNull,
         (Some("Arrays"), "mismatch", 2 | 6) => NullabilityState::DefinitelyNonNull,
         (Some("Arrays"), "binarySearch" | "binary_search", 2 | 4) => {
@@ -18019,6 +18121,7 @@ fn static_utility_method_role(
         (Some("IntStream" | "LongStream" | "DoubleStream"), "sum", 0) => ExternalApiRole::Getter,
         (Some("Arrays"), "asList" | "stream", _) => ExternalApiRole::Getter,
         (Some("Arrays"), "equals", 2 | 6) => ExternalApiRole::BooleanGetter,
+        (Some("Arrays"), "deepEquals" | "deep_equals", 2) => ExternalApiRole::BooleanGetter,
         (Some("Arrays"), "compare", 2 | 6) => ExternalApiRole::Getter,
         (Some("Arrays"), "mismatch", 2 | 6) => ExternalApiRole::Getter,
         (Some("Arrays"), "binarySearch" | "binary_search", 2 | 4) => ExternalApiRole::Getter,

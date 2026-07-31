@@ -21722,6 +21722,66 @@ mod generated_tests {
 }
 
 #[test]
+fn java_arrays_deep_equals_lowers_nested_arrays() {
+    let translation = translate_source(
+        r#"
+import java.util.Arrays;
+
+class JavaArraysDeepEqualsUse {
+    boolean names(String[][] left, String[][] right) {
+        return Arrays.deepEquals(left, right);
+    }
+
+    boolean cubes(String[][][] left, String[][][] right) {
+        return Arrays.deepEquals(left, right);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("java_arrays_deep_equals(left, right)")
+            && !translation.rust.contains("Arrays::deep_equals")
+            && !translation.rust.contains("JavaUtilArrays::deep_equals"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "java_arrays_deep_equals_use",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn compares_nested_arrays_recursively() {
+        let fixture = JavaArraysDeepEqualsUse {};
+        assert!(fixture.names(
+            &[vec!["a".to_string(), "b".to_string()], vec!["c".to_string()]],
+            &[vec!["a".to_string(), "b".to_string()], vec!["c".to_string()]]
+        ));
+        assert!(!fixture.names(
+            &[vec!["a".to_string(), "b".to_string()], vec!["c".to_string()]],
+            &[vec!["a".to_string(), "x".to_string()], vec!["c".to_string()]]
+        ));
+        assert!(fixture.cubes(
+            &[vec![vec!["x".to_string()], vec![]]],
+            &[vec![vec!["x".to_string()], vec![]]]
+        ));
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
 fn java_arrays_fill_lowers_whole_and_range_mutations() {
     let translation = translate_source(
         r#"

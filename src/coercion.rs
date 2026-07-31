@@ -2337,6 +2337,13 @@ pub fn arrays_equals_projection(left: RustExpr, right: RustExpr) -> RustExpr {
     }
 }
 
+pub fn arrays_deep_equals_projection(left: RustExpr, right: RustExpr) -> RustExpr {
+    RustExpr::Call {
+        function: Box::new(RustExpr::Raw("java_arrays_deep_equals".to_string())),
+        args: vec![left, right],
+    }
+}
+
 pub fn arrays_equals_range_projection(
     left: RustExpr,
     left_from: RustExpr,

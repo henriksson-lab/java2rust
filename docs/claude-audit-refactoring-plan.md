@@ -123,6 +123,9 @@ Landed in this batch:
   facade.
 - `Arrays.deepToString(...)` now lowers nested array carriers through a shared
   recursive formatting helper instead of a generated no-op `Arrays` facade.
+- `Arrays.deepEquals(...)` now lowers nested array carriers through a distinct
+  recursive equality helper, preserving the shallow/deep distinction from
+  ordinary `Arrays.equals(...)`.
 - `Arrays.stream(array, from, to)` now carries explicit source-range facts in
   stream planning and renders Java range checks before iterating the selected
   slice.

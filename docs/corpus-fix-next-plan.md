@@ -7078,7 +7078,7 @@ runtime assertion for `"ok!"`.
 Audit `0016` remains partial, not fixed: remaining Arrays helpers still need
 follow-up work, and broader facade fallibility remains open.
 `Arrays.copyOf(...)`, `Arrays.copyOfRange(...)`, `Arrays.toString(...)`,
-`Arrays.deepToString(...)`, `Arrays.hashCode(...)`, whole/range
+`Arrays.deepToString(...)`, `Arrays.deepEquals(...)`, `Arrays.hashCode(...)`, whole/range
 `Arrays.stream(...)`, whole/range `Arrays.equals(...)`, whole/range
 `Arrays.binarySearch(...)`, whole/range `Arrays.fill(...)`, whole/range
 `Arrays.sort(...)`/`Arrays.parallelSort(...)`, whole/range

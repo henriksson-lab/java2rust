@@ -365,6 +365,7 @@ pub enum NativeCollectionExtendArgPlan {
 pub enum NativeCollectionStaticMethod {
     ArraysAsList,
     ArraysEquals,
+    ArraysDeepEquals,
     ArraysBinarySearch,
     ArraysCompare,
     ArraysMismatch,
@@ -2984,6 +2985,7 @@ fn plan_native_collection_static_call<'a>(
         let method = match name {
             "asList" | "as_list" => NativeCollectionStaticMethod::ArraysAsList,
             "equals" => NativeCollectionStaticMethod::ArraysEquals,
+            "deepEquals" | "deep_equals" => NativeCollectionStaticMethod::ArraysDeepEquals,
             "binarySearch" | "binary_search" => NativeCollectionStaticMethod::ArraysBinarySearch,
             "compare" => NativeCollectionStaticMethod::ArraysCompare,
             "mismatch" => NativeCollectionStaticMethod::ArraysMismatch,
