@@ -250,6 +250,12 @@ Landed in this batch:
   access, and sequence `.get(index)` projections no longer lower integer
   divide/remainder inside indexes as uncaught raw Rust operations. This further
   narrows audit `0003`, but does not close it.
+- Result-returning facade calls and external constructors now use the same
+  context policy instead of hardcoded `?` in direct call/new and slot-conversion
+  paths. In a `Result` carrier they propagate; outside one they render the
+  shared uncaught-Java-exception panic recovery. This also reduces audit `0010`
+  drift, but `0003` and `0010` remain active until the broader fallibility model
+  is unified.
 - One-dimensional array compound assignments with side-effecting indices now
   hoist the Java index once, save the old element value before evaluating the
   RHS, and reuse the shared numeric binary/narrowing planners for writeback.

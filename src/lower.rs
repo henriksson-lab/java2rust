@@ -8558,6 +8558,14 @@ fn apply_result_propagation_policy_from_ctx(
     )
 }
 
+fn apply_result_value_policy_from_ctx(lowered: RustExpr, ctx: LowerCtx) -> RustExpr {
+    if ctx.result_propagation_mode == ResultPropagationMode::Propagate {
+        propagate_result_projection(lowered)
+    } else {
+        unwrap_result_or_panic_uncaught_java_exception(lowered)
+    }
+}
+
 fn lower_index_expr(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> RustExpr {
     apply_result_propagation_policy_from_ctx(
         lower_expr_for_slot(expr, env, index_slot(), ctx),
@@ -11387,9 +11395,7 @@ fn lower_expr_with_refinements(
             );
             lowered = wrap_call_expr_with_argument_temporaries(lowered, lowered_args.temporaries);
             lowered = rewrite_optional_erased_borrowed_string_view_call_args(lowered, args);
-            if slot_expr_needs_result_propagation(expr, env, ctx) {
-                lowered = propagate_result_projection(lowered);
-            }
+            lowered = apply_result_propagation_policy_from_ctx(lowered, expr, env, ctx);
             lowered
         }
         Expr::New {
@@ -11439,7 +11445,7 @@ fn lower_expr_with_refinements(
                         ctx,
                     ),
                 );
-                return propagate_result_projection(lowered);
+                return apply_result_value_policy_from_ctx(lowered, ctx);
             }
             let target = plan_new_target_for_args_with_facts(
                 ty,
@@ -11475,7 +11481,7 @@ fn lower_expr_with_refinements(
                 ctx.representations,
             );
             if external_constructor_returns_rust_result(ty, args.len(), ctx.facts) {
-                lowered = propagate_result_projection(lowered);
+                lowered = apply_result_value_policy_from_ctx(lowered, ctx);
             }
             lowered
         }
@@ -20493,9 +20499,8 @@ fn lower_expr_for_slot_with_refinements(
     if let Some(mut external_expr) =
         lower_external_call_expr_for_slot(expr, env, &slot, ctx, refinements)
     {
-        if slot_expr_needs_result_propagation(expr, env, ctx) {
-            external_expr.expr = propagate_result_projection(external_expr.expr);
-        }
+        external_expr.expr =
+            apply_result_propagation_policy_from_ctx(external_expr.expr, expr, env, ctx);
         let plan = plan_lowered_slot_conversion(&external_expr.actual, slot, ctx.facts);
         let lowered = apply_lowered_slot_expr_conversion(external_expr, &plan);
         return if expr_is_object_input_stream_read_object_call(expr) {
@@ -20646,7 +20651,7 @@ fn lower_expr_for_slot_with_refinements(
         lower_expr_with_refinements(expr, env, ctx, refinements)
     };
     if slot_expr_needs_result_propagation(expr, env, ctx) {
-        lowered_expr = propagate_result_projection(lowered_expr);
+        lowered_expr = apply_result_propagation_policy_from_ctx(lowered_expr, expr, env, ctx);
     }
     if matches!(slot, Slot::StringConcatSegment | Slot::DisplaySegment)
         && matches!(expr, Expr::Var(name) if refinements.non_null_locals.contains(name))
@@ -26236,7 +26241,7 @@ fn lower_native_collection_call_expr_for_slot(
     let mut lowered_expr =
         apply_call_target_with_lower_context(&target, lowered_receiver, rust_args, ctx);
     if slot_expr_needs_result_propagation(expr, env, ctx) {
-        lowered_expr = propagate_result_projection(lowered_expr);
+        lowered_expr = apply_result_propagation_policy_from_ctx(lowered_expr, expr, env, ctx);
     }
     Some(crate::coercion::LoweredExpr {
         expr: lowered_expr,
@@ -26270,7 +26275,7 @@ fn lower_source_receiver_call_expr_for_slot(
         .or_else(|| source_trivial_accessor_getter_lowered_type(expr, env, ctx))?;
     let mut lowered = lower_expr_with_refinements(expr, env, ctx, refinements);
     if slot_expr_needs_result_propagation(expr, env, ctx) {
-        lowered = propagate_result_projection(lowered);
+        lowered = apply_result_propagation_policy_from_ctx(lowered, expr, env, ctx);
     }
     Some(crate::coercion::LoweredExpr {
         expr: lowered,
@@ -26824,7 +26829,7 @@ fn lower_external_call_expr_for_slot(
         ctx.current_type,
     ) || slot_expr_needs_result_propagation(expr, env, ctx)
     {
-        lowered_expr = propagate_result_projection(lowered_expr);
+        lowered_expr = apply_result_value_policy_from_ctx(lowered_expr, ctx);
     }
     actual = external_call_actual_for_matching_generic_slot(actual, slot);
     Some(crate::coercion::LoweredExpr {

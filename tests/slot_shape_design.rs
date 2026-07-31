@@ -29303,6 +29303,53 @@ class UsesRustFallibilityFacts {
 }
 
 #[test]
+fn rust_result_external_constructor_uses_context_result_policy() {
+    let facts = parse_external_pack_manifest(
+        r#"
+external-pack example ExternalApi rust-crate-mapping mapped target=example_facade
+external-pack-object example ExternalApi concrete
+external-pack-capability example ExternalApi clone=true final=true
+external-pack-constructor example ExternalApi 1 mapped rust-type=ExternalApi rust=new rust-result=true
+"#,
+    )
+    .facts;
+    let translation = translate_source_with_facts(
+        r#"
+class UsesRustResultExternalConstructorPolicy {
+    ExternalApi plain(String path) {
+        return new ExternalApi(path);
+    }
+
+    ExternalApi caught(String path) {
+        try {
+            return new ExternalApi(path);
+        } catch (RuntimeException ex) {
+            return new ExternalApi("fallback");
+        }
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation.rust.contains("pub fn plain")
+            && translation
+                .rust
+                .contains("example_facade::ExternalApi::new(path).unwrap_or_else")
+            && translation.rust.contains("pub fn caught")
+            && translation
+                .rust
+                .contains("example_facade::ExternalApi::new(path)?")
+            && translation
+                .rust
+                .contains("Err(ex) if ex.is_instance(&[\"InternalCodecException\""),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn external_constructor_argument_fact_borrows_facade_parameter() {
     let facts = parse_external_pack_manifest(
         r#"
