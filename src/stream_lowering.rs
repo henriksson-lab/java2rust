@@ -30,7 +30,7 @@ use crate::slot_render::rust_type_for_slot_with_facts;
 use crate::slot_shape::RustSlotShape;
 use crate::stream::{
     FilterPlan, FlatMapPlan, LambdaPlan, StreamLambdaBody, StreamOp, StreamPlan, StreamSource,
-    StreamSourceIteration, StreamSubPipeline, StreamTerminal,
+    StreamSourceIteration, StreamSourceRange, StreamSubPipeline, StreamTerminal,
 };
 use std::collections::HashSet;
 
@@ -755,7 +755,7 @@ pub fn render_stream_plan_with_context(
     ctx: StreamRenderContext<'_>,
 ) -> Option<LoweredExpr> {
     let source = crate::emit::emit_expr(&lowered_source);
-    let mut out = render_stream_source_iter(&source, &plan.source);
+    let mut out = render_stream_source_iter(&source, &plan.source, ctx);
     let (item_is_borrowed, item_shape) = render_stream_ops(&mut out, plan, ctx)?;
     render_stream_terminal(&mut out, plan, item_is_borrowed, &item_shape, ctx)?;
     Some(LoweredExpr {
@@ -764,12 +764,48 @@ pub fn render_stream_plan_with_context(
     })
 }
 
-fn render_stream_source_iter(source: &str, stream_source: &StreamSource<'_>) -> String {
+fn render_stream_source_iter(
+    source: &str,
+    stream_source: &StreamSource<'_>,
+    ctx: StreamRenderContext<'_>,
+) -> String {
     let source = parenthesize_stream_source_for_method_call(source);
+    let source = render_stream_source_range(&source, stream_source.range, ctx);
     render_sequence_iteration_source(
         &source,
         stream_source.optional_sequence,
         sequence_iteration_projection(stream_source.iteration),
+    )
+}
+
+fn render_stream_source_range(
+    source: &str,
+    range: Option<StreamSourceRange<'_>>,
+    ctx: StreamRenderContext<'_>,
+) -> String {
+    let Some(StreamSourceRange::JavaArrays { from, to }) = range else {
+        return source.to_string();
+    };
+    let from = emit_stream_lambda_body_with_locals(
+        from,
+        "__java_unused_stream_bound",
+        StreamLambdaValue::OwnedItem,
+        &[],
+        ctx,
+        None,
+    )
+    .unwrap_or_else(|| "compile_error!(\"unsupported Arrays.stream range start\")".to_string());
+    let to = emit_stream_lambda_body_with_locals(
+        to,
+        "__java_unused_stream_bound",
+        StreamLambdaValue::OwnedItem,
+        &[],
+        ctx,
+        None,
+    )
+    .unwrap_or_else(|| "compile_error!(\"unsupported Arrays.stream range end\")".to_string());
+    format!(
+        "{{ let __java_arrays_source = &{source}; let __java_arrays_from = {from}; let __java_arrays_to = {to}; if __java_arrays_from > __java_arrays_to {{ panic!(\"Java IllegalArgumentException: fromIndex > toIndex\"); }} if __java_arrays_from < 0 || __java_arrays_to as usize > __java_arrays_source.len() {{ panic!(\"Java ArrayIndexOutOfBoundsException\"); }} let __java_arrays_from = __java_arrays_from as usize; let __java_arrays_to = __java_arrays_to as usize; &__java_arrays_source[__java_arrays_from..__java_arrays_to] }}"
     )
 }
 
@@ -1038,7 +1074,7 @@ fn render_stream_sub_pipeline(
     let source_is_lambda_param =
         matches!(pipeline.source.expr, Expr::Var(name) if name == &lambda.param_name);
     let mut out = if source_is_lambda_param {
-        render_stream_source_iter(&source, &pipeline.source)
+        render_stream_source_iter(&source, &pipeline.source, ctx)
     } else {
         render_stream_source_owned_iter(&source, &pipeline.source)
     };
@@ -1056,8 +1092,10 @@ fn render_stream_sub_pipeline(
 }
 
 fn render_stream_source_owned_iter(source: &str, stream_source: &StreamSource<'_>) -> String {
+    let source =
+        render_stream_source_range(source, stream_source.range, StreamRenderContext::empty());
     render_sequence_iteration_source(
-        source,
+        &source,
         stream_source.optional_sequence,
         SequenceIterationProjection::OwnedValue,
     )

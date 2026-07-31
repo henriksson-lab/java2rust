@@ -3218,7 +3218,8 @@ fn known_argument_sensitive_external_method_return_type(
         (Some("Stream"), "of", args) if !args.is_empty() => {
             Some(stream_return_type(common_stream_of_element_type(args)))
         }
-        (Some("Arrays"), "stream", [JavaType::Array(element)]) => {
+        (Some("Arrays"), "stream", [JavaType::Array(element)])
+        | (Some("Arrays"), "stream", [JavaType::Array(element), _, _]) => {
             Some(stream_return_type(element.as_ref().clone()))
         }
         (Some("Arrays"), "asList", args) if !args.is_empty() => Some(JavaType::Named {

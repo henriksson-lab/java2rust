@@ -35448,6 +35448,26 @@ fn stream_plan_accepts_arrays_stream_as_source() {
 }
 
 #[test]
+fn stream_plan_accepts_arrays_stream_range_as_source() {
+    let mut env = TypeEnv::new();
+    env.insert_local("values", JavaType::Array(Box::new(JavaType::String)));
+    let expr = parse_expr(
+        "Arrays.stream(values, from, to).map(value -> value.trim()).collect(Collectors.toList())",
+    );
+
+    let plan = build_stream_plan(&expr, &env, &FactSet::default()).unwrap();
+    let lowered = render_stream_plan(&plan, RustExpr::Var("values".to_string())).unwrap();
+
+    assert_eq!(plan.source.expr, &parse_expr("values"));
+    assert_eq!(
+        lowered.expr,
+        RustExpr::Raw(
+            "{ let __java_arrays_source = &values; let __java_arrays_from = from; let __java_arrays_to = to; if __java_arrays_from > __java_arrays_to { panic!(\"Java IllegalArgumentException: fromIndex > toIndex\"); } if __java_arrays_from < 0 || __java_arrays_to as usize > __java_arrays_source.len() { panic!(\"Java ArrayIndexOutOfBoundsException\"); } let __java_arrays_from = __java_arrays_from as usize; let __java_arrays_to = __java_arrays_to as usize; &__java_arrays_source[__java_arrays_from..__java_arrays_to] }.iter().map(|value| value.trim()).collect::<Vec<_>>()".to_string()
+        )
+    );
+}
+
+#[test]
 fn stream_plan_lowers_arrays_stream_to_array_and_all_match_terminals() {
     let mut env = TypeEnv::new();
     env.insert_local("values", JavaType::Array(Box::new(JavaType::String)));

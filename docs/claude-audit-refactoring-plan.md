@@ -121,6 +121,9 @@ Landed in this batch:
   projection with Java-style bracket/comma rendering for primitive, string, and
   empty array values, instead of depending on a generated no-op `Arrays`
   facade.
+- `Arrays.stream(array, from, to)` now carries explicit source-range facts in
+  stream planning and renders Java range checks before iterating the selected
+  slice.
 - `Arrays.fill(...)` now plans both whole-array and range statement overloads
   as native mutating Rust operations, and `java.util.Arrays`/`JavaUtilArrays`
   canonicalize to the builtin `Arrays` identity so facade support does not

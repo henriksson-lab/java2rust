@@ -24,6 +24,12 @@ pub struct StreamSource<'a> {
     pub expr: &'a Expr,
     pub optional_sequence: bool,
     pub iteration: StreamSourceIteration,
+    pub range: Option<StreamSourceRange<'a>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StreamSourceRange<'a> {
+    JavaArrays { from: &'a Expr, to: &'a Expr },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -187,7 +193,8 @@ pub fn build_stream_plan<'a>(
         }
         _ => return None,
     };
-    let source_expr = receiver_source(receiver)?;
+    let source_spec = receiver_source_spec(receiver)?;
+    let source_expr = source_spec.expr;
     let source_shape = infer_stream_source_element_shape_with_facts(source_expr, env, facts)?;
     let (source, ops, current_shape) = collect_stream_chain(receiver, source_shape, env, facts)?;
     let actual = stream_terminal_actual(&terminal, current_shape.clone(), env, facts);
@@ -196,6 +203,7 @@ pub fn build_stream_plan<'a>(
             expr: source,
             optional_sequence: stream_source_is_optional_sequence(source, env, facts),
             iteration: stream_source_iteration(source),
+            range: source_spec.range,
         },
         ops,
         terminal,
@@ -299,10 +307,20 @@ fn is_collectors_terminal(expr: &Expr, terminal_name: &str) -> bool {
 }
 
 fn receiver_source(expr: &Expr) -> Option<&Expr> {
+    receiver_source_spec(expr).map(|spec| spec.expr)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StreamSourceSpec<'a> {
+    expr: &'a Expr,
+    range: Option<StreamSourceRange<'a>>,
+}
+
+fn receiver_source_spec(expr: &Expr) -> Option<StreamSourceSpec<'_>> {
     collect_stream_chain_source(expr)
 }
 
-fn collect_stream_chain_source(expr: &Expr) -> Option<&Expr> {
+fn collect_stream_chain_source(expr: &Expr) -> Option<StreamSourceSpec<'_>> {
     let Expr::Call {
         receiver,
         name,
@@ -314,20 +332,36 @@ fn collect_stream_chain_source(expr: &Expr) -> Option<&Expr> {
     };
 
     match name.as_str() {
-        "stream" | "parallelStream" | "parallel_stream" if args.is_empty() => receiver.as_deref(),
+        "stream" | "parallelStream" | "parallel_stream" if args.is_empty() => receiver
+            .as_deref()
+            .map(|expr| StreamSourceSpec { expr, range: None }),
         "stream"
             if args.len() == 1
                 && matches!(receiver.as_deref(), Some(Expr::Var(owner))
                     if crate::stdlib::canonical_external_receiver_type_key(owner) == "Arrays") =>
         {
             args.first()
+                .map(|expr| StreamSourceSpec { expr, range: None })
+        }
+        "stream"
+            if args.len() == 3
+                && matches!(receiver.as_deref(), Some(Expr::Var(owner))
+                    if crate::stdlib::canonical_external_receiver_type_key(owner) == "Arrays") =>
+        {
+            Some(StreamSourceSpec {
+                expr: &args[0],
+                range: Some(StreamSourceRange::JavaArrays {
+                    from: &args[1],
+                    to: &args[2],
+                }),
+            })
         }
         "range" | "range_closed"
             if args.len() == 2
                 && matches!(receiver.as_deref(), Some(Expr::Var(owner))
                     if crate::stdlib::canonical_external_receiver_type_key(owner) == "IntStream") =>
         {
-            Some(expr)
+            Some(StreamSourceSpec { expr, range: None })
         }
         "filter" | "map" | "mapToInt" | "map_to_int" | "mapToDouble" | "map_to_double"
         | "mapToObj" | "map_to_obj" | "flatMap" | "flat_map"
@@ -362,6 +396,13 @@ fn collect_stream_chain<'a>(
             .map(|source| (source, Vec::new(), input_shape)),
         "stream"
             if args.len() == 1
+                && matches!(receiver.as_deref(), Some(Expr::Var(owner))
+                    if crate::stdlib::canonical_external_receiver_type_key(owner) == "Arrays") =>
+        {
+            args.first().map(|source| (source, Vec::new(), input_shape))
+        }
+        "stream"
+            if args.len() == 3
                 && matches!(receiver.as_deref(), Some(Expr::Var(owner))
                     if crate::stdlib::canonical_external_receiver_type_key(owner) == "Arrays") =>
         {
@@ -700,6 +741,7 @@ fn lambda_stream_chain_plan<'a>(
                 expr: source,
                 optional_sequence: stream_source_is_optional_sequence(source, &lambda_env, facts),
                 iteration: stream_source_iteration(source),
+                range: receiver_source_spec(return_expr)?.range,
             },
             ops,
             source_element: StreamElement {
