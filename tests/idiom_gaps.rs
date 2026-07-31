@@ -9051,7 +9051,7 @@ fn optional_field_mutating_overload_call_uses_signature_name_and_mut_receiver() 
     assert!(
         translation
             .rust
-            .contains("self.holder.as_mut().unwrap().add_string_int(name, value);")
+            .contains("self.holder.as_mut().unwrap().add_string_int(&name, value);")
             && !translation.rust.contains(".as_ref().unwrap().add(")
             && !translation.rust.contains(".add(name, value);"),
         "{}",

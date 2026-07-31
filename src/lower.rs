@@ -59,21 +59,21 @@ use crate::coercion::{
     optional_clone_recovery_owned_element_projection, optional_copied_expect_projection,
     outer_this_field_projection, owned_map_keys_set_projection, owner_associated_path_projection,
     parenthesize_borrowed_method_receiver, print_macro_projection,
-    project_optional_element_borrow_carrier, project_optional_receiver,
-    project_optional_sequence_receiver, propagate_result_projection,
-    qualified_static_storage_accessor_projection, qualified_static_storage_setter_path_projection,
-    reborrow_optional_mut_projection, receiver_method_call_projection_exact,
-    render_sequence_iteration_source, rendered_expr_has_clone_recovery,
-    rendered_expr_has_direct_clone_recovery, rendered_expr_has_optional_unwrap_or_java_null_expect,
-    rendered_expr_is_mutable_alias, replace_optional_clone_recovery_unwrap,
-    rewrite_downcast_expect_message, rust_expr_is_constructed_optional_value,
-    rust_expr_mentions_constructor_self_temporary, self_associated_path_projection,
-    sequence_get_expect_projection, sequence_iter_cloned_projection,
-    sequence_iter_copied_projection, snapshot_rendered_shared_borrow_argument,
-    static_storage_accessor_projection, static_storage_getter_body_projection,
-    static_storage_setter_body_projection, static_storage_setter_path_projection,
-    subtype_owned_constructor_from_borrowed_projection, to_owned_sequence_projection,
-    tuple_field_projection, typed_none_projection, unsupported_constructor_call_handoff_projection,
+    project_optional_element_borrow_carrier, project_optional_sequence_receiver,
+    propagate_result_projection, qualified_static_storage_accessor_projection,
+    qualified_static_storage_setter_path_projection, reborrow_optional_mut_projection,
+    receiver_method_call_projection_exact, render_sequence_iteration_source,
+    rendered_expr_has_clone_recovery, rendered_expr_has_direct_clone_recovery,
+    rendered_expr_has_optional_unwrap_or_java_null_expect, rendered_expr_is_mutable_alias,
+    replace_optional_clone_recovery_unwrap, rewrite_downcast_expect_message,
+    rust_expr_is_constructed_optional_value, rust_expr_mentions_constructor_self_temporary,
+    self_associated_path_projection, sequence_get_expect_projection,
+    sequence_iter_cloned_projection, sequence_iter_copied_projection,
+    snapshot_rendered_shared_borrow_argument, static_storage_accessor_projection,
+    static_storage_getter_body_projection, static_storage_setter_body_projection,
+    static_storage_setter_path_projection, subtype_owned_constructor_from_borrowed_projection,
+    to_owned_sequence_projection, tuple_field_projection, typed_none_projection,
+    unsupported_constructor_call_handoff_projection,
     unsupported_deserialization_cast_handoff_projection,
     unsupported_outer_capture_constructor_projection, unwrap_java_null_receiver_projection,
     unwrap_optional_shared_value, unwrap_result_or_panic_uncaught_java_exception,
@@ -87,7 +87,8 @@ use crate::control_flow_lowering::{TailRecursiveLoopRender, render_tail_recursiv
 use crate::conversion_lowering::{
     adapt_optional_assignment_value_for_target as render_adapt_optional_assignment_value_for_target,
     apply_cast_conversion, apply_instanceof, apply_lowered_slot_expr_conversion,
-    apply_reused_optional_unwrap, apply_slot_expr_conversion, construct_optional_value_for_target,
+    apply_optional_receiver_slot_projection, apply_reused_optional_unwrap,
+    apply_slot_expr_conversion, construct_optional_value_for_target,
 };
 use crate::conversion_plan::{
     CloneRecoveryPolicy, DispatchCoercionPolicy, LoweredType, OptionalPresentConstructionSource,
@@ -99,8 +100,7 @@ use crate::conversion_plan::{
     optional_slot_construction_plan_for_actual, plan_cast_conversion_from_actual, plan_instanceof,
     plan_lowered_slot_conversion, plan_slot_conversion,
     preconverted_optional_slot_construction_plan, receiver_method_autoref_satisfies_facade_slot,
-    receiver_method_autoref_satisfies_optional_slot, return_value_plan,
-    reused_optional_unwrap_plan_for_slot,
+    return_value_plan, reused_optional_unwrap_plan_for_slot,
 };
 use crate::diagnostics::DiagnosticBag;
 use crate::emit;
@@ -19301,21 +19301,22 @@ fn adapt_optional_instance_receiver_with_slot_plan(
     mutable: bool,
     legacy_unchecked: bool,
 ) -> RustExpr {
-    if let Some(LoweredType::OptionalElementBorrow { element_shape, .. }) =
-        native_collection_optional_element_borrow_lowered_type(receiver, env, ctx)
+    if let Some(LoweredType::OptionalElementBorrow {
+        option_shape,
+        element_shape,
+        ..
+    }) = native_collection_optional_element_borrow_lowered_type(receiver, env, ctx)
     {
         let plan =
             optional_borrowed_receiver_slot_plan(element_shape.java_ty.clone(), mutable, ctx.facts);
-        let projected = project_optional_receiver(lowered, plan.projection);
-        let projected = crate::coercion::LoweredExpr {
-            expr: projected,
-            actual: LoweredType::Slot(element_shape),
-        };
-        let conversion_plan = plan_lowered_slot_conversion(&projected.actual, plan.slot, ctx.facts);
-        if receiver_method_autoref_satisfies_optional_slot(&conversion_plan) {
-            return projected.expr;
-        }
-        return apply_lowered_slot_expr_conversion(projected, &conversion_plan);
+        return apply_optional_receiver_slot_projection(
+            lowered,
+            *option_shape,
+            plan.slot,
+            plan.projection,
+            plan.element_ownership,
+            ctx.facts,
+        );
     }
 
     let shape_ctx = ExprShapeContext {
@@ -19343,22 +19344,14 @@ fn adapt_optional_instance_receiver_with_slot_plan(
         })
         .expect("receiver type was selected from receiver_shapes");
     let plan = optional_receiver_slot_plan(receiver_ty, mutable, legacy_unchecked, ctx.facts);
-    let projected = project_optional_receiver(lowered, plan.projection);
-    let Some(actual) = plan.optional_element_borrow_type(option_shape) else {
-        return projected;
-    };
-    let LoweredType::OptionalElementBorrow { element_shape, .. } = actual else {
-        return projected;
-    };
-    let projected = crate::coercion::LoweredExpr {
-        expr: projected,
-        actual: LoweredType::Slot(element_shape),
-    };
-    let conversion_plan = plan_lowered_slot_conversion(&projected.actual, plan.slot, ctx.facts);
-    if receiver_method_autoref_satisfies_optional_slot(&conversion_plan) {
-        return projected.expr;
-    }
-    apply_lowered_slot_expr_conversion(projected, &conversion_plan)
+    apply_optional_receiver_slot_projection(
+        lowered,
+        option_shape,
+        plan.slot,
+        plan.projection,
+        plan.element_ownership,
+        ctx.facts,
+    )
 }
 
 fn adapt_native_collection_receiver(

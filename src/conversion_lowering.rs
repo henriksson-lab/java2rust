@@ -1,12 +1,14 @@
-use crate::coercion::{LoweredExpr, apply_slot_conversion_plan};
+use crate::coercion::{LoweredExpr, OptionalReceiverProjection, apply_slot_conversion_plan};
 use crate::conversion_plan::{
     CastConversionPlan, InstanceOfPlan, JavaCastSemanticsPolicy, LoweredSlotExprConversionPlan,
     LoweredType, OptionalSlotConstructionPlan, ReusedOptionalUnwrapPlan,
     ReusedOptionalUnwrapProjection, Slot, SlotConversionPlan, SlotExprConversionPlan,
+    plan_lowered_slot_conversion, receiver_method_autoref_satisfies_optional_slot,
 };
+use crate::facts::FactSet;
 use crate::java_ir::PrimitiveType;
 use crate::rust_ir::RustExpr;
-use crate::slot_shape::RustSlotShape;
+use crate::slot_shape::{OwnershipShape, RustSlotShape};
 
 pub fn apply_cast_conversion(expr: RustExpr, plan: &CastConversionPlan) -> RustExpr {
     if let JavaCastSemanticsPolicy::PrimitiveNumericCast { from, to, .. } = plan.semantics {
@@ -46,6 +48,41 @@ pub fn apply_lowered_slot_expr_conversion(
     plan: &LoweredSlotExprConversionPlan,
 ) -> RustExpr {
     apply_slot_conversion_plan(lowered.expr, &plan.conversion)
+}
+
+pub fn apply_optional_receiver_slot_projection(
+    lowered: RustExpr,
+    option_shape: RustSlotShape,
+    receiver_slot: Slot,
+    projection: OptionalReceiverProjection,
+    element_ownership: OwnershipShape,
+    facts: &FactSet,
+) -> RustExpr {
+    let projected = crate::coercion::project_optional_receiver(lowered, projection);
+    let target_shape = match &receiver_slot {
+        Slot::Assignment(shape) | Slot::Return(shape) | Slot::Argument(shape) => shape,
+        _ => return projected,
+    };
+    let Some(actual) = LoweredType::optional_element_borrow_from_option_shape(
+        option_shape,
+        target_shape.java_ty.clone(),
+        Some(element_ownership),
+        facts,
+    ) else {
+        return projected;
+    };
+    let LoweredType::OptionalElementBorrow { element_shape, .. } = actual else {
+        return projected;
+    };
+    let projected = LoweredExpr {
+        expr: projected,
+        actual: LoweredType::Slot(element_shape),
+    };
+    let conversion_plan = plan_lowered_slot_conversion(&projected.actual, receiver_slot, facts);
+    if receiver_method_autoref_satisfies_optional_slot(&conversion_plan) {
+        return projected.expr;
+    }
+    apply_lowered_slot_expr_conversion(projected, &conversion_plan)
 }
 
 pub fn apply_reused_optional_unwrap(

@@ -1591,6 +1591,13 @@ Current remaining refactor priority from the parallel audit:
    `lower.rs` only identifies source argument candidates. This keeps the
    rendered `.as_ref().map(|value| value.as_str())` and optional erased
    downcast recovery policy with the other slot/coercion projections.
+   Optional receiver slot application now lives in
+   `conversion_lowering::apply_optional_receiver_slot_projection`; `lower.rs`
+   still discovers receiver shapes and mutability, but no longer locally owns
+   the projection-plus-slot-conversion body for optional instance receivers.
+   Focused receiver verification covers nullable external getters, optional
+   collection mutation, overload-selected optional field mutation, and
+   context-fallback mutable source receivers.
 
 Current implementation note, 2026-07-23:
 
