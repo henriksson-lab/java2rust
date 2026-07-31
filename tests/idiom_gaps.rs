@@ -806,12 +806,24 @@ class JdkNumericAndFormatFacades {
         return Math.round(value);
     }
 
+    static long roundedPositiveTie() {
+        return Math.round(2.5);
+    }
+
+    static long roundedHalf() {
+        return Math.round(0.5);
+    }
+
     static long roundedEdge() {
         return Math.round(0.49999999999999994);
     }
 
     static int roundedFloat(float value) {
         return Math.round(value);
+    }
+
+    static int roundedFloatNaN() {
+        return Math.round(Float.NaN);
     }
 
     static int absInt(int value) {
@@ -1010,9 +1022,12 @@ mod generated_tests {
             < 1e-9);
         assert_eq!(JdkNumericAndFormatFacades::imported_sqrt(16.0), 4.0);
         assert_eq!(JdkNumericAndFormatFacades::rounded(-2.5), -2);
+        assert_eq!(JdkNumericAndFormatFacades::rounded_positive_tie(), 3);
         assert_eq!(JdkNumericAndFormatFacades::rounded(-0.5), 0);
+        assert_eq!(JdkNumericAndFormatFacades::rounded_half(), 1);
         assert_eq!(JdkNumericAndFormatFacades::rounded_edge(), 0);
         assert_eq!(JdkNumericAndFormatFacades::rounded_float(-2.5), -2);
+        assert_eq!(JdkNumericAndFormatFacades::rounded_float_na_n(), 0);
         assert_eq!(JdkNumericAndFormatFacades::abs_int(i32::MIN), i32::MIN);
         assert_eq!(JdkNumericAndFormatFacades::abs_long(i64::MIN), i64::MIN);
         assert_eq!(JdkNumericAndFormatFacades::max_int(1, 2), 2);

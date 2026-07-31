@@ -7084,6 +7084,14 @@ types available. Audit `0032` remains partial because the broader external
 effect policy still needs more edge-semantics coverage outside the modeled
 Math/StrictMath overloads.
 
+2026-07-31 Math audit closure checkpoint: generated-runtime coverage now pins
+the `0032` edge cases directly: negative and positive half rounding,
+`0.49999999999999994`, `Float.NaN`, `Integer.MIN_VALUE`/`Long.MIN_VALUE`
+`abs`, signed `floorDiv`/`floorMod`, `floorMod(long,int) -> int`, and
+NaN-propagating floating `max`. Audit `0032` is moved to
+`claude_audits/done`; future Math work should be tracked as new edge coverage
+or new facade facts rather than keeping the original audit open.
+
 2026-07-31 parameter-pattern API effect checkpoint: external API effect facts
 can now carry explicit Java parameter patterns, manifests can spell them as
 `params=TypeA,TypeB`, and call lookup selects the highest-specificity matching
