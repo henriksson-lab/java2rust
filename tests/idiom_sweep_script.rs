@@ -143,6 +143,21 @@ fn focused_package_source_type_stub_stripping_is_separate_from_shared_support() 
 }
 
 #[test]
+fn focused_package_prelude_restore_keeps_top_level_helper_dependencies() {
+    let script_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/translate-focused-package.sh");
+    let script = fs::read_to_string(script_path).unwrap();
+
+    assert!(script.contains("top_level_function_items"), "{script}");
+    assert!(script.contains("referenced_function_names"), "{script}");
+    assert!(
+        script.contains("pending_texts = [current] + list(chunks)")
+            && script.contains("chunks.append(variants[0])"),
+        "{script}"
+    );
+}
+
+#[test]
 fn focused_package_shared_support_stripper_keeps_dyn_trait_inherent_impls() {
     let script_path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/translate-focused-package.sh");
@@ -1105,6 +1120,168 @@ pub struct UseB;
             .unwrap()
             .contains("impl From<ReadsFormatWriteOption> for WriteOption")
     );
+}
+
+#[test]
+fn shared_support_merger_promotes_top_level_helper_dependency_closure() {
+    let dir = unique_temp_dir("shared_support_top_level_helper_closure");
+    let generated_dir = dir.join("generated");
+    fs::create_dir_all(&generated_dir).unwrap();
+    let facade_support = r#"
+#[derive(Clone, Debug, Default)]
+pub struct StringBuffer {
+    value: String,
+}
+
+impl StringBuffer {
+    pub fn set_length(&mut self, new_len: i32) {
+        java_string_buffer_set_length(&mut self.value, new_len);
+        java_string_buffer_multiline_helper(
+            &self.value,
+            new_len,
+        );
+    }
+}
+
+fn java_string_buffer_byte_index(value: &str, char_index: i32) -> usize {
+    value.char_indices().nth(char_index as usize).map(|(index, _)| index).unwrap_or(value.len())
+}
+
+fn java_string_buffer_set_length(value: &mut String, new_len: i32) {
+    let byte_index = java_string_buffer_byte_index(value, new_len);
+    value.truncate(byte_index);
+}
+
+fn java_string_buffer_multiline_helper(
+    value: &str,
+    char_index: i32,
+) -> usize {
+    java_string_buffer_byte_index(value, char_index)
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Pattern {
+    pattern: &'static str,
+}
+
+impl Pattern {
+    pub fn matches(&self, input: &str) -> bool {
+        java_pattern_matches(self.pattern, input)
+    }
+}
+
+fn java_pattern_matches(pattern: &str, input: &str) -> bool {
+    input == java_pattern_simple_regex_literal(pattern)
+}
+
+fn java_pattern_simple_regex_literal(regex: &str) -> &str {
+    regex
+}
+
+fn java_existing_shared_helper() -> i32 {
+    7
+}
+
+fn java_already_shared_helper() -> i32 {
+    11
+}
+"#;
+    fs::write(
+        generated_dir.join("00001_UseA.rs"),
+        format!("{facade_support}\npub struct UseA;\n"),
+    )
+    .unwrap();
+    fs::write(
+        generated_dir.join("00002_UseB.rs"),
+        format!("{facade_support}\npub struct UseB;\n"),
+    )
+    .unwrap();
+
+    let shared_support = dir.join("shared.rs");
+    let shared_types = dir.join("shared-types.tsv");
+    let conflicts = dir.join("conflicts.tsv");
+    fs::write(
+        &shared_support,
+        r#"
+pub struct ExistingSharedFacade;
+
+impl ExistingSharedFacade {
+    pub fn existing_value(&self) -> i32 {
+        java_existing_shared_helper() + java_already_shared_helper()
+    }
+}
+
+fn java_already_shared_helper() -> i32 {
+    11
+}
+"#,
+    )
+    .unwrap();
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/merge-shared-support-facades.py");
+    let output = Command::new("python3")
+        .arg(script)
+        .arg("--generated-dir")
+        .arg(&generated_dir)
+        .arg("--shared-support")
+        .arg(&shared_support)
+        .arg("--shared-types")
+        .arg(&shared_types)
+        .arg("--conflicts")
+        .arg(&conflicts)
+        .output()
+        .expect("run shared support merger");
+    assert!(
+        output.status.success(),
+        "shared support merger failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let shared = fs::read_to_string(&shared_support).unwrap();
+    assert!(shared.contains("pub struct StringBuffer"), "{shared}");
+    assert!(shared.contains("pub struct Pattern"), "{shared}");
+    assert!(
+        shared.contains("fn java_string_buffer_set_length"),
+        "{shared}"
+    );
+    assert!(
+        shared.contains("fn java_string_buffer_byte_index"),
+        "{shared}"
+    );
+    assert!(
+        shared.contains("fn java_string_buffer_multiline_helper"),
+        "{shared}"
+    );
+    assert!(
+        shared.contains("java_string_buffer_byte_index(value, char_index)"),
+        "{shared}"
+    );
+    assert!(
+        shared.contains("fn java_existing_shared_helper"),
+        "{shared}"
+    );
+    assert_eq!(
+        shared.matches("fn java_already_shared_helper").count(),
+        1,
+        "{shared}"
+    );
+    assert!(shared.contains("fn java_pattern_matches"), "{shared}");
+    assert!(
+        shared.contains("fn java_pattern_simple_regex_literal"),
+        "{shared}"
+    );
+
+    for file in ["00001_UseA.rs", "00002_UseB.rs"] {
+        let source = fs::read_to_string(generated_dir.join(file)).unwrap();
+        assert!(!source.contains("pub struct StringBuffer"), "{source}");
+        assert!(!source.contains("pub struct Pattern"), "{source}");
+        assert!(
+            !source.contains("fn java_string_buffer_set_length"),
+            "{source}"
+        );
+        assert!(!source.contains("fn java_pattern_matches"), "{source}");
+    }
 }
 
 #[test]

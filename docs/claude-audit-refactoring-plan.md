@@ -29,6 +29,12 @@ Keep the standing constraint: do not make algorithm changes that block future
 global semantic analysis. Prefer explicit keys, indices, compatibility shims,
 and divergence logs.
 
+Audit file housekeeping is part of the work, not a later cleanup step: once a
+Claude audit has been fully implemented and verified, move its issue file from
+`claude_audits/` to
+`/home/mahogny/github/claude/new_java2rust/claude_audits/done` in the same
+checkpoint. Leave partially addressed audits in the active directory.
+
 Audit closure rule: no `claude_audits/` item is considered done until its issue
 file has also been moved to
 `/home/mahogny/github/claude/new_java2rust/claude_audits/done`.

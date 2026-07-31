@@ -1097,6 +1097,20 @@ def item_end(lines: list[str], start: int) -> int:
     return len(lines)
 
 
+def function_item_end(lines: list[str], start: int) -> int:
+    depth = 0
+    saw_body = False
+    for index in range(start, len(lines)):
+        if "{" in lines[index]:
+            saw_body = True
+        depth += brace_delta(lines[index])
+        if saw_body and depth <= 0:
+            return index + 1
+        if not saw_body and ";" in lines[index]:
+            return index + 1
+    return len(lines)
+
+
 def attached_start(lines: list[str], start: int) -> int:
     index = start
     while index > 0 and derive_re.match(lines[index - 1]):
@@ -1112,6 +1126,33 @@ def declared_names(text: str) -> set[str]:
         elif match := alias_re.match(line):
             names.add(match.group(1))
     return names
+
+
+def top_level_function_items(lines: list[str]) -> dict[str, list[tuple[int, int, str]]]:
+    functions = {}
+    depth = 0
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if depth == 0 and (match := re.match(r"^\s*(?:pub\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\b", line)):
+            end = function_item_end(lines, index)
+            functions.setdefault(match.group(1), []).append(
+                (index, end, "".join(lines[index:end]).rstrip())
+            )
+            index = end
+            depth = 0
+            continue
+        depth += brace_delta(line)
+        index += 1
+    return functions
+
+
+def referenced_function_names(text: str, candidate_names: set[str]) -> set[str]:
+    referenced = set()
+    for name in candidate_names:
+        if re.search(rf"\b{re.escape(name)}\s*(?:<|\()", text):
+            referenced.add(name)
+    return referenced
 
 
 def support_item_name(line: str):
@@ -1138,6 +1179,7 @@ def restorable_support_name(name: str) -> bool:
 
 current = rust_path.read_text()
 present = declared_names(current)
+present_functions = set(top_level_function_items(current.splitlines(keepends=True)))
 raw_lines = raw_path.read_text().splitlines(keepends=True)
 candidate_names = set()
 depth = 0
@@ -1158,27 +1200,47 @@ while index < len(raw_lines):
     depth += brace_delta(line)
     index += 1
 
-if not candidate_names:
-    raise SystemExit(0)
-
 chunks = []
-depth = 0
-index = 0
-while index < len(raw_lines):
-    line = raw_lines[index]
-    if depth == 0:
-        if (match := decl_re.match(line)) and match.group(2) == current_source:
-            break
-        name = support_item_name(line)
-        if name and name in candidate_names:
-            start = attached_start(raw_lines, index) if decl_re.match(line) else index
-            end = item_end(raw_lines, index)
-            chunks.append("".join(raw_lines[start:end]).rstrip())
-            index = end
-            depth = 0
+if candidate_names:
+    depth = 0
+    index = 0
+    while index < len(raw_lines):
+        line = raw_lines[index]
+        if depth == 0:
+            if (match := decl_re.match(line)) and match.group(2) == current_source:
+                break
+            name = support_item_name(line)
+            if name and name in candidate_names:
+                start = attached_start(raw_lines, index) if decl_re.match(line) else index
+                end = item_end(raw_lines, index)
+                chunks.append("".join(raw_lines[start:end]).rstrip())
+                index = end
+                depth = 0
+                continue
+        depth += brace_delta(line)
+        index += 1
+
+raw_functions = top_level_function_items(raw_lines)
+selected_functions = set()
+pending_texts = [current] + list(chunks)
+while pending_texts:
+    text = pending_texts.pop()
+    for name in referenced_function_names(text, set(raw_functions)):
+        if name in selected_functions or name in present_functions:
             continue
-    depth += brace_delta(line)
-    index += 1
+        selected_functions.add(name)
+        pending_texts.extend(item[2] for item in raw_functions[name])
+
+for name in sorted(selected_functions):
+    variants = []
+    seen = set()
+    for _, _, text in raw_functions[name]:
+        if text in seen:
+            continue
+        variants.append(text)
+        seen.add(text)
+    if variants:
+        chunks.append(variants[0])
 
 if not chunks:
     raise SystemExit(0)

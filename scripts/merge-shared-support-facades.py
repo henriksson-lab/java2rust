@@ -504,6 +504,77 @@ def parse_shared_items_from_text(text: str, selected: set[str]) -> list[dict]:
     return items
 
 
+def parse_top_level_functions_from_text(text: str) -> list[dict]:
+    lines = text.splitlines(keepends=True)
+    items = []
+    depth = 0
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if depth == 0:
+            fn_match = FN_RE.match(line)
+            if fn_match:
+                end = function_item_end(lines, index)
+                items.append(
+                    {
+                        "kind": "function",
+                        "name": fn_match.group(1),
+                        "start": index,
+                        "end": end,
+                        "text": "".join(lines[index:end]),
+                        "prelude": True,
+                    }
+                )
+                index = end
+                continue
+        depth += brace_delta(line)
+        index += 1
+    return items
+
+
+def parse_top_level_functions(path: Path) -> list[dict]:
+    return parse_top_level_functions_from_text(path.read_text())
+
+
+def function_item_end(lines: list[str], start: int) -> int:
+    depth = 0
+    saw_body = False
+    for index in range(start, len(lines)):
+        if "{" in lines[index]:
+            saw_body = True
+        depth += brace_delta(lines[index])
+        if saw_body and depth <= 0:
+            return index + 1
+        if not saw_body and ";" in lines[index]:
+            return index + 1
+    return len(lines)
+
+
+def referenced_function_names(text: str, candidate_names: set[str]) -> set[str]:
+    referenced = set()
+    for name in candidate_names:
+        pattern = re.compile(rf"\b{re.escape(name)}\s*(?:<|\()")
+        if pattern.search(text):
+            referenced.add(name)
+    return referenced
+
+
+def top_level_function_dependency_closure(
+    seed_texts: list[str], functions_by_name: dict[str, list[dict]]
+) -> set[str]:
+    candidate_names = set(functions_by_name)
+    selected = set()
+    pending_texts = list(seed_texts)
+    while pending_texts:
+        text = pending_texts.pop()
+        for name in referenced_function_names(text, candidate_names):
+            if name in selected:
+                continue
+            selected.add(name)
+            pending_texts.extend(item["text"] for item in functions_by_name[name])
+    return selected
+
+
 def remove_shared_items(path: Path, items: list[dict]) -> None:
     if not items or not path.exists():
         return
@@ -1150,6 +1221,9 @@ def main() -> int:
         for line in existing_shared_text.splitlines()
         if (match := ALIAS_RE.match(line))
     }
+    existing_shared_function_names = {
+        item["name"] for item in parse_top_level_functions_from_text(existing_shared_text)
+    }
     def promotable_shared_name(name: str) -> bool:
         return name not in existing_shared_types
 
@@ -1257,6 +1331,7 @@ def main() -> int:
     trait_impls = defaultdict(list)
     inherent_methods = defaultdict(list)
     inherent_consts = defaultdict(list)
+    top_level_functions_by_name = defaultdict(list)
 
     for path in merge_input_paths:
         items = parse_items(path, selected)
@@ -1277,6 +1352,10 @@ def main() -> int:
                     inherent_methods[(item["name"], method_name)].append((path, method_text))
                 for const_name, const_text in extract_consts(item["text"]):
                     inherent_consts[(item["name"], const_name)].append((path, const_text))
+        for item in parse_top_level_functions(path):
+            item_with_path = dict(item)
+            item_with_path["path"] = path
+            top_level_functions_by_name[item["name"]].append(item_with_path)
     for path in rust_paths:
         items_by_path[path] = parse_items(path, selected)
 
@@ -1474,6 +1553,28 @@ def main() -> int:
             continue
         shared_chunks.append("\n" + text.rstrip() + "\n")
 
+    selected_functions = top_level_function_dependency_closure(
+        [existing_shared_text] + shared_chunks, top_level_functions_by_name
+    )
+    for function_name in sorted(selected_functions):
+        if function_name in existing_shared_function_names:
+            continue
+        variants = []
+        seen_functions = set()
+        for item in top_level_functions_by_name[function_name]:
+            text = item["text"]
+            if text in seen_functions:
+                continue
+            variants.append(text)
+            seen_functions.add(text)
+        if not variants:
+            continue
+        if len(variants) > 1:
+            conflict_lines.append(
+                f"{function_name}\tfunction\tkept first of {len(variants)} variants\n"
+            )
+        shared_chunks.append("\n" + variants[0].rstrip() + "\n")
+
     for alias_name, variants in sorted(aliases.items()):
         if alias_name in protected_shared_aliases:
             continue
@@ -1502,6 +1603,12 @@ def main() -> int:
             shared_types.write(f"{name}\n")
 
     for path, items in items_by_path.items():
+        if selected_functions:
+            items = items + [
+                item
+                for item in parse_top_level_functions(path)
+                if item["name"] in selected_functions
+            ]
         remove_items(
             path,
             items,

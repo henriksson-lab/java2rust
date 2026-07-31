@@ -7071,6 +7071,27 @@ top families are erased-carrier field/method access, duplicate erased
 `From<T> for Box<dyn Any>` impls, missing StringBuffer/Pattern helper support,
 modeled static constants, and one cast-parentheses row.
 
+2026-07-31 focused support-helper restoration checkpoint: focused-package
+assembly now preserves top-level helper functions referenced by promoted or
+restored prelude support items. The shared-support merger follows function
+dependencies from generated shared chunks and existing shared support, and the
+prelude restore path follows helper dependencies from the stripped module text
+itself. This keeps restored `StringBuilder`/`StringBuffer` and
+`Pattern`/`Matcher` facades self-contained instead of dropping their private
+`java_string_buffer_*` and `java_pattern_*` helpers. Focused verification:
+`cargo test --test idiom_sweep_script -- --nocapture`, `bash -n
+scripts/translate-focused-package.sh`, `python3 -m py_compile
+scripts/merge-shared-support-facades.py`, `cargo fmt --check`, `git diff
+--check`, `cargo check --tests --quiet`, and reduced VCF rerun
+`.tmp/corpus-rerun-20260731-vcf-standard-bound-after-helper-restore-r2`.
+That rerun translates 9/9 files, reports 0 parse failures and
+`unsupported_statements=0`, and reduces generated-Rust errors from 42 to 34.
+The missing `java_string_buffer_set_length/delete/insert` and
+`java_pattern_matches/capture_groups` families are gone. Remaining top
+families are erased-carrier field/method access, duplicate erased
+`From<T> for Box<dyn Any>` impls, modeled static constants, generic
+`Standards<T>` clone bounds, and one cast-parentheses row.
+
 2026-07-31 fact-backed initializer checkpoint: declared external locals whose
 initializer has a planned typed return now anchor through a general erased-type
 identity predicate in signature/lowering instead of the former
