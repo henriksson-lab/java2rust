@@ -2708,6 +2708,16 @@ class JavaArraysSortUse {
         return values;
     }
 
+    static int[] parallelWhole(int[] values) {
+        Arrays.parallelSort(values);
+        return values;
+    }
+
+    static int[] parallelRange(int[] values) {
+        Arrays.parallelSort(values, 1, 4);
+        return values;
+    }
+
     static int[] badRangeOrder(int[] values) {
         Arrays.sort(values, 4, 1);
         return values;
@@ -2737,7 +2747,9 @@ class JavaArraysSortUse {
                 .rust
                 .contains("__java_arrays_target[__java_arrays_from..__java_arrays_to].sort()")
             && !translation.rust.contains("Arrays::sort")
-            && !translation.rust.contains("JavaUtilArrays::sort"),
+            && !translation.rust.contains("JavaUtilArrays::sort")
+            && !translation.rust.contains("Arrays::parallel_sort")
+            && !translation.rust.contains("JavaUtilArrays::parallel_sort"),
         "{}",
         translation.rust
     );
@@ -2760,6 +2772,8 @@ mod generated_tests {
             JavaArraysSortUse::names(vec!["z".to_string(), "b".to_string(), "a".to_string(), "x".to_string()]),
             vec!["z".to_string(), "a".to_string(), "b".to_string(), "x".to_string()]
         );
+        assert_eq!(JavaArraysSortUse::parallel_whole(vec![3, 1, 2]), vec![1, 2, 3]);
+        assert_eq!(JavaArraysSortUse::parallel_range(vec![9, 4, 3, 2, 1]), vec![9, 2, 3, 4, 1]);
 
         assert_eq!(JavaArraysSortUse::noop_at_end(vec![1, 2, 3]), vec![1, 2, 3]);
         assert!(std::panic::catch_unwind(|| JavaArraysSortUse::bad_range_order(vec![1, 2, 3])).is_err());

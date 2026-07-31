@@ -134,6 +134,9 @@ Landed in this batch:
 - `Arrays.sort(...)` now plans both whole-array and subrange statement
   overloads as native mutating Rust operations, with signature mutation
   detection marking the target array for both arities.
+- `Arrays.parallelSort(...)` now aliases to the same native sequential Rust sort
+  projections for whole-array and subrange overloads, intentionally erasing JDK
+  parallel execution while preserving sorted results and range validation.
 - `Arrays.binarySearch(...)` now lowers whole-array and subrange overloads
   through native Rust slice binary-search projections with Java's negative
   insertion-point result instead of depending on a generated no-op `Arrays`

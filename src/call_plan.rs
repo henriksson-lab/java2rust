@@ -1978,16 +1978,20 @@ fn plan_native_arrays_statement<'a>(
         return None;
     }
     match (name, args) {
-        ("sort", [target]) => Some(CallStatementPlan::NativeArraysSort {
-            target,
-            from: None,
-            to: None,
-        }),
-        ("sort", [target, from, to]) => Some(CallStatementPlan::NativeArraysSort {
-            target,
-            from: Some(from),
-            to: Some(to),
-        }),
+        ("sort" | "parallelSort" | "parallel_sort", [target]) => {
+            Some(CallStatementPlan::NativeArraysSort {
+                target,
+                from: None,
+                to: None,
+            })
+        }
+        ("sort" | "parallelSort" | "parallel_sort", [target, from, to]) => {
+            Some(CallStatementPlan::NativeArraysSort {
+                target,
+                from: Some(from),
+                to: Some(to),
+            })
+        }
         ("fill", [target, value]) => Some(CallStatementPlan::NativeArraysFill {
             target,
             from: None,

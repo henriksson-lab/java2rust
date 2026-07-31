@@ -8678,7 +8678,9 @@ fn static_collection_mutator_target<'a>(
         return None;
     };
     let receiver_key = crate::stdlib::canonical_external_receiver_type_key(receiver_name);
-    if receiver_key == "Arrays" && matches!(name, "sort" | "fill") {
+    if receiver_key == "Arrays"
+        && matches!(name, "sort" | "parallelSort" | "parallel_sort" | "fill")
+    {
         return args.first();
     }
     if receiver_key == "Collections" && name == "sort" && matches!(args.len(), 1 | 2) {
