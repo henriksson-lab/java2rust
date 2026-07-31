@@ -3228,6 +3228,9 @@ fn known_argument_sensitive_external_method_return_type(
         (Some("Arrays"), "equals", [JavaType::Array(_), JavaType::Array(_)]) => {
             Some(JavaType::Primitive(PrimitiveType::Boolean))
         }
+        (Some("Arrays"), "hashCode" | "hash_code", [JavaType::Array(_)]) => {
+            Some(JavaType::Primitive(PrimitiveType::Int))
+        }
         (Some("Arrays"), "toString" | "to_string", [JavaType::Array(_)]) => Some(JavaType::String),
         (Some("Arrays"), "copyOf", [JavaType::Array(element), _]) => {
             Some(JavaType::Array(element.clone()))
@@ -5661,6 +5664,94 @@ pub fn java_string_hash_code(value: &str) -> i32 {
     value
         .encode_utf16()
         .fold(0i32, |hash, unit| hash.wrapping_mul(31).wrapping_add(unit as i32))
+}
+
+pub trait JavaArraysHashElement {
+    fn java_arrays_hash_code(&self) -> i32;
+}
+
+pub fn java_arrays_hash_code<T: JavaArraysHashElement>(value: &[T]) -> i32 {
+    value.iter().fold(1i32, |hash, element| {
+        hash.wrapping_mul(31)
+            .wrapping_add(element.java_arrays_hash_code())
+    })
+}
+
+impl JavaArraysHashElement for bool {
+    fn java_arrays_hash_code(&self) -> i32 {
+        if *self { 1231 } else { 1237 }
+    }
+}
+
+impl JavaArraysHashElement for i8 {
+    fn java_arrays_hash_code(&self) -> i32 {
+        *self as i32
+    }
+}
+
+impl JavaArraysHashElement for i16 {
+    fn java_arrays_hash_code(&self) -> i32 {
+        *self as i32
+    }
+}
+
+impl JavaArraysHashElement for i32 {
+    fn java_arrays_hash_code(&self) -> i32 {
+        *self
+    }
+}
+
+impl JavaArraysHashElement for i64 {
+    fn java_arrays_hash_code(&self) -> i32 {
+        (*self ^ ((*self as u64 >> 32) as i64)) as i32
+    }
+}
+
+impl JavaArraysHashElement for char {
+    fn java_arrays_hash_code(&self) -> i32 {
+        *self as i32
+    }
+}
+
+impl JavaArraysHashElement for f32 {
+    fn java_arrays_hash_code(&self) -> i32 {
+        if self.is_nan() {
+            0x7fc00000u32 as i32
+        } else {
+            self.to_bits() as i32
+        }
+    }
+}
+
+impl JavaArraysHashElement for f64 {
+    fn java_arrays_hash_code(&self) -> i32 {
+        let bits = if self.is_nan() {
+            0x7ff8000000000000u64
+        } else {
+            self.to_bits()
+        };
+        (bits ^ (bits >> 32)) as i32
+    }
+}
+
+impl JavaArraysHashElement for String {
+    fn java_arrays_hash_code(&self) -> i32 {
+        java_string_hash_code(self)
+    }
+}
+
+impl JavaArraysHashElement for &str {
+    fn java_arrays_hash_code(&self) -> i32 {
+        java_string_hash_code(self)
+    }
+}
+
+impl<T: JavaArraysHashElement> JavaArraysHashElement for Option<T> {
+    fn java_arrays_hash_code(&self) -> i32 {
+        self.as_ref()
+            .map(JavaArraysHashElement::java_arrays_hash_code)
+            .unwrap_or(0)
+    }
 }
 
 pub fn java_list_hash_code<T>(value: &[T]) -> i32 {
@@ -16378,6 +16469,10 @@ fn expr_uses_java_string_runtime_helpers(expr: &Expr) -> bool {
                     if canonical_external_receiver_type_key(owner) == "Math"
             ) || matches!(
                 (receiver.as_deref(), name.as_str(), args.len()),
+                (Some(Expr::Var(owner)), "hashCode" | "hash_code", 1)
+                    if canonical_external_receiver_type_key(owner) == "Arrays"
+            ) || matches!(
+                (receiver.as_deref(), name.as_str(), args.len()),
                 (Some(Expr::Var(owner)), "round" | "abs", 1)
                     if canonical_external_receiver_type_key(owner) == "Math"
             ) || matches!(
@@ -17056,6 +17151,7 @@ fn external_api_method_policy_provenance_with_builtin_packs(
     match (receiver_type, name, arg_count) {
         (Some("Arrays"), "asList" | "stream", _) => FactProvenance::BuiltinExternalModel,
         (Some("Arrays"), "equals", 2) => FactProvenance::BuiltinExternalModel,
+        (Some("Arrays"), "hashCode" | "hash_code", 1) => FactProvenance::BuiltinExternalModel,
         (Some("Arrays"), "toString" | "to_string", 1) => FactProvenance::BuiltinExternalModel,
         (Some("Arrays"), "copyOf", 2) => FactProvenance::BuiltinExternalModel,
         (Some("Arrays"), "copyOfRange", 3) => FactProvenance::BuiltinExternalModel,
@@ -17496,6 +17592,7 @@ pub fn external_api_return_nullability(
         }
         (Some("Arrays"), "asList" | "stream", _) => NullabilityState::DefinitelyNonNull,
         (Some("Arrays"), "equals", 2) => NullabilityState::DefinitelyNonNull,
+        (Some("Arrays"), "hashCode" | "hash_code", 1) => NullabilityState::DefinitelyNonNull,
         (Some("Arrays"), "toString" | "to_string", 1) => NullabilityState::DefinitelyNonNull,
         (Some("Arrays"), "copyOf", 2) => NullabilityState::DefinitelyNonNull,
         (Some("Arrays"), "copyOfRange", 3) => NullabilityState::DefinitelyNonNull,
@@ -17657,6 +17754,7 @@ fn static_utility_method_role(
         (Some("IntStream" | "LongStream" | "DoubleStream"), "sum", 0) => ExternalApiRole::Getter,
         (Some("Arrays"), "asList" | "stream", _) => ExternalApiRole::Getter,
         (Some("Arrays"), "equals", 2) => ExternalApiRole::BooleanGetter,
+        (Some("Arrays"), "hashCode" | "hash_code", 1) => ExternalApiRole::Getter,
         (Some("Arrays"), "toString" | "to_string", 1) => ExternalApiRole::Getter,
         (Some("Arrays"), "copyOf", 2) => ExternalApiRole::Getter,
         (Some("Arrays"), "copyOfRange", 3) => ExternalApiRole::Getter,

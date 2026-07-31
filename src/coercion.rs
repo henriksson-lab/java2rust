@@ -2288,6 +2288,13 @@ pub fn arrays_to_string_projection(source: RustExpr) -> RustExpr {
     ))
 }
 
+pub fn arrays_hash_code_projection(source: RustExpr) -> RustExpr {
+    RustExpr::Call {
+        function: Box::new(RustExpr::Raw("java_arrays_hash_code".to_string())),
+        args: vec![source],
+    }
+}
+
 pub fn collections_empty_list_projection() -> RustExpr {
     RustExpr::Raw("Vec::new()".to_string())
 }

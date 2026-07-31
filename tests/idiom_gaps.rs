@@ -21239,6 +21239,68 @@ mod generated_tests {
 }
 
 #[test]
+fn java_arrays_hash_code_lowers_as_static_platform_hash_projection() {
+    let translation = translate_source(
+        r#"
+import java.util.Arrays;
+
+class JavaArraysHashCodeUse {
+    int ints(int[] values) {
+        return Arrays.hashCode(values);
+    }
+
+    int bools(boolean[] values) {
+        return Arrays.hashCode(values);
+    }
+
+    int doubles(double[] values) {
+        return Arrays.hashCode(values);
+    }
+
+    int names(String[] values) {
+        return Arrays.hashCode(values);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("java_arrays_hash_code(values)")
+            && !translation.rust.contains("Arrays::hash_code")
+            && !translation.rust.contains("JavaUtilArrays::hash_code"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "java_arrays_hash_code_use",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn hashes_arrays_with_java_seed_and_element_hashes() {
+        let fixture = JavaArraysHashCodeUse {};
+        assert_eq!(fixture.ints(&[1, 2, 3]), 30817);
+        assert_eq!(fixture.ints(&[]), 1);
+        assert_eq!(fixture.bools(&[true, false]), 40359);
+        assert_eq!(fixture.doubles(&[f64::NAN]), 2146959391);
+        assert_eq!(
+            fixture.names(&["a".to_string(), "b".to_string()]),
+            4066
+        );
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
 fn java_arrays_to_string_lowers_as_static_platform_format_projection() {
     let translation = translate_source(
         r#"

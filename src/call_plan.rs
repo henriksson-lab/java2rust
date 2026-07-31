@@ -365,6 +365,7 @@ pub enum NativeCollectionExtendArgPlan {
 pub enum NativeCollectionStaticMethod {
     ArraysAsList,
     ArraysEquals,
+    ArraysHashCode,
     ArraysCopyOf,
     ArraysCopyOfRange,
     ArraysToString,
@@ -560,6 +561,9 @@ pub fn native_java_call_lowered_type(target: &CallTargetPlan<'_>) -> Option<Lowe
                 | NativeJavaInstanceMethod::StringHashCode
                 | NativeJavaInstanceMethod::PrimitiveHashCode { .. },
             ..
+        }
+        | CallTargetPlan::NativeCollectionStatic {
+            method: NativeCollectionStaticMethod::ArraysHashCode,
         } => Some(LoweredType::from_java(JavaType::Primitive(
             PrimitiveType::Int,
         ))),
@@ -2947,6 +2951,7 @@ fn plan_native_collection_static_call<'a>(
         let method = match name {
             "asList" | "as_list" => NativeCollectionStaticMethod::ArraysAsList,
             "equals" => NativeCollectionStaticMethod::ArraysEquals,
+            "hashCode" | "hash_code" => NativeCollectionStaticMethod::ArraysHashCode,
             "copyOf" | "copy_of" => NativeCollectionStaticMethod::ArraysCopyOf,
             "copyOfRange" | "copy_of_range" => NativeCollectionStaticMethod::ArraysCopyOfRange,
             "toString" | "to_string" => NativeCollectionStaticMethod::ArraysToString,

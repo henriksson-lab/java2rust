@@ -48,6 +48,8 @@ fix, regression/focused verification, audit-status update, and the corresponding
 committed. If any of those pieces is missing, keep the audit open.
 During review, treat an audit marked done while its file still lives directly
 under `claude_audits/` as incomplete work to fix before the checkpoint lands.
+For partial checkpoints, leave the audit file active and note the remaining
+open scope instead of moving it.
 
 Operational reminder: when an audit issue is done, move the issue file into
 `/home/mahogny/github/claude/new_java2rust/claude_audits/done` immediately;
@@ -524,7 +526,7 @@ Completion checklist for any audit marked `fixed locally`:
 | `0013` nested downcast names | fixed locally | Moved to `claude_audits/done` |
 | `0014` labelled statements deleted | fixed locally | Moved to `claude_audits/done`; CFG liveness still needs labelled edges |
 | `0015` static initializer blocks dropped | partial | Loud diagnostic now; full class-init later |
-| `0016` no-op JDK facades | partial | `StringBuilder`/`StringBuffer` and literal `Pattern`/`Matcher` paths are stateful; `Arrays.copyOf/copyOfRange/toString/fill/sort` and common `Math` calls lower natively without dead `Math` fallback support; Apache `FastMath` uses a javalibs owner alias to the Math planner; remaining Arrays helpers and broader facade fallibility still open |
+| `0016` no-op JDK facades | partial | `StringBuilder`/`StringBuffer` and literal `Pattern`/`Matcher` paths are stateful; `Arrays.copyOf/copyOfRange/toString/fill/sort/hashCode` and common `Math` calls lower natively without dead `Math` fallback support; Apache `FastMath` uses a javalibs owner alias to the Math planner; remaining Arrays helpers and broader facade fallibility still open |
 | `0017` generic bounds dropped | partial | Method/constructor type parameters now emit as structured Rust function generics, ordinary source method/constructor bounds that resolve to emitted source interfaces/classes emit Rust bounds, analysis-only context bounds are suppressed to avoid missing Rust traits, and raw trait signatures preserve method generics/bounds with object-safe `where Self: Sized`; multi-bounds, external/JDK bound projection, and full typed type parsing remain open |
 | `0018` compile metric blind spots | partial | Parse gate and coverage counters |
 | `0019` raw Java expression fallback | fixed locally | Moved to `claude_audits/done`; simple switch expressions now lower to Rust `match` |
