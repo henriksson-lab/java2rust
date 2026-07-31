@@ -19377,6 +19377,56 @@ class NullableEnumSwitchChild extends NullableEnumSwitchOwner {
 }
 
 #[test]
+fn nullable_source_enum_fallthrough_switch_labels_wrap_some() {
+    let translation = translate_source(
+        r#"
+public class NullableEnumFallthroughSwitch {
+    public enum CountType {
+        INTEGER,
+        UNBOUNDED
+    }
+
+    private CountType countType;
+    private int count;
+
+    public int getCount() {
+        switch (countType) {
+            case INTEGER:
+                count++;
+                return count;
+            case UNBOUNDED:
+                return -1;
+            default:
+                return 0;
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "__java_switch_value == Some(NullableEnumFallthroughSwitchCountType::INTEGER)"
+        ) && translation.rust.contains(
+            "__java_switch_value == Some(NullableEnumFallthroughSwitchCountType::UNBOUNDED)"
+        ) && !translation
+            .rust
+            .contains("__java_switch_value == NullableEnumFallthroughSwitchCountType::INTEGER"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "nullable_enum_fallthrough_switch",
+        vec![GeneratedCrateModule {
+            name: "nullable_enum_fallthrough_switch",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn documents_diamond_single_unknown_gap() {
     let translation = translate_source(&idiom_gap("DiamondSingleUnknown.java"));
 

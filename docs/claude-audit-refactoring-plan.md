@@ -233,6 +233,15 @@ Landed in this batch:
   enum switch/match comparisons, value-vs-borrowed concrete argument
   adaptation, concrete/concrete `instanceof`, enum `hash_code`, and the
   existing unsupported member markers.
+- 2026-07-31 nullable enum switch checkpoint:
+  nullable source enum switch labels now render before bare enum label fallback,
+  so match arms and fallthrough `__java_switch_value == ...` guards wrap labels
+  as `Some(Enum::Variant)` when the selector storage is optional. Reduced VCF
+  rerun `.tmp/corpus-rerun-20260731-vcf-nullable-switch-r1` remains 9/9
+  translated with `parse_failures=0`, `stubbed_constants=0`, and
+  `cargo_check_errors=12`. Remaining VCF blockers are concrete/concrete
+  `instanceof`, stale concrete downcast handover temporaries, enum `hash_code`,
+  and subclass-to-super concrete argument conversion.
 
 1. Add a generated-Rust parse gate to focused corpus scripts.
    - Report parse failures separately from type-check errors.

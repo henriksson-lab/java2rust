@@ -7777,22 +7777,6 @@ fn switch_match_pattern(
     let SwitchCaseLabelPlan::Expr(expr) = label else {
         return None;
     };
-    if let (JavaType::Named { name, .. }, Expr::Var(label_name)) = (selector_ty, expr)
-        && let Some(variant) = ctx
-            .representations
-            .java_enum_variant_for_label(name, label_name)
-    {
-        return Some(variant);
-    }
-    if let (JavaType::Named { name, .. }, Expr::Var(label_name)) = (selector_ty, expr)
-        && external_enum_constant_label_matches(ctx.facts, name, label_name)
-    {
-        let owner = crate::slot_render::rust_name_for_java_named_type(
-            &crate::stdlib::canonical_external_receiver_type_key(name),
-        );
-        let field = crate::parser::to_snake_case(label_name);
-        return Some(format!("{owner}::{field}"));
-    }
     if let Some(element_ty) = selector_shape.optional_element_type()
         && let JavaType::Named { name, .. } = &element_ty
         && let Expr::Var(label_name) = expr
@@ -7810,6 +7794,22 @@ fn switch_match_pattern(
             let field = crate::parser::to_snake_case(label_name);
             return Some(format!("Some({owner}::{field})"));
         }
+    }
+    if let (JavaType::Named { name, .. }, Expr::Var(label_name)) = (selector_ty, expr)
+        && let Some(variant) = ctx
+            .representations
+            .java_enum_variant_for_label(name, label_name)
+    {
+        return Some(variant);
+    }
+    if let (JavaType::Named { name, .. }, Expr::Var(label_name)) = (selector_ty, expr)
+        && external_enum_constant_label_matches(ctx.facts, name, label_name)
+    {
+        let owner = crate::slot_render::rust_name_for_java_named_type(
+            &crate::stdlib::canonical_external_receiver_type_key(name),
+        );
+        let field = crate::parser::to_snake_case(label_name);
+        return Some(format!("{owner}::{field}"));
     }
     if matches!(
         selector_ty,
@@ -7876,21 +7876,6 @@ fn lower_switch_case_label_expr(
     {
         return label;
     }
-    if let (JavaType::Named { name, .. }, Expr::Var(label_name)) = (selector_ty, expr) {
-        if let Some(variant) = ctx
-            .representations
-            .java_enum_variant_for_label(name, label_name)
-        {
-            return RustExpr::Raw(variant);
-        }
-        if external_enum_constant_label_matches(ctx.facts, name, label_name) {
-            let owner = crate::slot_render::rust_name_for_java_named_type(
-                &crate::stdlib::canonical_external_receiver_type_key(name),
-            );
-            let field = crate::parser::to_snake_case(label_name);
-            return owner_associated_path_projection(&owner, &field);
-        }
-    }
     if let Some(element_ty) = selector_shape.optional_element_type()
         && let JavaType::Named { name, .. } = &element_ty
         && let Expr::Var(label_name) = expr
@@ -7907,6 +7892,21 @@ fn lower_switch_case_label_expr(
             );
             let field = crate::parser::to_snake_case(label_name);
             return RustExpr::Raw(format!("Some({owner}::{field})"));
+        }
+    }
+    if let (JavaType::Named { name, .. }, Expr::Var(label_name)) = (selector_ty, expr) {
+        if let Some(variant) = ctx
+            .representations
+            .java_enum_variant_for_label(name, label_name)
+        {
+            return RustExpr::Raw(variant);
+        }
+        if external_enum_constant_label_matches(ctx.facts, name, label_name) {
+            let owner = crate::slot_render::rust_name_for_java_named_type(
+                &crate::stdlib::canonical_external_receiver_type_key(name),
+            );
+            let field = crate::parser::to_snake_case(label_name);
+            return owner_associated_path_projection(&owner, &field);
         }
     }
     lower_expr(expr, env, ctx)
