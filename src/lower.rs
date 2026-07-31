@@ -5993,10 +5993,28 @@ fn pattern_binding_refinement_stmt(
 ) -> RustStmt {
     let lowered_source = lower_expr_with_refinements(binding.source_expr, env, ctx, refinements);
     let rust_name = crate::parser::to_snake_case(binding.binding_name);
-    let rust_type = pattern_binding_rust_type_name(&binding.ty);
+    let plan = plan_instanceof(
+        binding.source_expr,
+        &binding.ty,
+        env,
+        ExprShapeContext {
+            signatures: Some(ctx.signatures),
+            representations: Some(ctx.representations),
+            facts: Some(ctx.facts),
+        },
+    );
+    let downcast_source =
+        instanceof_pattern_downcast_ref_projection(lowered_source.clone(), &plan.check)
+            .unwrap_or_else(|| {
+                let rust_type = pattern_binding_rust_type_name(&binding.ty);
+                RustExpr::Raw(format!(
+                    "{}.downcast_ref::<{rust_type}>()",
+                    emit::emit_expr(&lowered_source)
+                ))
+            });
     RustStmt::Raw(format!(
-        "let {rust_name} = {}.downcast_ref::<{rust_type}>().expect(\"invalid Java cast\");",
-        emit::emit_expr(&lowered_source)
+        "let {rust_name} = {}.expect(\"invalid Java cast\");",
+        emit::emit_expr(&downcast_source)
     ))
 }
 

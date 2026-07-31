@@ -2982,6 +2982,12 @@ fn coercion_owns_closed_enum_instanceof_predicates() {
         RustExpr::Raw("matches!(animal, AnimalValue::Dog(_))".to_string())
     );
     assert_eq!(
+        instanceof_pattern_downcast_ref_projection(RustExpr::Var("animal".to_string()), &check),
+        Some(RustExpr::Raw(
+            "match &animal { AnimalValue::Dog(value) => Some(value), _ => None }".to_string()
+        ))
+    );
+    assert_eq!(
         apply_instanceof_check(RustExpr::Var("animal".to_string()), &actual, &target),
         RustExpr::Raw("matches!(animal, AnimalValue::Dog(_))".to_string())
     );

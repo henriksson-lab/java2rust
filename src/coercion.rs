@@ -3907,6 +3907,12 @@ pub fn instanceof_pattern_downcast_ref_projection(
 ) -> Option<RustExpr> {
     let rendered = parenthesize_cast_method_receiver(&emit::emit_expr(&expr));
     match check {
+        InstanceOfCheck::ClosedEnumVariant {
+            enum_name,
+            variant_name,
+        } => Some(RustExpr::Raw(format!(
+            "match &{rendered} {{ {enum_name}::{variant_name}(value) => Some(value), _ => None }}"
+        ))),
         InstanceOfCheck::DynTraitType { target_type } => {
             let target_type = normalize_downcast_target_type(target_type);
             Some(RustExpr::Raw(format!(

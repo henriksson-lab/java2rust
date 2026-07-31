@@ -7040,6 +7040,15 @@ erased-object-only lowering branch. Focused verification passed with
 Audit `0021` remains partial; record/guarded pattern forms and open concrete
 source-hierarchy carriers still need separate work.
 
+2026-07-31 pattern carrier unification checkpoint: negated early-return
+pattern guards now use the same shared downcast projection as positive
+pattern blocks, and closed-enum `InstanceOfCheck::ClosedEnumVariant` now binds
+the enum payload with a borrowed `match` projection. Focused verification
+passed with `instanceof_pattern_variable_negated_source_interface_uses_trait_downcast_plan`,
+`coercion_owns_closed_enum_instanceof_predicates`, and
+`sealed_source_hierarchy_instanceof_pattern_binds_closed_enum_payload`.
+This still does not solve the open/non-sealed VCF concrete hierarchy fixture.
+
 2026-07-30 sealed source-hierarchy checkpoint: proven closed source class
 hierarchies with enhanced-for `instanceof` now feed usage-derived dispatch
 requirements into representation planning and type rendering. Assigned

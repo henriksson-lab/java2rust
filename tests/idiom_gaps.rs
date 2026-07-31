@@ -3204,6 +3204,54 @@ class InstanceofPatternVariableNegatedGuard {
 }
 
 #[test]
+fn instanceof_pattern_variable_negated_source_interface_uses_trait_downcast_plan() {
+    let translation = translate_source(
+        r#"
+interface SizedAnimal {
+    int size();
+}
+
+class SizedDog implements SizedAnimal {
+    public int size() {
+        return 4;
+    }
+}
+
+class InstanceofPatternVariableNegatedSourceInterface {
+    int run(SizedAnimal animal) {
+        if (!(animal instanceof SizedDog dog)) {
+            return 0;
+        }
+        return dog.size();
+    }
+}
+"#,
+    );
+
+    assert!(
+        (translation
+            .rust
+            .contains("animal.as_any().downcast_ref::<SizedDog>().expect(\"invalid Java cast\")")
+            || translation.rust.contains(
+                "animal.as_ref().as_any().downcast_ref::<SizedDog>().expect(\"invalid Java cast\")"
+            ))
+            && translation.rust.contains("return dog.size();")
+            && !translation.rust.contains("unsupported Java instanceof"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "instanceof_pattern_negated_source_interface",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn instanceof_pattern_variable_and_chain_binds_rhs_and_then_block() {
     let translation = translate_source(
         r#"
@@ -9811,6 +9859,54 @@ class StandardLineRepair {
 
     cargo_check_generated_modules(
         "sealed_source_hierarchy_instanceof_repair",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn sealed_source_hierarchy_instanceof_pattern_binds_closed_enum_payload() {
+    let source = r#"
+sealed class PatternHeaderLine permits PatternFormatLine, PatternInfoLine {
+}
+
+final class PatternFormatLine extends PatternHeaderLine {
+    int size() {
+        return 4;
+    }
+}
+
+final class PatternInfoLine extends PatternHeaderLine {
+}
+
+class PatternLineUse {
+    int run(PatternHeaderLine line) {
+        if (line instanceof PatternFormatLine format) {
+            return format.size();
+        }
+        return 0;
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        !translation
+            .rust
+            .contains("unsupported Java instanceof shape")
+            && translation.rust.contains(
+                "if let Some(format) = match &line { PatternHeaderLineValue::PatternFormatLine(value) => Some(value), _ => None }"
+            )
+            && translation.rust.contains("return format.size();"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "sealed_source_hierarchy_instanceof_pattern",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
