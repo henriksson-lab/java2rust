@@ -466,6 +466,16 @@ pub fn plan_program_fallibility(
             (key, fallibility)
         })
         .collect::<HashMap<_, _>>();
+    // Declared throw facts are recorded under the Java name as well as the Rust
+    // name. Seeding both here means the fallibility plan is the single store;
+    // `MethodExceptionPlan` no longer needs its own parallel lookup.
+    for (key, _) in declared_throw_callables(program, facts) {
+        let entry = callables.entry(key).or_default();
+        if !entry.returns_result {
+            entry.returns_result = true;
+            entry.reasons.push(FallibilityReason::MethodThrowFact);
+        }
+    }
     // Integer `/` and `%` throw ArithmeticException on a zero divisor, and that
     // is an unchecked exception, so it propagates out of the method like any
     // other throw. Seeding it here closes it globally: the fixpoint then makes
@@ -532,8 +542,139 @@ pub fn plan_program_fallibility(
     }
 }
 
+/// Callables with a declared throw fact under either their Rust or Java name.
+fn declared_throw_callables(program: &Program, facts: &FactSet) -> Vec<(CallableKey, ())> {
+    let mut types = Vec::new();
+    for ty in &program.types {
+        collect_type_decls(ty, &mut types);
+    }
+    let mut keys = Vec::new();
+    for ty in types {
+        for member in &ty.members {
+            let Member::Method(method) = member else {
+                continue;
+            };
+            let rust_name = source_method_rust_name(method);
+            if facts.method_has_thrown_exceptions(&ty.name, &rust_name)
+                || facts.method_has_thrown_exceptions(&ty.name, &method.name)
+            {
+                keys.push((
+                    CallableKey::Method {
+                        type_name: ty.name.clone(),
+                        method_name: rust_name,
+                    },
+                    (),
+                ));
+            }
+        }
+    }
+    keys
+}
+
 /// Callables whose body contains an integer `/` or `%`, which can throw
 /// ArithmeticException.
+/// Whether any of these catch clauses would handle an ArithmeticException.
+///
+/// ArithmeticException is unchecked, so the existing
+/// `HandledExceptionBoundary` edge — which only considers *checked* exceptions
+/// — never clears it. Without this, a method that catches its own divide-by-zero
+/// is still marked fallible and returns `Result` for an exception it handles.
+fn catches_arithmetic_exception(catches: &[CatchClause]) -> bool {
+    catches.iter().any(|catch| {
+        catch.types.iter().any(|ty| {
+            let name = exception_class_name(ty);
+            let simple = name.rsplit('.').next().unwrap_or(&name);
+            matches!(
+                simple,
+                "ArithmeticException" | "RuntimeException" | "Exception" | "Throwable"
+            )
+        })
+    })
+}
+
+/// Integer `/` or `%` that is *not* already handled by an enclosing catch.
+fn block_has_unhandled_integer_div_rem(block: &Block) -> bool {
+    block
+        .statements
+        .iter()
+        .any(stmt_has_unhandled_integer_div_rem)
+}
+
+fn stmt_has_unhandled_integer_div_rem(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            // A catch that handles it stops the propagation, so the guarded
+            // region contributes nothing. The catch and finally bodies are
+            // outside the guard and still count.
+            let guarded_counts = !catches_arithmetic_exception(catches);
+            (guarded_counts
+                && (resources.iter().any(stmt_has_unhandled_integer_div_rem)
+                    || block_has_unhandled_integer_div_rem(body)))
+                || catches
+                    .iter()
+                    .any(|catch| block_has_unhandled_integer_div_rem(&catch.body))
+                || finally_block
+                    .as_ref()
+                    .is_some_and(block_has_unhandled_integer_div_rem)
+        }
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            expr_has_integer_div_rem_expr(condition)
+                || block_has_unhandled_integer_div_rem(then_block)
+                || else_block
+                    .as_ref()
+                    .is_some_and(block_has_unhandled_integer_div_rem)
+        }
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => expr_has_integer_div_rem_expr(condition) || block_has_unhandled_integer_div_rem(body),
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            init.iter().any(stmt_has_unhandled_integer_div_rem)
+                || condition
+                    .as_ref()
+                    .is_some_and(expr_has_integer_div_rem_expr)
+                || update.iter().any(expr_has_integer_div_rem_expr)
+                || block_has_unhandled_integer_div_rem(body)
+        }
+        Stmt::EnhancedFor { iterable, body, .. } => {
+            expr_has_integer_div_rem_expr(iterable) || block_has_unhandled_integer_div_rem(body)
+        }
+        Stmt::Block(body) | Stmt::LabeledBlock { body, .. } => {
+            block_has_unhandled_integer_div_rem(body)
+        }
+        Stmt::Switch { selector, cases } => {
+            expr_has_integer_div_rem_expr(selector)
+                || cases.iter().any(|case| {
+                    case.labels
+                        .iter()
+                        .any(switch_label_has_integer_div_rem_expr)
+                        || case
+                            .statements
+                            .iter()
+                            .any(stmt_has_unhandled_integer_div_rem)
+                })
+        }
+        _ => stmt_has_integer_div_rem_expr(stmt),
+    }
+}
+
 fn integer_div_rem_callables(program: &Program) -> Vec<CallableKey> {
     let mut types = Vec::new();
     for ty in &program.types {
@@ -547,7 +688,7 @@ fn integer_div_rem_callables(program: &Program) -> Vec<CallableKey> {
                     if method
                         .body
                         .as_ref()
-                        .is_some_and(block_has_integer_div_rem_expr)
+                        .is_some_and(block_has_unhandled_integer_div_rem)
                     {
                         keys.push(CallableKey::Method {
                             type_name: ty.name.clone(),
@@ -559,7 +700,7 @@ fn integer_div_rem_callables(program: &Program) -> Vec<CallableKey> {
                     if constructor
                         .body
                         .as_ref()
-                        .is_some_and(block_has_integer_div_rem_expr)
+                        .is_some_and(block_has_unhandled_integer_div_rem)
                     {
                         keys.push(CallableKey::Constructor {
                             type_name: ty.name.clone(),
@@ -912,14 +1053,17 @@ fn collect_method_exception_plans_for_type(
     for member in &ty.members {
         match member {
             Member::Method(method) => {
-                let mut plan = plan_method_exceptions(ty, method, facts);
-                if let Some(fallibility) = fallibility {
-                    let key = CallableKey::Method {
-                        type_name: ty.name.clone(),
-                        method_name: source_method_rust_name(method),
-                    };
-                    plan.wrap_returns_in_result |= fallibility.returns_result(&key);
-                }
+                // With a solved plan available it is the only store: it already
+                // carries the declared throw facts this used to re-derive.
+                let plan = match fallibility {
+                    Some(fallibility) => MethodExceptionPlan {
+                        wrap_returns_in_result: fallibility.returns_result(&CallableKey::Method {
+                            type_name: ty.name.clone(),
+                            method_name: source_method_rust_name(method),
+                        }),
+                    },
+                    None => plan_method_exceptions(ty, method, facts),
+                };
                 methods.insert(method_exception_key(ty, method), plan);
             }
             Member::Type(nested) => {

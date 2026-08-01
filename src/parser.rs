@@ -3212,56 +3212,62 @@ fn parse_permits(node: tree_sitter::Node, source: &str) -> Vec<String> {
 }
 
 fn parse_type_parameter_names(node: tree_sitter::Node, source: &str) -> Vec<String> {
-    let Some(type_params) = declared_type_parameters_text(node, source) else {
-        return Vec::new();
-    };
-    let Some(open) = type_params.find('<') else {
-        return Vec::new();
-    };
-    let Some(close) = matching_angle_close(type_params, open) else {
-        return Vec::new();
-    };
-
-    split_top_level_commas(&type_params[open + 1..close])
+    type_parameter_nodes(node)
         .into_iter()
-        .filter_map(|part| {
-            part.split_whitespace()
-                .next()
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
-                .map(str::to_string)
-        })
+        .filter_map(|param| type_parameter_name(param, source))
         .collect()
 }
 
 fn parse_type_parameter_bounds(node: tree_sitter::Node, source: &str) -> Vec<Option<JavaType>> {
-    let Some(type_params) = declared_type_parameters_text(node, source) else {
-        return Vec::new();
-    };
-    let Some(open) = type_params.find('<') else {
-        return Vec::new();
-    };
-    let Some(close) = matching_angle_close(type_params, open) else {
-        return Vec::new();
-    };
-
-    split_top_level_commas(&type_params[open + 1..close])
+    type_parameter_nodes(node)
         .into_iter()
-        .map(|part| {
-            part.split_once(" extends ")
-                .map(|(_, bound)| parse_type_text(bound.split('&').next().unwrap_or(bound).trim()))
-        })
+        .map(|param| type_parameter_bound(param, source))
         .collect()
 }
 
-fn declared_type_parameters_text<'a>(node: tree_sitter::Node, source: &'a str) -> Option<&'a str> {
-    if node.kind() == "type_parameters" {
-        return Some(text(node, source));
-    }
-    named_children(node)
+/// The `type_parameter` children of a declaration's `type_parameters` node.
+///
+/// Reading the tree rather than re-parsing the declaration text keeps nested
+/// generics, annotations and intersection bounds intact — text scanning had to
+/// rediscover all of that with `matching_angle_close` and comma splitting.
+fn type_parameter_nodes(node: tree_sitter::Node) -> Vec<tree_sitter::Node> {
+    let type_parameters = if node.kind() == "type_parameters" {
+        Some(node)
+    } else {
+        named_children(node)
+            .into_iter()
+            .find(|child| child.kind() == "type_parameters")
+    };
+    let Some(type_parameters) = type_parameters else {
+        return Vec::new();
+    };
+    named_children(type_parameters)
         .into_iter()
-        .find(|child| child.kind() == "type_parameters")
-        .map(|child| text(child, source))
+        .filter(|child| child.kind() == "type_parameter")
+        .collect()
+}
+
+fn type_parameter_name(param: tree_sitter::Node, source: &str) -> Option<String> {
+    named_children(param)
+        .into_iter()
+        .find(|child| child.kind() == "type_identifier" || child.kind() == "identifier")
+        .map(|name| text(name, source).trim().to_string())
+        .filter(|name| !name.is_empty())
+}
+
+/// The first type of a parameter's `type_bound`.
+///
+/// An intersection bound (`T extends A & B`) keeps only `A`, matching what the
+/// downstream shape model can currently express; the tree makes the rest
+/// available when that changes.
+fn type_parameter_bound(param: tree_sitter::Node, source: &str) -> Option<JavaType> {
+    let bound = named_children(param)
+        .into_iter()
+        .find(|child| child.kind() == "type_bound")?;
+    named_children(bound)
+        .into_iter()
+        .next()
+        .map(|ty| parse_type_node(ty, source))
 }
 
 fn matching_angle_close(src: &str, open: usize) -> Option<usize> {

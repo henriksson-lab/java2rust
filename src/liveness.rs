@@ -46,12 +46,30 @@ impl Binding {
 /// Name -> declaration id currently in scope.
 type ScopeMap = HashMap<String, usize>;
 
+/// Which relation the backward walk is computing. The control-flow structure —
+/// loop fixpoints, the `try` live floor, scope-correct kills — is identical for
+/// both; only what a statement *generates* differs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Pass {
+    /// Gen on `use`: which bindings may be read after this point.
+    #[default]
+    Reads,
+    /// Gen on `def`: which bindings may be written after this point.
+    Writes,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct LivenessAnalysis {
     live_out: HashMap<usize, HashSet<Binding>>,
+    /// May-be-written-after: the same backward fixpoint as `live_out`, but
+    /// generating on `def` instead of `use`. Also a *may* analysis — an
+    /// over-approximated write costs a defensive copy, an under-approximated
+    /// one is an aliasing bug.
+    mutated_after: HashMap<usize, HashSet<Binding>>,
     /// Scope in effect at each statement, so a read can be resolved to the
     /// declaration it actually refers to.
     scope_at: HashMap<usize, ScopeMap>,
+    pass: Pass,
 }
 
 fn stmt_id(stmt: &Stmt) -> usize {
@@ -65,6 +83,9 @@ impl LivenessAnalysis {
         analysis.record_scopes_block(body, &mut ScopeMap::new());
         let exit = HashSet::new();
         analysis.block_live_in(body, &exit, None);
+        analysis.pass = Pass::Writes;
+        analysis.block_live_in(body, &exit, None);
+        analysis.pass = Pass::Reads;
         analysis
     }
 
@@ -82,12 +103,41 @@ impl LivenessAnalysis {
             .iter()
             .map(|name| Binding::new(name, OUTER_DECL))
             .collect::<HashSet<_>>();
+        analysis.pass = Pass::Reads;
         analysis.loop_fixpoint(&enclosing, |analysis, carried| {
             let mut live = analysis.block_live_in(block, carried, Some(carried));
             live.retain(|binding| !rebound.contains(&binding.name));
             live
         });
+        analysis.pass = Pass::Writes;
+        analysis.loop_fixpoint(&enclosing, |analysis, carried| {
+            let mut live = analysis.block_live_in(block, carried, Some(carried));
+            live.retain(|binding| !rebound.contains(&binding.name));
+            live
+        });
+        analysis.pass = Pass::Reads;
         analysis
+    }
+
+    /// How many times each name is read *within* `stmt`.
+    ///
+    /// Not a dataflow relation — within-statement multiplicity — but it answers
+    /// "how is this binding used here", so it belongs to the same owner rather
+    /// than being a separate context field computed at each call site.
+    pub fn use_counts_in(&self, stmt: &Stmt) -> HashMap<String, usize> {
+        let mut counts = HashMap::new();
+        crate::lower::collect_stmt_read_counts_for_liveness(stmt, &mut counts);
+        counts
+    }
+
+    /// Names that may be *written* after `stmt` completes.
+    pub fn mutated_after_for(&self, stmt: &Stmt) -> Option<HashSet<String>> {
+        self.mutated_after.get(&stmt_id(stmt)).map(|bindings| {
+            bindings
+                .iter()
+                .map(|binding| binding.name.clone())
+                .collect()
+        })
     }
 
     /// Bindings that may be read after `stmt` completes.
@@ -194,7 +244,10 @@ impl LivenessAnalysis {
     /// Resolve the names read by `expr` to bindings, using the scope at `stmt`.
     fn read_bindings(&self, stmt: &Stmt, expr: &Expr, out: &mut HashSet<Binding>) {
         let mut names = HashSet::new();
-        read_names(expr, &mut names);
+        match self.pass {
+            Pass::Reads => read_names(expr, &mut names),
+            Pass::Writes => written_names(expr, &mut names),
+        }
         let scope = self.scope_at.get(&stmt_id(stmt));
         for name in names {
             let decl = scope
@@ -217,13 +270,85 @@ impl LivenessAnalysis {
         live
     }
 
+    /// Union `floor` into the live-out of every statement in `block`.
+    ///
+    /// Used for the guarded region of a `try`: an exception can leave *any*
+    /// statement for the catch, so a catch's reads stay live throughout — even
+    /// past a `return`, which otherwise kills everything after it.
+    fn add_live_floor_to_block(&mut self, block: &Block, floor: &HashSet<Binding>) {
+        for stmt in &block.statements {
+            self.add_live_floor_to_stmt(stmt, floor);
+        }
+    }
+
+    fn add_live_floor_to_stmt(&mut self, stmt: &Stmt, floor: &HashSet<Binding>) {
+        let target = match self.pass {
+            Pass::Reads => &mut self.live_out,
+            Pass::Writes => &mut self.mutated_after,
+        };
+        if let Some(live) = target.get_mut(&stmt_id(stmt)) {
+            live.extend(floor.iter().cloned());
+        }
+        match stmt {
+            Stmt::If {
+                then_block,
+                else_block,
+                ..
+            } => {
+                self.add_live_floor_to_block(then_block, floor);
+                if let Some(else_block) = else_block {
+                    self.add_live_floor_to_block(else_block, floor);
+                }
+            }
+            Stmt::While { body, .. }
+            | Stmt::DoWhile { body, .. }
+            | Stmt::For { body, .. }
+            | Stmt::EnhancedFor { body, .. }
+            | Stmt::Block(body)
+            | Stmt::LabeledBlock { body, .. } => self.add_live_floor_to_block(body, floor),
+            Stmt::Switch { cases, .. } => {
+                for case in cases {
+                    for stmt in &case.statements {
+                        self.add_live_floor_to_stmt(stmt, floor);
+                    }
+                }
+            }
+            Stmt::Try {
+                resources,
+                body,
+                catches,
+                finally_block,
+            } => {
+                for stmt in resources {
+                    self.add_live_floor_to_stmt(stmt, floor);
+                }
+                self.add_live_floor_to_block(body, floor);
+                for catch in catches {
+                    self.add_live_floor_to_block(&catch.body, floor);
+                }
+                if let Some(finally_block) = finally_block {
+                    self.add_live_floor_to_block(finally_block, floor);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn stmt_live_in(
         &mut self,
         stmt: &Stmt,
         live_out: &HashSet<Binding>,
         loop_live: Option<&HashSet<Binding>>,
     ) -> HashSet<Binding> {
-        self.live_out.insert(stmt_id(stmt), live_out.clone());
+        let recorded_live_out = if matches!(stmt, Stmt::Return(_) | Stmt::Throw(_)) {
+            HashSet::new()
+        } else {
+            live_out.clone()
+        };
+        match self.pass {
+            Pass::Reads => self.live_out.insert(stmt_id(stmt), recorded_live_out),
+            Pass::Writes => self.mutated_after.insert(stmt_id(stmt), recorded_live_out),
+        };
         match stmt {
             Stmt::VarDecl { initializer, .. } => {
                 let mut live = live_out.clone();
@@ -237,6 +362,18 @@ impl LivenessAnalysis {
             }
             Stmt::Assign { target, value } => {
                 let mut live = live_out.clone();
+                if self.pass == Pass::Writes
+                    && let Expr::Var(name) = target
+                {
+                    // A bare `x = …` target is the write itself; the expression
+                    // walker only reports nested writes such as `++` or `a = b`.
+                    let decl = self
+                        .scope_at
+                        .get(&stmt_id(stmt))
+                        .and_then(|scope| scope.get(name).copied())
+                        .unwrap_or(OUTER_DECL);
+                    live.insert(Binding::new(name, decl));
+                }
                 self.read_bindings(stmt, target, &mut live);
                 self.read_bindings(stmt, value, &mut live);
                 live
@@ -325,21 +462,17 @@ impl LivenessAnalysis {
                 live
             }
             Stmt::Switch { selector, cases } => {
-                // Cases may fall through, so union every case's live-in and the
-                // fall-out of the switch itself.
+                // Cases may fall through. Walk from bottom to top so a case
+                // without an effective break carries the next case's live-in.
                 let mut live = live_out.clone();
-                for case in cases {
-                    let case_block = Block {
-                        statements: case.statements.clone(),
-                    };
-                    let case_live = self.block_live_in(&case_block, live_out, loop_live);
-                    live.extend(case_live);
-                    // Record live-out for the real statement nodes too, since
-                    // the temporary block above holds clones.
-                    let mut trailing = live_out.clone();
+                let mut trailing_case_live = live_out.clone();
+                for case in cases.iter().rev() {
+                    let mut trailing = trailing_case_live.clone();
                     for stmt in case.statements.iter().rev() {
                         trailing = self.stmt_live_in(stmt, &trailing, loop_live);
                     }
+                    trailing_case_live = trailing.clone();
+                    live.extend(trailing);
                 }
                 self.read_bindings(stmt, selector, &mut live);
                 live
@@ -363,7 +496,17 @@ impl LivenessAnalysis {
                     catch_live.retain(|binding| binding.name != catch.name);
                     live.extend(catch_live);
                 }
+                // Everything a catch reads must stay live across the whole
+                // guarded region, because the exception edge leaves from any
+                // statement in it — not only from the entry.
+                let mut catch_live = HashSet::new();
+                for catch in catches {
+                    let mut reads = self.block_live_in(&catch.body, &after_body, loop_live);
+                    reads.retain(|binding| binding.name != catch.name);
+                    catch_live.extend(reads);
+                }
                 live = self.block_live_in(body, &live, loop_live);
+                self.add_live_floor_to_block(body, &catch_live);
                 for stmt in resources.iter().rev() {
                     live = self.stmt_live_in(stmt, &live, loop_live);
                 }
@@ -409,6 +552,10 @@ fn read_names(expr: &Expr, names: &mut HashSet<String>) {
     crate::lower::collect_expr_read_names_for_liveness(expr, names);
 }
 
+fn written_names(expr: &Expr, names: &mut HashSet<String>) {
+    crate::lower::collect_expr_assigned_names_for_liveness(expr, names);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -424,6 +571,10 @@ mod tests {
             ty: crate::java_ir::JavaType::String,
             initializer: Some(init),
         }
+    }
+
+    fn int(value: i32) -> Expr {
+        Expr::Literal(crate::java_ir::Literal::Int(value))
     }
 
     /// Two sibling scopes each declaring `x` are different variables. A live set
@@ -476,6 +627,75 @@ mod tests {
         assert!(
             live.iter().all(|binding| binding.decl == OUTER_DECL),
             "inner `x` must not appear as live: {live:?}"
+        );
+    }
+
+    #[test]
+    fn return_live_out_does_not_report_unreachable_continuation_reads() {
+        let body = Block {
+            statements: vec![Stmt::Return(Some(var("x"))), Stmt::Expr(var("later"))],
+        };
+        let analysis = LivenessAnalysis::for_body(&body);
+        let live = analysis
+            .live_out_for(&body.statements[0])
+            .expect("return statement was analyzed");
+        assert!(
+            live.is_empty(),
+            "a return has no normal continuation live-out: {live:?}"
+        );
+    }
+
+    #[test]
+    fn switch_case_fallthrough_keeps_next_case_reads_live() {
+        let first_stmt = Stmt::Expr(var("first"));
+        let second_stmt = Stmt::Expr(var("x"));
+        let body = Block {
+            statements: vec![Stmt::Switch {
+                selector: int(1),
+                cases: vec![
+                    crate::java_ir::SwitchCase {
+                        labels: vec![crate::java_ir::SwitchLabel::Expr(int(1))],
+                        statements: vec![first_stmt],
+                    },
+                    crate::java_ir::SwitchCase {
+                        labels: vec![crate::java_ir::SwitchLabel::Expr(int(2))],
+                        statements: vec![second_stmt],
+                    },
+                ],
+            }],
+        };
+        let analysis = LivenessAnalysis::for_body(&body);
+        let Stmt::Switch { cases, .. } = &body.statements[0] else {
+            panic!("expected switch");
+        };
+        let live = analysis
+            .live_out_for(&cases[0].statements[0])
+            .expect("case statement was analyzed");
+        assert!(
+            live.contains("x"),
+            "fallthrough into the next case should keep its reads live: {live:?}"
+        );
+    }
+
+    #[test]
+    fn loop_body_analysis_computes_write_pass() {
+        let first_stmt = Stmt::Expr(var("first"));
+        let body = Block {
+            statements: vec![
+                first_stmt,
+                Stmt::Assign {
+                    target: var("x"),
+                    value: var("value"),
+                },
+            ],
+        };
+        let analysis = LivenessAnalysis::for_loop_body(&body, &[], &[]);
+        let mutated = analysis
+            .mutated_after_for(&body.statements[0])
+            .expect("loop body statement was analyzed by write pass");
+        assert!(
+            mutated.contains("x"),
+            "writes later in a lowered loop body should be visible: {mutated:?}"
         );
     }
 }

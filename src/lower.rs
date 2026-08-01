@@ -250,11 +250,9 @@ struct LowerCtx<'a> {
     support_local_type_program: &'a Program,
     source_summary_type_program: &'a Program,
     context_sources_are_emitted: bool,
-    catch_future_use_names: Option<&'a std::collections::HashSet<String>>,
     later_read_names: Option<&'a std::collections::HashSet<String>>,
     later_mutated_names: Option<&'a std::collections::HashSet<String>>,
     current_stmt_read_counts: Option<&'a std::collections::HashMap<String, usize>>,
-    exclusive_terminal_branch_read_names: Option<&'a std::collections::HashSet<String>>,
     preinitialized_try_capture_names: Option<&'a std::collections::HashSet<String>>,
     /// Backward liveness for the callable body being lowered. Authoritative for
     /// "which names can be read after this point". Always present: outside a
@@ -387,12 +385,10 @@ pub fn lower_program_with_semantic_plans_and_support_context(
         support_local_type_program,
         source_summary_type_program,
         context_sources_are_emitted,
-        catch_future_use_names: None,
         later_read_names: None,
         liveness: &empty_liveness,
         later_mutated_names: None,
         current_stmt_read_counts: None,
-        exclusive_terminal_branch_read_names: None,
         preinitialized_try_capture_names: None,
         result_propagation_mode: ResultPropagationMode::UncaughtPanic,
     };
@@ -416,6 +412,10 @@ pub fn lower_program_with_semantic_plans_and_support_context(
         || program_has_source_object_to_string_fallback_items(program)
     {
         file.items.push(java_erased_object_runtime_support_item());
+    }
+    if crate::stdlib::program_uses_java_comparable_bound(program) {
+        file.items
+            .push(crate::stdlib::java_comparable_support_item());
     }
     if uses_java_platform_facades {
         file.items.push(java_platform_facade_support_item());
@@ -1179,7 +1179,13 @@ fn interface_default_trait_method_item(
         program,
     );
     let method_signature = ctx.signatures.required_method_signature(ty, method);
+    let liveness = method
+        .body
+        .as_ref()
+        .map(crate::liveness::LivenessAnalysis::for_body);
+    let empty_liveness = crate::liveness::LivenessAnalysis::default();
     let method_ctx = LowerCtx {
+        liveness: liveness.as_ref().unwrap_or(&empty_liveness),
         current_type: Some(&ty.name),
         current_method: Some(&method.name),
         current_method_decl: Some(method),
@@ -5063,36 +5069,32 @@ fn lower_block_with_refinements(
         exact_erased_object_locals: refinements.exact_erased_object_locals.clone(),
         map_entry_locals: refinements.map_entry_locals.clone(),
     };
-    for (index, stmt) in block.statements.iter().enumerate() {
+    for stmt in &block.statements {
         // Prefer the solved liveness result. It already accounts for loop back
         // edges, `break`/`continue`, switch fallthrough and exception edges, so
         // no per-loop-shape patching is needed. The textual-suffix scan remains
         // only for statements the analysis has no entry for (synthesized nodes).
-        let mut later_read_names = match ctx.liveness.live_out_for(stmt) {
-            Some(live_out) => live_out.clone(),
-            // No solved entry (a synthesized statement). Over-approximate with
-            // every read in the block rather than just the textual suffix: an
-            // absent result must err toward an unnecessary clone, never toward
-            // a move the borrow checker will reject.
-            None => {
-                let mut names = statement_suffix_read_names(&block.statements);
-                if let Some(inherited_later_read_names) = block_ctx.later_read_names {
-                    names.extend(inherited_later_read_names.iter().cloned());
-                }
-                names
-            }
-        };
+        // Every callable body builds an analysis, so a statement being lowered
+        // always has an entry. A missing one would mean a synthesized statement
+        // reached here; over-approximate with the whole block rather than
+        // answering "nothing is read later", which is the unsound direction.
+        let mut later_read_names = ctx
+            .liveness
+            .live_out_for(stmt)
+            .unwrap_or_else(|| statement_suffix_read_names(&block.statements));
         if let Some(inherited_later_read_names) = block_ctx.later_read_names {
             // A block lowered inside a larger construct (a lambda body inlined
             // into a loop, for instance) still inherits its enclosing context.
             later_read_names.extend(inherited_later_read_names.iter().cloned());
         }
-        let mut later_mutated_names =
-            statement_suffix_mutated_names(&block.statements[index + 1..]);
+        let mut later_mutated_names = ctx
+            .liveness
+            .mutated_after_for(stmt)
+            .unwrap_or_else(|| statement_suffix_mutated_names(&block.statements));
         if let Some(inherited_later_mutated_names) = block_ctx.later_mutated_names {
             later_mutated_names.extend(inherited_later_mutated_names.iter().cloned());
         }
-        let current_stmt_read_counts = statement_read_counts(stmt);
+        let current_stmt_read_counts = ctx.liveness.use_counts_in(stmt);
         let stmt_ctx = LowerCtx {
             later_read_names: Some(&later_read_names),
             later_mutated_names: Some(&later_mutated_names),
@@ -5134,10 +5136,17 @@ fn lower_lambda_block_with_result_carrier(
         ..ctx
     };
     let mut body = Vec::new();
-    for (index, stmt) in block.statements.iter().enumerate() {
-        let later_read_names = statement_suffix_read_names(&block.statements[index + 1..]);
-        let later_mutated_names = statement_suffix_mutated_names(&block.statements[index + 1..]);
-        let current_stmt_read_counts = statement_read_counts(stmt);
+    for stmt in &block.statements {
+        // Same rule as the other block walkers: the solved analysis wins.
+        let later_read_names = ctx
+            .liveness
+            .live_out_for(stmt)
+            .unwrap_or_else(|| statement_suffix_read_names(&block.statements));
+        let later_mutated_names = ctx
+            .liveness
+            .mutated_after_for(stmt)
+            .unwrap_or_else(|| statement_suffix_mutated_names(&block.statements));
+        let current_stmt_read_counts = ctx.liveness.use_counts_in(stmt);
         let stmt_ctx = LowerCtx {
             later_read_names: Some(&later_read_names),
             later_mutated_names: Some(&later_mutated_names),
@@ -5182,12 +5191,6 @@ fn statement_suffix_mutated_names(statements: &[Stmt]) -> HashSet<String> {
     let mut names = HashSet::new();
     collect_stmt_assigned_names(statements, &mut names);
     names
-}
-
-fn statement_read_counts(stmt: &Stmt) -> HashMap<String, usize> {
-    let mut counts = HashMap::new();
-    collect_stmt_read_counts(stmt, &mut counts);
-    counts
 }
 
 fn lower_stmt(
@@ -5427,25 +5430,12 @@ fn lower_stmt(
         } => {
             let (then_refinements, else_refinements) = branch_refinements(condition, refinements);
             let terminal_continuation_reads = HashSet::new();
-            let branches_terminate = else_block.as_ref().is_some_and(|else_block| {
-                block_returns_or_throws(then_block) && block_returns_or_throws(else_block)
-            });
-            let then_exclusive_reads = branches_terminate
-                .then(|| {
-                    else_block
-                        .as_ref()
-                        .map(|block| statement_suffix_read_names(&block.statements))
-                })
-                .flatten();
-            let else_exclusive_reads =
-                branches_terminate.then(|| statement_suffix_read_names(&then_block.statements));
             let then_ctx = LowerCtx {
                 later_read_names: if block_returns_or_throws(then_block) {
                     Some(&terminal_continuation_reads)
                 } else {
                     ctx.later_read_names
                 },
-                exclusive_terminal_branch_read_names: then_exclusive_reads.as_ref(),
                 ..ctx
             };
             let else_block_returns = else_block.as_ref().is_some_and(block_returns_or_throws);
@@ -5455,7 +5445,6 @@ fn lower_stmt(
                 } else {
                     ctx.later_read_names
                 },
-                exclusive_terminal_branch_read_names: else_exclusive_reads.as_ref(),
                 ..ctx
             };
             if let Some(stmt) = lower_instanceof_pattern_if_stmt(
@@ -7382,18 +7371,7 @@ fn java_types_have_same_erased_identity(left: &JavaType, right: &JavaType) -> bo
 }
 
 fn shape_has_more_generic_information(candidate: &RustSlotShape, current: &RustSlotShape) -> bool {
-    match (&candidate.java_ty, &current.java_ty) {
-        (
-            JavaType::Named {
-                args: candidate_args,
-                ..
-            },
-            JavaType::Named {
-                args: current_args, ..
-            },
-        ) => candidate_args.len() > current_args.len(),
-        _ => false,
-    }
+    candidate.has_more_generic_detail_than(current)
 }
 
 fn fallback_local_shape_from_declared_type_and_initializer(
@@ -8749,11 +8727,7 @@ fn lower_try_stmt(
             catches: planned_catches,
             completion,
         } => {
-            let catch_future_use_names = catch_body_read_names(planned_catches);
-            let try_ctx = LowerCtx {
-                catch_future_use_names: Some(&catch_future_use_names),
-                ..ctx
-            };
+            let try_ctx = LowerCtx { ..ctx };
             (
                 lower_block(planned_body, &mut env.clone(), true, try_ctx),
                 planned_catches,
@@ -8766,11 +8740,7 @@ fn lower_try_stmt(
             catches: planned_catches,
             completion,
         } => {
-            let catch_future_use_names = catch_body_read_names(planned_catches);
-            let try_ctx = LowerCtx {
-                catch_future_use_names: Some(&catch_future_use_names),
-                ..ctx
-            };
+            let try_ctx = LowerCtx { ..ctx };
             let mut resource_env = env.clone();
             let mut resource_initializers = Vec::new();
             for resource in resources {
@@ -8835,13 +8805,11 @@ fn lower_try_stmt(
             finally_block,
             completion,
         } => {
-            let catch_future_use_names = catch_body_read_names(planned_catches);
             let mut finally_read_names = statement_suffix_read_names(&finally_block.statements);
             if let Some(inherited_later_read_names) = ctx.later_read_names {
                 finally_read_names.extend(inherited_later_read_names.iter().cloned());
             }
             let try_ctx = LowerCtx {
-                catch_future_use_names: Some(&catch_future_use_names),
                 later_read_names: Some(&finally_read_names),
                 ..ctx
             };
@@ -9004,15 +8972,6 @@ fn resource_close_declares_result(resources: &[Stmt], resource_name: &str, ctx: 
     resource_close_declares_result_with_external_index(resource_ty, ctx.external_index)
 }
 
-fn catch_body_read_names(catches: &[CatchClause]) -> std::collections::HashSet<String> {
-    let mut names = std::collections::HashSet::new();
-    for catch in catches {
-        collect_stmt_read_names(&catch.body.statements, &mut names);
-        names.remove(&catch.name);
-    }
-    names
-}
-
 fn preinitialized_try_capture_names_for_block(
     statements: &[Stmt],
 ) -> std::collections::HashSet<String> {
@@ -9164,6 +9123,13 @@ fn collect_stmt_assigned_names(statements: &[Stmt], names: &mut std::collections
     }
 }
 
+pub fn collect_expr_assigned_names_for_liveness(
+    expr: &Expr,
+    names: &mut std::collections::HashSet<String>,
+) {
+    collect_expr_assigned_names(expr, names);
+}
+
 fn collect_expr_assigned_names(expr: &Expr, names: &mut std::collections::HashSet<String>) {
     match expr {
         Expr::Unary {
@@ -9289,6 +9255,13 @@ fn static_collection_mutator_target<'a>(
         return args.first();
     }
     None
+}
+
+pub fn collect_stmt_read_counts_for_liveness(
+    stmt: &Stmt,
+    counts: &mut std::collections::HashMap<String, usize>,
+) {
+    collect_stmt_read_counts(stmt, counts);
 }
 
 fn collect_stmt_read_counts(stmt: &Stmt, counts: &mut HashMap<String, usize>) {
@@ -17538,14 +17511,7 @@ fn plan_call_exception_propagation_with_lower_context(
     env: &ShapeEnv,
     current_type: Option<&str>,
 ) -> CallExceptionPropagationPlan {
-    if source_method_call_returns_result_with_exception_plan(
-        receiver,
-        name,
-        args.len(),
-        resolved,
-        env,
-        ctx,
-    ) {
+    if source_method_call_returns_result_with_exception_plan(receiver, name, resolved, env, ctx) {
         return CallExceptionPropagationPlan::PropagateResult;
     }
     if let Some(receiver_type) = receiver
@@ -18723,16 +18689,21 @@ impl<'a> MoveUseContext<'a> {
             .is_some_and(|later_reads| later_reads.contains(name))
     }
 
+    /// Reads reachable through an exception edge into a `catch`.
+    ///
+    /// Subsumed by liveness: the `Stmt::Try` arm keeps every catch body's reads
+    /// live across the whole guarded region, which is this relation.
     fn has_catch_future_use(&self, name: &str) -> bool {
-        self.ctx
-            .catch_future_use_names
-            .is_some_and(|future_uses| future_uses.contains(name))
+        self.has_later_read(name)
     }
 
+    /// Reads on a branch that terminates.
+    ///
+    /// Subsumed by liveness: `Stmt::If` unions both arms into live-out, and a
+    /// `return`/`throw` kills everything after it, so a terminating branch's
+    /// reads are already carried.
     fn has_exclusive_terminal_branch_read(&self, name: &str) -> bool {
-        self.ctx
-            .exclusive_terminal_branch_read_names
-            .is_some_and(|exclusive_reads| exclusive_reads.contains(name))
+        self.has_later_read(name)
     }
 
     fn current_stmt_read_count(&self, name: &str) -> Option<usize> {
@@ -23536,7 +23507,6 @@ fn slot_expr_needs_result_propagation(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx
     if source_method_call_returns_result_with_exception_plan(
         receiver.as_deref(),
         name,
-        args.len(),
         resolved.as_ref(),
         env,
         ctx,
@@ -23629,7 +23599,6 @@ fn slot_expr_needs_result_propagation_from_shape_env(
 fn source_method_call_returns_result_with_exception_plan(
     receiver: Option<&Expr>,
     name: &str,
-    arg_count: usize,
     resolved: Option<&ResolvedCall>,
     env: &ShapeEnv,
     ctx: LowerCtx,
@@ -23649,16 +23618,6 @@ fn source_method_call_returns_result_with_exception_plan(
                 method_name: method_name.clone(),
             })
         {
-            return true;
-        }
-        // The declaration-based view also covers `throws` clauses recorded on
-        // the method itself, which the call-graph keying does not carry.
-        if source_method_named_returns_result_with_exception_plan(
-            &type_name,
-            &method_name,
-            arg_count,
-            ctx,
-        ) {
             return true;
         }
     }
@@ -23698,22 +23657,6 @@ fn source_method_call_candidate_callees(
         push(receiver_name, name.to_string());
     }
     candidates
-}
-
-fn source_method_named_returns_result_with_exception_plan(
-    type_name: &str,
-    method_name: &str,
-    arg_count: usize,
-    ctx: LowerCtx,
-) -> bool {
-    let Some(ty) = find_context_type_decl_by_erased_name(ctx, type_name) else {
-        return false;
-    };
-    let Some(method) = find_declared_method_by_name_and_arity(ty, method_name, arg_count) else {
-        return false;
-    };
-    ctx.callable_analysis
-        .source_method_returns_result(ty, method)
 }
 
 fn receiver_shape_java_type<'a>(receiver: &Expr, env: &'a ShapeEnv) -> Option<&'a JavaType> {
@@ -27610,25 +27553,26 @@ fn lower_block_for_body(
     ctx: LowerCtx,
 ) -> Vec<RustStmt> {
     let mut out = Vec::new();
-    for (index, stmt) in block.statements.iter().enumerate() {
+    for stmt in &block.statements {
         // Same rule as the main block walker: the solved liveness result wins,
         // and the textual-suffix scan is only a fallback for statements the
         // analysis never saw (switch plans and other synthesized nodes).
-        let mut later_read_names = match ctx.liveness.live_out_for(stmt) {
-            Some(live_out) => live_out.clone(),
-            // See the note in `lower_block_with_refinements`: a missing solved
-            // entry over-approximates instead of under-approximating.
-            None => statement_suffix_read_names(&block.statements),
-        };
+        // See the note in `lower_block_with_refinements`.
+        let mut later_read_names = ctx
+            .liveness
+            .live_out_for(stmt)
+            .unwrap_or_else(|| statement_suffix_read_names(&block.statements));
         if let Some(inherited_later_read_names) = ctx.later_read_names {
             later_read_names.extend(inherited_later_read_names.iter().cloned());
         }
-        let mut later_mutated_names =
-            statement_suffix_mutated_names(&block.statements[index + 1..]);
+        let mut later_mutated_names = ctx
+            .liveness
+            .mutated_after_for(stmt)
+            .unwrap_or_else(|| statement_suffix_mutated_names(&block.statements));
         if let Some(inherited_later_mutated_names) = ctx.later_mutated_names {
             later_mutated_names.extend(inherited_later_mutated_names.iter().cloned());
         }
-        let current_stmt_read_counts = statement_read_counts(stmt);
+        let current_stmt_read_counts = ctx.liveness.use_counts_in(stmt);
         let stmt_ctx = LowerCtx {
             later_read_names: Some(&later_read_names),
             later_mutated_names: Some(&later_mutated_names),

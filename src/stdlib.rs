@@ -4623,6 +4623,49 @@ impl<T> JavaClass<T> {
     crate::rust_ir::RustItem::Raw(support)
 }
 
+/// `compareTo` for a type parameter bounded by `Comparable`.
+///
+/// A Java bound of `Comparable<T>` projects to `T: Ord`; this gives every such
+/// parameter the `compare_to` the source calls, without needing a modelled
+/// `Comparable` interface.
+pub fn java_comparable_support_item() -> crate::rust_ir::RustItem {
+    crate::rust_ir::RustItem::Raw(
+        r#"pub trait JavaComparable {
+    /// Accepts the value either way: a Java `compareTo` argument lowers to an
+    /// owned `T` or a borrow depending on the call site.
+    fn compare_to<B: std::borrow::Borrow<Self>>(&self, other: B) -> i32;
+}
+
+impl<T: Ord> JavaComparable for T {
+    fn compare_to<B: std::borrow::Borrow<Self>>(&self, other: B) -> i32 {
+        match self.cmp(other.borrow()) {
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Greater => 1,
+        }
+    }
+}"#
+        .to_string(),
+    )
+}
+
+/// Whether any declared type parameter is bounded by `Comparable`.
+pub fn program_uses_java_comparable_bound(program: &crate::java_ir::Program) -> bool {
+    fn type_uses(ty: &crate::java_ir::TypeDecl) -> bool {
+        ty.type_param_bounds.iter().any(|bound| {
+            matches!(
+                bound,
+                Some(crate::java_ir::JavaType::Named { name, .. })
+                    if name.rsplit('.').next().unwrap_or(name) == "Comparable"
+            )
+        }) || ty.members.iter().any(|member| match member {
+            crate::java_ir::Member::Type(nested) => type_uses(nested),
+            _ => false,
+        })
+    }
+    program.types.iter().any(type_uses)
+}
+
 pub fn java_platform_facade_support_item() -> crate::rust_ir::RustItem {
     crate::rust_ir::RustItem::Raw(
         r#"#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]

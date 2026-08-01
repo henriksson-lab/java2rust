@@ -23075,6 +23075,54 @@ class FallibleImpl implements FallibleIface {
 }
 
 #[test]
+fn integer_div_rem_fallibility_tracks_local_arithmetic_catches() {
+    let parsed = parse_java_source(
+        r#"
+class IntegerDivRemFallibilityAudit {
+    int handled(int value, int divisor) {
+        try {
+            return value / divisor;
+        } catch (ArithmeticException ex) {
+            return 0;
+        }
+    }
+
+    int conditionUnhandled(int value, int divisor) {
+        if (value / divisor > 0) {
+            try {
+                return value % divisor;
+            } catch (ArithmeticException ex) {
+                return 1;
+            }
+        }
+        return 2;
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let graph = new_java2rust::usage::build_call_graph(&resolved.program);
+    let fallibility = plan_program_fallibility(&resolved.program, &graph, &FactSet::default());
+    let handled = new_java2rust::usage::CallableKey::Method {
+        type_name: "IntegerDivRemFallibilityAudit".to_string(),
+        method_name: "handled".to_string(),
+    };
+    let condition_unhandled = new_java2rust::usage::CallableKey::Method {
+        type_name: "IntegerDivRemFallibilityAudit".to_string(),
+        method_name: "condition_unhandled".to_string(),
+    };
+
+    assert!(
+        !fallibility.returns_result(&handled),
+        "locally caught ArithmeticException should not force a Result signature"
+    );
+    assert!(
+        fallibility.returns_result(&condition_unhandled),
+        "an unhandled divide in a condition must not be masked by a handled divide in a branch"
+    );
+}
+
+#[test]
 fn lowering_uses_callable_fallibility_for_source_call_result_propagation() {
     let mut facts = FactSet::default();
     facts.method_effect_facts.push(MethodEffectFact {

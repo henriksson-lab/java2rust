@@ -90,6 +90,18 @@ fn rust_impl_target_for_source_type(ty: &TypeDecl, support_program: &Program) ->
     }
 }
 
+/// Rust bounds for a type-parameter bound that names a JDK interface.
+///
+/// `Comparable` maps to `Ord`; the generated support library blanket-implements
+/// `JavaComparable` (and therefore `compare_to`) for every `T: Ord`.
+fn jdk_type_param_bound_rust_bounds(bound: &str) -> Vec<String> {
+    match bound.rsplit('.').next().unwrap_or(bound) {
+        "Comparable" => vec!["Ord".to_string()],
+        "Cloneable" => vec!["Clone".to_string()],
+        _ => Vec::new(),
+    }
+}
+
 fn rust_impl_params_for_source_type(ty: &TypeDecl, support_program: &Program) -> Vec<String> {
     ty.type_params
         .iter()
@@ -103,6 +115,11 @@ fn rust_impl_params_for_source_type(ty: &TypeDecl, support_program: &Program) ->
                 } else if source_type_bound_is_class_like(bound, &[support_program]) {
                     bounds
                         .push(crate::representation_lowering::source_class_bound_trait_name(bound));
+                } else {
+                    // The bound names a library type rather than a source one.
+                    // Dropping it left the parameter with no capability at all,
+                    // so `T extends Comparable<T>` lost `compareTo`.
+                    bounds.extend(jdk_type_param_bound_rust_bounds(bound));
                 }
             }
             if source_type_param_needs_clone_bound(ty, name) {

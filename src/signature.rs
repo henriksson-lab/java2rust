@@ -6932,6 +6932,36 @@ pub fn signature_slot_dispatch_requirement_policy(
     )
 }
 
+/// Whether this type names a *type variable* rather than a class.
+///
+/// A type variable is never an unknown runtime object: its capability is
+/// exactly its declared bound, and the slot must stay the parameter. Erasing it
+/// to `Box<dyn Any>` made a bounded parameter unusable in argument position
+/// while an unbounded one stayed `T`.
+fn java_type_is_type_variable(java_ty: &JavaType) -> bool {
+    let JavaType::Named { name, args } = java_ty else {
+        return match java_ty {
+            JavaType::Unknown(name) => type_variable_name(name),
+            _ => false,
+        };
+    };
+    args.is_empty() && type_variable_name(name)
+}
+
+/// Java type variables are conventionally one or two characters with no
+/// lowercase letters (`T`, `U`, `K`, `V`, `R2`).
+fn type_variable_name(name: &str) -> bool {
+    let simple = name.rsplit('.').next().unwrap_or(name);
+    !simple.is_empty()
+        && simple.len() <= 2
+        && simple.chars().all(|ch| ch.is_ascii_alphanumeric())
+        && simple
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_uppercase())
+        && !simple.chars().any(|ch| ch.is_ascii_lowercase())
+}
+
 pub fn signature_slot_dispatch_requirement_policy_with_effective_facts(
     java_ty: &JavaType,
     role: SignatureSlotRole,
@@ -6950,7 +6980,9 @@ pub fn signature_slot_dispatch_requirement_policy_with_effective_facts(
     let mut requirements = java_type_name_for_signature_dispatch(java_ty)
         .map(|type_name| facts.dispatch_requirements_for(type_name))
         .unwrap_or_default();
-    if signature_declared_type_has_parsed_source_capability(java_ty, facts) {
+    if signature_declared_type_has_parsed_source_capability(java_ty, facts)
+        || java_type_is_type_variable(java_ty)
+    {
         requirements.retain(|requirement| {
             *requirement != DispatchRequirementKind::NeedsUnknownRuntimeObject
         });

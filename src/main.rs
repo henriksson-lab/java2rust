@@ -618,6 +618,7 @@ fn run_translate_batch(
         &analysis_profile_path,
         &report.analysis_profile,
         &report.timings,
+        &report.translations,
     )?;
     let mut status = String::from(
         "source\trust_path\ttranslate_status\tdiagnostics\tinvalid_patterns\tunsupported_members\tstubbed_constants\n",
@@ -759,6 +760,7 @@ fn write_analysis_profile(
     path: &Path,
     profile: &new_java2rust::BatchAnalysisProfile,
     timings: &new_java2rust::BatchTranslationTimings,
+    translations: &[new_java2rust::BatchTranslation],
 ) -> Result<(), String> {
     let mut out = String::from("metric\tvalue\n");
     push_profile_metric(&mut out, "primary_files", profile.primary_files);
@@ -906,6 +908,25 @@ fn write_analysis_profile(
             arm.elapsed_ns / 1_000,
         );
     }
+    // A compile-error count cannot see silent failures: a no-op facade, an
+    // `unimplemented!` body and an erased construct all lower cleanly while the
+    // behaviour they stood for is gone, so erasing is scored as an improvement.
+    // These counters put that cost back into the batch summary.
+    let mut noop_facade_methods = 0;
+    let mut unimplemented_facade_methods = 0;
+    let mut compile_error_markers = 0;
+    for translation in translations {
+        noop_facade_methods += count_noop_facade_methods(&translation.rust);
+        unimplemented_facade_methods += count_unimplemented_facade_methods(&translation.rust);
+        compile_error_markers += count_compile_error_markers(&translation.rust);
+    }
+    push_profile_metric(&mut out, "noop_facade_methods", noop_facade_methods);
+    push_profile_metric(
+        &mut out,
+        "unimplemented_facade_methods",
+        unimplemented_facade_methods,
+    );
+    push_profile_metric(&mut out, "compile_error_markers", compile_error_markers);
     fs::write(path, out).map_err(|err| format!("failed to write {}: {err}", path.display()))
 }
 
@@ -1007,6 +1028,27 @@ fn count_stubbed_constants(rust: &str) -> usize {
                 && line.contains(" has no modeled value\"")
         })
         .count()
+}
+
+fn count_noop_facade_methods(rust: &str) -> usize {
+    rust.lines()
+        .filter(|line| {
+            let line = line.trim_end();
+            line.ends_with("Default::default() }") || line.ends_with("self.clone() }")
+        })
+        .count()
+}
+
+fn count_unimplemented_facade_methods(rust: &str) -> usize {
+    rust.lines()
+        .filter(|line| line.contains("unimplemented!("))
+        .count()
+}
+
+fn count_compile_error_markers(rust: &str) -> usize {
+    rust.lines()
+        .map(|line| line.matches("compile_error!(").count())
+        .sum()
 }
 
 fn collect_java_paths(path: &str, out: &mut Vec<String>) -> Result<(), String> {

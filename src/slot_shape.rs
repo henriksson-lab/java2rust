@@ -177,3 +177,57 @@ pub fn conservative_ownership(java_ty: &JavaType) -> OwnershipShape {
         OwnershipShape::Owned
     }
 }
+
+impl RustSlotShape {
+    /// Whether `self` carries strictly more generic detail than `other` for the
+    /// same erased type — the partial order that decides which of two competing
+    /// shapes for one slot wins.
+    ///
+    /// Lowering previously compared generic argument counts inline at each
+    /// decision site. Keeping the order in one place means the sites cannot
+    /// drift apart, and it is where a real lattice `join` belongs when the
+    /// remaining shape axes are folded in.
+    pub fn has_more_generic_detail_than(&self, other: &Self) -> bool {
+        if self.erased_java_type() != other.erased_java_type() {
+            return false;
+        }
+        match (&self.java_ty, &other.java_ty) {
+            (
+                JavaType::Named {
+                    args: candidate_args,
+                    ..
+                },
+                JavaType::Named {
+                    args: current_args, ..
+                },
+            ) => candidate_args.len() > current_args.len(),
+            _ => false,
+        }
+    }
+
+    fn erased_java_type(&self) -> &JavaType {
+        self.type_identity.erasure.as_ref().unwrap_or(&self.java_ty)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn named(name: &str, args: Vec<JavaType>) -> JavaType {
+        JavaType::Named {
+            name: name.to_string(),
+            args,
+        }
+    }
+
+    #[test]
+    fn generic_detail_order_requires_same_erased_type() {
+        let list_string = RustSlotShape::for_storage(named("List", vec![JavaType::String]));
+        let raw_list = RustSlotShape::for_storage(named("List", Vec::new()));
+        let raw_map = RustSlotShape::for_storage(named("Map", Vec::new()));
+
+        assert!(list_string.has_more_generic_detail_than(&raw_list));
+        assert!(!list_string.has_more_generic_detail_than(&raw_map));
+    }
+}

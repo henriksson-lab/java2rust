@@ -28,12 +28,14 @@ nested, labelled, in-`try`, in-`switch`, enhanced-`for`, and `forEach` — all
 `E0382`-free, while `afterLoop` still takes no needless clone (precision kept).
 
 **Still open:** this audit is not closed. `LivenessAnalysis` now stores
-`Binding { name, decl }` internally and `LowerCtx::liveness` is non-optional,
-but the lowerer still projects live-out bindings back to names, the old
-optional `later_read_names`/`later_mutated_names`/read-count/branch sets still
-exist, and suffix scans remain as compatibility fallbacks for synthesized
-statements. Closing this requires retiring the fragmented query surface and
-making clone/borrow decisions consume binding identities end to end.
+`Binding { name, decl }` internally, `LowerCtx::liveness` is non-optional, and
+read, write, and within-statement read-count facts are owned by the analysis.
+Focused regressions cover terminal statements, switch fallthrough, and lowered
+loop-body write analysis. The lowerer still projects live-out/write bindings
+back to names, several optional local override sets still exist, and synthesized
+fallback scans are still name-based. Closing this requires retiring the
+fragmented query surface and making clone/borrow decisions consume binding
+identities end to end.
 
 ## Observation
 

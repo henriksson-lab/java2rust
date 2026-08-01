@@ -86,10 +86,9 @@ impl<'a> CallableAnalysis<'a> {
             type_name: ty.name.clone(),
             method_name: source_method_rust_name(method),
         };
+        // One store: the fallibility fixpoint. `MethodExceptionPlan` is derived
+        // from it, so consulting both could only ever disagree.
         self.callable_returns_result(&key)
-            || self
-                .method_exception_plan(ty, method)
-                .wrap_returns_in_result
     }
 
     pub fn external_method_returns_result(
