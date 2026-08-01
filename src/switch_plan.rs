@@ -99,6 +99,40 @@ pub fn plan_simple_return_switch_case(case: &SwitchCase) -> Option<SimpleReturnS
     })
 }
 
+/// Whether `rewrite_switch_breaks` would actually change this statement.
+///
+/// The rewrite clones, which destroys the statement identity that per-statement
+/// analyses (liveness) are keyed on. Most case statements contain no bare
+/// `break` at all, so checking first lets the caller keep the original node.
+/// Mirrors the traversal in `rewrite_switch_breaks` exactly: a `break` inside a
+/// nested loop belongs to that loop, not to the switch.
+pub fn switch_case_stmt_needs_break_rewrite(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Break(None) => true,
+        Stmt::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            block_needs_switch_break_rewrite(then_block)
+                || else_block
+                    .as_ref()
+                    .is_some_and(block_needs_switch_break_rewrite)
+        }
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            block_needs_switch_break_rewrite(block)
+        }
+        _ => false,
+    }
+}
+
+fn block_needs_switch_break_rewrite(block: &Block) -> bool {
+    block
+        .statements
+        .iter()
+        .any(switch_case_stmt_needs_break_rewrite)
+}
+
 pub fn rewrite_switch_breaks(stmt: &Stmt, switch_label: &str) -> Stmt {
     match stmt {
         Stmt::Break(None) => Stmt::Break(Some(switch_label.to_string())),

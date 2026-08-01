@@ -1,6 +1,6 @@
 # 0011 — `Box<dyn Any>` fallback for unmodelled externals type-checks at creation and fails at every use
 
-Status: **PARTIAL** — was: validated (corpus: FastQC 271 errors, htsjdk ~9)
+Status: **FIXED** — was: validated (corpus: FastQC 271 errors, htsjdk ~9)
 Severity: high by volume; the *fallback design* is the issue, not any one missing fact
 Kind: fallback shape — fails late and unattributably
 
@@ -157,3 +157,56 @@ parameter position: the `Unk`/`Unk3` probes go from 2 errors to **0**, with
 Still open (separate, smaller): AWT is hand-modelled but incomplete —
 `impl Graphics` has `dispose`/`draw_image` but not `draw_line`, and `add_method`
 in `stdlib.rs` drops AWT owners so the gaps are never synthesised.
+
+
+## Update 2026-08-01 — fallback design closed for the general case
+
+The fallback now matches what this issue asked for. For an unmodelled external
+type:
+
+```rust
+pub fn r#use(&self, w: Widget) { w.configure(3); w.reset(); }   // typed, compiles
+
+impl Widget {
+    pub fn configure<T0>(&self, _arg0: T0) -> () { unimplemented!("Widget.configure is not modelled") }
+    pub fn reset(&self) -> () { unimplemented!("Widget.reset is not modelled") }
+}
+```
+
+Typed (not `Box<dyn Any>`), compiles, fails loudly at runtime, and the message
+names the cause. Probe: 2 errors to **0**.
+
+**Explicitly out of scope: AWT/Swing.** `Graphics`, `Graphics2D` and
+`BufferedImage` are served by a *hand-written* facade with a fixed method set
+(`dispose`, `draw_image`, `get_clip`, …), and `add_method` drops observed
+methods for those owners, so anything outside that set is still `E0599`. This
+matches the recommendation in this issue's own analysis — modelling Swing is a
+project of its own and the corpus value is low. An attempt to synthesise the
+missing AWT methods was measured against a baseline, produced an identical error
+profile, and was reverted rather than left in as a no-op change. Closing AWT
+properly means either modelling it or refusing it with a diagnostic, not
+extending the hardcoded list.
+
+## Update — AWT closed to the same design
+
+`Graphics`/`Graphics2D` now carry the drawing surface real code calls
+(`set_color`, `set_font`, `draw_line`, `draw_rect`, `fill_rect`, `draw_oval`,
+`fill_oval`, `draw_string`, `draw_polygon`, `fill_polygon`, `set_clip`,
+`translate`, `get_font_metrics_0`), each `unimplemented!("java.awt.… is not
+modelled")` — typed, compiling, loud, attributable, exactly like every other
+unmodelled external.
+
+Two collisions found alongside it and fixed: a name emitted as `pub type X = Y;`
+was *also* emitted as `pub struct X;` (E0428 + two E0119s), and the refusal
+placeholder for an unmodelled constant named the type as a value, which fails
+with `E0423` whenever the type resolves through an alias — it now uses a
+diverging expression.
+
+The AWT probe goes from **12 errors to 1**, and that one is the intended
+diagnostic: `external static constant JavaAwtColor.RED has no modeled value`.
+Per [0031](0031-stubbed-constant-census.md) a constant with no known value must
+be an error, never a plausible default, so this is the design working.
+
+Status: **closed**. Focused AWT probes now compile after guarding the built-in
+`Shape` facade from duplicate placeholder emission; the remaining unmodelled
+`JavaAwtColor.RED` constant is intentionally loud.

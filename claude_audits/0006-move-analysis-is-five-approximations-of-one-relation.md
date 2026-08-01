@@ -27,11 +27,13 @@ correct clones from liveness alone. Verified across `while`, `for`, `do-while`,
 nested, labelled, in-`try`, in-`switch`, enhanced-`for`, and `forEach` — all
 `E0382`-free, while `afterLoop` still takes no needless clone (precision kept).
 
-**Still open:** this audit is not closed. The old optional/name-keyed context
-surface still exists, `LivenessAnalysis` is keyed by statement identity and
-`HashSet<String>`, and suffix scans remain as compatibility fallbacks for
-synthesized statements. Closing this requires BindingId-backed liveness (or a
-CFG-equivalent structured analysis) and retiring the fragmented query surface.
+**Still open:** this audit is not closed. `LivenessAnalysis` now stores
+`Binding { name, decl }` internally and `LowerCtx::liveness` is non-optional,
+but the lowerer still projects live-out bindings back to names, the old
+optional `later_read_names`/`later_mutated_names`/read-count/branch sets still
+exist, and suffix scans remain as compatibility fallbacks for synthesized
+statements. Closing this requires retiring the fragmented query surface and
+making clone/borrow decisions consume binding identities end to end.
 
 ## Observation
 

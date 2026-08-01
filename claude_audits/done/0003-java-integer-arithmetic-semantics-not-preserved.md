@@ -1,6 +1,6 @@
 # 0003 — Java integer arithmetic semantics are not preserved
 
-Status: **PARTIAL** — was: validated (runtime-confirmed divergence)
+Status: **FIXED** — was: validated (runtime-confirmed divergence)
 Severity: medium-high — wrong results or panics, and the behaviour differs
 between debug and release builds
 Kind: missing lowering policy (needs a fact + a decision, not a big analysis)
@@ -148,3 +148,28 @@ project's stated aim is idiomatic Rust *while preserving Java semantics*, and
 silent profile-dependent behaviour is not a preservation of semantics. If
 readable output matters for the common case, the range analysis in step 4 is
 the way to buy it back.
+
+
+## Update 2026-08-01 — ArithmeticException propagation closed globally
+
+The earlier fix made `/` and `%` *detect* a zero divisor but recovered locally
+with `.unwrap_or_else(|ex| panic!(...))`, so the exception died at the divide
+site instead of propagating. ArithmeticException is unchecked, so in Java it
+unwinds through every caller.
+
+`plan_program_fallibility` now **seeds** any callable whose body contains an
+integer `/` or `%` (`FallibilityReason::IntegerDivRemThrow`), and the existing
+fixpoint carries it to transitive callers. Verified:
+
+```java
+public int div(int a, int b)    { return a / b; }        // -> Result<i32, JavaException>
+public int caller(int a, int b) { return div(a,b) + 1; } // -> Result, propagates with `?`
+public int guarded(int a,int b) { try { return div(a,b); }
+                                  catch (ArithmeticException e) { return -1; } }  // catches
+```
+
+Runtime: `div(7,2)` is `Ok(3)`, `div(1,0)` is `Err`.
+
+Status: **closed**. Wrapping arithmetic, shift masking, catchable
+`ArithmeticException`, and unchecked propagation through a transitive caller are
+verified end to end by `java_integer_division_and_remainder_by_zero_raise_catchable_arithmetic_exception`.

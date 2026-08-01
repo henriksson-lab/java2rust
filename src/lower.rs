@@ -257,9 +257,11 @@ struct LowerCtx<'a> {
     exclusive_terminal_branch_read_names: Option<&'a std::collections::HashSet<String>>,
     preinitialized_try_capture_names: Option<&'a std::collections::HashSet<String>>,
     /// Backward liveness for the callable body being lowered. Authoritative for
-    /// "which names can be read after this point"; the legacy textual-suffix
-    /// scan is used only where this has no entry for a statement.
-    liveness: Option<&'a crate::liveness::LivenessAnalysis>,
+    /// "which names can be read after this point". Always present: outside a
+    /// callable body it is an empty analysis, whose missing entries take the
+    /// conservative (over-approximating) path rather than a silent "nothing is
+    /// read later", which was the unsound default of the old optional field.
+    liveness: &'a crate::liveness::LivenessAnalysis,
     result_propagation_mode: ResultPropagationMode,
 }
 
@@ -347,6 +349,7 @@ pub fn lower_program_with_semantic_plans_and_support_context(
     source_summary_type_program: &Program,
     context_sources_are_emitted: bool,
 ) -> LoweredProgram {
+    let empty_liveness = crate::liveness::LivenessAnalysis::default();
     let external_index = facts.external_lookup_index();
     push_lowering_diagnostic_plans(
         collect_lowering_diagnostic_plans(
@@ -386,7 +389,7 @@ pub fn lower_program_with_semantic_plans_and_support_context(
         context_sources_are_emitted,
         catch_future_use_names: None,
         later_read_names: None,
-        liveness: None,
+        liveness: &empty_liveness,
         later_mutated_names: None,
         current_stmt_read_counts: None,
         exclusive_terminal_branch_read_names: None,
@@ -2348,7 +2351,13 @@ fn lower_constructor(
     ctx: LowerCtx,
 ) -> RustFunction {
     let constructor_signature = ctx.signatures.required_constructor_signature(ty, ctor);
+    let empty_liveness = crate::liveness::LivenessAnalysis::default();
+    let liveness = ctor
+        .body
+        .as_ref()
+        .map(crate::liveness::LivenessAnalysis::for_body);
     let constructor_ctx = LowerCtx {
+        liveness: liveness.as_ref().unwrap_or(&empty_liveness),
         current_type: Some(&ty.name),
         current_method: None,
         current_method_decl: None,
@@ -4768,12 +4777,13 @@ fn lower_method_with_exception_owner(
     ctx: LowerCtx,
 ) -> RustFunction {
     let method_signature = ctx.signatures.required_method_signature(ty, method);
+    let empty_liveness = crate::liveness::LivenessAnalysis::default();
     let liveness = method
         .body
         .as_ref()
         .map(crate::liveness::LivenessAnalysis::for_body);
     let method_ctx = LowerCtx {
-        liveness: liveness.as_ref(),
+        liveness: liveness.as_ref().unwrap_or(&empty_liveness),
         current_type: Some(&ty.name),
         current_method: Some(&method.name),
         current_method_decl: Some(method),
@@ -5058,13 +5068,14 @@ fn lower_block_with_refinements(
         // edges, `break`/`continue`, switch fallthrough and exception edges, so
         // no per-loop-shape patching is needed. The textual-suffix scan remains
         // only for statements the analysis has no entry for (synthesized nodes).
-        let mut later_read_names = match ctx
-            .liveness
-            .and_then(|liveness| liveness.live_out_for(stmt))
-        {
+        let mut later_read_names = match ctx.liveness.live_out_for(stmt) {
             Some(live_out) => live_out.clone(),
+            // No solved entry (a synthesized statement). Over-approximate with
+            // every read in the block rather than just the textual suffix: an
+            // absent result must err toward an unnecessary clone, never toward
+            // a move the borrow checker will reject.
             None => {
-                let mut names = statement_suffix_read_names(&block.statements[index + 1..]);
+                let mut names = statement_suffix_read_names(&block.statements);
                 if let Some(inherited_later_read_names) = block_ctx.later_read_names {
                     names.extend(inherited_later_read_names.iter().cloned());
                 }
@@ -5171,118 +5182,6 @@ fn statement_suffix_mutated_names(statements: &[Stmt]) -> HashSet<String> {
     let mut names = HashSet::new();
     collect_stmt_assigned_names(statements, &mut names);
     names
-}
-
-fn loop_carried_read_names_for_while(
-    condition: &Expr,
-    body: &Block,
-    inherited_later_read_names: Option<&HashSet<String>>,
-) -> HashSet<String> {
-    let mut names = loop_carried_read_names_for_block(body, inherited_later_read_names);
-    collect_expr_read_names(condition, &mut names);
-    remove_block_declared_names(body, &mut names);
-    names
-}
-
-fn loop_carried_read_names_for_for(
-    init: &[Stmt],
-    condition: Option<&Expr>,
-    update: &[Expr],
-    body: &Block,
-    inherited_later_read_names: Option<&HashSet<String>>,
-) -> HashSet<String> {
-    let mut names = loop_carried_read_names_for_block(body, inherited_later_read_names);
-    if let Some(condition) = condition {
-        collect_expr_read_names(condition, &mut names);
-    }
-    for expr in update {
-        collect_expr_read_names(expr, &mut names);
-    }
-    for stmt in init {
-        collect_stmt_declared_names(stmt, &mut names);
-    }
-    remove_block_declared_names(body, &mut names);
-    names
-}
-
-fn loop_carried_read_names_for_block(
-    body: &Block,
-    inherited_later_read_names: Option<&HashSet<String>>,
-) -> HashSet<String> {
-    let mut names = statement_suffix_read_names(&body.statements);
-    if let Some(inherited_later_read_names) = inherited_later_read_names {
-        names.extend(inherited_later_read_names.iter().cloned());
-    }
-    remove_block_declared_names(body, &mut names);
-    names
-}
-
-fn remove_block_declared_names(block: &Block, names: &mut HashSet<String>) {
-    for stmt in &block.statements {
-        collect_stmt_declared_names(stmt, names);
-    }
-}
-
-fn collect_stmt_declared_names(stmt: &Stmt, names: &mut HashSet<String>) {
-    match stmt {
-        Stmt::VarDecl { name, .. } => {
-            names.remove(name);
-        }
-        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
-            remove_block_declared_names(block, names);
-        }
-        Stmt::If {
-            then_block,
-            else_block,
-            ..
-        } => {
-            remove_block_declared_names(then_block, names);
-            if let Some(else_block) = else_block {
-                remove_block_declared_names(else_block, names);
-            }
-        }
-        Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::For { body, .. } => {
-            remove_block_declared_names(body, names);
-        }
-        Stmt::EnhancedFor { var_name, body, .. } => {
-            names.remove(var_name);
-            remove_block_declared_names(body, names);
-        }
-        Stmt::Switch { cases, .. } => {
-            for case in cases {
-                for stmt in &case.statements {
-                    collect_stmt_declared_names(stmt, names);
-                }
-            }
-        }
-        Stmt::Try {
-            resources,
-            body,
-            catches,
-            finally_block,
-        } => {
-            for resource in resources {
-                collect_stmt_declared_names(resource, names);
-            }
-            remove_block_declared_names(body, names);
-            for catch in catches {
-                names.remove(&catch.name);
-                remove_block_declared_names(&catch.body, names);
-            }
-            if let Some(finally_block) = finally_block {
-                remove_block_declared_names(finally_block, names);
-            }
-        }
-        Stmt::Assign { .. }
-        | Stmt::Expr(_)
-        | Stmt::Return(_)
-        | Stmt::Break(_)
-        | Stmt::Continue(_)
-        | Stmt::Throw(_)
-        | Stmt::LocalType(_)
-        | Stmt::ConstructorInvocation { .. }
-        | Stmt::Unsupported(_) => {}
-    }
 }
 
 fn statement_read_counts(stmt: &Stmt) -> HashMap<String, usize> {
@@ -5664,12 +5563,7 @@ fn lower_stmt(
                 ));
             }
             WhileStmtPlan::Plain { condition, body } => {
-                let loop_read_names =
-                    loop_carried_read_names_for_while(condition, body, ctx.later_read_names);
-                let body_ctx = LowerCtx {
-                    later_read_names: Some(&loop_read_names),
-                    ..ctx
-                };
+                let body_ctx = ctx;
                 let condition = lower_condition_expr_with_result_policy(
                     condition,
                     env,
@@ -5696,12 +5590,7 @@ fn lower_stmt(
             WhileStmtPlan::Infinite { body } => out.push(RustStmt::Loop {
                 label: label.clone(),
                 body: {
-                    let loop_read_names =
-                        loop_carried_read_names_for_block(body, ctx.later_read_names);
-                    let body_ctx = LowerCtx {
-                        later_read_names: Some(&loop_read_names),
-                        ..ctx
-                    };
+                    let body_ctx = ctx;
                     lower_block(body, &mut env.clone(), wrap_returns_in_ok, body_ctx)
                 },
             }),
@@ -5718,12 +5607,7 @@ fn lower_stmt(
                 refinements,
                 wrap_returns_in_ok,
             );
-            let loop_read_names =
-                loop_carried_read_names_for_while(condition, body, ctx.later_read_names);
-            let body_ctx = LowerCtx {
-                later_read_names: Some(&loop_read_names),
-                ..ctx
-            };
+            let body_ctx = ctx;
             let mut loop_body = lower_block(body, &mut env.clone(), wrap_returns_in_ok, body_ctx);
             loop_body.push(if_stmt(
                 logical_not_projection(lowered_condition),
@@ -5748,17 +5632,7 @@ fn lower_stmt(
                     learn_stmt_shapes(init_stmt, env, ctx.current_local_shapes, ctx.signatures);
                 }
             }
-            let loop_read_names = loop_carried_read_names_for_for(
-                init,
-                condition.as_ref(),
-                update,
-                body,
-                ctx.later_read_names,
-            );
-            let body_ctx = LowerCtx {
-                later_read_names: Some(&loop_read_names),
-                ..ctx
-            };
+            let body_ctx = LowerCtx { ..ctx };
             let mut loop_body =
                 lower_block_for_body(body, update, &mut env.clone(), wrap_returns_in_ok, body_ctx);
             let lowered_updates = update
@@ -8649,9 +8523,19 @@ fn lower_switch_case_statements(
     let mut case_env = env.clone();
     let mut out = Vec::new();
     for stmt in &case.statements {
-        let stmt = rewrite_switch_breaks(stmt, switch_label);
+        // Only rewrite when there is a bare `break` to relabel. The rewrite
+        // clones, and a cloned statement loses the identity that per-statement
+        // liveness is keyed on, which would silently fall back to the textual
+        // suffix scan inside switch cases.
+        let rewritten;
+        let stmt: &Stmt = if crate::switch_plan::switch_case_stmt_needs_break_rewrite(stmt) {
+            rewritten = rewrite_switch_breaks(stmt, switch_label);
+            &rewritten
+        } else {
+            stmt
+        };
         lower_stmt(
-            &stmt,
+            stmt,
             &mut case_env,
             wrap_returns_in_ok,
             ctx,
@@ -8659,7 +8543,7 @@ fn lower_switch_case_statements(
             &mut out,
         );
         learn_stmt_shapes(
-            &stmt,
+            stmt,
             &mut case_env,
             ctx.current_local_shapes,
             ctx.signatures,
@@ -10626,12 +10510,15 @@ fn lower_iterable_for_each_stmt(
     // `forEach` becomes a real loop, so the lambda body needs the same
     // back-edge liveness as any other loop body. It is nested in an expression,
     // so the enclosing body's statement walk never reached it.
-    let empty_live = std::collections::HashSet::new();
+    let enclosing_live = ctx
+        .later_read_names
+        .map(|names| names.iter().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
     let lambda_liveness = match body {
         LambdaBody::Block(block) => Some(crate::liveness::LivenessAnalysis::for_loop_body(
             block,
             param_names,
-            ctx.later_read_names.unwrap_or(&empty_live),
+            &enclosing_live,
         )),
         LambdaBody::Expr(_) => None,
     };
@@ -10651,7 +10538,7 @@ fn lower_iterable_for_each_stmt(
             }
         }
         LambdaBody::Block(_) => LowerCtx {
-            liveness: lambda_liveness.as_ref(),
+            liveness: lambda_liveness.as_ref().unwrap_or(ctx.liveness),
             ..ctx
         },
     };
@@ -23747,26 +23634,59 @@ fn source_method_call_returns_result_with_exception_plan(
     env: &ShapeEnv,
     ctx: LowerCtx,
 ) -> bool {
-    if let Some(resolved) = resolved
-        && source_method_named_returns_result_with_exception_plan(
-            &resolved.declaring_type,
-            &resolved.rust_name,
+    // One mechanism: build the candidate callee identities, then ask the solved
+    // fallibility plan about each. Signature planning keys on the same
+    // `CallableKey`, so a call site and a signature cannot disagree about a
+    // callee they both name. Resolution comes first; the receiver-derived
+    // candidates only matter for calls resolution could not pin down.
+    for (type_name, method_name) in
+        source_method_call_candidate_callees(receiver, name, resolved, env, ctx)
+    {
+        if ctx
+            .callable_analysis
+            .callable_returns_result(&crate::usage::CallableKey::Method {
+                type_name: type_name.clone(),
+                method_name: method_name.clone(),
+            })
+        {
+            return true;
+        }
+        // The declaration-based view also covers `throws` clauses recorded on
+        // the method itself, which the call-graph keying does not carry.
+        if source_method_named_returns_result_with_exception_plan(
+            &type_name,
+            &method_name,
             arg_count,
             ctx,
-        )
-    {
-        return true;
+        ) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Candidate `(type, method)` identities for a call, most authoritative first.
+fn source_method_call_candidate_callees(
+    receiver: Option<&Expr>,
+    name: &str,
+    resolved: Option<&ResolvedCall>,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Vec<(String, String)> {
+    let mut candidates = Vec::new();
+    let mut push = |type_name: String, method_name: String| {
+        let candidate = (type_name, method_name);
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    };
+    if let Some(resolved) = resolved {
+        push(resolved.declaring_type.clone(), resolved.rust_name.clone());
     }
     if matches!(receiver, Some(receiver) if is_this_receiver_expr(receiver))
         && let Some(current_type) = ctx.current_type
-        && source_method_named_returns_result_with_exception_plan(
-            current_type,
-            name,
-            arg_count,
-            ctx,
-        )
     {
-        return true;
+        push(current_type.to_string(), name.to_string());
     }
     if let Some(receiver_name) = receiver.and_then(|receiver| {
         receiver_shape_java_type(receiver, env).and_then(|ty| {
@@ -23774,15 +23694,10 @@ fn source_method_call_returns_result_with_exception_plan(
             let ty = element_ty.as_ref().unwrap_or(ty);
             concrete_java_type_name(ty).map(str::to_string)
         })
-    }) && source_method_named_returns_result_with_exception_plan(
-        &receiver_name,
-        name,
-        arg_count,
-        ctx,
-    ) {
-        return true;
+    }) {
+        push(receiver_name, name.to_string());
     }
-    false
+    candidates
 }
 
 fn source_method_named_returns_result_with_exception_plan(
@@ -27699,12 +27614,11 @@ fn lower_block_for_body(
         // Same rule as the main block walker: the solved liveness result wins,
         // and the textual-suffix scan is only a fallback for statements the
         // analysis never saw (switch plans and other synthesized nodes).
-        let mut later_read_names = match ctx
-            .liveness
-            .and_then(|liveness| liveness.live_out_for(stmt))
-        {
+        let mut later_read_names = match ctx.liveness.live_out_for(stmt) {
             Some(live_out) => live_out.clone(),
-            None => statement_suffix_read_names(&block.statements[index + 1..]),
+            // See the note in `lower_block_with_refinements`: a missing solved
+            // entry over-approximates instead of under-approximating.
+            None => statement_suffix_read_names(&block.statements),
         };
         if let Some(inherited_later_read_names) = ctx.later_read_names {
             later_read_names.extend(inherited_later_read_names.iter().cloned());

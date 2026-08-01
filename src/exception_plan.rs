@@ -52,6 +52,8 @@ pub struct CallableFallibility {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FallibilityReason {
+    /// Integer `/` or `%` can throw ArithmeticException on a zero divisor.
+    IntegerDivRemThrow,
     /// Equalized across an override set: a trait method and its implementations
     /// must share one Rust signature.
     PropagatedFromOverride,
@@ -464,6 +466,17 @@ pub fn plan_program_fallibility(
             (key, fallibility)
         })
         .collect::<HashMap<_, _>>();
+    // Integer `/` and `%` throw ArithmeticException on a zero divisor, and that
+    // is an unchecked exception, so it propagates out of the method like any
+    // other throw. Seeding it here closes it globally: the fixpoint then makes
+    // every transitive caller fallible instead of the divide site panicking.
+    for key in integer_div_rem_callables(program) {
+        let entry = callables.entry(key).or_default();
+        if !entry.returns_result {
+            entry.returns_result = true;
+            entry.reasons.push(FallibilityReason::IntegerDivRemThrow);
+        }
+    }
     let override_groups = override_groups_for_program(program);
     let mut solve_iterations = 0usize;
     loop {
@@ -517,6 +530,48 @@ pub fn plan_program_fallibility(
         callables,
         solve_iterations,
     }
+}
+
+/// Callables whose body contains an integer `/` or `%`, which can throw
+/// ArithmeticException.
+fn integer_div_rem_callables(program: &Program) -> Vec<CallableKey> {
+    let mut types = Vec::new();
+    for ty in &program.types {
+        collect_type_decls(ty, &mut types);
+    }
+    let mut keys = Vec::new();
+    for ty in types {
+        for member in &ty.members {
+            match member {
+                Member::Method(method) => {
+                    if method
+                        .body
+                        .as_ref()
+                        .is_some_and(block_has_integer_div_rem_expr)
+                    {
+                        keys.push(CallableKey::Method {
+                            type_name: ty.name.clone(),
+                            method_name: source_method_rust_name(method),
+                        });
+                    }
+                }
+                Member::Constructor(constructor) => {
+                    if constructor
+                        .body
+                        .as_ref()
+                        .is_some_and(block_has_integer_div_rem_expr)
+                    {
+                        keys.push(CallableKey::Constructor {
+                            type_name: ty.name.clone(),
+                            rust_name: constructor.name.clone(),
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    keys
 }
 
 /// Groups each declared method with the supertype method it overrides or

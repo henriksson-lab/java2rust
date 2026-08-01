@@ -22923,9 +22923,11 @@ class LoopLivenessAudit {
     );
     let lower_source = include_str!("../src/lower.rs");
     let liveness_source = include_str!("../src/liveness.rs");
-    assert!(lower_source.contains("liveness: Option<&'a crate::liveness::LivenessAnalysis>"));
+    assert!(lower_source.contains("liveness: &'a crate::liveness::LivenessAnalysis"));
+    assert!(lower_source.contains("statement_suffix_read_names(&block.statements)"));
     assert!(lower_source.contains("LivenessAnalysis::for_body"));
     assert!(liveness_source.contains("pub fn live_out_for"));
+    assert!(liveness_source.contains("pub struct Binding"));
     assert!(liveness_source.contains("fn loop_fixpoint"));
 }
 

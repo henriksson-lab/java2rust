@@ -1956,8 +1956,8 @@ mod generated_tests {
         let fixture = JavaStringRegexHelpers {};
         assert!(fixture.digit("7".to_string()));
         assert!(!fixture.digit("77".to_string()));
-        assert_eq!(fixture.strip_prefix("-abc"), "abc".to_string());
-        assert_eq!(fixture.digits("a1-b2"), "12".to_string());
+        assert_eq!(fixture.strip_prefix(&"-abc".to_string()), "abc".to_string());
+        assert_eq!(fixture.digits(&"a1-b2".to_string()), "12".to_string());
     }
 }
 "#,
@@ -5613,6 +5613,14 @@ class JavaIntegerArithmeticExceptionSemantics {
             return 553;
         }
     }
+
+    int div(int value, int divisor) {
+        return value / divisor;
+    }
+
+    int caller(int value, int divisor) {
+        return 1 + div(value, divisor);
+    }
 }
 "#,
     );
@@ -5650,40 +5658,44 @@ mod generated_tests {
     #[test]
     fn integer_div_rem_zero_is_catchable() {
         let fixture = JavaIntegerArithmeticExceptionSemantics {};
-        assert_eq!(fixture.catch_int_div(8, 2), 4);
-        assert_eq!(fixture.catch_int_rem(8, 3), 2);
-        assert_eq!(fixture.catch_long_div(9, 3), 3);
-        assert_eq!(fixture.catch_long_rem(9, 4), 1);
-        assert_eq!(fixture.catch_int_div(8, 0), 101);
-        assert_eq!(fixture.catch_int_rem(8, 0), 102);
-        assert_eq!(fixture.catch_long_div(9, 0), 201);
-        assert_eq!(fixture.catch_long_rem(9, 0), 202);
-        assert_eq!(fixture.catch_runtime_div(8, 0), 301);
-        assert_eq!(fixture.catch_nested_add(8, 2), 5);
-        assert_eq!(fixture.catch_nested_add(8, 0), 401);
-        assert!(!fixture.catch_nested_compare(7, 3));
-        assert!(fixture.catch_nested_compare(8, 0));
-        assert_eq!(fixture.catch_if_condition(8, 2), 501);
-        assert_eq!(fixture.catch_if_condition(8, 3), 502);
-        assert_eq!(fixture.catch_if_condition(8, 0), 503);
-        assert_eq!(fixture.catch_while_condition(8, 2), 511);
-        assert_eq!(fixture.catch_while_condition(8, 3), 512);
-        assert_eq!(fixture.catch_while_condition(8, 0), 513);
-        assert_eq!(fixture.catch_for_condition(8, 2), 521);
-        assert_eq!(fixture.catch_for_condition(8, 0), 523);
-        assert_eq!(fixture.catch_logical_condition(8, 2), 531);
-        assert_eq!(fixture.catch_logical_condition(8, 3), 532);
-        assert_eq!(fixture.catch_logical_condition(8, 0), 533);
-        assert_eq!(fixture.catch_ternary_branch(true, 8, 2), 4);
-        assert_eq!(fixture.catch_ternary_branch(true, 8, 0), 541);
-        assert_eq!(fixture.catch_ternary_branch(false, 8, 0), 7);
-        assert_eq!(fixture.catch_ternary_condition(8, 2), 551);
-        assert_eq!(fixture.catch_ternary_condition(8, 3), 552);
-        assert_eq!(fixture.catch_ternary_condition(8, 0), 553);
-        assert_eq!(fixture.catch_int_div(i32::MIN, -1), i32::MIN);
-        assert_eq!(fixture.catch_int_rem(i32::MIN, -1), 0);
-        assert_eq!(fixture.catch_long_div(i64::MIN, -1), i64::MIN);
-        assert_eq!(fixture.catch_long_rem(i64::MIN, -1), 0);
+        assert_eq!(fixture.catch_int_div(8, 2), Ok(4));
+        assert_eq!(fixture.catch_int_rem(8, 3), Ok(2));
+        assert_eq!(fixture.catch_long_div(9, 3), Ok(3));
+        assert_eq!(fixture.catch_long_rem(9, 4), Ok(1));
+        assert_eq!(fixture.catch_int_div(8, 0), Ok(101));
+        assert_eq!(fixture.catch_int_rem(8, 0), Ok(102));
+        assert_eq!(fixture.catch_long_div(9, 0), Ok(201));
+        assert_eq!(fixture.catch_long_rem(9, 0), Ok(202));
+        assert_eq!(fixture.catch_runtime_div(8, 0), Ok(301));
+        assert_eq!(fixture.catch_nested_add(8, 2), Ok(5));
+        assert_eq!(fixture.catch_nested_add(8, 0), Ok(401));
+        assert_eq!(fixture.catch_nested_compare(7, 3), Ok(false));
+        assert_eq!(fixture.catch_nested_compare(8, 0), Ok(true));
+        assert_eq!(fixture.catch_if_condition(8, 2), Ok(501));
+        assert_eq!(fixture.catch_if_condition(8, 3), Ok(502));
+        assert_eq!(fixture.catch_if_condition(8, 0), Ok(503));
+        assert_eq!(fixture.catch_while_condition(8, 2), Ok(511));
+        assert_eq!(fixture.catch_while_condition(8, 3), Ok(512));
+        assert_eq!(fixture.catch_while_condition(8, 0), Ok(513));
+        assert_eq!(fixture.catch_for_condition(8, 2), Ok(521));
+        assert_eq!(fixture.catch_for_condition(8, 0), Ok(523));
+        assert_eq!(fixture.catch_logical_condition(8, 2), Ok(531));
+        assert_eq!(fixture.catch_logical_condition(8, 3), Ok(532));
+        assert_eq!(fixture.catch_logical_condition(8, 0), Ok(533));
+        assert_eq!(fixture.catch_ternary_branch(true, 8, 2), Ok(4));
+        assert_eq!(fixture.catch_ternary_branch(true, 8, 0), Ok(541));
+        assert_eq!(fixture.catch_ternary_branch(false, 8, 0), Ok(7));
+        assert_eq!(fixture.catch_ternary_condition(8, 2), Ok(551));
+        assert_eq!(fixture.catch_ternary_condition(8, 3), Ok(552));
+        assert_eq!(fixture.catch_ternary_condition(8, 0), Ok(553));
+        assert_eq!(fixture.catch_int_div(i32::MIN, -1), Ok(i32::MIN));
+        assert_eq!(fixture.catch_int_rem(i32::MIN, -1), Ok(0));
+        assert_eq!(fixture.catch_long_div(i64::MIN, -1), Ok(i64::MIN));
+        assert_eq!(fixture.catch_long_rem(i64::MIN, -1), Ok(0));
+        assert_eq!(fixture.div(7, 2), Ok(3));
+        assert!(fixture.div(1, 0).is_err());
+        assert_eq!(fixture.caller(8, 2), Ok(5));
+        assert!(fixture.caller(8, 0).is_err());
     }
 }
 "#,

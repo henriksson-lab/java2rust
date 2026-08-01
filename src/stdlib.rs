@@ -5473,6 +5473,45 @@ impl Graphics {
     pub fn get_font_metrics<T0>(&self, _font: T0) -> FontMetrics {
         FontMetrics
     }
+    pub fn get_font_metrics_0(&self) -> FontMetrics {
+        FontMetrics
+    }
+    pub fn set_color<T0>(&self, _color: T0) {
+        unimplemented!("java.awt.Graphics.setColor is not modelled")
+    }
+    pub fn set_font<T0>(&self, _font: T0) {
+        unimplemented!("java.awt.Graphics.setFont is not modelled")
+    }
+    pub fn set_clip<T0, T1, T2, T3>(&self, _x: T0, _y: T1, _w: T2, _h: T3) {
+        unimplemented!("java.awt.Graphics.setClip is not modelled")
+    }
+    pub fn translate<T0, T1>(&self, _x: T0, _y: T1) {
+        unimplemented!("java.awt.Graphics.translate is not modelled")
+    }
+    pub fn draw_line<T0, T1, T2, T3>(&self, _x1: T0, _y1: T1, _x2: T2, _y2: T3) {
+        unimplemented!("java.awt.Graphics.drawLine is not modelled")
+    }
+    pub fn draw_rect<T0, T1, T2, T3>(&self, _x: T0, _y: T1, _w: T2, _h: T3) {
+        unimplemented!("java.awt.Graphics.drawRect is not modelled")
+    }
+    pub fn fill_rect<T0, T1, T2, T3>(&self, _x: T0, _y: T1, _w: T2, _h: T3) {
+        unimplemented!("java.awt.Graphics.fillRect is not modelled")
+    }
+    pub fn draw_oval<T0, T1, T2, T3>(&self, _x: T0, _y: T1, _w: T2, _h: T3) {
+        unimplemented!("java.awt.Graphics.drawOval is not modelled")
+    }
+    pub fn fill_oval<T0, T1, T2, T3>(&self, _x: T0, _y: T1, _w: T2, _h: T3) {
+        unimplemented!("java.awt.Graphics.fillOval is not modelled")
+    }
+    pub fn draw_string<T0, T1, T2>(&self, _text: T0, _x: T1, _y: T2) {
+        unimplemented!("java.awt.Graphics.drawString is not modelled")
+    }
+    pub fn draw_polygon<T0, T1, T2>(&self, _xs: T0, _ys: T1, _n: T2) {
+        unimplemented!("java.awt.Graphics.drawPolygon is not modelled")
+    }
+    pub fn fill_polygon<T0, T1, T2>(&self, _xs: T0, _ys: T1, _n: T2) {
+        unimplemented!("java.awt.Graphics.fillPolygon is not modelled")
+    }
 }
 
 impl Graphics2D {
@@ -5482,6 +5521,30 @@ impl Graphics2D {
     }
     pub fn set_stroke<T0>(&self, _stroke: T0) {}
     pub fn set_rendering_hint<T0, T1>(&self, _key: T0, _value: T1) {}
+    pub fn get_font_metrics<T0>(&self, _font: T0) -> FontMetrics {
+        FontMetrics
+    }
+    pub fn get_font_metrics_0(&self) -> FontMetrics {
+        FontMetrics
+    }
+    pub fn set_color<T0>(&self, _color: T0) {
+        unimplemented!("java.awt.Graphics2D.setColor is not modelled")
+    }
+    pub fn set_font<T0>(&self, _font: T0) {
+        unimplemented!("java.awt.Graphics2D.setFont is not modelled")
+    }
+    pub fn draw_line<T0, T1, T2, T3>(&self, _x1: T0, _y1: T1, _x2: T2, _y2: T3) {
+        unimplemented!("java.awt.Graphics2D.drawLine is not modelled")
+    }
+    pub fn draw_rect<T0, T1, T2, T3>(&self, _x: T0, _y: T1, _w: T2, _h: T3) {
+        unimplemented!("java.awt.Graphics2D.drawRect is not modelled")
+    }
+    pub fn fill_rect<T0, T1, T2, T3>(&self, _x: T0, _y: T1, _w: T2, _h: T3) {
+        unimplemented!("java.awt.Graphics2D.fillRect is not modelled")
+    }
+    pub fn draw_string<T0, T1, T2>(&self, _text: T0, _x: T1, _y: T2) {
+        unimplemented!("java.awt.Graphics2D.drawString is not modelled")
+    }
 }
 
 impl From<Graphics2D> for Graphics {
@@ -7021,8 +7084,10 @@ fn is_awt_platform_facade_rust_ident(owner: &str) -> bool {
         "BufferedImage"
             | "Graphics"
             | "Graphics2D"
+            | "Shape"
             | "JavaAwtImageBufferedImage"
             | "JavaAwtGraphics"
+            | "JavaAwtShape"
     )
 }
 
@@ -10623,7 +10688,12 @@ impl ExternalApiFacadeSupport {
                 continue;
             }
             lines.push(format!(
-                "impl From<{from}> for {to} {{\n    fn from(_value: {from}) -> Self {{ Default::default() }}\n}}"
+                // A Java upcast must preserve the object. These facade types
+                // carry no state today, so `Default::default()` happens to lose
+                // nothing — but it is indistinguishable from a working
+                // conversion, and would silently discard the value the moment
+                // either type gains a field. Name the gap instead of hiding it.
+                "impl From<{from}> for {to} {{\n    /// Unmodelled Java upcast: {from} -> {to}.\n    fn from(_value: {from}) -> Self {{ Default::default() }}\n}}"
             ));
         }
         let erased_object_return_upgrades =
@@ -14724,12 +14794,10 @@ fn is_builtin_external_facade_type(name: &str) -> bool {
             | "StringBuffer"
             | "StringBuilder"
             | "StringTokenizer"
-            | "Class"
-            | "JavaClass"
             | "Pattern"
             | "Matcher"
-            | "JavaUtilRegexPattern"
-            | "JavaUtilRegexMatcher"
+            | "Class"
+            | "JavaClass"
             | "File"
             | "Path"
             | "URI"
@@ -14750,6 +14818,7 @@ fn is_builtin_external_facade_type(name: &str) -> bool {
             | "BufferedImage"
             | "Graphics"
             | "Graphics2D"
+            | "Shape"
             | "InputStream"
             | "logger"
             | "bool"
@@ -14968,6 +15037,7 @@ pub fn external_static_string_constant_support_items_with_context_programs_and_d
     let mapped_types = rust_crate_mapped_external_facade_type_names(facts);
     let mut support_items = Vec::new();
     let mut support_type_names = BTreeSet::new();
+    let mut emitted_alias_names = BTreeSet::new();
     for (owner, fields) in constants_by_owner {
         if mapped_types.contains(&owner) {
             continue;
@@ -14984,10 +15054,13 @@ pub fn external_static_string_constant_support_items_with_context_programs_and_d
             fields,
             &local_static_string_values,
             declared_owners,
+            &mut emitted_alias_names,
         ) {
             support_items.push(item);
         }
     }
+    // A name emitted as a type alias must not also get a placeholder struct.
+    support_type_names.retain(|name| !emitted_alias_names.contains(name));
     for type_name in support_type_names {
         support_items.push(crate::rust_ir::RustItem::Raw(format!(
             "#[derive(Clone, Debug, Default)]\npub struct {type_name};"
@@ -15859,6 +15932,7 @@ fn external_static_string_constant_support_item(
     fields: BTreeMap<String, StaticConstantFact>,
     local_static_string_values: &BTreeMap<(String, String), String>,
     declared_owners: &BTreeSet<String>,
+    emitted_alias_names: &mut BTreeSet<String>,
 ) -> Option<crate::rust_ir::RustItem> {
     if is_awt_platform_facade_rust_ident(owner) {
         return None;
@@ -15878,6 +15952,12 @@ fn external_static_string_constant_support_item(
     let aliases = alias_owners
         .iter()
         .filter(|alias| !declared_owners.contains(*alias))
+        .inspect(|alias| {
+            // Record it: the caller also emits a placeholder struct for every
+            // support type it saw, and a name cannot be both `pub type X = Y;`
+            // and `pub struct X;`.
+            emitted_alias_names.insert((*alias).to_string());
+        })
         .map(|alias| format!("pub type {alias} = {owner};"))
         .collect::<Vec<_>>()
         .join("\n");
@@ -16109,7 +16189,12 @@ fn unknown_static_named_constant_compile_error_value(
     rust_type: &str,
 ) -> String {
     let message = format!("external static constant {owner}.{field} has no modeled value");
-    format!("{{ compile_error!({message:?}); {rust_type} }}")
+    // `compile_error!` already aborts, but the placeholder still has to
+    // type-check. Naming the type as a value works only for a unit struct and
+    // fails with `E0423` as soon as the type resolves through an alias, so use
+    // a diverging expression: `!` coerces to any type and const panic is legal.
+    let _ = rust_type;
+    format!("{{ compile_error!({message:?}); panic!({message:?}) }}")
 }
 
 fn known_jdk_static_constant_value(owner: &str, field: &str) -> Option<&'static str> {

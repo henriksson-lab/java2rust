@@ -1,6 +1,6 @@
 # 0016 — Core JDK facades are no-op stubs, so correct-looking code silently produces nothing
 
-Status: **validated** (runtime-confirmed; live call sites in the FastQC corpus)
+Status: **FIXED** — was: validated (runtime-confirmed; live call sites in the FastQC corpus)
 Severity: **critical** — output compiles, runs, and produces empty/zero results
 Kind: facade coverage, and a fallback that cannot be distinguished from a real implementation
 
@@ -118,3 +118,34 @@ compile-error-based gate can catch this issue — see
 The reported silent-no-op class is resolved. `StringBuilder`/`StringBuffer` now accumulate for real (`Fallthrough.java` returns `"onetwo"`/`"threeother"` instead of `""`), `Math.sqrt`, `Arrays.sort`, and `Arrays.toString` map to real implementations, and unmodelled facade methods now emit `unimplemented!("X.m is not modelled")` rather than `Default::default()` — so the fallback is loud, as this issue asked. `Math.PI` is `std::f64::consts::PI` ([0031](0031-stubbed-constant-census.md)).
 
 **Remaining, lower severity:** `Pattern`/`Matcher` are listed as builtin facade types (so nothing synthesises them) but no implementation is emitted, giving `E0433: undeclared type JavaUtilRegexPattern`. That is a *loud* failure, not the silent class this issue is about. Also ~78 `impl From<X> for Y { Default::default() }` upcast conversions remain no-ops; they convert between placeholder structs that carry no data, so they lose nothing that exists today — they become real defects only once those types are modelled.
+
+
+## Update 2026-08-01 — regex facade closed
+
+`Pattern`/`Matcher` have hand-written structs, but the package-qualified
+`JavaUtilRegexPattern`/`JavaUtilRegexMatcher` were listed as builtin facade
+types — which *excludes* them from method synthesis — while nothing ever emitted
+them. Any `Pattern.matches(...)` therefore produced `E0433: undeclared type`.
+
+Removing only the qualified names from `is_builtin_external_facade_type` lets
+them take the standard unmodelled-external path: a typed shim whose methods are
+`unimplemented!("...is not modelled")`. The probe goes from 2 errors to **0**.
+`Pattern`/`Matcher` stay builtin, since removing those duplicated the
+hand-written structs.
+
+The `impl From<X> for Y` upcast conversions still return `Default::default()`.
+They convert between facade placeholders that hold no state, so nothing is lost
+*today*; they now carry a doc comment naming the unmodelled upcast so the gap is
+visible rather than looking like a working conversion. They become real defects
+the moment either type gains a field.
+
+## Update — closed
+
+The regex facade compiles (probe 2 errors to 0). The `impl From<X> for Y` upcast
+conversions now carry a doc comment naming the unmodelled upcast, so a
+value-discarding conversion is visible rather than looking like a working one;
+they convert between placeholders that hold no state, so nothing is lost today.
+
+Status: **closed** for the silent-no-op class this issue describes. The focused
+regex runtime-surface probe compiles after updating its generated Rust caller to
+the current borrowed-`String` signature.

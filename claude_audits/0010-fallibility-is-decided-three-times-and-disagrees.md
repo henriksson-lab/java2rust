@@ -112,3 +112,37 @@ This is the same shape of work as
 several local guesses with one solved relation — but it is **cheaper**, because
 the call graph already exists and no CFG or binding identity is required. It is
 the better first demonstration that routing an analysis end to end works.
+
+
+## Update 2026-08-01 — call-site `?` now reads the solved plan directly
+
+Override equalization alone left the call site guessing. `source_method_call_returns_result_with_exception_plan`
+identified the callee through three *name-based probes* and re-found the
+declaration with `find_context_type_decl_by_erased_name`, so a call could
+disagree with the signature whenever that lookup missed.
+
+For a resolved call it now builds the callee's `CallableKey` from
+`resolved.declaring_type` + `resolved.rust_name` and queries
+`callable_returns_result` directly — the same key signature planning uses, so
+the two cannot disagree. The name probes remain only for calls resolution could
+not pin down.
+
+Still open: those fallback probes are still name-based, and they answer "not
+fallible" when they fail to find a declaration, which is the unsound direction.
+Making them conservative needs the overload-identity work in
+[0009](0009-overload-identity-collapses-onto-rust-name.md).
+
+## Update — legacy probes centralized, but not retired
+
+`source_method_call_candidate_callees` centralizes candidate discovery and asks
+the solved plan first. That is progress, but this audit is **not closed**:
+`source_method_call_returns_result_with_exception_plan` still falls back to
+`source_method_named_returns_result_with_exception_plan`, external call paths
+still have direct fact probes in `call_plan`, and integer `/`/`%` fallibility is
+seeded for any callable containing the expression even when a local catch handles
+it. The focused tests compile, but the implementation is still not one
+authoritative fallibility relation.
+
+Status: **partial**. Finish by making every emitted `?` and every Result
+signature decision read one solved callable relation, or emit a divergence
+diagnostic.
