@@ -90,8 +90,69 @@ fn rust_impl_target_for_source_type(ty: &TypeDecl, support_program: &Program) ->
     }
 }
 
-/// Rust bounds for a type-parameter bound that names a JDK interface.
+/// Rust bounds for one declared Java type-parameter bound.
 ///
+/// The single owner of that mapping. It previously existed twice — once for
+/// class parameters and once for method/constructor parameters — and the two
+/// copies drifted: only the class copy learned the JDK case, so a
+/// `Comparable` bound on a method was silently dropped.
+pub fn rust_bounds_for_java_type_param(
+    bound: &JavaType,
+    support_programs: &[&Program],
+) -> Vec<String> {
+    let JavaType::Named { name: bound, .. } = bound else {
+        return Vec::new();
+    };
+    if source_type_bound_is_trait_like(bound, support_programs) {
+        return vec![rust_name_for_java_named_type(bound)];
+    }
+    if source_type_bound_is_class_like(bound, support_programs) {
+        return vec![crate::representation_lowering::source_class_bound_trait_name(bound)];
+    }
+    // The bound names a library type rather than a source one. Dropping it left
+    // the parameter with no capability at all, so `T extends Comparable<T>`
+    // lost `compareTo`.
+    jdk_type_param_bound_rust_bounds(bound)
+}
+
+/// Whether any declared type-parameter bound in the program projects to a Rust
+/// bound that needs the `JavaComparable` support trait.
+///
+/// Asks the projection itself rather than re-scanning the IR for `Comparable`.
+/// A separate scan is a second source of truth, and the previous one walked only
+/// class parameters — so a `Comparable` bound on a method projected to `Ord`
+/// while the trait providing `compare_to` was never emitted.
+pub fn program_projects_java_comparable_bound(
+    program: &Program,
+    support_programs: &[&Program],
+) -> bool {
+    fn bound_needs_it(bound: &Option<JavaType>, support_programs: &[&Program]) -> bool {
+        bound.as_ref().is_some_and(|bound| {
+            rust_bounds_for_java_type_param(bound, support_programs)
+                .iter()
+                .any(|rust_bound| rust_bound == "Ord")
+        })
+    }
+    fn walk(ty: &TypeDecl, support_programs: &[&Program]) -> bool {
+        ty.type_param_bounds
+            .iter()
+            .any(|bound| bound_needs_it(bound, support_programs))
+            || ty.members.iter().any(|member| match member {
+                Member::Method(method) => method
+                    .type_param_bounds
+                    .iter()
+                    .any(|bound| bound_needs_it(bound, support_programs)),
+                Member::Constructor(constructor) => constructor
+                    .type_param_bounds
+                    .iter()
+                    .any(|bound| bound_needs_it(bound, support_programs)),
+                Member::Type(nested) => walk(nested, support_programs),
+                _ => false,
+            })
+    }
+    program.types.iter().any(|ty| walk(ty, support_programs))
+}
+
 /// `Comparable` maps to `Ord`; the generated support library blanket-implements
 /// `JavaComparable` (and therefore `compare_to`) for every `T: Ord`.
 fn jdk_type_param_bound_rust_bounds(bound: &str) -> Vec<String> {
@@ -108,19 +169,8 @@ fn rust_impl_params_for_source_type(ty: &TypeDecl, support_program: &Program) ->
         .enumerate()
         .map(|(index, name)| {
             let mut bounds = Vec::new();
-            if let Some(Some(JavaType::Named { name: bound, .. })) = ty.type_param_bounds.get(index)
-            {
-                if source_type_bound_is_trait_like(bound, &[support_program]) {
-                    bounds.push(rust_name_for_java_named_type(bound));
-                } else if source_type_bound_is_class_like(bound, &[support_program]) {
-                    bounds
-                        .push(crate::representation_lowering::source_class_bound_trait_name(bound));
-                } else {
-                    // The bound names a library type rather than a source one.
-                    // Dropping it left the parameter with no capability at all,
-                    // so `T extends Comparable<T>` lost `compareTo`.
-                    bounds.extend(jdk_type_param_bound_rust_bounds(bound));
-                }
+            if let Some(Some(bound)) = ty.type_param_bounds.get(index) {
+                bounds.extend(rust_bounds_for_java_type_param(bound, &[support_program]));
             }
             if source_type_param_needs_clone_bound(ty, name) {
                 bounds.push("Clone".to_string());
@@ -192,6 +242,37 @@ fn find_type_decl_by_name_or_rust_name_in_type<'a>(
         Member::Type(nested) => find_type_decl_by_name_or_rust_name_in_type(nested, name),
         _ => None,
     })
+}
+
+/// Whether a *method or constructor* type parameter needs a `Clone` bound.
+///
+/// The analogue of the class rule below: there, a parameter stored in a field
+/// and flowing through a method may be cloned. Here, a parameter that arrives as
+/// an argument and is read more than once in the body is what makes clone
+/// recovery insert `.clone()`, which then needs the bound to compile.
+pub fn callable_type_param_needs_clone_bound(
+    type_param: &str,
+    params: &[crate::java_ir::Param],
+    body: Option<&crate::java_ir::Block>,
+) -> bool {
+    let Some(body) = body else {
+        return false;
+    };
+    let typed_params = params
+        .iter()
+        .filter(|param| java_type_contains_type_param(&param.ty, type_param))
+        .map(|param| param.name.as_str())
+        .collect::<Vec<_>>();
+    if typed_params.is_empty() {
+        return false;
+    }
+    let mut counts = std::collections::HashMap::new();
+    for stmt in &body.statements {
+        crate::lower::collect_stmt_read_counts_for_liveness(stmt, &mut counts);
+    }
+    typed_params
+        .iter()
+        .any(|name| counts.get(*name).copied().unwrap_or(0) > 1)
 }
 
 fn source_type_param_needs_clone_bound(ty: &TypeDecl, type_param: &str) -> bool {
@@ -319,6 +400,8 @@ pub fn constructor_function_shell_with_facts_and_support_contexts(
             &ctor.type_param_bounds,
             false,
             support_programs,
+            &ctor.params,
+            ctor.body.as_ref(),
         ),
         params: constructor_params(ty, ctor, signatures, facts),
         return_type: Some(constructor_return_type(ty, ctor, signatures)),
@@ -357,24 +440,26 @@ fn function_type_params_with_optional_lifetime_and_support_contexts(
     type_param_bounds: &[Option<JavaType>],
     needs_lifetime: bool,
     support_programs: &[&Program],
+    callable_params: &[crate::java_ir::Param],
+    callable_body: Option<&crate::java_ir::Block>,
 ) -> Vec<String> {
     let mut params = Vec::new();
     if needs_lifetime {
         params.push("'a".to_string());
     }
     params.extend(type_params.iter().enumerate().map(|(index, name)| {
-        let Some(Some(JavaType::Named { name: bound, .. })) = type_param_bounds.get(index) else {
-            return name.clone();
-        };
-        if source_type_bound_is_trait_like(bound, support_programs) {
-            format!("{name}: {}", rust_name_for_java_named_type(bound))
-        } else if source_type_bound_is_class_like(bound, support_programs) {
-            format!(
-                "{name}: {}",
-                crate::representation_lowering::source_class_bound_trait_name(bound)
-            )
-        } else {
+        let mut bounds = type_param_bounds
+            .get(index)
+            .and_then(|bound| bound.as_ref())
+            .map(|bound| rust_bounds_for_java_type_param(bound, support_programs))
+            .unwrap_or_default();
+        if callable_type_param_needs_clone_bound(name, callable_params, callable_body) {
+            bounds.push("Clone".to_string());
+        }
+        if bounds.is_empty() {
             name.clone()
+        } else {
+            format!("{name}: {}", bounds.join(" + "))
         }
     }));
     params
@@ -575,6 +660,8 @@ pub fn method_function_shell_with_facts_exception_plan_and_support_contexts(
             &method.type_param_bounds,
             needs_lifetime,
             support_programs,
+            &method.params,
+            method.body.as_ref(),
         ),
         params: method_params_with_optional_lifetime(ty, method, signatures, facts, needs_lifetime),
         return_type: method_return_type_with_optional_lifetime(

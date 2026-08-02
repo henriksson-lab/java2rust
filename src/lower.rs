@@ -250,10 +250,19 @@ struct LowerCtx<'a> {
     support_local_type_program: &'a Program,
     source_summary_type_program: &'a Program,
     context_sources_are_emitted: bool,
+    /// The statement being lowered, so move decisions can ask the analysis
+    /// about it directly instead of being handed pre-projected name sets.
+    current_stmt: Option<&'a Stmt>,
+    /// Deliberate local overrides of the solved relation. Set only where there
+    /// is no statement to key on — a lambda whose body is a bare expression
+    /// lowers into a loop with no `Stmt` node of its own.
     later_read_names: Option<&'a std::collections::HashSet<String>>,
     later_mutated_names: Option<&'a std::collections::HashSet<String>>,
-    current_stmt_read_counts: Option<&'a std::collections::HashMap<String, usize>>,
-    preinitialized_try_capture_names: Option<&'a std::collections::HashSet<String>>,
+    /// Locals a `try` scope must pre-initialize before the guarded block.
+    ///
+    /// An initialization-time question, not part of the move relation — kept
+    /// separate so it does not read as another approximation of liveness.
+    try_capture_preinitialized_names: Option<&'a std::collections::HashSet<String>>,
     /// Backward liveness for the callable body being lowered. Authoritative for
     /// "which names can be read after this point". Always present: outside a
     /// callable body it is an empty analysis, whose missing entries take the
@@ -385,11 +394,11 @@ pub fn lower_program_with_semantic_plans_and_support_context(
         support_local_type_program,
         source_summary_type_program,
         context_sources_are_emitted,
+        current_stmt: None,
         later_read_names: None,
         liveness: &empty_liveness,
         later_mutated_names: None,
-        current_stmt_read_counts: None,
-        preinitialized_try_capture_names: None,
+        try_capture_preinitialized_names: None,
         result_propagation_mode: ResultPropagationMode::UncaughtPanic,
     };
     let mut file = RustFile::default();
@@ -413,7 +422,10 @@ pub fn lower_program_with_semantic_plans_and_support_context(
     {
         file.items.push(java_erased_object_runtime_support_item());
     }
-    if crate::stdlib::program_uses_java_comparable_bound(program) {
+    if crate::item_assembly::program_projects_java_comparable_bound(
+        program,
+        &[ctx.support_local_type_program],
+    ) {
         file.items
             .push(crate::stdlib::java_comparable_support_item());
     }
@@ -5056,10 +5068,10 @@ fn lower_block_with_refinements(
     ctx: LowerCtx,
     refinements: &ExprRefinements,
 ) -> Vec<RustStmt> {
-    let preinitialized_try_capture_names =
-        preinitialized_try_capture_names_for_block(&block.statements);
+    let try_capture_preinitialized_names =
+        try_capture_preinitialized_names_for_block(&block.statements);
     let block_ctx = LowerCtx {
-        preinitialized_try_capture_names: Some(&preinitialized_try_capture_names),
+        try_capture_preinitialized_names: Some(&try_capture_preinitialized_names),
         result_propagation_mode: result_propagation_mode_for_block(wrap_returns_in_ok),
         ..ctx
     };
@@ -5081,7 +5093,7 @@ fn lower_block_with_refinements(
         let mut later_read_names = ctx
             .liveness
             .live_out_for(stmt)
-            .unwrap_or_else(|| statement_suffix_read_names(&block.statements));
+            .unwrap_or_else(|| ctx.liveness.conservative_live_in_block(block));
         if let Some(inherited_later_read_names) = block_ctx.later_read_names {
             // A block lowered inside a larger construct (a lambda body inlined
             // into a loop, for instance) still inherits its enclosing context.
@@ -5090,15 +5102,14 @@ fn lower_block_with_refinements(
         let mut later_mutated_names = ctx
             .liveness
             .mutated_after_for(stmt)
-            .unwrap_or_else(|| statement_suffix_mutated_names(&block.statements));
+            .unwrap_or_else(|| ctx.liveness.conservative_mutated_in_block(block));
         if let Some(inherited_later_mutated_names) = block_ctx.later_mutated_names {
             later_mutated_names.extend(inherited_later_mutated_names.iter().cloned());
         }
-        let current_stmt_read_counts = ctx.liveness.use_counts_in(stmt);
         let stmt_ctx = LowerCtx {
+            current_stmt: Some(stmt),
             later_read_names: Some(&later_read_names),
             later_mutated_names: Some(&later_mutated_names),
-            current_stmt_read_counts: Some(&current_stmt_read_counts),
             ..block_ctx
         };
         lower_stmt(
@@ -5128,10 +5139,10 @@ fn lower_lambda_block_with_result_carrier(
     ctx: LowerCtx,
     wrap_returns_in_ok: bool,
 ) -> Vec<RustStmt> {
-    let preinitialized_try_capture_names =
-        preinitialized_try_capture_names_for_block(&block.statements);
+    let try_capture_preinitialized_names =
+        try_capture_preinitialized_names_for_block(&block.statements);
     let block_ctx = LowerCtx {
-        preinitialized_try_capture_names: Some(&preinitialized_try_capture_names),
+        try_capture_preinitialized_names: Some(&try_capture_preinitialized_names),
         result_propagation_mode: result_propagation_mode_for_block(wrap_returns_in_ok),
         ..ctx
     };
@@ -5141,16 +5152,15 @@ fn lower_lambda_block_with_result_carrier(
         let later_read_names = ctx
             .liveness
             .live_out_for(stmt)
-            .unwrap_or_else(|| statement_suffix_read_names(&block.statements));
+            .unwrap_or_else(|| ctx.liveness.conservative_live_in_block(block));
         let later_mutated_names = ctx
             .liveness
             .mutated_after_for(stmt)
-            .unwrap_or_else(|| statement_suffix_mutated_names(&block.statements));
-        let current_stmt_read_counts = ctx.liveness.use_counts_in(stmt);
+            .unwrap_or_else(|| ctx.liveness.conservative_mutated_in_block(block));
         let stmt_ctx = LowerCtx {
+            current_stmt: Some(stmt),
             later_read_names: Some(&later_read_names),
             later_mutated_names: Some(&later_mutated_names),
-            current_stmt_read_counts: Some(&current_stmt_read_counts),
             ..block_ctx
         };
         lower_stmt(
@@ -5179,18 +5189,6 @@ fn result_propagation_mode_for_block(wrap_returns_in_ok: bool) -> ResultPropagat
     } else {
         ResultPropagationMode::UncaughtPanic
     }
-}
-
-fn statement_suffix_read_names(statements: &[Stmt]) -> HashSet<String> {
-    let mut names = HashSet::new();
-    collect_stmt_read_names(statements, &mut names);
-    names
-}
-
-fn statement_suffix_mutated_names(statements: &[Stmt]) -> HashSet<String> {
-    let mut names = HashSet::new();
-    collect_stmt_assigned_names(statements, &mut names);
-    names
 }
 
 fn lower_stmt(
@@ -5238,10 +5236,17 @@ fn lower_stmt(
             ) {
                 local_plan.shape = declared_generic_local_slot_shape(ty, &local_plan.shape);
             }
-            if ctx
-                .later_mutated_names
-                .is_some_and(|names| names.contains(name))
-            {
+            // A local that is written later must be declared `mut`. Ask the
+            // analysis about this statement's binding rather than a name set.
+            // Union for the same reason as `binding_has_later_read`.
+            let mutated_later = ctx
+                .current_stmt
+                .and_then(|stmt| ctx.liveness.binding_is_mutated_after(stmt, name))
+                .unwrap_or(false)
+                || ctx
+                    .later_mutated_names
+                    .is_some_and(|names| names.contains(name));
+            if mutated_later {
                 local_plan.binding_mutable = true;
             }
             let mut lowered_initializer = initializer
@@ -5277,7 +5282,7 @@ fn lower_stmt(
                     adapt_reused_owned_value_for_slot(lowered, expr, &initializer_slot, env, ctx)
                 })
                 .or_else(|| {
-                    ctx.preinitialized_try_capture_names.and_then(|names| {
+                    ctx.try_capture_preinitialized_names.and_then(|names| {
                         names
                             .contains(name)
                             .then(|| RustExpr::Raw("Default::default()".to_string()))
@@ -5429,22 +5434,15 @@ fn lower_stmt(
             else_block,
         } => {
             let (then_refinements, else_refinements) = branch_refinements(condition, refinements);
-            let terminal_continuation_reads = HashSet::new();
+            // A terminating branch used to get an empty read set here. Liveness
+            // already kills everything at `return`/`throw`, so the override is
+            // the same answer computed twice.
             let then_ctx = LowerCtx {
-                later_read_names: if block_returns_or_throws(then_block) {
-                    Some(&terminal_continuation_reads)
-                } else {
-                    ctx.later_read_names
-                },
+                later_read_names: ctx.later_read_names,
                 ..ctx
             };
-            let else_block_returns = else_block.as_ref().is_some_and(block_returns_or_throws);
             let else_ctx = LowerCtx {
-                later_read_names: if else_block_returns {
-                    Some(&terminal_continuation_reads)
-                } else {
-                    ctx.later_read_names
-                },
+                later_read_names: ctx.later_read_names,
                 ..ctx
             };
             if let Some(stmt) = lower_instanceof_pattern_if_stmt(
@@ -8780,14 +8778,10 @@ fn lower_try_stmt(
             finally_block,
             completion,
         } => {
-            let mut finally_read_names = statement_suffix_read_names(&finally_block.statements);
-            if let Some(inherited_later_read_names) = ctx.later_read_names {
-                finally_read_names.extend(inherited_later_read_names.iter().cloned());
-            }
-            let try_ctx = LowerCtx {
-                later_read_names: Some(&finally_read_names),
-                ..ctx
-            };
+            // The finally block's reads used to be unioned in here. The
+            // analysis already folds finally into the guarded body's live-out,
+            // so this was the same relation computed a second time.
+            let try_ctx = ctx;
             let try_body = lower_block(planned_body, &mut env.clone(), true, try_ctx);
             let finally_body =
                 lower_block(finally_block, &mut env.clone(), wrap_returns_in_ok, ctx);
@@ -8805,14 +8799,10 @@ fn lower_try_stmt(
             finally_block,
             completion,
         } => {
-            let mut finally_read_names = statement_suffix_read_names(&finally_block.statements);
-            if let Some(inherited_later_read_names) = ctx.later_read_names {
-                finally_read_names.extend(inherited_later_read_names.iter().cloned());
-            }
-            let try_ctx = LowerCtx {
-                later_read_names: Some(&finally_read_names),
-                ..ctx
-            };
+            // The finally block's reads used to be unioned in here. The
+            // analysis already folds finally into the guarded body's live-out,
+            // so this was the same relation computed a second time.
+            let try_ctx = ctx;
             let try_body = lower_block(planned_body, &mut env.clone(), true, try_ctx);
             let try_ok_type = if matches!(completion, TryBlockCompletion::FallsThroughUnit) {
                 RustType::Unit
@@ -8972,7 +8962,7 @@ fn resource_close_declares_result(resources: &[Stmt], resource_name: &str, ctx: 
     resource_close_declares_result_with_external_index(resource_ty, ctx.external_index)
 }
 
-fn preinitialized_try_capture_names_for_block(
+fn try_capture_preinitialized_names_for_block(
     statements: &[Stmt],
 ) -> std::collections::HashSet<String> {
     let mut declared_uninitialized = std::collections::HashSet::new();
@@ -18683,10 +18673,13 @@ impl<'a> MoveUseContext<'a> {
         Self { ctx }
     }
 
+    /// Whether the binding `name` refers to here may be read afterwards.
+    ///
+    /// Asks the analysis about the current statement, comparing *bindings* — a
+    /// same-named variable in another scope cannot answer for this one. The
+    /// override is consulted only where there is no statement to key on.
     fn has_later_read(&self, name: &str) -> bool {
-        self.ctx
-            .later_read_names
-            .is_some_and(|later_reads| later_reads.contains(name))
+        binding_has_later_read(name, self.ctx)
     }
 
     /// Reads reachable through an exception edge into a `catch`.
@@ -18708,8 +18701,8 @@ impl<'a> MoveUseContext<'a> {
 
     fn current_stmt_read_count(&self, name: &str) -> Option<usize> {
         self.ctx
-            .current_stmt_read_counts
-            .and_then(|current_counts| current_counts.get(name).copied())
+            .current_stmt
+            .and_then(|stmt| self.ctx.liveness.use_counts_in(stmt).get(name).copied())
     }
 
     fn has_repeated_current_stmt_read(&self, name: &str) -> bool {
@@ -19163,8 +19156,26 @@ fn current_callable_binding_use_count_for_id(
 }
 
 fn current_callable_binding_has_later_read(name: &str, ctx: LowerCtx) -> bool {
-    ctx.later_read_names
-        .is_some_and(|later_reads| later_reads.contains(name))
+    binding_has_later_read(name, ctx)
+}
+
+/// Whether the binding `name` refers to at the statement being lowered may be
+/// read afterwards. One place that resolves the name to a binding; the override
+/// is only for constructs with no statement of their own.
+fn binding_has_later_read(name: &str, ctx: LowerCtx) -> bool {
+    // Union, not precedence. An override is installed for a construct the
+    // analysis cannot key on — a lambda whose body is a bare expression lowers
+    // into a loop with no `Stmt` of its own — while `current_stmt` still points
+    // at the *enclosing* statement. Returning the analysis answer alone there
+    // silently discards the carried reads and drops the clone the loop needs.
+    let analysis_says = ctx
+        .current_stmt
+        .and_then(|stmt| ctx.liveness.binding_is_live_after(stmt, name))
+        .unwrap_or(false);
+    analysis_says
+        || ctx
+            .later_read_names
+            .is_some_and(|later_reads| later_reads.contains(name))
 }
 
 fn current_callable_binding_is_returned(name: &str, ctx: LowerCtx) -> bool {
@@ -22070,10 +22081,7 @@ fn lower_reused_external_into_array_child(
     let Expr::Var(name) = child else {
         return None;
     };
-    if !ctx
-        .later_read_names
-        .is_some_and(|later_reads| later_reads.contains(name))
-    {
+    if !binding_has_later_read(name, ctx) {
         return None;
     }
     let slot = argument_slot(element_shape.clone());
@@ -27561,22 +27569,21 @@ fn lower_block_for_body(
         let mut later_read_names = ctx
             .liveness
             .live_out_for(stmt)
-            .unwrap_or_else(|| statement_suffix_read_names(&block.statements));
+            .unwrap_or_else(|| ctx.liveness.conservative_live_in_block(block));
         if let Some(inherited_later_read_names) = ctx.later_read_names {
             later_read_names.extend(inherited_later_read_names.iter().cloned());
         }
         let mut later_mutated_names = ctx
             .liveness
             .mutated_after_for(stmt)
-            .unwrap_or_else(|| statement_suffix_mutated_names(&block.statements));
+            .unwrap_or_else(|| ctx.liveness.conservative_mutated_in_block(block));
         if let Some(inherited_later_mutated_names) = ctx.later_mutated_names {
             later_mutated_names.extend(inherited_later_mutated_names.iter().cloned());
         }
-        let current_stmt_read_counts = ctx.liveness.use_counts_in(stmt);
         let stmt_ctx = LowerCtx {
+            current_stmt: Some(stmt),
             later_read_names: Some(&later_read_names),
             later_mutated_names: Some(&later_mutated_names),
-            current_stmt_read_counts: Some(&current_stmt_read_counts),
             ..ctx
         };
         lower_stmt_for_body(stmt, update, env, wrap_returns_in_ok, stmt_ctx, &mut out);

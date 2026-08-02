@@ -130,6 +130,61 @@ impl LivenessAnalysis {
         counts
     }
 
+    /// Whether the binding `name` refers to at `stmt` may be read afterwards.
+    ///
+    /// Resolves the name to the binding in scope at that point and compares
+    /// bindings, so a same-named variable from another scope cannot answer for
+    /// it. `None` means the statement was not analyzed.
+    pub fn binding_is_live_after(&self, stmt: &Stmt, name: &str) -> Option<bool> {
+        let bindings = self.live_out.get(&stmt_id(stmt))?;
+        Some(bindings.contains(&self.binding_at(stmt, name)))
+    }
+
+    /// The write-side equivalent of [`Self::binding_is_live_after`].
+    pub fn binding_is_mutated_after(&self, stmt: &Stmt, name: &str) -> Option<bool> {
+        let bindings = self.mutated_after.get(&stmt_id(stmt))?;
+        Some(bindings.contains(&self.binding_at(stmt, name)))
+    }
+
+    /// The binding a name refers to at `stmt`.
+    fn binding_at(&self, stmt: &Stmt, name: &str) -> Binding {
+        let decl = self
+            .scope_at
+            .get(&stmt_id(stmt))
+            .and_then(|scope| scope.get(name).copied())
+            .unwrap_or(OUTER_DECL);
+        Binding::new(name, decl)
+    }
+
+    /// Conservative answer for a statement the analysis never saw.
+    ///
+    /// A synthesized statement has no identity in the maps. Unioning what is
+    /// live across the block it was inserted into over-approximates — the safe
+    /// direction, costing a clone rather than a rejected move — and it uses only
+    /// solved data, so no separate textual scan is needed.
+    pub fn conservative_live_in_block(&self, block: &Block) -> HashSet<String> {
+        self.union_over_block(block, &self.live_out)
+    }
+
+    /// The write-side equivalent of [`Self::conservative_live_in_block`].
+    pub fn conservative_mutated_in_block(&self, block: &Block) -> HashSet<String> {
+        self.union_over_block(block, &self.mutated_after)
+    }
+
+    fn union_over_block(
+        &self,
+        block: &Block,
+        source: &HashMap<usize, HashSet<Binding>>,
+    ) -> HashSet<String> {
+        let mut names = HashSet::new();
+        for stmt in &block.statements {
+            if let Some(bindings) = source.get(&stmt_id(stmt)) {
+                names.extend(bindings.iter().map(|binding| binding.name.clone()));
+            }
+        }
+        names
+    }
+
     /// Names that may be *written* after `stmt` completes.
     pub fn mutated_after_for(&self, stmt: &Stmt) -> Option<HashSet<String>> {
         self.mutated_after.get(&stmt_id(stmt)).map(|bindings| {
@@ -498,15 +553,22 @@ impl LivenessAnalysis {
                 }
                 // Everything a catch reads must stay live across the whole
                 // guarded region, because the exception edge leaves from any
-                // statement in it — not only from the entry.
-                let mut catch_live = HashSet::new();
+                // statement in it — not only from the entry. A `finally` needs
+                // the same treatment for a different reason: it runs however the
+                // body exits, including through a `return` that would otherwise
+                // kill everything after it.
+                let mut guarded_floor = HashSet::new();
                 for catch in catches {
                     let mut reads = self.block_live_in(&catch.body, &after_body, loop_live);
                     reads.retain(|binding| binding.name != catch.name);
-                    catch_live.extend(reads);
+                    guarded_floor.extend(reads);
+                }
+                if let Some(finally_block) = finally_block {
+                    let exit = HashSet::new();
+                    guarded_floor.extend(self.block_live_in(finally_block, &exit, loop_live));
                 }
                 live = self.block_live_in(body, &live, loop_live);
-                self.add_live_floor_to_block(body, &catch_live);
+                self.add_live_floor_to_block(body, &guarded_floor);
                 for stmt in resources.iter().rev() {
                     live = self.stmt_live_in(stmt, &live, loop_live);
                 }

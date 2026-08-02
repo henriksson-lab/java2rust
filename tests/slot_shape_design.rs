@@ -17879,6 +17879,7 @@ fn signature_shape_request_centralizes_role_base_shape_and_constraints() {
             java_ty: JavaType::Array(Box::new(JavaType::String)),
             role: SignatureSlotRole::Param { is_varargs: false },
             constraints: Vec::new(),
+            type_params: Vec::new(),
         },
     )
     .unwrap();
@@ -17891,6 +17892,7 @@ fn signature_shape_request_centralizes_role_base_shape_and_constraints() {
             java_ty: JavaType::String,
             role: SignatureSlotRole::Storage,
             constraints: Vec::new(),
+            type_params: Vec::new(),
         },
     )
     .unwrap();
@@ -17904,6 +17906,7 @@ fn signature_shape_request_centralizes_role_base_shape_and_constraints() {
                 java_ty: JavaType::Void,
                 role: SignatureSlotRole::Return,
                 constraints: Vec::new(),
+                type_params: Vec::new(),
             },
         ),
         None
@@ -17917,6 +17920,7 @@ fn signature_shape_request_centralizes_role_base_shape_and_constraints() {
             constraints: signature_constraints_for_borrowed_content_policy(
                 BorrowedContentPolicy::string_like_view(),
             ),
+            type_params: Vec::new(),
         },
     )
     .unwrap();
@@ -17935,6 +17939,7 @@ fn signature_shape_request_centralizes_role_base_shape_and_constraints() {
                     enum_name: "AnimalValue".to_string(),
                 },
             )],
+            type_params: Vec::new(),
         },
     )
     .unwrap();
@@ -18092,6 +18097,7 @@ class Use {
             },
             role: SignatureSlotRole::Storage,
             constraints: Vec::new(),
+            type_params: Vec::new(),
         },
         &facts,
     )
@@ -21116,6 +21122,7 @@ class VariantAttributeOptionPlanning {
             },
             role: SignatureSlotRole::Storage,
             constraints: local_constraints.constraints.clone(),
+            type_params: Vec::new(),
         },
         &facts,
     )
@@ -22924,11 +22931,47 @@ class LoopLivenessAudit {
     let lower_source = include_str!("../src/lower.rs");
     let liveness_source = include_str!("../src/liveness.rs");
     assert!(lower_source.contains("liveness: &'a crate::liveness::LivenessAnalysis"));
-    assert!(lower_source.contains("statement_suffix_read_names(&block.statements)"));
     assert!(lower_source.contains("LivenessAnalysis::for_body"));
+    // The textual-suffix scan is gone: a statement the analysis never saw now
+    // falls back to a projection of the analysis itself, not a second scan.
+    assert!(!lower_source.contains("fn statement_suffix_read_names"));
+    assert!(lower_source.contains("conservative_live_in_block"));
     assert!(liveness_source.contains("pub fn live_out_for"));
     assert!(liveness_source.contains("pub struct Binding"));
     assert!(liveness_source.contains("fn loop_fixpoint"));
+}
+
+#[test]
+fn for_each_expression_lambda_keeps_outer_value_live_across_back_edge() {
+    let translation = translate_source(
+        r#"
+import java.util.List;
+
+class ForEachExpressionLambdaMoveAudit {
+    void take(Payload value) {
+    }
+
+    void run(List<Integer> xs, Payload value) {
+        xs.forEach(x -> take(value));
+    }
+}
+
+class Payload {
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("self.take(value.clone()"),
+        "{}",
+        translation.rust
+    );
 }
 
 #[test]
@@ -24060,6 +24103,7 @@ fn signature_boundary_preserves_unknown_erased_object_shape() {
                 &JavaType::Unknown("Object".to_string()),
                 &FactSet::default(),
             ),
+            type_params: Vec::new(),
         },
     )
     .unwrap();
@@ -24084,6 +24128,7 @@ fn signature_boundary_preserves_wildcard_erased_object_shape() {
                 &JavaType::Wildcard(None),
                 &FactSet::default(),
             ),
+            type_params: Vec::new(),
         },
     )
     .unwrap();
@@ -25086,6 +25131,7 @@ class NullFields {
             java_ty: field("maybe").ty.clone(),
             role: SignatureSlotRole::Storage,
             constraints: field_shape_constraints_with_facts(ty, field("maybe"), &facts),
+            type_params: Vec::new(),
         },
     )
     .unwrap();
@@ -25095,6 +25141,7 @@ class NullFields {
             java_ty: field("proven").ty.clone(),
             role: SignatureSlotRole::Storage,
             constraints: field_shape_constraints_with_facts(ty, field("proven"), &facts),
+            type_params: Vec::new(),
         },
     )
     .unwrap();
@@ -25106,6 +25153,7 @@ class NullFields {
             constraints: vec![SignatureConstraint::RequiredStorageNullability(
                 NullabilityState::MaybeNull,
             )],
+            type_params: Vec::new(),
         },
     )
     .unwrap();
@@ -26288,6 +26336,70 @@ class Caller {
     );
     assert!(
         translation.rust.contains("helper.score(value.as_str())"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn scoped_type_param_does_not_collide_with_same_named_source_class() {
+    let translation = translate_source(
+        r#"
+class ELEM {
+    String label() {
+        return "concrete";
+    }
+}
+
+class GenericElemBox<ELEM> {
+    private ELEM value;
+
+    GenericElemBox(ELEM value) {
+        this.value = value;
+    }
+
+    ELEM get() {
+        return value;
+    }
+
+    ELEM local(ELEM input) {
+        ELEM tmp = input;
+        return tmp;
+    }
+}
+
+class MethodElemUse {
+    <ELEM> ELEM id(ELEM value) {
+        ELEM tmp = value;
+        return tmp;
+    }
+
+    String concrete(ELEM value) {
+        return value.label();
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("pub struct ELEM")
+            && translation.rust.contains("pub struct GenericElemBox<ELEM>")
+            && translation.rust.contains("pub fn get(&self) -> &ELEM")
+            && translation
+                .rust
+                .contains("pub fn local(&self, input: ELEM) -> ELEM")
+            && translation
+                .rust
+                .contains("pub fn id<ELEM>(&self, value: ELEM) -> ELEM")
+            && translation
+                .rust
+                .contains("pub fn concrete(&self, value: &ELEM) -> String"),
         "{}",
         translation.rust
     );

@@ -1,6 +1,6 @@
 # 0017 — Generic bounds are dropped and method-level type parameters are never declared
 
-Status: **PARTIAL** — was: validated (probe + matching corpus errors)
+Status: **DONE** — closed 2026-08-02
 Severity: high — the largest error cluster in the biojava corpus
 Kind: missing type-parameter model
 
@@ -138,3 +138,24 @@ static <U> U id(U u) { return u; }                 // <U> must be emitted
 static <K, V extends Number> V pick(K k, V v)      // multiple, one bounded
 class Pair<A, B extends List<A>> { }               // bound referring to another param
 ```
+
+## Resolution 2026-08-02
+
+Closed for the audited defects. Type-parameter identity is now declaration
+driven and scoped through `TypeParamScope`, rather than inferred from name
+shape or collected globally. Class, method, constructor, parameter, return,
+field, local, and inherited source-method signature slots carry the relevant
+scope into `SignatureShapeRequest`.
+
+Declared bounds now share `rust_bounds_for_java_type_param`, so class,
+method, and constructor type parameters use the same trait-like, class-like,
+and JDK projection. `Comparable` projections gate `JavaComparable` support from
+the projection path itself, including method-only and constructor-only bounds.
+Method/constructor type parameters also receive `Clone` when clone recovery can
+insert a clone for repeated reads.
+
+Regression coverage includes a same-name collision between a real class `ELEM`,
+a class type parameter `ELEM`, and a method type parameter `ELEM`, plus existing
+generic class/method/constructor bound fixtures. Multi-bound/intersection
+coverage remains a broader generic-type-modeling follow-up, not this audit's
+original failure.

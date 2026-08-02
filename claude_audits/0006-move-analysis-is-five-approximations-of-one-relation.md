@@ -27,15 +27,17 @@ correct clones from liveness alone. Verified across `while`, `for`, `do-while`,
 nested, labelled, in-`try`, in-`switch`, enhanced-`for`, and `forEach` — all
 `E0382`-free, while `afterLoop` still takes no needless clone (precision kept).
 
-**Still open:** this audit is not closed. `LivenessAnalysis` now stores
-`Binding { name, decl }` internally, `LowerCtx::liveness` is non-optional, and
-read, write, and within-statement read-count facts are owned by the analysis.
-Focused regressions cover terminal statements, switch fallthrough, and lowered
-loop-body write analysis. The lowerer still projects live-out/write bindings
-back to names, several optional local override sets still exist, and synthesized
-fallback scans are still name-based. Closing this requires retiring the
-fragmented query surface and making clone/borrow decisions consume binding
-identities end to end.
+**Still open:** this audit is not closed architecturally. `LivenessAnalysis` now
+stores `Binding { name, decl }` internally, `LowerCtx::liveness` is
+non-optional, and read, write, and within-statement read-count facts are owned
+by the analysis. Focused regressions cover terminal statements, switch
+fallthrough, finally floors, lowered loop-body write analysis, and expression
+lambda carried reads. The old textual `statement_suffix_*` scans are gone; a
+missing statement identity now falls back to a conservative projection of the
+analysis. Two `HashSet<String>` overrides remain deliberately load-bearing for
+expression-lambda bodies that lower into loops but have no inner `Stmt` to key
+on. Closing the broader architecture still requires a binding-native query
+surface for those synthesized expression contexts.
 
 ## Observation
 

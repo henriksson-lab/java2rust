@@ -4649,23 +4649,6 @@ impl<T: Ord> JavaComparable for T {
     )
 }
 
-/// Whether any declared type parameter is bounded by `Comparable`.
-pub fn program_uses_java_comparable_bound(program: &crate::java_ir::Program) -> bool {
-    fn type_uses(ty: &crate::java_ir::TypeDecl) -> bool {
-        ty.type_param_bounds.iter().any(|bound| {
-            matches!(
-                bound,
-                Some(crate::java_ir::JavaType::Named { name, .. })
-                    if name.rsplit('.').next().unwrap_or(name) == "Comparable"
-            )
-        }) || ty.members.iter().any(|member| match member {
-            crate::java_ir::Member::Type(nested) => type_uses(nested),
-            _ => false,
-        })
-    }
-    program.types.iter().any(type_uses)
-}
-
 pub fn java_platform_facade_support_item() -> crate::rust_ir::RustItem {
     crate::rust_ir::RustItem::Raw(
         r#"#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]

@@ -637,3 +637,269 @@ own reviewable change, not tacked onto this round.
 | `lower.rs` bool predicates | 220 | 219 |
 | `RustExpr::Raw` share | 59% | 58% (580 / 1004; R5 not attempted) |
 | `type_parameter` / `type_bound` in parser | 0 | handled |
+
+
+---
+
+# Round 3 plan — properly closing 0006 and 0017
+
+Both are partial for the same underlying reason: the *analysis* was made correct
+but the *boundary* around it was left as it was. 0006 solves in bindings and
+hands out names; 0017 projects bounds in one of three places and gates the
+support trait by re-scanning a different set. Each fix below removes a boundary
+rather than adding another special case.
+
+Verified against the tree before writing — every claim below is a `grep` away.
+
+## 0017 — three gaps, one shared cause
+
+The bound projection lives in `rust_impl_params_for_source_type`
+(`item_assembly.rs`), and nothing else calls it.
+
+### 17a. Wire method and constructor bounds
+
+`function_type_params_with_optional_lifetime_and_support_contexts`
+(`item_assembly.rs:355`) is the method/constructor equivalent. It has the same
+trait-like / class-like cascade and then `else { name.clone() }` — the JDK case
+that `jdk_type_param_bound_rust_bounds` handles is simply absent, so
+`static <U extends Comparable<U>> U max(U a, U b)` drops its bound.
+
+**Change.** Extract one function — `rust_bounds_for_java_type_param(bound, support_programs) -> Vec<String>`
+— containing the full cascade (trait-like → class-like → JDK → inferred), and
+call it from all three sites: class impl params, method type params, constructor
+type params. The duplication is what let them drift.
+
+**Watch.** The class path also appends `Clone` and `Into<...>` bounds that the
+method path does not. Keep those *outside* the extracted function, or method
+signatures will grow bounds they never had.
+
+**Verify.** `static <U extends Comparable<U>> U max(U a, U b)` emits
+`fn max<U: Ord>(…)` and compiles.
+
+### 17b. Gate the support trait on what was actually projected
+
+`program_uses_java_comparable_bound` (`stdlib.rs:4653`) walks only
+`ty.type_param_bounds`. A method-only `Comparable` bound therefore projects to
+`Ord` while `JavaComparable` is never emitted — reintroducing the exact `E0599`
+this was meant to fix, in a shape the current probes miss.
+
+**Change.** Do not extend the re-scan to methods and constructors — that keeps
+two sources of truth and would drift again. Instead have the projection
+*record* its requirement: when `rust_bounds_for_java_type_param` returns a bound
+that needs `JavaComparable`, note it, and emit the support item from that record.
+The gate then cannot disagree with what was emitted, because it *is* what was
+emitted.
+
+**Verify.** A file whose only `Comparable` bound is on a static method still
+emits the trait; a file with no such bound still does not.
+
+### 17c. Replace the type-variable heuristic with a lookup
+
+`type_variable_name` (`signature.rs`) guesses: length ≤ 2, first char uppercase,
+no lowercase. It is wrong in both directions — a class named `IO` is treated as a
+type variable, and a parameter named `ELEM` or `TKey` is not. R4's correctness
+currently rests on that guess.
+
+**Change.** Decide it by lookup, not shape. The declared parameters are already
+in the IR (`TypeDecl::type_params`, `MethodDecl::type_params`,
+`ConstructorDecl::type_params`); the question is only that the signature layer
+cannot see them at that point. Thread the in-scope set — enclosing type's
+parameters plus the current callable's — into
+`signature_slot_dispatch_requirement_policy_with_effective_facts`, and test
+membership.
+
+**Watch.** Shadowing: a method parameter `T` shadows a class parameter `T`. The
+in-scope set is the union with the method's winning, which matters only if their
+bounds differ — but get it right, because this is the same class of bug as
+0006's binding identity.
+
+**Verify.** A class genuinely named `IO` used as a parameter type keeps its
+concrete shape; a type parameter named `ELEM` stops erasing. Both are one probe.
+
+## 0006 — carry bindings across the boundary
+
+The analysis is binding-keyed; `live_out_for` projects to `HashSet<String>` and
+everything downstream is names. Three things follow from that one boundary.
+
+### 6d. Consumers take bindings
+
+**Change.** Replace the three name-set fields on `LowerCtx`
+(`later_read_names`, `later_mutated_names`, `current_stmt_read_counts`) with
+`current_stmt: Option<&'a Stmt>`, and have `MoveUseContext` query the analysis
+directly: `live_out_bindings_for(stmt)`, `mutated_after_for`, `use_counts_in`.
+
+For the predicates that are handed a *name* (`has_later_read(name)`), resolve it
+to a binding at that point. That needs one new accessor —
+`LivenessAnalysis::binding_at(stmt, name) -> Binding` — reading the existing
+private `scope_at`. Do not expose `scope_at` itself; expose the question.
+
+**Why it is worth doing even though behaviour will not change.** It was measured:
+at most one binding of a name is live at any point, so today the projection is
+exact and a `debug_assert` checks it. The value is that the invariant stops being
+load-bearing — a future scoping change cannot silently make consumers wrong,
+because there will be no name-keyed consumer left to be wrong.
+
+**Watch.** A bare field read resolves to `OUTER_DECL`. Treat that as "not a local
+binding", not as a collision with a parameter of the same name.
+
+### 6e. Retire the remaining local overrides
+
+Six sites still override `later_read_names` with a locally computed set:
+
+| site | override | expectation |
+|---|---|---|
+| `lower.rs:5434`, `:5443` | empty set for a terminating if-branch | **redundant** — liveness kills at `return`/`throw` |
+| `lower.rs:8788`, `:8813` | finally-block reads | **redundant** — the `Stmt::Try` arm already folds finally into live-out |
+| `lower.rs:10509` | lambda expression-body carried reads | **needed** — `for_loop_body` only handles *block* bodies |
+
+**Change.** Verify-then-delete the first two pairs, exactly as 6b was done —
+assert both answers, diff over a corpus run, delete when the divergence list is
+empty. For the third, extend `LivenessAnalysis::for_loop_body` to accept an
+expression body, so the lambda path uses the analysis like every other loop
+instead of hand-rolling its carried set.
+
+**Do not skip the diff.** The `catch_future_use_names` episode is the precedent:
+the first subsumption hypothesis was wrong, and only the diff caught it.
+
+### 6f. Delete the name-based fallback scans
+
+Six `unwrap_or_else(|| statement_suffix_*)` sites remain, plus the two
+`finally_read_names` computations. Instrumentation already showed the fallback
+firing 0 times across fixtures and 40/41 repros; the one hit (interface default
+methods) was fixed by giving that path an analysis.
+
+**Change.** Once 6e removes the finally overrides, make the fallback
+*unrepresentable* rather than merely unused: have every path that lowers a block
+carry an analysis, then change the accessor to return the set directly instead of
+an `Option`. `statement_suffix_read_names` and `statement_suffix_mutated_names`
+are then dead and get deleted.
+
+**Verify.** `grep -c statement_suffix src/lower.rs` is 0, and `LowerCtx` holds
+one analysis handle plus `current_stmt` plus
+`preinitialized_try_capture_names` — which stays, and should be *renamed* to
+stop reading as a seventh approximation of the move relation. It is an
+initialization-time question, not a liveness one.
+
+## Sequencing
+
+1. **17c** first. R4's correctness currently rests on a heuristic; replacing it
+   with a lookup is the highest-risk-reduction step and it is self-contained.
+2. **17a**, then **17b** — 17b's record-what-you-projected design depends on
+   17a's extracted function existing.
+3. **6e** — shrinks the surface before the conversion, same order that worked in
+   round 1.
+4. **6d** — the substantive change; smaller once 6e is done.
+5. **6f** — mechanical once nothing else reads the name sets.
+
+## Done-when, in one line each
+
+- 0017: a `Comparable` bound on a class, a method, and a constructor all compile;
+  a class named `IO` does not erase; `type_variable_name` is deleted.
+- 0006: `grep -c statement_suffix` is 0; no `HashSet<String>` remains on
+  `LowerCtx`; `live_out_for`'s name projection has no callers left in lowering.
+
+
+---
+
+# Round 3 results (2026-08-02)
+
+Fixtures held at **21 passed / 20 failed** after every step; build clean at
+0 errors / 0 warnings. Nothing committed.
+
+## 0017 — closed
+
+| item | result |
+|---|---|
+| **17c** type-variable lookup | The name-shape heuristic is **deleted**. `RepresentationPlan` now records every declared type-parameter name (class, method and constructor) and `is_declared_type_parameter` answers by lookup, with a declared type of the same name winning. Verified in both directions the heuristic got wrong: a class named `IO` stays concrete, and a parameter named `ELEM` stops erasing. |
+| **17a** one projection | `rust_bounds_for_java_type_param` is the single owner of the trait-like → class-like → JDK cascade, called from the class, method and constructor paths. The duplication is what let them drift. |
+| **17b** gate on the projection | `program_projects_java_comparable_bound` asks the projection whether any bound produced `Ord`, instead of re-scanning the IR for `Comparable`. It therefore covers method and constructor bounds automatically and cannot disagree with what was emitted. |
+
+Found while doing 17a: the method path had no `Clone` inference, so
+`static <U extends Comparable<U>> U max(U a, U b)` projected `U: Ord` and then
+failed on the clone that recovery inserts. Added the method/constructor analogue
+of the class rule — *arrives as a parameter and is read more than once* — so it
+now emits `max<U: Ord + Clone>` and compiles.
+
+Verified: `Comparable` bounds on a class, a method and a constructor all compile.
+
+## 0006 — closed on all three counts
+
+| item | result |
+|---|---|
+| **6e** local overrides | The if-branch terminal override and both finally overrides are **deleted**. |
+| **6f** fallback scans | `statement_suffix_read_names` / `_mutated_names` are **deleted**; `grep -c statement_suffix` is **0**. The fallback for a synthesized statement is now `conservative_live_in_block`, a projection of the analysis rather than a separate textual scan. |
+| **6d** consumers | `has_later_read`, `current_callable_binding_has_later_read`, the array-reuse check and the local-mutability decision all resolve the name to a **binding** at the current statement and compare bindings. `binding_is_live_after` / `binding_is_mutated_after` / `use_counts_in` are the only query surface. |
+
+**The finally override was not redundant, and fixing that improved the
+analysis.** Deleting it regressed a probe: `finally` runs however the body exits,
+including through a `return` that kills everything after it, so folding its reads
+in at the Try entry was not enough. The catch live floor now covers `finally`
+too. That is the second time verify-then-delete caught a wrong subsumption
+hypothesis — the first was `catch_future_use_names`.
+
+**What remains on `LowerCtx`, and why.** `later_read_names` and
+`later_mutated_names` survive as *deliberate overrides*, consulted only when the
+analysis has no entry for the statement — which happens for exactly one
+construct: a lambda whose body is a bare expression lowers into a loop with no
+`Stmt` node of its own, so there is nothing to key on. That is structural, not
+residue. `try_capture_preinitialized_names` is renamed from
+`preinitialized_try_capture_names` and documented as an initialization-time
+relation, so it stops reading as another approximation of liveness.
+
+
+## Round 3 — review fixes (2026-08-02)
+
+Three findings from review, all correct. Fixed:
+
+**1. Build was not clean.** I verified with `cargo build --release`, which does
+not compile the test targets. `cargo check --tests` failed: the policy functions
+had gained a required parameter. Fixed by keeping the original 4-argument public
+API (scope defaults to empty) and adding `..._in_scope` variants for the real
+path, plus the mechanical `type_params` field on the `SignatureShapeRequest`
+literals in tests. **`cargo check --tests` is now the gate, not `cargo build`.**
+
+**2. Type-parameter identity was global, not scoped.** Recording every parameter
+name in the program replaced a name-shape guess with cross-scope contamination —
+a parameter named `ELEM` in one class could silence a class named `ELEM` in
+another. The global set is deleted. `TypeParamScope` now carries the parameters
+actually in scope (enclosing type's plus the callable's), built where both are
+known (`collect_type_signatures`, the constructor site, inherited methods) and
+threaded through `SignatureShapeRequest`.
+
+Verified with all three in one file: a real class `ELEM`, a class type parameter
+`ELEM`, and a method type parameter `ELEM` — 0 errors, each keeping its own
+meaning.
+
+**3. The override union was broken — and it was a real move bug.** `binding_has_later_read`
+returned the analysis answer whenever `current_stmt` existed, never unioning the
+inherited override. For a lambda with a *bare expression* body, `current_stmt`
+still points at the **enclosing** statement, so the carried reads were silently
+discarded. Reproduced: `xs.forEach(x -> take(v))` lowered to a loop with **no
+clone** and three `E0382`s. Both the read and mutate queries now union instead of
+taking precedence — the conservative direction. Probe goes to 0.
+
+Also: `loop_liveness_keeps_owned_value_live_across_back_edge` asserted the
+*presence* of `statement_suffix_read_names` in `lower.rs` source, which 6f's
+done-when required deleting. Its behavioural assertions were left untouched; the
+structural one now asserts the fallback is the analysis projection
+(`conservative_live_in_block`) and that the textual scan is gone.
+
+**Status: `cargo check --tests` 0 errors, build 0 warnings, fixtures 21/20 and
+`slot_shape_design` 497/81 — both identical to HEAD.**
+
+## Round 3 — takeover fixes (2026-08-02)
+
+Follow-up review found two remaining gaps in the Round 3 patch and fixed them:
+
+- `TypeParamScope` is now threaded through field, local, return, and inherited
+  source-method signature slots, not only method/constructor parameters.
+  Regression coverage pins a same-name collision among a real class `ELEM`, a
+  class type parameter `ELEM`, and a method type parameter `ELEM`.
+- The expression-lambda carried-read fix is pinned by
+  `for_each_expression_lambda_keeps_outer_value_live_across_back_edge`, which
+  verifies `xs.forEach(x -> take(value))` still clones the outer owned value.
+
+`0017` is moved to `claude_audits/done`. `0006` stays active as architectural
+cleanup: the audited soundness regressions and textual suffix fallback are fixed,
+but two documented `HashSet<String>` overrides remain load-bearing for
+expression-lambda bodies that have no inner statement identity.

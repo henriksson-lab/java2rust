@@ -307,6 +307,9 @@ pub struct SignatureShapeRequest {
     pub java_ty: JavaType,
     pub role: SignatureSlotRole,
     pub constraints: Vec<SignatureConstraint>,
+    /// Type parameters in scope where this slot appears. Empty means none are,
+    /// which is the conservative reading: the slot is treated as a class.
+    pub type_params: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -5886,7 +5889,13 @@ fn collect_type_signatures(
                     .unwrap_or_else(field_shape_constraints);
                 plan.fields.insert(
                     field_key,
-                    constrained_field_shape(&field.ty, representations, &field_constraints, facts),
+                    constrained_field_shape(
+                        &field.ty,
+                        representations,
+                        &field_constraints,
+                        facts,
+                        &ty.type_params,
+                    ),
                 );
             }
             crate::java_ir::Member::Method(method) => {
@@ -5895,6 +5904,9 @@ fn collect_type_signatures(
                     rust_name: method_rust_name(method),
                 };
                 let method_constraints = constraints.methods.get(&method_key);
+                // In scope here: the enclosing type's parameters plus this
+                // method's own, the method's shadowing on a name clash.
+                let type_param_scope = type_params_in_scope(&ty.type_params, &method.type_params);
                 let signature = MethodSignaturePlan {
                     params: method
                         .params
@@ -5905,14 +5917,27 @@ fn collect_type_signatures(
                                 .and_then(|constraints| constraints.params.get(index))
                                 .cloned()
                                 .unwrap_or_default();
-                            constrained_param_plan(param, representations, &constraints, facts)
+                            constrained_param_plan(
+                                param,
+                                representations,
+                                &constraints,
+                                facts,
+                                &type_param_scope,
+                            )
                         })
                         .collect(),
                     return_shape: {
                         let constraints = method_constraints
                             .map(|constraints| constraints.return_constraints.clone())
                             .unwrap_or_default();
-                        constrained_return_shape(ty, method, representations, &constraints, facts)
+                        constrained_return_shape(
+                            ty,
+                            method,
+                            representations,
+                            &constraints,
+                            facts,
+                            &type_param_scope,
+                        )
                     },
                     locals: method
                         .body
@@ -5925,6 +5950,7 @@ fn collect_type_signatures(
                                     .map(|constraints| constraints.locals.as_slice())
                                     .unwrap_or(&[]),
                                 facts,
+                                &type_param_scope,
                             )
                         })
                         .unwrap_or_default(),
@@ -5946,6 +5972,7 @@ fn collect_type_signatures(
                     rust_name: constructor_rust_name(ctor),
                 };
                 let constructor_constraints = constraints.constructors.get(&constructor_key);
+                let type_param_scope = type_params_in_scope(&ty.type_params, &ctor.type_params);
                 plan.constructors.insert(
                     constructor_key,
                     ConstructorSignaturePlan {
@@ -5958,7 +5985,13 @@ fn collect_type_signatures(
                                     .and_then(|constraints| constraints.params.get(index))
                                     .cloned()
                                     .unwrap_or_default();
-                                constrained_param_plan(param, representations, &constraints, facts)
+                                constrained_param_plan(
+                                    param,
+                                    representations,
+                                    &constraints,
+                                    facts,
+                                    &type_param_scope,
+                                )
                             })
                             .collect(),
                         locals: ctor
@@ -5972,6 +6005,7 @@ fn collect_type_signatures(
                                         .map(|constraints| constraints.locals.as_slice())
                                         .unwrap_or(&[]),
                                     facts,
+                                    &type_param_scope,
                                 )
                             })
                             .unwrap_or_default(),
@@ -6032,6 +6066,9 @@ fn collect_type_signatures(
                 representations,
                 &field_constraints,
                 facts,
+                declaring_ty
+                    .map(|declaring_ty| declaring_ty.type_params.as_slice())
+                    .unwrap_or(&[]),
             ),
         );
     }
@@ -6061,6 +6098,7 @@ fn collect_type_signatures(
                 representations,
                 &external_constraints,
                 facts,
+                &[],
             ),
         );
     }
@@ -6102,6 +6140,10 @@ fn inherited_source_method_signature(
         type_name: inherited.declaring_type.to_string(),
         rust_name: method_rust_name(inherited.method),
     });
+    let type_param_scope = type_params_in_scope(
+        &inherited.declaring_ty.type_params,
+        &inherited.method.type_params,
+    );
     MethodSignaturePlan {
         params: inherited
             .method
@@ -6113,7 +6155,13 @@ fn inherited_source_method_signature(
                     .and_then(|constraints| constraints.params.get(index))
                     .cloned()
                     .unwrap_or_default();
-                constrained_param_plan(param, representations, &constraints, facts)
+                constrained_param_plan(
+                    param,
+                    representations,
+                    &constraints,
+                    facts,
+                    &type_param_scope,
+                )
             })
             .collect(),
         return_shape: {
@@ -6126,6 +6174,7 @@ fn inherited_source_method_signature(
                 representations,
                 &constraints,
                 facts,
+                &type_param_scope,
             )
         },
         locals: inherited
@@ -6140,6 +6189,7 @@ fn inherited_source_method_signature(
                         .map(|constraints| constraints.locals.as_slice())
                         .unwrap_or(&[]),
                     facts,
+                    &type_param_scope,
                 )
             })
             .unwrap_or_default(),
@@ -6170,6 +6220,7 @@ fn external_inherited_method_signature(
                             java_ty,
                             role: SignatureSlotRole::Param { is_varargs: false },
                             constraints: Vec::new(),
+                            type_params: Vec::new(),
                         },
                         facts,
                     )
@@ -6185,6 +6236,7 @@ fn external_inherited_method_signature(
                     java_ty,
                     role: SignatureSlotRole::Return,
                     constraints: Vec::new(),
+                    type_params: Vec::new(),
                 },
                 facts,
             )
@@ -6923,43 +6975,24 @@ pub fn signature_slot_dispatch_requirement_policy(
     source_dispatch: DispatchShape,
     facts: &FactSet,
 ) -> SignatureSlotDispatchRequirementPolicy {
+    signature_slot_dispatch_requirement_policy_in_scope(java_ty, role, source_dispatch, facts, &[])
+}
+
+pub fn signature_slot_dispatch_requirement_policy_in_scope(
+    java_ty: &JavaType,
+    role: SignatureSlotRole,
+    source_dispatch: DispatchShape,
+    facts: &FactSet,
+    type_param_scope: TypeParamScope<'_>,
+) -> SignatureSlotDispatchRequirementPolicy {
     let effective_facts = EffectiveFacts::new(facts);
-    signature_slot_dispatch_requirement_policy_with_effective_facts(
+    signature_slot_dispatch_requirement_policy_with_effective_facts_in_scope(
         java_ty,
         role,
         source_dispatch,
         &effective_facts,
+        type_param_scope,
     )
-}
-
-/// Whether this type names a *type variable* rather than a class.
-///
-/// A type variable is never an unknown runtime object: its capability is
-/// exactly its declared bound, and the slot must stay the parameter. Erasing it
-/// to `Box<dyn Any>` made a bounded parameter unusable in argument position
-/// while an unbounded one stayed `T`.
-fn java_type_is_type_variable(java_ty: &JavaType) -> bool {
-    let JavaType::Named { name, args } = java_ty else {
-        return match java_ty {
-            JavaType::Unknown(name) => type_variable_name(name),
-            _ => false,
-        };
-    };
-    args.is_empty() && type_variable_name(name)
-}
-
-/// Java type variables are conventionally one or two characters with no
-/// lowercase letters (`T`, `U`, `K`, `V`, `R2`).
-fn type_variable_name(name: &str) -> bool {
-    let simple = name.rsplit('.').next().unwrap_or(name);
-    !simple.is_empty()
-        && simple.len() <= 2
-        && simple.chars().all(|ch| ch.is_ascii_alphanumeric())
-        && simple
-            .chars()
-            .next()
-            .is_some_and(|ch| ch.is_ascii_uppercase())
-        && !simple.chars().any(|ch| ch.is_ascii_lowercase())
 }
 
 pub fn signature_slot_dispatch_requirement_policy_with_effective_facts(
@@ -6967,6 +7000,54 @@ pub fn signature_slot_dispatch_requirement_policy_with_effective_facts(
     role: SignatureSlotRole,
     source_dispatch: DispatchShape,
     facts: &EffectiveFacts<'_>,
+) -> SignatureSlotDispatchRequirementPolicy {
+    signature_slot_dispatch_requirement_policy_with_effective_facts_in_scope(
+        java_ty,
+        role,
+        source_dispatch,
+        facts,
+        &[],
+    )
+}
+
+/// The type parameters in scope at the slot being solved: the enclosing type's
+/// plus the current callable's, with the callable's shadowing.
+///
+/// Scope matters. A global list of every parameter name in the program would let
+/// a parameter named `ELEM` in one class silence a class named `ELEM` used in
+/// another, and vice versa — which is the same cross-scope conflation that
+/// binding identity exists to prevent.
+pub type TypeParamScope<'a> = &'a [String];
+
+/// The parameters visible at a slot: the enclosing type's plus the callable's.
+/// A callable parameter shadows a type parameter of the same name, but since
+/// membership is all that is asked, the union answers both.
+fn type_params_in_scope(type_params: &[String], callable_params: &[String]) -> Vec<String> {
+    let mut scope = type_params.to_vec();
+    scope.extend(callable_params.iter().cloned());
+    scope
+}
+
+/// Whether this type names a type parameter that is in scope here.
+///
+/// A type parameter is never an unknown runtime object: its capability is
+/// exactly its declared bound, so the slot must stay the parameter.
+fn java_type_is_type_param_in_scope(java_ty: &JavaType, scope: TypeParamScope<'_>) -> bool {
+    let name = match java_ty {
+        JavaType::Named { name, args } if args.is_empty() => name,
+        JavaType::Unknown(name) => name,
+        _ => return false,
+    };
+    let simple = name.rsplit('.').next().unwrap_or(name);
+    scope.iter().any(|param| param == simple)
+}
+
+pub fn signature_slot_dispatch_requirement_policy_with_effective_facts_in_scope(
+    java_ty: &JavaType,
+    role: SignatureSlotRole,
+    source_dispatch: DispatchShape,
+    facts: &EffectiveFacts<'_>,
+    type_param_scope: TypeParamScope<'_>,
 ) -> SignatureSlotDispatchRequirementPolicy {
     if crate::stdlib::java_collection_kind_for_type(java_ty).is_some() {
         return SignatureSlotDispatchRequirementPolicy {
@@ -6981,7 +7062,7 @@ pub fn signature_slot_dispatch_requirement_policy_with_effective_facts(
         .map(|type_name| facts.dispatch_requirements_for(type_name))
         .unwrap_or_default();
     if signature_declared_type_has_parsed_source_capability(java_ty, facts)
-        || java_type_is_type_variable(java_ty)
+        || java_type_is_type_param_in_scope(java_ty, type_param_scope)
     {
         requirements.retain(|requirement| {
             *requirement != DispatchRequirementKind::NeedsUnknownRuntimeObject
@@ -7323,6 +7404,7 @@ fn constrained_param_plan(
     representations: &RepresentationPlan,
     constraints: &[SignatureConstraint],
     facts: &FactSet,
+    type_param_scope: TypeParamScope<'_>,
 ) -> ParamPlan {
     let mut constraints = constraints.to_vec();
     normalize_param_borrowed_slice_constraints(param, &mut constraints);
@@ -7334,6 +7416,7 @@ fn constrained_param_plan(
                 is_varargs: param.is_varargs,
             },
             constraints: constraints.clone(),
+            type_params: type_param_scope.to_vec(),
         },
         facts,
     )
@@ -7360,11 +7443,12 @@ pub fn solve_signature_shape_with_facts(
     facts: &FactSet,
 ) -> Option<RustSlotShape> {
     let source_dispatch = representations.dispatch_for(&request.java_ty);
-    let dispatch_policy = signature_slot_dispatch_requirement_policy(
+    let dispatch_policy = signature_slot_dispatch_requirement_policy_in_scope(
         &request.java_ty,
         request.role,
         source_dispatch,
         facts,
+        &request.type_params,
     );
     solve_signature_shape_with_extra_constraints(
         representations,
@@ -8132,6 +8216,7 @@ fn constrained_field_shape(
     representations: &RepresentationPlan,
     constraints: &[SignatureConstraint],
     facts: &FactSet,
+    type_param_scope: TypeParamScope<'_>,
 ) -> RustSlotShape {
     let mut shape = solve_signature_shape_with_facts(
         representations,
@@ -8139,6 +8224,7 @@ fn constrained_field_shape(
             java_ty: java_ty.clone(),
             role: SignatureSlotRole::Storage,
             constraints: constraints.to_vec(),
+            type_params: type_param_scope.to_vec(),
         },
         facts,
     )
@@ -9806,6 +9892,7 @@ fn collect_local_plans_from_constraints(
     representations: &RepresentationPlan,
     constraints: &[LocalConstraintSet],
     facts: &FactSet,
+    type_param_scope: TypeParamScope<'_>,
 ) -> Vec<LocalPlan> {
     let mut locals = Vec::new();
     collect_local_plans_from_stmts(
@@ -9813,6 +9900,7 @@ fn collect_local_plans_from_constraints(
         representations,
         constraints,
         facts,
+        type_param_scope,
         &mut locals,
     );
     locals
@@ -9823,6 +9911,7 @@ fn collect_local_plans_from_stmts(
     representations: &RepresentationPlan,
     constraints: &[LocalConstraintSet],
     facts: &FactSet,
+    type_param_scope: TypeParamScope<'_>,
     locals: &mut Vec<LocalPlan>,
 ) {
     use crate::java_ir::Stmt;
@@ -9840,15 +9929,24 @@ fn collect_local_plans_from_stmts(
                     representations,
                     local_constraints_for_declared_type(constraints, name, ty),
                     facts,
+                    type_param_scope,
                 ));
             }
             Stmt::For { init, body, .. } => {
-                collect_local_plans_from_stmts(init, representations, constraints, facts, locals);
+                collect_local_plans_from_stmts(
+                    init,
+                    representations,
+                    constraints,
+                    facts,
+                    type_param_scope,
+                    locals,
+                );
                 collect_local_plans_from_stmts(
                     &body.statements,
                     representations,
                     constraints,
                     facts,
+                    type_param_scope,
                     locals,
                 );
             }
@@ -9865,12 +9963,14 @@ fn collect_local_plans_from_stmts(
                     representations,
                     local_constraints_for_declared_type(constraints, var_name, var_type),
                     facts,
+                    type_param_scope,
                 ));
                 collect_local_plans_from_stmts(
                     &body.statements,
                     representations,
                     constraints,
                     facts,
+                    type_param_scope,
                     locals,
                 );
             }
@@ -9884,6 +9984,7 @@ fn collect_local_plans_from_stmts(
                     representations,
                     constraints,
                     facts,
+                    type_param_scope,
                     locals,
                 );
                 if let Some(else_block) = else_block {
@@ -9892,6 +9993,7 @@ fn collect_local_plans_from_stmts(
                         representations,
                         constraints,
                         facts,
+                        type_param_scope,
                         locals,
                     );
                 }
@@ -9905,6 +10007,7 @@ fn collect_local_plans_from_stmts(
                     representations,
                     constraints,
                     facts,
+                    type_param_scope,
                     locals,
                 );
             }
@@ -9915,6 +10018,7 @@ fn collect_local_plans_from_stmts(
                         representations,
                         constraints,
                         facts,
+                        type_param_scope,
                         locals,
                     );
                 }
@@ -9927,6 +10031,7 @@ fn collect_local_plans_from_stmts(
                     representations,
                     constraints,
                     facts,
+                    type_param_scope,
                     locals,
                 );
                 collect_local_plans_from_stmts(
@@ -9934,6 +10039,7 @@ fn collect_local_plans_from_stmts(
                     representations,
                     constraints,
                     facts,
+                    type_param_scope,
                     locals,
                 );
             }
@@ -11255,6 +11361,7 @@ fn local_plan(
     representations: &RepresentationPlan,
     constraints: &[SignatureConstraint],
     facts: &FactSet,
+    type_param_scope: TypeParamScope<'_>,
 ) -> LocalPlan {
     let shape = if declared_typed_initializer_should_anchor_local_type(java_ty, initializer, facts)
     {
@@ -11273,6 +11380,7 @@ fn local_plan(
                 java_ty: java_ty.clone(),
                 role: SignatureSlotRole::Storage,
                 constraints: constraints.to_vec(),
+                type_params: type_param_scope.to_vec(),
             },
             facts,
         )
@@ -13560,6 +13668,7 @@ fn constrained_return_shape(
     representations: &RepresentationPlan,
     constraints: &[SignatureConstraint],
     facts: &FactSet,
+    type_param_scope: TypeParamScope<'_>,
 ) -> Option<RustSlotShape> {
     let return_type = method_return_type_for_signature(method).unwrap_or(&method.return_type);
     if java_type_is_string_like_signature_type(return_type)
@@ -13617,6 +13726,7 @@ fn constrained_return_shape(
             java_ty: return_type.clone(),
             role: SignatureSlotRole::Return,
             constraints: constraints.to_vec(),
+            type_params: type_param_scope.to_vec(),
         },
         facts,
     )?;
