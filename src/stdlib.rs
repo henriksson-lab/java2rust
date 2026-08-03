@@ -4628,6 +4628,66 @@ impl<T> JavaClass<T> {
 /// A Java bound of `Comparable<T>` projects to `T: Ord`; this gives every such
 /// parameter the `compare_to` the source calls, without needing a modelled
 /// `Comparable` interface.
+/// Java renders a `double`/`float` with a decimal point even when integral:
+/// `String.valueOf(3.0)` is `"3.0"`, while Rust's `Display` gives `"3"`. String
+/// concatenation is the common path, so the difference shows up as a silent
+/// output mismatch rather than a compile error.
+pub fn java_floating_point_display_support_item() -> crate::rust_ir::RustItem {
+    crate::rust_ir::RustItem::Raw(
+        r#"pub fn java_double_to_string(value: f64) -> String {
+    if value.is_nan() {
+        return "NaN".to_string();
+    }
+    if value.is_infinite() {
+        return if value > 0.0 { "Infinity" } else { "-Infinity" }.to_string();
+    }
+    if value == value.trunc() && value.abs() < 1e7 {
+        return format!("{value:.1}");
+    }
+    value.to_string()
+}
+
+pub fn java_float_to_string(value: f32) -> String {
+    if value.is_nan() {
+        return "NaN".to_string();
+    }
+    if value.is_infinite() {
+        return if value > 0.0 { "Infinity" } else { "-Infinity" }.to_string();
+    }
+    if value == value.trunc() && value.abs() < 1e7 {
+        return format!("{value:.1}");
+    }
+    value.to_string()
+}"#
+        .to_string(),
+    )
+}
+
+/// Whether the program mentions a `float` or `double` anywhere.
+pub fn program_uses_floating_point(program: &crate::java_ir::Program) -> bool {
+    use crate::java_ir::{JavaType, Member, PrimitiveType, TypeDecl};
+    fn is_fp(ty: &JavaType) -> bool {
+        match ty {
+            JavaType::Primitive(PrimitiveType::Float | PrimitiveType::Double) => true,
+            JavaType::Array(inner) => is_fp(inner),
+            JavaType::Named { args, .. } => args.iter().any(is_fp),
+            _ => false,
+        }
+    }
+    fn walk(ty: &TypeDecl) -> bool {
+        ty.members.iter().any(|member| match member {
+            Member::Field(field) => is_fp(&field.ty),
+            Member::Method(method) => {
+                is_fp(&method.return_type) || method.params.iter().any(|param| is_fp(&param.ty))
+            }
+            Member::Constructor(ctor) => ctor.params.iter().any(|param| is_fp(&param.ty)),
+            Member::Type(nested) => walk(nested),
+            Member::Unsupported { .. } => false,
+        })
+    }
+    program.types.iter().any(walk)
+}
+
 pub fn java_comparable_support_item() -> crate::rust_ir::RustItem {
     crate::rust_ir::RustItem::Raw(
         r#"pub trait JavaComparable {
@@ -4723,11 +4783,11 @@ impl JavaAppendValue for usize {
 }
 
 impl JavaAppendValue for f32 {
-    fn into_java_append_string(self) -> String { self.to_string() }
+    fn into_java_append_string(self) -> String { java_float_to_string(self) }
 }
 
 impl JavaAppendValue for f64 {
-    fn into_java_append_string(self) -> String { self.to_string() }
+    fn into_java_append_string(self) -> String { java_double_to_string(self) }
 }
 
 impl JavaAppendValue for String {

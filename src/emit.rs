@@ -203,6 +203,10 @@ fn emit_expr_prec(
     child_side: ExprChildSide,
 ) -> String {
     let rendered = match expr {
+        // A shape tag is a note for other passes, never output.
+        RustExpr::Shaped { expr, .. } => {
+            return emit_expr_prec(expr, parent_prec, parent_op, child_side);
+        }
         RustExpr::Literal(value) => value.clone(),
         RustExpr::Var(name) => rust_ident(name),
         RustExpr::Field(receiver, field) => {
@@ -231,10 +235,14 @@ fn emit_expr_prec(
             )
         }
         RustExpr::Cast { expr, ty } => {
-            format!(
-                "{} as {ty}",
-                emit_expr_prec(expr, 11, None, ExprChildSide::None)
-            )
+            let rendered = emit_expr_prec(expr, 11, None, ExprChildSide::None);
+            // A Rust integer literal takes its type from the cast target, so
+            // `(byte) 200` rendered as `200 as i8` is rejected as out of range
+            // and `(-1) as u32` negates an unsigned value. Java always casts a
+            // value that already has a wider type, so pin the literal and let
+            // the cast truncate — which is the Java narrowing.
+            let rendered = pin_integer_literal_before_cast(rendered, ty);
+            format!("{rendered} as {ty}")
         }
         RustExpr::If {
             condition,
@@ -462,6 +470,7 @@ fn is_unit_expr(expr: &RustExpr) -> bool {
 
 fn expr_precedence(expr: &RustExpr) -> u8 {
     match expr {
+        RustExpr::Shaped { expr, .. } => expr_precedence(expr),
         RustExpr::Binary { op, .. } => binary_precedence(op),
         RustExpr::Cast { .. } => 6,
         RustExpr::Unary { .. } => 10,
@@ -740,4 +749,46 @@ pub fn emit_type(ty: &RustType) -> String {
         }
         RustType::Raw(raw) => raw.clone(),
     }
+}
+
+/// Give a bare integer literal a source type before a narrowing cast — but only
+/// when it needs one.
+///
+/// `200 as i8` is rejected outright: rustc infers the literal's type *from the
+/// cast*, and 200 does not fit `i8`. `200i64 as i8` truncates instead, which is
+/// what Java does. The same inference is why `-1 as u32` computed the wrong
+/// value — the literal became unsigned and was then negated.
+///
+/// `1 as i8` needs no help. The test is therefore "does this literal fit the
+/// target", not "is the target narrow": pinning every literal would compile
+/// just as correctly but make the output noisier for no reason.
+fn pin_integer_literal_before_cast(rendered: String, target: &str) -> String {
+    let Some(bounds) = integer_target_bounds(target) else {
+        return rendered;
+    };
+    let Ok(value) = rendered.parse::<i128>() else {
+        return rendered;
+    };
+    if bounds.contains(&value) {
+        return rendered;
+    }
+    format!("{rendered}i64")
+}
+
+/// The value range of a Rust integer type, for deciding whether a literal can
+/// be left unsuffixed. `usize`/`isize` are taken as 64-bit; on a narrower target
+/// the answer is only ever more conservative, which costs a suffix rather than
+/// correctness.
+fn integer_target_bounds(target: &str) -> Option<std::ops::RangeInclusive<i128>> {
+    Some(match target {
+        "i8" => i128::from(i8::MIN)..=i128::from(i8::MAX),
+        "i16" => i128::from(i16::MIN)..=i128::from(i16::MAX),
+        "i32" => i128::from(i32::MIN)..=i128::from(i32::MAX),
+        "u8" => 0..=i128::from(u8::MAX),
+        "u16" => 0..=i128::from(u16::MAX),
+        "u32" => 0..=i128::from(u32::MAX),
+        "usize" => 0..=i128::from(u64::MAX),
+        "isize" => i128::from(i64::MIN)..=i128::from(i64::MAX),
+        _ => return None,
+    })
 }

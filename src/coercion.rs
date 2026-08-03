@@ -13,7 +13,7 @@ use crate::conversion_plan::{
 use crate::emit;
 use crate::facts::FactSet;
 use crate::java_ir::{JavaType, Literal, PrimitiveType};
-use crate::rust_ir::{RustExpr, RustStmt};
+use crate::rust_ir::{RustExpr, RustExprShape, RustStmt};
 use crate::slot_shape::ViewShape;
 use crate::slot_shape::{DispatchShape, OwnershipShape, RustSlotShape};
 
@@ -37,6 +37,8 @@ pub enum BorrowProjectionUse {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JavaDisplayPlan {
     ConcatValue,
+    /// `double`/`float` concatenation, which Java renders with a decimal point.
+    ConcatFloatValue { double: bool },
     FormatValue,
     ErasedObject,
     OptionalString,
@@ -150,6 +152,8 @@ impl UnsupportedCoercionMessagePolicy {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Coercion {
+    /// Java prints a concatenated `double`/`float` with a decimal point.
+    ToJavaFloatStringForConcat { double: bool },
     Identity,
     WidenPrimitive {
         from: PrimitiveType,
@@ -254,6 +258,9 @@ impl SyntaxSlotCoercionPolicy {
             SyntaxSlotCoercionPolicy::Identity => vec![Coercion::Identity],
             SyntaxSlotCoercionPolicy::IndexToUsize => vec![Coercion::IndexToUsize],
             SyntaxSlotCoercionPolicy::ToStringForConcat => vec![Coercion::ToStringForConcat],
+            SyntaxSlotCoercionPolicy::ToJavaFloatStringForConcat { double } => {
+                vec![Coercion::ToJavaFloatStringForConcat { double: *double }]
+            }
             SyntaxSlotCoercionPolicy::ErasedObjectToJavaDisplayString => {
                 vec![Coercion::ErasedObjectToJavaDisplayString]
             }
@@ -864,7 +871,7 @@ fn normalize_optional_constructed_element_expr(expr: RustExpr) -> RustExpr {
         .strip_prefix('&')
         .and_then(|value| value.strip_suffix(".as_str()"))
     {
-        return RustExpr::Raw(format!("{inner}.as_str()"));
+        return string_view_expr(RustExpr::Raw(format!("{inner}.as_str()")));
     }
     expr
 }
@@ -1029,10 +1036,24 @@ pub fn force_shared_borrow_projection(expr: RustExpr) -> RustExpr {
 }
 
 pub fn propagate_result_projection(expr: RustExpr) -> RustExpr {
-    if matches!(&expr, RustExpr::Raw(raw) if raw.trim_end().ends_with('?')) {
+    if expr_is_result_propagated(&expr) {
         return expr;
     }
-    RustExpr::Raw(format!("{}?", emit::emit_expr(&expr)))
+    RustExpr::shaped(
+        RustExprShape::ResultPropagated,
+        RustExpr::Raw(format!("{}?", emit::emit_expr(&expr))),
+    )
+}
+
+/// Whether `?` has already been applied to this expression.
+///
+/// The textual fallback asks whether the rendered expression ends in `?`, which
+/// cannot tell a try operator from a question mark inside a string literal —
+/// that confusion has already shipped once, as a `?` spliced into a literal. A
+/// recorded shape removes the guess for every producer that carries one.
+pub fn expr_is_result_propagated(expr: &RustExpr) -> bool {
+    expr.recorded_shape() == Some(RustExprShape::ResultPropagated)
+        || matches!(expr.unshaped(), RustExpr::Raw(raw) if raw.trim_end().ends_with('?'))
 }
 
 pub fn self_associated_path_projection(member: &str) -> RustExpr {
@@ -1287,6 +1308,7 @@ pub fn optional_or_else_owned_value_projection(receiver: RustExpr, fallback: Rus
 
 pub fn rust_expr_mentions_constructor_self_temporary(expr: &RustExpr) -> bool {
     match expr {
+        RustExpr::Shaped { expr, .. } => rust_expr_mentions_constructor_self_temporary(expr),
         RustExpr::Var(name) => name == "__java_self",
         RustExpr::Raw(rendered) => rendered.contains("__java_self"),
         RustExpr::Field(receiver, _) => rust_expr_mentions_constructor_self_temporary(receiver),
@@ -1477,7 +1499,7 @@ pub fn normalize_map_key_borrow_projection(
         && shape.view == ViewShape::Native
         && rust_expr_is_local_name(&expr, name)
     {
-        return RustExpr::Raw(format!("{name}.as_str()"));
+        return string_view_expr(RustExpr::Raw(format!("{name}.as_str()")));
     }
     let actual_for_projection = if actual.is_some_and(|shape| {
         matches!(
@@ -1759,13 +1781,14 @@ pub fn optional_string_view_projection(expr: RustExpr) -> RustExpr {
 }
 
 pub fn string_helper_receiver_projection(receiver: RustExpr) -> RustExpr {
+    if expr_is_string_view(&receiver) {
+        return receiver;
+    }
     let rendered = emit::emit_expr(&receiver);
-    if rendered_expr_is_already_string_view(&rendered) {
-        receiver
-    } else if rendered.ends_with(".as_ref().unwrap()") {
-        RustExpr::Raw(format!("{rendered}.as_str()"))
+    if rendered.ends_with(".as_ref().unwrap()") {
+        string_view_expr(RustExpr::Raw(format!("{rendered}.as_str()")))
     } else {
-        RustExpr::Raw(format!("&{rendered}"))
+        string_view_expr(RustExpr::Raw(format!("&{rendered}")))
     }
 }
 
@@ -2005,6 +2028,7 @@ pub fn primitive_number_value_projection(receiver: RustExpr, target: PrimitiveTy
     };
     RustExpr::Raw(format!("{} as {rust_ty}", emit::emit_expr(&receiver)))
 }
+
 
 pub fn facade_receiver_method_call_projection(
     receiver: RustExpr,
@@ -3111,6 +3135,9 @@ pub fn if_err_panic_uncaught_java_exception_stmt(expr: RustExpr) -> RustStmt {
 
 fn recover_nested_result_try_operator(expr: RustExpr, recovery: &str) -> Option<RustExpr> {
     match expr {
+        // Rewriting the inside cannot preserve what the tag asserted, so the
+        // rewritten expression comes back untagged rather than mislabelled.
+        RustExpr::Shaped { expr, .. } => recover_nested_result_try_operator(*expr, recovery),
         RustExpr::Raw(raw) => raw.trim_end().strip_suffix('?').map(|without_try| {
             first_rust_try_operator_index(without_try)
                 .map(|index| {
@@ -3295,13 +3322,13 @@ pub fn normalize_reused_clone_for_borrowed_argument(
         target_shape.ownership,
     ) {
         (JavaType::String, ViewShape::Str, OwnershipShape::SharedBorrow) => {
-            Some(RustExpr::Raw(format!("{name}.as_str()")))
+            Some(string_view_expr(RustExpr::Raw(format!("{name}.as_str()"))))
         }
         (JavaType::Array(_), ViewShape::Slice, OwnershipShape::MutableBorrow) => {
             Some(RustExpr::Raw(format!("{name}.as_mut_slice()")))
         }
         (JavaType::Array(_), ViewShape::Slice, OwnershipShape::SharedBorrow) => {
-            Some(RustExpr::Raw(format!("{name}.as_slice()")))
+            Some(slice_view_expr(RustExpr::Raw(format!("{name}.as_slice()"))))
         }
         (_, _, OwnershipShape::SharedBorrow) => Some(RustExpr::Raw(format!("&{name}"))),
         _ => None,
@@ -3659,10 +3686,31 @@ pub fn apply_borrowed_string_view_projection(
     }
 }
 
+/// The concat plan for a value of this Java type.
+pub fn java_concat_display_plan(java_ty: &crate::java_ir::JavaType) -> JavaDisplayPlan {
+    match java_ty {
+        crate::java_ir::JavaType::Primitive(crate::java_ir::PrimitiveType::Double) => {
+            JavaDisplayPlan::ConcatFloatValue { double: true }
+        }
+        crate::java_ir::JavaType::Primitive(crate::java_ir::PrimitiveType::Float) => {
+            JavaDisplayPlan::ConcatFloatValue { double: false }
+        }
+        _ => JavaDisplayPlan::ConcatValue,
+    }
+}
+
 pub fn apply_java_display_plan(expr: RustExpr, plan: JavaDisplayPlan) -> RustExpr {
     match plan {
         JavaDisplayPlan::ConcatValue => {
             RustExpr::Raw(format!("({}).to_string()", emit::emit_expr(&expr)))
+        }
+        JavaDisplayPlan::ConcatFloatValue { double } => {
+            let helper = if double {
+                "java_double_to_string"
+            } else {
+                "java_float_to_string"
+            };
+            RustExpr::Raw(format!("{helper}({})", emit::emit_expr(&expr)))
         }
         JavaDisplayPlan::FormatValue => RustExpr::Raw(format!(
             "{}.to_string()",
@@ -3710,8 +3758,17 @@ pub fn rendered_expr_has_direct_clone_recovery(rendered: &str) -> bool {
         || rendered.ends_with(".clone()/* TODO(translation): validate added clone */")
 }
 
+/// Whether an owned value has already been recovered from a borrow here.
+///
+/// The textual fallback below is an eight-way alternation, one arm of which
+/// matches an emitted **comment** — changing the wording of
+/// `/* TODO(translation): validate added clone */` changes behaviour. Every
+/// recovery that carries `OwnedRecovery` is answered before that alternation is
+/// consulted; when all of them do, the comment stops being syntax and the arm
+/// can go.
 pub fn rust_expr_has_clone_recovery(expr: &RustExpr) -> bool {
-    rendered_expr_has_clone_recovery(&emit::emit_expr(expr))
+    expr.recorded_shape() == Some(RustExprShape::OwnedRecovery)
+        || rendered_expr_has_clone_recovery(&emit::emit_expr(expr))
 }
 
 pub fn snapshot_rendered_shared_borrow_argument(lowered: RustExpr, name: &str) -> RustExpr {
@@ -3896,8 +3953,8 @@ fn borrow_projection_already_satisfied(
                 || (actual.is_some_and(|shape| shape.ownership == OwnershipShape::SharedBorrow)
                     && rendered_expr_is_simple_local_path(&rendered))
         }
-        BorrowProjectionUse::StringView => rendered_expr_is_already_string_view(&rendered),
-        BorrowProjectionUse::SliceView => rendered.ends_with(".as_slice()"),
+        BorrowProjectionUse::StringView => expr_is_string_view(expr),
+        BorrowProjectionUse::SliceView => expr_is_slice_view(expr),
         BorrowProjectionUse::MutableSliceView => {
             rendered.ends_with(".as_mut_slice()")
                 || target.is_some_and(|target| {
@@ -3977,12 +4034,44 @@ fn rendered_expr_is_simple_local_path(rendered: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '#'))
 }
 
+/// Whether an expression is already a `&str`.
+///
+/// Asks the shape recorded when the expression was built, and only falls back
+/// to matching the rendered text when nothing was recorded. Every producer that
+/// gains a tag is one shape this question no longer has to guess at; until they
+/// all have one, the textual answer is still needed and is still correct for
+/// what it can see.
+pub fn expr_is_string_view(expr: &RustExpr) -> bool {
+    expr.recorded_shape() == Some(RustExprShape::StringView)
+        || rendered_expr_is_already_string_view(&emit::emit_expr(expr))
+}
+
+/// The text-only form of [`expr_is_string_view`], for consumers that never had
+/// the expression — only its rendering.
 pub fn rendered_expr_is_already_string_view(rendered: &str) -> bool {
     let trimmed = rendered.trim();
     trimmed.ends_with(".as_str()")
         || (trimmed.starts_with('"') && trimmed.ends_with('"'))
         || trimmed.starts_with("r#\"")
         || trimmed.starts_with("r\"")
+}
+
+/// A `&str` produced by an adapter, tagged so the next consumer does not have
+/// to recognise the spelling.
+pub fn string_view_expr(expr: RustExpr) -> RustExpr {
+    RustExpr::shaped(RustExprShape::StringView, expr)
+}
+
+/// Whether an expression is already a slice view. See [`expr_is_string_view`]
+/// for why the fallback is still here.
+pub fn expr_is_slice_view(expr: &RustExpr) -> bool {
+    expr.recorded_shape() == Some(RustExprShape::SliceView)
+        || emit::emit_expr(expr).ends_with(".as_slice()")
+}
+
+/// A slice view produced by an adapter.
+pub fn slice_view_expr(expr: RustExpr) -> RustExpr {
+    RustExpr::shaped(RustExprShape::SliceView, expr)
 }
 
 fn simple_deref_projection_source(rendered: &str) -> Option<&str> {
@@ -4416,7 +4505,7 @@ fn apply_required_borrowed_element_target_view(
             if matches!(policy.target.java_ty, crate::java_ir::JavaType::Array(_)) =>
         {
             (!rendered.ends_with(".as_slice()"))
-                .then(|| RustExpr::Raw(format!("{rendered}.as_slice()")))
+                .then(|| slice_view_expr(RustExpr::Raw(format!("{rendered}.as_slice()"))))
         }
         (OwnershipShape::MutableBorrow, ViewShape::Slice)
             if matches!(policy.target.java_ty, crate::java_ir::JavaType::Array(_)) =>
@@ -4433,7 +4522,7 @@ fn apply_required_borrowed_element_target_view(
                 return Some(RustExpr::Raw(borrowed_erased_view));
             }
             (!rendered.ends_with(".as_str()"))
-                .then(|| RustExpr::Raw(format!("{rendered}.as_str()")))
+                .then(|| string_view_expr(RustExpr::Raw(format!("{rendered}.as_str()"))))
         }
         _ => None,
     }
@@ -4619,6 +4708,9 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
             parenthesize_compound_cast_operand(&emit::emit_expr(&expr))
         )),
         Coercion::ToStringForConcat => apply_java_display_plan(expr, JavaDisplayPlan::ConcatValue),
+        Coercion::ToJavaFloatStringForConcat { double } => {
+            apply_java_display_plan(expr, JavaDisplayPlan::ConcatFloatValue { double: *double })
+        }
         Coercion::ErasedObjectToJavaDisplayString => {
             apply_java_display_plan(expr, JavaDisplayPlan::ErasedObject)
         }
@@ -4634,11 +4726,11 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
         Coercion::AsStr => {
             let rendered = emit::emit_expr(&expr);
             if let Some(borrowed_item) = simple_deref_projection_source(&rendered) {
-                RustExpr::Raw(format!("{borrowed_item}.as_str()"))
+                string_view_expr(RustExpr::Raw(format!("{borrowed_item}.as_str()")))
             } else if let Some(borrowed_item) = rendered.trim().strip_prefix('*') {
-                RustExpr::Raw(format!("{borrowed_item}.as_str()"))
+                string_view_expr(RustExpr::Raw(format!("{borrowed_item}.as_str()")))
             } else {
-                RustExpr::Raw(format!("{rendered}.as_str()"))
+                string_view_expr(RustExpr::Raw(format!("{rendered}.as_str()")))
             }
         }
         Coercion::ToOwnedString => {
@@ -4654,7 +4746,7 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
             if rendered.contains("::") && !rendered.contains('(') {
                 RustExpr::Raw(rendered)
             } else {
-                RustExpr::Raw(format!("{rendered}.as_slice()"))
+                slice_view_expr(RustExpr::Raw(format!("{rendered}.as_slice()")))
             }
         }
         Coercion::AsMutSlice => RustExpr::Raw(format!("{}.as_mut_slice()", emit::emit_expr(&expr))),
@@ -4766,12 +4858,10 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
             ensure_borrow_projection(expr, None, None, BorrowProjectionUse::MutableSliceView)
         }
         Coercion::CopyBorrowedValue => {
-            let rendered = emit::emit_expr(&expr);
-            if rendered_expr_is_already_string_view(&rendered) {
-                RustExpr::Raw(rendered)
-            } else {
-                RustExpr::Raw(format!("*{rendered}"))
+            if expr_is_string_view(&expr) {
+                return expr;
             }
+            RustExpr::Raw(format!("*{}", emit::emit_expr(&expr)))
         }
         Coercion::CloneErasedObject { sequence } => {
             let helper = if *sequence {
@@ -5012,11 +5102,14 @@ pub fn to_owned_sequence_projection(expr: RustExpr, policy: &CloneRecoveryPolicy
 }
 
 fn apply_clone_recovery(expr: RustExpr, policy: &CloneRecoveryPolicy) -> RustExpr {
-    let rendered = emit::emit_expr(&expr);
-    if rendered_expr_has_clone_recovery(&rendered) {
+    if rust_expr_has_clone_recovery(&expr) {
         return expr;
     }
-    RustExpr::Raw(render_clone_recovery_expr(&rendered, policy))
+    let rendered = emit::emit_expr(&expr);
+    RustExpr::shaped(
+        RustExprShape::OwnedRecovery,
+        RustExpr::Raw(render_clone_recovery_expr(&rendered, policy)),
+    )
 }
 
 fn render_clone_recovery_expr(rendered: &str, policy: &CloneRecoveryPolicy) -> String {
@@ -5042,6 +5135,7 @@ fn render_clone_recovery_expr(rendered: &str, policy: &CloneRecoveryPolicy) -> S
 
 fn rust_receiver_expr_needs_parentheses(expr: &RustExpr, rendered: &str) -> bool {
     match expr {
+        RustExpr::Shaped { expr, .. } => rust_receiver_expr_needs_parentheses(expr, rendered),
         RustExpr::Field(_, _)
         | RustExpr::Call { .. }
         | RustExpr::MethodCall { .. }
@@ -6112,5 +6206,62 @@ mod tests {
             render_audited_clone_recovery("value.into()"),
             "value.clone()/* TODO(translation): validate added clone */.into()"
         );
+    }
+    /// The point of the tag: an adapter that does not spell its result
+    /// `.as_str()` is still recognised as a string view, where the textual
+    /// answer cannot see it. This is the case that makes new adapters safe to
+    /// add without teaching every consumer their spelling.
+    #[test]
+    fn a_recorded_string_view_is_recognised_without_matching_the_text() {
+        let opaque = RustExpr::Raw("java_string_view_helper(value)".to_string());
+        assert!(
+            !rendered_expr_is_already_string_view(&emit::emit_expr(&opaque)),
+            "the text check cannot recognise this spelling, which is the premise"
+        );
+        assert!(expr_is_string_view(&string_view_expr(opaque)));
+    }
+
+    /// The fallback still answers for the untagged majority, so tagging can
+    /// proceed one producer at a time instead of all at once.
+    #[test]
+    fn an_untagged_string_view_still_falls_back_to_the_text() {
+        assert!(expr_is_string_view(&RustExpr::Raw("name.as_str()".to_string())));
+        assert!(!expr_is_string_view(&RustExpr::Raw("name".to_string())));
+    }
+
+    /// A tag is a positive answer about *its own* shape only; it must not be
+    /// read as a denial of every other shape when it disagrees.
+    #[test]
+    fn a_slice_view_tag_does_not_answer_the_string_view_question() {
+        let tagged = slice_view_expr(RustExpr::Raw("values.as_slice()".to_string()));
+        assert!(expr_is_slice_view(&tagged));
+        assert!(!expr_is_string_view(&tagged));
+    }
+    /// `?` must be applied at most once. The old check only looked inside
+    /// `RustExpr::Raw`, so a propagated expression carried by any other variant
+    /// was propagated again.
+    #[test]
+    fn result_propagation_is_idempotent() {
+        let once = propagate_result_projection(RustExpr::Raw("call()".to_string()));
+        assert_eq!(emit::emit_expr(&once), "call()?");
+        let twice = propagate_result_projection(once.clone());
+        assert_eq!(emit::emit_expr(&twice), "call()?");
+        assert_eq!(once, twice);
+    }
+
+    /// The recorded answer does not depend on which variant carries it, which
+    /// is the difference between asking the expression and matching its text.
+    #[test]
+    fn a_recorded_propagation_is_recognised_on_any_variant() {
+        let propagated = RustExpr::shaped(
+            RustExprShape::ResultPropagated,
+            RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Var("value".to_string())),
+                method: "take".to_string(),
+                args: Vec::new(),
+            },
+        );
+        assert!(expr_is_result_propagated(&propagated));
+        assert!(!expr_is_result_propagated(&RustExpr::Var("value".to_string())));
     }
 }

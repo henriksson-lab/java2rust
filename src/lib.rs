@@ -1,4 +1,5 @@
 pub mod access_lowering;
+pub mod aliasing;
 pub mod array_lowering;
 pub mod array_plan;
 pub mod binding_id;
@@ -940,6 +941,15 @@ fn translate_parsed_source_with_context(
             .diagnostics
             .warning(diagnostic.code, diagnostic.message);
     }
+    // Lowering copies where Java aliased, because there is no shared
+    // representation to lower an alias into. Where that copy is observable the
+    // output compiles and computes a different answer, so it is reported here
+    // rather than left to be discovered downstream.
+    aliasing::report_observable_aliases(
+        &resolved.program,
+        &semantic.usage,
+        &mut lowered.diagnostics,
+    );
     let rust = emit::emit_file(&lowered.file);
     Translation {
         rust,

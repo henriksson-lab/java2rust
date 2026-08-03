@@ -129,6 +129,8 @@ pub fn return_value_plan(shape: Option<&RustSlotShape>) -> ReturnValuePlan {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyntaxSlotCoercionPolicy {
+    /// See `Coercion::ToJavaFloatStringForConcat`.
+    ToJavaFloatStringForConcat { double: bool },
     Identity,
     IndexToUsize,
     ToStringForConcat,
@@ -2533,6 +2535,18 @@ fn syntax_slot_coercion_policy_from_content(
             if java_type_needs_java_object_display_fallback(actual, content) =>
         {
             SyntaxSlotCoercionPolicy::ErasedObjectToJavaDisplayString
+        }
+        // Java renders a concatenated `double`/`float` with a decimal point;
+        // Rust's `Display` does not, so this needs its own conversion.
+        Slot::StringConcatSegment | Slot::DisplaySegment
+            if matches!(
+                actual,
+                JavaType::Primitive(PrimitiveType::Double | PrimitiveType::Float)
+            ) =>
+        {
+            SyntaxSlotCoercionPolicy::ToJavaFloatStringForConcat {
+                double: matches!(actual, JavaType::Primitive(PrimitiveType::Double)),
+            }
         }
         Slot::StringConcatSegment if !content.string_content => {
             SyntaxSlotCoercionPolicy::ToStringForConcat

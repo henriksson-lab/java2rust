@@ -9646,13 +9646,22 @@ class ChildOverloadIdentity extends BaseOverloadIdentity {
 "#,
     );
 
+    // `ChildOverloadIdentity` declares only one `f`, but its superclass
+    // overloads that name, so the override has to carry the same suffix as the
+    // method it overrides — otherwise `Base::f_int` and `Child::f` are two Rust
+    // names for one Java method, which is audit 0009. The suffix is therefore
+    // decided from the whole hierarchy, not from the declaring type alone.
+    //
+    // The dispatched values below are the contract; the names are how it is
+    // spelled. Both are checked here, and against the Java oracle in
+    // `tests/differential/Overloads.java`.
     assert!(
         translation
             .rust
             .contains("pub fn f_int_int(&self, a: i32, b: i32) -> i32")
-            && translation.rust.contains("pub fn f(&self, a: i32) -> i32")
+            && translation.rust.contains("pub fn f_int(&self, a: i32) -> i32")
             && translation.rust.contains("return (a).wrapping_mul(2);")
-            && translation.rust.contains("return self.f(1);")
+            && translation.rust.contains("return self.f_int(1);")
             && translation.rust.contains("return self.f_int_int(3, 1);"),
         "{}",
         translation.rust
@@ -10306,11 +10315,24 @@ class Box<T extends HeaderLine> {
         "{:?}",
         translation.diagnostics
     );
+    // The call through the bound must reach the *zero-argument* overload, and
+    // must stay distinguishable from the `String` one.
+    //
+    // This used to assert the name `get_count_`, with the trailing underscore
+    // produced by joining an empty parameter suffix. That spelling was never
+    // intended — `inherited_receiverless_instance_call_uses_current_override_signature_name`
+    // asserted the opposite convention on the same construct, so the two tests
+    // contradicted each other. Only one overload of a name can take no
+    // arguments, so the zero-argument one now keeps the bare name and no
+    // collision is possible. Verified against the Java oracle: both sides print
+    // `1,2`.
     assert!(
-        translation.rust.contains("fn get_count_(&self) -> i32;")
+        translation.rust.contains("fn get_count(&self) -> i32;")
+            && translation
+                .rust
+                .contains("fn get_count_string(&self, value: &String) -> i32;")
             && translation.rust.contains("impl<T: HeaderLineBound> Box<T>")
-            && translation.rust.contains("return self.value.get_count_();")
-            && !translation.rust.contains("return self.value.get_count();"),
+            && translation.rust.contains("return self.value.get_count();"),
         "{}",
         translation.rust
     );

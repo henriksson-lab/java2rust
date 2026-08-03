@@ -132,8 +132,12 @@ pub fn source_symbols_from_program(source_program: &Program) -> SourceSymbols {
     let mut symbol_program = source_program.clone();
     let mut diagnostics = DiagnosticBag::new();
     qualify_nested_type_names(&mut symbol_program);
+    let mut program_counts = ProgramMethodCounts::new();
+    for ty in &symbol_program.types {
+        collect_program_method_counts(ty, &mut program_counts);
+    }
     for ty in &mut symbol_program.types {
-        assign_type_rust_names(ty, &mut diagnostics);
+        assign_type_rust_names(ty, &mut diagnostics, &program_counts);
     }
     SourceSymbols {
         symbols: ProgramSymbols::from_program(&symbol_program),
@@ -162,8 +166,12 @@ pub fn resolve_program_with_source_symbols_and_facts(
     let mut diagnostics = diagnostics;
     let mut program = program.clone();
     qualify_nested_type_names(&mut program);
+    let mut program_counts = ProgramMethodCounts::new();
+    for ty in &program.types {
+        collect_program_method_counts(ty, &mut program_counts);
+    }
     for ty in &mut program.types {
-        assign_type_rust_names(ty, &mut diagnostics);
+        assign_type_rust_names(ty, &mut diagnostics, &program_counts);
     }
     let symbols = &source_symbols.symbols;
     let mut resolver_facts = FactSet::default();
@@ -589,24 +597,100 @@ fn qualify_nested_java_type(ty: &mut JavaType, direct_nested: &HashMap<String, S
     }
 }
 
-fn assign_type_rust_names(ty: &mut TypeDecl, diagnostics: &mut DiagnosticBag) {
-    let mut method_counts: HashMap<String, usize> = HashMap::new();
-    let mut ctor_count = 0usize;
+/// Method-name counts per type, used to decide whether a name needs an overload
+/// suffix. Counting only a type's *declared* methods gave a subclass that
+/// overrides one of several overloads a different Rust name from the superclass
+/// it overrides — same Java method, two names, which breaks the moment dispatch
+/// is virtual.
+type ProgramMethodCounts = HashMap<String, HashMap<String, usize>>;
+
+fn collect_program_method_counts(ty: &TypeDecl, out: &mut ProgramMethodCounts) {
+    let mut counts: HashMap<String, usize> = HashMap::new();
     for member in &ty.members {
-        match member {
-            Member::Method(method) => {
-                *method_counts.entry(method.name.clone()).or_default() += 1;
-            }
-            Member::Constructor(_) => ctor_count += 1,
-            _ => {}
+        if let Member::Method(method) = member {
+            *counts.entry(method.name.clone()).or_default() += 1;
         }
     }
+    // Index under both names: nested types are stored qualified (`Outer.Inner`)
+    // while an `extends` clause usually names them simply (`Inner`).
+    let simple = ty.name.rsplit('.').next().unwrap_or(&ty.name).to_string();
+    for key in [ty.name.clone(), simple] {
+        let entry = out.entry(key).or_default();
+        for (name, count) in &counts {
+            let slot = entry.entry(name.clone()).or_default();
+            *slot = (*slot).max(*count);
+        }
+    }
+    for member in &ty.members {
+        if let Member::Type(nested) = member {
+            collect_program_method_counts(nested, out);
+        }
+    }
+}
 
+/// Counts for `ty` including everything it inherits, so an override is named the
+/// same way as the method it overrides.
+fn method_counts_including_supertypes(
+    ty: &TypeDecl,
+    program_counts: &ProgramMethodCounts,
+) -> HashMap<String, usize> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for member in &ty.members {
+        if let Member::Method(method) = member {
+            *counts.entry(method.name.clone()).or_default() += 1;
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut pending = ty.extends.clone().into_iter().collect::<Vec<_>>();
+    while let Some(super_name) = pending.pop() {
+        let simple = super_name
+            .rsplit('.')
+            .next()
+            .unwrap_or(&super_name)
+            .to_string();
+        if !seen.insert(simple.clone()) {
+            continue;
+        }
+        for key in [super_name.as_str(), simple.as_str()] {
+            if let Some(super_counts) = program_counts.get(key) {
+                for (name, count) in super_counts {
+                    let entry = counts.entry(name.clone()).or_default();
+                    *entry = (*entry).max(*count);
+                }
+            }
+        }
+    }
+    counts
+}
+
+fn assign_type_rust_names(
+    ty: &mut TypeDecl,
+    diagnostics: &mut DiagnosticBag,
+    program_counts: &ProgramMethodCounts,
+) {
+    let method_counts = method_counts_including_supertypes(ty, program_counts);
+    let mut ctor_count = 0usize;
+    for member in &ty.members {
+        if let Member::Constructor(_) = member {
+            ctor_count += 1;
+        }
+    }
+    assign_type_rust_names_with_counts(ty, diagnostics, program_counts, method_counts, ctor_count)
+}
+
+fn assign_type_rust_names_with_counts(
+    ty: &mut TypeDecl,
+    diagnostics: &mut DiagnosticBag,
+    program_counts: &ProgramMethodCounts,
+    method_counts: HashMap<String, usize>,
+    ctor_count: usize,
+) {
+    let extends = ty.extends.clone();
     for member in &mut ty.members {
         match member {
-            Member::Method(method) => resolve_method(method, &method_counts, ty.extends.as_deref()),
+            Member::Method(method) => resolve_method(method, &method_counts, extends.as_deref()),
             Member::Constructor(ctor) => resolve_constructor(ctor, ctor_count),
-            Member::Type(nested) => assign_type_rust_names(nested, diagnostics),
+            Member::Type(nested) => assign_type_rust_names(nested, diagnostics, program_counts),
             Member::Unsupported { reason, .. } => {
                 diagnostics.unsupported("unsupported_member", reason.clone());
             }
@@ -706,6 +790,15 @@ fn resolve_method(
         return;
     }
     if counts.get(&method.name).copied().unwrap_or(0) <= 1 {
+        method.rust_name = Some(base);
+        return;
+    }
+
+    // The zero-argument overload keeps the bare name. Only one overload of a
+    // name can take no arguments, so this cannot collide, and the alternative
+    // is a trailing underscore (`to_string_encoding_`) from joining an empty
+    // suffix.
+    if method.params.is_empty() {
         method.rust_name = Some(base);
         return;
     }
@@ -3020,7 +3113,13 @@ fn resolve_expr_calls(
                                 );
                             }
                         }
-                        Member::Type(ty) => assign_type_rust_names(ty, diagnostics),
+                        Member::Type(ty) => {
+                            // A local type declared inside a body: only its own
+                            // members are in play, so its counts stand alone.
+                            let mut local_counts = ProgramMethodCounts::new();
+                            collect_program_method_counts(ty, &mut local_counts);
+                            assign_type_rust_names(ty, diagnostics, &local_counts);
+                        }
                         _ => {}
                     }
                 }

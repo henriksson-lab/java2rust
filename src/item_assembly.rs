@@ -21,7 +21,8 @@ use crate::slot_render::{
 };
 use crate::slot_shape::{OwnershipShape, RustSlotShape};
 use crate::types::{
-    optional_element_type, raw_rust_box_dyn_trait, raw_rust_generic_args, raw_rust_option_inner,
+    optional_element_type, raw_rust_box_dyn_trait, raw_rust_box_sized_inner, raw_rust_generic_args,
+    raw_rust_option_inner,
     raw_rust_vec_inner, sequence_element_type, two_dimensional_array_element_type,
 };
 
@@ -497,6 +498,7 @@ fn rust_expr_direct_move_var(expr: &RustExpr) -> Option<String> {
 
 fn rust_expr_reads_var(expr: &RustExpr, var_name: &str) -> bool {
     match expr {
+        RustExpr::Shaped { expr, .. } => rust_expr_reads_var(expr, var_name),
         RustExpr::Var(name) => name == var_name,
         RustExpr::Field(receiver, _) => rust_expr_reads_var(receiver, var_name),
         RustExpr::Index(target, index) => {
@@ -1094,6 +1096,16 @@ fn raw_rust_type_supports_derive_clone(
     if raw_rust_box_dyn_trait(raw).is_some_and(raw_dyn_trait_supports_box_clone_adapter) {
         return true;
     }
+    if let Some(inner) = raw_rust_box_sized_inner(raw) {
+        return raw_type_arg_supports_derive_clone(
+            inner,
+            type_params,
+            signatures,
+            facts,
+            support_program,
+            visiting,
+        );
+    }
     if let Some(args) = raw_rust_generic_args(raw, "std::collections::HashMap")
         .or_else(|| raw_rust_generic_args(raw, "HashMap"))
         && args.len() == 2
@@ -1165,6 +1177,16 @@ fn raw_type_arg_supports_derive_clone(
     }
     if raw_rust_box_dyn_trait(raw).is_some_and(raw_dyn_trait_supports_box_clone_adapter) {
         return true;
+    }
+    if let Some(inner) = raw_rust_box_sized_inner(raw) {
+        return raw_type_arg_supports_derive_clone(
+            inner,
+            type_params,
+            signatures,
+            facts,
+            support_program,
+            visiting,
+        );
     }
     if raw.contains('<') {
         return raw_rust_type_supports_derive_clone(

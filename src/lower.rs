@@ -422,6 +422,10 @@ pub fn lower_program_with_semantic_plans_and_support_context(
     {
         file.items.push(java_erased_object_runtime_support_item());
     }
+    // Always emitted: the `JavaAppendValue` impls reference these, and a program
+    // can concatenate a float without declaring one (a call result, a literal).
+    file.items
+        .push(crate::stdlib::java_floating_point_display_support_item());
     if crate::item_assembly::program_projects_java_comparable_bound(
         program,
         &[ctx.support_local_type_program],
@@ -2043,10 +2047,47 @@ fn lower_find_type_decl<'a>(program: &'a Program, type_name: &str) -> Option<&'a
         .find(|ty| ty.name == type_name || ty.name.rsplit('.').next() == Some(type_name))
 }
 
+/// Names the Rust prelude already binds.
+///
+/// A convenience alias for a Java class called `Box` shadows `std::boxed::Box`
+/// for the whole generated crate — `Option<Box<JavaException>>` in the support
+/// types then resolves to the user's type and fails as an infinitely sized
+/// recursive struct. The qualified name is always available, so skipping the
+/// alias costs nothing.
+fn rust_prelude_type_name(name: &str) -> bool {
+    matches!(
+        name,
+        "Box"
+            | "Option"
+            | "Result"
+            | "Vec"
+            | "String"
+            | "Some"
+            | "None"
+            | "Ok"
+            | "Err"
+            | "Iterator"
+            | "Default"
+            | "Clone"
+            | "Copy"
+            | "Drop"
+            | "Send"
+            | "Sync"
+            | "Sized"
+            | "Ord"
+            | "PartialOrd"
+            | "Eq"
+            | "PartialEq"
+    )
+}
+
 fn nested_type_simple_alias_item(nested: &TypeDecl) -> Option<String> {
     let simple = nested.name.rsplit('.').next().unwrap_or(&nested.name);
     let alias = upper_camel_type_name_from_static_receiver(simple);
-    if alias == "Builder" || crate::stdlib::is_java_platform_facade_type_name(&alias) {
+    if alias == "Builder"
+        || crate::stdlib::is_java_platform_facade_type_name(&alias)
+        || rust_prelude_type_name(&alias)
+    {
         return None;
     }
     let target = crate::slot_render::rust_name_for_java_named_type(&nested.name);
@@ -6920,7 +6961,8 @@ fn hoist_borrowed_string_temporaries_in_expr(
         RustExpr::Field(receiver, _)
         | RustExpr::Index(receiver, _)
         | RustExpr::Unary { expr: receiver, .. }
-        | RustExpr::Cast { expr: receiver, .. } => {
+        | RustExpr::Cast { expr: receiver, .. }
+        | RustExpr::Shaped { expr: receiver, .. } => {
             hoist_borrowed_string_temporaries_in_expr(local_name, receiver, out, counter);
         }
         RustExpr::Binary { left, right, .. } => {
@@ -7269,7 +7311,7 @@ fn local_env_shape_from_initializer(
     let initializer = initializer?;
     let initializer_shape = planned_method_call_return_shape(initializer, env, ctx)?;
     (java_types_have_same_erased_identity(&local_shape.java_ty, &initializer_shape.java_ty)
-        && shape_has_more_generic_information(&initializer_shape, local_shape))
+        && initializer_shape.has_more_generic_detail_than(local_shape))
     .then_some(initializer_shape)
 }
 
@@ -7358,7 +7400,7 @@ fn initializer_shape_has_more_generic_information_for_local(
     local: &RustSlotShape,
 ) -> bool {
     java_types_have_same_erased_identity(&initializer.java_ty, &local.java_ty)
-        && shape_has_more_generic_information(initializer, local)
+        && initializer.has_more_generic_detail_than(local)
 }
 
 fn java_types_have_same_erased_identity(left: &JavaType, right: &JavaType) -> bool {
@@ -7366,10 +7408,6 @@ fn java_types_have_same_erased_identity(left: &JavaType, right: &JavaType) -> bo
         (JavaType::Named { name: left, .. }, JavaType::Named { name: right, .. }) => left == right,
         _ => left == right,
     }
-}
-
-fn shape_has_more_generic_information(candidate: &RustSlotShape, current: &RustSlotShape) -> bool {
-    candidate.has_more_generic_detail_than(current)
 }
 
 fn fallback_local_shape_from_declared_type_and_initializer(
@@ -7466,7 +7504,7 @@ fn refine_assigned_local_shape(target: &Expr, value: &Expr, env: &mut ShapeEnv, 
         return;
     };
     if !java_types_have_same_erased_identity(&current.java_ty, &value_shape.java_ty)
-        || !shape_has_more_generic_information(&value_shape, &current)
+        || !value_shape.has_more_generic_detail_than(&current)
     {
         return;
     }
@@ -7489,7 +7527,7 @@ fn refine_local_shapes_from_branch_assignments(
             continue;
         };
         if !java_types_have_same_erased_identity(&current.java_ty, &shape.java_ty)
-            || !shape_has_more_generic_information(&shape, &current)
+            || !shape.has_more_generic_detail_than(&current)
         {
             continue;
         }
@@ -20793,7 +20831,10 @@ fn lower_expr_for_slot_with_refinements(
     if matches!(slot, Slot::StringConcatSegment | Slot::DisplaySegment)
         && matches!(expr, Expr::Var(name) if refinements.non_null_locals.contains(name))
     {
-        return apply_java_display_plan(lowered_expr, JavaDisplayPlan::ConcatValue);
+        return apply_java_display_plan(
+            lowered_expr,
+            crate::coercion::java_concat_display_plan(&actual.java_ty),
+        );
     }
     if let Some(upcast) =
         lower_source_subtype_to_supertype_slot(&lowered_expr, &actual, &slot, env, ctx)
@@ -23489,6 +23530,12 @@ fn slot_expr_needs_result_propagation(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx
     if let Expr::Binary { op, left, right } = expr {
         if java_integer_div_rem_expr_can_throw(*op, left, right, env, ctx) {
             return true;
+        }
+        // A string concatenation lowers to `format!`, whose segments are lowered
+        // individually and already carry their own `?`. Propagating for the
+        // concatenation as a whole would apply `?` to the resulting `String`.
+        if crate::string_concat::is_string_concat(expr, env.type_env()) {
+            return false;
         }
         return slot_expr_needs_result_propagation(left, env, ctx)
             || slot_expr_needs_result_propagation(right, env, ctx);
@@ -27058,7 +27105,7 @@ fn lowered_type_slot_has_more_generic_information(
         return false;
     };
     java_types_have_same_erased_identity(&actual.java_ty, &inferred.java_ty)
-        && shape_has_more_generic_information(actual, inferred)
+        && actual.has_more_generic_detail_than(inferred)
 }
 
 fn lower_ternary_expr_for_slot(
@@ -27488,7 +27535,7 @@ fn lower_non_null_optional_display_branch(
     if matches!(slot, Slot::StringConcatSegment | Slot::DisplaySegment) {
         return Some(apply_java_display_plan(
             unwrapped,
-            JavaDisplayPlan::ConcatValue,
+            crate::coercion::java_concat_display_plan(&element_shape.java_ty),
         ));
     }
     let plan = plan_slot_conversion(element_shape, slot, ctx.facts);

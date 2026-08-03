@@ -496,13 +496,25 @@ pub fn raw_rust_vec_inner(raw: &str) -> Option<&str> {
 }
 
 pub fn raw_rust_box_dyn_trait(raw: &str) -> Option<&str> {
+    raw_rust_box_arg(raw).and_then(|arg| arg.strip_prefix("dyn ").map(str::trim))
+}
+
+/// The pointee of a `Box<T>` where `T` is a sized type — the complement of
+/// [`raw_rust_box_dyn_trait`]. Recursive Java object graphs (`Node next`) lower
+/// to `Option<Box<Node>>`, and a boxed pointee is transparent to most type
+/// properties (`Clone`, `PartialEq`, …), so callers need to see through it.
+pub fn raw_rust_box_sized_inner(raw: &str) -> Option<&str> {
+    raw_rust_box_arg(raw).filter(|arg| !arg.starts_with("dyn "))
+}
+
+fn raw_rust_box_arg(raw: &str) -> Option<&str> {
     raw_rust_generic_args(raw, "Box")
         .or_else(|| raw_rust_generic_args(raw, "std::boxed::Box"))
         .and_then(|args| {
             if args.len() != 1 {
                 return None;
             }
-            args[0].strip_prefix("dyn ").map(str::trim)
+            args.first().copied().map(str::trim)
         })
 }
 

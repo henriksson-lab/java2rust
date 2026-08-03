@@ -173,8 +173,12 @@ pub fn lower_checked_java_integer_div_rem_expr(
         plan.promoted,
     );
     let right = crate::emit::emit_expr(&apply_coercions(right, &plan.right));
+    let temp_ty = match plan.promoted {
+        PrimitiveType::Long => "i64",
+        _ => "i32",
+    };
     Some(RustExpr::Raw(format!(
-        "{{ let __java_left = {left}; let __java_right = {right}; if __java_right == 0 {{ Err(JavaException::new(\"ArithmeticException\", \"/ by zero\".to_string())) }} else {{ Ok((__java_left).{method}(__java_right)) }} }}"
+        "{{ let __java_left: {temp_ty} = {left}; let __java_right: {temp_ty} = {right}; if __java_right == 0 {{ Err(JavaException::new(\"ArithmeticException\", \"/ by zero\".to_string())) }} else {{ Ok((__java_left).{method}(__java_right)) }} }}"
     )))
 }
 
@@ -208,8 +212,14 @@ fn lower_java_integer_binary_expr(
     Some(RustExpr::Raw(format!("({left}).{method}({right})")))
 }
 
+/// Pin an integer literal receiver to a concrete type.
+///
+/// `(-1).wrapping_shr(..)` does not compile: the literal stays `{integer}` and
+/// the method is ambiguous. A leading `-` has to be accepted, not just digits,
+/// or every negative literal keeps that ambiguity.
 fn integer_wrapping_receiver_text(rendered: String, primitive: PrimitiveType) -> String {
-    if !rendered.chars().all(|ch| ch.is_ascii_digit()) {
+    let digits = rendered.strip_prefix('-').unwrap_or(&rendered);
+    if digits.is_empty() || !digits.chars().all(|ch| ch.is_ascii_digit()) {
         return rendered;
     }
     match primitive {
@@ -228,7 +238,21 @@ pub fn lower_unsigned_right_shift_expr(
         PrimitiveType::Long => ("u64", "i64"),
         _ => ("u32", "i32"),
     };
-    let left = crate::emit::emit_expr(&apply_coercions(left, &plan.left));
+    // Pin the operand's type before the cast. `(-1) as u32` infers the literal
+    // as `u32` and then negates it; `(-1i32) as u32` is the reinterpretation
+    // Java's `>>>` actually means.
+    let left = integer_wrapping_receiver_text(
+        crate::emit::emit_expr(&apply_coercions(left, &plan.left)),
+        plan.promoted,
+    );
+    // `as` binds tighter than unary minus, so `-x as u32` is `-(x as u32)`. Only
+    // a negated operand needs the grouping; adding it unconditionally would just
+    // make every ordinary shift noisier.
+    let left = if left.starts_with('-') {
+        format!("({left})")
+    } else {
+        left
+    };
     let right = crate::emit::emit_expr(&apply_coercions(right, &plan.right));
     RustExpr::Raw(format!(
         "(({left} as {unsigned_ty}).wrapping_shr(({right}) as u32)) as {signed_ty}"

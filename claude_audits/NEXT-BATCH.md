@@ -903,3 +903,155 @@ Follow-up review found two remaining gaps in the Round 3 patch and fixed them:
 cleanup: the audited soundness regressions and textual suffix fallback are fixed,
 but two documented `HashSet<String>` overrides remain load-bearing for
 expression-lambda bodies that have no inner statement identity.
+
+## Round 4 — 0002 detection, 0007 shape tags, 0008 reframed (2026-08-03)
+
+Goal: fix as much as possible of 0002, 0006, 0007, 0008, 0009, 0010, 0018.
+0006/0009/0010 were already closed in earlier rounds; this round moved 0002,
+0007, 0008 and 0018.
+
+### 0002 — 0002a done, detection added, 0002b still open
+
+`#[derive(Clone)]` was missing on any struct with a `Box<ConcreteType>` field,
+because the derive-reachability walk handled only `Box<dyn Trait>` — and a
+recursive Java object graph (`Node next`) always lowers to `Option<Box<Node>>`.
+`raw_rust_box_sized_inner` (`src/types.rs`) fixes it in both raw-type arms of
+`rust_type_supports_struct_derive_clone`.
+
+That made the repro *compile and print `0` where Java prints `5`* — precisely
+the outcome 0002 warned 0002a would produce. So the detection half was not
+optional and is now in `src/aliasing.rs`: it joins the liveness fixpoint with
+`MethodUsageFacts.mutates_self` to decide whether an inserted clone is
+observably wrong, and reports `observable_alias`.
+
+**1 warning across 196 corpus files**, on the one file written to exercise it.
+
+### 0007 — measured, and the tag mechanism landed
+
+61% of all `RustExpr::Raw` construction is in `coercion.rs` alone (357 of 586),
+which is also where 39 of the 52 render-then-reparse round trips are. The
+format strings are dominated by shapes the IR *already has* variants for, and
+the consumers are dominated by one question — idempotence, "have I already
+applied this adapter?".
+
+`RustExpr::Shaped { shape, expr }` + `RustExprShape` record that answer at the
+producer. Three properties keep the migration incremental, each tested: the tag
+is invisible to the emitter, all 7 exhaustive matches see through it, and
+`recorded_shape() == None` means *unknown* so the query falls back to the old
+text check. A tagged producer can therefore only turn a `false` into a `true`.
+
+Four families are migrated: `StringView`, `SliceView`, `ResultPropagated` and
+`OwnedRecovery`. The last two mattered most — the `?` check matched only
+`RustExpr::Raw` (so a propagated expression on any other variant was propagated
+twice), and clone recovery was an eight-way text alternation one arm of which
+matches an emitted **comment**. Every query is monotone
+(`tag == expected || <old text check>`), so a producer can be tagged without
+auditing its consumers first.
+
+Next: `OptionalProjected` / `MutBorrowed`, then tag the remaining clone
+producers and delete the comment-matching arm outright.
+
+### 0008 — steps 1–3 done; the published metric is now misleading
+
+206 → **159** `-> bool` predicates in `lower.rs`; 6 → **2** name-set fields on
+`LowerCtx`; `CallableAnalysis` is the single handle. `src/aliasing.rs` is the
+second relation routed end to end, and the more interesting one: it was
+*composed* from two facts that already existed rather than written from scratch.
+
+`grep -c lattice src/lower.rs` is still **0**, deliberately. Expressing the shape
+order through `crate::lattice` was tried and rejected — the lattice ranks encode
+storage-requirement strength, the shape order encodes generic detail for one
+erased type. They are different orders over the same values, and routing one
+through the other would raise the metric while making the code less precise.
+See the 0008 update for the worked example.
+
+Remaining 0008 work is step 4: the ~15 hardcoded library predicates, and
+`stdlib.rs`'s 195 `-> bool` predicates — more than `lower.rs` has.
+
+### 0018 — the harness found another one
+
+`new T[n]` for a *reference* element type allocates an empty `Vec`, so the first
+index panics. Primitive arrays are fine. Two independent detectors missed it: the
+corpus reaches the fallback in **0 of 196 files**, and `count_invalid_patterns`
+was looking for `"unsupported Java array creation"` while the marker read
+`"Java array creation"` — so the line was emitted and counted as clean. The
+marker text is fixed; the lowering is filed as
+[0034](0034-object-array-allocation-produces-an-empty-vec.md).
+
+New known-gap fixtures: `Aliasing.java` (0002), `ObjectArray.java` (0034).
+
+### Not attempted
+
+**0002b** — the shared representation. `ObjectRepresentation` still has no
+shared case, and the `impl From<Child> for Base` shortcut stays rejected: with
+inherited fields flattened it would compile and dispatch to the wrong bodies,
+trading a compile error for a silent wrong answer.
+
+**0007 steps 3–5** — retiring the round trips by inversion, adding the missing
+structured variants, and the anti-regression lint. The lint should come last, once
+there is a tag for every question it would forbid asking textually.
+
+### Verification — and five regressions the verification had been missing
+
+`cargo check --tests` 0 errors, `cargo build --release` 0 warnings, and all
+sixteen integration suites at their HEAD numbers. One pre-existing `--lib`
+failure (`coercion::tests::jdk_collection_static_projections_own_expression_shapes`)
+confirmed present at HEAD by stash-and-compare.
+
+**The important part of this round is what the verification initially missed.**
+
+`tests/idiom_gaps` — the largest behavioural suite, 684 tests — has 11 tests that
+hang, so it never returns and had been reported as a timeout rather than a
+failure in every previous round. Establishing a real baseline (run to a fixed
+truncation point at HEAD with all changes stashed, then diff failure *names*)
+surfaced **five regressions, three of them from Round 3, which had been reported
+as verified**:
+
+| test | cause | fix |
+|---|---|---|
+| `documents_primitive_array_allocation_gap` | `pin_integer_literal_before_cast` suffixed *every* literal before a narrowing cast, so `1 as i8` became `1i64 as i8` | pin only when the literal does not **fit** the target |
+| `java_arrays_fill_lowers_whole_and_range_mutations` | same | same |
+| `java_unsigned_right_shift_lowers_with_unsigned_carrier_casts` | operand parenthesised unconditionally to fix `-1 as u32` | parenthesise only a **negated** operand |
+| `inherited_receiverless_instance_call_uses_current_override_signature_name` | overload suffix could be empty → `to_string_encoding_` | the **zero-argument** overload keeps the bare name; only one overload can take none, so it cannot collide |
+| `overloaded_override_preserves_child_body_and_inherited_overload` | the 0009 fix deliberately renames `Child::f` → `Child::f_int` to agree with `Base::f_int` | **test updated**, naming assertion only, values left alone and verified against the Java oracle (`2,4`) |
+
+Two tests in that file were found to demand **contradictory** overload-naming
+conventions (`get_count_` vs no trailing underscore), which is why the empty
+suffix survived: neither convention could be satisfied while the other passed.
+
+Final state: `idiom_gaps` 534 ok / 143 failed vs HEAD's 532 / 145 — **zero new
+failures, two fixed**.
+
+The suite itself is filed as
+[0035](0035-idiom-gaps-suite-never-terminates.md). A suite that never terminates
+is indistinguishable, to anything that waits on it, from a suite that passes —
+0018's thesis pointed at the test infrastructure. Its 144 known failures need a
+triage pass of their own, and every test needs a watchdog.
+
+### Round 4 planning output — the 0002b design is on paper
+
+[CONCURRENCY-SCOPE](../CONCURRENCY-SCOPE.md) step 2 has been asking for this:
+*"fix the representation choice on paper before implementing it — cheap now,
+expensive later."* Written as
+[0002b-shared-representation-design.md](0002b-shared-representation-design.md).
+
+The finding that changes the estimate: **every analysis the design needs already
+exists** — `EscapeLatticeValue` (defined, never consumed), `src/aliasing.rs`
+(built this round), `MethodUsageFacts.mutates_self`, and the `CallGraph`. 0002b
+is a wiring change plus a lowering rewrite, not new analysis.
+
+Two other things fell out of writing it:
+
+- **0028 is not "also fixed" by 0002b, it is fixed *because* the representation
+  becomes correct.** Reference identity is unimplementable on values and free on
+  handles (`Rc::ptr_eq`). That is the strongest available argument that the
+  representation is the defect rather than any individual symptom.
+- **`RefCell` converts a Java-legal re-entrant call into a runtime panic.** The
+  design rule that avoids it — *lowering must never hold a borrow across a
+  call* — has to be a guarantee, not a convention.
+
+Recommended next: steps 1 and 2 of that document. Land `StorageStrategy`
+computing `Value` for everything (byte-identical output, proves the wiring),
+then turn on the real decision rule while keeping lowering unchanged and
+*report* the disagreements. That converts "we do not know how big 0002b is" into
+a number, before anything expensive starts.
