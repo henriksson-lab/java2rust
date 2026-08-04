@@ -111,12 +111,7 @@ fn collect_in_type(ty: &TypeDecl, usage: &UsageFacts, found: &mut Vec<Observable
         match member {
             Member::Method(method) => {
                 if let Some(body) = &method.body {
-                    collect_in_body(
-                        body,
-                        &format!("{}.{}", ty.name, method.name),
-                        usage,
-                        found,
-                    );
+                    collect_in_body(body, &format!("{}.{}", ty.name, method.name), usage, found);
                 }
             }
             Member::Constructor(constructor) => {
@@ -255,11 +250,7 @@ fn mutation_sites<'a>(statements: &[&'a Stmt], usage: &UsageFacts) -> Vec<Mutati
     sites
 }
 
-fn collect_expr_mutations(
-    expr: &Expr,
-    usage: &UsageFacts,
-    out: &mut Vec<(String, MutationKind)>,
-) {
+fn collect_expr_mutations(expr: &Expr, usage: &UsageFacts, out: &mut Vec<(String, MutationKind)>) {
     match expr {
         Expr::Binary {
             op: crate::java_ir::BinaryOp::Assign,
@@ -367,9 +358,7 @@ fn collect_nested_statements<'a>(stmt: &'a Stmt, out: &mut Vec<&'a Stmt>) {
         Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::EnhancedFor { body, .. } => {
             collect_statements(body, out)
         }
-        Stmt::For {
-            init, body, ..
-        } => {
+        Stmt::For { init, body, .. } => {
             for stmt in init {
                 out.push(stmt);
                 collect_nested_statements(stmt, out);

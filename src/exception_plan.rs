@@ -120,6 +120,13 @@ impl ProgramFallibilityPlan {
     pub fn solve_iterations(&self) -> usize {
         self.solve_iterations
     }
+
+    /// Marks a callable fallible. Test-only: the solver is the sole writer in
+    /// real use, which is the property 0010 is about.
+    #[cfg(test)]
+    pub fn mark_returns_result_for_test(&mut self, key: CallableKey) {
+        self.callables.entry(key).or_default().returns_result = true;
+    }
 }
 
 impl Default for ProgramExceptionPlan {
@@ -414,29 +421,14 @@ fn switch_label_has_integer_div_rem_expr(label: &crate::java_ir::SwitchLabel) ->
     }
 }
 
-pub fn plan_method_exceptions(
-    ty: &TypeDecl,
-    method: &MethodDecl,
-    facts: &FactSet,
-) -> MethodExceptionPlan {
-    let rust_name = source_method_rust_name(method);
-    MethodExceptionPlan {
-        wrap_returns_in_result: facts.method_has_thrown_exceptions(&ty.name, &rust_name)
-            || facts.method_has_thrown_exceptions(&ty.name, &method.name),
-    }
-}
-
-pub fn plan_program_exceptions(program: &Program, facts: &FactSet) -> ProgramExceptionPlan {
-    let mut methods = BTreeMap::new();
-    for ty in &program.types {
-        collect_method_exception_plans_for_type(ty, facts, None, &mut methods);
-    }
-    ProgramExceptionPlan {
-        support: plan_java_exception_support(program, facts),
-        methods,
-    }
-}
-
+/// The **only** producer of `MethodExceptionPlan`.
+///
+/// `plan_method_exceptions` used to derive `wrap_returns_in_result` a second
+/// time from `facts.method_has_thrown_exceptions`, giving fallibility two
+/// stores that could disagree — the defect
+/// [0010](../claude_audits/0010-fallibility-is-decided-three-times-and-disagrees.md)
+/// is named for. It had no non-test caller left, so it is deleted and the
+/// solved plan is not optional.
 pub fn plan_program_exceptions_with_fallibility(
     program: &Program,
     facts: &FactSet,
@@ -444,7 +436,7 @@ pub fn plan_program_exceptions_with_fallibility(
 ) -> ProgramExceptionPlan {
     let mut methods = BTreeMap::new();
     for ty in &program.types {
-        collect_method_exception_plans_for_type(ty, facts, Some(fallibility), &mut methods);
+        collect_method_exception_plans_for_type(ty, facts, fallibility, &mut methods);
     }
     ProgramExceptionPlan {
         support: plan_java_exception_support(program, facts),
@@ -558,13 +550,7 @@ fn declared_throw_callables(program: &Program, facts: &FactSet) -> Vec<(Callable
             if facts.method_has_thrown_exceptions(&ty.name, &rust_name)
                 || facts.method_has_thrown_exceptions(&ty.name, &method.name)
             {
-                keys.push((
-                    CallableKey::Method {
-                        type_name: ty.name.clone(),
-                        method_name: rust_name,
-                    },
-                    (),
-                ));
+                keys.push((CallableKey::source_method(ty.name.clone(), method), ()));
             }
         }
     }
@@ -690,10 +676,7 @@ fn integer_div_rem_callables(program: &Program) -> Vec<CallableKey> {
                         .as_ref()
                         .is_some_and(block_has_unhandled_integer_div_rem)
                     {
-                        keys.push(CallableKey::Method {
-                            type_name: ty.name.clone(),
-                            method_name: source_method_rust_name(method),
-                        });
+                        keys.push(CallableKey::source_method(ty.name.clone(), method));
                     }
                 }
                 Member::Constructor(constructor) => {
@@ -735,21 +718,25 @@ fn override_groups_for_program(program: &Program) -> Vec<Vec<CallableKey>> {
             if method.modifiers.contains(&Modifier::Static) {
                 continue;
             }
+            // Key on the *Rust* name, as every other `CallableKey::Method` in
+            // the program does. This used to use `method.name` — the Java name
+            // — so a group's keys matched the solved plan's keys only when the
+            // two spellings happened to coincide, which for anything
+            // camelCased or overloaded they do not. The equalization therefore
+            // did nothing for most methods, and `trait_method_exception_plan`
+            // carried a second `|=` pass to compensate. Same defect as
+            // [0009](../claude_audits/0009-overload-identity-collapses-onto-rust-name.md),
+            // one layer down: identity spelled two ways.
+            let rust_name = source_method_rust_name(method);
             for supertype in supertype_names_declaring_method(ty, method, &by_name) {
                 let entry = groups
-                    .entry((supertype.clone(), method.name.clone()))
+                    .entry((supertype.clone(), rust_name.clone()))
                     .or_default();
-                let declaring = CallableKey::Method {
-                    type_name: supertype,
-                    method_name: method.name.clone(),
-                };
+                let declaring = CallableKey::source_method(supertype, method);
                 if !entry.contains(&declaring) {
                     entry.push(declaring);
                 }
-                let implementing = CallableKey::Method {
-                    type_name: ty.name.clone(),
-                    method_name: method.name.clone(),
-                };
+                let implementing = CallableKey::source_method(ty.name.clone(), method);
                 if !entry.contains(&implementing) {
                     entry.push(implementing);
                 }
@@ -1047,22 +1034,17 @@ pub fn plan_block_exception_completion(block: &Block) -> TryBlockCompletion {
 fn collect_method_exception_plans_for_type(
     ty: &TypeDecl,
     facts: &FactSet,
-    fallibility: Option<&ProgramFallibilityPlan>,
+    fallibility: &ProgramFallibilityPlan,
     methods: &mut BTreeMap<(String, String), MethodExceptionPlan>,
 ) {
     for member in &ty.members {
         match member {
             Member::Method(method) => {
-                // With a solved plan available it is the only store: it already
-                // carries the declared throw facts this used to re-derive.
-                let plan = match fallibility {
-                    Some(fallibility) => MethodExceptionPlan {
-                        wrap_returns_in_result: fallibility.returns_result(&CallableKey::Method {
-                            type_name: ty.name.clone(),
-                            method_name: source_method_rust_name(method),
-                        }),
-                    },
-                    None => plan_method_exceptions(ty, method, facts),
+                // One store. The solved plan already carries the declared
+                // `throws` facts that the deleted second producer re-derived.
+                let plan = MethodExceptionPlan {
+                    wrap_returns_in_result: fallibility
+                        .returns_result(&CallableKey::source_method(ty.name.clone(), method)),
                 };
                 methods.insert(method_exception_key(ty, method), plan);
             }

@@ -22,8 +22,8 @@ use crate::slot_render::{
 use crate::slot_shape::{OwnershipShape, RustSlotShape};
 use crate::types::{
     optional_element_type, raw_rust_box_dyn_trait, raw_rust_box_sized_inner, raw_rust_generic_args,
-    raw_rust_option_inner,
-    raw_rust_vec_inner, sequence_element_type, two_dimensional_array_element_type,
+    raw_rust_option_inner, raw_rust_vec_inner, sequence_element_type,
+    two_dimensional_array_element_type,
 };
 
 pub fn struct_item_for_type(ty: &TypeDecl, signatures: &SignaturePlan) -> RustItem {

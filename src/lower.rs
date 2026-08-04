@@ -27,10 +27,9 @@ use crate::call_plan::{
     facade_receiver_slot_plan, known_external_call_lowered_type, native_collection_lowered_type,
     non_self_trivial_accessor_target, optional_borrowed_receiver_slot_plan,
     optional_receiver_slot_plan, plan_call_arguments, plan_call_arguments_with_facts_and_args,
-    plan_call_exception_propagation_with_external_index, plan_call_expr_with_external_index,
-    plan_call_statement, plan_constructor_arguments, plan_native_collection_extend_arg,
-    plan_new_target_for_args_with_facts, resource_close_declares_result_with_external_index,
-    retarget_static_call_to_receiver_if,
+    plan_call_expr_with_external_index, plan_call_statement, plan_constructor_arguments,
+    plan_native_collection_extend_arg, plan_new_target_for_args_with_facts,
+    resource_close_declares_result_with_external_index, retarget_static_call_to_receiver_if,
 };
 use crate::callable_analysis::CallableAnalysis;
 use crate::coercion::{
@@ -253,11 +252,6 @@ struct LowerCtx<'a> {
     /// The statement being lowered, so move decisions can ask the analysis
     /// about it directly instead of being handed pre-projected name sets.
     current_stmt: Option<&'a Stmt>,
-    /// Deliberate local overrides of the solved relation. Set only where there
-    /// is no statement to key on — a lambda whose body is a bare expression
-    /// lowers into a loop with no `Stmt` node of its own.
-    later_read_names: Option<&'a std::collections::HashSet<String>>,
-    later_mutated_names: Option<&'a std::collections::HashSet<String>>,
     /// Locals a `try` scope must pre-initialize before the guarded block.
     ///
     /// An initialization-time question, not part of the move relation — kept
@@ -374,6 +368,14 @@ pub fn lower_program_with_semantic_plans_and_support_context(
         plan_program_exceptions_with_fallibility(support_local_type_program, facts, &fallibility);
     let callable_analysis =
         CallableAnalysis::new(usage, &call_graph, signatures, &exceptions, &fallibility);
+    // Fallibility is decided at three points; this is the check that they agree.
+    // A violation is a solver bug with a name, instead of two anonymous `rustc`
+    // errors per call site.
+    crate::fallibility_invariant::report_fallibility_violations(
+        &call_graph,
+        &fallibility,
+        &mut diagnostics,
+    );
     let ctx = LowerCtx {
         program,
         facts,
@@ -395,9 +397,7 @@ pub fn lower_program_with_semantic_plans_and_support_context(
         source_summary_type_program,
         context_sources_are_emitted,
         current_stmt: None,
-        later_read_names: None,
         liveness: &empty_liveness,
-        later_mutated_names: None,
         try_capture_preinitialized_names: None,
         result_propagation_mode: ResultPropagationMode::UncaughtPanic,
     };
@@ -2031,13 +2031,37 @@ fn lower_implementing_method_candidates<'a>(
     ty: &'a TypeDecl,
     interface_method: &MethodDecl,
 ) -> Vec<&'a MethodDecl> {
-    ty.members
+    let candidates = ty
+        .members
         .iter()
         .filter_map(|member| match member {
             Member::Method(method) if method.name == interface_method.name => Some(method),
             _ => None,
         })
-        .collect()
+        .collect();
+    order_candidates_by_signature_identity(candidates, interface_method)
+}
+
+/// Orders same-named candidates so the one whose **Java signature** matches the
+/// interface method comes first.
+///
+/// Candidates are still collected by name, because the interface and the
+/// implementation can spell a parameter type differently and dropping a
+/// candidate outright would lose a real implementation. But when a type
+/// overrides one overload and inherits another, name order alone can hand the
+/// wrong body to the trait slot — that is
+/// [0009](../claude_audits/0009-overload-identity-collapses-onto-rust-name.md).
+/// Sorting by signature identity makes the correct overload win without
+/// narrowing the candidate set.
+fn order_candidates_by_signature_identity<'a>(
+    mut candidates: Vec<&'a MethodDecl>,
+    interface_method: &MethodDecl,
+) -> Vec<&'a MethodDecl> {
+    let wanted = crate::java_signature::JavaCallableSlotKey::source_method(interface_method);
+    candidates.sort_by_key(|candidate| {
+        crate::java_signature::JavaCallableSlotKey::source_method(candidate) != wanted
+    });
+    candidates
 }
 
 fn lower_find_type_decl<'a>(program: &'a Program, type_name: &str) -> Option<&'a TypeDecl> {
@@ -5102,6 +5126,43 @@ fn lower_block(
     )
 }
 
+/// A liveness analysis that is guaranteed to cover every statement in `block`.
+///
+/// Every path that lowers a block builds an analysis for it, so the inherited
+/// one normally covers the block already and this borrows it unchanged. The
+/// fallback exists because "covers it normally" is not "covers it always": a
+/// synthesized block reaching lowering without an entry would otherwise make
+/// `binding_is_live_after` answer `None`, and the consumers read that as *no
+/// later read* — the direction that omits a clone.
+///
+/// Rebuilding for the block rather than carrying a pre-projected name set keeps
+/// the answer per-statement instead of collapsing it to a block-wide union, so
+/// the safety net is more precise than the name sets it replaces.
+fn liveness_covering_block<'a>(
+    block: &Block,
+    ctx: LowerCtx<'a>,
+    owned: &'a mut Option<crate::liveness::LivenessAnalysis>,
+) -> &'a crate::liveness::LivenessAnalysis {
+    if block
+        .statements
+        .iter()
+        .all(|stmt| ctx.liveness.live_out_for(stmt).is_some())
+    {
+        return ctx.liveness;
+    }
+    let enclosing_live = ctx
+        .current_stmt
+        .and_then(|stmt| ctx.liveness.live_out_for(stmt))
+        .map(|names| names.into_iter().collect::<Vec<_>>())
+        .unwrap_or_default();
+    *owned = Some(crate::liveness::LivenessAnalysis::for_loop_body(
+        block,
+        &[],
+        &enclosing_live,
+    ));
+    owned.as_ref().expect("just assigned")
+}
+
 fn lower_block_with_refinements(
     block: &Block,
     env: &mut ShapeEnv,
@@ -5111,9 +5172,12 @@ fn lower_block_with_refinements(
 ) -> Vec<RustStmt> {
     let try_capture_preinitialized_names =
         try_capture_preinitialized_names_for_block(&block.statements);
+    let mut owned_liveness = None;
+    let block_liveness = liveness_covering_block(block, ctx, &mut owned_liveness);
     let block_ctx = LowerCtx {
         try_capture_preinitialized_names: Some(&try_capture_preinitialized_names),
         result_propagation_mode: result_propagation_mode_for_block(wrap_returns_in_ok),
+        liveness: block_liveness,
         ..ctx
     };
     let mut body = Vec::new();
@@ -5123,34 +5187,13 @@ fn lower_block_with_refinements(
         map_entry_locals: refinements.map_entry_locals.clone(),
     };
     for stmt in &block.statements {
-        // Prefer the solved liveness result. It already accounts for loop back
+        // The solved liveness result is authoritative and covers loop back
         // edges, `break`/`continue`, switch fallthrough and exception edges, so
-        // no per-loop-shape patching is needed. The textual-suffix scan remains
-        // only for statements the analysis has no entry for (synthesized nodes).
-        // Every callable body builds an analysis, so a statement being lowered
-        // always has an entry. A missing one would mean a synthesized statement
-        // reached here; over-approximate with the whole block rather than
-        // answering "nothing is read later", which is the unsound direction.
-        let mut later_read_names = ctx
-            .liveness
-            .live_out_for(stmt)
-            .unwrap_or_else(|| ctx.liveness.conservative_live_in_block(block));
-        if let Some(inherited_later_read_names) = block_ctx.later_read_names {
-            // A block lowered inside a larger construct (a lambda body inlined
-            // into a loop, for instance) still inherits its enclosing context.
-            later_read_names.extend(inherited_later_read_names.iter().cloned());
-        }
-        let mut later_mutated_names = ctx
-            .liveness
-            .mutated_after_for(stmt)
-            .unwrap_or_else(|| ctx.liveness.conservative_mutated_in_block(block));
-        if let Some(inherited_later_mutated_names) = block_ctx.later_mutated_names {
-            later_mutated_names.extend(inherited_later_mutated_names.iter().cloned());
-        }
+        // no per-loop-shape patching is needed. Consumers ask
+        // `block_ctx.liveness` about this statement directly rather than being
+        // handed a pre-projected name set.
         let stmt_ctx = LowerCtx {
             current_stmt: Some(stmt),
-            later_read_names: Some(&later_read_names),
-            later_mutated_names: Some(&later_mutated_names),
             ..block_ctx
         };
         lower_stmt(
@@ -5182,26 +5225,18 @@ fn lower_lambda_block_with_result_carrier(
 ) -> Vec<RustStmt> {
     let try_capture_preinitialized_names =
         try_capture_preinitialized_names_for_block(&block.statements);
+    let mut owned_liveness = None;
+    let block_liveness = liveness_covering_block(block, ctx, &mut owned_liveness);
     let block_ctx = LowerCtx {
         try_capture_preinitialized_names: Some(&try_capture_preinitialized_names),
         result_propagation_mode: result_propagation_mode_for_block(wrap_returns_in_ok),
+        liveness: block_liveness,
         ..ctx
     };
     let mut body = Vec::new();
     for stmt in &block.statements {
-        // Same rule as the other block walkers: the solved analysis wins.
-        let later_read_names = ctx
-            .liveness
-            .live_out_for(stmt)
-            .unwrap_or_else(|| ctx.liveness.conservative_live_in_block(block));
-        let later_mutated_names = ctx
-            .liveness
-            .mutated_after_for(stmt)
-            .unwrap_or_else(|| ctx.liveness.conservative_mutated_in_block(block));
         let stmt_ctx = LowerCtx {
             current_stmt: Some(stmt),
-            later_read_names: Some(&later_read_names),
-            later_mutated_names: Some(&later_mutated_names),
             ..block_ctx
         };
         lower_stmt(
@@ -5283,10 +5318,7 @@ fn lower_stmt(
             let mutated_later = ctx
                 .current_stmt
                 .and_then(|stmt| ctx.liveness.binding_is_mutated_after(stmt, name))
-                .unwrap_or(false)
-                || ctx
-                    .later_mutated_names
-                    .is_some_and(|names| names.contains(name));
+                .unwrap_or(false);
             if mutated_later {
                 local_plan.binding_mutable = true;
             }
@@ -5478,14 +5510,8 @@ fn lower_stmt(
             // A terminating branch used to get an empty read set here. Liveness
             // already kills everything at `return`/`throw`, so the override is
             // the same answer computed twice.
-            let then_ctx = LowerCtx {
-                later_read_names: ctx.later_read_names,
-                ..ctx
-            };
-            let else_ctx = LowerCtx {
-                later_read_names: ctx.later_read_names,
-                ..ctx
-            };
+            let then_ctx = ctx;
+            let else_ctx = ctx;
             if let Some(stmt) = lower_instanceof_pattern_if_stmt(
                 condition,
                 then_block,
@@ -5591,6 +5617,21 @@ fn lower_stmt(
                 ));
             }
             WhileStmtPlan::Plain { condition, body } => {
+                // `while (o instanceof T s)` puts `s` in scope in the body, the
+                // same way the `if` form does. Without this the body lowers
+                // with an unbound name.
+                if let Some(stmt) = lower_instanceof_pattern_while_stmt(
+                    condition,
+                    body,
+                    label.as_deref(),
+                    env,
+                    wrap_returns_in_ok,
+                    ctx,
+                    refinements,
+                ) {
+                    out.push(stmt);
+                    return;
+                }
                 let body_ctx = ctx;
                 let condition = lower_condition_expr_with_result_policy(
                     condition,
@@ -6556,8 +6597,9 @@ fn pattern_binding_refinement_stmt(
                 ))
             });
     RustStmt::Raw(format!(
-        "let {rust_name} = {}.expect(\"invalid Java cast\");",
-        emit::emit_expr(&downcast_source)
+        "let {rust_name} = {}{};",
+        emit::emit_expr(&downcast_source),
+        crate::output_markers::invalid_java_cast_expect()
     ))
 }
 
@@ -6832,6 +6874,158 @@ fn lower_instanceof_pattern_if_stmt(
             format!(" else {{\n{}}}", emit::emit_statements(&else_body, 1))
         }
     )))
+}
+
+/// Lowers an `instanceof` pattern that binds a variable **in value position**.
+///
+/// `lower_instanceof_pattern_if_stmt` covers the shapes where the type test is
+/// an `if` condition. Everywhere else the binding used to be dropped while the
+/// type test survived, so the pattern variable was emitted as an unresolved
+/// name (`E0425`) — and in the ternary case the whole use came out as raw Java.
+/// See `claude_audits/0021-instanceof-pattern-variable-not-bound.md`.
+///
+/// The three shapes here are the ones where JLS 6.3.1 puts the binding in scope
+/// inside a larger *expression*:
+///
+/// | Java | Rust |
+/// |---|---|
+/// | `o instanceof T s && p(s)` | `o.downcast_ref::<T>().is_some_and(\|s\| p(s))` |
+/// | `!(o instanceof T s) \|\| p(s)` | `o.downcast_ref::<T>().is_none_or(\|s\| p(s))` |
+/// | `(o instanceof T s) ? a(s) : b` | `match o.downcast_ref::<T>() { Some(s) => a(s), None => b }` |
+///
+/// Returns `None` when the expression is not one of these, which leaves a bare
+/// `instanceof` with an unused binding to the ordinary path — correct, because
+/// the negated-`if` lowering re-introduces the binding as a following `let`.
+fn lower_instanceof_pattern_value_expr(
+    expr: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    match expr {
+        // `o instanceof T s && p(s)`
+        Expr::Binary {
+            op: BinaryOp::And,
+            left,
+            right,
+        } => {
+            let (binding, downcast) =
+                instanceof_pattern_option_projection(left, env, ctx, refinements)?;
+            let guard = lower_instanceof_pattern_guard(right, &binding, left, env, ctx);
+            Some(RustExpr::Raw(format!(
+                "{}.is_some_and(|{}| {})",
+                emit::emit_expr(&downcast),
+                crate::parser::to_snake_case(&binding),
+                emit::emit_expr(&guard)
+            )))
+        }
+        // `!(o instanceof T s) || p(s)`
+        Expr::Binary {
+            op: BinaryOp::Or,
+            left,
+            right,
+        } => {
+            let Expr::Unary {
+                op: UnaryOp::Not,
+                expr: negated,
+            } = left.as_ref()
+            else {
+                return None;
+            };
+            let (binding, downcast) =
+                instanceof_pattern_option_projection(negated, env, ctx, refinements)?;
+            let guard = lower_instanceof_pattern_guard(right, &binding, negated, env, ctx);
+            Some(RustExpr::Raw(format!(
+                "{}.is_none_or(|{}| {})",
+                emit::emit_expr(&downcast),
+                crate::parser::to_snake_case(&binding),
+                emit::emit_expr(&guard)
+            )))
+        }
+        // `(o instanceof T s) ? a(s) : b`
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            let (binding, downcast) =
+                instanceof_pattern_option_projection(condition, env, ctx, refinements)?;
+            let mut pattern_env = env.clone();
+            pattern_env.insert_local_shape(
+                binding.clone(),
+                instanceof_pattern_binding_shape(instanceof_pattern_target_type(condition)?),
+            );
+            let then_lowered =
+                lower_expr_with_refinements(then_expr, &pattern_env, ctx, refinements);
+            let else_lowered = lower_expr_with_refinements(else_expr, env, ctx, refinements);
+            Some(RustExpr::Raw(format!(
+                "match {} {{ Some({}) => {}, None => {} }}",
+                emit::emit_expr(&downcast),
+                crate::parser::to_snake_case(&binding),
+                emit::emit_expr(&then_lowered),
+                emit::emit_expr(&else_lowered)
+            )))
+        }
+        _ => None,
+    }
+}
+
+/// The `Option`-producing downcast for a pattern `instanceof`, plus the Java
+/// name it binds. `None` for a type test that binds nothing, or whose check has
+/// no `Option` projection.
+fn instanceof_pattern_option_projection(
+    expr: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<(String, RustExpr)> {
+    let Expr::InstanceOf {
+        expr: source,
+        ty,
+        binding: Some(binding),
+    } = expr
+    else {
+        return None;
+    };
+    let plan = plan_instanceof(
+        source,
+        ty,
+        env,
+        ExprShapeContext {
+            signatures: Some(ctx.signatures),
+            representations: Some(ctx.representations),
+            facts: Some(ctx.facts),
+        },
+    );
+    let lowered_source = lower_expr_with_refinements(source, env, ctx, refinements);
+    let downcast = instanceof_pattern_downcast_ref_projection(lowered_source, &plan.check)?;
+    Some((binding.clone(), downcast))
+}
+
+fn instanceof_pattern_target_type(expr: &Expr) -> Option<&JavaType> {
+    match expr {
+        Expr::InstanceOf {
+            ty,
+            binding: Some(_),
+            ..
+        } => Some(ty),
+        _ => None,
+    }
+}
+
+/// Lowers the operand that runs with the pattern binding in scope.
+fn lower_instanceof_pattern_guard(
+    guard: &Expr,
+    binding: &str,
+    pattern: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> RustExpr {
+    let mut pattern_env = env.clone();
+    if let Some(ty) = instanceof_pattern_target_type(pattern) {
+        pattern_env.insert_local_shape(binding.to_string(), instanceof_pattern_binding_shape(ty));
+    }
+    lower_expr_for_slot(guard, &pattern_env, condition_slot(), ctx)
 }
 
 fn instanceof_pattern_binding_shape(ty: &JavaType) -> RustSlotShape {
@@ -10512,36 +10706,39 @@ fn lower_iterable_for_each_stmt(
     // back-edge liveness as any other loop body. It is nested in an expression,
     // so the enclosing body's statement walk never reached it.
     let enclosing_live = ctx
-        .later_read_names
-        .map(|names| names.iter().cloned().collect::<Vec<_>>())
+        .current_stmt
+        .and_then(|stmt| ctx.liveness.live_out_for(stmt))
+        .map(|names| names.into_iter().collect::<Vec<_>>())
         .unwrap_or_default();
-    let lambda_liveness = match body {
-        LambdaBody::Block(block) => Some(crate::liveness::LivenessAnalysis::for_loop_body(
-            block,
-            param_names,
-            &enclosing_live,
-        )),
-        LambdaBody::Expr(_) => None,
-    };
-    let mut lambda_carried;
-    let ctx = match body {
+    // A bare-expression body has no `Stmt` of its own, which is why this used to
+    // fall back to a name set on `LowerCtx`. Synthesizing the statement the
+    // body *is* gives the analysis something to key on, so the expression body
+    // and the block body go through exactly the same relation. The synthesized
+    // block is bound here so it outlives the borrow the context holds.
+    let synthesized_body;
+    let analyzed_block = match body {
+        LambdaBody::Block(block) => block,
         LambdaBody::Expr(expr) => {
-            // A single-expression body still re-executes, so its reads are
-            // carried; there are no inner statements to analyze.
-            lambda_carried = ctx.later_read_names.cloned().unwrap_or_default();
-            crate::lower::collect_expr_read_names_for_liveness(expr, &mut lambda_carried);
-            for param_name in param_names {
-                lambda_carried.remove(param_name);
-            }
-            LowerCtx {
-                later_read_names: Some(&lambda_carried),
-                ..ctx
-            }
+            synthesized_body = Block {
+                statements: vec![Stmt::Expr(expr.as_ref().clone())],
+            };
+            &synthesized_body
         }
-        LambdaBody::Block(_) => LowerCtx {
-            liveness: lambda_liveness.as_ref().unwrap_or(ctx.liveness),
-            ..ctx
+    };
+    let lambda_liveness = crate::liveness::LivenessAnalysis::for_loop_body(
+        analyzed_block,
+        param_names,
+        &enclosing_live,
+    );
+    let ctx = LowerCtx {
+        liveness: &lambda_liveness,
+        // For a block body the inner statement walk sets this per statement; for
+        // the synthesized single-statement body it is the statement itself.
+        current_stmt: match body {
+            LambdaBody::Block(_) => ctx.current_stmt,
+            LambdaBody::Expr(_) => analyzed_block.statements.first(),
         },
+        ..ctx
     };
     let mut loop_env = env.clone();
     let param_shapes = map_for_each_lambda_param_shapes(receiver, param_names.len(), env)
@@ -11032,6 +11229,9 @@ fn lower_expr_with_refinements(
     }
     if let Expr::Switch { selector, cases } = expr {
         return lower_switch_expr(selector, cases, env, None, ctx, refinements);
+    }
+    if let Some(pattern_expr) = lower_instanceof_pattern_value_expr(expr, env, ctx, refinements) {
+        return pattern_expr;
     }
     if let Some(kind) = plan_unsupported_expression(expr) {
         return unsupported_expression_expr(kind);
@@ -11815,6 +12015,10 @@ fn lower_callback_lambda_expr_with_shapes(
             });
         lambda_env.insert_local_shape(param.name.clone(), shape);
     }
+    let param_names = params
+        .iter()
+        .map(|param| param.name.clone())
+        .collect::<Vec<_>>();
     let params = params
         .iter()
         .enumerate()
@@ -11832,8 +12036,24 @@ fn lower_callback_lambda_expr_with_shapes(
             emit::emit_expr(&lower_expr(expr, &lambda_env, ctx))
         )),
         LambdaBody::Block(block) => {
+            // A callback body re-executes per element, so it needs the same
+            // back-edge liveness as a loop body — and it needs to know its own
+            // parameters are rebound each time, or they look live across the
+            // back edge and every use takes a defensive clone.
+            let param_names = param_names.iter().cloned().collect::<Vec<_>>();
+            let enclosing_live = ctx
+                .current_stmt
+                .and_then(|stmt| ctx.liveness.live_out_for(stmt))
+                .map(|names| names.into_iter().collect::<Vec<_>>())
+                .unwrap_or_default();
+            let lambda_liveness = crate::liveness::LivenessAnalysis::for_loop_body(
+                block,
+                &param_names,
+                &enclosing_live,
+            );
             let lambda_ctx = LowerCtx {
                 current_return_shape,
+                liveness: &lambda_liveness,
                 ..ctx
             };
             let statements = lower_lambda_block_with_result_carrier(
@@ -15654,14 +15874,7 @@ fn source_or_jdk_subtype_reaches(actual_name: &str, target_name: &str, program: 
 }
 
 fn is_known_exception_supertype_name(name: &str) -> bool {
-    matches!(
-        erased_java_simple_name(name),
-        "Throwable"
-            | "Exception"
-            | "RuntimeException"
-            | "IllegalArgumentException"
-            | "IllegalStateException"
-    )
+    crate::javalibs::is_known_exception_supertype(erased_java_simple_name(name))
 }
 
 fn current_type_implements_target(target_ty: &JavaType, ctx: LowerCtx) -> bool {
@@ -17553,11 +17766,15 @@ fn plan_call_exception_propagation_with_lower_context(
     {
         return CallExceptionPropagationPlan::PropagateResult;
     }
-    plan_call_exception_propagation_with_external_index(
+    // Deliberately the *external-only* entry point. The source-method probes in
+    // `plan_call_exception_propagation_with_external_index` re-derive
+    // fallibility from the fact set, and everything above has already asked the
+    // solved plan — so reaching them here would let a probe contradict the
+    // solver. See 0010.
+    crate::call_plan::plan_external_call_exception_propagation(
         receiver,
         name,
         args,
-        resolved,
         ctx.facts,
         ctx.external_index,
         env.type_env(),
@@ -18522,8 +18739,9 @@ fn adapt_source_subtype_to_supertype_argument(
 }
 
 fn clone_source_subtype_value_for_owned_supertype(lowered: RustExpr) -> RustExpr {
-    let rendered = emit::emit_expr(&lowered);
-    if rendered_expr_has_clone_recovery(&rendered) {
+    // Tag first, text second: a producer that recorded `OwnedRecovery` answers
+    // before the eight-way string alternation is consulted.
+    if crate::coercion::rust_expr_has_clone_recovery(&lowered) {
         lowered
     } else {
         apply_audited_clone_recovery(lowered)
@@ -18565,8 +18783,7 @@ fn source_argument_needs_clone_before_subtype_conversion(
     let Some(name) = move_recovery_source_name(source) else {
         return false;
     };
-    let rendered = emit::emit_expr(lowered);
-    if rendered_expr_has_clone_recovery(&rendered) {
+    if crate::coercion::rust_expr_has_clone_recovery(lowered) {
         return false;
     }
     let move_use = MoveUseContext::new(ctx);
@@ -18753,7 +18970,7 @@ impl<'a> MoveUseContext<'a> {
     }
 
     fn has_later_read_facts(&self) -> bool {
-        self.ctx.later_read_names.is_some()
+        self.ctx.current_stmt.is_some()
     }
 
     fn binding_use_count(&self, name: &str) -> Option<usize> {
@@ -19206,14 +19423,9 @@ fn binding_has_later_read(name: &str, ctx: LowerCtx) -> bool {
     // into a loop with no `Stmt` of its own — while `current_stmt` still points
     // at the *enclosing* statement. Returning the analysis answer alone there
     // silently discards the carried reads and drops the clone the loop needs.
-    let analysis_says = ctx
-        .current_stmt
+    ctx.current_stmt
         .and_then(|stmt| ctx.liveness.binding_is_live_after(stmt, name))
-        .unwrap_or(false);
-    analysis_says
-        || ctx
-            .later_read_names
-            .is_some_and(|later_reads| later_reads.contains(name))
+        .unwrap_or(false)
 }
 
 fn current_callable_binding_is_returned(name: &str, ctx: LowerCtx) -> bool {
@@ -19753,14 +19965,8 @@ fn current_type_extends_jdk_input_stream_facade(ctx: LowerCtx) -> bool {
         return false;
     };
     decl.extends.as_deref().is_some_and(|extends| {
-        matches!(
-            crate::stdlib::canonical_external_receiver_type_key(extends).as_str(),
-            "InputStream"
-                | "FilterInputStream"
-                | "GZIPInputStream"
-                | "java.io.InputStream"
-                | "java.io.FilterInputStream"
-                | "java.util.zip.GZIPInputStream"
+        crate::javalibs::is_jdk_input_stream_facade_type(
+            &crate::stdlib::canonical_external_receiver_type_key(extends),
         )
     })
 }
@@ -25364,9 +25570,8 @@ fn lower_source_summary_super_boundary_call(
 }
 
 fn source_summary_method_unimplemented_expr(owner: &str, method: &str) -> RustExpr {
-    RustExpr::Raw(format!(
-        "unimplemented!(\"source-summary method {owner}.{method} is not translated\")"
-    ))
+    let message = crate::output_markers::untranslated_source_summary_message(owner, method);
+    RustExpr::Raw(format!("unimplemented!({message:?})"))
 }
 
 fn static_context_owner_is_emitted(owner: &str, ctx: LowerCtx) -> bool {
@@ -27108,6 +27313,75 @@ fn lowered_type_slot_has_more_generic_information(
         && actual.has_more_generic_detail_than(inferred)
 }
 
+/// `while (o instanceof T s) { … }` → `while let Some(s) = o.downcast_ref::<T>() { … }`.
+///
+/// The condition is loop-invariant in both languages, so a body that never
+/// breaks loops forever either way — the shapes correspond exactly.
+fn lower_instanceof_pattern_while_stmt(
+    condition: &Expr,
+    body: &Block,
+    label: Option<&str>,
+    env: &ShapeEnv,
+    wrap_returns_in_ok: bool,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustStmt> {
+    let (binding, downcast) =
+        instanceof_pattern_option_projection(condition, env, ctx, refinements)?;
+    let mut pattern_env = env.clone();
+    pattern_env.insert_local_shape(
+        binding.clone(),
+        instanceof_pattern_binding_shape(instanceof_pattern_target_type(condition)?),
+    );
+    let lowered_body = lower_block(body, &mut pattern_env, wrap_returns_in_ok, ctx);
+    let label = label.map(|label| format!("'{label}: ")).unwrap_or_default();
+    Some(RustStmt::Raw(format!(
+        "{label}while let Some({}) = {} {{\n{}}}",
+        crate::parser::to_snake_case(&binding),
+        emit::emit_expr(&downcast),
+        emit::emit_statements(&lowered_body, 1)
+    )))
+}
+
+/// The slot-aware form of the ternary arm of
+/// [`lower_instanceof_pattern_value_expr`].
+///
+/// `lower_expr_for_slot_with_refinements` has its own ternary path, so the
+/// value-position hook in `lower_expr_with_refinements` never sees a ternary
+/// that reaches a typed slot — which is every `return cond ? a : b`.
+fn lower_instanceof_pattern_ternary_for_slot(
+    condition: &Expr,
+    then_expr: &Expr,
+    else_expr: &Expr,
+    env: &ShapeEnv,
+    slot: Slot,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    let (binding, downcast) =
+        instanceof_pattern_option_projection(condition, env, ctx, refinements)?;
+    let mut pattern_env = env.clone();
+    pattern_env.insert_local_shape(
+        binding.clone(),
+        instanceof_pattern_binding_shape(instanceof_pattern_target_type(condition)?),
+    );
+    let then_lowered = lower_expr_for_slot_with_refinements(
+        then_expr,
+        &pattern_env,
+        slot.clone(),
+        ctx,
+        refinements,
+    );
+    let else_lowered = lower_expr_for_slot_with_refinements(else_expr, env, slot, ctx, refinements);
+    Some(RustExpr::Raw(format!(
+        "match {} {{ Some({}) => {}, None => {} }}",
+        emit::emit_expr(&downcast),
+        crate::parser::to_snake_case(&binding),
+        emit::emit_expr(&then_lowered),
+        emit::emit_expr(&else_lowered)
+    )))
+}
+
 fn lower_ternary_expr_for_slot(
     condition: &Expr,
     then_expr: &Expr,
@@ -27117,6 +27391,20 @@ fn lower_ternary_expr_for_slot(
     ctx: LowerCtx,
     refinements: &ExprRefinements,
 ) -> RustExpr {
+    // Before anything else: a condition that binds a pattern variable puts that
+    // binding in scope in the `then` branch, and no other arm below knows about
+    // it. Without this the branch lowers with an unbound name.
+    if let Some(expr) = lower_instanceof_pattern_ternary_for_slot(
+        condition,
+        then_expr,
+        else_expr,
+        env,
+        slot.clone(),
+        ctx,
+        refinements,
+    ) {
+        return expr;
+    }
     let (then_refinements, else_refinements) = branch_refinements(condition, refinements);
     if let Some(expr) = lower_fallible_ternary_expr_for_slot(
         condition,
@@ -27607,30 +27895,16 @@ fn lower_block_for_body(
     wrap_returns_in_ok: bool,
     ctx: LowerCtx,
 ) -> Vec<RustStmt> {
+    let mut owned_liveness = None;
+    let block_liveness = liveness_covering_block(block, ctx, &mut owned_liveness);
+    let ctx = LowerCtx {
+        liveness: block_liveness,
+        ..ctx
+    };
     let mut out = Vec::new();
     for stmt in &block.statements {
-        // Same rule as the main block walker: the solved liveness result wins,
-        // and the textual-suffix scan is only a fallback for statements the
-        // analysis never saw (switch plans and other synthesized nodes).
-        // See the note in `lower_block_with_refinements`.
-        let mut later_read_names = ctx
-            .liveness
-            .live_out_for(stmt)
-            .unwrap_or_else(|| ctx.liveness.conservative_live_in_block(block));
-        if let Some(inherited_later_read_names) = ctx.later_read_names {
-            later_read_names.extend(inherited_later_read_names.iter().cloned());
-        }
-        let mut later_mutated_names = ctx
-            .liveness
-            .mutated_after_for(stmt)
-            .unwrap_or_else(|| ctx.liveness.conservative_mutated_in_block(block));
-        if let Some(inherited_later_mutated_names) = ctx.later_mutated_names {
-            later_mutated_names.extend(inherited_later_mutated_names.iter().cloned());
-        }
         let stmt_ctx = LowerCtx {
             current_stmt: Some(stmt),
-            later_read_names: Some(&later_read_names),
-            later_mutated_names: Some(&later_mutated_names),
             ..ctx
         };
         lower_stmt_for_body(stmt, update, env, wrap_returns_in_ok, stmt_ctx, &mut out);

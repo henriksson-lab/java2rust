@@ -111,11 +111,11 @@ return sb.toString();          // must be "one2x", must never be ""
 
 A test that asserts on *values* rather than on compilation. Note that no
 compile-error-based gate can catch this issue — see
-[0018](0018-the-compile-error-metric-cannot-see-silent-failures.md).
+[0018](../0018-the-compile-error-metric-cannot-see-silent-failures.md).
 
 ## Status 2026-08-01 — core defect fixed
 
-The reported silent-no-op class is resolved. `StringBuilder`/`StringBuffer` now accumulate for real (`Fallthrough.java` returns `"onetwo"`/`"threeother"` instead of `""`), `Math.sqrt`, `Arrays.sort`, and `Arrays.toString` map to real implementations, and unmodelled facade methods now emit `unimplemented!("X.m is not modelled")` rather than `Default::default()` — so the fallback is loud, as this issue asked. `Math.PI` is `std::f64::consts::PI` ([0031](0031-stubbed-constant-census.md)).
+The reported silent-no-op class is resolved. `StringBuilder`/`StringBuffer` now accumulate for real (`Fallthrough.java` returns `"onetwo"`/`"threeother"` instead of `""`), `Math.sqrt`, `Arrays.sort`, and `Arrays.toString` map to real implementations, and unmodelled facade methods now emit `unimplemented!("X.m is not modelled")` rather than `Default::default()` — so the fallback is loud, as this issue asked. `Math.PI` is `std::f64::consts::PI` ([0031](../0031-stubbed-constant-census.md)).
 
 **Remaining, lower severity:** `Pattern`/`Matcher` are listed as builtin facade types (so nothing synthesises them) but no implementation is emitted, giving `E0433: undeclared type JavaUtilRegexPattern`. That is a *loud* failure, not the silent class this issue is about. Also ~78 `impl From<X> for Y { Default::default() }` upcast conversions remain no-ops; they convert between placeholder structs that carry no data, so they lose nothing that exists today — they become real defects only once those types are modelled.
 

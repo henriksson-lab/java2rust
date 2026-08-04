@@ -401,7 +401,7 @@ a *bounded* type parameter erases to `Box<dyn Any>` in argument position, while
 an unbounded one stays `T`. Isolated cause: calling a method on a `T`-typed
 receiver classifies the call as an unknown boundary, which erases the arguments.
 That is the erasure policy from
-[0011](0011-dyn-any-fallback-fails-at-every-use.md), not bound projection —
+[0011](done/0011-dyn-any-fallback-fails-at-every-use.md), not bound projection —
 track it there.
 
 ## 0006 surface now
@@ -1023,7 +1023,7 @@ Final state: `idiom_gaps` 534 ok / 143 failed vs HEAD's 532 / 145 — **zero new
 failures, two fixed**.
 
 The suite itself is filed as
-[0035](0035-idiom-gaps-suite-never-terminates.md). A suite that never terminates
+[0035](done/0035-idiom-gaps-suite-never-terminates.md). A suite that never terminates
 is indistinguishable, to anything that waits on it, from a suite that passes —
 0018's thesis pointed at the test infrastructure. Its 144 known failures need a
 triage pass of their own, and every test needs a watchdog.

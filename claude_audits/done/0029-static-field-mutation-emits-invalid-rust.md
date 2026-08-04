@@ -59,7 +59,7 @@ Interacts with:
   narrowing cast;
 - [0003](0003-java-integer-arithmetic-semantics-not-preserved.md) — the
   arithmetic should be wrapping;
-- [0030](0030-java-statics-are-thread-local.md) — the storage this writes to is
+- [0030](../0030-java-statics-are-thread-local.md) — the storage this writes to is
   currently thread-local, which is a separate defect now that concurrency is in
   scope.
 
@@ -68,7 +68,7 @@ Interacts with:
 `static` mutable counters are less common than instance state, and this fails
 *loudly*, so it cannot hide behind a clean run — it would already be visible in
 any corpus containing the pattern. Worth checking whether the corpora simply
-lack mutable statics, since that would also mean [0030](0030-java-statics-are-thread-local.md)
+lack mutable statics, since that would also mean [0030](../0030-java-statics-are-thread-local.md)
 is currently untested in practice.
 
 ## Regression tests worth adding

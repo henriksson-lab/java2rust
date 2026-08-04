@@ -1594,7 +1594,8 @@ fn lowered_slot_conversion_plan_records_borrowed_element_adapter_before_renderin
         })
     );
     assert_eq!(
-        apply_slot_conversion_plan(RustExpr::Raw("values.iter().next()".to_string()), &plan),
+        apply_slot_conversion_plan(RustExpr::Raw("values.iter().next()".to_string()), &plan)
+            .into_unshaped(),
         RustExpr::Raw(
             "values.iter().next().cloned()/* TODO(translation): validate added clone */"
                 .to_string()
@@ -4756,6 +4757,10 @@ fn borrowed_element_clone_recovery_audits_conservative_clone_capability() {
                     .to_string(),
         }]
     );
+    // Compared through `into_unshaped`: the producer now records
+    // `RustExprShape::OwnedRecovery` so consumers can ask the tag instead of
+    // matching the emitted comment. The tag is invisible to the emitter, so the
+    // generated Rust asserted here is unchanged.
     assert_eq!(
         apply_lowered_expr_to_slot(
             LoweredExpr {
@@ -4763,7 +4768,8 @@ fn borrowed_element_clone_recovery_audits_conservative_clone_capability() {
                 actual: LoweredType::optional_element_borrow(element_ty.clone()),
             },
             &Slot::Return(RustSlotShape::conservative(optional_java_type(element_ty))),
-        ),
+        )
+        .into_unshaped(),
         RustExpr::Raw(
             "values.iter().next().cloned()/* TODO(translation): validate added clone */"
                 .to_string()
@@ -5223,8 +5229,11 @@ fn coercion_fuses_borrowed_collection_clone_recovery_into_terminal_collect() {
             JavaType::String,
         ))),
     );
+    // `into_unshaped`: the clone-recovery producers record
+    // `RustExprShape::OwnedRecovery`, which the emitter ignores, so the Rust
+    // asserted here is unchanged.
     assert_eq!(
-        vec_expr,
+        vec_expr.into_unshaped(),
         RustExpr::Raw("values.iter().cloned().collect::<Vec<_>>()".to_string())
     );
 
@@ -5239,7 +5248,7 @@ fn coercion_fuses_borrowed_collection_clone_recovery_into_terminal_collect() {
         &Slot::Return(RustSlotShape::conservative(set_java_type(JavaType::String))),
     );
     assert_eq!(
-        set_expr,
+        set_expr.into_unshaped(),
         RustExpr::Raw(
             "groups.iter().flat_map(|item| item.iter()).cloned().collect::<std::collections::HashSet<_>>()"
                 .to_string()

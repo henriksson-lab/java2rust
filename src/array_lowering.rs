@@ -62,9 +62,11 @@ pub fn java_array_creation_fallback_projection(
     // The marker text is what `count_invalid_patterns` looks for. It used to
     // read "Java array creation", which that detector does not match, so an
     // allocation that silently comes out with length 0 — every index into it
-    // panics — counted as a clean translation.
+    // panics — counted as a clean translation. Both sides now read one
+    // constant, so the text cannot drift again.
     RustExpr::Raw(format!(
-        "/* unsupported Java array creation: {:?}[{dims}] */ Vec::new()",
+        "/* {}: {:?}[{dims}] */ Vec::new()",
+        crate::output_markers::UNSUPPORTED_JAVA_ARRAY_CREATION,
         element_type
     ))
 }

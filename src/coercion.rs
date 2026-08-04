@@ -38,7 +38,9 @@ pub enum BorrowProjectionUse {
 pub enum JavaDisplayPlan {
     ConcatValue,
     /// `double`/`float` concatenation, which Java renders with a decimal point.
-    ConcatFloatValue { double: bool },
+    ConcatFloatValue {
+        double: bool,
+    },
     FormatValue,
     ErasedObject,
     OptionalString,
@@ -153,7 +155,9 @@ impl UnsupportedCoercionMessagePolicy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Coercion {
     /// Java prints a concatenated `double`/`float` with a decimal point.
-    ToJavaFloatStringForConcat { double: bool },
+    ToJavaFloatStringForConcat {
+        double: bool,
+    },
     Identity,
     WidenPrimitive {
         from: PrimitiveType,
@@ -1269,10 +1273,12 @@ pub fn rendered_vec_macro_body(rendered: &str) -> Option<String> {
 }
 
 pub fn borrow_as_dyn_trait(expr: RustExpr, trait_name: &str) -> RustExpr {
+    let trait_name = normalize_emitted_java_type_name(trait_name);
     RustExpr::Raw(format!("&{} as &dyn {trait_name}", emit::emit_expr(&expr)))
 }
 
 pub fn anonymous_dyn_trait_projection(trait_name: &str) -> RustExpr {
+    let trait_name = normalize_emitted_java_type_name(trait_name);
     RustExpr::Raw(format!("<dyn {trait_name}>::anonymous()"))
 }
 
@@ -2028,7 +2034,6 @@ pub fn primitive_number_value_projection(receiver: RustExpr, target: PrimitiveTy
     };
     RustExpr::Raw(format!("{} as {rust_ty}", emit::emit_expr(&receiver)))
 }
-
 
 pub fn facade_receiver_method_call_projection(
     receiver: RustExpr,
@@ -3000,11 +3005,13 @@ pub fn rewrite_downcast_expect_message(
     replacement_message: &'static str,
 ) -> RustExpr {
     let rendered = emit::emit_expr(&expr);
-    if rendered.contains(".downcast::<") && rendered.contains(".expect(\"invalid Java cast\")") {
-        RustExpr::Raw(rendered.replace(
-            ".expect(\"invalid Java cast\")",
-            &format!(".expect(\"{replacement_message}\")"),
-        ))
+    let cast_expect = crate::output_markers::invalid_java_cast_expect();
+    if rendered.contains(crate::output_markers::DOWNCAST_TURBOFISH)
+        && rendered.contains(&cast_expect)
+    {
+        RustExpr::Raw(
+            rendered.replace(&cast_expect, &format!(".expect(\"{replacement_message}\")")),
+        )
     } else {
         expr
     }
@@ -3029,13 +3036,16 @@ pub fn rewrite_optional_erased_borrowed_string_view_call_args(
         }
     }
     for name in erased_string_cast_locals {
-        let consuming_view =
-            format!("{name}.unwrap().downcast::<String>().expect(\"invalid Java cast\").as_str()");
+        let consuming_view = format!(
+            "{name}.unwrap().downcast::<String>(){}.as_str()",
+            crate::output_markers::invalid_java_cast_expect()
+        );
         if rendered.contains(&consuming_view) {
             rendered = rendered.replace(
                 &consuming_view,
                 &format!(
-                    "{name}.as_ref().and_then(|value| value.downcast_ref::<String>()).expect(\"invalid Java cast\").as_str()"
+                    "{name}.as_ref().and_then(|value| value.downcast_ref::<String>()){}.as_str()",
+                    crate::output_markers::invalid_java_cast_expect()
                 ),
             );
             changed = true;
@@ -3053,11 +3063,15 @@ pub fn rewrite_optional_erased_borrowed_string_view_call_args(
 }
 
 fn rewrite_rendered_optional_erased_string_views(rendered: &str) -> Option<String> {
-    const SUFFIX: &str = ".unwrap().downcast::<String>().expect(\"invalid Java cast\").as_str()";
+    let suffix = format!(
+        ".unwrap().downcast::<String>(){}.as_str()",
+        crate::output_markers::invalid_java_cast_expect()
+    );
+    let suffix = suffix.as_str();
     let mut out = String::with_capacity(rendered.len());
     let mut rest = rendered;
     let mut changed = false;
-    while let Some(pos) = rest.find(SUFFIX) {
+    while let Some(pos) = rest.find(suffix) {
         let prefix = &rest[..pos];
         let local_start = prefix
             .char_indices()
@@ -3072,15 +3086,16 @@ fn rewrite_rendered_optional_erased_string_views(rendered: &str) -> Option<Strin
                 .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
         {
             out.push_str(prefix);
-            out.push_str(SUFFIX);
-            rest = &rest[pos + SUFFIX.len()..];
+            out.push_str(suffix);
+            rest = &rest[pos + suffix.len()..];
             continue;
         }
         out.push_str(&prefix[..local_start]);
         out.push_str(&format!(
-            "{local_name}.as_ref().and_then(|value| value.downcast_ref::<String>()).expect(\"invalid Java cast\").as_str()"
+            "{local_name}.as_ref().and_then(|value| value.downcast_ref::<String>()){}.as_str()",
+            crate::output_markers::invalid_java_cast_expect()
         ));
-        rest = &rest[pos + SUFFIX.len()..];
+        rest = &rest[pos + suffix.len()..];
         changed = true;
     }
     if changed {
@@ -3312,8 +3327,7 @@ pub fn normalize_reused_clone_for_borrowed_argument(
     name: &str,
     target_shape: &RustSlotShape,
 ) -> Option<RustExpr> {
-    let rendered = emit::emit_expr(lowered);
-    if !rendered_expr_has_clone_recovery(&rendered) {
+    if !rust_expr_has_clone_recovery(lowered) {
         return None;
     }
     match (
@@ -3739,23 +3753,47 @@ pub fn render_java_display_operand(expr: &RustExpr) -> String {
     strip_arithmetic_display_conversion(&emit::emit_expr(expr))
 }
 
+/// Textual fallback for "has an owned value already been recovered here".
+///
+/// This used to have three further arms matching the emitted
+/// `/* TODO(translation): validate added clone */` **comment** verbatim, one of
+/// them with `contains` rather than `ends_with`. A comment whose *wording*
+/// changes behaviour is not a comment, it is syntax.
+///
+/// The comment is still tolerated — it just is not spelled here. Trailing block
+/// comments are stripped first, so an annotated clone is recognised whatever the
+/// annotation says. That keeps idempotence (a clone is never applied twice)
+/// without making any particular text load-bearing.
 pub fn rendered_expr_has_clone_recovery(rendered: &str) -> bool {
+    let rendered = strip_trailing_block_comments(rendered);
     rendered.ends_with(".clone()")
         || rendered.ends_with(".clone_box()")
         || rendered.ends_with(".cloned()")
         || rendered.ends_with(".cloned().expect(\"Java null receiver\")")
-        || rendered.ends_with(".cloned()/* TODO(translation): validate added clone */")
-        || rendered.ends_with(
-            ".cloned()/* TODO(translation): validate added clone */.expect(\"Java null receiver\")",
-        )
-        || rendered.ends_with(".clone()/* TODO(translation): validate added clone */")
-        || rendered.contains(".clone()/* TODO(translation): validate added clone */.into()")
 }
 
 pub fn rendered_expr_has_direct_clone_recovery(rendered: &str) -> bool {
-    rendered.ends_with(".clone()")
-        || rendered.ends_with(".clone_box()")
-        || rendered.ends_with(".clone()/* TODO(translation): validate added clone */")
+    let rendered = strip_trailing_block_comments(rendered);
+    rendered.ends_with(".clone()") || rendered.ends_with(".clone_box()")
+}
+
+/// Drops block comments from the end of a rendered expression, including ones
+/// followed by further method calls (`x.clone()/* … */.expect(…)`).
+///
+/// Structural, not textual: it recognises `/* … */` as a comment rather than
+/// matching what any particular comment says.
+fn strip_trailing_block_comments(rendered: &str) -> String {
+    let mut out = String::with_capacity(rendered.len());
+    let mut rest = rendered;
+    while let Some(open) = rest.find("/*") {
+        let Some(close) = rest[open..].find("*/") else {
+            break;
+        };
+        out.push_str(&rest[..open]);
+        rest = &rest[open + close + 2..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Whether an owned value has already been recovered from a borrow here.
@@ -4143,25 +4181,25 @@ pub fn instanceof_pattern_downcast_ref_projection(
             "match &{rendered} {{ {enum_name}::{variant_name}(value) => Some(value), _ => None }}"
         ))),
         InstanceOfCheck::DynTraitType { target_type } => {
-            let target_type = normalize_downcast_target_type(target_type);
+            let target_type = normalize_emitted_java_type_name(target_type);
             Some(RustExpr::Raw(format!(
                 "{rendered}.as_any().downcast_ref::<{target_type}>()"
             )))
         }
         InstanceOfCheck::BoxedDynTraitType { target_type } => {
-            let target_type = normalize_downcast_target_type(target_type);
+            let target_type = normalize_emitted_java_type_name(target_type);
             Some(RustExpr::Raw(format!(
                 "{rendered}.as_ref().as_any().downcast_ref::<{target_type}>()"
             )))
         }
         InstanceOfCheck::ErasedObjectType { target_type } => {
-            let target_type = normalize_downcast_target_type(target_type);
+            let target_type = normalize_emitted_java_type_name(target_type);
             Some(RustExpr::Raw(format!(
                 "{rendered}.downcast_ref::<{target_type}>()"
             )))
         }
         InstanceOfCheck::OptionalErasedObjectType { target_type } => {
-            let target_type = normalize_downcast_target_type(target_type);
+            let target_type = normalize_emitted_java_type_name(target_type);
             Some(RustExpr::Raw(format!(
                 "{rendered}.as_ref().and_then(|value| value.downcast_ref::<{target_type}>())"
             )))
@@ -4427,6 +4465,7 @@ fn apply_borrowed_element_target_view(
     }
     match &policy.target.dispatch {
         DispatchShape::DynTrait { trait_name } => {
+            let trait_name = normalize_emitted_java_type_name(trait_name);
             RustExpr::Raw(format!("{} as &dyn {trait_name}", emit::emit_expr(&expr)))
         }
         DispatchShape::Concrete if policy.target.java_ty != policy.element_shape.java_ty => {
@@ -4529,8 +4568,10 @@ fn apply_required_borrowed_element_target_view(
 }
 
 fn optional_erased_string_downcast_ref_view_projection(rendered: &str) -> Option<String> {
-    let local_name =
-        rendered.strip_suffix(".unwrap().downcast::<String>().expect(\"invalid Java cast\")")?;
+    let local_name = rendered.strip_suffix(&format!(
+        ".unwrap().downcast::<String>(){}",
+        crate::output_markers::invalid_java_cast_expect()
+    ))?;
     if local_name.is_empty()
         || !local_name
             .chars()
@@ -4539,7 +4580,8 @@ fn optional_erased_string_downcast_ref_view_projection(rendered: &str) -> Option
         return None;
     }
     Some(format!(
-        "{local_name}.as_ref().and_then(|value| value.downcast_ref::<String>()).expect(\"invalid Java cast\").as_str()"
+        "{local_name}.as_ref().and_then(|value| value.downcast_ref::<String>()){}.as_str()",
+        crate::output_markers::invalid_java_cast_expect()
     ))
 }
 
@@ -4559,11 +4601,14 @@ fn apply_borrowed_option_clone_adapter(expr: RustExpr, policy: &CloneRecoveryPol
             method: "cloned".to_string(),
             args: Vec::new(),
         },
-        CloneRecoveryPolicy::AuditRequired => RustExpr::Raw(format!(
-            "{}.cloned(){}",
-            emit::emit_expr(&expr),
-            render_clone_recovery_policy(policy)
-        )),
+        CloneRecoveryPolicy::AuditRequired => RustExpr::shaped(
+            RustExprShape::OwnedRecovery,
+            RustExpr::Raw(format!(
+                "{}.cloned(){}",
+                emit::emit_expr(&expr),
+                render_clone_recovery_policy(policy)
+            )),
+        ),
     }
 }
 
@@ -4574,11 +4619,14 @@ fn apply_owned_option_clone_adapter(expr: RustExpr, policy: &CloneRecoveryPolicy
             method: "clone".to_string(),
             args: Vec::new(),
         },
-        CloneRecoveryPolicy::AuditRequired => RustExpr::Raw(format!(
-            "{}.clone(){}",
-            emit::emit_expr(&expr),
-            render_clone_recovery_policy(policy)
-        )),
+        CloneRecoveryPolicy::AuditRequired => RustExpr::shaped(
+            RustExprShape::OwnedRecovery,
+            RustExpr::Raw(format!(
+                "{}.clone(){}",
+                emit::emit_expr(&expr),
+                render_clone_recovery_policy(policy)
+            )),
+        ),
     }
 }
 
@@ -4605,15 +4653,21 @@ fn apply_borrowed_vec_clone_adapter(expr: RustExpr, policy: &CloneRecoveryPolicy
         return expr;
     }
     if let Some(iterator) = rendered.strip_suffix(".collect::<Vec<_>>()") {
-        return RustExpr::Raw(format!(
-            "{iterator}.cloned(){}.collect::<Vec<_>>()",
-            render_clone_recovery_policy(policy)
-        ));
+        return RustExpr::shaped(
+            RustExprShape::OwnedRecovery,
+            RustExpr::Raw(format!(
+                "{iterator}.cloned(){}.collect::<Vec<_>>()",
+                render_clone_recovery_policy(policy)
+            )),
+        );
     }
-    RustExpr::Raw(format!(
-        "{rendered}.into_iter().cloned(){}.collect::<Vec<_>>()",
-        render_clone_recovery_policy(policy)
-    ))
+    RustExpr::shaped(
+        RustExprShape::OwnedRecovery,
+        RustExpr::Raw(format!(
+            "{rendered}.into_iter().cloned(){}.collect::<Vec<_>>()",
+            render_clone_recovery_policy(policy)
+        )),
+    )
 }
 
 fn apply_borrowed_set_clone_adapter(expr: RustExpr, policy: &CloneRecoveryPolicy) -> RustExpr {
@@ -4622,15 +4676,21 @@ fn apply_borrowed_set_clone_adapter(expr: RustExpr, policy: &CloneRecoveryPolicy
         return expr;
     }
     if let Some(iterator) = rendered.strip_suffix(".collect::<std::collections::HashSet<_>>()") {
-        return RustExpr::Raw(format!(
-            "{iterator}.cloned(){}.collect::<std::collections::HashSet<_>>()",
-            render_clone_recovery_policy(policy)
-        ));
+        return RustExpr::shaped(
+            RustExprShape::OwnedRecovery,
+            RustExpr::Raw(format!(
+                "{iterator}.cloned(){}.collect::<std::collections::HashSet<_>>()",
+                render_clone_recovery_policy(policy)
+            )),
+        );
     }
-    RustExpr::Raw(format!(
-        "{rendered}.into_iter().cloned(){}.collect::<std::collections::HashSet<_>>()",
-        render_clone_recovery_policy(policy)
-    ))
+    RustExpr::shaped(
+        RustExprShape::OwnedRecovery,
+        RustExpr::Raw(format!(
+            "{rendered}.into_iter().cloned(){}.collect::<std::collections::HashSet<_>>()",
+            render_clone_recovery_policy(policy)
+        )),
+    )
 }
 
 impl BorrowedElementRecoveryPolicy {
@@ -4764,8 +4824,9 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
         }
         Coercion::BorrowDynTrait { trait_name } => borrow_as_dyn_trait(expr, trait_name),
         Coercion::BorrowBoxedDynTrait { trait_name } => RustExpr::Raw(format!(
-            "{}.as_ref() as &dyn {trait_name}",
-            emit::emit_expr(&expr)
+            "{}.as_ref() as &dyn {}",
+            emit::emit_expr(&expr),
+            normalize_emitted_java_type_name(trait_name)
         )),
         Coercion::BorrowConcreteFacade { target_type } => {
             if is_native_collection_facade_target(target_type) {
@@ -4993,9 +5054,9 @@ fn apply_unsupported_dispatch_coercion(
         .compile_error_expr_consuming(&expr)
 }
 
-fn render_invalid_cast_policy(policy: &InvalidCastPolicy) -> &'static str {
+fn render_invalid_cast_policy(policy: &InvalidCastPolicy) -> String {
     match policy {
-        InvalidCastPolicy::Panic => "panic!(\"invalid Java cast\")",
+        InvalidCastPolicy::Panic => crate::output_markers::invalid_java_cast_panic(),
     }
 }
 
@@ -5005,10 +5066,11 @@ fn apply_dyn_trait_downcast(
     invalid_cast: &InvalidCastPolicy,
 ) -> RustExpr {
     let rendered = parenthesize_cast_method_receiver(&emit::emit_expr(&expr));
-    let target_type = normalize_downcast_target_type(target_type);
+    let target_type = normalize_emitted_java_type_name(target_type);
     match invalid_cast {
         InvalidCastPolicy::Panic => RustExpr::Raw(format!(
-            "{rendered}.as_any().downcast_ref::<{target_type}>().expect(\"invalid Java cast\")"
+            "{rendered}.as_any().downcast_ref::<{target_type}>(){}",
+            crate::output_markers::invalid_java_cast_expect()
         )),
     }
 }
@@ -5019,10 +5081,11 @@ fn apply_boxed_dyn_trait_downcast(
     invalid_cast: &InvalidCastPolicy,
 ) -> RustExpr {
     let rendered = parenthesize_cast_method_receiver(&emit::emit_expr(&expr));
-    let target_type = normalize_downcast_target_type(target_type);
+    let target_type = normalize_emitted_java_type_name(target_type);
     match invalid_cast {
         InvalidCastPolicy::Panic => RustExpr::Raw(format!(
-            "{rendered}.as_ref().as_any().downcast_ref::<{target_type}>().expect(\"invalid Java cast\")"
+            "{rendered}.as_ref().as_any().downcast_ref::<{target_type}>(){}",
+            crate::output_markers::invalid_java_cast_expect()
         )),
     }
 }
@@ -5033,15 +5096,17 @@ pub fn erased_object_borrowed_downcast_ref_projection(
     optional_carrier: bool,
 ) -> RustExpr {
     let rendered = emit::emit_expr(&expr);
-    let target_type = normalize_downcast_target_type(target_type);
+    let target_type = normalize_emitted_java_type_name(target_type);
     if optional_carrier {
         RustExpr::Raw(format!(
-            "{rendered}.as_ref().and_then(|value| value.downcast_ref::<{target_type}>()).expect(\"invalid Java cast\")"
+            "{rendered}.as_ref().and_then(|value| value.downcast_ref::<{target_type}>()){}",
+            crate::output_markers::invalid_java_cast_expect()
         ))
     } else {
         let rendered = parenthesize_cast_method_receiver(&rendered);
         RustExpr::Raw(format!(
-            "{rendered}.downcast_ref::<{target_type}>().expect(\"invalid Java cast\")"
+            "{rendered}.downcast_ref::<{target_type}>(){}",
+            crate::output_markers::invalid_java_cast_expect()
         ))
     }
 }
@@ -5051,19 +5116,28 @@ fn apply_erased_object_downcast(
     target_type: &str,
     invalid_cast: &InvalidCastPolicy,
 ) -> RustExpr {
-    let target_type = normalize_downcast_target_type(target_type);
+    let target_type = normalize_emitted_java_type_name(target_type);
     if !plausible_rust_nominal_type_name(&target_type) {
         return expr;
     }
     let rendered = parenthesize_cast_method_receiver(&emit::emit_expr(&expr));
     match invalid_cast {
         InvalidCastPolicy::Panic => RustExpr::Raw(format!(
-            "*{rendered}.downcast::<{target_type}>().expect(\"invalid Java cast\")"
+            "*{rendered}.downcast::<{target_type}>(){}",
+            crate::output_markers::invalid_java_cast_expect()
         )),
     }
 }
 
-fn normalize_downcast_target_type(target_type: &str) -> String {
+/// Mangles a Java type name into the Rust name actually emitted for it.
+///
+/// A nested Java type is written `Outer.Inner`, which is not a Rust path.
+/// [0013](../claude_audits/done/0013-nested-type-names-unmangled-in-downcast.md)
+/// fixed this for `downcast::<T>` targets only, so the same name reached `as
+/// &dyn Outer.Inner` unmangled and failed to parse — a fix applied at one
+/// symptom rather than at the name. Every position that emits a Java type name
+/// as Rust goes through this.
+fn normalize_emitted_java_type_name(target_type: &str) -> String {
     if target_type.contains('.') || target_type.contains('$') {
         crate::slot_render::rust_name_for_java_named_type(target_type)
     } else {
@@ -6225,7 +6299,9 @@ mod tests {
     /// proceed one producer at a time instead of all at once.
     #[test]
     fn an_untagged_string_view_still_falls_back_to_the_text() {
-        assert!(expr_is_string_view(&RustExpr::Raw("name.as_str()".to_string())));
+        assert!(expr_is_string_view(&RustExpr::Raw(
+            "name.as_str()".to_string()
+        )));
         assert!(!expr_is_string_view(&RustExpr::Raw("name".to_string())));
     }
 
@@ -6262,6 +6338,8 @@ mod tests {
             },
         );
         assert!(expr_is_result_propagated(&propagated));
-        assert!(!expr_is_result_propagated(&RustExpr::Var("value".to_string())));
+        assert!(!expr_is_result_propagated(&RustExpr::Var(
+            "value".to_string()
+        )));
     }
 }

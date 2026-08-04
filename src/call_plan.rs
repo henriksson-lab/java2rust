@@ -1535,6 +1535,18 @@ pub fn plan_call_exception_propagation(
     )
 }
 
+/// Whether a call propagates an exception, for a caller that has **no solved
+/// fallibility plan**.
+///
+/// The source-method probes below re-derive fallibility from the fact set. That
+/// is the third decision point
+/// [0010](../claude_audits/0010-fallibility-is-decided-three-times-and-disagrees.md)
+/// is named for, and it is why lowering must not call this: lowering has a
+/// solved plan and reaches
+/// [`plan_external_call_exception_propagation`] instead, so a probe cannot
+/// contradict the plan. Measured over 100 corpus files, the probes fired **0**
+/// times once the plan was consulted first; splitting the function makes that
+/// unreachability structural rather than incidental.
 pub fn plan_call_exception_propagation_with_external_index(
     receiver: Option<&Expr>,
     name: &str,
@@ -1569,6 +1581,31 @@ pub fn plan_call_exception_propagation_with_external_index(
         return CallExceptionPropagationPlan::PropagateResult;
     }
 
+    plan_external_call_exception_propagation(
+        receiver,
+        name,
+        args,
+        facts,
+        external_index,
+        types,
+        current_type,
+    )
+}
+
+/// Whether an **external** call propagates a checked exception.
+///
+/// Contains no source-method probe, so a caller that has already asked the
+/// solved fallibility plan about source callables cannot have that answer
+/// second-guessed here. This is the entry point lowering uses.
+pub fn plan_external_call_exception_propagation(
+    receiver: Option<&Expr>,
+    name: &str,
+    args: &[Expr],
+    facts: &FactSet,
+    external_index: &ExternalFactLookupIndex<'_>,
+    types: &TypeEnv,
+    current_type: Option<&str>,
+) -> CallExceptionPropagationPlan {
     if let Some(effect) = external_call_effect_with_external_index(
         receiver,
         name,

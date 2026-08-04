@@ -2299,27 +2299,17 @@ fn parse_array_creation_expr(node: tree_sitter::Node, source: &str) -> Expr {
 }
 
 fn parse_cast_type_node(node: tree_sitter::Node, source: &str) -> JavaType {
-    let field_ty = field_children(node, "type")
+    // The `type` field is authoritative. This used to prefer a re-parse of the
+    // text between the cast parentheses whenever that produced an array or a
+    // generic type, because `parse_array_type_node` dropped a dimension on
+    // `int[][]` — a workaround for that bug, not a reason to parse types from
+    // text. With the dimension bug fixed the tree and the text agree on every
+    // shape the probes cover, so the text path is gone.
+    field_children(node, "type")
         .into_iter()
         .next()
-        .map(|ty| parse_type_node(ty, source));
-    let cast_text = text(node, source).trim();
-    if let Some(close) = cast_text.find(')') {
-        let ty_text = cast_text
-            .get(1..close)
-            .map(str::trim)
-            .filter(|text| !text.is_empty());
-        if let Some(ty_text) = ty_text {
-            let parsed = parse_type_text(ty_text);
-            if matches!(parsed, JavaType::Array(_))
-                || matches!(parsed, JavaType::Named { ref args, .. } if !args.is_empty())
-                || field_ty.is_none()
-            {
-                return parsed;
-            }
-        }
-    }
-    field_ty.unwrap_or_else(|| JavaType::Unknown("cast".to_string()))
+        .map(|ty| parse_type_node(ty, source))
+        .unwrap_or_else(|| JavaType::Unknown("cast".to_string()))
 }
 
 fn parse_array_initializer_elements(node: tree_sitter::Node, source: &str) -> Vec<Expr> {
@@ -2472,6 +2462,11 @@ fn parse_type_node(node: tree_sitter::Node, source: &str) -> JavaType {
             .unwrap_or_else(|| parse_type_text(text(node, source))),
         "annotated_type" => parse_annotated_type_node(node, source)
             .unwrap_or_else(|| parse_type_text(text(node, source))),
+        // Defensive: every type-level node kind the grammar produces is
+        // handled above. Instrumented over the corpus and the type-shape
+        // probes at **0 hits**, so this is not a live text path — but it is
+        // kept rather than turned into a diagnostic, because the sample here
+        // is 248 files and the real corpora are much larger.
         _ => parse_type_text(text(node, source)),
     }
 }
@@ -2492,6 +2487,9 @@ fn parse_primitive_type_node(node: tree_sitter::Node, source: &str) -> Option<Ja
 fn parse_named_type_node(node: tree_sitter::Node, source: &str) -> JavaType {
     let raw = text(node, source);
     if raw.contains('<') {
+        // A named-type node whose own text carries type arguments: the
+        // `generic_type` handler owns that shape, so this is a defensive path.
+        // Measured at 0 hits across the corpus and the type-shape probes.
         return parse_type_text(raw);
     }
     let name = java_type_name_suffix(raw);
@@ -2517,7 +2515,33 @@ fn parse_array_type_node(node: tree_sitter::Node, source: &str) -> Option<JavaTy
                 )
             })
         })?;
-    Some(JavaType::Array(Box::new(parse_type_node(element, source))))
+    // `int[][]` is one `array_type` whose `dimensions` child carries *both*
+    // pairs of brackets, not two nested `array_type` nodes. Wrapping once
+    // dropped a dimension, which is why `parse_cast_type_node` preferred a
+    // text re-parse over this result — a workaround for this bug rather than a
+    // reason to keep parsing types from text.
+    let depth = array_type_node_dimension_depth(node).max(1);
+    let mut ty = parse_type_node(element, source);
+    for _ in 0..depth {
+        ty = JavaType::Array(Box::new(ty));
+    }
+    Some(ty)
+}
+
+/// Number of `[]` pairs directly on an `array_type` node, read from the token
+/// stream rather than from the node's source text.
+fn array_type_node_dimension_depth(node: tree_sitter::Node) -> usize {
+    let mut cursor = node.walk();
+    node.children(&mut cursor)
+        .filter(|child| child.kind() == "dimensions")
+        .map(|dimensions| {
+            let mut dim_cursor = dimensions.walk();
+            dimensions
+                .children(&mut dim_cursor)
+                .filter(|token| token.kind() == "[")
+                .count()
+        })
+        .sum()
 }
 
 fn parse_generic_type_node(node: tree_sitter::Node, source: &str) -> Option<JavaType> {
@@ -2686,6 +2710,12 @@ fn parse_hierarchy_type_text(src: &str) -> JavaType {
     parse_type_text(src)
 }
 
+/// Parses a type from **text**.
+///
+/// Legitimate only for genuinely text-sourced types — `javalibs` signatures and
+/// external pack manifests. Source types come from the parse tree via
+/// [`parse_type_node`]; see
+/// `claude_audits/0022-types-are-reparsed-from-source-text.md`.
 fn parse_type_text(src: &str) -> JavaType {
     let mut src = src.trim();
     while let Some(rest) = src.strip_prefix("final ") {

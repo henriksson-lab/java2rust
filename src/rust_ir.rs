@@ -259,10 +259,7 @@ mod tests {
     /// whatever the most recent adapter made it, not a stack of them.
     #[test]
     fn re_tagging_replaces_rather_than_nests() {
-        let once = RustExpr::shaped(
-            RustExprShape::Borrowed,
-            RustExpr::Raw("value".to_string()),
-        );
+        let once = RustExpr::shaped(RustExprShape::Borrowed, RustExpr::Raw("value".to_string()));
         let twice = RustExpr::shaped(RustExprShape::StringView, once);
         assert_eq!(twice.recorded_shape(), Some(RustExprShape::StringView));
         assert_eq!(twice.unshaped(), &RustExpr::Raw("value".to_string()));

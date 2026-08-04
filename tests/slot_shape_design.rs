@@ -57,8 +57,8 @@ use new_java2rust::exception_lowering::{
 use new_java2rust::exception_plan::{
     JavaExceptionSupportPlan, MethodExceptionPlan, ProgramExceptionPlan, ThrowExprPlan,
     TryBlockCompletion, TryStmtPlan, catch_match_class_names, exception_class_name,
-    plan_java_exception_support, plan_method_exceptions, plan_program_exceptions,
-    plan_program_fallibility, plan_throw_expr, plan_try_stmt, try_resource_names,
+    plan_java_exception_support, plan_program_fallibility, plan_throw_expr, plan_try_stmt,
+    try_resource_names,
 };
 use new_java2rust::expr_render::{
     binary_expr, indexed_expr, literal_expr, named_constructor_expr, raw_expr, super_expr,
@@ -4829,7 +4829,13 @@ fn unsupported_lowering_policy_owns_compile_error_placeholders() {
 
 #[test]
 fn unsupported_compile_error_literals_are_centralized() {
-    let allowed_files = ["src/unsupported.rs", "src/main.rs", "src/stdlib.rs"];
+    // Tightened: `src/main.rs` and `src/stdlib.rs` used to be exempt. `main.rs`
+    // now reads the marker text from `src/output_markers.rs` instead of
+    // spelling it, and `stdlib.rs`'s stubbed-constant emitters route through
+    // `compile_error_value_text` / `compile_error_diverging_text`. What remains
+    // is the producer (`unsupported.rs`) and the module that owns the marker
+    // text both it and the corpus counters read (`output_markers.rs`).
+    let allowed_files = ["src/unsupported.rs", "src/output_markers.rs"];
     for entry in std::fs::read_dir("src").unwrap() {
         let entry = entry.unwrap();
         let path = entry.path();
@@ -22932,10 +22938,15 @@ class LoopLivenessAudit {
     let liveness_source = include_str!("../src/liveness.rs");
     assert!(lower_source.contains("liveness: &'a crate::liveness::LivenessAnalysis"));
     assert!(lower_source.contains("LivenessAnalysis::for_body"));
-    // The textual-suffix scan is gone: a statement the analysis never saw now
-    // falls back to a projection of the analysis itself, not a second scan.
+    // The textual-suffix scan is gone, and so is the block-wide union that
+    // replaced it: a block whose statements the analysis never saw now gets a
+    // real analysis built for it (`liveness_covering_block`), so the fallback
+    // stays per-statement instead of collapsing to one set for the whole block.
     assert!(!lower_source.contains("fn statement_suffix_read_names"));
-    assert!(lower_source.contains("conservative_live_in_block"));
+    assert!(lower_source.contains("fn liveness_covering_block"));
+    // No name-set approximation of the move relation survives on `LowerCtx`.
+    assert!(!lower_source.contains("later_read_names"));
+    assert!(!lower_source.contains("later_mutated_names"));
     assert!(liveness_source.contains("pub fn live_out_for"));
     assert!(liveness_source.contains("pub struct Binding"));
     assert!(liveness_source.contains("fn loop_fixpoint"));
@@ -32308,13 +32319,22 @@ class ThrowsValue {
             emit_support_item: true
         }
     );
-    assert_eq!(
-        plan_method_exceptions(ty, method, &exception_facts),
-        MethodExceptionPlan {
-            wrap_returns_in_result: true
-        }
+    // Fallibility has exactly one producer now: the call-graph fixpoint.
+    // `plan_method_exceptions` / `plan_program_exceptions` re-derived it from
+    // the fact set and are deleted, so this goes through the solved plan.
+    let exception_call_graph =
+        new_java2rust::usage::build_call_graph_with_facts(&resolved.program, &exception_facts);
+    let exception_fallibility = new_java2rust::exception_plan::plan_program_fallibility(
+        &resolved.program,
+        &exception_call_graph,
+        &exception_facts,
     );
-    let program_exception_plan = plan_program_exceptions(&resolved.program, &exception_facts);
+    let program_exception_plan =
+        new_java2rust::exception_plan::plan_program_exceptions_with_fallibility(
+            &resolved.program,
+            &exception_facts,
+            &exception_fallibility,
+        );
     assert_eq!(
         program_exception_plan.support,
         JavaExceptionSupportPlan {
@@ -32737,9 +32757,18 @@ class SpecificProblem extends BaseProblem {}
     assert!(exception_plan_source.contains("pub struct MethodExceptionPlan"));
     assert!(exception_plan_source.contains("pub struct ProgramExceptionPlan"));
     assert!(exception_plan_source.contains("pub fn plan_java_exception_support"));
-    assert!(exception_plan_source.contains("pub fn plan_method_exceptions"));
-    assert!(exception_plan_source.contains("pub fn plan_program_exceptions"));
+    // One producer of `MethodExceptionPlan`. The two that re-derived it from
+    // the fact set are deleted; asserting their absence is the check that keeps
+    // 0010's second store from growing back.
+    assert!(!exception_plan_source.contains("pub fn plan_method_exceptions"));
     assert!(exception_plan_source.contains("pub fn plan_program_exceptions_with_fallibility"));
+    // Lowering must not be able to reach the source-method fallibility probes:
+    // it has a solved plan, and a probe that re-derives fallibility from the
+    // fact set could contradict it. `plan_external_call_exception_propagation`
+    // contains no such probe, and lowering does not name the function that does.
+    let call_plan_source = include_str!("../src/call_plan.rs");
+    assert!(call_plan_source.contains("pub fn plan_external_call_exception_propagation"));
+    assert!(!lower_source.contains("plan_call_exception_propagation_with_external_index"));
     assert!(exception_plan_source.contains("pub enum TryStmtPlan"));
     assert!(exception_plan_source.contains("pub fn plan_try_stmt"));
     assert!(exception_plan_source.contains("pub fn catch_match_class_names"));

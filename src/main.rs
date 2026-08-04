@@ -7,6 +7,8 @@ use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use new_java2rust::output_markers;
+
 fn main() -> ExitCode {
     let Some(args) = parse_args(env::args().skip(1)) else {
         eprintln!(
@@ -637,8 +639,8 @@ fn run_translate_batch(
                 diagnostic.severity, diagnostic.code, diagnostic.message
             );
         }
-        let invalid_patterns = count_invalid_patterns(&translation.rust);
-        let stubbed_constants = count_stubbed_constants(&translation.rust);
+        let invalid_patterns = output_markers::count_invalid_patterns(&translation.rust);
+        let stubbed_constants = output_markers::count_stubbed_constants(&translation.rust);
         let unsupported_members = translation
             .diagnostics
             .iter()
@@ -916,9 +918,10 @@ fn write_analysis_profile(
     let mut unimplemented_facade_methods = 0;
     let mut compile_error_markers = 0;
     for translation in translations {
-        noop_facade_methods += count_noop_facade_methods(&translation.rust);
-        unimplemented_facade_methods += count_unimplemented_facade_methods(&translation.rust);
-        compile_error_markers += count_compile_error_markers(&translation.rust);
+        noop_facade_methods += output_markers::count_noop_facade_methods(&translation.rust);
+        unimplemented_facade_methods +=
+            output_markers::count_unimplemented_facade_methods(&translation.rust);
+        compile_error_markers += output_markers::count_compile_error_markers(&translation.rust);
     }
     push_profile_metric(&mut out, "noop_facade_methods", noop_facade_methods);
     push_profile_metric(
@@ -1001,54 +1004,6 @@ fn sanitize_rust_file_stem(value: &str) -> String {
             }
         })
         .collect()
-}
-
-fn count_invalid_patterns(rust: &str) -> usize {
-    rust.lines()
-        .filter(|line| {
-            line.contains("compile_error!")
-                || (line.contains("downcast::<") && line.contains(".expect(\"invalid Java cast\")"))
-                || line.contains(".add_all(")
-                || line.contains(".put(")
-                || line.contains("unsupported Java lambda")
-                || line.contains("unsupported Java method reference")
-                || line.contains("unsupported Java array creation")
-                || (line.contains("= None;")
-                    && !line.contains("let mut ")
-                    && !line.contains(": Option<"))
-        })
-        .count()
-}
-
-fn count_stubbed_constants(rust: &str) -> usize {
-    rust.lines()
-        .filter(|line| {
-            line.contains("pub const ")
-                && line.contains("compile_error!(\"external static constant ")
-                && line.contains(" has no modeled value\"")
-        })
-        .count()
-}
-
-fn count_noop_facade_methods(rust: &str) -> usize {
-    rust.lines()
-        .filter(|line| {
-            let line = line.trim_end();
-            line.ends_with("Default::default() }") || line.ends_with("self.clone() }")
-        })
-        .count()
-}
-
-fn count_unimplemented_facade_methods(rust: &str) -> usize {
-    rust.lines()
-        .filter(|line| line.contains("unimplemented!("))
-        .count()
-}
-
-fn count_compile_error_markers(rust: &str) -> usize {
-    rust.lines()
-        .map(|line| line.matches("compile_error!(").count())
-        .sum()
 }
 
 fn collect_java_paths(path: &str, out: &mut Vec<String>) -> Result<(), String> {

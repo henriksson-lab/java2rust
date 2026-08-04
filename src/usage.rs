@@ -52,6 +52,33 @@ pub enum CallableKey {
     },
 }
 
+impl CallableKey {
+    /// The key for a declared source method.
+    ///
+    /// Always use this rather than building `CallableKey::Method` by hand. The
+    /// `method_name` field holds the **Rust** name, and one place built it from
+    /// `method.name` — the Java name — instead: `override_groups_for_program`,
+    /// whose groups therefore matched the fallibility plan's keys only when the
+    /// two spellings happened to coincide. For anything camelCased or
+    /// overloaded they do not, so the override equalization silently did
+    /// nothing and a second store had to compensate
+    /// ([0010](../claude_audits/0010-fallibility-is-decided-three-times-and-disagrees.md)).
+    ///
+    /// Identity spelled two ways is
+    /// [0009](../claude_audits/0009-overload-identity-collapses-onto-rust-name.md)'s
+    /// defect; this constructor makes that particular instance of it
+    /// unrepresentable.
+    pub fn source_method(
+        type_name: impl Into<String>,
+        method: &crate::java_ir::MethodDecl,
+    ) -> Self {
+        CallableKey::Method {
+            type_name: type_name.into(),
+            method_name: crate::java_signature::source_method_rust_name(method),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallGraphEdge {
     pub caller: CallableKey,

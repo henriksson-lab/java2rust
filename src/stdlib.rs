@@ -6797,13 +6797,13 @@ pub fn external_api_facade_support_items_with_local_type_program(
     support.add_nested_type_aliases_from_fields(facts, &local_types);
     support.add_declared_external_types(program, &declared_external_type_exclusions);
     support.add_declared_source_summary_types(program, &source_summary_types, &emitted_local_types);
-    while support.add_source_summary_method_surfaces(
+    support.saturate_source_summary_method_surfaces(
         facts,
         source_summary_type_program,
         &source_summary_types,
         &emitted_local_types,
         &used_calls,
-    ) {}
+    );
     support.add_emitted_source_summary_super_method_surfaces(
         facts,
         program,
@@ -6839,13 +6839,13 @@ pub fn external_api_facade_support_items_with_local_type_program(
         &emitted_local_types,
         &imported_static_owner_calls,
     );
-    while support.add_source_summary_method_surfaces(
+    support.saturate_source_summary_method_surfaces(
         facts,
         source_summary_type_program,
         &source_summary_types,
         &emitted_local_types,
         &used_calls,
-    ) {}
+    );
     support.add_emitted_source_summary_super_method_surfaces(
         facts,
         program,
@@ -7155,7 +7155,17 @@ struct ExternalApiFacadeSupport {
     erased_object_method_conflicts: BTreeSet<(String, usize)>,
     emitted_source_methods: BTreeSet<(String, String, usize)>,
     erased_source_alias_owners: BTreeSet<String>,
+    /// Set when the source-summary surface fixpoint hit its budget. Surfaced as
+    /// a `compile_error!` by `into_items` rather than being dropped silently.
+    diverged_source_summary_surface_fixpoint: bool,
 }
+
+/// Iteration budget for the source-summary surface fixpoint.
+///
+/// Generous by design: it is a backstop against a non-monotone regression, not
+/// the mechanism that makes the loop converge. Real programs settle in a
+/// handful of rounds.
+const SOURCE_SUMMARY_SURFACE_FIXPOINT_BUDGET: usize = 1_000;
 
 fn is_awt_platform_facade_owner(owner: &str) -> bool {
     matches!(
@@ -7520,6 +7530,40 @@ impl ExternalApiFacadeSupport {
         }
     }
 
+    /// Runs [`Self::add_source_summary_method_surfaces`] to a fixpoint under a
+    /// finite budget.
+    ///
+    /// The budget is a backstop, not the termination condition: the loop
+    /// converges because `add_method` reports real state changes. It exists
+    /// because the previous unbounded `while … {}` hung the whole `idiom_gaps`
+    /// suite for months, and a suite that never returns is indistinguishable,
+    /// to anything waiting on it, from one that passes
+    /// ([0035](../claude_audits/0035-idiom-gaps-suite-never-terminates.md)).
+    /// Exceeding the budget records a diagnostic in the generated output rather
+    /// than looping: a translator may refuse to translate, but it must never
+    /// hang and it must never quietly omit.
+    fn saturate_source_summary_method_surfaces(
+        &mut self,
+        facts: &FactSet,
+        source_summary_program: &Program,
+        source_summary_types: &BTreeSet<String>,
+        emitted_local_types: &BTreeSet<String>,
+        used_calls: &BTreeMap<String, BTreeSet<usize>>,
+    ) {
+        for _ in 0..SOURCE_SUMMARY_SURFACE_FIXPOINT_BUDGET {
+            if !self.add_source_summary_method_surfaces(
+                facts,
+                source_summary_program,
+                source_summary_types,
+                emitted_local_types,
+                used_calls,
+            ) {
+                return;
+            }
+        }
+        self.diverged_source_summary_surface_fixpoint = true;
+    }
+
     fn add_source_summary_method_surfaces(
         &mut self,
         facts: &FactSet,
@@ -7602,18 +7646,26 @@ impl ExternalApiFacadeSupport {
                         return_type.clone(),
                     );
                 }
-                if self.has_method_signature(&owner, &rust_method, method.params.len())
-                    && !self.replace_weak_method_return(
+                if self.has_method_signature(&owner, &rust_method, method.params.len()) {
+                    if !self.replace_weak_method_return(
                         &owner,
                         &rust_method,
                         method.params.len(),
                         &method_body,
-                    )
-                {
-                    continue;
+                    ) {
+                        continue;
+                    }
+                    // The weak-returning body was removed: a real state change,
+                    // and one that cannot recur, because the replacement below
+                    // is not weak.
+                    changed = true;
                 }
-                changed = true;
-                self.add_method(owner.clone(), method_body);
+                // `changed` must come from what `add_method` did, not from the
+                // fact that it was called: it declines silently for AWT owners,
+                // invalid idents, erased alias owners and already-emitted source
+                // methods, and reporting those as progress is what made this
+                // fixpoint diverge.
+                changed |= self.add_method(owner.clone(), method_body);
             }
         }
         changed
@@ -10023,25 +10075,36 @@ impl ExternalApiFacadeSupport {
         }
     }
 
-    fn add_method(&mut self, owner: String, method: String) {
+    /// Adds a facade method, reporting whether the support state actually
+    /// changed.
+    ///
+    /// The return value is load-bearing: `add_source_summary_method_surfaces`
+    /// is driven by a `while … {}` fixpoint, and it used to derive "changed"
+    /// from the *intent* to add a method rather than from the outcome. Every
+    /// early return below is a case where this method does nothing, so the
+    /// fixpoint reported progress it had not made and never terminated — seven
+    /// `idiom_gaps` tests hung on exactly that
+    /// ([0035](../claude_audits/0035-idiom-gaps-suite-never-terminates.md)).
+    /// A fixpoint's termination condition has to be "the state stopped
+    /// changing", so this must keep reporting the outcome.
+    fn add_method(&mut self, owner: String, method: String) -> bool {
         if is_awt_platform_facade_owner(&owner) {
-            return;
+            return false;
         }
         if !valid_external_facade_type_ident(&owner) {
-            return;
+            return false;
         }
         if self.erased_source_alias_owners.contains(&owner) {
-            return;
+            return false;
         }
         let method = self.upgrade_known_weak_opaque_method(&owner, method);
         if let Some(const_name) = facade_const_name(&method)
             && self.has_const_named(&owner, const_name)
         {
-            return;
+            return false;
         }
         let Some(method_name) = facade_method_name(&method) else {
-            self.impls.entry(owner).or_default().insert(method);
-            return;
+            return self.impls.entry(owner).or_default().insert(method);
         };
         let arg_count = facade_method_arg_count(&method);
         if self.emitted_source_methods.contains(&(
@@ -10049,8 +10112,9 @@ impl ExternalApiFacadeSupport {
             method_name.to_string(),
             arg_count,
         )) {
-            return;
+            return false;
         }
+        let mut changed = false;
         let receiver_kind = facade_method_receiver_kind(&method);
         if self.has_method_signature_with_receiver(&owner, method_name, arg_count, receiver_kind) {
             if !self.replace_weak_method_return_with_receiver(
@@ -10060,14 +10124,19 @@ impl ExternalApiFacadeSupport {
                 receiver_kind,
                 &method,
             ) {
-                return;
+                return false;
             }
+            // A weak-returning body was removed to make room for this one.
+            changed = true;
         }
         if self.has_method_signature(&owner, method_name, arg_count) {
             if receiver_kind == FacadeMethodReceiverKind::Static {
                 self.remove_method_signature(&owner, method_name, arg_count);
+                changed = true;
             } else if !self.replace_weak_method_return(&owner, method_name, arg_count, &method) {
-                return;
+                return false;
+            } else {
+                changed = true;
             }
         }
         if matches!(method_name, "read" | "write") && arg_count > 1 {
@@ -10076,13 +10145,14 @@ impl ExternalApiFacadeSupport {
                 && let Some(overload_method) =
                     rename_facade_method(&method, method_name, &overload_name)
             {
-                self.impls
+                changed |= self
+                    .impls
                     .entry(owner.clone())
                     .or_default()
                     .insert(overload_method);
             }
         }
-        self.impls.entry(owner).or_default().insert(method);
+        changed | self.impls.entry(owner).or_default().insert(method)
     }
 
     fn upgrade_known_weak_opaque_method(&self, owner: &str, method: String) -> String {
@@ -10826,6 +10896,18 @@ impl ExternalApiFacadeSupport {
             lines.push(format!(
                 "pub trait JavaErasedObjectFacade {{\n{trait_methods}\n}}\n\nimpl JavaErasedObjectFacade for Box<dyn std::any::Any> {{\n{impl_methods}\n}}"
             ));
+        }
+
+        if self.diverged_source_summary_surface_fixpoint {
+            // Loud rather than silent: the surfaces below are incomplete, and a
+            // truncated facade compiles cleanly while doing the wrong thing.
+            lines.insert(
+                0,
+                crate::unsupported::compile_error_item_text(
+                    "source-summary facade surface did not reach a fixpoint within its budget; \
+                     the emitted external facade is incomplete",
+                ),
+            );
         }
 
         if lines.is_empty() {
@@ -16256,17 +16338,16 @@ fn unknown_static_constant_compile_error_value(
     field: &str,
     primitive: PrimitiveType,
 ) -> String {
-    let message = format!("external static constant {owner}.{field} has no modeled value");
-    match primitive {
-        PrimitiveType::Boolean => format!("{{ compile_error!({message:?}); false }}"),
-        PrimitiveType::Byte | PrimitiveType::Short | PrimitiveType::Int => {
-            format!("{{ compile_error!({message:?}); 0 }}")
-        }
-        PrimitiveType::Long => format!("{{ compile_error!({message:?}); 0i64 }}"),
-        PrimitiveType::Float => format!("{{ compile_error!({message:?}); 0.0f32 }}"),
-        PrimitiveType::Double => format!("{{ compile_error!({message:?}); 0.0f64 }}"),
-        PrimitiveType::Char => format!("{{ compile_error!({message:?}); '\\0' }}"),
-    }
+    let message = crate::output_markers::unmodelled_static_constant_message(owner, field);
+    let value = match primitive {
+        PrimitiveType::Boolean => "false",
+        PrimitiveType::Byte | PrimitiveType::Short | PrimitiveType::Int => "0",
+        PrimitiveType::Long => "0i64",
+        PrimitiveType::Float => "0.0f32",
+        PrimitiveType::Double => "0.0f64",
+        PrimitiveType::Char => "'\\0'",
+    };
+    crate::unsupported::compile_error_value_text(&message, value)
 }
 
 fn unknown_static_named_constant_compile_error_value(
@@ -16274,13 +16355,9 @@ fn unknown_static_named_constant_compile_error_value(
     field: &str,
     rust_type: &str,
 ) -> String {
-    let message = format!("external static constant {owner}.{field} has no modeled value");
-    // `compile_error!` already aborts, but the placeholder still has to
-    // type-check. Naming the type as a value works only for a unit struct and
-    // fails with `E0423` as soon as the type resolves through an alias, so use
-    // a diverging expression: `!` coerces to any type and const panic is legal.
+    let message = crate::output_markers::unmodelled_static_constant_message(owner, field);
     let _ = rust_type;
-    format!("{{ compile_error!({message:?}); panic!({message:?}) }}")
+    crate::unsupported::compile_error_diverging_text(&message)
 }
 
 fn known_jdk_static_constant_value(owner: &str, field: &str) -> Option<&'static str> {

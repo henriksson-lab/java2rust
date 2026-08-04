@@ -9,6 +9,32 @@ pub fn compile_error_expr(message: &str) -> RustExpr {
     RustExpr::Raw(format!("compile_error!({message:?})"))
 }
 
+/// A `compile_error!` at item position, for a refusal that has no expression or
+/// statement to attach to.
+pub fn compile_error_item_text(message: &str) -> String {
+    format!("compile_error!({message:?});")
+}
+
+/// A `compile_error!` followed by a value of the expected type.
+///
+/// `compile_error!` already aborts the build, but the placeholder still has to
+/// type-check for the surrounding item to parse, so the refusal is paired with
+/// a value. Used for external constants that have a declared type and no
+/// modelled value.
+pub fn compile_error_value_text(message: &str, value: &str) -> String {
+    format!("{{ compile_error!({message:?}); {value} }}")
+}
+
+/// A `compile_error!` paired with a diverging expression.
+///
+/// `!` coerces to any type, so this works where the placeholder's type is not
+/// known well enough to name a value — naming the type as a value works only
+/// for a unit struct and fails with `E0423` as soon as the type resolves
+/// through an alias.
+pub fn compile_error_diverging_text(message: &str) -> String {
+    compile_error_value_text(message, &format!("panic!({message:?})"))
+}
+
 pub fn compile_error_expr_consuming(expr: &RustExpr, message: &str) -> RustExpr {
     RustExpr::Raw(format!(
         "{{ let _ = {}; compile_error!({message:?}) }}",
@@ -221,9 +247,11 @@ fn statement_message(kind: UnsupportedStatementLowering) -> String {
 
 fn expression_message(kind: UnsupportedExpressionLowering) -> String {
     match kind {
-        UnsupportedExpressionLowering::Lambda => "unsupported Java expression: lambda".to_string(),
+        UnsupportedExpressionLowering::Lambda => {
+            crate::output_markers::UNSUPPORTED_JAVA_LAMBDA.to_string()
+        }
         UnsupportedExpressionLowering::MethodReference => {
-            "unsupported Java expression: method reference".to_string()
+            crate::output_markers::UNSUPPORTED_JAVA_METHOD_REFERENCE.to_string()
         }
         UnsupportedExpressionLowering::ParserUnsupported(reason) => {
             format!("unsupported Java expression: {reason}")

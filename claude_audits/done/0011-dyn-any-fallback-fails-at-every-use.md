@@ -115,7 +115,7 @@ change hides real gaps. Land the diagnostic first.
 ## Relationship to other findings
 
 The generalisable lesson is the same as
-[0007](0007-rust-ir-is-mostly-opaque-strings.md): an escape hatch that discards
+[0007](../0007-rust-ir-is-mostly-opaque-strings.md): an escape hatch that discards
 structure (`RustExpr::Raw`, `Box<dyn Any>`) postpones the failure to a place
 where the cause is no longer recoverable. Fallbacks should stay typed and name
 their cause.
@@ -204,7 +204,7 @@ diverging expression.
 
 The AWT probe goes from **12 errors to 1**, and that one is the intended
 diagnostic: `external static constant JavaAwtColor.RED has no modeled value`.
-Per [0031](0031-stubbed-constant-census.md) a constant with no known value must
+Per [0031](../0031-stubbed-constant-census.md) a constant with no known value must
 be an error, never a plausible default, so this is the design working.
 
 Status: **closed**. Focused AWT probes now compile after guarding the built-in

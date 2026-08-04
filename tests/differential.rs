@@ -64,7 +64,9 @@ fn compare_fixture(translator: &Path, fixture: &Path, class: &str) -> Result<(),
     if expected == actual {
         Ok(())
     } else {
-        Err(format!("java produced {expected:?}, translation produced {actual:?}"))
+        Err(format!(
+            "java produced {expected:?}, translation produced {actual:?}"
+        ))
     }
 }
 

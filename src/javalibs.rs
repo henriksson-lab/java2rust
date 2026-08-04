@@ -646,3 +646,72 @@ fn is_broad_ioutils_type_name(name: &str) -> bool {
         "IOUtils" | "io_utils" | "i_o_utils" | "org.broadinstitute.hellbender.utils.io.IOUtils"
     )
 }
+
+/// JDK class names the translator has hardcoded knowledge of.
+///
+/// These sets used to live inline in `src/lower.rs`, as `matches!` arms in
+/// one-off `-> bool` predicates. That is the "hardcoded library knowledge"
+/// cluster [0008](../claude_audits/0008-inference-machinery-does-not-reach-lowering.md)
+/// step 4 is about: facts about a *library* compiled into the translator's
+/// lowering rules, where they cannot be inspected, tested, or overridden.
+///
+/// Moving them here does not make them data-driven — `javalibs` is Rust, not a
+/// manifest — but it does put library knowledge in the library module and give
+/// each set one named query and one test. That is the honest half of step 4;
+/// see the issue for why the other half is not a mechanical move.
+/// Exception classes broad enough to be worth treating as a supertype when
+/// matching a `catch`.
+const KNOWN_EXCEPTION_SUPERTYPES: &[&str] = &[
+    "Throwable",
+    "Exception",
+    "RuntimeException",
+    "IllegalArgumentException",
+    "IllegalStateException",
+];
+
+/// `java.io` stream classes a source type can extend and still be lowered
+/// against the stream facade.
+const JDK_INPUT_STREAM_FACADE_TYPES: &[&str] = &[
+    "InputStream",
+    "FilterInputStream",
+    "GZIPInputStream",
+    "java.io.InputStream",
+    "java.io.FilterInputStream",
+    "java.util.zip.GZIPInputStream",
+];
+
+/// Whether a simple class name is one of the broad JDK exception supertypes.
+pub fn is_known_exception_supertype(simple_name: &str) -> bool {
+    KNOWN_EXCEPTION_SUPERTYPES.contains(&simple_name)
+}
+
+/// Whether a canonical external type key names a JDK input-stream facade type.
+pub fn is_jdk_input_stream_facade_type(canonical_key: &str) -> bool {
+    JDK_INPUT_STREAM_FACADE_TYPES.contains(&canonical_key)
+}
+
+#[cfg(test)]
+mod jdk_name_set_tests {
+    use super::*;
+
+    #[test]
+    fn exception_supertypes_cover_the_hierarchy_roots_and_nothing_else() {
+        assert!(is_known_exception_supertype("Throwable"));
+        assert!(is_known_exception_supertype("RuntimeException"));
+        // A specific exception is not a supertype for this purpose: treating it
+        // as one would make a narrow `catch` swallow more than Java does.
+        assert!(!is_known_exception_supertype("IOException"));
+        assert!(!is_known_exception_supertype("NumberFormatException"));
+    }
+
+    #[test]
+    fn input_stream_facade_types_match_both_spellings() {
+        assert!(is_jdk_input_stream_facade_type("InputStream"));
+        assert!(is_jdk_input_stream_facade_type("java.io.InputStream"));
+        assert!(is_jdk_input_stream_facade_type(
+            "java.util.zip.GZIPInputStream"
+        ));
+        assert!(!is_jdk_input_stream_facade_type("OutputStream"));
+        assert!(!is_jdk_input_stream_facade_type("Reader"));
+    }
+}

@@ -1,7 +1,8 @@
 use std::fs;
+use std::io::Read;
 use std::path::Path;
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use new_java2rust::facts::{
     DispatchRequirementFact, DispatchRequirementKind, ExternalApiArgumentEffectFact,
@@ -64,6 +65,74 @@ fn cargo_test_generated_modules(crate_name: &str, modules: Vec<GeneratedCrateMod
     cargo_verify_generated_modules(crate_name, modules, "test");
 }
 
+/// How long a nested `cargo` invocation may run before its test fails.
+///
+/// A nested cargo that never returns is indistinguishable, to anything waiting
+/// on this suite, from one that passed — see
+/// `claude_audits/0035-idiom-gaps-suite-never-terminates.md`. The watchdog turns
+/// a hang into a named failure so a baseline can be established at all.
+const GENERATED_CRATE_VERIFY_TIMEOUT: Duration = Duration::from_secs(300);
+
+fn generated_crate_verify_timeout() -> Duration {
+    std::env::var("NEW_JAVA2RUST_GENERATED_CRATE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(GENERATED_CRATE_VERIFY_TIMEOUT)
+}
+
+/// Outcome of a watched child process. `status` is `None` when the watchdog
+/// fired and the child was killed.
+struct WatchedOutput {
+    status: Option<std::process::ExitStatus>,
+    stdout: String,
+    stderr: String,
+}
+
+fn run_with_watchdog(command: &mut Command, timeout: Duration) -> WatchedOutput {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    // Drain both pipes on their own threads: a child that fills a pipe buffer
+    // while we are waiting on the other one would deadlock regardless of the
+    // watchdog.
+    let mut stdout_pipe = child.stdout.take().unwrap();
+    let mut stderr_pipe = child.stderr.take().unwrap();
+    let stdout_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut buf);
+        buf
+    });
+
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait().unwrap() {
+            Some(status) => break Some(status),
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            None => std::thread::sleep(Duration::from_millis(25)),
+        }
+    };
+
+    WatchedOutput {
+        status,
+        stdout: String::from_utf8_lossy(&stdout_reader.join().unwrap_or_default()).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr_reader.join().unwrap_or_default()).into_owned(),
+    }
+}
+
 fn cargo_verify_generated_modules(
     crate_name: &str,
     modules: Vec<GeneratedCrateModule>,
@@ -91,19 +160,42 @@ fn cargo_verify_generated_modules(
         ));
     }
     fs::write(src_dir.join("lib.rs"), lib_rs).unwrap();
-    let output = Command::new("cargo")
+
+    let mut command = Command::new(env!("CARGO"));
+    command
         .arg(cargo_command)
         .arg("--tests")
         .arg("--quiet")
         .current_dir(&crate_dir)
-        .output()
-        .unwrap();
+        // A nested cargo that inherits the outer run's jobserver blocks
+        // indefinitely waiting for a token the parent will never hand out, and
+        // an inherited CARGO_TARGET_DIR would make every generated crate
+        // contend on one build lock. Both are hangs, not failures.
+        .env_remove("CARGO_MAKEFLAGS")
+        .env_remove("MAKEFLAGS")
+        .env("CARGO_TARGET_DIR", crate_dir.join("target"));
+
+    let timeout = generated_crate_verify_timeout();
+    let output = run_with_watchdog(&mut command, timeout);
+
+    let Some(status) = output.status else {
+        panic!(
+            "generated crate {cargo_command} for {crate_name} did not finish within {}s and was killed; \
+             crate kept at {}",
+            timeout.as_secs(),
+            crate_dir.display()
+        );
+    };
+
     assert!(
-        output.status.success(),
+        status.success(),
         "generated crate {cargo_command} failed for {crate_name}\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        output.stdout,
+        output.stderr
     );
+
+    // Only on success: a failing or killed run keeps its crate for inspection.
+    let _ = fs::remove_dir_all(&crate_dir);
 }
 
 #[test]
@@ -9659,7 +9751,9 @@ class ChildOverloadIdentity extends BaseOverloadIdentity {
         translation
             .rust
             .contains("pub fn f_int_int(&self, a: i32, b: i32) -> i32")
-            && translation.rust.contains("pub fn f_int(&self, a: i32) -> i32")
+            && translation
+                .rust
+                .contains("pub fn f_int(&self, a: i32) -> i32")
             && translation.rust.contains("return (a).wrapping_mul(2);")
             && translation.rust.contains("return self.f_int(1);")
             && translation.rust.contains("return self.f_int_int(3, 1);"),

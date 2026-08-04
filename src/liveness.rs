@@ -76,6 +76,15 @@ fn stmt_id(stmt: &Stmt) -> usize {
     std::ptr::from_ref(stmt) as usize
 }
 
+/// The name a statement introduces, if it introduces one.
+fn declared_binding_name(stmt: &Stmt) -> Option<&str> {
+    match stmt {
+        Stmt::VarDecl { name, .. } => Some(name),
+        Stmt::EnhancedFor { var_name, .. } => Some(var_name),
+        _ => None,
+    }
+}
+
 impl LivenessAnalysis {
     /// Analyze a callable body. Nothing is live on normal exit.
     pub fn for_body(body: &Block) -> Self {
@@ -147,42 +156,26 @@ impl LivenessAnalysis {
     }
 
     /// The binding a name refers to at `stmt`.
+    ///
+    /// `scope_at` deliberately records the scope *before* a statement's own
+    /// declaration, so that `int x = x + 1` reads the outer `x`. Both callers
+    /// here ask about the program point *after* the statement, where a name the
+    /// statement declares refers to the new binding — so a declaration is
+    /// resolved to itself. Without this, "is `values` written after
+    /// `byte[] values = …`?" resolved to `OUTER_DECL`, matched nothing in the
+    /// write set, and the local came out non-`mut`.
     fn binding_at(&self, stmt: &Stmt, name: &str) -> Binding {
+        if let Some(declared) = declared_binding_name(stmt)
+            && declared == name
+        {
+            return Binding::new(name, stmt_id(stmt));
+        }
         let decl = self
             .scope_at
             .get(&stmt_id(stmt))
             .and_then(|scope| scope.get(name).copied())
             .unwrap_or(OUTER_DECL);
         Binding::new(name, decl)
-    }
-
-    /// Conservative answer for a statement the analysis never saw.
-    ///
-    /// A synthesized statement has no identity in the maps. Unioning what is
-    /// live across the block it was inserted into over-approximates — the safe
-    /// direction, costing a clone rather than a rejected move — and it uses only
-    /// solved data, so no separate textual scan is needed.
-    pub fn conservative_live_in_block(&self, block: &Block) -> HashSet<String> {
-        self.union_over_block(block, &self.live_out)
-    }
-
-    /// The write-side equivalent of [`Self::conservative_live_in_block`].
-    pub fn conservative_mutated_in_block(&self, block: &Block) -> HashSet<String> {
-        self.union_over_block(block, &self.mutated_after)
-    }
-
-    fn union_over_block(
-        &self,
-        block: &Block,
-        source: &HashMap<usize, HashSet<Binding>>,
-    ) -> HashSet<String> {
-        let mut names = HashSet::new();
-        for stmt in &block.statements {
-            if let Some(bindings) = source.get(&stmt_id(stmt)) {
-                names.extend(bindings.iter().map(|binding| binding.name.clone()));
-            }
-        }
-        names
     }
 
     /// Names that may be *written* after `stmt` completes.

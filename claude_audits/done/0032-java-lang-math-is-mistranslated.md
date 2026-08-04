@@ -93,7 +93,7 @@ propagation changes which branch a comparison takes.
 is `Integer.MIN_VALUE` (it wraps), while an `f64` round trip yields
 `2147483648.0`.
 
-This is [0009](0009-overload-identity-collapses-onto-rust-name.md)'s
+This is [0009](../0009-overload-identity-collapses-onto-rust-name.md)'s
 identity-by-name problem appearing in the **facade** model rather than in source
 classes: `Math.abs` has four overloads (`int`, `long`, `float`, `double`) and the
 model keeps one.
@@ -157,10 +157,10 @@ bound — this is why the clamp is written on `rounded` rather than on `x`.)
 | `abs(float)`/`abs(double)` | `f32::abs` / `f64::abs` |
 | `floorDiv`/`floorMod` | explicit floor-semantics helpers; **not** `div_euclid`/`rem_euclid` |
 | `sqrt`, `sin`, `cos`, `exp`, `log`, `pow`, `cbrt`, `hypot` | direct `f64` methods |
-| `PI`, `E` | `std::f64::consts::{PI, E}` — currently `0.0`, see [0031](0031-stubbed-constant-census.md) |
+| `PI`, `E` | `std::f64::consts::{PI, E}` — currently `0.0`, see [0031](../0031-stubbed-constant-census.md) |
 
 The overload set must be keyed by parameter type, not collapsed — see
-[0009](0009-overload-identity-collapses-onto-rust-name.md).
+[0009](../0009-overload-identity-collapses-onto-rust-name.md).
 
 ## Regression tests worth adding
 

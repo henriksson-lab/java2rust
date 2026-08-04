@@ -112,7 +112,7 @@ inheritance, raw types, erasure at call boundaries) — none of which are covere
 by the current examples.
 
 Do not attempt this at the same time as the object-representation work in
-[0002](0002-object-aliasing-has-no-representation.md); they both touch how a
+[0002](../0002-object-aliasing-has-no-representation.md); they both touch how a
 Java type becomes a Rust type, and simultaneous change would make failures
 unattributable.
 

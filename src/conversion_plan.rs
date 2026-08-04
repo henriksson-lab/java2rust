@@ -130,7 +130,9 @@ pub fn return_value_plan(shape: Option<&RustSlotShape>) -> ReturnValuePlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyntaxSlotCoercionPolicy {
     /// See `Coercion::ToJavaFloatStringForConcat`.
-    ToJavaFloatStringForConcat { double: bool },
+    ToJavaFloatStringForConcat {
+        double: bool,
+    },
     Identity,
     IndexToUsize,
     ToStringForConcat,

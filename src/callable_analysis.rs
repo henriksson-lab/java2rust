@@ -1,6 +1,6 @@
 use crate::exception_plan::{MethodExceptionPlan, ProgramExceptionPlan, ProgramFallibilityPlan};
 use crate::java_ir::{MethodDecl, TypeDecl};
-use crate::java_signature::{JavaCallableKey, source_method_rust_name};
+use crate::java_signature::JavaCallableKey;
 use crate::signature::{MethodSignaturePlan, SignaturePlan};
 use crate::usage::{CallGraph, MethodUsageFacts, UsageConstructorKey, UsageFacts, UsageMethodKey};
 
@@ -82,10 +82,7 @@ impl<'a> CallableAnalysis<'a> {
     }
 
     pub fn source_method_returns_result(&self, ty: &TypeDecl, method: &MethodDecl) -> bool {
-        let key = crate::usage::CallableKey::Method {
-            type_name: ty.name.clone(),
-            method_name: source_method_rust_name(method),
-        };
+        let key = crate::usage::CallableKey::source_method(ty.name.clone(), method);
         // One store: the fallibility fixpoint. `MethodExceptionPlan` is derived
         // from it, so consulting both could only ever disagree.
         self.callable_returns_result(&key)

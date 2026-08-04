@@ -762,11 +762,15 @@ fn collect_implemented_interface_name(
     seen: &mut HashSet<String>,
     out: &mut Vec<String>,
 ) {
-    if !seen.insert(interface_name.to_string()) {
+    let interface = find_type_decl(program, interface_name);
+    let canonical_name = interface
+        .map(|interface| interface.name.as_str())
+        .unwrap_or(interface_name);
+    if !seen.insert(canonical_name.to_string()) {
         return;
     }
-    out.push(interface_name.to_string());
-    if let Some(interface) = find_type_decl(program, interface_name) {
+    out.push(canonical_name.to_string());
+    if let Some(interface) = interface {
         collect_implemented_interfaces_for_type(program, interface, seen, out);
     }
 }
@@ -1348,23 +1352,25 @@ pub(crate) fn trait_method_return_shape_plan(
         .required_method_signature(interface, interface_method)
         .return_shape
         .clone()?;
-    for implementor in program.types.iter().filter(|ty| {
-        ty.kind == TypeKind::Class
-            && ty
-                .implements
-                .iter()
-                .any(|implemented| implemented == &interface.name)
-    }) {
-        let Some(implementation) = implementing_method_candidates(implementor, interface_method)
-            .into_iter()
-            .find(|candidate| {
-                trait_impl_method_compatibility_error(interface_method, candidate).is_none()
-            })
+    for implementor in program
+        .types
+        .iter()
+        .filter(|ty| type_implements_interface(program, ty, interface))
+    {
+        let Some((implementation_owner, implementation)) =
+            implementing_method_candidates_in_hierarchy(implementor, interface_method, program)
+                .into_iter()
+                .find(|candidate| {
+                    trait_impl_method_compatibility_error(interface_method, candidate.1).is_none()
+                })
         else {
             continue;
         };
         let Some(implementation_shape) = signatures
-            .required_method_signature(implementor, implementation)
+            .method_signature(implementation_owner, implementation)
+            .unwrap_or_else(|| {
+                signatures.required_method_signature(implementation_owner, implementation)
+            })
             .return_shape
             .clone()
         else {
@@ -1395,23 +1401,25 @@ pub(crate) fn trait_method_param_shape_plan(
     if interface.kind != TypeKind::Interface {
         return param_shapes;
     }
-    for implementor in program.types.iter().filter(|ty| {
-        ty.kind == TypeKind::Class
-            && ty
-                .implements
-                .iter()
-                .any(|implemented| implemented == &interface.name)
-    }) {
-        let Some(implementation) = implementing_method_candidates(implementor, interface_method)
-            .into_iter()
-            .find(|candidate| {
-                trait_impl_method_compatibility_error(interface_method, candidate).is_none()
-            })
+    for implementor in program
+        .types
+        .iter()
+        .filter(|ty| type_implements_interface(program, ty, interface))
+    {
+        let Some((implementation_owner, implementation)) =
+            implementing_method_candidates_in_hierarchy(implementor, interface_method, program)
+                .into_iter()
+                .find(|candidate| {
+                    trait_impl_method_compatibility_error(interface_method, candidate.1).is_none()
+                })
         else {
             continue;
         };
-        let implementation_signature =
-            signatures.required_method_signature(implementor, implementation);
+        let implementation_signature = signatures
+            .method_signature(implementation_owner, implementation)
+            .unwrap_or_else(|| {
+                signatures.required_method_signature(implementation_owner, implementation)
+            });
         for (index, implementation_param) in implementation_signature.params.iter().enumerate() {
             let Some(interface_shape) = param_shapes.get_mut(index) else {
                 continue;
@@ -1478,23 +1486,25 @@ pub(crate) fn trait_method_receiver_plan(
         .required_method_signature(interface, interface_method)
         .receiver;
     let mut receiver = interface_receiver;
-    for implementor in program.types.iter().filter(|ty| {
-        ty.kind == TypeKind::Class
-            && ty
-                .implements
-                .iter()
-                .any(|implemented| implemented == &interface.name)
-    }) {
-        let Some(implementation) = implementing_method_candidates(implementor, interface_method)
-            .into_iter()
-            .find(|candidate| {
-                trait_impl_method_compatibility_error(interface_method, candidate).is_none()
-            })
+    for implementor in program
+        .types
+        .iter()
+        .filter(|ty| type_implements_interface(program, ty, interface))
+    {
+        let Some((implementation_owner, implementation)) =
+            implementing_method_candidates_in_hierarchy(implementor, interface_method, program)
+                .into_iter()
+                .find(|candidate| {
+                    trait_impl_method_compatibility_error(interface_method, candidate.1).is_none()
+                })
         else {
             continue;
         };
         let implementation_receiver = signatures
-            .required_method_signature(implementor, implementation)
+            .method_signature(implementation_owner, implementation)
+            .unwrap_or_else(|| {
+                signatures.required_method_signature(implementation_owner, implementation)
+            })
             .receiver;
         if implementation_receiver == ReceiverPlan::Mutable {
             receiver = ReceiverPlan::Mutable;
@@ -1503,33 +1513,23 @@ pub(crate) fn trait_method_receiver_plan(
     Some(receiver)
 }
 
+/// The trait declaration's exception plan.
+///
+/// This used to join over every implementor with `|=`, re-doing the override
+/// equalization the fallibility fixpoint already performs — a second store, and
+/// the one 0010 is named for. That workaround was load-bearing only because
+/// `override_groups_for_program` keyed its groups on the *Java* method name
+/// while the plan is keyed on the Rust name, so the fixpoint's equalization
+/// never matched. With the keys agreeing, the solved plan is authoritative and
+/// this is a plain lookup.
 pub(crate) fn trait_method_exception_plan(
     interface: &TypeDecl,
     interface_method: &MethodDecl,
     program: &Program,
     exceptions: &ProgramExceptionPlan,
 ) -> MethodExceptionPlan {
-    let mut plan = exceptions.method_plan(interface, interface_method);
-    for implementor in program.types.iter().filter(|ty| {
-        ty.kind == TypeKind::Class
-            && ty
-                .implements
-                .iter()
-                .any(|implemented| implemented == &interface.name)
-    }) {
-        let Some(implementation) = implementing_method_candidates(implementor, interface_method)
-            .into_iter()
-            .find(|candidate| {
-                trait_impl_method_compatibility_error(interface_method, candidate).is_none()
-            })
-        else {
-            continue;
-        };
-        plan.wrap_returns_in_result |= exceptions
-            .method_plan(implementor, implementation)
-            .wrap_returns_in_result;
-    }
-    plan
+    let _ = program;
+    exceptions.method_plan(interface, interface_method)
 }
 
 fn trait_method_return_type_with_exception_plan(
@@ -1573,13 +1573,30 @@ fn implementing_method_candidates<'a>(
     ty: &'a TypeDecl,
     interface_method: &MethodDecl,
 ) -> Vec<&'a MethodDecl> {
-    ty.members
+    let candidates = ty
+        .members
         .iter()
         .filter_map(|member| match member {
             Member::Method(method) if method.name == interface_method.name => Some(method),
             _ => None,
         })
-        .collect()
+        .collect();
+    order_candidates_by_signature_identity(candidates, interface_method)
+}
+
+/// See the note on the `lower.rs` twin: candidates stay name-collected so a
+/// differently-spelled parameter type cannot lose a real implementation, but the
+/// exact signature match is tried first so an inherited overload cannot displace
+/// an override ([0009](../claude_audits/0009-overload-identity-collapses-onto-rust-name.md)).
+fn order_candidates_by_signature_identity<'a>(
+    mut candidates: Vec<&'a MethodDecl>,
+    interface_method: &MethodDecl,
+) -> Vec<&'a MethodDecl> {
+    let wanted = crate::java_signature::JavaCallableSlotKey::source_method(interface_method);
+    candidates.sort_by_key(|candidate| {
+        crate::java_signature::JavaCallableSlotKey::source_method(candidate) != wanted
+    });
+    candidates
 }
 
 fn implementing_method_candidates_in_hierarchy<'a>(
@@ -1587,23 +1604,36 @@ fn implementing_method_candidates_in_hierarchy<'a>(
     interface_method: &MethodDecl,
     program: &'a Program,
 ) -> Vec<(&'a TypeDecl, &'a MethodDecl)> {
-    let mut out = implementing_method_candidates(ty, interface_method)
+    let direct_candidates = implementing_method_candidates(ty, interface_method);
+    let mut seen_slots = direct_candidates
+        .iter()
+        .map(|method| crate::java_signature::JavaCallableSlotKey::source_method(method))
+        .collect::<HashSet<_>>();
+    let mut out = direct_candidates
         .into_iter()
         .map(|method| (ty, method))
         .collect::<Vec<_>>();
-    if !out.is_empty() {
-        return out;
-    }
     if let Some(super_name) = ty.extends.as_deref()
         && let Some(super_ty) = find_type_decl(program, super_name)
     {
-        out.extend(implementing_method_candidates_in_hierarchy(
-            super_ty,
-            interface_method,
-            program,
-        ));
+        out.extend(
+            implementing_method_candidates_in_hierarchy(super_ty, interface_method, program)
+                .into_iter()
+                .filter(|(_, method)| {
+                    seen_slots.insert(crate::java_signature::JavaCallableSlotKey::source_method(
+                        method,
+                    ))
+                }),
+        );
     }
     out
+}
+
+fn type_implements_interface(program: &Program, ty: &TypeDecl, interface: &TypeDecl) -> bool {
+    ty.kind == TypeKind::Class
+        && implemented_interfaces_for_type(program, ty)
+            .iter()
+            .any(|implemented| implemented == &interface.name)
 }
 
 fn source_class_bounds_for_type<'a>(program: &'a Program, ty: &TypeDecl) -> Vec<&'a TypeDecl> {

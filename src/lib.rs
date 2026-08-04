@@ -23,6 +23,7 @@ pub mod external_facts;
 pub mod external_packs;
 pub mod fact_saturation;
 pub mod facts;
+pub mod fallibility_invariant;
 pub mod fixtures;
 pub mod graph;
 pub mod inherited_members;
@@ -45,6 +46,7 @@ pub mod method_reference_shape;
 pub mod nullability_plan;
 pub mod object_model;
 pub mod operator_lowering;
+pub mod output_markers;
 pub mod parser;
 pub mod representation;
 pub mod representation_lowering;
@@ -60,6 +62,7 @@ pub mod slot_render;
 pub mod slot_shape;
 pub mod statement_render;
 pub mod stdlib;
+pub mod storage_strategy;
 pub mod stream;
 pub mod stream_lowering;
 pub mod stream_shape;
@@ -946,6 +949,15 @@ fn translate_parsed_source_with_context(
     // output compiles and computes a different answer, so it is reported here
     // rather than left to be discovered downstream.
     aliasing::report_observable_aliases(
+        &resolved.program,
+        &semantic.usage,
+        &mut lowered.diagnostics,
+    );
+    // Step 2 of the 0002b design: the decision rule runs, lowering does not
+    // change, and every type the plan says should be shared while lowering
+    // holds it by value is reported. That list is the work queue for the
+    // representation change and the size estimate it needs first.
+    storage_strategy::report_storage_disagreements(
         &resolved.program,
         &semantic.usage,
         &mut lowered.diagnostics,
