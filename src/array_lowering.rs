@@ -6,10 +6,29 @@ use crate::rust_ir::{RustExpr, RustStmt};
 use crate::slot_shape::{OwnershipShape, RustSlotShape};
 
 pub fn render_array_expr(plan: &ArrayExprPlan<'_>, children: Vec<RustExpr>) -> RustExpr {
+    render_array_expr_with_object_default(plan, children, false)
+}
+
+/// `render_array_expr`, told whether the element type has a usable zero value.
+///
+/// `new T[n]` allocates `n` `null` slots in Java. Without a zero value for `T`
+/// the translation used to emit `Vec::new()` — the right *type* and the wrong
+/// *length*, so every index panicked
+/// ([0034](../claude_audits/0034-object-array-allocation-produces-an-empty-vec.md)).
+/// `element_has_default` says whether `T` derives `Default`, which lowering
+/// decides from the same capability check that adds the derive, so the two
+/// cannot disagree.
+pub fn render_array_expr_with_object_default(
+    plan: &ArrayExprPlan<'_>,
+    children: Vec<RustExpr>,
+    element_has_default: bool,
+) -> RustExpr {
     match plan {
         ArrayExprPlan::Creation { element_type, .. } => {
+            let default = default_array_element_expr(element_type)
+                .or(element_has_default.then_some(OBJECT_ELEMENT_DEFAULT));
             if children.len() == 2
-                && let Some(default) = default_array_element_expr(element_type)
+                && let Some(default) = default
             {
                 return array2_from_elem_projection(
                     children[0].clone(),
@@ -18,7 +37,7 @@ pub fn render_array_expr(plan: &ArrayExprPlan<'_>, children: Vec<RustExpr>) -> R
                 );
             }
             if children.len() == 1
-                && let Some(default) = default_array_element_expr(element_type)
+                && let Some(default) = default
             {
                 return array_from_elem_projection(children[0].clone(), default);
             }
@@ -247,6 +266,20 @@ fn default_array_element_expr(element_type: &JavaType) -> Option<&'static str> {
         _ => None,
     }
 }
+
+/// The element expression for an object array whose element type derives
+/// `Default`.
+///
+/// Spelled `Default::default()` rather than `T::default()` so the element type
+/// is inferred from the annotated `Vec<T>` binding, which keeps the projection
+/// independent of how `T`'s Rust name is rendered.
+///
+/// This is the audit's option 2: length-correct, with one divergence left —
+/// reading an element that was never assigned yields a zero value where Java
+/// throws `NullPointerException`. Option 1 (`Vec<Option<T>>`) is the faithful
+/// end state and is a slot-shape change; this is strictly better than an
+/// allocation of the wrong length.
+const OBJECT_ELEMENT_DEFAULT: &str = "Default::default()";
 
 #[cfg(test)]
 mod tests {

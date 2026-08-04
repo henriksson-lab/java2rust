@@ -1,5 +1,6 @@
 pub mod access_lowering;
 pub mod aliasing;
+pub mod array_default_obligations;
 pub mod array_lowering;
 pub mod array_plan;
 pub mod binding_id;

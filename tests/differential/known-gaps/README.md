@@ -54,15 +54,3 @@ shared representation in `ObjectRepresentation`.
 The fourth case (`cell[0] = a`, an alias stored in an array element rather than
 a second local) is not yet detected: the analysis only treats a local
 declaration as an alias point.
-
-## ObjectArray.java
-
-`new T[n]` for a reference element type allocates an empty `Vec`, so the first
-index panics.
-
-```
-java:        4,3,1,ab
-translation: panic — index out of bounds: the len is 0 but the index is 0
-```
-
-See `claude_audits/0034-object-array-allocation-produces-an-empty-vec.md`.

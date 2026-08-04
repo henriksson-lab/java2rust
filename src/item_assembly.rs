@@ -990,6 +990,27 @@ fn struct_derives_for_type(
     {
         derives.push("PartialEq".to_string());
     }
+    // `Default` is added only for a type some `new T[n]` needs, not for every
+    // struct that could support it. Java allocates `n` null slots; the closest
+    // thing the value representation has is `n` default values, and that needs
+    // the derive. Restricting it to the types that need it keeps the change off
+    // every other struct's derive line — the "derive obligation" 0034 asks for,
+    // the same shape as the `Clone` obligation 0002a needed.
+    if crate::array_default_obligations::program_allocates_object_array_of(support_program, ty)
+        && ty.type_params.is_empty()
+        && fields.iter().all(|field| {
+            rust_type_supports_struct_derive_default(
+                &field.ty,
+                &type_params,
+                signatures,
+                facts,
+                support_program,
+                &mut HashSet::new(),
+            )
+        })
+    {
+        derives.push("Default".to_string());
+    }
     if source_type_declares_java_hash_equality(ty)
         && fields
             .iter()
@@ -1210,6 +1231,105 @@ fn raw_type_arg_supports_derive_clone(
 
 fn raw_dyn_trait_supports_box_clone_adapter(trait_name: &str) -> bool {
     !matches!(trait_name.trim(), "Any" | "std::any::Any")
+}
+
+/// Whether a struct field's Rust type can participate in `#[derive(Default)]`.
+///
+/// Mirrors [`rust_type_supports_struct_derive_clone`], with one deliberate
+/// difference: an *unknown* named type answers **false** rather than true.
+/// Clone can assume an unmodelled facade is `Clone` because getting it wrong
+/// costs a compile error at a site that was already using `.clone()`. Default is
+/// asked speculatively — to decide whether `new T[n]` can allocate `n` slots —
+/// so a wrong "yes" would turn a loud fallback into a broken build. A wrong
+/// "no" only keeps today's diagnostic.
+pub fn rust_type_supports_struct_derive_default(
+    ty: &RustType,
+    type_params: &HashSet<String>,
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    support_program: &Program,
+    visiting: &mut HashSet<String>,
+) -> bool {
+    match ty {
+        RustType::Unit
+        | RustType::Bool
+        | RustType::I8
+        | RustType::I16
+        | RustType::I32
+        | RustType::I64
+        | RustType::F32
+        | RustType::F64
+        | RustType::Char
+        | RustType::String => true,
+        // `Option` is `Default` (as `None`) whatever it wraps, which is what
+        // makes a recursive `Node { Node next; }` work: the field lowers to
+        // `Option<Box<Node>>` and defaults to `None` without needing `Node`
+        // itself to be constructible.
+        RustType::Option(_) => true,
+        RustType::Vec(_) | RustType::Array2(_) => true,
+        RustType::Named(name) if type_params.contains(name) => false,
+        RustType::Named(name) => rust_named_type_supports_struct_derive_default(
+            name,
+            type_params,
+            signatures,
+            facts,
+            support_program,
+            visiting,
+        ),
+        RustType::Slice(_) | RustType::Ref { .. } | RustType::Raw(_) => false,
+    }
+}
+
+/// Whether a named source type can derive `Default`.
+///
+/// Unknown names answer `false` — see the note on
+/// [`rust_type_supports_struct_derive_default`].
+pub fn rust_named_type_supports_struct_derive_default(
+    name: &str,
+    type_params: &HashSet<String>,
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    support_program: &Program,
+    visiting: &mut HashSet<String>,
+) -> bool {
+    if type_params.contains(name) {
+        return false;
+    }
+    let Some(ty) = find_type_decl_by_rust_name(support_program, name) else {
+        return false;
+    };
+    if !source_type_is_plain_struct(ty) {
+        return false;
+    }
+    // Coinductive: a type reached through its own field graph is assumed to
+    // work, exactly as the `Clone` walk does, so a self-referential type does
+    // not recurse forever.
+    if !visiting.insert(ty.name.clone()) {
+        return true;
+    }
+    let nested_type_params: HashSet<String> = ty.type_params.iter().cloned().collect();
+    let fields = struct_fields_for_type(ty, signatures, facts, support_program);
+    // A generic type has no single zero value, so it is excluded rather than
+    // guessed at.
+    let supports_default = ty.type_params.is_empty()
+        && fields.iter().all(|field| {
+            rust_type_supports_struct_derive_default(
+                &field.ty,
+                &nested_type_params,
+                signatures,
+                facts,
+                support_program,
+                visiting,
+            )
+        });
+    visiting.remove(&ty.name);
+    supports_default
+}
+
+/// `Default` is only meaningful for a type lowered as a plain struct: an
+/// interface, an enum or an erased carrier has no zero value to derive.
+fn source_type_is_plain_struct(ty: &TypeDecl) -> bool {
+    matches!(ty.kind, crate::java_ir::TypeKind::Class)
 }
 
 fn rust_named_type_supports_struct_derive_clone(

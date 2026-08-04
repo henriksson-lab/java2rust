@@ -6,9 +6,8 @@
 //! text nothing produces. Both had happened:
 //!
 //! - `count_invalid_patterns` matched `"unsupported Java array creation"` while
-//!   the emitter wrote `"Java array creation"`, so every object-array allocation
-//!   — which comes out with length zero and panics on first index — was scored
-//!   as a clean translation
+//!   the emitter wrote `"Java array creation"`, so unsupported object-array
+//!   allocations were scored as clean translations
 //!   (`claude_audits/0034-object-array-allocation-produces-an-empty-vec.md`).
 //! - Two further clauses matched `"unsupported Java lambda"` and
 //!   `"unsupported Java method reference"`, text that has never appeared in any
@@ -54,8 +53,8 @@ const FIXTURES: &[MarkerFixture] = &[
     },
     MarkerFixture {
         marker: "unsupported_java_array_creation",
-        // A *reference* element type takes the fallback; primitives do not.
-        java: "public class MarkerObjectArray { static class Node { int v; } public int m() { Node[] ns = new Node[1]; ns[0] = new Node(); return ns[0].v; } }",
+        // Unknown external reference elements still take the loud fallback.
+        java: "import com.unmodelled.Node;\npublic class MarkerObjectArray { public int m() { Node[] ns = new Node[1]; return ns.length; } }",
         counters: &["invalid_patterns"],
     },
     MarkerFixture {

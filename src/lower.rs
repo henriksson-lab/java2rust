@@ -3,7 +3,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use crate::access_lowering::{lower_bare_name, lower_field_access_with_facts};
 use crate::array_lowering::{
     array2_from_rows_projection, array2_index_projection, array2_row_mut_assign_stmt,
-    borrowed_array2_temporary_for_slot, ragged_array_outer_creation_projection, render_array_expr,
+    borrowed_array2_temporary_for_slot, ragged_array_outer_creation_projection,
+    render_array_expr_with_object_default,
 };
 use crate::array_plan::plan_array_expr;
 use crate::binding_id::BindingId;
@@ -11196,6 +11197,40 @@ impl ExprRefinements {
     }
 }
 
+/// Whether an array's element type has a zero value the allocation can use.
+///
+/// Asks the same capability check that decides whether to add
+/// `#[derive(Default)]`, so lowering and item assembly cannot disagree about
+/// whether `vec![Default::default(); n]` will compile
+/// ([0034](../claude_audits/0034-object-array-allocation-produces-an-empty-vec.md)).
+fn array_element_type_has_default(
+    plan: &crate::array_plan::ArrayExprPlan<'_>,
+    ctx: LowerCtx,
+) -> bool {
+    let crate::array_plan::ArrayExprPlan::Creation { element_type, .. } = plan else {
+        return false;
+    };
+    let JavaType::Named { name, args } = element_type else {
+        return false;
+    };
+    if !args.is_empty() {
+        return false;
+    }
+    let rust_name = crate::slot_render::rust_name_for_java_named_type(name);
+    [ctx.program, ctx.support_local_type_program]
+        .iter()
+        .any(|program| {
+            crate::item_assembly::rust_named_type_supports_struct_derive_default(
+                &rust_name,
+                &std::collections::HashSet::new(),
+                ctx.signatures,
+                ctx.facts,
+                program,
+                &mut std::collections::HashSet::new(),
+            )
+        })
+}
+
 fn lower_expr_with_refinements(
     expr: &Expr,
     env: &ShapeEnv,
@@ -11219,7 +11254,11 @@ fn lower_expr_with_refinements(
             .iter()
             .map(|child| lower_expr_with_refinements(child, env, ctx, refinements))
             .collect();
-        return render_array_expr(&array_plan, children);
+        return render_array_expr_with_object_default(
+            &array_plan,
+            children,
+            array_element_type_has_default(&array_plan, ctx),
+        );
     }
     if let Expr::Lambda { params, body } = expr {
         return lower_callback_lambda_expr(params, body, env, ctx);
@@ -21919,7 +21958,11 @@ fn lower_array_expr_for_slot(
             )
         })
         .collect();
-    let lowered = render_array_expr(&array_plan, children);
+    let lowered = render_array_expr_with_object_default(
+        &array_plan,
+        children,
+        array_element_type_has_default(&array_plan, ctx),
+    );
     if let Some(temporary) = borrowed_array2_temporary_for_slot(&lowered, target) {
         return Some(temporary);
     }

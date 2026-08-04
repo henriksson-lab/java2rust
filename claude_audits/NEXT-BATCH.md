@@ -976,7 +976,7 @@ corpus reaches the fallback in **0 of 196 files**, and `count_invalid_patterns`
 was looking for `"unsupported Java array creation"` while the marker read
 `"Java array creation"` — so the line was emitted and counted as clean. The
 marker text is fixed; the lowering is filed as
-[0034](0034-object-array-allocation-produces-an-empty-vec.md).
+[0034](done/0034-object-array-allocation-produces-an-empty-vec.md).
 
 New known-gap fixtures: `Aliasing.java` (0002), `ObjectArray.java` (0034).
 

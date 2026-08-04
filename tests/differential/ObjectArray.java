@@ -1,8 +1,12 @@
 /**
- * `new T[n]` for a reference element type allocates an empty Vec, so the first
- * index panics. Primitive arrays are fine. See claude_audits/0034.
+ * `new T[n]` for a reference element type must allocate `n` slots.
  *
- * Java prints "4,3,1,ab". The translation panics at the first `cell[0]`.
+ * It used to allocate an empty `Vec` — the right type, the wrong length — so the
+ * first index panicked while the program compiled cleanly. Primitive arrays were
+ * always fine, which is why nothing caught it.
+ *
+ * Java and the translation both print "4,3,1,ab". See
+ * claude_audits/done/0034.
  */
 public class ObjectArray {
     static class Node {
