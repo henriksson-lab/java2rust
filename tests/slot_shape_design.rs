@@ -38766,7 +38766,7 @@ public class Caller {
 
 /// Java evaluates an assignment's target subexpressions before its right-hand
 /// side; Rust evaluates the value first
-/// ([0026](../claude_audits/0026-assignment-evaluation-order-differs-from-java.md)).
+/// ([0026](../claude_audits/done/0026-assignment-evaluation-order-differs-from-java.md)).
 ///
 /// The case pinned here is the one that is easy to miss: the index has no side
 /// effect of its own, and the **value** is what changes what it denotes. The
@@ -38864,12 +38864,12 @@ public class Order {
 /// The ndarray-backed numeric case was already ordered; a `String[][]` is a
 /// `Vec<Vec<T>>` and fell through to the plain path, where Rust reads the value
 /// before either index is evaluated
-/// ([0026](../claude_audits/0026-assignment-evaluation-order-differs-from-java.md)).
+/// ([0026](../claude_audits/done/0026-assignment-evaluation-order-differs-from-java.md)).
 ///
 /// Pinned textually rather than against the Java oracle because the output for
 /// this shape does not compile for an unrelated reason — the declared type, the
 /// initialiser and the read projection pick three different carriers
-/// ([0038](../claude_audits/0038-two-dimensional-object-array-carrier-disagrees.md)).
+/// ([0038](../claude_audits/done/0038-two-dimensional-object-array-carrier-disagrees.md)).
 #[test]
 fn ragged_two_dimensional_assignment_hoists_both_indices() {
     let translation = translate_source(
@@ -38994,5 +38994,102 @@ public class Caller {
         !translation.rust.contains("u.inst(") && !translation.rust.contains("Util::pick("),
         "an overload still collapsed onto its bare name:\n{}",
         translation.rust
+    );
+}
+
+/// Java's `Object.equals` **is** reference identity unless a class overrides it.
+///
+/// Lowering compares fields either way, so `a.equals(b)` on a class with no
+/// `equals` override answers `true` where Java says `false` — and in the
+/// damaging direction: a `HashMap` or a `contains` built on it merges entries
+/// Java keeps apart. The fix needs object identity and is therefore blocked on
+/// [0002b](../claude_audits/0002b-shared-representation-design.md); until then
+/// the divergence is *reported*, which is the interim measure
+/// [0028](../claude_audits/0028-reference-equality-lowered-as-structural-equality.md)
+/// asks for.
+#[test]
+fn inherited_equals_on_a_source_class_is_reported_as_identity() {
+    let translation = translate_source(
+        r#"
+public class Eq {
+    static final class Key { final int v; Key(int v) { this.v = v; } }
+
+    public static boolean run() {
+        Key a = new Key(5);
+        Key b = new Key(5);
+        return a.equals(b);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .diagnostics
+            .has_code("java_inherited_equals_identity"),
+        "an inherited equals must be reported:\n{:?}",
+        translation.diagnostics
+    );
+}
+
+/// The negative, which is what makes the diagnostic worth having: a class that
+/// *does* override `equals` is behaving correctly and must not be reported.
+#[test]
+fn an_overridden_equals_is_not_reported_as_identity() {
+    let translation = translate_source(
+        r#"
+public class Eq {
+    static final class Key {
+        final int v;
+        Key(int v) { this.v = v; }
+        public boolean equals(Object other) { return other instanceof Key; }
+    }
+
+    public static boolean run() {
+        Key a = new Key(5);
+        Key b = new Key(5);
+        return a.equals(b);
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation
+            .diagnostics
+            .has_code("java_inherited_equals_identity"),
+        "an overridden equals is correct and must not be reported:\n{:?}",
+        translation.diagnostics
+    );
+}
+
+/// A subclass inherits its superclass's override, so it must not be reported
+/// either — the walk has to follow `extends`, not just look at the class.
+#[test]
+fn an_equals_inherited_from_a_source_superclass_is_not_reported() {
+    let translation = translate_source(
+        r#"
+public class Eq {
+    static class Base {
+        public boolean equals(Object other) { return other instanceof Base; }
+    }
+
+    static class Derived extends Base { }
+
+    public static boolean run() {
+        Derived a = new Derived();
+        Derived b = new Derived();
+        return a.equals(b);
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation
+            .diagnostics
+            .has_code("java_inherited_equals_identity"),
+        "an equals inherited from a source superclass is still an override:\n{:?}",
+        translation.diagnostics
     );
 }

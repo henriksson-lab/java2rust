@@ -83,15 +83,87 @@ pub fn collect_lowering_diagnostic_plans(
 fn collect_java_reference_identity_equality_diagnostics(
     program: &Program,
 ) -> Vec<LoweringDiagnosticPlan> {
+    let identity = SourceIdentityFacts::from_program(program);
     let mut diagnostics = Vec::new();
     for ty in &program.types {
-        collect_type_reference_identity_equality_diagnostics(ty, &mut diagnostics);
+        collect_type_reference_identity_equality_diagnostics(ty, &identity, &mut diagnostics);
     }
     diagnostics
 }
 
+/// Which source types declare their own `equals`.
+///
+/// Java's `Object.equals` **is** reference identity unless a class overrides it,
+/// so `a.equals(b)` on a class that does not override it should answer the same
+/// as `a == b`. Lowering compares structurally either way, which answers `true`
+/// where Java says `false` — and in the wrong direction: a `HashMap` or a
+/// `contains` built on it **merges entries Java keeps apart**
+/// ([0028](../claude_audits/0028-reference-equality-lowered-as-structural-equality.md)).
+#[derive(Debug, Default)]
+struct SourceIdentityFacts {
+    declared: std::collections::BTreeSet<String>,
+    declares_equals: std::collections::BTreeSet<String>,
+    extends: std::collections::BTreeMap<String, String>,
+}
+
+impl SourceIdentityFacts {
+    fn from_program(program: &Program) -> Self {
+        let mut facts = Self::default();
+        for ty in &program.types {
+            facts.collect_type(ty);
+        }
+        facts
+    }
+
+    fn collect_type(&mut self, ty: &TypeDecl) {
+        let simple = simple_type_name(&ty.name).to_string();
+        self.declared.insert(simple.clone());
+        if let Some(extends) = &ty.extends {
+            self.extends
+                .insert(simple.clone(), simple_type_name(extends).to_string());
+        }
+        for member in &ty.members {
+            match member {
+                Member::Method(method) if method.name == "equals" && method.params.len() == 1 => {
+                    self.declares_equals.insert(simple.clone());
+                }
+                Member::Type(nested) => self.collect_type(nested),
+                _ => {}
+            }
+        }
+    }
+
+    /// A source class that inherits `Object.equals` rather than overriding it,
+    /// anywhere up its `extends` chain.
+    fn inherits_object_equals(&self, type_name: &str) -> bool {
+        let mut current = simple_type_name(type_name).to_string();
+        let mut seen = std::collections::BTreeSet::new();
+        if !self.declared.contains(&current) {
+            return false;
+        }
+        while seen.insert(current.clone()) {
+            if self.declares_equals.contains(&current) {
+                return false;
+            }
+            match self.extends.get(&current) {
+                // An unknown supertype may well override it; saying nothing is
+                // the conservative direction for a warning.
+                Some(next) if !self.declared.contains(next) => return false,
+                Some(next) => current = next.clone(),
+                None => return true,
+            }
+        }
+        false
+    }
+}
+
+fn simple_type_name(name: &str) -> &str {
+    name.rsplit('.').next().unwrap_or(name)
+}
+
 fn collect_type_reference_identity_equality_diagnostics(
     ty: &TypeDecl,
+    identity: &SourceIdentityFacts,
     diagnostics: &mut Vec<LoweringDiagnosticPlan>,
 ) {
     let mut field_env = TypeEnv::new();
@@ -112,6 +184,7 @@ fn collect_type_reference_identity_equality_diagnostics(
                     collect_block_reference_identity_equality_diagnostics(
                         body,
                         &mut env,
+                        identity,
                         diagnostics,
                     );
                 }
@@ -125,6 +198,7 @@ fn collect_type_reference_identity_equality_diagnostics(
                     collect_block_reference_identity_equality_diagnostics(
                         body,
                         &mut env,
+                        identity,
                         diagnostics,
                     );
                 }
@@ -134,12 +208,13 @@ fn collect_type_reference_identity_equality_diagnostics(
                     collect_expr_reference_identity_equality_diagnostics(
                         initializer,
                         &field_env,
+                        identity,
                         diagnostics,
                     );
                 }
             }
             Member::Type(nested) => {
-                collect_type_reference_identity_equality_diagnostics(nested, diagnostics)
+                collect_type_reference_identity_equality_diagnostics(nested, identity, diagnostics)
             }
             Member::Unsupported { .. } => {}
         }
@@ -149,16 +224,18 @@ fn collect_type_reference_identity_equality_diagnostics(
 fn collect_block_reference_identity_equality_diagnostics(
     block: &Block,
     env: &mut TypeEnv,
+    identity: &SourceIdentityFacts,
     diagnostics: &mut Vec<LoweringDiagnosticPlan>,
 ) {
     for stmt in &block.statements {
-        collect_stmt_reference_identity_equality_diagnostics(stmt, env, diagnostics);
+        collect_stmt_reference_identity_equality_diagnostics(stmt, env, identity, diagnostics);
     }
 }
 
 fn collect_stmt_reference_identity_equality_diagnostics(
     stmt: &Stmt,
     env: &mut TypeEnv,
+    identity: &SourceIdentityFacts,
     diagnostics: &mut Vec<LoweringDiagnosticPlan>,
 ) {
     match stmt {
@@ -168,16 +245,26 @@ fn collect_stmt_reference_identity_equality_diagnostics(
             initializer,
         } => {
             if let Some(initializer) = initializer {
-                collect_expr_reference_identity_equality_diagnostics(initializer, env, diagnostics);
+                collect_expr_reference_identity_equality_diagnostics(
+                    initializer,
+                    env,
+                    identity,
+                    diagnostics,
+                );
             }
             env.insert_local(name.clone(), ty.clone());
         }
         Stmt::Assign { target, value } => {
-            collect_expr_reference_identity_equality_diagnostics(target, env, diagnostics);
-            collect_expr_reference_identity_equality_diagnostics(value, env, diagnostics);
+            collect_expr_reference_identity_equality_diagnostics(
+                target,
+                env,
+                identity,
+                diagnostics,
+            );
+            collect_expr_reference_identity_equality_diagnostics(value, env, identity, diagnostics);
         }
         Stmt::Expr(expr) | Stmt::Return(Some(expr)) | Stmt::Throw(expr) => {
-            collect_expr_reference_identity_equality_diagnostics(expr, env, diagnostics);
+            collect_expr_reference_identity_equality_diagnostics(expr, env, identity, diagnostics);
         }
         Stmt::Return(None) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => {}
         Stmt::If {
@@ -185,16 +272,23 @@ fn collect_stmt_reference_identity_equality_diagnostics(
             then_block,
             else_block,
         } => {
-            collect_expr_reference_identity_equality_diagnostics(condition, env, diagnostics);
+            collect_expr_reference_identity_equality_diagnostics(
+                condition,
+                env,
+                identity,
+                diagnostics,
+            );
             collect_block_reference_identity_equality_diagnostics(
                 then_block,
                 &mut env.clone(),
+                identity,
                 diagnostics,
             );
             if let Some(else_block) = else_block {
                 collect_block_reference_identity_equality_diagnostics(
                     else_block,
                     &mut env.clone(),
+                    identity,
                     diagnostics,
                 );
             }
@@ -205,10 +299,16 @@ fn collect_stmt_reference_identity_equality_diagnostics(
         | Stmt::DoWhile {
             condition, body, ..
         } => {
-            collect_expr_reference_identity_equality_diagnostics(condition, env, diagnostics);
+            collect_expr_reference_identity_equality_diagnostics(
+                condition,
+                env,
+                identity,
+                diagnostics,
+            );
             collect_block_reference_identity_equality_diagnostics(
                 body,
                 &mut env.clone(),
+                identity,
                 diagnostics,
             );
         }
@@ -224,6 +324,7 @@ fn collect_stmt_reference_identity_equality_diagnostics(
                 collect_stmt_reference_identity_equality_diagnostics(
                     init_stmt,
                     &mut loop_env,
+                    identity,
                     diagnostics,
                 );
             }
@@ -231,6 +332,7 @@ fn collect_stmt_reference_identity_equality_diagnostics(
                 collect_expr_reference_identity_equality_diagnostics(
                     condition,
                     &loop_env,
+                    identity,
                     diagnostics,
                 );
             }
@@ -238,10 +340,16 @@ fn collect_stmt_reference_identity_equality_diagnostics(
                 collect_expr_reference_identity_equality_diagnostics(
                     update_expr,
                     &loop_env,
+                    identity,
                     diagnostics,
                 );
             }
-            collect_block_reference_identity_equality_diagnostics(body, &mut loop_env, diagnostics);
+            collect_block_reference_identity_equality_diagnostics(
+                body,
+                &mut loop_env,
+                identity,
+                diagnostics,
+            );
         }
         Stmt::EnhancedFor {
             var_type,
@@ -250,15 +358,35 @@ fn collect_stmt_reference_identity_equality_diagnostics(
             body,
             ..
         } => {
-            collect_expr_reference_identity_equality_diagnostics(iterable, env, diagnostics);
+            collect_expr_reference_identity_equality_diagnostics(
+                iterable,
+                env,
+                identity,
+                diagnostics,
+            );
             let mut body_env = env.clone();
             body_env.insert_local(var_name.clone(), var_type.clone());
-            collect_block_reference_identity_equality_diagnostics(body, &mut body_env, diagnostics);
+            collect_block_reference_identity_equality_diagnostics(
+                body,
+                &mut body_env,
+                identity,
+                diagnostics,
+            );
         }
         Stmt::Switch { selector, cases } => {
-            collect_expr_reference_identity_equality_diagnostics(selector, env, diagnostics);
+            collect_expr_reference_identity_equality_diagnostics(
+                selector,
+                env,
+                identity,
+                diagnostics,
+            );
             for case in cases {
-                collect_switch_case_reference_identity_equality_diagnostics(case, env, diagnostics);
+                collect_switch_case_reference_identity_equality_diagnostics(
+                    case,
+                    env,
+                    identity,
+                    diagnostics,
+                );
             }
         }
         Stmt::Try {
@@ -272,33 +400,51 @@ fn collect_stmt_reference_identity_equality_diagnostics(
                 collect_stmt_reference_identity_equality_diagnostics(
                     resource,
                     &mut try_env,
+                    identity,
                     diagnostics,
                 );
             }
-            collect_block_reference_identity_equality_diagnostics(body, &mut try_env, diagnostics);
+            collect_block_reference_identity_equality_diagnostics(
+                body,
+                &mut try_env,
+                identity,
+                diagnostics,
+            );
             for catch in catches {
-                collect_catch_reference_identity_equality_diagnostics(catch, env, diagnostics);
+                collect_catch_reference_identity_equality_diagnostics(
+                    catch,
+                    env,
+                    identity,
+                    diagnostics,
+                );
             }
             if let Some(finally_block) = finally_block {
                 collect_block_reference_identity_equality_diagnostics(
                     finally_block,
                     &mut env.clone(),
+                    identity,
                     diagnostics,
                 );
             }
         }
         Stmt::LocalType(ty) => {
-            collect_type_reference_identity_equality_diagnostics(ty, diagnostics);
+            collect_type_reference_identity_equality_diagnostics(ty, identity, diagnostics);
         }
         Stmt::ConstructorInvocation { args, .. } => {
             for arg in args {
-                collect_expr_reference_identity_equality_diagnostics(arg, env, diagnostics);
+                collect_expr_reference_identity_equality_diagnostics(
+                    arg,
+                    env,
+                    identity,
+                    diagnostics,
+                );
             }
         }
         Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
             collect_block_reference_identity_equality_diagnostics(
                 block,
                 &mut env.clone(),
+                identity,
                 diagnostics,
             );
         }
@@ -308,22 +454,34 @@ fn collect_stmt_reference_identity_equality_diagnostics(
 fn collect_switch_case_reference_identity_equality_diagnostics(
     case: &SwitchCase,
     env: &TypeEnv,
+    identity: &SourceIdentityFacts,
     diagnostics: &mut Vec<LoweringDiagnosticPlan>,
 ) {
     let mut case_env = env.clone();
     for label in &case.labels {
         if let crate::java_ir::SwitchLabel::Expr(expr) = label {
-            collect_expr_reference_identity_equality_diagnostics(expr, &case_env, diagnostics);
+            collect_expr_reference_identity_equality_diagnostics(
+                expr,
+                &case_env,
+                identity,
+                diagnostics,
+            );
         }
     }
     for stmt in &case.statements {
-        collect_stmt_reference_identity_equality_diagnostics(stmt, &mut case_env, diagnostics);
+        collect_stmt_reference_identity_equality_diagnostics(
+            stmt,
+            &mut case_env,
+            identity,
+            diagnostics,
+        );
     }
 }
 
 fn collect_catch_reference_identity_equality_diagnostics(
     catch: &CatchClause,
     env: &TypeEnv,
+    identity: &SourceIdentityFacts,
     diagnostics: &mut Vec<LoweringDiagnosticPlan>,
 ) {
     let mut catch_env = env.clone();
@@ -333,12 +491,18 @@ fn collect_catch_reference_identity_equality_diagnostics(
         .cloned()
         .unwrap_or_else(|| JavaType::Unknown("Throwable".to_string()));
     catch_env.insert_local(catch.name.clone(), catch_ty);
-    collect_block_reference_identity_equality_diagnostics(&catch.body, &mut catch_env, diagnostics);
+    collect_block_reference_identity_equality_diagnostics(
+        &catch.body,
+        &mut catch_env,
+        identity,
+        diagnostics,
+    );
 }
 
 fn collect_expr_reference_identity_equality_diagnostics(
     expr: &Expr,
     env: &TypeEnv,
+    identity: &SourceIdentityFacts,
     diagnostics: &mut Vec<LoweringDiagnosticPlan>,
 ) {
     if let Expr::Binary { op, left, right } = expr
@@ -356,13 +520,44 @@ fn collect_expr_reference_identity_equality_diagnostics(
             });
         }
     }
+    // `a.equals(b)` on a class that does not override `equals` is *identity* in
+    // Java, not structural comparison. Same defect as `==`, and worse in effect:
+    // it answers `true` where Java says `false`, so a `HashMap` or `contains`
+    // built on it merges entries Java keeps apart.
+    if let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        ..
+    } = expr
+        && name == "equals"
+        && args.len() == 1
+        && !expr_is_null_literal(&args[0])
+        && let JavaType::Named {
+            name: receiver_type,
+            ..
+        } = infer_expr_type(receiver, env)
+        && identity.inherits_object_equals(&receiver_type)
+    {
+        diagnostics.push(LoweringDiagnosticPlan {
+            severity: Severity::Warning,
+            code: "java_inherited_equals_identity",
+            message: format!(
+                "{receiver_type} does not override equals, so Java compares references here; \
+                 lowering compares fields, which reports equal for distinct objects"
+            ),
+        });
+    }
     match expr {
-        Expr::FieldAccess(receiver, _) => {
-            collect_expr_reference_identity_equality_diagnostics(receiver, env, diagnostics)
-        }
+        Expr::FieldAccess(receiver, _) => collect_expr_reference_identity_equality_diagnostics(
+            receiver,
+            env,
+            identity,
+            diagnostics,
+        ),
         Expr::ArrayAccess(array, index) => {
-            collect_expr_reference_identity_equality_diagnostics(array, env, diagnostics);
-            collect_expr_reference_identity_equality_diagnostics(index, env, diagnostics);
+            collect_expr_reference_identity_equality_diagnostics(array, env, identity, diagnostics);
+            collect_expr_reference_identity_equality_diagnostics(index, env, identity, diagnostics);
         }
         Expr::ArrayCreation {
             dimensions,
@@ -370,68 +565,131 @@ fn collect_expr_reference_identity_equality_diagnostics(
             ..
         } => {
             for dimension in dimensions {
-                collect_expr_reference_identity_equality_diagnostics(dimension, env, diagnostics);
+                collect_expr_reference_identity_equality_diagnostics(
+                    dimension,
+                    env,
+                    identity,
+                    diagnostics,
+                );
             }
             if let Some(initializer) = initializer {
                 for item in initializer {
-                    collect_expr_reference_identity_equality_diagnostics(item, env, diagnostics);
+                    collect_expr_reference_identity_equality_diagnostics(
+                        item,
+                        env,
+                        identity,
+                        diagnostics,
+                    );
                 }
             }
         }
         Expr::ArrayInitializer(items) => {
             for item in items {
-                collect_expr_reference_identity_equality_diagnostics(item, env, diagnostics);
+                collect_expr_reference_identity_equality_diagnostics(
+                    item,
+                    env,
+                    identity,
+                    diagnostics,
+                );
             }
         }
         Expr::Binary { left, right, .. } => {
-            collect_expr_reference_identity_equality_diagnostics(left, env, diagnostics);
-            collect_expr_reference_identity_equality_diagnostics(right, env, diagnostics);
+            collect_expr_reference_identity_equality_diagnostics(left, env, identity, diagnostics);
+            collect_expr_reference_identity_equality_diagnostics(right, env, identity, diagnostics);
         }
         Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::InstanceOf { expr, .. } => {
-            collect_expr_reference_identity_equality_diagnostics(expr, env, diagnostics)
+            collect_expr_reference_identity_equality_diagnostics(expr, env, identity, diagnostics)
         }
         Expr::Ternary {
             condition,
             then_expr,
             else_expr,
         } => {
-            collect_expr_reference_identity_equality_diagnostics(condition, env, diagnostics);
-            collect_expr_reference_identity_equality_diagnostics(then_expr, env, diagnostics);
-            collect_expr_reference_identity_equality_diagnostics(else_expr, env, diagnostics);
+            collect_expr_reference_identity_equality_diagnostics(
+                condition,
+                env,
+                identity,
+                diagnostics,
+            );
+            collect_expr_reference_identity_equality_diagnostics(
+                then_expr,
+                env,
+                identity,
+                diagnostics,
+            );
+            collect_expr_reference_identity_equality_diagnostics(
+                else_expr,
+                env,
+                identity,
+                diagnostics,
+            );
         }
         Expr::Switch { selector, cases } => {
-            collect_expr_reference_identity_equality_diagnostics(selector, env, diagnostics);
+            collect_expr_reference_identity_equality_diagnostics(
+                selector,
+                env,
+                identity,
+                diagnostics,
+            );
             for case in cases {
-                collect_expr_reference_identity_equality_diagnostics(&case.value, env, diagnostics);
+                collect_expr_reference_identity_equality_diagnostics(
+                    &case.value,
+                    env,
+                    identity,
+                    diagnostics,
+                );
             }
         }
         Expr::Call { receiver, args, .. } => {
             if let Some(receiver) = receiver {
-                collect_expr_reference_identity_equality_diagnostics(receiver, env, diagnostics);
+                collect_expr_reference_identity_equality_diagnostics(
+                    receiver,
+                    env,
+                    identity,
+                    diagnostics,
+                );
             }
             for arg in args {
-                collect_expr_reference_identity_equality_diagnostics(arg, env, diagnostics);
+                collect_expr_reference_identity_equality_diagnostics(
+                    arg,
+                    env,
+                    identity,
+                    diagnostics,
+                );
             }
         }
         Expr::New { args, body, .. } => {
             for arg in args {
-                collect_expr_reference_identity_equality_diagnostics(arg, env, diagnostics);
+                collect_expr_reference_identity_equality_diagnostics(
+                    arg,
+                    env,
+                    identity,
+                    diagnostics,
+                );
             }
             if let Some(body) = body {
                 for member in body {
                     if let Member::Type(ty) = member {
-                        collect_type_reference_identity_equality_diagnostics(ty, diagnostics);
+                        collect_type_reference_identity_equality_diagnostics(
+                            ty,
+                            identity,
+                            diagnostics,
+                        );
                     }
                 }
             }
         }
         Expr::Lambda { body, .. } => match body {
-            LambdaBody::Expr(expr) => {
-                collect_expr_reference_identity_equality_diagnostics(expr, env, diagnostics)
-            }
+            LambdaBody::Expr(expr) => collect_expr_reference_identity_equality_diagnostics(
+                expr,
+                env,
+                identity,
+                diagnostics,
+            ),
             LambdaBody::Block(block) => collect_block_reference_identity_equality_diagnostics(
                 block,
                 &mut env.clone(),
+                identity,
                 diagnostics,
             ),
         },

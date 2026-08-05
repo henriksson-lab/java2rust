@@ -31,7 +31,8 @@ Already fixed and moved:
 | [0033](done/0033-receiver-mutability-not-propagated-through-lambdas.md) | a method mutating self only inside a lambda was inferred `&self` |
 | [0036](done/0036-string-concat-type-inference-is-exponential.md) | type inference was exponential in `+` chain length; a dozen segments took minutes |
 | [0037](done/0037-nested-class-outer-static-read-is-capture.md) | nested class reading an enclosing `static` lowered as an outer-*instance* capture |
-| [0038](0038-two-dimensional-object-array-carrier-disagrees.md) | `String[][]` is declared, built, written and read as **three different carriers** — output does not compile | rustc | small; the predicate already exists |
+| [0038](done/0038-two-dimensional-object-array-carrier-disagrees.md) | `String[][]` was declared, built, written and read as three different carriers |
+| [0039](done/0039-static-array-fields-lose-their-value-and-their-writes.md) | `static int[] a = new int[3]` had length 0, and every `a[i] = v` was silently discarded |
 
 Issues 0012 and 0013 were the parse-error pair in Tier 0 of
 [SUGGESTIONS.md](SUGGESTIONS.md), so that step is complete: corpus error counts
@@ -88,7 +89,7 @@ handling the idioms we currently fail, grounded in corpus error counts.
 | [0023](0023-inner-class-construction-always-panics.md) | **Every non-static inner class panics on construction**; compiles clean | runtime | blocked on 0002b |
 | [0024](done/0024-numeric-limit-constants-stubbed-to-zero.md) | **`Integer.MAX_VALUE` is `0`** — breaks every min/max idiom; live in corpus | runtime + corpus | **tiny** |
 | [0025](done/0025-interface-default-methods-are-discarded.md) | `default` method bodies dropped → runtime panic | runtime | small — Rust supports it natively |
-| [0026](0026-assignment-evaluation-order-differs-from-java.md) | Rust evaluates assignment RHS before the target; Java is the reverse | runtime | small |
+| [0026](done/0026-assignment-evaluation-order-differs-from-java.md) | Rust evaluates assignment RHS before the target; Java is the reverse | runtime | small |
 | [0027](done/0027-compound-assignment-implicit-narrowing-missing.md) | `byte b; b += 300;` → `E0308`; missing JLS 15.26.2 narrowing cast | rustc | **tiny** |
 | [0028](0028-reference-equality-lowered-as-structural-equality.md) | `==` on classes is structural, not identity — **violates decision 2** | runtime | blocked on 0002b + warning now |
 | [0029](done/0029-static-field-mutation-emits-invalid-rust.md) | `static n; n++;` → `E0067` invalid left-hand side | rustc | small |

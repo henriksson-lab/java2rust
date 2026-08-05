@@ -110,3 +110,72 @@ Node c = a;                                a == c   // true
 String s = new String("x");                s == "x" // Java false; documented divergence + warning
 "x" == "x"                                          // Java true (interned)
 ```
+
+---
+
+## Update 2026-08-05 — the `.equals()` half has a reproducer, and this issue is now on the critical path
+
+Two things found while probing
+[0002b](0002b-shared-representation-design.md)'s step-3 sequencing.
+
+### 1. `.equals()` diverges for the same reason, and it was undesigned
+
+This file says of `Rc::ptr_eq` for `==`:
+
+> With `Rc::ptr_eq` for `==`, Java's `.equals()` needs a separate path. That is
+> 0028's other half and is not designed here.
+
+It now has a reproducer. `Object.equals` in Java **is** reference identity
+unless a class overrides it:
+
+```java
+static final class Key { final int v; Key(int v) { this.v = v; } }
+Key a = new Key(5), c = new Key(5);
+a.equals(c)     // Java: false — Key does not override equals
+```
+
+The translation answers `true`, because `.equals()` is lowered to structural
+comparison whether or not the source class overrides it. Same defect as `==`,
+same cause, and the same fix once objects have identity: **an inherited
+(non-overridden) `equals` is `Rc::ptr_eq`; an overridden one calls the source
+body.** The discriminator already exists — the override graph — so this is a
+lookup, not new analysis.
+
+Note the direction of the error: it answers `true` where Java says `false`, so a
+`HashMap`/`contains`/dedup built on `.equals()` **merges entries Java keeps
+apart**. That is data loss, not just a wrong boolean.
+
+Pinned by `tests/differential/known-gaps/Identity.java`, which covers `==` and
+`.equals()`, both the true-identity and distinct-object cases.
+
+**The interim measure is now applied to this half too.** This file argues that
+an audit warning at every reference-identity comparison is "worth doing
+immediately and independently"; `==` already had one, `.equals()` did not.
+`java_inherited_equals_identity` now reports it, naming the class:
+
+```
+Immut.Key does not override equals, so Java compares references here;
+lowering compares fields, which reports equal for distinct objects
+```
+
+The discriminator follows `extends`, so a class inheriting an override from a
+source superclass is **not** reported — and an unknown supertype is treated as
+possibly overriding, which is the conservative direction for a warning. Three
+tests pin it: the positive, the overridden negative, and the
+inherited-from-superclass negative.
+
+### 2. This issue is no longer merely "blocked on 0002b" — it is *half of* it
+
+0002b's `SharedImmutable` tier turns out to have **no observable behaviour of its
+own**: a type that is never mutated after aliasing behaves identically whether it
+is copied or shared. So the representation change cannot be validated by a
+differential test without an identity operator to observe it through.
+
+Which makes the dependency mutual:
+
+- 0028 is **unimplementable** without the shared representation;
+- 0002b step 3 is **untestable** without 0028.
+
+They are one change, and `known-gaps/Identity.java` is its acceptance test —
+failing on two of four cases today, passing when both land. Recorded in 0002b
+as a correction to its sequencing.

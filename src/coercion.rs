@@ -1136,6 +1136,34 @@ pub fn static_storage_getter_body_projection(storage_name: &str, initial: RustEx
     ))
 }
 
+/// Writes one *element* of a static array back into the shared storage.
+///
+/// The getter returns the value **by value** — it clones out of the mutex — so
+/// `Self::__static_counter()[0] = v` assigns into a temporary and is silently
+/// discarded. Rust accepts it, nothing warns, and the array never changes
+/// ([0039](../claude_audits/done/0039-static-array-fields-lose-their-value-and-their-writes.md)).
+///
+/// `index` and `value` must already be bound to temporaries by the caller. That
+/// is not tidiness: `counter[0] = counter[0] + 1` re-reads the same static, and
+/// a `Mutex` is not reentrant, so evaluating either operand while holding the
+/// guard deadlocks. Binding first also gives Java's order — target
+/// subexpressions before the right-hand side
+/// ([0026](../claude_audits/done/0026-assignment-evaluation-order-differs-from-java.md)).
+///
+/// `get_or_insert_with` rather than `as_mut().unwrap()` so a write that lands
+/// before any read still installs the declared initial value.
+pub fn static_storage_element_write_projection(
+    storage_name: &str,
+    initial: &RustExpr,
+    index: &str,
+    value: &str,
+) -> String {
+    format!(
+        "{storage_name}.lock().unwrap_or_else(|poisoned| poisoned.into_inner())\n        .get_or_insert_with(|| {})[{index}] = {value};",
+        emit::emit_expr(initial)
+    )
+}
+
 pub fn static_storage_setter_body_projection(storage_name: &str) -> String {
     format!(
         "*{storage_name}.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(value);"

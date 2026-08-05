@@ -224,12 +224,12 @@ so working output is not rewritten. Both directions are pinned:
 `ragged_two_dimensional_assignment_hoists_both_indices` and
 `ndarray_backed_two_dimensional_assignment_keeps_its_own_ordered_path`.
 
-**Not** pinned against the Java oracle, and it cannot be yet: the output for
-that shape does not compile, because the declared type, the initialiser and the
-read projection choose three different carriers. That is
-[0038](0038-two-dimensional-object-array-carrier-disagrees.md), filed with the
-reproducer. When 0038 lands, this residual gets a differential fixture and this
-criterion is fully met.
+**Now also pinned against the Java oracle.** It could not be at first: the
+output for that shape did not compile, because the declared type, the
+initialiser and the read projection chose three different carriers. That was
+[0038](done/0038-two-dimensional-object-array-carrier-disagrees.md), since
+fixed, and `tests/differential/ObjectArray2D.java` (`x,y,z,v2,2`) now carries
+this case. **Criterion met.**
 
 ### 2. Array-store exception ordering — **not applicable yet**
 
@@ -250,6 +250,26 @@ Fixing the order here would produce code that is still wrong, and a fixture for
 it would fail for the aliasing reason first. It belongs with the aliasing
 fixture and is recorded there, not here.
 
-So: this issue is `partial` on **criterion 1's differential fixture only**, which
-is blocked on 0038. Criterion 2 has no work to do, and criterion 3 is no longer
-this issue's.
+### Status
+
+All three criteria are now met: criterion 1 is fixed and pinned against the Java
+oracle, criterion 2 has no work to do until array stores throw at all, and
+criterion 3 belongs to 0002.
+
+This issue is therefore **closed**. What remains of Java's evaluation-order
+surface is recorded in the two places it actually belongs — the
+`ArrayStoreException` dependency, above, and the aliasing fixture — rather than
+kept open here as a standing reminder.
+
+The sibling checks the original "Broader point" section asks for are correct
+today, and are now **pinned** rather than asserted:
+`tests/differential/EvalOrderSiblings.java` (`123,12,false,true,110`) covers
+argument evaluation order, binary operand order, and `&&`/`||` short-circuiting
+— the last checked by the side effects the *unevaluated* operand would have had,
+since that is the only way a short-circuit failure is observable. Compound
+assignment's target/value order is covered by criterion 1's fixture.
+
+They are pinned even though they pass because they share the property that made
+this issue hard to see: the generated code reads like a faithful translation, so
+a regression would look like nothing in a diff and would produce no compile
+error.

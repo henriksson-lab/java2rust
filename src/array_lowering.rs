@@ -30,7 +30,22 @@ pub fn render_array_expr_with_object_default(
             if children.len() == 2
                 && let Some(default) = default
             {
-                return array2_from_elem_projection(
+                // The `ndarray` carrier is for **primitive** elements only —
+                // `types::ndarray_array2_element_type` has always said so, and
+                // the write path has always consulted it. Construction did not,
+                // so `new String[2][2]` was built as an `Array2` while its
+                // declared type said `Vec<Vec<String>>` and `new String[2][]`
+                // built a nested `Vec`: one Java type, three carriers, and
+                // output `rustc` rejects
+                // ([0038](../claude_audits/done/0038-two-dimensional-object-array-carrier-disagrees.md)).
+                if matches!(element_type, JavaType::Primitive(_)) {
+                    return array2_from_elem_projection(
+                        children[0].clone(),
+                        children[1].clone(),
+                        default,
+                    );
+                }
+                return nested_array2_from_elem_projection(
                     children[0].clone(),
                     children[1].clone(),
                     default,
@@ -58,6 +73,23 @@ pub fn array2_from_elem_projection(rows: RustExpr, cols: RustExpr, default: &str
         emit_expr(&rows),
         emit_expr(&cols),
         default,
+    ))
+}
+
+/// `new T[rows][cols]` for a non-primitive `T`: rows of `Vec<T>`.
+///
+/// Matches what `new T[rows][]` followed by per-row allocation already
+/// produced, and what the declared type says.
+pub fn nested_array2_from_elem_projection(
+    rows: RustExpr,
+    cols: RustExpr,
+    default: &str,
+) -> RustExpr {
+    RustExpr::Raw(format!(
+        "vec![vec![{}; {}]; {}]",
+        default,
+        array_dimension_len_expr(&cols),
+        array_dimension_len_expr(&rows),
     ))
 }
 
@@ -251,7 +283,7 @@ fn split_top_level_commas(input: &str) -> Vec<&str> {
     parts.into_iter().filter(|part| !part.is_empty()).collect()
 }
 
-fn default_array_element_expr(element_type: &JavaType) -> Option<&'static str> {
+pub fn default_array_element_expr(element_type: &JavaType) -> Option<&'static str> {
     match element_type {
         JavaType::Primitive(PrimitiveType::Boolean) => Some("false"),
         JavaType::Primitive(PrimitiveType::Byte)

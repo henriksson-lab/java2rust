@@ -15,6 +15,6 @@ parser_gaps	33	0
 parser_tree_sitter	43	1
 resolve_calls	280	10
 semantic_facts	165	4
-slot_shape_design	509	81
+slot_shape_design	512	81
 type_coercion	99	10
 --lib	121	1

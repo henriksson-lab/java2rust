@@ -340,3 +340,67 @@ reason the design gives: no `borrow()`, no panic risk, so it isolates "did the
 handle plumbing work" from "did the borrow discipline work".
 
 Lowering still does not consult the plan; this remains step 2, a report.
+
+---
+
+## Update 2026-08-05 (second) — a correction to the sequencing: `SharedImmutable` cannot be tested on its own
+
+This document recommends step 3 (`SharedImmutable`) next, because it has no
+`borrow()` and no panic risk and so "isolates *did the handle plumbing work*
+from *did the borrow discipline work*". That is sound as engineering tactics and
+**wrong as a plan**, for a reason the document does not state.
+
+### The tier has no observable behaviour
+
+`SharedImmutable` is by definition a type that is aliased and **never mutated
+after sharing**. If it is never mutated, a copy and a shared handle are
+indistinguishable — that is what "immutable" means. So changing the
+representation of those 13 types changes no program output at all.
+
+Measured rather than argued. `tests/differential/known-gaps/Identity.java`:
+
+```java
+Key a = new Key(5);
+Key b = a;            // alias, never mutated
+Key c = new Key(5);   // distinct object, equal contents
+return b.get() + "," + (a == b) + "," + (a == c) + "," + a.equals(c);
+```
+
+| | Java | translation |
+|---|---|---|
+| `b.get()` — read through the alias | `5` | `5` ✓ |
+| `a == b` — true identity | `true` | `true` ✓ |
+| `a == c` — distinct objects | `false` | **`true`** |
+| `a.equals(c)` — distinct objects | `false` | **`true`** |
+
+Everything that is not an identity comparison already agrees. Both divergences
+are [0028](0028-reference-equality-lowered-as-structural-equality.md).
+
+### What that means for the plan
+
+A differential gate cannot tell step 3 from a no-op: both report "nothing
+changed". The change would be validated only structurally — the emitted types
+are `Rc<T>` and the corpus still compiles — which is exactly the kind of
+evidence this audit set keeps finding to be insufficient.
+
+So the revised sequencing is:
+
+> **Step 3 lands together with 0028's identity lowering**, not before it.
+> `Rc::ptr_eq` for `==` is what gives the tier a test, and
+> `known-gaps/Identity.java` is that test: it fails today on two of four cases
+> and passes when both land.
+
+This is not extra work bolted on. It is the same work in the order that makes it
+verifiable: 0028 is *unimplementable* without the representation, and the
+representation is *untestable* without 0028. They are one change.
+
+Step 4 (`SharedLocal`) keeps its own test —
+`tests/differential/known-gaps/Aliasing.java` — because mutation through an
+alias is observable without any identity operator.
+
+### A third finding, recorded where it belongs
+
+`a.equals(c)` is `true` in the translation and `false` in Java. Java's
+`Object.equals` **is** reference identity unless overridden, and the class in
+the fixture does not override it. 0028 names this as its "other half" and
+explicitly does not design it; it now has a reproducer, noted there.

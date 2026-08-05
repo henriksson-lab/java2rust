@@ -116,10 +116,8 @@ pub fn inherited_instance_method_refs_for_type<'a>(
 
 /// Default methods a type inherits from the interfaces it implements.
 ///
-/// This covers a type's own `implements` entries, including their
-/// super-interfaces. Defaults inherited through a superclass's `implements`
-/// remain blocked by the facade-shell issue recorded in
-/// [0025](../claude_audits/done/0025-interface-default-methods-are-discarded.md).
+/// This covers a type's own `implements` entries, their super-interfaces, and
+/// the interfaces implemented by its superclasses.
 ///
 /// The previous walk only followed `extends`, so direct interface defaults were
 /// not inherited members at all. That mattered less for lowering (the trait

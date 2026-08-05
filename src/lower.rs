@@ -1598,6 +1598,10 @@ fn static_storage_initial_value_expr(
                 )
             }
         }
+        Expr::ArrayCreation { .. } | Expr::ArrayInitializer(_) => {
+            static_storage_array_initial_value_expr(initializer, shape)
+                .unwrap_or_else(|| static_storage_initial_fallback_value(shape, ctx.facts))
+        }
         _ => static_storage_initial_fallback_value(shape, ctx.facts),
     };
     if let Some(element_ty) = shape.optional_element_type() {
@@ -1610,6 +1614,70 @@ fn static_storage_initial_value_expr(
     } else {
         value
     }
+}
+
+/// The initial value of a `static` **array** field.
+///
+/// `static int[] a = new int[3]` had no arm here at all, so it fell to the
+/// fallback — `Vec::new()`, the right type and the wrong length, so the first
+/// index panics. That is the shape
+/// [0034](../claude_audits/done/0034-object-array-allocation-produces-an-empty-vec.md)
+/// fixed for *local* allocations and which the static-storage path computes
+/// separately ([0039](../claude_audits/done/0039-static-array-fields-lose-their-value-and-their-writes.md)).
+///
+/// Deliberately narrow: a constant length and constant elements, which is what
+/// a `static final`-style array declaration almost always is. Anything else
+/// keeps the old fallback rather than guessing — this runs during item
+/// assembly, with no shape environment to lower a general expression against.
+fn static_storage_array_initial_value_expr(
+    initializer: &Expr,
+    shape: &crate::slot_shape::RustSlotShape,
+) -> Option<RustExpr> {
+    let JavaType::Array(element_ty) = &shape.java_ty else {
+        return None;
+    };
+    let scope = crate::source_constant_values::ConstantScope::new();
+    let render_element = |expr: &Expr| -> Option<String> {
+        let value = crate::source_constant_values::fold_constant_expr(expr, &scope)?;
+        let rendered = value.rust_value_for(element_ty)?;
+        // `rust_value_for` renders a Java `String` constant as a `&'static str`
+        // literal, which is right for `pub const` and wrong here: the storage is
+        // a `Vec<String>`.
+        Some(match element_ty.as_ref() {
+            JavaType::String => format!("{rendered}.to_string()"),
+            _ => rendered,
+        })
+    };
+    match initializer {
+        Expr::ArrayCreation {
+            dimensions,
+            initializer: Some(elements),
+            ..
+        } if dimensions.is_empty() => render_array_literal(elements, &render_element),
+        Expr::ArrayInitializer(elements) => render_array_literal(elements, &render_element),
+        Expr::ArrayCreation {
+            dimensions,
+            initializer: None,
+            ..
+        } if dimensions.len() == 1 => {
+            let length = crate::source_constant_values::fold_constant_expr(&dimensions[0], &scope)?
+                .rust_value_for(&JavaType::Primitive(PrimitiveType::Int))?;
+            let default = crate::array_lowering::default_array_element_expr(element_ty)?;
+            Some(RustExpr::Raw(format!("vec![{default}; {length} as usize]")))
+        }
+        _ => None,
+    }
+}
+
+fn render_array_literal(
+    elements: &[Expr],
+    render_element: &dyn Fn(&Expr) -> Option<String>,
+) -> Option<RustExpr> {
+    let rendered = elements
+        .iter()
+        .map(render_element)
+        .collect::<Option<Vec<_>>>()?;
+    Some(RustExpr::Raw(format!("vec![{}]", rendered.join(", "))))
 }
 
 fn static_primitive_storage_initial_value_expr(
@@ -1826,7 +1894,15 @@ fn static_const_reference_name_for_type<'a>(ty: &'a TypeDecl, name: &'a str) -> 
 }
 
 fn static_storage_symbol_name(ty: &TypeDecl, field_name: &str) -> String {
-    let type_name = crate::slot_render::rust_name_for_java_named_type(&ty.name);
+    static_storage_symbol_name_for_owner(&ty.name, field_name)
+}
+
+/// The storage global's name, from the owner's *Java* name.
+///
+/// Split out so the element-write path can name the same global the accessors
+/// do without holding the `TypeDecl`; one spelling, so they cannot drift.
+fn static_storage_symbol_name_for_owner(owner_java_name: &str, field_name: &str) -> String {
+    let type_name = crate::slot_render::rust_name_for_java_named_type(owner_java_name);
     let raw = format!(
         "{}_{}",
         crate::parser::to_snake_case(&type_name),
@@ -5485,6 +5561,12 @@ fn lower_stmt(
             }
             if let Some(stmt) =
                 lower_static_storage_assignment_stmt(target, value, env, ctx, refinements)
+            {
+                out.push(stmt);
+                return;
+            }
+            if let Some(stmt) =
+                lower_static_storage_element_assignment_stmt(target, value, env, ctx, refinements)
             {
                 out.push(stmt);
                 return;
@@ -12813,7 +12895,7 @@ fn lower_ordered_array_index_assignment_stmt(
 /// not recognise it and Rust's order applies: the value is read before the
 /// index increments, and the write lands on the wrong element with the wrong
 /// value. Java evaluates the whole place first
-/// ([0026](../claude_audits/0026-assignment-evaluation-order-differs-from-java.md)).
+/// ([0026](../claude_audits/done/0026-assignment-evaluation-order-differs-from-java.md)).
 ///
 /// The index is hoisted by lowering the place with the index replaced by the
 /// temporary's name, so the field projection — optional carriers, reference
@@ -13128,7 +13210,7 @@ fn lower_ordered_array2_index_assignment_stmt(
 /// object array is a `Vec<Vec<T>>` and fell through to the plain path, where
 /// Rust's order applies and the value is read before either index is evaluated.
 /// Java evaluates the array reference, then the indices, then the value
-/// ([0026](../claude_audits/0026-assignment-evaluation-order-differs-from-java.md)).
+/// ([0026](../claude_audits/done/0026-assignment-evaluation-order-differs-from-java.md)).
 ///
 /// Both indices are hoisted, in Java's left-to-right order, even when only one
 /// of them is order-sensitive: the first index has to be evaluated before the
@@ -13274,7 +13356,7 @@ fn array_assignment_receiver_is_one_dimensional(expr: &Expr, env: &ShapeEnv) -> 
 ///
 /// That one is easy to miss because `b[0]` reads `0` either way — the defect is
 /// that a different element was written. See
-/// [0026](../claude_audits/0026-assignment-evaluation-order-differs-from-java.md).
+/// [0026](../claude_audits/done/0026-assignment-evaluation-order-differs-from-java.md).
 fn assignment_order_is_observable(target_part: &Expr, value: &Expr, env: &ShapeEnv) -> bool {
     if expr_has_assignment_order_side_effect(target_part) {
         return true;
@@ -14066,6 +14148,93 @@ fn lower_static_storage_assignment_stmt(
         static_storage_setter_for_name(static_name, env, ctx),
         vec![assigned_value],
     )))
+}
+
+/// `staticArray[i] = v` — a write to one element of a Java `static` array.
+///
+/// Without this it lowers to `Self::__static_a()[i] = v`, which assigns into the
+/// temporary the getter cloned out of the mutex and is **silently discarded**
+/// ([0039](../claude_audits/done/0039-static-array-fields-lose-their-value-and-their-writes.md)).
+///
+/// Index and value are bound before the guard is taken, because the right-hand
+/// side commonly re-reads the same static (`a[i] = a[i] + 1`) and a `Mutex` is
+/// not reentrant — doing it the other way round deadlocks rather than
+/// misbehaving. It also gives Java's evaluation order for free.
+fn lower_static_storage_element_assignment_stmt(
+    target: &Expr,
+    value: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustStmt> {
+    let Expr::ArrayAccess(array, index) = target else {
+        return None;
+    };
+    let Expr::Var(name) = array.as_ref() else {
+        return None;
+    };
+    if env.local_type(name).is_some() || env.is_instance_field(name) {
+        return None;
+    }
+    let static_name = env.static_storage_field_access_name(name)?.to_string();
+    let owner_name = env
+        .static_storage_field_owner(&static_name)
+        .or(ctx.current_type)?;
+    let (owner, field) = find_static_storage_owner_field(owner_name, &static_name, ctx)?;
+    let shape = ctx
+        .signatures
+        .required_field_shape(&owner.name, &field.name);
+    let storage_name = static_storage_symbol_name_for_owner(&owner.name, &field.name);
+    let initial = static_storage_initial_value_expr(owner, field, &shape, ctx);
+
+    let JavaType::Array(element_ty) = &shape.java_ty else {
+        return None;
+    };
+    let element_slot = Slot::Assignment(RustSlotShape::conservative(element_ty.as_ref().clone()));
+    let lowered_index = lower_index_expr(index, env, ctx);
+    let lowered_value =
+        lower_assignment_value_for_slot(target, value, env, &element_slot, ctx, refinements);
+    let lowered_value =
+        adapt_reused_owned_value_for_slot(lowered_value, value, &element_slot, env, ctx);
+
+    Some(RustStmt::Raw(format!(
+        "{{\n    let __java_static_index = {};\n    let __java_static_value = {};\n    {}\n}}",
+        emit::emit_expr(&lowered_index),
+        emit::emit_expr(&lowered_value),
+        crate::coercion::static_storage_element_write_projection(
+            &storage_name,
+            &initial,
+            "__java_static_index",
+            "__java_static_value",
+        ),
+    )))
+}
+
+/// The type and field declaring a static-storage field, searched across the
+/// programs lowering can see.
+fn find_static_storage_owner_field<'a>(
+    owner_name: &str,
+    static_name: &str,
+    ctx: LowerCtx<'a>,
+) -> Option<(&'a TypeDecl, &'a FieldDecl)> {
+    [
+        ctx.program,
+        ctx.support_local_type_program,
+        ctx.source_summary_type_program,
+    ]
+    .into_iter()
+    .find_map(|program| {
+        let ty = find_context_type_by_key(program, owner_name)?;
+        let field = ty.members.iter().find_map(|member| match member {
+            Member::Field(field)
+                if field.modifiers.contains(&Modifier::Static) && field.name == static_name =>
+            {
+                Some(field)
+            }
+            _ => None,
+        })?;
+        Some((ty, field))
+    })
 }
 
 fn lower_static_storage_assignment_value_expr(
@@ -22399,7 +22568,19 @@ fn lower_array_access_expr(
         ))
         .is_some()
     {
-        if two_dimensional_array_expr_uses_nested_slice(outer_array, env, ctx) {
+        // Reading asked "is this two-dimensional?" while writing asked "is the
+        // element a primitive?", so a `String[][]` was written with nested
+        // indexing and read as `g[[i, j]]`
+        // ([0038](../claude_audits/done/0038-two-dimensional-object-array-carrier-disagrees.md)).
+        // Both now ask the same question, which is the only way the two can
+        // agree by construction.
+        if ndarray_element_type_after_optional(&crate::types::infer_expr_type(
+            outer_array,
+            env.type_env(),
+        ))
+        .is_none()
+            || two_dimensional_array_expr_uses_nested_slice(outer_array, env, ctx)
+        {
             return indexed_expr(
                 indexed_expr(
                     lower_read_sequence_receiver(outer_array, env, ctx, refinements),

@@ -26,7 +26,7 @@
  *
  * Java prints "1,0:0:0,15,1,1".
  *
- * See claude_audits/0026-assignment-evaluation-order-differs-from-java.md.
+ * See claude_audits/done/0026-assignment-evaluation-order-differs-from-java.md.
  */
 public class EvalOrder {
     int field = 0;

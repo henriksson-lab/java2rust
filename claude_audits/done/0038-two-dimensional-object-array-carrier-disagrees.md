@@ -122,3 +122,57 @@ agree.
   **one decision taken independently at several sites**, which disagree. The
   predicate here already exists, which makes this the cheapest instance of that
   pattern currently open.
+
+---
+
+## Update 2026-08-05 — fixed
+
+One predicate, consulted by every site that decides the carrier.
+
+`types::ndarray_array2_element_type` already said what the rule is — the ndarray
+carrier is for **primitive** elements — and the write path already asked it. The
+two sites that did not:
+
+- **Construction** (`array_lowering::render_array_expr_with_object_default`)
+  took the ndarray branch for any two-dimensional creation with a known element
+  default, so `new String[2][2]` was built as an `Array2` while the declared type
+  said `Vec<Vec<String>>`. It now asks the predicate and otherwise emits
+  `vec![vec![default; cols]; rows]` — which is what `new String[2][]` followed
+  by per-row allocation already produced, so the two Java allocation forms now
+  agree as well.
+- **Read** (`lower_array_access_expr`) asked a *different question*:
+  `two_dimensional_element_type_after_optional`, which is true for any element
+  type. That is why a `String[][]` was written with nested indexing and read as
+  `g[[i, j]]`. It now asks the same predicate as the write.
+
+The `two_dimensional_array_expr_uses_nested_slice` special case stays: it covers
+`static final` const arrays of primitives that are nested slices, which is a
+genuine exception rather than a second answer to the same question.
+
+### Verification
+
+`tests/differential/ObjectArray2D.java`, against the Java oracle, prints
+`x,y,z,v2,2` from both toolchains. It covers both allocation forms of
+`String[][]`, a **source** type as the element, and the ragged evaluation-order
+case from 0026 — so all four sites are forced to agree, and the fixture would
+fail if any one of them drifted back.
+
+Two cases are deliberately excluded, each because it would fail for a second,
+unrelated reason:
+
+- `int[][]`, the primitive control: a local `int[][]` pulls in `ndarray`, which
+  the differential harness does not link. Covered by
+  `ndarray_backed_two_dimensional_assignment_keeps_its_own_ordered_path` instead.
+- `StringBuilder[][]`, an *external facade* element: still falls back to an empty
+  `Vec`, the two-dimensional form of the residual
+  [0034](done/0034-object-array-allocation-produces-an-empty-vec.md) records. A
+  source type (`Cell`) is used instead.
+
+`scripts/gate.sh --all`: zero deltas.
+
+### What this unblocks
+
+[0026](0026-assignment-evaluation-order-differs-from-java.md)'s ragged
+multi-level residual, which was fixed but could only be pinned textually because
+the output did not compile. It now has a differential fixture, so that issue's
+exit criterion 1 is fully met.

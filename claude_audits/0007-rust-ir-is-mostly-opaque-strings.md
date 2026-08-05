@@ -348,3 +348,90 @@ signal, and it moved because arms were deleted rather than added.
 the one Tier 5 (optional carriers) will need. The anti-regression lint stays
 last, as this file has said twice: adding it before every question has a tag
 would only force the checks underground.
+
+---
+
+## Update 2026-08-05 (third pass) — the optional-projection family needs `actual`, not another tag variant
+
+Status: **still open.** The family this file named as "next" was attempted and
+**deliberately not migrated**, for a reason that is a correction to the design
+rather than a lack of effort.
+
+### What the family actually asks
+
+`apply_optional_borrowed_element_target_view` (`src/coercion.rs`) is five arms
+that all ask the same idempotence question, each about a *different* adapter:
+
+| target (ownership, view) | adapter | text check |
+|---|---|---|
+| `SharedBorrow, Slice` | `.as_deref()` | `ends_with(".as_deref()")` |
+| `MutableBorrow, Slice` | `.as_deref_mut()` | `ends_with(".as_deref_mut()")` |
+| `SharedBorrow, Str` | `.as_ref().map(\|v\| v.as_str())` | `ends_with(…)` |
+| `SharedBorrow, Native` | `.as_ref()` | `ends_with(".as_ref()")` |
+| `MutableBorrow, Native` | `.as_mut()` | `ends_with(".as_mut()")` |
+
+The question is **not** "what kind of thing is this expression" — it is "which
+of these five adapters has already been applied". `RustExprShape` has one name
+for all of them, `OptionalProjected`.
+
+### Why tagging them anyway would emit wrong code
+
+The monotone rule that made the earlier migrations safe —
+`tag == expected || <old text check>`, so a tag can only turn `false` into
+`true` — does **not** make this family safe, and it is worth being explicit
+about why, because the rule is stated in this file as though it were universal.
+
+In these arms `true` means *skip the adapter*. So a tag that is right about the
+family and wrong about the member suppresses an adapter that was needed:
+tag `.as_deref()`'s result `OptionalProjected`, and the `SharedBorrow, Native`
+arm will decline to add `.as_ref()` because it sees the family tag. The result
+is a missing adapter — a type error at best, a wrong borrow at worst.
+
+Where `true` means "already correct" (`expr_is_string_view`) monotonicity is
+genuinely safe. Where `true` means "do nothing", it is not. **The rule is about
+the *consumer's* interpretation of `true`, not about tagging.** That distinction
+was not stated before and is the reason this pass stopped.
+
+### The constraint that blocks it
+
+`RustExprShape` is `#[derive(Copy)]` and `RustSlotShape` is not, so the shape
+cannot simply carry the slot it produced. Adding five more coarse variants would
+work mechanically and would encode one call site's arm list into a shared enum.
+
+This file's own step 1 already proposes the right answer, and it is the part not
+yet built:
+
+> `LoweredExpr { expr: RustExpr, shape: RustExprShape, actual: RustSlotShape }`
+
+`actual` is what this family needs — the *resulting slot shape*, which the arm
+computes anyway (`target_element`) and then throws away. With it, every arm's
+question becomes `actual == target_element` and all five text checks go at once,
+along with the three in `apply_required_borrowed_element_target_view`.
+
+So the ordering in the previous update's "Next" was wrong: this family is not
+the next tagging step, it is the first consumer of `actual`, and `actual` should
+be built first.
+
+### Re-measurement
+
+```
+2026-08-03: 598 Raw, 52 round trips, 56 fragments, 12 Shaped sites
+2026-08-03: 604 Raw, 52 round trips, 52 fragments, 27 Shaped sites
+2026-08-05: 609 Raw, 49 round trips, 52 fragments, 15 `RustExpr::shaped(` sites
+```
+
+Round trips 52 → 49 (38 of them still in `coercion.rs`). Fragments unchanged at
+52, which is correct: nothing was deleted this pass because nothing was
+migrated.
+
+`Raw` continues to rise and continues to be the wrong number to watch, for the
+reason given twice above.
+
+### Revised next
+
+1. Add `actual: RustSlotShape` alongside the coarse tag — the audit's step 1,
+   and the prerequisite this pass discovered.
+2. Then migrate the optional-projection family and
+   `apply_required_borrowed_element_target_view` together: eight text checks,
+   one question, one mechanism.
+3. The anti-regression lint stays last, unchanged.
