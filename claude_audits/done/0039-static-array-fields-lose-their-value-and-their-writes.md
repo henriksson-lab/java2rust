@@ -210,3 +210,68 @@ is the more common one and is correct as it stands.
 Non-constant static array initializers, as above. `static int[] a = compute();`
 keeps the empty-`Vec` fallback and will still panic on first index — loud, and
 the same class as the rest of this file, but out of reach of a fold.
+
+---
+
+## Update 2026-08-05 (second pass) — two gaps in the first fix
+
+Both found by review rather than by the gate, which is worth noting: the gate
+was green after the first pass and stayed green through both of these.
+
+### 1. Only the *bare* spelling was fixed
+
+`lower_static_storage_element_assignment_stmt` matched `Expr::Var`, so
+`a[i] = v` was routed through the storage and **`Outer.a[i] = v` was not** — it
+still went through the by-value accessor and was still silently discarded. The
+same defect, one syntax later, and the fixture did not catch it because it used
+only the bare form.
+
+`static_storage_element_target_owner_field` now handles both, resolving the
+declaring type from the receiver for the qualified form. The nested-class case
+is the one a bare name cannot exercise: `Inner` writing `Outer.a[0]` has to take
+the owner from the receiver rather than from the type being lowered.
+
+### 2. "Constant length" overstated what was folded
+
+The initial-value fold was given an **empty** `ConstantScope`, so it folded only
+*literal* lengths and elements. `static final int N = 3; static int[] a = new
+int[N];` — ordinary Java, and the shape most likely to use a named size — did
+not fold, kept the empty-`Vec` fallback, and still panicked on first index. The
+text claiming "a constant length or element list" was true only of literals.
+
+`owner_constant_scope` now seeds the scope with the owning type's own
+`static final` constants, folded in declaration order (which is the order a Java
+compiler requires anyway, since a forward reference is an error).
+
+**And then twice more, because "the owner's own constants" was also too narrow.**
+Review closed two further gaps in the same fold, each reached by a different
+syntax and each ending in the same empty `Vec`:
+
+- a *qualified* reference to a sibling constant — `new int[Owner.TWO]` — which
+  the bare-name scope could not resolve, so the constants are now recorded under
+  their qualified spellings as well;
+- a constant owned by a **different type** — `new int[Sizes.M]`, ordinary Java —
+  which no per-owner scope can see. The fold now starts from the whole program's
+  `static final` declarations (`resolve::fold_constant_declarations`, the same
+  fixpoint the summary-source path uses) and layers the owner's bare names on
+  top.
+
+Worth being explicit about the failure mode, because "does not fold" sounds
+benign: the fallback is `Vec::new()`, so the array has **length 0** and the
+first index panics. A missed fold here is not a missed optimisation.
+
+### Verification
+
+`tests/differential/StaticArrayQualified.java`, against the Java oracle, both
+printing `11,5,3,7,2`:
+
+- `Outer.b[0] = 7` — qualified, same class;
+- `Inner.write()` doing `Outer.a[0] = 11` — qualified, from a nested class;
+- `a[1] = 5` — bare, the case the first pass covered;
+- `static final int N = 3` as the array length, and `TWO = N - 1` so a constant
+  defined from another constant is exercised too;
+- `new int[StaticArrayQualified.TWO]` — the qualified spelling of a sibling;
+- `new int[Sizes.M]` and `{N, Sizes.M}` — a constant owned by another type, as
+  both a length and an element.
+
+`scripts/gate.sh --all`: zero deltas.

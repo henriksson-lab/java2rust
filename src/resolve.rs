@@ -5993,6 +5993,20 @@ pub struct ConstantDeclaration {
 
 /// Folds `declarations` to a fixpoint and reports the values that resolve.
 pub fn constant_value_facts_from_declarations(declarations: &[ConstantDeclaration]) -> FactSet {
+    let (facts, _) = fold_constant_declarations(declarations);
+    facts
+}
+
+/// Folds `declarations` and returns both the value facts and the scope they
+/// were folded in.
+///
+/// The scope is what a *later* fold needs in order to resolve a constant owned
+/// by another type — `static int[] a = new int[Other.N];`, which is ordinary
+/// Java and which a per-owner scope cannot answer
+/// ([0039](../claude_audits/done/0039-static-array-fields-lose-their-value-and-their-writes.md)).
+pub fn fold_constant_declarations(
+    declarations: &[ConstantDeclaration],
+) -> (FactSet, crate::source_constant_values::ConstantScope) {
     let mut facts = FactSet::default();
     let mut scope = crate::source_constant_values::ConstantScope::new();
     let mut folded: std::collections::BTreeMap<
@@ -6063,7 +6077,7 @@ pub fn constant_value_facts_from_declarations(declarations: &[ConstantDeclaratio
                 });
         }
     }
-    facts
+    (facts, scope)
 }
 
 fn collect_static_final_constant_declarations(

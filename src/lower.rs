@@ -1599,7 +1599,7 @@ fn static_storage_initial_value_expr(
             }
         }
         Expr::ArrayCreation { .. } | Expr::ArrayInitializer(_) => {
-            static_storage_array_initial_value_expr(initializer, shape)
+            static_storage_array_initial_value_expr(ty, initializer, shape, ctx)
                 .unwrap_or_else(|| static_storage_initial_fallback_value(shape, ctx.facts))
         }
         _ => static_storage_initial_fallback_value(shape, ctx.facts),
@@ -1630,13 +1630,15 @@ fn static_storage_initial_value_expr(
 /// keeps the old fallback rather than guessing — this runs during item
 /// assembly, with no shape environment to lower a general expression against.
 fn static_storage_array_initial_value_expr(
+    owner: &TypeDecl,
     initializer: &Expr,
     shape: &crate::slot_shape::RustSlotShape,
+    ctx: LowerCtx,
 ) -> Option<RustExpr> {
     let JavaType::Array(element_ty) = &shape.java_ty else {
         return None;
     };
-    let scope = crate::source_constant_values::ConstantScope::new();
+    let scope = owner_constant_scope(owner, ctx);
     let render_element = |expr: &Expr| -> Option<String> {
         let value = crate::source_constant_values::fold_constant_expr(expr, &scope)?;
         let rendered = value.rust_value_for(element_ty)?;
@@ -1667,6 +1669,57 @@ fn static_storage_array_initial_value_expr(
         }
         _ => None,
     }
+}
+
+/// A fold scope holding `owner`'s own `static final` constants.
+///
+/// `static final int N = 3; static int[] a = new int[N];` is ordinary Java, and
+/// an empty scope would fold neither the length nor an element that names a
+/// sibling constant — leaving the empty-`Vec` fallback and its panic in place
+/// for exactly the declarations most likely to use a named size
+/// ([0039](../claude_audits/done/0039-static-array-fields-lose-their-value-and-their-writes.md)).
+///
+/// Declaration order is the fold order, which is the order a Java compiler
+/// requires anyway: a forward reference to a later field is an error.
+fn owner_constant_scope(
+    owner: &TypeDecl,
+    ctx: LowerCtx,
+) -> crate::source_constant_values::ConstantScope {
+    // Constants owned by *other* types first — `new int[Other.N]` is ordinary
+    // Java and a per-owner scope answers it with the empty-`Vec` fallback,
+    // i.e. a length-0 array and a panic on first index.
+    let mut declarations = crate::resolve::static_final_constant_declarations(ctx.program);
+    for program in [
+        ctx.support_local_type_program,
+        ctx.source_summary_type_program,
+    ] {
+        declarations.extend(crate::resolve::static_final_constant_declarations(program));
+    }
+    let (_, mut scope) = crate::resolve::fold_constant_declarations(&declarations);
+    let mut own = std::collections::BTreeMap::new();
+    for member in &owner.members {
+        let Member::Field(field) = member else {
+            continue;
+        };
+        if !field.modifiers.contains(&Modifier::Static)
+            || !field.modifiers.contains(&Modifier::Final)
+        {
+            continue;
+        }
+        let Some(initializer) = field.initializer.as_ref() else {
+            continue;
+        };
+        scope.focus_on_owner(None, own.clone());
+        let Some(value) = crate::source_constant_values::fold_constant_expr(initializer, &scope)
+        else {
+            continue;
+        };
+        scope.record(&owner.name, &field.name, value.clone());
+        own.insert(field.name.clone(), value.clone());
+        own.insert(crate::parser::to_snake_case(&field.name), value);
+    }
+    scope.focus_on_owner(None, own);
+    scope
 }
 
 fn render_array_literal(
@@ -14170,17 +14223,7 @@ fn lower_static_storage_element_assignment_stmt(
     let Expr::ArrayAccess(array, index) = target else {
         return None;
     };
-    let Expr::Var(name) = array.as_ref() else {
-        return None;
-    };
-    if env.local_type(name).is_some() || env.is_instance_field(name) {
-        return None;
-    }
-    let static_name = env.static_storage_field_access_name(name)?.to_string();
-    let owner_name = env
-        .static_storage_field_owner(&static_name)
-        .or(ctx.current_type)?;
-    let (owner, field) = find_static_storage_owner_field(owner_name, &static_name, ctx)?;
+    let (owner, field) = static_storage_element_target_owner_field(array, env, ctx)?;
     let shape = ctx
         .signatures
         .required_field_shape(&owner.name, &field.name);
@@ -14208,6 +14251,51 @@ fn lower_static_storage_element_assignment_stmt(
             "__java_static_value",
         ),
     )))
+}
+
+/// The type and field a static-array element write targets.
+///
+/// Both spellings Java allows. Only the bare one was handled at first, so
+/// `Outer.a[i] = v` kept writing into the accessor's cloned temporary — the same
+/// silent discard, one syntax later
+/// ([0039](../claude_audits/done/0039-static-array-fields-lose-their-value-and-their-writes.md)).
+fn static_storage_element_target_owner_field<'a>(
+    array: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx<'a>,
+) -> Option<(&'a TypeDecl, &'a FieldDecl)> {
+    match array {
+        // `a[i] = v` — unqualified, so the declaring type is the one the shape
+        // environment recorded for the name, or the type being lowered.
+        Expr::Var(name) => {
+            if env.local_type(name).is_some() || env.is_instance_field(name) {
+                return None;
+            }
+            let static_name = env.static_storage_field_access_name(name)?.to_string();
+            let owner_name = env
+                .static_storage_field_owner(&static_name)
+                .or(ctx.current_type)?;
+            find_static_storage_owner_field(owner_name, &static_name, ctx)
+        }
+        // `Owner.a[i] = v` / `pkg.Outer.a[i] = v` — the receiver names the type.
+        Expr::FieldAccess(receiver, field_name) => {
+            let owner_name = static_qualified_owner_path(receiver)?;
+            find_static_storage_owner_field(&owner_name, field_name, ctx)
+        }
+        _ => None,
+    }
+}
+
+/// `a.b.C` from a `FieldAccess` chain, for a qualified static owner.
+fn static_qualified_owner_path(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Var(name) => Some(name.clone()),
+        Expr::FieldAccess(receiver, field) => Some(format!(
+            "{}.{field}",
+            static_qualified_owner_path(receiver)?
+        )),
+        _ => None,
+    }
 }
 
 /// The type and field declaring a static-storage field, searched across the

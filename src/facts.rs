@@ -3400,7 +3400,40 @@ fn external_api_argument_effects_agree(
         && first.provenance == second.provenance
 }
 
+/// Every spelling an external type name can be matched under.
+///
+/// Memoized because it is a **pure function of its argument** that sits on the
+/// hottest path in the translator: `external_type_name_matches` is called once
+/// per external-pack member during a linear scan, and it recomputed the alias
+/// list — `to_snake_case`, `canonical_external_receiver_type_key`, and several
+/// `String` allocations — for *both* names on every comparison.
+///
+/// Profiled on a seven-method file with one context-summary source: 38% of
+/// samples under `external_type_name_matches`, with `to_snake_case` (14.6%),
+/// `canonical_external_receiver_type_key` (13.8%) and ~25% in
+/// `malloc`/`free`/`realloc` as the self-time leaders. The names repeat
+/// constantly across the scan, so almost all of that work was recomputation.
+///
+/// Safe to cache process-wide precisely because it depends on nothing but the
+/// string: no facts, no program, no configuration.
 fn external_type_name_aliases(type_name: &str) -> Vec<String> {
+    thread_local! {
+        static CACHE: std::cell::RefCell<HashMap<String, Vec<String>>> =
+            std::cell::RefCell::new(HashMap::new());
+    }
+    if let Some(cached) = CACHE.with(|cache| cache.borrow().get(type_name).cloned()) {
+        return cached;
+    }
+    let aliases = external_type_name_aliases_uncached(type_name);
+    CACHE.with(|cache| {
+        cache
+            .borrow_mut()
+            .insert(type_name.to_string(), aliases.clone())
+    });
+    aliases
+}
+
+fn external_type_name_aliases_uncached(type_name: &str) -> Vec<String> {
     let mut aliases = external_direct_type_name_aliases(type_name);
     let canonical = crate::stdlib::canonical_external_receiver_type_key(type_name);
     if let Some(simple) = package_qualified_simple_alias(type_name) {

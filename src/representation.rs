@@ -32,6 +32,16 @@ pub struct RepresentationPlan {
     types: HashMap<String, TypeRepresentation>,
     hierarchy_edges_by_subtype: HashMap<String, Vec<ObjectHierarchyEdge>>,
     diagnostics: Vec<RepresentationDiagnostic>,
+    /// How each type's values are *held* — by value, or behind a shared handle.
+    ///
+    /// Carried here because this plan is the one both signature solving and
+    /// lowering already consult, and a storage decision that only lowering can
+    /// see would let the two disagree about a type's Rust type. Step 2 of
+    /// [0002b](../claude_audits/0002b-shared-representation-design.md) computed
+    /// this plan and reported it *after* lowering; nothing reads it yet, and
+    /// moving it in front of representation planning is the step that makes it
+    /// readable at all.
+    storage: crate::storage_strategy::StoragePlan,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,6 +90,7 @@ pub fn plan_representations(program: &Program, facts: &FactSet) -> Representatio
     let mut plan = RepresentationPlan::default();
     let effective_facts = EffectiveFacts::new(facts);
     let usage = crate::usage::analyze_usage_with_facts(program, facts);
+    plan.storage = crate::storage_strategy::plan_storage_strategies(program, &usage);
     let object_plan = plan_object_model_from_input(ObjectModelInput {
         program,
         facts,
@@ -238,6 +249,19 @@ fn external_final_facade_should_keep_concrete_dispatch(
 impl RepresentationPlan {
     pub fn type_representations(&self) -> impl Iterator<Item = &TypeRepresentation> {
         self.types.values()
+    }
+
+    /// How values of `type_name` are held.
+    ///
+    /// `StorageStrategy::Value` is both the default and the answer for a type
+    /// the plan has never heard of, so a caller cannot accidentally treat
+    /// "unknown" as "shared".
+    pub fn storage_strategy(&self, type_name: &str) -> crate::storage_strategy::StorageStrategy {
+        self.storage.strategy(type_name)
+    }
+
+    pub fn storage(&self) -> &crate::storage_strategy::StoragePlan {
+        &self.storage
     }
 
     pub fn type_representation(&self, type_name: &str) -> Option<&TypeRepresentation> {

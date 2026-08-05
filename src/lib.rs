@@ -982,16 +982,16 @@ fn translate_parsed_source_with_context(
     // change, and every type the plan says should be shared while lowering
     // holds it by value is reported. That list is the work queue for the
     // representation change and the size estimate it needs first.
+    storage_strategy::report_storage_disagreements(
+        &resolved.program,
+        &semantic.usage,
+        &mut lowered.diagnostics,
+    );
     // A non-static inner class compiles and then panics on construction. The
     // translator has to say so; a compile-error count cannot see it.
     inner_class_capture::report_unconstructable_inner_classes(
         &resolved.program,
         &semantic.facts,
-        &mut lowered.diagnostics,
-    );
-    storage_strategy::report_storage_disagreements(
-        &resolved.program,
-        &semantic.usage,
         &mut lowered.diagnostics,
     );
     let rust = emit::emit_file(&lowered.file);

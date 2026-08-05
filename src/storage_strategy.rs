@@ -290,12 +290,12 @@ fn collect_type_facts(
                     collect_unknown_boundary_escapes(method_usage, declared, into);
                 }
                 if let Some(body) = &method.body {
-                    collect_block_facts(body, ty, program, declared, into);
+                    collect_block_facts(body, ty, program, declared, false, into);
                 }
             }
             Member::Constructor(constructor) => {
                 if let Some(body) = &constructor.body {
-                    collect_block_facts(body, ty, program, declared, into);
+                    collect_block_facts(body, ty, program, declared, true, into);
                 }
             }
             Member::Type(nested) => {
@@ -352,10 +352,11 @@ fn collect_block_facts(
     owner: &TypeDecl,
     program: &Program,
     declared: &BTreeSet<String>,
+    in_constructor: bool,
     into: &mut BTreeMap<String, TypeStorageFacts>,
 ) {
     for stmt in &block.statements {
-        collect_stmt_facts(stmt, owner, program, declared, into);
+        collect_stmt_facts(stmt, owner, program, declared, in_constructor, into);
     }
 }
 
@@ -364,6 +365,7 @@ fn collect_stmt_facts(
     owner: &TypeDecl,
     program: &Program,
     declared: &BTreeSet<String>,
+    in_constructor: bool,
     into: &mut BTreeMap<String, TypeStorageFacts>,
 ) {
     match stmt {
@@ -383,18 +385,52 @@ fn collect_stmt_facts(
             }
         }
         Stmt::Assign { target, value } => {
-            if expr_is_bare_handle(value)
-                && matches!(target, Expr::FieldAccess(..) | Expr::ArrayAccess(..))
-            {
-                // An alias stored into a field or an element. The type is not
-                // available here without a type environment, so charge the
-                // owner: it is the type whose object graph now has two edges to
-                // one value.
-                if let Some(facts) = into.get_mut(&owner.name) {
-                    facts.escape = facts.escape.max(Escape::Stored);
+            if expr_is_bare_handle(value) {
+                match target {
+                    // `this.f = x` stores an alias *of `f`'s declared type*.
+                    // Charging the **owner** instead — which is what this did,
+                    // for want of a type environment — marked `Stored` on every
+                    // class whose constructor assigns a parameter to a field,
+                    // including `this.v = v` where `v` is an `int`. That is
+                    // almost every class, so the escape input said "shared" for
+                    // types that never leave a local
+                    // ([0002b](../claude_audits/0002b-shared-representation-design.md)).
+                    //
+                    // The field's declared type is available right here, and it
+                    // is the correct answer rather than a cheaper one.
+                    Expr::FieldAccess(receiver, field_name)
+                        if matches!(receiver.as_ref(), Expr::This) =>
+                    {
+                        if let Some(name) = field_type_name(owner, field_name, declared)
+                            && let Some(facts) = into.get_mut(&name)
+                        {
+                            facts.escape = facts.escape.max(Escape::Stored);
+                        }
+                    }
+                    // A qualified field or an array element: the element type is
+                    // genuinely not available here, so the conservative charge
+                    // on the owner stands.
+                    Expr::FieldAccess(..) | Expr::ArrayAccess(..) => {
+                        if let Some(facts) = into.get_mut(&owner.name) {
+                            facts.escape = facts.escape.max(Escape::Stored);
+                        }
+                    }
+                    _ => {}
                 }
             }
-            if let Expr::FieldAccess(receiver, _) = target
+            // A field write inside a *constructor* is not mutation in this
+            // lattice's sense. `mutated` distinguishes `SharedImmutable`
+            // (`Rc<T>`) from `SharedLocal` (`Rc<RefCell<T>>`), and the question
+            // it asks is whether a value is mutated **after being shared** —
+            // construction necessarily precedes any alias to the object.
+            //
+            // Counting it moved exactly the population the design expects to
+            // find in `SharedImmutable` ("value objects, keys, strings") into
+            // the harder tier: a `final`-field class whose only writes are
+            // `this.v = v` was reported `SharedLocal`
+            // ([0002b](../claude_audits/0002b-shared-representation-design.md)).
+            if !in_constructor
+                && let Expr::FieldAccess(receiver, _) = target
                 && let Some(name) = handle_type_name(receiver, owner, declared)
                 && let Some(facts) = into.get_mut(&name)
             {
@@ -406,9 +442,9 @@ fn collect_stmt_facts(
             else_block,
             ..
         } => {
-            collect_block_facts(then_block, owner, program, declared, into);
+            collect_block_facts(then_block, owner, program, declared, in_constructor, into);
             if let Some(else_block) = else_block {
-                collect_block_facts(else_block, owner, program, declared, into);
+                collect_block_facts(else_block, owner, program, declared, in_constructor, into);
             }
         }
         Stmt::While { body, .. }
@@ -417,7 +453,7 @@ fn collect_stmt_facts(
         | Stmt::EnhancedFor { body, .. }
         | Stmt::Block(body)
         | Stmt::LabeledBlock { body, .. } => {
-            collect_block_facts(body, owner, program, declared, into)
+            collect_block_facts(body, owner, program, declared, in_constructor, into)
         }
         Stmt::Try {
             resources,
@@ -426,20 +462,27 @@ fn collect_stmt_facts(
             finally_block,
         } => {
             for resource in resources {
-                collect_stmt_facts(resource, owner, program, declared, into);
+                collect_stmt_facts(resource, owner, program, declared, in_constructor, into);
             }
-            collect_block_facts(body, owner, program, declared, into);
+            collect_block_facts(body, owner, program, declared, in_constructor, into);
             for catch in catches {
-                collect_block_facts(&catch.body, owner, program, declared, into);
+                collect_block_facts(&catch.body, owner, program, declared, in_constructor, into);
             }
             if let Some(finally_block) = finally_block {
-                collect_block_facts(finally_block, owner, program, declared, into);
+                collect_block_facts(
+                    finally_block,
+                    owner,
+                    program,
+                    declared,
+                    in_constructor,
+                    into,
+                );
             }
         }
         Stmt::Switch { cases, .. } => {
             for case in cases {
                 for stmt in &case.statements {
-                    collect_stmt_facts(stmt, owner, program, declared, into);
+                    collect_stmt_facts(stmt, owner, program, declared, in_constructor, into);
                 }
             }
         }
@@ -566,5 +609,89 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(unknown.strategy(), StorageStrategy::SharedLocal);
+    }
+}
+
+#[cfg(test)]
+mod constructor_mutation_tests {
+    use super::*;
+    use crate::parser::parse_java_source;
+
+    /// Resolves first, because nested type names are qualified during
+    /// resolution and the plan is keyed by the qualified name — the same
+    /// program the lowering pipeline hands it.
+    fn strategy_of(source: &str, type_name: &str) -> StorageStrategy {
+        let parsed = parse_java_source(source);
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let usage = crate::usage::analyze_usage(&resolved.program);
+        plan_storage_strategies(&resolved.program, &usage).strategy(type_name)
+    }
+
+    /// A constructor writing its own fields is **not** mutation in this
+    /// lattice.
+    ///
+    /// `mutated` decides `SharedImmutable` (`Rc<T>`) against `SharedLocal`
+    /// (`Rc<RefCell<T>>`, borrow discipline, panic risk), and the question it
+    /// asks is whether a value is mutated *after being shared*. Construction
+    /// necessarily precedes any alias, so counting it put the exact population
+    /// the design expects in `SharedImmutable` — value objects and keys — into
+    /// the harder tier.
+    #[test]
+    fn constructor_field_writes_do_not_make_a_type_mutable() {
+        let strategy = strategy_of(
+            r#"
+public class Outer {
+    static final class Key {
+        final int v;
+        Key(int v) { this.v = v; }
+        int get() { return v; }
+    }
+    static int run() { Key a = new Key(1); Key b = a; return b.get(); }
+}
+"#,
+            "Outer.Key",
+        );
+        assert_eq!(strategy, StorageStrategy::SharedImmutable);
+    }
+
+    /// The negative: a write from an ordinary method still counts, or the
+    /// distinction would be meaningless.
+    #[test]
+    fn a_method_field_write_still_makes_a_type_mutable() {
+        let strategy = strategy_of(
+            r#"
+public class Outer {
+    static final class Cell {
+        int v;
+        Cell(int v) { this.v = v; }
+        void set(int x) { this.v = x; }
+        int get() { return v; }
+    }
+    static int run() { Cell a = new Cell(1); Cell b = a; a.set(2); return b.get(); }
+}
+"#,
+            "Outer.Cell",
+        );
+        assert_eq!(strategy, StorageStrategy::SharedLocal);
+    }
+
+    /// A type that is never aliased stays `Value` whichever way it is written —
+    /// the escape/alias inputs still gate everything.
+    #[test]
+    fn an_unaliased_type_stays_held_by_value() {
+        let strategy = strategy_of(
+            r#"
+public class Outer {
+    static final class Local {
+        int v;
+        Local(int v) { this.v = v; }
+        int get() { return v; }
+    }
+    static int run() { Local a = new Local(1); return a.get(); }
+}
+"#,
+            "Outer.Local",
+        );
+        assert_eq!(strategy, StorageStrategy::Value);
     }
 }

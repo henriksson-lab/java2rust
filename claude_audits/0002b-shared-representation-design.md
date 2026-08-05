@@ -404,3 +404,92 @@ alias is observable without any identity operator.
 `Object.equals` **is** reference identity unless overridden, and the class in
 the fixture does not override it. 0028 names this as its "other half" and
 explicitly does not design it; it now has a reproducer, noted there.
+
+---
+
+## Update 2026-08-05 (third) — two wrong inputs, and the estimate halves
+
+Attempting step 3 turned up two defects in the *plan itself*. Both were
+over-approximations, both fired on very common shapes, and together they had
+inflated the population and put it in the wrong tier.
+
+### 1. `mutated` counted constructor field writes
+
+`mutated` is the bit that separates `SharedImmutable` (`Rc<T>` — no borrow, no
+panic risk) from `SharedLocal` (`Rc<RefCell<T>>` — borrow discipline, panic
+risk). The question it is supposed to ask is whether a value is mutated **after
+being shared**; this document says so in the lattice comment.
+
+The walk counted *any* field write, including `this.v = v;` in a constructor. But
+construction necessarily precedes any alias to the object — there is nothing to
+observe a constructor's writes through. So a `final`-field value class, the exact
+population this document names for `SharedImmutable` ("value objects, keys,
+strings"), was landing in the harder tier:
+
+```
+Identity.Key needs SharedLocal (… locally_aliased=true, mutated=true …)
+```
+
+Constructor bodies are still walked for *escape*; only the mutation signal is
+suppressed. A setter that happens to be called only from a constructor still
+counts, which is right: it is public and can be called later.
+
+### 2. `escape` charged the owner for `this.v = v` on an `int`
+
+The `Stmt::Assign` arm charged `Escape::Stored` to the **owner** whenever a bare
+handle was assigned into a field, with the comment "the type is not available
+here without a type environment".
+
+The field's declared type *is* available — the walk holds the owning `TypeDecl`,
+and `field_type_name` was already being used two lines away for the mutation
+signal. Charging the owner instead meant that **every class whose constructor
+assigns a parameter to a field** was marked `Stored`, including `this.v = v`
+where `v` is an `int`. That is almost every class, so the escape input reported
+"shared" for types that never leave a local:
+
+```
+Unaliased.Local needs SharedImmutable (escape=Stored, locally_aliased=false …)
+```
+
+Now `this.f = x` charges `f`'s declared type. A *qualified* field or an array
+element keeps the conservative owner charge, because there the element type
+genuinely is not available.
+
+### The revised measurement
+
+Same corpus, same three roots, distinct names:
+
+| tier | as documented | after both fixes |
+|---|---:|---:|
+| `SharedImmutable` (`Rc<T>`) | 14 | **19** |
+| `SharedLocal` (`Rc<RefCell<T>>`) | 34 | **4** |
+| `SharedSync` | 0 | 0 |
+| **distinct types needing sharing** | **47** | **22** |
+
+The population is **less than half** what this document costed, and the split
+has inverted. That matters more than the total:
+
+- `SharedLocal` is the tier with the `RefCell` hazard — the *"never hold a
+  borrow across a call"* rule, and the risk of turning a Java-legal program into
+  a runtime abort. It is **4 types**, not 34.
+- `SharedImmutable` is 19 of 23 tier assignments, and it needs no `borrow()` at
+  all.
+
+So the "large but not deep" characterisation holds and the depth is concentrated
+in four types. Whether the remaining 4 justify `RefCell` at all, or should be
+handled some other way, is now a question worth asking — it was not, at 34.
+
+### What this does *not* change
+
+The sequencing correction from the previous update stands: `SharedImmutable`
+still has no observable behaviour of its own, so step 3 still has to land with
+0028's identity lowering to be testable. Fewer types, same acceptance test.
+
+### Pinned
+
+Three tests in `src/storage_strategy.rs`: a constructor-only writer is
+`SharedImmutable`, a method writer is still `SharedLocal` (or the distinction
+would be meaningless), and an unaliased type stays `Value`. They resolve the
+program first, because the plan is keyed by qualified nested type names.
+
+`scripts/gate.sh --all`: zero deltas — the plan is still report-only.
