@@ -703,15 +703,12 @@ fn infer_binary_type(op: BinaryOp, left: &Expr, right: &Expr, env: &TypeEnv) -> 
         | BinaryOp::Ge
         | BinaryOp::And
         | BinaryOp::Or => JavaType::Primitive(PrimitiveType::Boolean),
+        // Ask about the operands directly. Rebuilding the `Expr::Binary` node
+        // here — deep-cloning both subtrees — made this exponential in the
+        // length of a `+` chain; see the note on
+        // `binary_add_operands_make_string_concat`.
         BinaryOp::Add
-            if crate::string_concat::is_string_concat(
-                &Expr::Binary {
-                    op,
-                    left: Box::new(left.clone()),
-                    right: Box::new(right.clone()),
-                },
-                env,
-            ) =>
+            if crate::string_concat::binary_add_operands_make_string_concat(left, right, env) =>
         {
             JavaType::String
         }

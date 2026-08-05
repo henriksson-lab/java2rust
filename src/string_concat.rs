@@ -48,7 +48,20 @@ fn binary_add_is_string_concat(expr: &Expr, env: &TypeEnv) -> bool {
     }
 }
 
-fn binary_add_operands_make_string_concat(left: &Expr, right: &Expr, env: &TypeEnv) -> bool {
+/// Whether a `+` whose operands are `left` and `right` is a string concatenation.
+///
+/// Public so callers that already hold the operands can ask directly instead of
+/// rebuilding the `Expr::Binary` node to pass to [`is_string_concat`].
+/// `infer_binary_type` used to do exactly that — deep-cloning both subtrees to
+/// reconstruct a node it was already looking at — which made type inference
+/// **exponential** in the length of a `+` chain, because the reconstructed node
+/// was then re-analysed down the same path. An eleven-segment concatenation
+/// took over two minutes to translate.
+///
+/// For a `Binary { Add, left, right }` node this is equivalent to
+/// `is_string_concat` on that node: when the operand check passes, flattening
+/// descends into both sides and so always yields more than one part.
+pub fn binary_add_operands_make_string_concat(left: &Expr, right: &Expr, env: &TypeEnv) -> bool {
     matches!(infer_expr_type(left, env), JavaType::String)
         || matches!(infer_expr_type(right, env), JavaType::String)
 }

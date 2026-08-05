@@ -6102,17 +6102,12 @@ fn collect_type_signatures(
             ),
         );
     }
-    for inherited in
-        crate::inherited_members::external_inherited_instance_methods_for_type(ty, facts)
-    {
-        let method_key = MethodKey {
-            type_name: ty.name.clone(),
-            rust_name: inherited.rust_name.clone(),
-        };
-        plan.methods.entry(method_key).or_insert_with(|| {
-            external_inherited_method_signature(&inherited, representations, facts)
-        });
-    }
+    // Source-declared members first. `or_insert` means whoever registers a key
+    // first wins, and an *external* inherited signature is a guess (often unit)
+    // while a source-inherited one is solved. Registering the external ones
+    // first meant a class that inherits an interface `default` through its
+    // superclass got `fn greet(&self)` with no return type, because an
+    // unresolved call had recorded the superclass as an external API receiver.
     for inherited in
         crate::inherited_members::inherited_instance_method_refs_for_type(ty, support_program)
     {
@@ -6127,6 +6122,17 @@ fn collect_type_signatures(
         plan.methods_by_java_key
             .entry(java_key)
             .or_insert(signature);
+    }
+    for inherited in
+        crate::inherited_members::external_inherited_instance_methods_for_type(ty, facts)
+    {
+        let method_key = MethodKey {
+            type_name: ty.name.clone(),
+            rust_name: inherited.rust_name.clone(),
+        };
+        plan.methods.entry(method_key).or_insert_with(|| {
+            external_inherited_method_signature(&inherited, representations, facts)
+        });
     }
 }
 

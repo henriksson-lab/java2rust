@@ -127,3 +127,50 @@ class Outer { int base = 10; class In { int get(){ return base; } }
 
 The mutate-after-construction step is the point: it distinguishes by-reference
 capture from a copy, and a copy-based implementation would return 10.
+
+---
+
+## Update 2026-08-05 — the interim requirement is met; the repair still needs 0002b
+
+Status: **still open** for the feature. What changed is that it is no longer
+silent.
+
+This file asked: *"Until then, this should be a translator diagnostic, not a
+runtime `panic!` embedded in generated code. As written, a corpus reports zero
+compile errors for a program guaranteed to abort."* Both halves are now covered:
+
+- **The translator reports it.** `src/inner_class_capture.rs` walks the program
+  for types with an outer-`this` capture and emits
+  `inner_class_construction_panics`, naming the inner type, the enclosing type,
+  and why:
+
+  ```
+  Warning inner_class_construction_panics: IC.Adder captures an enclosing IC
+  instance, but its constructor cannot obtain a shared handle to it, so
+  `new IC.Adder(…)` panics at runtime. Needs the shared object representation
+  (0002b); the generated code compiles either way.
+  ```
+
+- **The corpus metric sees it.** The panic text is now the
+  `UNSUPPORTED_INNER_CLASS_OUTER_CAPTURE` constant in `src/output_markers.rs`,
+  read by both the emitter and `count_invalid_patterns`, with a fixture in
+  `tests/output_markers.rs` that fails if the lowering stops emitting it. So an
+  inner class no longer contributes zero to every quality signal the project has.
+
+Deliberately a **warning** rather than a `compile_error!`: refusing to emit would
+hide the rest of a file behind one feature gap, and the generated code is exactly
+what it was. The point is attribution, not obstruction.
+
+### Why the repair is still not here
+
+Unchanged, and confirmed while doing the above. To construct the inner class a
+method of `Outer` must hand over an `Rc<RefCell<Outer>>`, and its receiver is
+`&mut Outer`. No local change produces that handle: it requires `Outer` itself to
+be *represented* as a shared handle, which is
+[0002b](0002b-shared-representation-design.md)'s `SharedLocal` tier.
+
+The narrower option this file floats — apply the shared representation only to
+classes that are outer types of inner classes — remains the right first consumer,
+and is now better supported: the diagnostic above enumerates exactly that set of
+types, so the blast radius can be measured before the representation work
+starts rather than guessed at.

@@ -26,6 +26,13 @@ pub struct ShapeEnv {
     static_field_names: HashMap<String, String>,
     static_field_owners: HashMap<String, String>,
     static_storage_field_names: HashMap<String, String>,
+    /// Declaring type of each static-storage field, so a reference from a
+    /// *nested* class qualifies the accessor with the class that owns it
+    /// instead of assuming `Self`
+    /// ([0037](../claude_audits/done/0037-nested-class-outer-static-read-is-capture.md)).
+    static_storage_field_owners: HashMap<String, String>,
+    /// The type whose members this environment was built for, when known.
+    current_type: Option<String>,
     type_static_storage_field_names: HashMap<(String, String), String>,
     instance_field_names: HashSet<String>,
     binding_ids: HashMap<String, BindingId>,
@@ -336,6 +343,59 @@ impl ShapeEnv {
         self.static_storage_field_names
             .insert(name.clone(), name.clone());
         self.static_storage_field_names.insert(alias, name);
+    }
+
+    /// As [`Self::insert_static_storage_field_shape`], also recording which type
+    /// declares the field.
+    pub fn insert_static_storage_field_shape_owned_by(
+        &mut self,
+        owner: &str,
+        name: impl Into<String>,
+        shape: RustSlotShape,
+    ) {
+        let name = name.into();
+        let alias = crate::parser::to_snake_case(&name);
+        self.insert_static_storage_field_shape(name.clone(), shape);
+        self.static_storage_field_owners
+            .insert(name, owner.to_string());
+        self.static_storage_field_owners
+            .insert(alias, owner.to_string());
+    }
+
+    /// The type declaring the static-storage field `name`, if known.
+    pub fn static_storage_field_owner(&self, name: &str) -> Option<&str> {
+        self.static_storage_field_owners
+            .get(name)
+            .map(String::as_str)
+    }
+
+    /// Records the type this environment lowers members of.
+    pub fn set_current_type(&mut self, name: impl Into<String>) {
+        self.current_type = Some(name.into());
+    }
+
+    /// The Rust type to qualify an unqualified static-storage read with, or
+    /// `None` when `Self` is right.
+    ///
+    /// A nested class's environment also carries the enclosing class's statics
+    /// (they are in scope in Java), so `Self` names the wrong type whenever the
+    /// declaring type is not the one being lowered
+    /// ([0037](../claude_audits/done/0037-nested-class-outer-static-read-is-capture.md)).
+    pub fn static_storage_accessor_qualifier(&self, name: &str) -> Option<String> {
+        let owner = self.static_storage_field_owners.get(name)?;
+        let current = self.current_type.as_ref()?;
+        if owner == current {
+            return None;
+        }
+        // The current type declaring it under its own key wins over a stale
+        // cross-type record, whichever order the two seedings ran in.
+        if self
+            .type_static_storage_field_names
+            .contains_key(&(current.clone(), name.to_string()))
+        {
+            return None;
+        }
+        Some(crate::slot_render::rust_name_for_java_named_type(owner))
     }
 
     pub fn insert_static_storage_field_shape_with_java_type(
@@ -734,6 +794,7 @@ fn shape_env_for_type_with_fields(
     include_instance_fields: bool,
 ) -> ShapeEnv {
     let mut env = ShapeEnv::new();
+    env.set_current_type(&ty.name);
     seed_type_param_bounds(&mut env, &ty.type_params, &ty.type_param_bounds);
     for member in &ty.members {
         if let Member::Field(field) = member {

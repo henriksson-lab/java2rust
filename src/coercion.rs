@@ -1116,15 +1116,30 @@ pub fn qualified_static_storage_setter_path_projection(owner: &str, static_name:
     ))
 }
 
+/// Reads a Java `static` field from process-wide storage.
+///
+/// A Java `static` is **one variable shared by every thread**. This used to read
+/// a `thread_local!`, giving each thread its own copy — so a shared counter,
+/// cache or registry silently became per-thread, and a lazily initialised
+/// singleton was built once *per thread*
+/// ([0030](../claude_audits/done/0030-java-statics-are-thread-local.md)).
+///
+/// The lock is taken and released within the accessor, so no guard is ever held
+/// across a call — the same discipline
+/// [0002b](../claude_audits/0002b-shared-representation-design.md) requires of
+/// `RefCell`, and for the same reason: Java's monitors are reentrant and Rust's
+/// are not.
 pub fn static_storage_getter_body_projection(storage_name: &str, initial: RustExpr) -> RustExpr {
     RustExpr::Raw(format!(
-        "{storage_name}.with(|cell| cell.borrow().clone().unwrap_or_else(|| {}))",
+        "{storage_name}.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone().unwrap_or_else(|| {})",
         emit::emit_expr(&initial)
     ))
 }
 
 pub fn static_storage_setter_body_projection(storage_name: &str) -> String {
-    format!("{storage_name}.with(|cell| *cell.borrow_mut() = Some(value));")
+    format!(
+        "*{storage_name}.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(value);"
+    )
 }
 
 pub fn associated_const_projection(owner: &str, member: &str) -> RustExpr {
@@ -3444,7 +3459,8 @@ pub fn abstract_interface_method_stub_projection(owner: &str, method: &str) -> R
 
 pub fn unsupported_outer_capture_constructor_projection(owner: &str, outer_type: &str) -> RustExpr {
     RustExpr::Raw(format!(
-        "panic!(\"unsupported Java inner-class outer capture construction for {owner}; pass an outer {outer_type} handle\")"
+        "panic!(\"{} for {owner}; pass an outer {outer_type} handle\")",
+        crate::output_markers::UNSUPPORTED_INNER_CLASS_OUTER_CAPTURE
     ))
 }
 

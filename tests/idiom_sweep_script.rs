@@ -2818,9 +2818,15 @@ pub fn unsupported_examples() {
     compile_error!("unsupported Java expression: unsupported expression node: switch_expression");
 }
 
-pub fn facade_examples() {
-    unimplemented!("Graphics.drawLine is not modelled");
-    Default::default()
+impl GraphicsFacade for Graphics {
+    fn draw_line(&self) { unimplemented!("Graphics.drawLine is not modelled"); }
+    /// A modelled surface with no behaviour behind it.
+    fn get_font(&self) -> Font { Default::default() }
+}
+
+impl From<ZipOutputStream> for OutputStream {
+    /// Unmodelled Java upcast: ZipOutputStream -> OutputStream.
+    fn from(_value: ZipOutputStream) -> Self { Default::default() }
 }
 
 pub const UNKNOWN_LIMIT: i32 = { compile_error!("external static constant SomeLib.UNKNOWN_LIMIT has no modeled value"); 0 };
@@ -2834,6 +2840,60 @@ pub const UNKNOWN_LIMIT: i32 = { compile_error!("external static constant SomeLi
     assert_eq!(counts.get("unsupported_expressions").copied(), Some(1));
     assert_eq!(counts.get("unmodelled_types").copied(), Some(1));
     assert_eq!(counts.get("unmodelled_call_sites").copied(), Some(1));
+    // The no-op *method* counts; the synthesised upcast conversion does not,
+    // even though both bodies are `Default::default()`. They are different
+    // phenomena with different fixes, and lumping them together made this
+    // counter 97% upcasts on real output (claude_audits/0018).
     assert_eq!(counts.get("noop_facade_methods").copied(), Some(1));
+    assert_eq!(
+        counts.get("unmodelled_upcast_conversions").copied(),
+        Some(1)
+    );
     assert_eq!(counts.get("stubbed_constants").copied(), Some(1));
+}
+
+/// The Python sweep and the Rust counters must agree on the signals they share.
+///
+/// They are two independent implementations of the same named metric, on
+/// opposite sides of a language boundary, and they *did* disagree:
+/// `sweep-generated-idioms.py` matched every `Default::default()` anywhere in
+/// the file while `output_markers::count_noop_facade_methods` matched only a
+/// method body, and neither excluded the synthesised upcast conversions that
+/// made up 78 of 80 matches on a trivial program.
+///
+/// A shared constant cannot fix this — one side is Python — so the agreement is
+/// asserted instead. See
+/// `claude_audits/0018-the-compile-error-metric-cannot-see-silent-failures.md`.
+#[test]
+fn the_python_sweep_and_the_rust_counters_agree_on_shared_signals() {
+    let rust = new_java2rust::translate_source(
+        "public class SweepAgreement { public String m() { StringBuilder b = new StringBuilder(); \
+         b.append(\"x\"); return b.toString(); } }",
+    )
+    .rust;
+
+    let dir = unique_temp_dir("sweep_agreement");
+    fs::write(dir.join("generated.rs"), &rust).unwrap();
+    let swept = run_idiom_sweep(&dir);
+
+    for (signal, counted) in [
+        (
+            "noop_facade_methods",
+            new_java2rust::output_markers::count_noop_facade_methods(&rust),
+        ),
+        (
+            "unmodelled_upcast_conversions",
+            new_java2rust::output_markers::count_unmodelled_upcast_conversions(&rust),
+        ),
+        (
+            "stubbed_constants",
+            new_java2rust::output_markers::count_stubbed_constants(&rust),
+        ),
+    ] {
+        assert_eq!(
+            swept.get(signal).copied().unwrap_or(0),
+            counted,
+            "the sweep and the Rust counter disagree on {signal}"
+        );
+    }
 }

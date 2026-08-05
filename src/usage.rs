@@ -288,36 +288,58 @@ fn propagate_self_mutability_through_self_calls(facts: &mut UsageFacts) {
                 .then(|| (key.owner.clone(), key.java_name.clone()))
         }));
         let mut changed = false;
-        for usage in facts
-            .methods
-            .values_mut()
-            .chain(facts.methods_by_rust_name.values_mut())
-            .chain(facts.methods_by_java_key.values_mut())
-        {
+        // The owner type is carried by each map's key, so an *unqualified* self
+        // call can be identified without a resolved callee. That matters:
+        // `resolve_expr_calls` does not descend into lambda bodies, so a call
+        // made inside `xs.forEach(x -> take(v))` reaches here with
+        // `resolved: None`, and the method that only mutates through a lambda
+        // was inferred `&self`
+        // ([0033](../claude_audits/done/0033-receiver-mutability-not-propagated-through-lambdas.md)).
+        let mut mark = |owner: &str, usage: &mut MethodUsageFacts| {
             if usage.mutates_self {
-                continue;
+                return;
             }
             if usage.call_sites.iter().any(|call_site| {
-                (call_site.receiver_is_self || call_site.receiver_targets_self_field)
-                    && (call_site.resolved.as_ref().is_some_and(|resolved| {
-                        mutating_methods.contains(&(
-                            resolved.declaring_type.clone(),
-                            resolved.rust_name.clone(),
-                        )) || mutating_methods
+                if !(call_site.receiver_is_self || call_site.receiver_targets_self_field) {
+                    return false;
+                }
+                if call_site.resolved.as_ref().is_some_and(|resolved| {
+                    mutating_methods
+                        .contains(&(resolved.declaring_type.clone(), resolved.rust_name.clone()))
+                        || mutating_methods
                             .contains(&(resolved.declaring_type.clone(), call_site.name.clone()))
-                    }) || call_site
-                        .receiver_type
-                        .as_ref()
-                        .is_some_and(|receiver_type| {
-                            java_type_name_for_usage(receiver_type).is_some_and(|receiver_name| {
-                                mutating_methods
-                                    .contains(&(receiver_name.to_string(), call_site.name.clone()))
-                            })
-                        }))
+                }) {
+                    return true;
+                }
+                if call_site
+                    .receiver_type
+                    .as_ref()
+                    .is_some_and(|receiver_type| {
+                        java_type_name_for_usage(receiver_type).is_some_and(|receiver_name| {
+                            mutating_methods
+                                .contains(&(receiver_name.to_string(), call_site.name.clone()))
+                        })
+                    })
+                {
+                    return true;
+                }
+                // Unqualified call naming a mutating method of the enclosing
+                // type. This is what an unresolved `take(v)` is.
+                call_site.receiver_is_self
+                    && mutating_methods.contains(&(owner.to_string(), call_site.name.clone()))
             }) {
                 usage.mutates_self = true;
                 changed = true;
             }
+        };
+        for (key, usage) in facts.methods.iter_mut() {
+            mark(&key.type_name, usage);
+        }
+        for (key, usage) in facts.methods_by_rust_name.iter_mut() {
+            mark(&key.type_name, usage);
+        }
+        for (key, usage) in facts.methods_by_java_key.iter_mut() {
+            mark(&key.owner, usage);
         }
         if !changed {
             break;

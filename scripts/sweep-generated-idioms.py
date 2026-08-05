@@ -146,10 +146,24 @@ SIGNALS = [
         "UnmodelledFacadeCall.java",
     ),
     Signal(
+        # Must stay in step with `output_markers::count_noop_facade_methods`.
+        # Two independent detectors for one named signal is the drift hazard
+        # claude_audits/0018 is about, and these two did disagree: this one
+        # matched every `Default::default()` anywhere, including the synthesised
+        # upcast conversions below, which were 78 of 80 matches on a program
+        # whose only Java API use was `StringBuilder`.
+        # `tests/idiom_sweep_script.rs` asserts the two agree.
         "noop_facade_methods",
         "Facade methods returning default placeholders",
-        r"Default::default\(\)",
+        r"^(?!\s*fn from\().*(?:Default::default\(\)|self\.clone\(\)) \}\s*$",
         "javalibs facade coverage",
+        "StringBuilderFacade.java",
+    ),
+    Signal(
+        "unmodelled_upcast_conversions",
+        "Synthesised From impls for Java upcasts with no model",
+        r"Unmodelled Java upcast: ",
+        "javalibs upcast coverage",
         "StringBuilderFacade.java",
     ),
     Signal(
@@ -190,8 +204,13 @@ def rust_files(root: Path) -> list[Path]:
     return sorted(path for path in root.rglob("*.rs") if path.is_file())
 
 
+# Signals whose regex is anchored per line rather than across the whole file.
+LINE_ANCHORED_SIGNALS = {"noop_facade_methods"}
+
+
 def signal_matches(signal: Signal, text: str) -> list[re.Match[str]]:
-    pattern = re.compile(signal.regex)
+    flags = re.MULTILINE if signal.key in LINE_ANCHORED_SIGNALS else 0
+    pattern = re.compile(signal.regex, flags)
     matches = list(pattern.finditer(text))
     if signal.key == "concrete_none":
         return [match for match in matches if not concrete_none_match_is_valid_option(text, match)]

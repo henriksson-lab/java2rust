@@ -20,7 +20,7 @@ pub fn lower_bare_name(name: &str, env: &ShapeEnv) -> RustExpr {
     } else if env.local_type(name).is_none()
         && let Some(static_name) = env.static_storage_field_access_name(name)
     {
-        static_storage_accessor_projection(static_name)
+        static_storage_accessor_for(static_name, env)
     } else if env.local_type(name).is_none()
         && let Some(static_name) = env.static_field_access_name(name)
     {
@@ -46,7 +46,7 @@ pub fn render_bare_name(name: &str, env: &ShapeEnv) -> String {
     } else if env.local_type(name).is_none()
         && let Some(static_name) = env.static_storage_field_access_name(name)
     {
-        emit::emit_expr(&static_storage_accessor_projection(static_name))
+        emit::emit_expr(&static_storage_accessor_for(static_name, env))
     } else if env.local_type(name).is_none()
         && let Some(static_name) = env.static_field_access_name(name)
     {
@@ -60,6 +60,18 @@ pub fn render_bare_name(name: &str, env: &ShapeEnv) -> String {
         }
     } else {
         crate::parser::to_snake_case(name)
+    }
+}
+
+/// A static-storage read, qualified with the declaring type when that is not
+/// the type being lowered
+/// ([0037](../claude_audits/done/0037-nested-class-outer-static-read-is-capture.md)).
+fn static_storage_accessor_for(static_name: &str, env: &ShapeEnv) -> RustExpr {
+    match env.static_storage_accessor_qualifier(static_name) {
+        Some(owner) => {
+            crate::coercion::qualified_static_storage_accessor_projection(&owner, static_name)
+        }
+        None => static_storage_accessor_projection(static_name),
     }
 }
 

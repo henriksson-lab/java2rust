@@ -262,3 +262,73 @@ without that risk, which is the monotone version of the fix.
    before representation lookup, and interface-slot candidates now include
    inherited methods whose Java slot is not overridden by the child. The former
    known-gap fixture is now `tests/differential/InterfaceOverloads.java`.
+
+## Update 2026-08-05 — a fresh instance, minimized: the two call paths disagree
+
+Probing the remaining `.name ==` comparisons in `lower.rs` turned up a live
+instance on the **context-summary** route, and it is a clean demonstration of
+what this file means by "identity is modelled as a name string": the *same*
+overloaded method gets a different Rust name depending on which lowering path
+reaches it.
+
+```java
+// summary source, package dep
+public class Util {
+    public static int pick(int x)      { return x + 1; }
+    public static int pick(String s)   { return s.length() + 100; }
+    public int inst(int x)             { return x + 2; }
+    public int inst(String s)          { return s.length() + 200; }
+}
+// primary
+Util u = new Util();
+return Util.pick(1) + "," + Util.pick("ab") + "," + u.inst(1) + "," + u.inst("ab");
+```
+
+Java prints `2,102,3,202`. Emitted:
+
+```rust
+let u: Util = Util::new();
+return format!("{},{},{},{}",
+    Util::pick_int(1),        // static path:   overload-suffixed, correct
+    Util::pick_string("ab"),
+    u.inst(1),                // instance path: both overloads collapse
+    u.inst("ab"));            //                onto one name
+```
+
+The static path resolves the overload and suffixes the name; the instance path
+does not, so `inst(int)` and `inst(String)` are the same Rust method. Two
+independent answers to "what is this method's identity", which is the thing this
+file asks to be made single.
+
+### And the facade does not provide either name
+
+The generated facade for the summary type is:
+
+```rust
+impl DepUtil {
+    pub fn pick<R, T0>(_arg0: T0) -> R { unimplemented!("imported static method pick is not modelled") }
+}
+```
+
+No `new`, no `inst`, and `pick` under the *unsuffixed* name that no call site
+uses. So the program does not compile:
+
+```
+error[E0599]: no function or associated item named `new` found for struct `DepUtil`
+error[E0599]: no function or associated item named `pick_int` found for struct `DepUtil`
+error[E0599]: no function or associated item named `pick_string` found for struct `DepUtil`
+```
+
+That second half is a facade-completeness gap of the
+[0016](done/0016-core-jdk-facades-are-no-op-stubs.md) family rather than an
+identity defect, but it sits on top of this one: the facade emitter and the call
+sites are a third and fourth place that name methods, and they disagree with
+each other *and* with the two above.
+
+**Not fixed in this pass, deliberately.** The repair is the adoption step this
+file already identifies — give the facade emitter and the instance-call path the
+same `JavaCallableSlotKey` the static path effectively uses — and that is the
+broad change the previous update argued should be done one caller at a time
+behind `CallableKey::source_method`. Landing half of it would move errors
+without attributing them. The reproducer above is written down so the next pass
+starts from a failing case rather than from the corpus symptom.

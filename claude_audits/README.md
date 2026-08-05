@@ -27,11 +27,15 @@ Already fixed and moved:
 | [0022](done/0022-types-are-reparsed-from-source-text.md) | source types were re-parsed from text, hiding a dropped array dimension. **Scoped:** closed for the source route; four defensive `parse_type_text` fallbacks remain in `parser.rs` by design, measured at 0 hits |
 | [0034](done/0034-object-array-allocation-produces-an-empty-vec.md) | `new T[n]` allocated length 0, so every index panicked |
 | [0035](done/0035-idiom-gaps-suite-never-terminates.md) | the largest behavioural suite never returned, so it had no baseline |
+| [0025](done/0025-interface-default-methods-are-discarded.md) | interface `default` methods: five defects, four sharing one nested-name-lookup cause |
+| [0033](done/0033-receiver-mutability-not-propagated-through-lambdas.md) | a method mutating self only inside a lambda was inferred `&self` |
+| [0036](done/0036-string-concat-type-inference-is-exponential.md) | type inference was exponential in `+` chain length; a dozen segments took minutes |
+| [0037](done/0037-nested-class-outer-static-read-is-capture.md) | nested class reading an enclosing `static` lowered as an outer-*instance* capture |
 
-Both were the parse-error pair in Tier 0 of [SUGGESTIONS.md](SUGGESTIONS.md), so
-that step is complete: corpus error counts are no longer being voided by files
-that fail to parse. Worth re-running the corpora to see what those two files were
-hiding.
+Issues 0012 and 0013 were the parse-error pair in Tier 0 of
+[SUGGESTIONS.md](SUGGESTIONS.md), so that step is complete: corpus error counts
+are no longer being voided by files that fail to parse. Worth re-running the
+corpora to see what those two files were hiding.
 
 ## How to reproduce any of these
 
@@ -82,13 +86,13 @@ handling the idioms we currently fail, grounded in corpus error counts.
 | [0020](done/0020-text-block-content-not-processed.md) | Text block keeps incidental indentation → wrong string | runtime | small |
 | [0023](0023-inner-class-construction-always-panics.md) | **Every non-static inner class panics on construction**; compiles clean | runtime | blocked on 0002b |
 | [0024](done/0024-numeric-limit-constants-stubbed-to-zero.md) | **`Integer.MAX_VALUE` is `0`** — breaks every min/max idiom; live in corpus | runtime + corpus | **tiny** |
-| [0025](0025-interface-default-methods-are-discarded.md) | `default` method bodies dropped → runtime panic | runtime | small — Rust supports it natively |
+| [0025](done/0025-interface-default-methods-are-discarded.md) | `default` method bodies dropped → runtime panic | runtime | small — Rust supports it natively |
 | [0026](0026-assignment-evaluation-order-differs-from-java.md) | Rust evaluates assignment RHS before the target; Java is the reverse | runtime | small |
 | [0027](done/0027-compound-assignment-implicit-narrowing-missing.md) | `byte b; b += 300;` → `E0308`; missing JLS 15.26.2 narrowing cast | rustc | **tiny** |
 | [0028](0028-reference-equality-lowered-as-structural-equality.md) | `==` on classes is structural, not identity — **violates decision 2** | runtime | blocked on 0002b + warning now |
 | [0029](done/0029-static-field-mutation-emits-invalid-rust.md) | `static n; n++;` → `E0067` invalid left-hand side | rustc | small |
-| [0030](0030-java-statics-are-thread-local.md) | Java `static` fields are `thread_local!` — per-thread copies | inspection | split 0030a/b |
-| [0031](0031-stubbed-constant-census.md) | **`Math.PI` is `0.0`**; full census of 27 stubbed constants across 3 corpora | corpus | **tiny for the fix** |
+| [0030](done/0030-java-statics-are-thread-local.md) | Java `static` fields are `thread_local!` — per-thread copies | inspection | split 0030a/b |
+| [0031](done/0031-stubbed-constant-census.md) | **`Math.PI` is `0.0`**; full census of 27 stubbed constants across 3 corpora | corpus | **tiny for the fix** |
 | [0032](done/0032-java-lang-math-is-mistranslated.md) | `Math.round(-2.5)` → `-3`, Java `-2`; plus 5 more `Math` defects. **Tested replacement code included** | rustc + runtime | medium, one focused pass |
 
 ## Structural findings

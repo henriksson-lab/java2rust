@@ -6896,6 +6896,18 @@ fn collect_local_type_keys(
     let qualified_key = canonical_external_receiver_type_key(&qualified);
     types.insert(qualified_key.clone());
     types.insert(rust_name_for_java_named_type(&qualified_key));
+    // A nested type is stored qualified (`Outer.Inner`) but source refers to it
+    // simply (`Inner`), so the simple name has to be a key too — otherwise a
+    // nested type is not recognised as locally declared and gets an external
+    // facade shell synthesised alongside the type actually emitted for it.
+    for key in [type_key.clone(), qualified_key.clone()] {
+        if let Some(simple) = key.rsplit(['.', '$']).next()
+            && simple != key
+        {
+            types.insert(simple.to_string());
+            types.insert(rust_name_for_java_named_type(simple));
+        }
+    }
     for member in &ty.members {
         if let Member::Type(nested) = member {
             collect_local_type_keys(nested, Some(&qualified), types);
@@ -6941,7 +6953,14 @@ fn find_program_type_by_key<'a>(program: &'a Program, type_key: &str) -> Option<
 }
 
 fn find_type_by_key_in_type<'a>(ty: &'a TypeDecl, type_key: &str) -> Option<&'a TypeDecl> {
-    if canonical_external_receiver_type_key(&ty.name) == type_key {
+    let key = canonical_external_receiver_type_key(&ty.name);
+    // Simple names too: a nested type is stored qualified (`Outer.Inner`) while
+    // source, and therefore any recorded fact, names it simply (`Inner`).
+    // Matching only the qualified form made a locally declared nested type
+    // invisible to callers asking "is this type declared here?", which is how
+    // facade shells were synthesised for types already emitted.
+    let simple = key.rsplit(['.', '$']).next().unwrap_or(&key);
+    if key == type_key || simple == type_key {
         return Some(ty);
     }
     ty.members.iter().find_map(|member| match member {
@@ -7073,6 +7092,38 @@ fn source_summary_supertypes_for_emitted_type<'a>(
     out
 }
 
+/// Whether any interface `ty` implements (transitively) declares the method.
+fn source_interfaces_declare_method(
+    program: &Program,
+    ty: &TypeDecl,
+    method_name: &str,
+    arity: usize,
+) -> bool {
+    let mut pending = ty.implements.clone();
+    let mut visited = BTreeSet::new();
+    while let Some(name) = pending.pop() {
+        let key = canonical_external_receiver_type_key(&name);
+        if !visited.insert(key.clone()) {
+            continue;
+        }
+        let Some(interface) = find_program_type_by_key(program, &key) else {
+            continue;
+        };
+        if interface.members.iter().any(|member| {
+            matches!(
+                member,
+                Member::Method(method)
+                    if method.name == method_name && method.params.len() == arity
+            )
+        }) {
+            return true;
+        }
+        pending.extend(interface.extends.iter().cloned());
+        pending.extend(interface.implements.iter().cloned());
+    }
+    false
+}
+
 fn source_method_hierarchy_contains(
     program: &Program,
     ty: &TypeDecl,
@@ -7093,6 +7144,11 @@ fn source_method_hierarchy_contains(
                     if method.name == method_name && method.params.len() == arity
             )
         }) {
+            return true;
+        }
+        // An interface the type implements provides the method too — through
+        // the trait, including a `default` body.
+        if source_interfaces_declare_method(program, ty, method_name, arity) {
             return true;
         }
         current = ty
@@ -7924,12 +7980,24 @@ impl ExternalApiFacadeSupport {
                 {
                     continue;
                 }
+                // A supertype the program declares is not an *external* super,
+                // whatever the fact set says. An unresolved call on a local
+                // class records an external API effect fact for it, so without
+                // this a source superclass's methods are stubbed onto the
+                // subclass — colliding with the members it actually inherits.
+                if find_program_type_by_key(
+                    program,
+                    &canonical_external_receiver_type_key(&inherited.declaring_type),
+                )
+                .is_some()
+                {
+                    continue;
+                }
+                // The real program, not a synthetic one-type program: the
+                // check walks `extends`, so a one-type program could never find
+                // the superclass and always answered "not present".
                 if source_method_hierarchy_contains(
-                    &Program {
-                        package: None,
-                        imports: Vec::new(),
-                        types: vec![ty.clone()],
-                    },
+                    program,
                     ty,
                     &inherited.method_name,
                     inherited.arg_count,
@@ -7973,12 +8041,24 @@ impl ExternalApiFacadeSupport {
             for inherited in
                 query_backed_external_inherited_methods_for_type(facts, ty, program, used_calls)
             {
+                // A supertype the program declares is not an *external* super,
+                // whatever the fact set says. An unresolved call on a local
+                // class records an external API effect fact for it, so without
+                // this a source superclass's methods are stubbed onto the
+                // subclass — colliding with the members it actually inherits.
+                if find_program_type_by_key(
+                    program,
+                    &canonical_external_receiver_type_key(&inherited.declaring_type),
+                )
+                .is_some()
+                {
+                    continue;
+                }
+                // The real program, not a synthetic one-type program: the
+                // check walks `extends`, so a one-type program could never find
+                // the superclass and always answered "not present".
                 if source_method_hierarchy_contains(
-                    &Program {
-                        package: None,
-                        imports: Vec::new(),
-                        types: vec![ty.clone()],
-                    },
+                    program,
                     ty,
                     &inherited.method_name,
                     inherited.arg_count,
@@ -8380,7 +8460,13 @@ impl ExternalApiFacadeSupport {
             let receiver_key = canonical_external_receiver_type_key(receiver_type);
             let receiver_is_summary_only = source_summary_types.contains(&receiver_key)
                 && !emitted_local_types.contains(&receiver_key);
-            if local_types.contains(&receiver_key) && !receiver_is_summary_only {
+            // A type this program *emits* never needs an external facade shell.
+            // `local_types` comes from the support-context program, which is
+            // empty for a single-file translation, so checking it alone let a
+            // declared source type reach here.
+            if (local_types.contains(&receiver_key) || emitted_local_types.contains(&receiver_key))
+                && !receiver_is_summary_only
+            {
                 continue;
             }
             if imported_static_owner_call_contains(

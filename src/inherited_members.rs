@@ -103,7 +103,88 @@ pub fn inherited_instance_method_refs_for_type<'a>(
         current = super_ty.extends.as_deref();
     }
 
+    collect_inherited_interface_default_methods(
+        ty,
+        support_program,
+        &direct_method_rust_names,
+        &mut seen_methods,
+        &mut methods,
+    );
+
     methods
+}
+
+/// Default methods a type inherits from the interfaces it implements.
+///
+/// This covers a type's own `implements` entries, including their
+/// super-interfaces. Defaults inherited through a superclass's `implements`
+/// remain blocked by the facade-shell issue recorded in
+/// [0025](../claude_audits/done/0025-interface-default-methods-are-discarded.md).
+///
+/// The previous walk only followed `extends`, so direct interface defaults were
+/// not inherited members at all. That mattered less for lowering (the trait
+/// carries the default body) than for **signature planning**: with no signature
+/// registered for the child, a call like `a.greet()` had no known return type
+/// and took the erased-display path, so it compiled and returned `""` where
+/// Java returned `"hi a"`.
+///
+/// Only methods with a body are inherited. An abstract interface method is the
+/// implementor's own obligation and is handled by the interface-stub path.
+fn collect_inherited_interface_default_methods<'a>(
+    ty: &TypeDecl,
+    support_program: &'a Program,
+    direct_method_rust_names: &HashSet<String>,
+    seen_methods: &mut HashSet<JavaCallableSlotKey>,
+    methods: &mut Vec<InheritedInstanceMethodRef<'a>>,
+) {
+    // A class inherits the defaults of the interfaces its *superclasses*
+    // implement as well as its own.
+    let mut pending = ty.implements.clone();
+    let mut super_name = ty.extends.as_deref();
+    let mut visited_supers = HashSet::new();
+    while let Some(name) = super_name {
+        let Some(super_ty) = find_type_decl(support_program, name) else {
+            break;
+        };
+        if !visited_supers.insert(super_ty.name.clone()) {
+            break;
+        }
+        pending.extend(super_ty.implements.iter().cloned());
+        super_name = super_ty.extends.as_deref();
+    }
+
+    let mut visited = HashSet::new();
+    while let Some(name) = pending.pop() {
+        let Some(interface) = find_type_decl(support_program, &name) else {
+            continue;
+        };
+        if !visited.insert(interface.name.clone()) {
+            continue;
+        }
+        // Super-interfaces contribute their defaults too.
+        pending.extend(interface.extends.iter().cloned());
+        pending.extend(interface.implements.iter().cloned());
+
+        for member in &interface.members {
+            let Member::Method(method) = member else {
+                continue;
+            };
+            if method.body.is_none() || !is_inheritable_instance_method(method) {
+                continue;
+            }
+            let signature = JavaCallableSlotKey::source_method(method);
+            if !seen_methods.insert(signature) {
+                continue;
+            }
+            let rust_name = inherited_method_rust_name_for_child(method, direct_method_rust_names);
+            methods.push(InheritedInstanceMethodRef {
+                declaring_type: &interface.name,
+                declaring_ty: interface,
+                method,
+                rust_name,
+            });
+        }
+    }
 }
 
 pub fn external_inherited_instance_fields_for_type(

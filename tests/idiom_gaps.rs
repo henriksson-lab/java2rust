@@ -179,23 +179,40 @@ fn cargo_verify_generated_modules(
     let output = run_with_watchdog(&mut command, timeout);
 
     let Some(status) = output.status else {
+        keep_sources_discard_build_artifacts(&crate_dir);
         panic!(
             "generated crate {cargo_command} for {crate_name} did not finish within {}s and was killed; \
-             crate kept at {}",
+             crate sources kept at {}",
             timeout.as_secs(),
             crate_dir.display()
         );
     };
 
-    assert!(
-        status.success(),
-        "generated crate {cargo_command} failed for {crate_name}\nstdout:\n{}\nstderr:\n{}",
-        output.stdout,
-        output.stderr
-    );
+    if !status.success() {
+        keep_sources_discard_build_artifacts(&crate_dir);
+        panic!(
+            "generated crate {cargo_command} failed for {crate_name}\nstdout:\n{}\nstderr:\n{}",
+            output.stdout, output.stderr
+        );
+    }
 
-    // Only on success: a failing or killed run keeps its crate for inspection.
     let _ = fs::remove_dir_all(&crate_dir);
+}
+
+/// Keep a failed crate's `Cargo.toml` and `src/`, drop its `target/`.
+///
+/// A failing crate is kept so it can be inspected, which is right — but it was
+/// kept *whole*, and `target/` is ~99% of its bytes and entirely regenerable by
+/// re-running `cargo` in the directory. With ~146 failures a run and no upper
+/// bound on runs, the leftovers reached **10,525 directories / 31 GB** and
+/// filled the root filesystem. The suite then failed 404 of 684 tests for no
+/// reason but disk, which is exactly the "a metric can silently report the wrong
+/// thing" failure
+/// [0018](../claude_audits/0018-the-compile-error-metric-cannot-see-silent-failures.md)
+/// is about — and it had already perturbed one gate run by a single test before
+/// it became obvious.
+fn keep_sources_discard_build_artifacts(crate_dir: &std::path::Path) {
+    let _ = fs::remove_dir_all(crate_dir.join("target"));
 }
 
 #[test]
@@ -18464,7 +18481,10 @@ class Format {}
             && translation.rust.contains(
                 "pub struct Factory {\n    formats: std::collections::HashMap<String, Format>"
             )
-            && translation.rust.contains("cell.borrow().clone()")
+            // See claude_audits/0030: static storage is a process-wide `Mutex`.
+            && translation
+                .rust
+                .contains("lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()")
             && !translation.rust.contains("downcast::<Format>")
             && !translation.rust.contains("invalid Java cast"),
         "{}",
@@ -18789,7 +18809,11 @@ class StaticOptionalStringStorageInitializer {
     assert!(
         translation
             .rust
-            .contains("cell.borrow().clone().unwrap_or_else(|| \"alpha\".to_string())")
+            // Process-wide storage, not `thread_local!`: a Java `static` is one
+            // variable shared by every thread (claude_audits/0030).
+            .contains(
+                "lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone().unwrap_or_else(|| \"alpha\".to_string())"
+            )
             && !translation.rust.contains("Some(Some("),
         "{}",
         translation.rust

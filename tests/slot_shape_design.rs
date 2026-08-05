@@ -5475,12 +5475,17 @@ interface Named {
     assert_eq!(
         type_emission_for(&representations, named_ty, &signatures),
         RepresentationTypeEmission::RawRustItem(
-            "pub trait Named {\n    fn name(&self) -> String;\n    fn score(&self, prefix: String) -> i32;\n    fn as_any(&self) -> &dyn std::any::Any;\n    fn clone_box(&self) -> Box<dyn Named>;\n}\n\nimpl dyn Named {\n    pub fn anonymous() -> Box<dyn Named> { panic!(\"java2rust: anonymous class body for Named requires object lowering\") }\n}\n\nimpl Clone for Box<dyn Named> {\n    fn clone(&self) -> Self { self.clone_box() }\n}"
+            "pub trait Named {\n    fn name(&self) -> String;\n    fn score(&self, prefix: String) -> i32;\n    fn as_any(&self) -> &dyn std::any::Any;\n    fn clone_box(&self) -> Box<dyn Named>;\n}\n\nimpl dyn Named {\n    pub fn anonymous() -> Box<dyn Named> { panic!(\"java2rust: anonymous class body for Named requires object lowering\") }\n}\n\nimpl Clone for Box<dyn Named> {\n    fn clone(&self) -> Self { Named::clone_box(&**self) }\n}"
                 .to_string()
         )
     );
 }
 
+// The `Clone for Box<dyn T>` impls below call `T::clone_box(&**self)` rather
+// than `self.clone_box()`. A Java interface that extends another lowers to a
+// Rust subtrait, and both traits declare `clone_box`, so the unqualified call
+// became ambiguous (`E0034`) as soon as interface hierarchies were supported —
+// see claude_audits/0025.
 #[test]
 fn representation_lowering_renders_interface_method_type_params() {
     let parsed = parse_java_source(
@@ -5513,7 +5518,7 @@ interface Mapper {
             &ProgramExceptionPlan::default(),
         ),
         RepresentationTypeEmission::RawRustItem(
-            "pub trait Mapper {\n    fn id<T>(&self, value: T) -> T where Self: Sized;\n    fn as_any(&self) -> &dyn std::any::Any;\n    fn clone_box(&self) -> Box<dyn Mapper>;\n}\n\nimpl dyn Mapper {\n    pub fn anonymous() -> Box<dyn Mapper> { panic!(\"java2rust: anonymous class body for Mapper requires object lowering\") }\n}\n\nimpl Clone for Box<dyn Mapper> {\n    fn clone(&self) -> Self { self.clone_box() }\n}"
+            "pub trait Mapper {\n    fn id<T>(&self, value: T) -> T where Self: Sized;\n    fn as_any(&self) -> &dyn std::any::Any;\n    fn clone_box(&self) -> Box<dyn Mapper>;\n}\n\nimpl dyn Mapper {\n    pub fn anonymous() -> Box<dyn Mapper> { panic!(\"java2rust: anonymous class body for Mapper requires object lowering\") }\n}\n\nimpl Clone for Box<dyn Mapper> {\n    fn clone(&self) -> Self { Mapper::clone_box(&**self) }\n}"
                 .to_string()
         )
     );
@@ -5634,7 +5639,7 @@ class ExternalId {}
     assert_eq!(
         type_emission_for_with_facts(&representations, source_ty, &signatures, &facts),
         RepresentationTypeEmission::RawRustItem(
-            "pub trait IdSource {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId>;\n    fn as_any(&self) -> &dyn std::any::Any;\n    fn clone_box(&self) -> Box<dyn IdSource>;\n}\n\nimpl dyn IdSource {\n    pub fn anonymous() -> Box<dyn IdSource> { panic!(\"java2rust: anonymous class body for IdSource requires object lowering\") }\n}\n\nimpl Clone for Box<dyn IdSource> {\n    fn clone(&self) -> Self { self.clone_box() }\n}"
+            "pub trait IdSource {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId>;\n    fn as_any(&self) -> &dyn std::any::Any;\n    fn clone_box(&self) -> Box<dyn IdSource>;\n}\n\nimpl dyn IdSource {\n    pub fn anonymous() -> Box<dyn IdSource> { panic!(\"java2rust: anonymous class body for IdSource requires object lowering\") }\n}\n\nimpl Clone for Box<dyn IdSource> {\n    fn clone(&self) -> Self { IdSource::clone_box(&**self) }\n}"
                 .to_string()
         )
     );
@@ -19503,6 +19508,99 @@ class StaticInitAudit {
         translation
             .rust
             .contains("pub fn __static_b() -> i32 {\n        Self::__java_class_init();")
+    );
+}
+
+/// A Java `static` is one variable shared by every thread.
+///
+/// The weaker-but-useful check
+/// [0030](../claude_audits/done/0030-java-statics-are-thread-local.md) asks for
+/// while the harness has no threaded fixture: no `thread_local!` may appear for
+/// a `static` field, and the storage must be a process-wide `Mutex`. The
+/// differential fixture `StaticSharing.java` pins the observable behaviour;
+/// this pins the storage *identity*, which a single-threaded run cannot see.
+#[test]
+fn static_storage_is_shared_across_threads_not_per_thread() {
+    let translation = translate_source(
+        r#"
+public class SharedStatics {
+    static int counter = 0;
+    static String name = "abc";
+    static int initRuns = 0;
+
+    static { initRuns = initRuns + 1; }
+
+    static void bump() { counter = counter + 1; }
+    public static int read() { bump(); return counter + initRuns; }
+}
+"#,
+    );
+
+    assert!(
+        !translation.rust.contains("thread_local!"),
+        "static storage must not be per-thread:\n{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("std::sync::Mutex"),
+        "static storage must be process-wide:\n{}",
+        translation.rust
+    );
+    // The class-initialisation guard is shared too, or a `static { .. }` block
+    // runs once per class *per thread* rather than once per class.
+    assert!(
+        !translation.rust.contains("Cell<bool>") && !translation.rust.contains("RefCell<bool>"),
+        "the class-init guard must not be per-thread:\n{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("AtomicBool"),
+        "the class-init guard must be an atomic:\n{}",
+        translation.rust
+    );
+}
+
+/// A nested class reads an enclosing class's `static` through the declaring
+/// type, never `Self`
+/// ([0037](../claude_audits/done/0037-nested-class-outer-static-read-is-capture.md)).
+#[test]
+fn nested_class_reads_enclosing_static_through_its_owner() {
+    let translation = translate_source(
+        r#"
+public class OuterStatics {
+    static int n = 0;
+
+    static class In {
+        static int read() { return n; }
+        static void bump() { n = n + 1; }
+    }
+
+    public static int run() { In.bump(); return In.read() + n; }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("OuterStatics::__static_n()"),
+        "the read must name the declaring type:\n{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("OuterStaticsIn::__static_n"),
+        "the read must not resolve to the nested type:\n{}",
+        translation.rust
+    );
+    // `static` members involve no enclosing instance, so no capture at all.
+    assert!(
+        !translation.rust.contains("__outer"),
+        "a static nested class captures no outer instance:\n{}",
+        translation.rust
+    );
+    // Reading the same field from the declaring type still uses `Self`.
+    assert!(
+        translation.rust.contains("Self::__static_n()"),
+        "a same-type read stays on `Self`:\n{}",
+        translation.rust
     );
 }
 
@@ -38548,5 +38646,215 @@ fn core_signature_lattice_merges_satisfy_join_laws() {
             NullabilityState::MaybeNull,
         ],
         |left, right| merge_storage_nullability_requirement_policy(Some(left), right).kept,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Constants declared in available source
+// ---------------------------------------------------------------------------
+
+/// Group 3 of [0031](../claude_audits/done/0031-stubbed-constant-census.md): a
+/// constant whose owner is a *context-summary* source — the corpus's own
+/// dependency set — has its value right there in the parsed declaration, and it
+/// was being dropped. The facade then emitted `compile_error!` for a value the
+/// translation had already read.
+///
+/// The values below are checked against the Java oracle in the audit: `javac`
+/// on both files prints `9,-1.0,BCF\2\2`, and so does the translation.
+#[test]
+fn static_final_constants_from_summary_sources_carry_their_declared_values() {
+    let summary = r#"
+package htsjdk.variant.bcf2;
+
+public class BcfFormat {
+    public static final int SIZEOF_BCF_HEADER = 9;
+    public static final int UNKNOWN_SEQUENCE_LENGTH = -1;
+    public static final double NO_LOG10_PERROR = -1.0;
+    public static final boolean DEBUG_MODE_ENABLED = false;
+    public static final String MAGIC = "BCF";
+    public static final long BIG = 1L << 40;
+    /** Derived from an earlier constant of the same owner. */
+    public static final int HEADER_PLUS_ONE = SIZEOF_BCF_HEADER + 1;
+    /** Not a constant expression: the value really is unknown. */
+    public static final int RUNTIME = computed();
+
+    static int computed() { return 3; }
+}
+"#;
+    let source = r#"
+import htsjdk.variant.bcf2.BcfFormat;
+
+public class Reader {
+    public static int headerSize() { return BcfFormat.SIZEOF_BCF_HEADER; }
+    public static int unknownLength() { return BcfFormat.UNKNOWN_SEQUENCE_LENGTH; }
+    public static double noError() { return BcfFormat.NO_LOG10_PERROR; }
+    public static boolean debug() { return BcfFormat.DEBUG_MODE_ENABLED; }
+    public static String magic() { return BcfFormat.MAGIC; }
+    public static long big() { return BcfFormat.BIG; }
+    public static int plusOne() { return BcfFormat.HEADER_PLUS_ONE; }
+}
+"#;
+    let translation = translate_source_with_context_summary_sources(
+        source,
+        &[summary.to_string()],
+        &FactSet::default(),
+    );
+
+    for expected in [
+        "pub const SIZEOF_BCF_HEADER: i32 = 9;",
+        "pub const UNKNOWN_SEQUENCE_LENGTH: i32 = -1;",
+        "pub const NO_LOG10_PERROR: f64 = -1.0;",
+        "pub const DEBUG_MODE_ENABLED: bool = false;",
+        "pub const MAGIC: &'static str = \"BCF\";",
+        "pub const BIG: i64 = 1099511627776i64;",
+        "pub const HEADER_PLUS_ONE: i32 = 10;",
+    ] {
+        assert!(
+            translation.rust.contains(expected),
+            "missing {expected:?}:\n{}",
+            translation.rust
+        );
+    }
+
+    assert!(
+        !translation.rust.contains("has no modeled value"),
+        "a constant whose value is in the summary source must not be stubbed:\n{}",
+        translation.rust
+    );
+}
+
+/// The other half of the same rule: a value that genuinely is not a constant
+/// expression must stay loud rather than acquire a plausible zero.
+#[test]
+fn non_constant_static_final_initializers_stay_unmodelled() {
+    let summary = r#"
+package dep;
+
+public class Runtime {
+    public static final int RUNTIME = computed();
+    static int computed() { return 3; }
+}
+"#;
+    let source = r#"
+import dep.Runtime;
+
+public class Caller {
+    public static int value() { return Runtime.RUNTIME; }
+}
+"#;
+    let translation = translate_source_with_context_summary_sources(
+        source,
+        &[summary.to_string()],
+        &FactSet::default(),
+    );
+
+    assert!(
+        translation.rust.contains("has no modeled value"),
+        "a non-constant initializer must not be folded into a value:\n{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("pub const RUNTIME: i32 = 0;"),
+        "the whole point of 0031 is that this is never a plain zero:\n{}",
+        translation.rust
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Assignment evaluation order
+// ---------------------------------------------------------------------------
+
+/// Java evaluates an assignment's target subexpressions before its right-hand
+/// side; Rust evaluates the value first
+/// ([0026](../claude_audits/0026-assignment-evaluation-order-differs-from-java.md)).
+///
+/// The case pinned here is the one that is easy to miss: the index has no side
+/// effect of its own, and the **value** is what changes what it denotes. The
+/// behaviour is checked against the Java oracle by
+/// `tests/differential/EvalOrder.java`; this pins that the hoist is emitted at
+/// all, which reading the result cannot show — `b[0]` is `0` either way, and
+/// the defect is that a *different element* was written.
+#[test]
+fn a_side_effecting_value_hoists_a_stable_looking_index() {
+    let translation = translate_source(
+        r#"
+public class Order {
+    public static int run() {
+        int[] b = new int[3];
+        int m = 0;
+        b[m] = m++;
+        return b[1];
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let __java_assignment_index = m as usize;"),
+        "the index must be evaluated before the value:\n{}",
+        translation.rust
+    );
+}
+
+/// A literal index needs no hoist, however side-effecting the value is: nothing
+/// can change what it denotes, so the extra temporary would be pure noise.
+#[test]
+fn a_literal_index_is_not_hoisted_for_a_side_effecting_value() {
+    let translation = translate_source(
+        r#"
+public class Order {
+    public static int run() {
+        int[] b = new int[3];
+        int m = 0;
+        b[0] = m++;
+        return b[0];
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.rust.contains("__java_assignment_index"),
+        "a literal index is stable across evaluating the value:\n{}",
+        translation.rust
+    );
+}
+
+/// The assignment place is a *field*, and the array access is a subexpression
+/// of it — so none of the ordered-*array*-assignment paths recognise it.
+#[test]
+fn a_field_place_hoists_its_receivers_array_index() {
+    let translation = translate_source(
+        r#"
+public class Order {
+    int field = 0;
+
+    public static int run() {
+        Order[] arr = new Order[2];
+        arr[0] = new Order();
+        arr[1] = new Order();
+        int j = 0;
+        arr[j++].field = j;
+        return arr[0].field;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let __java_assignment_index: i32 = {"),
+        "the place's index must be evaluated before the value:\n{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("arr[__java_assignment_index as usize].field ="),
+        "the write must go through the hoisted index:\n{}",
+        translation.rust
     );
 }

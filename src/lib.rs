@@ -28,6 +28,7 @@ pub mod fallibility_invariant;
 pub mod fixtures;
 pub mod graph;
 pub mod inherited_members;
+pub mod inner_class_capture;
 pub mod item_assembly;
 pub mod java_ir;
 pub mod java_naming;
@@ -61,6 +62,7 @@ pub mod signature;
 pub mod slot_policy;
 pub mod slot_render;
 pub mod slot_shape;
+pub mod source_constant_values;
 pub mod statement_render;
 pub mod stdlib;
 pub mod storage_strategy;
@@ -234,16 +236,26 @@ pub fn translate_source_with_context_sources_and_summary_sources(
         context_diagnostics.extend(context_parsed.diagnostics);
         merge_program_context(&mut source_program, context_parsed.program.clone());
     }
+    // Pooled across files, because a constant may be defined in terms of one
+    // owned by another class in another file. Type names are qualified with
+    // each file's own package here; the merged program no longer knows them.
+    let mut summary_constant_declarations = Vec::new();
     for summary_source in summary_sources {
         let summary_parsed = parser::parse_java_source(summary_source);
         context_diagnostics.extend(summary_parsed.diagnostics);
         summary_facts.extend_from(resolve::declaration_facts_from_program(
             &summary_parsed.program,
         ));
+        summary_constant_declarations.extend(resolve::static_final_constant_declarations(
+            &summary_parsed.program,
+        ));
         let summary_declarations = declaration_only_program(summary_parsed.program);
         merge_program_context(&mut summary_program, summary_declarations.clone());
         merge_program_context(&mut source_program, summary_declarations);
     }
+    summary_facts.extend_from(resolve::constant_value_facts_from_declarations(
+        &summary_constant_declarations,
+    ));
     let source_program_context =
         (!context_sources.is_empty() || !summary_sources.is_empty()).then_some(source_program);
     let support_program_context = source_program_context.clone();
@@ -350,16 +362,26 @@ pub fn translate_batch_sources_with_context_sources_summary_sources_and_options(
         &format!("{} summary files", summary_sources.len()),
     );
     let summary_parse_start = Instant::now();
+    // Pooled across files, because a constant may be defined in terms of one
+    // owned by another class in another file. Type names are qualified with
+    // each file's own package here; the merged program no longer knows them.
+    let mut summary_constant_declarations = Vec::new();
     for summary_source in summary_sources {
         let summary_parsed = parser::parse_java_source(summary_source);
         context_diagnostics.extend(summary_parsed.diagnostics);
         summary_facts.extend_from(resolve::declaration_facts_from_program(
             &summary_parsed.program,
         ));
+        summary_constant_declarations.extend(resolve::static_final_constant_declarations(
+            &summary_parsed.program,
+        ));
         let summary_declarations = declaration_only_program(summary_parsed.program);
         merge_program_context(&mut summary_program, summary_declarations.clone());
         merge_program_context(&mut source_program, summary_declarations);
     }
+    summary_facts.extend_from(resolve::constant_value_facts_from_declarations(
+        &summary_constant_declarations,
+    ));
     timings.summary_parse_ms = summary_parse_start.elapsed().as_millis();
     emit_batch_phase_progress(
         event_sink,
@@ -958,6 +980,13 @@ fn translate_parsed_source_with_context(
     // change, and every type the plan says should be shared while lowering
     // holds it by value is reported. That list is the work queue for the
     // representation change and the size estimate it needs first.
+    // A non-static inner class compiles and then panics on construction. The
+    // translator has to say so; a compile-error count cannot see it.
+    inner_class_capture::report_unconstructable_inner_classes(
+        &resolved.program,
+        &semantic.facts,
+        &mut lowered.diagnostics,
+    );
     storage_strategy::report_storage_disagreements(
         &resolved.program,
         &semantic.usage,

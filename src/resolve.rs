@@ -199,6 +199,7 @@ pub fn declaration_facts_from_program(program: &Program) -> FactSet {
     let mut facts = FactSet::default();
     collect_type_capability_facts(&program, &mut facts);
     collect_field_declaration_facts(&program, &mut facts);
+    collect_static_final_constant_value_facts(&program, &mut facts);
     collect_method_declaration_effect_facts(&program, &mut facts);
     facts
 }
@@ -5878,23 +5879,180 @@ fn collect_field_declaration_facts_for_type(
     let type_name = package_qualified_source_type_name(ty, package, outer_name);
     for member in &ty.members {
         match member {
-            Member::Field(field) => facts.external_field_facts.push(ExternalFieldFact {
-                field: FieldKey {
-                    type_name: type_name.clone(),
-                    field_name: field.name.clone(),
-                },
-                field_type: Some(field.ty.clone()),
-                field_kind: if field.modifiers.contains(&Modifier::Static)
-                    && field.modifiers.contains(&Modifier::Final)
-                {
-                    ExternalFieldKind::StaticFinal
-                } else {
-                    ExternalFieldKind::Unknown
-                },
-                provenance: FactProvenance::ParsedSource,
-            }),
+            Member::Field(field) => {
+                let is_static_final = field.modifiers.contains(&Modifier::Static)
+                    && field.modifiers.contains(&Modifier::Final);
+                facts.external_field_facts.push(ExternalFieldFact {
+                    field: FieldKey {
+                        type_name: type_name.clone(),
+                        field_name: field.name.clone(),
+                    },
+                    field_type: Some(field.ty.clone()),
+                    field_kind: if is_static_final {
+                        ExternalFieldKind::StaticFinal
+                    } else {
+                        ExternalFieldKind::Unknown
+                    },
+                    provenance: FactProvenance::ParsedSource,
+                });
+            }
             Member::Type(nested) => {
                 collect_field_declaration_facts_for_type(nested, facts, package, Some(&type_name))
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The declared values of every `static final` field that is a Java constant
+/// expression.
+///
+/// Without this the value is simply dropped and the facade emits a
+/// `compile_error!` for a constant whose initialiser the translation just
+/// parsed — group 3 of
+/// [0031](../claude_audits/done/0031-stubbed-constant-census.md). Anything that does
+/// not fold is left alone, so the diagnostic still stands wherever the value
+/// really is unknown.
+///
+/// Run over the whole program rather than per type, because a constant may be
+/// defined in terms of one owned by another class
+/// (`VariantContext.NO_LOG10_PERROR = CommonInfo.NO_LOG10_PERROR`). That is a
+/// dependency graph, so it is iterated to a fixpoint instead of assuming
+/// declaration order resolves it.
+fn collect_static_final_constant_value_facts(program: &Program, facts: &mut FactSet) {
+    let declarations = static_final_constant_declarations(program);
+    facts.extend_from(constant_value_facts_from_declarations(&declarations));
+}
+
+/// Every `static final` field of `program`, paired with its package-qualified
+/// owner.
+///
+/// Exposed so a caller holding several parsed files can pool them: type names
+/// are qualified with each file's *own* package, which a merged program no
+/// longer knows.
+pub fn static_final_constant_declarations(
+    program: &Program,
+) -> Vec<(String, crate::java_ir::FieldDecl)> {
+    let mut declarations = Vec::new();
+    for ty in &program.types {
+        collect_static_final_constant_declarations(
+            ty,
+            program.package.as_deref(),
+            None,
+            &mut declarations,
+        );
+    }
+    declarations
+}
+
+/// Folds `declarations` to a fixpoint and reports the values that resolve.
+pub fn constant_value_facts_from_declarations(
+    declarations: &[(String, crate::java_ir::FieldDecl)],
+) -> FactSet {
+    let mut facts = FactSet::default();
+    let mut scope = crate::source_constant_values::ConstantScope::new();
+    let mut folded: std::collections::BTreeMap<
+        usize,
+        crate::source_constant_values::ConstantValue,
+    > = std::collections::BTreeMap::new();
+    // Each round can only resolve references to constants folded in an earlier
+    // round, so the number of rounds is bounded by the longest chain. Stopping
+    // when a round adds nothing is what makes that bound implicit.
+    loop {
+        let mut progressed = false;
+        for (index, (owner, field)) in declarations.iter().enumerate() {
+            if folded.contains_key(&index) {
+                continue;
+            }
+            let Some(initializer) = field.initializer.as_ref() else {
+                continue;
+            };
+            // Same-owner bare names must not leak between owners, so the bare
+            // spellings are added to a copy for this owner only.
+            let mut owner_scope = scope.clone();
+            for (other_owner, other_field) in declarations.iter() {
+                if other_owner != owner {
+                    continue;
+                }
+                if let Some(value) =
+                    declaration_value(&folded, &declarations, other_owner, other_field)
+                {
+                    crate::source_constant_values::record_constant(
+                        &mut owner_scope,
+                        None,
+                        &other_field.name,
+                        value,
+                    );
+                }
+            }
+            let Some(value) =
+                crate::source_constant_values::fold_constant_expr(initializer, &owner_scope)
+            else {
+                continue;
+            };
+            crate::source_constant_values::record_constant(
+                &mut scope,
+                Some(owner),
+                &field.name,
+                value.clone(),
+            );
+            folded.insert(index, value);
+            progressed = true;
+        }
+        if !progressed {
+            break;
+        }
+    }
+
+    for (index, (owner, field)) in declarations.iter().enumerate() {
+        let Some(value) = folded.get(&index) else {
+            continue;
+        };
+        if let Some(rust_value) = value.rust_value_for(&field.ty) {
+            facts
+                .external_field_value_facts
+                .push(crate::facts::ExternalFieldValueFact {
+                    field: FieldKey {
+                        type_name: owner.clone(),
+                        field_name: field.name.clone(),
+                    },
+                    rust_value,
+                    provenance: FactProvenance::ParsedSource,
+                });
+        }
+    }
+    facts
+}
+
+fn declaration_value(
+    folded: &std::collections::BTreeMap<usize, crate::source_constant_values::ConstantValue>,
+    declarations: &[(String, crate::java_ir::FieldDecl)],
+    owner: &str,
+    field: &crate::java_ir::FieldDecl,
+) -> Option<crate::source_constant_values::ConstantValue> {
+    let index = declarations.iter().position(|(other_owner, other_field)| {
+        other_owner == owner && other_field.name == field.name
+    })?;
+    folded.get(&index).cloned()
+}
+
+fn collect_static_final_constant_declarations(
+    ty: &TypeDecl,
+    package: Option<&str>,
+    outer_name: Option<&str>,
+    into: &mut Vec<(String, crate::java_ir::FieldDecl)>,
+) {
+    let type_name = package_qualified_source_type_name(ty, package, outer_name);
+    for member in &ty.members {
+        match member {
+            Member::Field(field)
+                if field.modifiers.contains(&Modifier::Static)
+                    && field.modifiers.contains(&Modifier::Final) =>
+            {
+                into.push((type_name.clone(), field.clone()));
+            }
+            Member::Type(nested) => {
+                collect_static_final_constant_declarations(nested, package, Some(&type_name), into)
             }
             _ => {}
         }
@@ -6210,7 +6368,7 @@ impl CaptureAnalyzer {
 
     fn analyze_type_members(&mut self, ty: &TypeDecl, outer: Option<&TypeDecl>) {
         let fields = field_types(ty);
-        let outer_fields = outer.map(field_types).unwrap_or_default();
+        let outer_fields = outer.map(instance_field_types).unwrap_or_default();
         let outer_type_name = outer.map(|ty| ty.name.clone());
 
         for member in &ty.members {
@@ -6243,7 +6401,15 @@ impl CaptureAnalyzer {
                         self.analyze_block(body, &mut ctx, None);
                     }
                 }
-                Member::Type(inner) => self.analyze_inner_type(inner, ty),
+                // A `static` nested class has no enclosing instance, so nothing
+                // in it can capture one. Analysing it as an inner class made an
+                // unqualified reference to an outer *static* lower to
+                // `self.__outer.borrow().field`
+                // ([0037](../claude_audits/done/0037-nested-class-outer-static-read-is-capture.md)).
+                Member::Type(inner) if !inner.modifiers.contains(&Modifier::Static) => {
+                    self.analyze_inner_type(inner, ty)
+                }
+                Member::Type(inner) => self.analyze_type_members(inner, None),
                 _ => {}
             }
         }
@@ -6276,7 +6442,7 @@ impl CaptureAnalyzer {
         captures: &mut Vec<Capture>,
     ) {
         let fields = field_types(ty);
-        let outer_fields = outer.map(field_types).unwrap_or_default();
+        let outer_fields = outer.map(instance_field_types).unwrap_or_default();
         let outer_type_name = outer.map(|ty| ty.name.clone());
 
         for member in &ty.members {
@@ -6733,6 +6899,25 @@ fn field_types(ty: &TypeDecl) -> HashMap<String, JavaType> {
         .iter()
         .filter_map(|member| match member {
             Member::Field(field) => Some((field.name.clone(), field.ty.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Instance fields only.
+///
+/// Used for the *enclosing* type when classifying outer-`this` captures: a
+/// `static` member is reached through the class, not through an instance, so
+/// naming one from a nested class is not a capture at all. Including statics
+/// here produced `self.__outer.borrow().counter` for a field that is not even a
+/// struct member ([0037](../claude_audits/done/0037-nested-class-outer-static-read-is-capture.md)).
+fn instance_field_types(ty: &TypeDecl) -> HashMap<String, JavaType> {
+    ty.members
+        .iter()
+        .filter_map(|member| match member {
+            Member::Field(field) if !field.modifiers.contains(&Modifier::Static) => {
+                Some((field.name.clone(), field.ty.clone()))
+            }
             _ => None,
         })
         .collect()

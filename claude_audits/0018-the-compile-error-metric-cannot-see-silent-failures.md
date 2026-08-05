@@ -230,3 +230,130 @@ so regressions in it were undetectable by construction. Fixed at the cause — a
 `while … {}` fixpoint that derived "changed" from the *intent* to add a facade
 method rather than from the outcome. The suite now returns in ~8 minutes, and
 its failure-name set is checked in as `tests/baselines/idiom-gaps-failures.txt`.
+
+---
+
+## Update 2026-08-05 (third pass) — the coverage counters, and one that was 97% noise
+
+The three items this file asks for stand at: **1 done, 2 done with one exception
+recorded below, 3 done** (15 differential fixtures, run through `javac`+`java`
+against `rustc`+run on every gate).
+
+Item 2 asked for five counters. Four exist in `summary.tsv`
+(`parse_failures`, `unmodelled_types`, `unsupported_statements` — this file's
+`dropped_statements` — and `noop_facade_methods`), plus `unsupported_members`,
+`unsupported_expressions`, `unmodelled_call_sites` and `stubbed_constants`
+which it did not ask for.
+
+### `noop_facade_methods` was mostly measuring something else
+
+On a program whose only Java API use is `StringBuilder`, the counter reported
+**80** — of which **78 were synthesised `From` impls**:
+
+```rust
+impl From<ZipOutputStream> for OutputStream {
+    /// Unmodelled Java upcast: ZipOutputStream -> OutputStream.
+    fn from(_value: ZipOutputStream) -> Self { Default::default() }
+}
+```
+
+These are erasure — a widened value silently becomes a fresh empty one — and
+worth counting. But they are a *different* phenomenon from a modelled API that
+does nothing, with a different fix, and they drowned it 39:1. A coverage counter
+that is 97% a different signal cannot make erasure visible; it hides it in a new
+way, which is this file's own thesis turned on one of its own remedies.
+
+They are now `unmodelled_upcast_conversions`, counted separately and reported in
+`summary.tsv`. `noop_facade_methods` drops from 80 to **2** on that program.
+
+Worth noting for whoever picks this up: the upcast surface is emitted for
+**every** translation regardless of what the program uses — a Java file that
+touches no API at all still gets all 78. So it is a constant offset, not a
+per-file cost, and `unmodelled_upcasts_are_not_counted_as_noop_facade_methods`
+asserts exactly that so the claim is checkable.
+
+### Two implementations of one metric, on opposite sides of a language boundary
+
+The same drift this module was built to prevent existed one level up:
+`scripts/sweep-generated-idioms.py` (which feeds `summary.tsv`) and
+`output_markers::count_noop_facade_methods` (which feeds the analysis profile)
+are **independent detectors for the same named signal**, and they disagreed —
+145 vs 130 on the htsjdk corpus. A shared constant cannot fix this, because one
+side is Python.
+
+So the agreement is asserted instead:
+`the_python_sweep_and_the_rust_counters_agree_on_shared_signals`
+(`tests/idiom_sweep_script.rs`) translates one Java source, runs the real sweep
+script over the output, and requires the two to produce the same number for
+every shared signal.
+
+### `noop_facade_call_sites` — specified, deliberately not built
+
+The one counter from item 2 that does not exist, and the reason is worth
+recording rather than leaving as a silent omission.
+
+It cannot be recovered from generated text. The no-op methods that remain after
+the split are named `to_string`, `clone`, `into` — names that collide with
+Rust's own, so counting `.to_string(` would count mostly unrelated calls. That
+is precisely the kind of detector this file argues against: one whose number
+looks like a measurement and is not.
+
+Doing it soundly means recording the fact at **lowering** time, where the
+translator knows a call resolved to a no-op facade, rather than recovering it by
+regex afterwards. That is the same shape as `unmodelled_call_sites`, which is
+emitted (`unimplemented!("… is not modelled")`) rather than inferred, and which
+works. The work is a diagnostic at the facade-call lowering site; it is not
+started.
+
+### Measured on the corpus
+
+`htsjdk_vcf`, 32 files, with the htsjdk `variant`/`samtools` slice as a
+context-summary source:
+
+| | before | after |
+|---|---:|---:|
+| `noop_facade_methods` | 145 | **130** |
+| `unmodelled_upcast_conversions` | (not counted) | 0 in the swept root, **68** in the crate |
+
+The 15 removed were never facade methods: struct-field initialisers and local
+defaults, matched because the old regex looked for `Default::default()`
+*anywhere* in the file —
+
+```rust
+let mut __java_self = VCFHeader { vcf_header_version: Default::default(), … };
+let mut i: i32 = Default::default();
+```
+
+One more gap found and **not** fixed here, recorded so it is not mistaken for a
+zero: the sweep runs over `generated/*.rs` only, and the crate's shared support
+module is where the upcast conversions live — hence `0` swept against `68`
+present. Every signal the sweep reports is therefore a lower bound on anything
+that can appear in support code.
+
+### The gate itself was silently reporting the wrong numbers
+
+Found by accident, and it belongs in this file because it is the same failure
+one more level up: **the measurement apparatus can be wrong for reasons that
+have nothing to do with the thing measured.**
+
+`idiom_gaps` writes each generated crate to `/tmp` and — deliberately — keeps
+the ones that *fail*, so they can be inspected. Reasonable. But it kept them
+**whole**, including `target/`, and with ~146 failures per run and no bound on
+runs the leftovers reached **10,525 directories / 31 GB** and filled the root
+filesystem.
+
+The symptoms, in the order they appeared:
+
+1. a gate run came back `537/147` against a `538/146` baseline — one test,
+   easily mistaken for a real regression from the change under test;
+2. a direct re-run of the same suite, same tree, reported **280 passed / 404
+   failed**. Nothing had changed but the free space.
+
+A one-test delta is exactly the size of signal this whole audit set treats as
+meaningful, so the near miss is the point: the number moved for a reason
+invisible in the diff.
+
+Fixed by keeping what is actually inspected and dropping what is regenerable —
+`Cargo.toml` and `src/` stay, `target/` goes. A failing crate still reproduces
+by running `cargo` in its directory. Cost of a full run drops from ~450 MB to
+**1.9 MB**, measured, with the suite still at `538/146`.

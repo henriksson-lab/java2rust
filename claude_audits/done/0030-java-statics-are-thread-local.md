@@ -93,3 +93,61 @@ static int counter = 0;
 
 Until threaded tests exist, a weaker but useful check: assert that no
 `thread_local!` appears in generated output for a `static` field.
+
+---
+
+## Update 2026-08-05 — fixed
+
+Static storage is now process-wide. `thread_local!` appears nowhere in the
+emitter.
+
+### What changed
+
+| | before | after |
+|---|---|---|
+| mutable static | `thread_local!` + `RefCell<Option<T>>` | `static … : std::sync::Mutex<Option<T>>` |
+| class-init guard | per-thread flag | `AtomicBool` |
+| getter | `.borrow().clone()` | `.lock()…clone()` |
+
+The getter recovers from a poisoned lock
+(`unwrap_or_else(|poisoned| poisoned.into_inner())`) rather than propagating the
+panic. A Java static initialiser that throws leaves the class in an erroneous
+state, but it does not make the *field* permanently unreadable, and propagating
+poisoning would turn one failure into every subsequent access failing for an
+unrelated reason.
+
+### Both halves are pinned, because a single-threaded run cannot see the defect
+
+This is the part worth stating: the bug is **invisible to behaviour** on one
+thread. A per-thread copy and a shared variable are indistinguishable until a
+second thread exists. So there are two tests, deliberately:
+
+- `tests/differential/StaticSharing.java` — against the Java oracle, pins the
+  observable behaviour the shared storage has to keep giving: `static final`
+  reads, a mutable counter across calls, a lazily initialised value, and
+  once-per-class initialisation. Both toolchains print `7,abc,2,99,1`.
+- `static_storage_is_shared_across_threads_not_per_thread`
+  (`tests/slot_shape_design.rs`) — pins the storage *identity*: no
+  `thread_local!`, a `std::sync::Mutex`, and an `AtomicBool` init guard rather
+  than a `Cell<bool>`. This is exactly the weaker check this file proposed while
+  the harness has no threaded fixture, and it is the one that would catch a
+  revert.
+
+The threaded fixture this file asks for is still not written, and cannot be
+until the translator supports `Thread`. That is a *coverage* gap, not an
+unfixed defect: the identity check above fails for any per-thread storage,
+which is the property the threaded test would be measuring.
+
+### What this does not close
+
+`Send`/`Sync` propagation through the object graph — item 3 of the sequencing
+section — stays with [0002](0002-object-aliasing-has-no-representation.md) and
+`CONCURRENCY-SCOPE.md`. A `static Mutex<T>` requires `T: Send`, and today the
+types that reach static storage satisfy it; a shared representation using
+`Rc<RefCell<_>>` would not. That is a constraint on 0002's design, recorded
+there, not a remaining defect here.
+
+Found on the way and filed separately:
+[0037](0037-nested-class-outer-static-read-is-capture.md) — a nested class
+reading an enclosing static was lowered as an outer-*instance* capture, which is
+why the fixture for this issue had to route around that shape. Since fixed.

@@ -96,6 +96,20 @@ pub const UNTRANSLATED_SOURCE_SUMMARY_PREFIX: &str = "source-summary method ";
 /// End of the message for a source-summary method that was not translated.
 pub const UNTRANSLATED_SOURCE_SUMMARY_SUFFIX: &str = " is not translated";
 
+/// Emitted where a non-static inner class's constructor cannot build its outer
+/// handle. The program compiles and aborts on first construction.
+pub const UNSUPPORTED_INNER_CLASS_OUTER_CAPTURE: &str =
+    "unsupported Java inner-class outer capture construction";
+
+/// Introduces the `From` impl synthesised for a Java upcast that has no model.
+///
+/// Its body is `Default::default()`, so a widened value silently becomes a
+/// fresh empty one. That is erasure, and 0018's argument is that erasure has to
+/// be *visible as a cost*; before this constant existed the conversions were
+/// counted as `noop_facade_methods`, where they were 78 of 80 on a program
+/// whose only Java API use was `StringBuilder`.
+pub const UNMODELLED_JAVA_UPCAST_PREFIX: &str = "Unmodelled Java upcast: ";
+
 /// A `Collection.addAll` that kept its Java name instead of becoming `extend`.
 pub const UNTRANSLATED_JAVA_ADD_ALL_CALL: &str = ".add_all(";
 
@@ -145,6 +159,16 @@ pub const OUTPUT_MARKERS: &[OutputMarker] = &[
         name: "unsupported_java_array_creation",
         text: UNSUPPORTED_JAVA_ARRAY_CREATION,
         kind: OutputMarkerKind::Diagnostic,
+    },
+    OutputMarker {
+        name: "unsupported_inner_class_outer_capture",
+        text: UNSUPPORTED_INNER_CLASS_OUTER_CAPTURE,
+        kind: OutputMarkerKind::Diagnostic,
+    },
+    OutputMarker {
+        name: "unmodelled_java_upcast",
+        text: UNMODELLED_JAVA_UPCAST_PREFIX,
+        kind: OutputMarkerKind::Stub,
     },
     OutputMarker {
         name: "unmodelled_static_constant",
@@ -199,6 +223,7 @@ pub fn count_invalid_patterns(rust: &str) -> usize {
                 || line.contains(UNTRANSLATED_JAVA_ADD_ALL_CALL)
                 || line.contains(UNTRANSLATED_JAVA_PUT_CALL)
                 || line.contains(UNSUPPORTED_JAVA_ARRAY_CREATION)
+                || line.contains(UNSUPPORTED_INNER_CLASS_OUTER_CAPTURE)
                 || (line.contains("= None;")
                     && !line.contains("let mut ")
                     && !line.contains(": Option<"))
@@ -224,9 +249,33 @@ pub fn count_noop_facade_methods(rust: &str) -> usize {
     rust.lines()
         .filter(|line| {
             let line = line.trim_end();
-            line.ends_with("Default::default() }") || line.ends_with("self.clone() }")
+            !line_is_unmodelled_upcast_conversion(line)
+                && (line.ends_with("Default::default() }") || line.ends_with("self.clone() }"))
         })
         .count()
+}
+
+/// `From` impls synthesised for Java upcasts with no model.
+///
+/// Counted apart from [`count_noop_facade_methods`] because they are a
+/// different phenomenon with a different fix: a no-op *method* means a modelled
+/// API does nothing, while this means a widening conversion throws the value
+/// away. Lumping them together made the facade counter 97% noise on a trivial
+/// program and hid the signal it exists to show
+/// ([0018](../claude_audits/0018-the-compile-error-metric-cannot-see-silent-failures.md)).
+pub fn count_unmodelled_upcast_conversions(rust: &str) -> usize {
+    rust.lines()
+        .filter(|line| line.contains(UNMODELLED_JAVA_UPCAST_PREFIX))
+        .count()
+}
+
+/// The conversion body a synthesised upcast `From` impl has.
+///
+/// Matched on the body rather than the doc comment above it, so a counter that
+/// walks lines does not have to remember the previous one.
+fn line_is_unmodelled_upcast_conversion(line: &str) -> bool {
+    let line = line.trim_start();
+    line.starts_with("fn from(") && line.ends_with("Default::default() }")
 }
 
 /// Facade methods that panic when reached.

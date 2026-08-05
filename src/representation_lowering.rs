@@ -749,10 +749,16 @@ fn collect_implemented_interfaces_for_type(
     for interface_name in &ty.implements {
         collect_implemented_interface_name(program, interface_name, seen, out);
     }
-    if let Some(super_name) = ty.extends.as_deref()
-        && let Some(super_ty) = find_type_decl(program, super_name)
-    {
-        collect_implemented_interfaces_for_type(program, super_ty, seen, out);
+    if let Some(super_name) = ty.extends.as_deref() {
+        if ty.kind == TypeKind::Interface {
+            // For an interface, `extends` names a *super-interface*, which the
+            // type implements. Treating it as a superclass meant a class
+            // implementing `P extends G` never got `impl G for C`, so the
+            // subtrait bound could not be satisfied (`E0277`).
+            collect_implemented_interface_name(program, super_name, seen, out);
+        } else if let Some(super_ty) = find_type_decl(program, super_name) {
+            collect_implemented_interfaces_for_type(program, super_ty, seen, out);
+        }
     }
 }
 
@@ -894,8 +900,12 @@ fn trait_object_support_impl_methods(trait_name: &str) -> Vec<String> {
 }
 
 pub(crate) fn boxed_dyn_trait_clone_impl(trait_name: &str) -> String {
+    // Qualified rather than `self.clone_box()`. A Java interface that extends
+    // another lowers to a subtrait, and both declare `clone_box`, so an
+    // unqualified call is ambiguous (`E0034`). Naming the trait picks the one
+    // whose return type matches this `Box`.
     format!(
-        "impl Clone for Box<dyn {trait_name}> {{\n    fn clone(&self) -> Self {{ self.clone_box() }}\n}}"
+        "impl Clone for Box<dyn {trait_name}> {{\n    fn clone(&self) -> Self {{ {trait_name}::clone_box(&**self) }}\n}}"
     )
 }
 

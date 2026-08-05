@@ -764,6 +764,39 @@ fn seed_support_type_fields(env: &mut ShapeEnv, program: &Program) {
     }
 }
 
+/// The accessor path for an unqualified static-storage reference.
+///
+/// `Self::` is right only when the *current* type declares the field. A nested
+/// class naming an enclosing class's static resolves through the same shared
+/// environment, and assuming `Self` emitted
+/// `NestedIn::__static_n()` for a field the enclosing class owns
+/// ([0037](../claude_audits/done/0037-nested-class-outer-static-read-is-capture.md)).
+fn static_storage_accessor_for_name(name: &str, env: &ShapeEnv, ctx: LowerCtx) -> RustExpr {
+    match static_storage_owner_qualifier(name, env, ctx) {
+        Some(owner) => qualified_static_storage_accessor_projection(&owner, name),
+        None => static_storage_accessor_projection(name),
+    }
+}
+
+fn static_storage_setter_for_name(name: &str, env: &ShapeEnv, ctx: LowerCtx) -> RustExpr {
+    match static_storage_owner_qualifier(name, env, ctx) {
+        Some(owner) => qualified_static_storage_setter_path_projection(&owner, name),
+        None => static_storage_setter_path_projection(name),
+    }
+}
+
+/// The Rust type name to qualify with, or `None` to use `Self`.
+fn static_storage_owner_qualifier(name: &str, env: &ShapeEnv, ctx: LowerCtx) -> Option<String> {
+    let owner = env.static_storage_field_owner(name)?;
+    let current = ctx.current_type?;
+    if crate::stdlib::canonical_external_receiver_type_key(owner)
+        == crate::stdlib::canonical_external_receiver_type_key(current)
+    {
+        return None;
+    }
+    Some(crate::slot_render::rust_name_for_java_named_type(owner))
+}
+
 fn seed_support_type_fields_for_type(env: &mut ShapeEnv, ty: &TypeDecl) {
     for member in &ty.members {
         match member {
@@ -778,7 +811,11 @@ fn seed_support_type_fields_for_type(env: &mut ShapeEnv, ty: &TypeDecl) {
                         field.name.clone(),
                         shape.clone(),
                     );
-                    env.insert_static_storage_field_shape(field.name.clone(), shape);
+                    env.insert_static_storage_field_shape_owned_by(
+                        &ty.name,
+                        field.name.clone(),
+                        shape,
+                    );
                 } else {
                     env.insert_type_field_shape(&ty.name, field.name.clone(), shape);
                 }
@@ -1171,12 +1208,59 @@ fn raw_interface_trait_item_with_default_methods(
         })
         .collect::<Vec<_>>();
     methods.extend(trait_object_support_method_signatures(&trait_name));
+    let supertraits = source_interface_supertrait_bounds(ty, ctx);
     Some(format!(
-        "pub trait {trait_name} {{\n{}\n}}\n\n{}\n\n{}",
+        "pub trait {trait_name}{supertraits} {{\n{}\n}}\n\n{}\n\n{}",
         methods.join("\n"),
         dyn_trait_anonymous_impl(&trait_name),
         boxed_dyn_trait_clone_impl(&trait_name)
     ))
+}
+
+/// `: Super` bounds for an interface that extends other source interfaces.
+///
+/// Java's `interface P extends G` means a `P` *is* a `G`, and a `default` body
+/// in `P` may call `G`'s methods through `this`. Without the supertrait bound
+/// the generated default body cannot see them (`E0599: no method named … for
+/// &Self`), so an interface hierarchy with defaults did not compile
+/// ([0025](../claude_audits/done/0025-interface-default-methods-are-discarded.md)).
+fn source_interface_supertrait_bounds(ty: &TypeDecl, ctx: LowerCtx) -> String {
+    let mut bounds = Vec::new();
+    for super_name in ty.extends.iter().chain(ty.implements.iter()) {
+        // `find_super_type_decl_by_erased_name` rather than an exact match: a
+        // nested interface is stored qualified (`Outer.G`) while `extends`
+        // names it simply (`G`).
+        let Some(super_ty) =
+            find_super_type_decl_by_erased_name(ctx.program, super_name).or_else(|| {
+                find_super_type_decl_by_erased_name(ctx.support_local_type_program, super_name)
+            })
+        else {
+            continue;
+        };
+        if super_ty.kind != TypeKind::Interface {
+            continue;
+        }
+        let Some(bound) = ctx
+            .representations
+            .type_representation(&super_ty.name)
+            .and_then(|representation| match &representation.representation {
+                crate::representation::ObjectRepresentation::DynTrait { trait_name } => Some(
+                    crate::slot_render::rust_name_for_java_named_type(trait_name),
+                ),
+                _ => None,
+            })
+        else {
+            continue;
+        };
+        if !bounds.contains(&bound) {
+            bounds.push(bound);
+        }
+    }
+    if bounds.is_empty() {
+        String::new()
+    } else {
+        format!(": {}", bounds.join(" + "))
+    }
 }
 
 fn interface_default_trait_method_item(
@@ -1260,8 +1344,10 @@ fn interface_default_helper_name(rust_name: &str) -> String {
 fn static_storage_items_for_type(ty: &TypeDecl, ctx: LowerCtx) -> Vec<String> {
     let mut items = Vec::new();
     if !ty.static_init_blocks.is_empty() {
+        // Class initialisation happens once per class, not once per class per
+        // thread — see 0030. `AtomicBool` gives that without a lock.
         items.push(format!(
-            "std::thread_local! {{\n    static {}: std::cell::Cell<bool> = const {{ std::cell::Cell::new(false) }};\n}}",
+            "static {}: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);",
             class_init_guard_symbol_name(ty)
         ));
     }
@@ -1283,8 +1369,11 @@ fn static_storage_field_items_for_type(ty: &TypeDecl, ctx: LowerCtx) -> Vec<Stri
             }
             let shape = ctx.signatures.required_field_shape(&ty.name, &field.name);
             let rust_ty = crate::slot_render::rust_type_for_slot_with_facts(&shape, ctx.facts);
+            // Process-wide, not thread-local: a Java `static` is one variable
+            // shared by all threads (0030). `Mutex::new` is a `const fn`, so
+            // this stays a plain `static` with no lazy-init machinery.
             Some(format!(
-                "std::thread_local! {{\n    static {}: std::cell::RefCell<Option<{}>> = const {{ std::cell::RefCell::new(None) }};\n}}",
+                "static {}: std::sync::Mutex<Option<{}>> = std::sync::Mutex::new(None);",
                 static_storage_symbol_name(ty, &field.name),
                 emit::emit_type(&rust_ty)
             ))
@@ -1348,7 +1437,7 @@ fn class_init_function_for_type(ty: &TypeDecl, ctx: LowerCtx) -> Option<RustFunc
         // Set the flag before running the body: a static read re-entered from
         // within initialization must see the current value rather than recurse,
         // which is also what Java does during circular initialization.
-        "if {guard}.with(|done| done.replace(true)) {{ return; }}"
+        "if {guard}.swap(true, std::sync::atomic::Ordering::SeqCst) {{ return; }}"
     ))];
     let mut env = crate::expr_shape::shape_env_for_type(ty, ctx.signatures);
     let type_ctx = LowerCtx {
@@ -5423,6 +5512,18 @@ fn lower_stmt(
                 )));
             } else {
                 if let Some(stmt) = lower_ordered_array_index_assignment_stmt(
+                    target,
+                    value,
+                    env,
+                    ctx,
+                    refinements,
+                    assignment_slot.clone(),
+                ) {
+                    out.push(stmt);
+                    refine_assigned_local_shape(target, value, env, ctx);
+                    return;
+                }
+                if let Some(stmt) = lower_ordered_field_place_assignment_stmt(
                     target,
                     value,
                     env,
@@ -12566,7 +12667,7 @@ fn lower_ordered_array_index_assignment_value_expr(
     }
     if !array_assignment_receiver_is_simple(array)
         || !array_assignment_receiver_is_one_dimensional(array, env)
-        || !expr_has_assignment_order_side_effect(index)
+        || !assignment_order_is_observable(index, value, env)
     {
         return None;
     }
@@ -12652,7 +12753,8 @@ fn lower_ordered_array_index_assignment_stmt(
     ) {
         return Some(stmt);
     }
-    if !array_assignment_receiver_is_simple(array) || !expr_has_assignment_order_side_effect(index)
+    if !array_assignment_receiver_is_simple(array)
+        || !assignment_order_is_observable(index, value, env)
     {
         return None;
     }
@@ -12691,6 +12793,65 @@ fn lower_ordered_array_index_assignment_stmt(
         emit::emit_expr(&assigned_value),
     )))
 }
+
+/// `arr[j++].field = j` — the assignment place is a *field*, and the array
+/// access is a subexpression of it.
+///
+/// Nothing here is an array *assignment*, so the ordered-array paths above do
+/// not recognise it and Rust's order applies: the value is read before the
+/// index increments, and the write lands on the wrong element with the wrong
+/// value. Java evaluates the whole place first
+/// ([0026](../claude_audits/0026-assignment-evaluation-order-differs-from-java.md)).
+///
+/// The index is hoisted by lowering the place with the index replaced by the
+/// temporary's name, so the field projection — optional carriers, reference
+/// storage and all — stays the one the ordinary path would have produced.
+fn lower_ordered_field_place_assignment_stmt(
+    target: &Expr,
+    value: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+    assignment_slot: Slot,
+) -> Option<RustStmt> {
+    let Expr::FieldAccess(receiver, field) = target else {
+        return None;
+    };
+    let Expr::ArrayAccess(array, index) = receiver.as_ref() else {
+        return None;
+    };
+    if !array_assignment_receiver_is_simple(array)
+        || !array_assignment_receiver_is_one_dimensional(array, env)
+        || !assignment_order_is_observable(index, value, env)
+    {
+        return None;
+    }
+    let hoisted_index = lower_expr(index, env, ctx);
+    let substituted_target = Expr::FieldAccess(
+        Box::new(Expr::ArrayAccess(
+            array.clone(),
+            Box::new(Expr::Var(ORDERED_ASSIGNMENT_INDEX_TEMP.to_string())),
+        )),
+        field.clone(),
+    );
+    let lowered_target = lower_expr(&substituted_target, env, ctx);
+    let lowered_value =
+        lower_assignment_value_for_slot(target, value, env, &assignment_slot, ctx, refinements);
+    let lowered_value =
+        adapt_reused_owned_value_for_slot(lowered_value, value, &assignment_slot, env, ctx);
+    let assigned_value =
+        wrap_optional_assignment_value_if_needed(value, env, assignment_slot, lowered_value, ctx);
+    Some(RustStmt::Raw(format!(
+        "{{\n    let {ORDERED_ASSIGNMENT_INDEX_TEMP}: i32 = {};\n    {} = {};\n}}",
+        emit::emit_expr(&hoisted_index),
+        emit::emit_expr(&lowered_target),
+        emit::emit_expr(&assigned_value),
+    )))
+}
+
+/// The name the hoisted index is bound to. Shared so the substituted place and
+/// the binding cannot drift apart.
+const ORDERED_ASSIGNMENT_INDEX_TEMP: &str = "__java_assignment_index";
 
 fn lower_ordered_array_receiver_assignment_value_expr(
     target: &Expr,
@@ -13007,6 +13168,127 @@ fn array_assignment_receiver_is_one_dimensional(expr: &Expr, env: &ShapeEnv) -> 
     }
     let ty = crate::types::infer_expr_type(expr, env.type_env());
     ndarray_element_type_after_optional(&ty).is_none()
+}
+
+/// Whether Java's "target subexpressions first" order is observable here.
+///
+/// Rust evaluates an assignment's value before its place, so the two languages
+/// disagree whenever evaluating the value can change what the place denotes.
+/// Gating only on the *target part* having a side effect misses the mirror
+/// case, where the index is a bare local and the **value** is what mutates it:
+///
+/// ```java
+/// int[] b = new int[3]; int m = 0;
+/// b[m] = m++;     // Java writes b[0]; evaluating the value first writes b[1]
+/// ```
+///
+/// That one is easy to miss because `b[0]` reads `0` either way — the defect is
+/// that a different element was written. See
+/// [0026](../claude_audits/0026-assignment-evaluation-order-differs-from-java.md).
+fn assignment_order_is_observable(target_part: &Expr, value: &Expr, env: &ShapeEnv) -> bool {
+    if expr_has_assignment_order_side_effect(target_part) {
+        return true;
+    }
+    if expr_is_stable_across_evaluation(target_part) {
+        return false;
+    }
+    // A **local** can only be disturbed by an explicit write to that same name:
+    // Java has no way for a callee to reach a caller's local, so a call in the
+    // value cannot change what the index denotes. Hoisting on any call would
+    // wrap most `a[i] = f()` in a temporary for nothing.
+    if let Expr::Var(name) = target_part
+        && !name_is_field_like(name, env)
+    {
+        return value_writes_name(value, name);
+    }
+    // Anything else the index reads — a field, an array element — a call in the
+    // value could reach, so the conservative rule applies.
+    expr_has_assignment_order_side_effect(value)
+}
+
+/// Whether `name` refers to a field rather than a local.
+///
+/// A bare field reference and a local are the same `Expr::Var` in the IR, and
+/// only the shape environment can tell them apart.
+fn name_is_field_like(name: &str, env: &ShapeEnv) -> bool {
+    env.is_instance_field(name)
+        || env.static_storage_field_access_name(name).is_some()
+        || env.static_field_access_name(name).is_some()
+}
+
+/// Whether evaluating `value` assigns to, or increments, `name`.
+fn value_writes_name(value: &Expr, name: &str) -> bool {
+    let writes_this_name = |target: &Expr| matches!(target, Expr::Var(other) if other == name);
+    match value {
+        Expr::Unary {
+            op: UnaryOp::PreInc | UnaryOp::PreDec | UnaryOp::PostInc | UnaryOp::PostDec,
+            expr,
+        } => writes_this_name(expr) || value_writes_name(expr, name),
+        Expr::Binary {
+            op: BinaryOp::Assign,
+            left,
+            right,
+        } => {
+            writes_this_name(left)
+                || value_writes_name(left, name)
+                || value_writes_name(right, name)
+        }
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::InstanceOf { expr, .. } => {
+            value_writes_name(expr, name)
+        }
+        Expr::Binary { left, right, .. } => {
+            value_writes_name(left, name) || value_writes_name(right, name)
+        }
+        Expr::FieldAccess(receiver, _) => value_writes_name(receiver, name),
+        Expr::ArrayAccess(array, index) => {
+            value_writes_name(array, name) || value_writes_name(index, name)
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            value_writes_name(condition, name)
+                || value_writes_name(then_expr, name)
+                || value_writes_name(else_expr, name)
+        }
+        Expr::Call { receiver, args, .. } => {
+            receiver
+                .as_ref()
+                .is_some_and(|receiver| value_writes_name(receiver, name))
+                || args.iter().any(|arg| value_writes_name(arg, name))
+        }
+        Expr::New { args, .. } => args.iter().any(|arg| value_writes_name(arg, name)),
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            dimensions.iter().any(|dim| value_writes_name(dim, name))
+                || initializer
+                    .as_ref()
+                    .is_some_and(|items| items.iter().any(|item| value_writes_name(item, name)))
+        }
+        Expr::ArrayInitializer(items) => items.iter().any(|item| value_writes_name(item, name)),
+        _ => false,
+    }
+}
+
+/// An expression whose value cannot be changed by evaluating anything else.
+///
+/// Only literals and pure operations over them qualify. A bare local does not:
+/// that is exactly the case above.
+fn expr_is_stable_across_evaluation(expr: &Expr) -> bool {
+    match expr {
+        Expr::Literal(_) => true,
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => {
+            expr_is_stable_across_evaluation(expr)
+        }
+        Expr::Binary { left, right, .. } => {
+            expr_is_stable_across_evaluation(left) && expr_is_stable_across_evaluation(right)
+        }
+        _ => false,
+    }
 }
 
 fn expr_has_assignment_order_side_effect(expr: &Expr) -> bool {
@@ -13691,7 +13973,7 @@ fn lower_static_storage_assignment_stmt(
     let assigned_value =
         wrap_optional_assignment_value_if_needed(value, env, assignment_slot, lowered_value, ctx);
     Some(expr_stmt(function_call_projection(
-        static_storage_setter_path_projection(static_name),
+        static_storage_setter_for_name(static_name, env, ctx),
         vec![assigned_value],
     )))
 }
@@ -13714,10 +13996,10 @@ fn lower_static_storage_assignment_value_expr(
         adapt_reused_owned_value_for_slot(lowered_value, value, &assignment_slot, env, ctx);
     let assigned_value =
         wrap_optional_assignment_value_if_needed(value, env, assignment_slot, lowered_value, ctx);
-    let getter = static_storage_accessor_projection(static_name);
+    let getter = static_storage_accessor_for_name(static_name, env, ctx);
     Some(RustExpr::Raw(format!(
         "{{ {}({}); {} }}",
-        emit::emit_expr(&static_storage_setter_path_projection(static_name)),
+        emit::emit_expr(&static_storage_setter_for_name(static_name, env, ctx)),
         emit::emit_expr(&assigned_value),
         emit::emit_expr(&getter)
     )))
@@ -14050,7 +14332,7 @@ fn static_storage_update_plan(
         Expr::Var(name) => {
             let static_name = env.static_storage_field_access_name(name)?;
             Some(StaticStorageUpdatePlan {
-                getter: static_storage_accessor_projection(static_name),
+                getter: static_storage_accessor_for_name(static_name, env, ctx),
                 setter: static_storage_setter_path_projection(static_name),
                 shape: static_storage_field_shape(name, env, ctx)?,
             })
@@ -15994,7 +16276,11 @@ fn find_unique_type_decl_by_simple_name<'a>(
     let mut found = None;
     for ty in &program.types {
         for candidate in type_decl_and_nested_types(ty) {
-            if candidate.name == simple_name {
+            // Compare simple-to-simple. A nested type is stored qualified
+            // (`Outer.Inner`), so comparing its stored name against a simple
+            // query never matched — which is how `interface P extends G`
+            // failed to resolve `G` and lost its supertrait bound.
+            if erased_java_simple_name(&candidate.name) == erased_java_simple_name(simple_name) {
                 if found.is_some() {
                     return None;
                 }
@@ -21643,9 +21929,17 @@ fn lower_interface_super_default_call(
     }) {
         return None;
     }
-    let interface_decl = find_type_decl_by_name(ctx.program, interface_name)
-        .or_else(|| find_type_decl_by_name(ctx.support_local_type_program, interface_name))
-        .or_else(|| find_type_decl_by_name(ctx.source_summary_type_program, interface_name))?;
+    // Erased-name lookup: a nested interface is stored qualified (`Outer.G`)
+    // while `G.super.m()` names it simply, so an exact match returned `None`
+    // and the call fell through to the static-owner path, emitting
+    // `Super::greet()` (`E0433`).
+    let interface_decl = find_super_type_decl_by_erased_name(ctx.program, interface_name)
+        .or_else(|| {
+            find_super_type_decl_by_erased_name(ctx.support_local_type_program, interface_name)
+        })
+        .or_else(|| {
+            find_super_type_decl_by_erased_name(ctx.source_summary_type_program, interface_name)
+        })?;
     if interface_decl.kind != TypeKind::Interface
         || !interface_decl.members.iter().any(|member| {
             matches!(member, Member::Method(method) if method.name == name && method.body.is_some())

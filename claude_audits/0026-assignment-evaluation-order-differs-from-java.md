@@ -103,3 +103,106 @@ int k=0; a[k++] = k;      return a[0];   // 1
 int k=0; a[k] = k++;      return a[0];   // 0
 int i=0; a[i++] += 5;                    // compound with side-effecting index
 ```
+
+---
+
+## Update 2026-08-05 — residual surfaces, probed
+
+The one-dimensional array cases this file opens with are fixed and hoist their
+index before the right-hand side. Probing the rest of the surface with a
+seven-case fixture (`EvalOrder.java`, run through `javac` for the oracle) splits
+the remainder into three groups, and only two of them are this issue's to fix.
+
+| case | Java | translation | status |
+|---|---|---|---|
+| `a[k++] = k` | `a[0] == 1` | `1` | fixed |
+| `c[i++] += 5` | `15` | `15` | fixed |
+| `g.grid[f()][f()] = v` | `grid[0][1] == 2` | `2` | fixed |
+| `b[m] = m++` | writes `b[0]` | **writes `b[1]`** | open — below |
+| `arr[j++].field = j` | `arr[0].field == 1` | **`arr[0].field == 0`** | open — below |
+| `pick(e).field = calls` | `e.field == 1` | `0`, and to a *clone* | blocked on 0002 |
+
+### The RHS can invalidate a target index that has no side effect of its own
+
+```java
+int[] b = new int[3]; int m = 0;
+b[m] = m++;             // Java: index 0, then RHS 0  ->  b[0] = 0
+```
+
+The hoist is currently gated on the *index* having a side effect. Here it does
+not — the index is a bare local — and the **value** is what mutates it. Rust
+evaluates the value first, so `m` is already `1` when the index is read and the
+write lands on `b[1]`.
+
+This is worth naming precisely because the observable symptom is so weak: `b[0]`
+holds `0` either way, so a test that only reads the written-to slot passes. The
+defect is that a *different element* was written.
+
+The gate has to be "the index is not stable across evaluating the value", not
+"the index has a side effect".
+
+### A field-assignment place has target subexpressions too
+
+```java
+arr[j++].field = j;     // Java: index 0, then RHS 1  ->  arr[0].field = 1
+```
+
+Nothing about this is array-*assignment*; the assignment target is a field, and
+the array access is a subexpression of the place. The ordered-assignment path
+only recognises `Expr::ArrayAccess` targets, so this falls through to the plain
+path and Rust's order applies.
+
+### What is not this issue's to fix
+
+`pick(e).field = calls` is wrong in two independent ways: the order, and the
+fact that `pick` receives `e.clone()` so the write cannot be observed at all.
+The second is [0002](0002-object-aliasing-has-no-representation.md), and fixing
+the order alone would produce code that is still wrong — so this case belongs in
+the aliasing fixture, not here. Stated so the next pass does not spend time on
+it.
+
+### Both residual surfaces fixed
+
+**1. The value can invalidate a stable-looking index.** The hoist gate moved
+from "the index has a side effect" to "the order is observable":
+`assignment_order_is_observable(index, value, env)`.
+
+The rule needed one refinement that the first attempt got wrong, and the
+regression it caused is worth recording because it is the interesting part.
+Gating on "the value has *any* order side effect" makes every `a[i] = f()`
+hoist, since a call counts. That cost three `idiom_gaps` tests and would have
+wrapped a large fraction of all array writes in a temporary for nothing.
+
+The precise rule is that **a Java method cannot reach a caller's local**. So if
+the index is a local, only an explicit write to that same name inside the value
+can disturb it; if it is a field or an array element, a call *can* reach it and
+the conservative rule stands. Telling the two apart needs the shape environment,
+because a bare field reference and a local are the same `Expr::Var` in the IR.
+
+**2. A field-assignment place has target subexpressions.**
+`lower_ordered_field_place_assignment_stmt` handles
+`FieldAccess(ArrayAccess(..), field)`. It hoists the index and then lowers the
+place with the index replaced by the temporary's name, so the field projection —
+optional carriers, reference storage and all — is the one the ordinary path
+would have produced, rather than a second hand-built spelling of it.
+
+### Verification
+
+- `tests/differential/EvalOrder.java` against the Java oracle, both printing
+  `1,0:0:0,15,1,1`. It reads the *whole* array for the second case, because
+  `b[0]` reads `0` under either order and only the element written differs.
+- `a_side_effecting_value_hoists_a_stable_looking_index`,
+  `a_literal_index_is_not_hoisted_for_a_side_effecting_value` (the negative —
+  no hoist where none is needed) and `a_field_place_hoists_its_receivers_array_index`
+  in `tests/slot_shape_design.rs`.
+
+### Still open
+
+- **Multi-level ragged receivers.** `a[i()][j()] = v` on a `T[][]` that is not
+  ndarray-backed. The ndarray-backed two-dimensional numeric case is handled;
+  the ragged one is not.
+- **Array-store exception ordering.** Java checks the store type after
+  evaluating the value and before the store; there is no `ArrayStoreException`
+  at all today, so the ordering question does not yet arise.
+- **`pick(e).field = v`**, blocked on
+  [0002](0002-object-aliasing-has-no-representation.md) as described above.

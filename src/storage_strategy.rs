@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::diagnostics::DiagnosticBag;
 use crate::java_ir::{Block, Expr, JavaType, Member, Program, Stmt, TypeDecl};
-use crate::usage::UsageFacts;
+use crate::usage::{BindingUse, CallArgumentBoundary, MethodUsageFacts, UsageFacts};
 
 /// How values of a source type are held.
 ///
@@ -217,7 +217,7 @@ fn collect_declared_types(ty: &TypeDecl, into: &mut BTreeSet<String>) {
 /// Types reachable from a thread entry point.
 ///
 /// Conservative and shallow on purpose: `SharedSync` is sequenced last in the
-/// design (after [0030a](../claude_audits/0030-java-statics-are-thread-local.md)),
+/// design (after [0030](../claude_audits/done/0030-java-statics-are-thread-local.md)),
 /// so this only has to be right enough to keep the tier from being reported as
 /// empty when it is not.
 fn threaded_type_names(program: &Program, declared: &BTreeSet<String>) -> BTreeSet<String> {
@@ -281,12 +281,13 @@ fn collect_type_facts(
                 // mutated. This is `mutates_self` from `usage`, already a
                 // fixpoint over self-calls, so a method that mutates only by
                 // delegating counts.
-                if usage
-                    .source_method_usage(ty, method)
-                    .is_some_and(|facts| facts.mutates_self)
-                    && let Some(facts) = into.get_mut(&ty.name)
-                {
-                    facts.mutated = true;
+                if let Some(method_usage) = usage.source_method_usage(ty, method) {
+                    if method_usage.mutates_self
+                        && let Some(facts) = into.get_mut(&ty.name)
+                    {
+                        facts.mutated = true;
+                    }
+                    collect_unknown_boundary_escapes(method_usage, declared, into);
                 }
                 if let Some(body) = &method.body {
                     collect_block_facts(body, ty, program, declared, into);
@@ -301,6 +302,47 @@ fn collect_type_facts(
                 collect_type_facts(nested, program, usage, declared, threaded, into)
             }
             Member::Unsupported { .. } => {}
+        }
+    }
+}
+
+/// A handle handed to a call the translator cannot see through escapes.
+///
+/// This is the `UnknownBoundary` input the design names and the earlier pass
+/// left unproduced, which biased the plan **low** — and under-sharing is a
+/// silent wrong answer, while over-sharing costs a pointer indirection. An
+/// unmodelled callee may retain the reference, so a value that crosses that
+/// boundary must be assumed reachable from a second place.
+///
+/// The evidence already existed: `usage` classifies every call argument as
+/// `InternalSameType`, `KnownContentRead` or `Unknown`, and a binding carries
+/// its declared Java type. Nothing new had to be analysed — the same finding as
+/// the rest of this design, one input later.
+///
+/// `ReceiverForCall` is deliberately **not** treated as an escape. Passing an
+/// argument gives the callee a handle it can store; being the receiver does
+/// not, and `KnownContentRead`/`InternalSameType` say the boundary is
+/// understood.
+fn collect_unknown_boundary_escapes(
+    method_usage: &MethodUsageFacts,
+    declared: &BTreeSet<String>,
+    into: &mut BTreeMap<String, TypeStorageFacts>,
+) {
+    for binding in method_usage.bindings.values() {
+        let Some(name) = declared_type_name(&binding.java_ty, declared) else {
+            continue;
+        };
+        let crosses_unknown_boundary = binding.uses.iter().any(|use_site| {
+            matches!(
+                use_site,
+                BindingUse::PassedToCall {
+                    boundary: CallArgumentBoundary::Unknown,
+                    ..
+                }
+            )
+        });
+        if crosses_unknown_boundary && let Some(facts) = into.get_mut(&name) {
+            facts.escape = facts.escape.max(Escape::UnknownBoundary);
         }
     }
 }
