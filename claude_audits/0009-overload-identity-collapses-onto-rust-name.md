@@ -332,3 +332,88 @@ broad change the previous update argued should be done one caller at a time
 behind `CallableKey::source_method`. Landing half of it would move errors
 without attributing them. The reproducer above is written down so the next pass
 starts from a failing case rather than from the corpus symptom.
+
+## Update 2026-08-05 (second pass) — the two paths now agree; the facade half does not
+
+The instance/static disagreement reported above is **fixed**, and the cause was
+narrower and duller than the audit's framing suggested — which is worth saying,
+because the framing pointed at a large refactor and the defect did not need one.
+
+### Cause
+
+`assign_type_rust_names` gives every method its overload-disambiguated Rust
+name, and it was already correct, including the supertype-aware counting added
+in the first pass. It simply **was not run on context and summary programs**.
+
+The primary program gets it during resolution. A summary source went
+`parse_java_source` → `declaration_only_program` → straight into
+`ctx.source_summary_type_program`, so every `MethodDecl` in it carried
+`rust_name: None`, and `source_method_rust_name` falls back to the bare
+snake-cased Java name:
+
+```rust
+pub fn source_method_rust_name(method: &MethodDecl) -> String {
+    method.rust_name.clone()
+        .unwrap_or_else(|| crate::parser::to_snake_case(&method.name))
+}
+```
+
+The static path escaped because it does not read `rust_name` at all — it
+re-solves signatures on an isolated one-type program
+(`solve_signatures_with_facts_and_support_context`), and *that* assigns names.
+So the same question had two implementations, one of which was fed and one of
+which was not. That is this file's thesis, and the instance of it here is a
+missing call rather than a missing key.
+
+### Fix
+
+`resolve::assign_rust_names_to_context_program`, applied to summary declarations
+in both the single-file and batch paths. Deliberately **not**
+`qualify_nested_type_names`: those programs are looked up by the names they
+already carry, so requalifying would change lookups rather than names.
+
+```
+before:  Util::pick_int(1), Util::pick_string("ab"),  u.inst(1),      u.inst("ab")
+after:   Util::pick_int(1), Util::pick_string("ab"),  u.inst_int(1),  u.inst_string("ab")
+```
+
+Pinned by `summary_source_overloads_get_one_rust_name_from_every_path`, which
+asserts the four resolved spellings **and** that neither collapsed spelling
+survives anywhere in the output.
+
+`scripts/gate.sh --all`: **zero movement** on every target. A naming change with
+no corpus effect is the expected shape here — the collapsed name was only ever
+reachable through the summary route, which the gated fixtures exercise for
+signatures rather than for overloaded instance calls.
+
+### What is still open, and it is not an identity defect
+
+The facade emitted for a summary type is still incomplete:
+
+```rust
+impl DepUtil {
+    pub fn pick<R, T0>(_arg0: T0) -> R { unimplemented!("imported static method pick is not modelled") }
+}
+```
+
+No `new`, no `inst`, and `pick` under the unsuffixed name that no call site now
+uses — so the program still does not compile (`E0599` ×3). The *call sites* are
+now right and the *facade* is wrong, where before both were wrong in the same
+direction and accidentally agreed on one name.
+
+That is a facade-completeness gap of the
+[0016](done/0016-core-jdk-facades-are-no-op-stubs.md) family: the emitter
+synthesises a generic arity-based stub instead of the declared methods it has in
+hand. It is a **fourth** place that names methods, and it should consume the
+same naming pass rather than inventing its own — but the work is in facade
+emission, not in identity, and it is not started.
+
+### Status
+
+The adoption step this file has been asking for — making
+`usage::CallableKey::Method` carry a `JavaCallableSlotKey` — is **still not
+done**, and remains the right description of the residual work. What this pass
+shows is that some of what looked like it needed that adoption did not: the
+name was already computed correctly and was not being asked for. Worth checking
+the remaining `.name ==` sites for the same shape before assuming they need the
+key.

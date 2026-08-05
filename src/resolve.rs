@@ -144,6 +144,38 @@ pub fn source_symbols_from_program(source_program: &Program) -> SourceSymbols {
     }
 }
 
+/// Give every method in `program` its overload-disambiguated Rust name.
+///
+/// The primary program gets this during resolution; **context and summary
+/// programs did not**, so a `MethodDecl` reaching lowering from one of them had
+/// `rust_name: None` and `source_method_rust_name` fell back to the bare
+/// snake-cased Java name. Two overloads then became one Rust method:
+///
+/// ```text
+/// Util::pick_int(1), Util::pick_string("ab")   // static path:   resolved
+/// u.inst(1),         u.inst("ab")              // instance path: collapsed
+/// ```
+///
+/// The static path escaped because it re-solves signatures on an isolated
+/// one-type program, which does name them. Two answers to one question, which is
+/// what [0009](../claude_audits/0009-overload-identity-collapses-onto-rust-name.md)
+/// is about — and the naming pass was already correct, it was simply not applied
+/// here.
+///
+/// Deliberately does **not** call `qualify_nested_type_names`: these programs
+/// are looked up by the names they already carry, and requalifying them would
+/// change lookups rather than names.
+pub fn assign_rust_names_to_context_program(program: &mut Program) {
+    let mut diagnostics = DiagnosticBag::new();
+    let mut program_counts = ProgramMethodCounts::new();
+    for ty in &program.types {
+        collect_program_method_counts(ty, &mut program_counts);
+    }
+    for ty in &mut program.types {
+        assign_type_rust_names(ty, &mut diagnostics, &program_counts);
+    }
+}
+
 pub fn resolve_program_with_source_symbols(
     program: &Program,
     diagnostics: DiagnosticBag,
@@ -5930,9 +5962,7 @@ fn collect_static_final_constant_value_facts(program: &Program, facts: &mut Fact
 /// Exposed so a caller holding several parsed files can pool them: type names
 /// are qualified with each file's *own* package, which a merged program no
 /// longer knows.
-pub fn static_final_constant_declarations(
-    program: &Program,
-) -> Vec<(String, crate::java_ir::FieldDecl)> {
+pub fn static_final_constant_declarations(program: &Program) -> Vec<ConstantDeclaration> {
     let mut declarations = Vec::new();
     for ty in &program.types {
         collect_static_final_constant_declarations(
@@ -5945,10 +5975,24 @@ pub fn static_final_constant_declarations(
     declarations
 }
 
+/// One `static final` declaration, with what a fold needs to resolve it.
+///
+/// The package is carried separately rather than recovered from `owner`,
+/// because a nested type's owner is `pkg.Outer.Inner` and splitting it would
+/// give `pkg.Outer` as the package. Getting that wrong is how a simple-name
+/// reference resolves into the wrong package
+/// ([0031](../claude_audits/done/0031-stubbed-constant-census.md)).
+#[derive(Debug, Clone)]
+pub struct ConstantDeclaration {
+    /// Package-qualified owner, e.g. `pkg1.Constants` or `pkg1.Outer.Inner`.
+    pub owner: String,
+    /// The declaring file's package, if any.
+    pub package: Option<String>,
+    pub field: crate::java_ir::FieldDecl,
+}
+
 /// Folds `declarations` to a fixpoint and reports the values that resolve.
-pub fn constant_value_facts_from_declarations(
-    declarations: &[(String, crate::java_ir::FieldDecl)],
-) -> FactSet {
+pub fn constant_value_facts_from_declarations(declarations: &[ConstantDeclaration]) -> FactSet {
     let mut facts = FactSet::default();
     let mut scope = crate::source_constant_values::ConstantScope::new();
     let mut folded: std::collections::BTreeMap<
@@ -5960,42 +6004,40 @@ pub fn constant_value_facts_from_declarations(
     // when a round adds nothing is what makes that bound implicit.
     loop {
         let mut progressed = false;
-        for (index, (owner, field)) in declarations.iter().enumerate() {
+        for (index, declaration) in declarations.iter().enumerate() {
             if folded.contains_key(&index) {
                 continue;
             }
-            let Some(initializer) = field.initializer.as_ref() else {
+            let Some(initializer) = declaration.field.initializer.as_ref() else {
                 continue;
             };
-            // Same-owner bare names must not leak between owners, so the bare
-            // spellings are added to a copy for this owner only.
+            // A type's own constants are visible to it as bare names, and must
+            // not leak to any other owner — so they go into a copy of the scope
+            // pointed at this declaration.
             let mut owner_scope = scope.clone();
-            for (other_owner, other_field) in declarations.iter() {
-                if other_owner != owner {
+            let mut own = std::collections::BTreeMap::new();
+            for (other_index, other) in declarations.iter().enumerate() {
+                if other.owner != declaration.owner {
                     continue;
                 }
-                if let Some(value) =
-                    declaration_value(&folded, &declarations, other_owner, other_field)
-                {
-                    crate::source_constant_values::record_constant(
-                        &mut owner_scope,
-                        None,
-                        &other_field.name,
-                        value,
-                    );
+                let Some(value) = folded.get(&other_index) else {
+                    continue;
+                };
+                for alias in [
+                    other.field.name.clone(),
+                    crate::parser::to_snake_case(&other.field.name),
+                ] {
+                    own.insert(alias, value.clone());
                 }
             }
+            owner_scope.focus_on_owner(declaration.package.as_deref(), own);
+
             let Some(value) =
                 crate::source_constant_values::fold_constant_expr(initializer, &owner_scope)
             else {
                 continue;
             };
-            crate::source_constant_values::record_constant(
-                &mut scope,
-                Some(owner),
-                &field.name,
-                value.clone(),
-            );
+            scope.record(&declaration.owner, &declaration.field.name, value.clone());
             folded.insert(index, value);
             progressed = true;
         }
@@ -6004,17 +6046,17 @@ pub fn constant_value_facts_from_declarations(
         }
     }
 
-    for (index, (owner, field)) in declarations.iter().enumerate() {
+    for (index, declaration) in declarations.iter().enumerate() {
         let Some(value) = folded.get(&index) else {
             continue;
         };
-        if let Some(rust_value) = value.rust_value_for(&field.ty) {
+        if let Some(rust_value) = value.rust_value_for(&declaration.field.ty) {
             facts
                 .external_field_value_facts
                 .push(crate::facts::ExternalFieldValueFact {
                     field: FieldKey {
-                        type_name: owner.clone(),
-                        field_name: field.name.clone(),
+                        type_name: declaration.owner.clone(),
+                        field_name: declaration.field.name.clone(),
                     },
                     rust_value,
                     provenance: FactProvenance::ParsedSource,
@@ -6024,23 +6066,11 @@ pub fn constant_value_facts_from_declarations(
     facts
 }
 
-fn declaration_value(
-    folded: &std::collections::BTreeMap<usize, crate::source_constant_values::ConstantValue>,
-    declarations: &[(String, crate::java_ir::FieldDecl)],
-    owner: &str,
-    field: &crate::java_ir::FieldDecl,
-) -> Option<crate::source_constant_values::ConstantValue> {
-    let index = declarations.iter().position(|(other_owner, other_field)| {
-        other_owner == owner && other_field.name == field.name
-    })?;
-    folded.get(&index).cloned()
-}
-
 fn collect_static_final_constant_declarations(
     ty: &TypeDecl,
     package: Option<&str>,
     outer_name: Option<&str>,
-    into: &mut Vec<(String, crate::java_ir::FieldDecl)>,
+    into: &mut Vec<ConstantDeclaration>,
 ) {
     let type_name = package_qualified_source_type_name(ty, package, outer_name);
     for member in &ty.members {
@@ -6049,7 +6079,11 @@ fn collect_static_final_constant_declarations(
                 if field.modifiers.contains(&Modifier::Static)
                     && field.modifiers.contains(&Modifier::Final) =>
             {
-                into.push((type_name.clone(), field.clone()));
+                into.push(ConstantDeclaration {
+                    owner: type_name.clone(),
+                    package: package.map(str::to_string),
+                    field: field.clone(),
+                });
             }
             Member::Type(nested) => {
                 collect_static_final_constant_declarations(nested, package, Some(&type_name), into)

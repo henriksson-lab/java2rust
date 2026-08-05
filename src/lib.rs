@@ -249,7 +249,8 @@ pub fn translate_source_with_context_sources_and_summary_sources(
         summary_constant_declarations.extend(resolve::static_final_constant_declarations(
             &summary_parsed.program,
         ));
-        let summary_declarations = declaration_only_program(summary_parsed.program);
+        let mut summary_declarations = declaration_only_program(summary_parsed.program);
+        resolve::assign_rust_names_to_context_program(&mut summary_declarations);
         merge_program_context(&mut summary_program, summary_declarations.clone());
         merge_program_context(&mut source_program, summary_declarations);
     }
@@ -375,7 +376,8 @@ pub fn translate_batch_sources_with_context_sources_summary_sources_and_options(
         summary_constant_declarations.extend(resolve::static_final_constant_declarations(
             &summary_parsed.program,
         ));
-        let summary_declarations = declaration_only_program(summary_parsed.program);
+        let mut summary_declarations = declaration_only_program(summary_parsed.program);
+        resolve::assign_rust_names_to_context_program(&mut summary_declarations);
         merge_program_context(&mut summary_program, summary_declarations.clone());
         merge_program_context(&mut source_program, summary_declarations);
     }

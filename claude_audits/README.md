@@ -31,6 +31,7 @@ Already fixed and moved:
 | [0033](done/0033-receiver-mutability-not-propagated-through-lambdas.md) | a method mutating self only inside a lambda was inferred `&self` |
 | [0036](done/0036-string-concat-type-inference-is-exponential.md) | type inference was exponential in `+` chain length; a dozen segments took minutes |
 | [0037](done/0037-nested-class-outer-static-read-is-capture.md) | nested class reading an enclosing `static` lowered as an outer-*instance* capture |
+| [0038](0038-two-dimensional-object-array-carrier-disagrees.md) | `String[][]` is declared, built, written and read as **three different carriers** — output does not compile | rustc | small; the predicate already exists |
 
 Issues 0012 and 0013 were the parse-error pair in Tier 0 of
 [SUGGESTIONS.md](SUGGESTIONS.md), so that step is complete: corpus error counts

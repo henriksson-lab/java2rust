@@ -206,3 +206,50 @@ would have produced, rather than a second hand-built spelling of it.
   at all today, so the ordering question does not yet arise.
 - **`pick(e).field = v`**, blocked on
   [0002](0002-object-aliasing-has-no-representation.md) as described above.
+
+---
+
+## Exit criteria — what still keeps this issue `partial`
+
+Stated explicitly so the status is checkable rather than a judgement call. This
+issue closes when all three of the following are true.
+
+### 1. Ragged multi-level receivers — **fixed**, pinned textually
+
+`g[f()][h()] = v` on a `String[][]` (or any object `T[][]`) is a `Vec<Vec<T>>`
+and fell through to the plain path, where Rust reads the value before either
+index. `lower_ordered_ragged_array2_index_assignment_stmt` now hoists both
+indices in Java's left-to-right order; the ndarray-backed numeric path declines,
+so working output is not rewritten. Both directions are pinned:
+`ragged_two_dimensional_assignment_hoists_both_indices` and
+`ndarray_backed_two_dimensional_assignment_keeps_its_own_ordered_path`.
+
+**Not** pinned against the Java oracle, and it cannot be yet: the output for
+that shape does not compile, because the declared type, the initialiser and the
+read projection choose three different carriers. That is
+[0038](0038-two-dimensional-object-array-carrier-disagrees.md), filed with the
+reproducer. When 0038 lands, this residual gets a differential fixture and this
+criterion is fully met.
+
+### 2. Array-store exception ordering — **not applicable yet**
+
+Java evaluates the value, then checks the store type, then stores, and throws
+`ArrayStoreException` between the last two. There is **no `ArrayStoreException`
+in the translator at all**, so there is no ordering to get wrong — the question
+cannot be asked until covariant array stores are modelled. Tracked here as a
+dependency, not as unfinished work: this criterion is met when array stores
+throw, or is dropped if they never do.
+
+### 3. `pick(e).field = v` — **reassigned to
+[0002](0002-object-aliasing-has-no-representation.md)**
+
+Not this issue's, and saying so is the point of writing these down. The receiver
+is a call returning an object, and the argument is passed as `e.clone()`, so the
+write lands on a copy and cannot be observed *whatever* the evaluation order is.
+Fixing the order here would produce code that is still wrong, and a fixture for
+it would fail for the aliasing reason first. It belongs with the aliasing
+fixture and is recorded there, not here.
+
+So: this issue is `partial` on **criterion 1's differential fixture only**, which
+is blocked on 0038. Criterion 2 has no work to do, and criterion 3 is no longer
+this issue's.

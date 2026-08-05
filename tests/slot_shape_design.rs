@@ -38858,3 +38858,141 @@ public class Order {
         translation.rust
     );
 }
+
+/// A *ragged* two-dimensional assignment hoists both indices.
+///
+/// The ndarray-backed numeric case was already ordered; a `String[][]` is a
+/// `Vec<Vec<T>>` and fell through to the plain path, where Rust reads the value
+/// before either index is evaluated
+/// ([0026](../claude_audits/0026-assignment-evaluation-order-differs-from-java.md)).
+///
+/// Pinned textually rather than against the Java oracle because the output for
+/// this shape does not compile for an unrelated reason — the declared type, the
+/// initialiser and the read projection pick three different carriers
+/// ([0038](../claude_audits/0038-two-dimensional-object-array-carrier-disagrees.md)).
+#[test]
+fn ragged_two_dimensional_assignment_hoists_both_indices() {
+    let translation = translate_source(
+        r#"
+public class Ragged {
+    static int[] counter = new int[1];
+    static int bump() { counter[0] = counter[0] + 1; return counter[0] - 1; }
+
+    public static void run() {
+        String[][] g = new String[2][];
+        g[0] = new String[2];
+        g[1] = new String[2];
+        g[bump()][bump()] = "v";
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let __java_assignment_row = Self::bump() as usize;"),
+        "the row index must be evaluated first:\n{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("let __java_assignment_col = Self::bump() as usize;"),
+        "then the column index, before the value:\n{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("g[__java_assignment_row][__java_assignment_col] ="),
+        "and the write goes through both temporaries:\n{}",
+        translation.rust
+    );
+}
+
+/// The numeric case keeps the ndarray projection: the ragged path must decline
+/// where ndarray is the right carrier, or it would rewrite working output.
+#[test]
+fn ndarray_backed_two_dimensional_assignment_keeps_its_own_ordered_path() {
+    let translation = translate_source(
+        r#"
+public class Numeric {
+    static int[] counter = new int[1];
+    static int bump() { counter[0] = counter[0] + 1; return counter[0] - 1; }
+
+    public static void run() {
+        int[][] g = new int[2][2];
+        g[bump()][bump()] = 7;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("g[[__java_assignment_row, __java_assignment_col]] ="),
+        "a primitive 2D array stays on the ndarray projection:\n{}",
+        translation.rust
+    );
+}
+
+/// Overloads reached through a context-summary source must get the same Rust
+/// name from every lowering path.
+///
+/// The static path resolved them (`pick_int`, `pick_string`) because it
+/// re-solves signatures on an isolated one-type program, which assigns Rust
+/// names. The instance path read `MethodDecl::rust_name` directly — and context
+/// and summary programs never went through the naming pass, so it was `None`
+/// and `source_method_rust_name` fell back to the bare snake-cased Java name,
+/// collapsing both overloads onto `inst`.
+///
+/// Two answers to one question, which is what
+/// [0009](../claude_audits/0009-overload-identity-collapses-onto-rust-name.md)
+/// is about. The naming pass was already correct; it was not applied here.
+#[test]
+fn summary_source_overloads_get_one_rust_name_from_every_path() {
+    let summary = r#"
+package dep;
+
+public class Util {
+    public static int pick(int x) { return x + 1; }
+    public static int pick(String s) { return s.length() + 100; }
+    public int inst(int x) { return x + 2; }
+    public int inst(String s) { return s.length() + 200; }
+}
+"#;
+    let source = r#"
+import dep.Util;
+
+public class Caller {
+    public static int statics() { return Util.pick(1) + Util.pick("ab"); }
+    public static int instances(Util u) { return u.inst(1) + u.inst("ab"); }
+}
+"#;
+    let translation = translate_source_with_context_summary_sources(
+        source,
+        &[summary.to_string()],
+        &FactSet::default(),
+    );
+
+    for expected in [
+        "Util::pick_int(1)",
+        "Util::pick_string(",
+        "u.inst_int(1)",
+        "u.inst_string(",
+    ] {
+        assert!(
+            translation.rust.contains(expected),
+            "missing {expected:?}:\n{}",
+            translation.rust
+        );
+    }
+    // The collapsed spelling must not survive anywhere: it is the defect.
+    assert!(
+        !translation.rust.contains("u.inst(") && !translation.rust.contains("Util::pick("),
+        "an overload still collapsed onto its bare name:\n{}",
+        translation.rust
+    );
+}

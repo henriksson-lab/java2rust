@@ -266,3 +266,77 @@ it isolates "did the handle plumbing work" from "did the borrow discipline
 work". Then step 4 (`SharedLocal`, 34 types) with the
 *never hold a borrow across a call* rule as a guarantee rather than a
 convention. Step 5 has no population to serve yet.
+
+---
+
+## Update 2026-08-05 — `UnknownBoundary` is now produced, and the "47" is reconciled
+
+### The correction the previous update promised
+
+> `UnknownBoundary` is in the domain and is not yet produced … the escape input
+> is the one that will move the 47 up or down, and it is currently biased *low*.
+
+It is now produced. A handle passed as an argument to a call the translator
+cannot see through escapes: the callee may retain the reference, and
+under-sharing is a silent wrong answer while over-sharing costs a pointer
+indirection.
+
+No new analysis was needed, which is this design's recurring finding one input
+later. `usage` already classifies every call argument as `InternalSameType`,
+`KnownContentRead` or `Unknown`, and a binding already carries its declared Java
+type; `collect_unknown_boundary_escapes` reads both.
+
+`ReceiverForCall` is deliberately **not** an escape. Passing an argument gives
+the callee a handle it can store; being the receiver does not.
+
+### First: the "47" was never a well-defined number
+
+Three different counts were being conflated, and the document's own table shows
+it — `14 + 34 = 48`, while the stated total is `47`. Both are right under
+different rules, and the missing sentence is that **a type can appear at two
+tiers**, because the plan is computed per program and each fixture is its own
+program. The distinct-name count is therefore the sum of the per-tier counts
+minus the types that appear at both.
+
+So `47 = 14 + 34 − 1`: fourteen `SharedImmutable`, thirty-four `SharedLocal`,
+one type counted in both.
+
+Measured today over the same three roots (`examples/`,
+`claude_audits/repro/`, `tests/differential/`), stating the rule each time:
+
+| counting rule | without `UnknownBoundary` | with `UnknownBoundary` |
+|---|---:|---:|
+| per-file occurrences | 49 | **51** |
+| distinct names, `SharedImmutable` | 12 | **13** |
+| distinct names, `SharedLocal` | 32 | 32 |
+| sum of the two tiers | 44 | **45** |
+| **distinct names overall** | 42 | **43** |
+| types appearing at both tiers | 2 | 2 |
+
+### What is attributable to this change, and what is not
+
+The two columns above are the **same tree and the same corpus**, with only the
+new escape input toggled. That is the attributable measurement:
+
+> `UnknownBoundary` adds **one** distinct type (`SharedImmutable` 12 → 13) and
+> two per-file occurrences.
+
+Small — smaller than "will move the 47 up or down" implied. Worth stating
+plainly rather than dressing up: the corpus's unresolved-call argument passing
+mostly involves types that were already shared for another reason.
+
+The remaining difference from the documented figure (47 distinct then, 43 now)
+is **not** attributable to this change and is not claimed to be. The corpus grew
+from 248 to 255 files, and the translator itself moved a great deal in between —
+several of this round's fixes touch `usage`, which feeds the `mutated` and
+alias inputs. Attributing that delta would need the old tree re-measured, which
+has not been done. It is recorded here as drift, not as an effect.
+
+### Consequence for sequencing
+
+Unchanged. `SharedSync` is still empty, so step 5 has no population. Step 3
+(`SharedImmutable`) is now **13 types** — still the right next step for the
+reason the design gives: no `borrow()`, no panic risk, so it isolates "did the
+handle plumbing work" from "did the borrow discipline work".
+
+Lowering still does not consult the plan; this remains step 2, a report.

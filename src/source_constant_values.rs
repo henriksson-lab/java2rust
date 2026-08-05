@@ -134,36 +134,101 @@ fn render_f32(value: f32) -> String {
     format!("{value:?}f32")
 }
 
-/// Constants already folded, under every spelling they can be referred to by.
+/// Constants already folded, indexed so a reference resolves the way Java's
+/// scoping rules say it should.
 ///
-/// Bare names are the current owner's own constants (`A = 1; B = A + 1;`);
-/// dotted keys are other owners' (`CommonInfo.NO_LOG10_PERROR`), which is how a
-/// constant defined in one summary file reaches a facade emitted for another.
-pub type ConstantScope = BTreeMap<String, ConstantValue>;
+/// Recording simple owner names in one flat map was **wrong**, and silently so:
+/// `pkg1.Constants.X` and `pkg2.Constants.X` both wrote the key `Constants.X`,
+/// last one winning, so a class in `pkg1` referring to `Constants.X` could fold
+/// to `pkg2`'s value. A constant that is confidently the wrong number is
+/// precisely what
+/// [0031](../claude_audits/done/0031-stubbed-constant-census.md) exists to
+/// prevent, so the resolution order is now explicit:
+///
+/// 1. a fully-qualified path always wins;
+/// 2. a simple owner name resolves **within the referring type's package**, as
+///    Java does;
+/// 3. failing that it must be unambiguous across everything recorded;
+/// 4. otherwise nothing folds and the loud `compile_error!` stands.
+#[derive(Debug, Clone, Default)]
+pub struct ConstantScope {
+    /// Fully-qualified `pkg.Owner.FIELD`, in every alias spelling.
+    qualified: BTreeMap<String, ConstantValue>,
+    /// `(simple owner, field alias)` -> the qualified owners that declare it.
+    /// A map rather than a value so ambiguity is *detectable* instead of being
+    /// resolved by whichever file was parsed last.
+    by_simple: BTreeMap<(String, String), BTreeMap<String, ConstantValue>>,
+    /// Bare names visible to the owner currently being folded.
+    own: BTreeMap<String, ConstantValue>,
+    /// That owner's package, which decides which same-simple-name owner a
+    /// simple reference means.
+    package: Option<String>,
+}
 
-/// Records `value` under every spelling a reference to it can take.
-///
-/// The parser snake-cases identifiers, so `SIZEOF_BCF_HEADER` arrives as
-/// `Var("sizeof_bcf_header")` and `CommonInfo.X` as
-/// `FieldAccess(Var("common_info"), "X")`. Rather than guess which spelling a
-/// given reference will use, every one is recorded.
-pub fn record_constant(
-    scope: &mut ConstantScope,
-    owner: Option<&str>,
-    field_name: &str,
-    value: ConstantValue,
-) {
-    let field_aliases = name_aliases(field_name);
-    let Some(owner) = owner else {
-        for alias in field_aliases {
-            scope.insert(alias, value.clone());
+impl ConstantScope {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records `value` under every spelling a reference to it can take.
+    ///
+    /// The parser snake-cases identifiers, so `SIZEOF_BCF_HEADER` arrives as
+    /// `Var("sizeof_bcf_header")` and `CommonInfo.X` as
+    /// `FieldAccess(Var("common_info"), "X")`. Rather than guess which spelling
+    /// a given reference will use, every one is recorded.
+    pub fn record(&mut self, owner: &str, field_name: &str, value: ConstantValue) {
+        let simple_owner = owner.rsplit('.').next().unwrap_or(owner);
+        for field_alias in name_aliases(field_name) {
+            for owner_alias in name_aliases(owner) {
+                self.qualified
+                    .insert(format!("{owner_alias}.{field_alias}"), value.clone());
+            }
+            for simple_alias in name_aliases(simple_owner) {
+                self.by_simple
+                    .entry((simple_alias, field_alias.clone()))
+                    .or_default()
+                    .insert(owner.to_string(), value.clone());
+            }
         }
-        return;
-    };
-    for owner_alias in owner_aliases(owner) {
-        for field_alias in &field_aliases {
-            scope.insert(format!("{owner_alias}.{field_alias}"), value.clone());
+    }
+
+    /// Points the scope at the owner whose declarations are being folded.
+    ///
+    /// `own` are that owner's already-folded constants, which Java makes
+    /// visible as bare names inside it.
+    pub fn focus_on_owner(&mut self, package: Option<&str>, own: BTreeMap<String, ConstantValue>) {
+        self.package = package.map(str::to_string);
+        self.own = own;
+    }
+
+    fn lookup_bare(&self, name: &str) -> Option<ConstantValue> {
+        self.own.get(name).cloned()
+    }
+
+    fn lookup_path(&self, path: &str) -> Option<ConstantValue> {
+        if let Some(value) = self.qualified.get(path) {
+            return Some(value.clone());
         }
+        let (owner, field) = path.rsplit_once('.')?;
+        // Only a bare `Owner.FIELD` can be package-relative; a longer path that
+        // did not match `qualified` above names something not recorded.
+        if owner.contains('.') {
+            return None;
+        }
+        let candidates = self
+            .by_simple
+            .get(&(owner.to_string(), field.to_string()))?;
+        if let Some(package) = &self.package
+            && let Some(value) = candidates.get(&format!("{package}.{owner}"))
+        {
+            return Some(value.clone());
+        }
+        if candidates.len() == 1 {
+            return candidates.values().next().cloned();
+        }
+        // Ambiguous, and nothing in scope says which one is meant. Refusing is
+        // the whole point: the alternative is a plausible wrong number.
+        None
     }
 }
 
@@ -174,19 +239,6 @@ fn name_aliases(name: &str) -> Vec<String> {
     } else {
         vec![name.to_string(), snake]
     }
-}
-
-/// `a.b.C` is referable as `a.b.C` and as `C`, and each of those snake-cased.
-fn owner_aliases(owner: &str) -> Vec<String> {
-    let mut aliases = Vec::new();
-    for form in [owner, owner.rsplit('.').next().unwrap_or(owner)] {
-        for alias in name_aliases(form) {
-            if !aliases.contains(&alias) {
-                aliases.push(alias);
-            }
-        }
-    }
-    aliases
 }
 
 /// The dotted text of a reference, or `None` if it is not a plain dotted path.
@@ -205,10 +257,10 @@ pub fn fold_constant_expr(expr: &Expr, scope: &ConstantScope) -> Option<Constant
         // A bare name is a constant only if it is one of the constants already
         // folded for this owner. Anything else (a field of another class, a
         // parameter, a static import) is out of scope by construction.
-        Expr::Var(name) => scope.get(name).cloned(),
+        Expr::Var(name) => scope.lookup_bare(name),
         // A qualified reference to another owner's constant. Java requires the
         // referent to be a constant too, so this stays inside JLS 15.28.
-        Expr::FieldAccess(..) => scope.get(&dotted_path(expr)?).cloned(),
+        Expr::FieldAccess(..) => scope.lookup_path(&dotted_path(expr)?),
         Expr::Unary { op, expr } => fold_unary(*op, fold_constant_expr(expr, scope)?),
         Expr::Binary { op, left, right } => fold_binary(
             *op,
@@ -472,6 +524,7 @@ mod tests {
     fn fold_declared(source: &str) -> Option<String> {
         let parsed = crate::parser::parse_java_source(source);
         let mut scope = ConstantScope::new();
+        let mut own = BTreeMap::new();
         let mut last = None;
         for ty in &parsed.program.types {
             for member in &ty.members {
@@ -481,9 +534,9 @@ mod tests {
                 let initializer = field.initializer.as_ref()?;
                 let value = fold_constant_expr(initializer, &scope)?;
                 last = value.rust_value_for(&field.ty);
-                let alias = crate::parser::to_snake_case(&field.name);
-                scope.insert(alias, value.clone());
-                scope.insert(field.name.clone(), value);
+                own.insert(field.name.clone(), value.clone());
+                own.insert(crate::parser::to_snake_case(&field.name), value);
+                scope.focus_on_owner(None, own.clone());
             }
         }
         last
@@ -620,6 +673,113 @@ mod tests {
         assert_eq!(
             fold_one("static final char A = (char) 65;").as_deref(),
             Some("'A'")
+        );
+    }
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+    use crate::java_ir::PrimitiveType;
+
+    fn int(value: i32) -> ConstantValue {
+        ConstantValue::Int(value)
+    }
+
+    fn folded(scope: &ConstantScope, path: &str) -> Option<i32> {
+        match scope.lookup_path(path) {
+            Some(ConstantValue::Int(value)) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// Two packages declaring a class of the same simple name must not share
+    /// its constants. Recording simple owner names in one flat map made
+    /// `pkg1.Uses.Q = Constants.X + 1` fold to **23** using `pkg2`'s `X = 22`
+    /// instead of 12 using `pkg1`'s `X = 11` — a confidently wrong number,
+    /// which is the failure
+    /// [0031](../claude_audits/done/0031-stubbed-constant-census.md) is about.
+    #[test]
+    fn a_simple_owner_name_resolves_within_the_referring_package() {
+        let mut scope = ConstantScope::new();
+        scope.record("pkg1.Constants", "X", int(11));
+        scope.record("pkg2.Constants", "X", int(22));
+
+        scope.focus_on_owner(Some("pkg1"), BTreeMap::new());
+        assert_eq!(folded(&scope, "Constants.X"), Some(11));
+
+        scope.focus_on_owner(Some("pkg2"), BTreeMap::new());
+        assert_eq!(folded(&scope, "Constants.X"), Some(22));
+    }
+
+    /// A fully-qualified path is never affected by which package is referring.
+    #[test]
+    fn a_qualified_path_wins_over_package_scoping() {
+        let mut scope = ConstantScope::new();
+        scope.record("pkg1.Constants", "X", int(11));
+        scope.record("pkg2.Constants", "X", int(22));
+
+        scope.focus_on_owner(Some("pkg1"), BTreeMap::new());
+        assert_eq!(folded(&scope, "pkg2.Constants.X"), Some(22));
+        assert_eq!(folded(&scope, "pkg1.Constants.X"), Some(11));
+    }
+
+    /// An ambiguous simple name with no package to disambiguate it must fold to
+    /// nothing, so the loud `compile_error!` stands. Picking either value would
+    /// be a coin flip presented as an answer.
+    #[test]
+    fn an_ambiguous_simple_owner_refuses_to_fold() {
+        let mut scope = ConstantScope::new();
+        scope.record("pkg1.Constants", "X", int(11));
+        scope.record("pkg2.Constants", "X", int(22));
+
+        scope.focus_on_owner(Some("pkg3"), BTreeMap::new());
+        assert_eq!(folded(&scope, "Constants.X"), None);
+
+        scope.focus_on_owner(None, BTreeMap::new());
+        assert_eq!(folded(&scope, "Constants.X"), None);
+    }
+
+    /// One owner with that simple name is unambiguous wherever it is referred
+    /// from — the common case, and it must keep working.
+    #[test]
+    fn a_unique_simple_owner_resolves_from_any_package() {
+        let mut scope = ConstantScope::new();
+        scope.record("pkg1.Constants", "X", int(11));
+
+        scope.focus_on_owner(Some("elsewhere"), BTreeMap::new());
+        assert_eq!(folded(&scope, "Constants.X"), Some(11));
+    }
+
+    /// Bare names are the *focused* owner's own constants and must not leak.
+    #[test]
+    fn bare_names_belong_to_the_focused_owner_only() {
+        let mut scope = ConstantScope::new();
+        scope.record("pkg1.Constants", "X", int(11));
+
+        let mut own = BTreeMap::new();
+        own.insert("X".to_string(), int(11));
+        scope.focus_on_owner(Some("pkg1"), own);
+        assert_eq!(scope.lookup_bare("X"), Some(int(11)));
+
+        scope.focus_on_owner(Some("pkg2"), BTreeMap::new());
+        assert_eq!(scope.lookup_bare("X"), None);
+    }
+
+    /// The snake-cased spelling the parser produces resolves the same way.
+    #[test]
+    fn snake_cased_reference_spellings_resolve_identically() {
+        let mut scope = ConstantScope::new();
+        scope.record("pkg1.BcfFormat", "SIZEOF_BCF_HEADER", int(9));
+
+        scope.focus_on_owner(Some("pkg1"), BTreeMap::new());
+        assert_eq!(folded(&scope, "bcf_format.SIZEOF_BCF_HEADER"), Some(9));
+        assert_eq!(folded(&scope, "BcfFormat.SIZEOF_BCF_HEADER"), Some(9));
+
+        // And the declared type still gates what is emitted.
+        assert_eq!(
+            int(9).rust_value_for(&JavaType::Primitive(PrimitiveType::Int)),
+            Some("9".to_string())
         );
     }
 }

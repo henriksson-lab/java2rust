@@ -12741,6 +12741,18 @@ fn lower_ordered_array_index_assignment_stmt(
     ) {
         return Some(stmt);
     }
+    if let Some(stmt) = lower_ordered_ragged_array2_index_assignment_stmt(
+        target,
+        value,
+        array,
+        index,
+        env,
+        ctx,
+        refinements,
+        assignment_slot.clone(),
+    ) {
+        return Some(stmt);
+    }
     if let Some(stmt) = lower_ordered_array_receiver_assignment_stmt(
         target,
         value,
@@ -13075,6 +13087,84 @@ fn lower_ordered_array2_index_assignment_stmt(
     let lowered_target = array2_index_projection(
         lower_write_sequence_receiver(outer_array, env, ctx, refinements),
         RustExpr::Raw("__java_assignment_row".to_string()),
+        RustExpr::Raw("__java_assignment_col".to_string()),
+    );
+    if let Some((old_value_stmt, assigned_value)) = lower_ordered_array_compound_assignment_value(
+        target,
+        value,
+        lowered_target.clone(),
+        env,
+        ctx,
+        refinements,
+        &assignment_slot,
+    ) {
+        return Some(RustStmt::Raw(format!(
+            "{{\n    let __java_assignment_row = {};\n    let __java_assignment_col = {};\n    {};\n    {} = {};\n}}",
+            emit::emit_expr(&row_index),
+            emit::emit_expr(&col_index),
+            old_value_stmt,
+            emit::emit_expr(&lowered_target),
+            emit::emit_expr(&assigned_value),
+        )));
+    }
+    let lowered_value =
+        lower_assignment_value_for_slot(target, value, env, &assignment_slot, ctx, refinements);
+    let lowered_value =
+        adapt_reused_owned_value_for_slot(lowered_value, value, &assignment_slot, env, ctx);
+    let assigned_value =
+        wrap_optional_assignment_value_if_needed(value, env, assignment_slot, lowered_value, ctx);
+    Some(RustStmt::Raw(format!(
+        "{{\n    let __java_assignment_row = {};\n    let __java_assignment_col = {};\n    {} = {};\n}}",
+        emit::emit_expr(&row_index),
+        emit::emit_expr(&col_index),
+        emit::emit_expr(&lowered_target),
+        emit::emit_expr(&assigned_value),
+    )))
+}
+
+/// `g[f()][h()] = v` on a **ragged** two-dimensional array.
+///
+/// The path above covers ndarray-backed numeric arrays; a `String[][]` or any
+/// object array is a `Vec<Vec<T>>` and fell through to the plain path, where
+/// Rust's order applies and the value is read before either index is evaluated.
+/// Java evaluates the array reference, then the indices, then the value
+/// ([0026](../claude_audits/0026-assignment-evaluation-order-differs-from-java.md)).
+///
+/// Both indices are hoisted, in Java's left-to-right order, even when only one
+/// of them is order-sensitive: the first index has to be evaluated before the
+/// second regardless, and binding both keeps that visible in the output rather
+/// than leaving the reader to work out which one mattered.
+fn lower_ordered_ragged_array2_index_assignment_stmt(
+    target: &Expr,
+    value: &Expr,
+    array: &Expr,
+    index: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+    assignment_slot: Slot,
+) -> Option<RustStmt> {
+    let Expr::ArrayAccess(outer_array, outer_index) = array else {
+        return None;
+    };
+    if !array_assignment_receiver_is_simple(outer_array)
+        || ndarray_element_type_after_optional(&crate::types::infer_expr_type(
+            outer_array,
+            env.type_env(),
+        ))
+        .is_some()
+        || (!assignment_order_is_observable(outer_index, value, env)
+            && !assignment_order_is_observable(index, value, env))
+    {
+        return None;
+    }
+    let row_index = lower_index_expr(outer_index, env, ctx);
+    let col_index = lower_index_expr(index, env, ctx);
+    let lowered_target = indexed_expr(
+        indexed_expr(
+            lower_write_sequence_receiver(outer_array, env, ctx, refinements),
+            RustExpr::Raw("__java_assignment_row".to_string()),
+        ),
         RustExpr::Raw("__java_assignment_col".to_string()),
     );
     if let Some((old_value_stmt, assigned_value)) = lower_ordered_array_compound_assignment_value(
