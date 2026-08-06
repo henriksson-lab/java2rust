@@ -6491,7 +6491,12 @@ class NumericDomainGetterFactUse {
             .unwrap();
         assert_eq!(effect.role, ExternalApiRole::Getter);
         assert_eq!(effect.receiver_mutability, ReceiverMutabilityFact::ReadOnly);
-        assert_eq!(effect.return_nullability, NullabilityState::Unknown);
+        // Nullability is deliberately *not* asserted here. It is now derived
+        // from the return kind, which is per-arity, while this fact is keyed by
+        // `(receiver, method)` — so what it holds depends on the arity the
+        // source happened to call with. This test is about read-only-ness; the
+        // derivation has its own tests in `src/stdlib.rs`.
+        // See claude_audits/0008.
     }
 
     let to_binary_string = semantic
@@ -7589,7 +7594,7 @@ class ReadOnlyExternalReceiverParam {
                 _ => None,
             })
             .unwrap(),
-        &resolved.program.types[0]
+        resolved.program.types[0]
             .members
             .iter()
             .find_map(|member| match member {

@@ -915,15 +915,21 @@ fn write_analysis_profile(
     // behaviour they stood for is gone, so erasing is scored as an improvement.
     // These counters put that cost back into the batch summary.
     let mut noop_facade_methods = 0;
+    // The *cost* of a no-op facade, as distinct from its surface: one facade
+    // constructor may be called from a hundred places
+    // ([0018](../claude_audits/0018-the-compile-error-metric-cannot-see-silent-failures.md)).
+    let mut noop_facade_call_sites = 0;
     let mut unimplemented_facade_methods = 0;
     let mut compile_error_markers = 0;
     for translation in translations {
         noop_facade_methods += output_markers::count_noop_facade_methods(&translation.rust);
+        noop_facade_call_sites += output_markers::count_noop_facade_call_sites(&translation.rust);
         unimplemented_facade_methods +=
             output_markers::count_unimplemented_facade_methods(&translation.rust);
         compile_error_markers += output_markers::count_compile_error_markers(&translation.rust);
     }
     push_profile_metric(&mut out, "noop_facade_methods", noop_facade_methods);
+    push_profile_metric(&mut out, "noop_facade_call_sites", noop_facade_call_sites);
     push_profile_metric(
         &mut out,
         "unimplemented_facade_methods",

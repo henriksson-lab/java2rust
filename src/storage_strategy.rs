@@ -23,7 +23,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::diagnostics::DiagnosticBag;
-use crate::java_ir::{Block, Expr, JavaType, Member, Program, Stmt, TypeDecl};
+use crate::java_ir::{
+    Block, Expr, JavaType, Member, Modifier, Program, Stmt, TypeDecl, TypeKind, WildcardBound,
+};
 use crate::usage::{BindingUse, CallArgumentBoundary, MethodUsageFacts, UsageFacts};
 
 /// How values of a source type are held.
@@ -81,7 +83,7 @@ pub enum Escape {
 }
 
 /// The evidence behind one type's decision, kept so the report can say *why*.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeStorageFacts {
     pub escape: Escape,
     /// `T b = a;` with `a` a bare handle — the shape that makes lowering clone.
@@ -91,34 +93,264 @@ pub struct TypeStorageFacts {
     pub mutated: bool,
     /// Reachable from a thread entry point.
     pub threaded: bool,
+    /// Whether the absence of mutation could be *proved*.
+    ///
+    /// `mutated` says a mutation was seen; this says the walk was able to see
+    /// them all. A field write through a receiver it cannot type clears this,
+    /// and without it a type cannot be `SharedImmutable` however clean it looks.
+    pub mutation_provably_absent: bool,
+    /// Reachable from a Java `static` field.
+    ///
+    /// Independent of `threaded`, and it forces the same answer for a different
+    /// reason. [0030](../claude_audits/done/0030-java-statics-are-thread-local.md)
+    /// made every Java `static` a process-wide `std::sync::Mutex`, and a
+    /// `static` in Rust must be `Sync` — so a type a Java `static` can reach
+    /// must be `Send + Sync` **in a single-threaded program with no `Thread`
+    /// anywhere**. `Rc` is neither; `Arc` is both.
+    pub static_reachable: bool,
+}
+
+impl Default for TypeStorageFacts {
+    fn default() -> Self {
+        Self {
+            escape: Escape::default(),
+            locally_aliased: false,
+            mutated: false,
+            threaded: false,
+            // Absence of mutation is assumed provable until the walk meets a
+            // field write it cannot attribute to a type.
+            mutation_provably_absent: true,
+            static_reachable: false,
+        }
+    }
 }
 
 impl TypeStorageFacts {
-    /// The decision rule from the 0002b design, verbatim:
+    /// Conservative merge of two observations for the same source type.
+    pub fn join(&mut self, other: TypeStorageFacts) {
+        self.escape = self.escape.max(other.escape);
+        self.locally_aliased |= other.locally_aliased;
+        self.mutated |= other.mutated;
+        self.threaded |= other.threaded;
+        self.mutation_provably_absent &= other.mutation_provably_absent;
+        self.static_reachable |= other.static_reachable;
+    }
+
+    /// The decision rule from the 0002b design, with the later static-storage
+    /// correction folded in:
     ///
     /// ```text
     /// escapes(T) ∈ {Stored, UnknownBoundary} ∨ locally_aliased(T)
-    ///   ? (mutated(T) ? (threaded(T) ? SharedSync : SharedLocal) : SharedImmutable)
+    ///   ? (mutated(T) ? (sync(T) ? SharedSync : SharedLocal) : SharedImmutable)
     ///   : Value
     /// ```
+    ///
+    /// where `sync(T)` is `threaded(T) ∨ static_reachable(T)`. Java statics are
+    /// process-wide Rust statics, so a type reachable from static storage must
+    /// use the sync handle/cell even in a single-threaded Java source.
     ///
     /// `UnknownBoundary` lands on the shared side deliberately: an unmodelled
     /// external call could retain the reference, and getting that wrong is a
     /// silent wrong answer, whereas over-sharing costs a pointer indirection.
+    /// The three axes, read off the evidence.
+    ///
+    /// Each is an inference step, not a case in a table:
+    /// reachable-from-two-places implies `shared`; mutated-after-sharing implies
+    /// `interior_mutable`; reachable-from-a-static-or-a-thread implies `sync`.
+    pub fn placement(&self) -> StoragePlacement {
+        let shared =
+            matches!(self.escape, Escape::Stored | Escape::UnknownBoundary) || self.locally_aliased;
+        StoragePlacement {
+            shared,
+            // `SharedImmutable` must be *proved*, not merely unobserved: a
+            // missed mutation gives `Rc<T>` for a type that is written through,
+            // which does not compile.
+            interior_mutable: shared && (self.mutated || !self.mutation_provably_absent),
+            sync: self.threaded || self.static_reachable,
+        }
+    }
+
+    /// Which pointer this type's shared handle must be.
+    pub fn handle(&self) -> SharedHandle {
+        if self.threaded || self.static_reachable {
+            SharedHandle::Sync
+        } else {
+            SharedHandle::Local
+        }
+    }
+
     pub fn strategy(&self) -> StorageStrategy {
         let shared =
             matches!(self.escape, Escape::Stored | Escape::UnknownBoundary) || self.locally_aliased;
         if !shared {
             return StorageStrategy::Value;
         }
-        if !self.mutated {
+        // `SharedImmutable` is `Rc<T>` with no `RefCell`, so it must be
+        // *proved*, not merely unobserved: a missed mutation emits `cannot
+        // assign to data in an Rc` and does not compile.
+        if !self.mutated && self.mutation_provably_absent {
             return StorageStrategy::SharedImmutable;
         }
-        if self.threaded {
+        if self.threaded || self.static_reachable {
             StorageStrategy::SharedSync
         } else {
             StorageStrategy::SharedLocal
         }
+    }
+}
+
+/// Which pointer a shared type is held behind.
+///
+/// Orthogonal to [`StorageStrategy`], which says *whether* and *how mutably* a
+/// type is shared. This says whether the handle has to be thread-safe, and the
+/// two combine: `SharedImmutable` is `Rc<T>` or `Arc<T>`, `SharedLocal` is
+/// `Rc<RefCell<T>>` or `Arc<Mutex<T>>`.
+///
+/// `Rc` is the default because it is cheaper — a non-atomic refcount — and
+/// `Arc` is selected only where it is forced, which keeps the common case out
+/// of atomics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub enum SharedHandle {
+    /// `Rc` — single-threaded, not reachable from a Java `static`.
+    #[default]
+    Local,
+    /// `Arc` — reachable from a thread entry point or from a Java `static`.
+    Sync,
+}
+
+impl SharedHandle {
+    /// The Rust path, so the emitter and any test read one spelling.
+    pub fn rust_path(self) -> &'static str {
+        match self {
+            SharedHandle::Local => "std::rc::Rc",
+            SharedHandle::Sync => "std::sync::Arc",
+        }
+    }
+
+    pub fn join(self, other: Self) -> Self {
+        self.max(other)
+    }
+}
+
+/// Where a value lives, as three independent yes/no questions.
+///
+/// This replaces an enumerated `StorageForm` — five named rungs and a `match`
+/// over the pair `(strategy, handle)`. That match was a lookup table: it listed
+/// the answers instead of deriving them, so a sixth combination would have had
+/// to be *remembered* rather than falling out.
+///
+/// The wrapping is **compositional**. Reading inside out:
+///
+/// ```text
+/// rust_type(T) = slot( handle( cell( T ) ) )
+///
+///   cell(T)   = T | RefCell<T> | Mutex<T>    interior_mutable, then sync
+///   handle(X) = X | Rc<X>      | Arc<X>      shared,           then sync
+///   slot(Y)   = Y | &Y                       decided per slot, not per type
+/// ```
+///
+/// `RefCell`/`Mutex` and `Rc`/`Arc` are chosen by the *same* `sync` bit, which
+/// is why they always agree — that agreement was an invariant the table had to
+/// maintain by hand.
+///
+/// Each axis is a monotone boolean, so the join is `|` per axis: adding a use
+/// can only turn a `false` into a `true`, and the fixpoint terminates because
+/// there are three bits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StoragePlacement {
+    /// The value has an identity that outlives one owner: it needs a pointer.
+    ///
+    /// From `escape ∈ {Stored, UnknownBoundary} ∨ locally_aliased`.
+    pub shared: bool,
+    /// It is mutated *after* being shared, so the pointer needs a cell.
+    ///
+    /// From `mutated`, and only meaningful when `shared`.
+    pub interior_mutable: bool,
+    /// The handle must be `Send + Sync`.
+    ///
+    /// From `threaded ∨ static_reachable` — a Rust `static` must be `Sync`, and
+    /// [0030](../claude_audits/done/0030-java-statics-are-thread-local.md) makes
+    /// every Java `static` a real one, so this is reachable with no `Thread` in
+    /// the program.
+    pub sync: bool,
+}
+
+impl StoragePlacement {
+    /// Join per axis. Monotone, so the plan's fixpoint terminates.
+    pub fn join(self, other: Self) -> Self {
+        Self {
+            shared: self.shared || other.shared,
+            interior_mutable: self.interior_mutable || other.interior_mutable,
+            sync: self.sync || other.sync,
+        }
+    }
+
+    /// The cell a mutated shared value needs, if any.
+    pub fn cell_path(self) -> Option<&'static str> {
+        if !self.shared || !self.interior_mutable {
+            return None;
+        }
+        Some(if self.sync {
+            "std::sync::Mutex"
+        } else {
+            "std::cell::RefCell"
+        })
+    }
+
+    /// The pointer a shared value is held behind, if any.
+    pub fn handle_path(self) -> Option<&'static str> {
+        if !self.shared {
+            return None;
+        }
+        Some(if self.sync {
+            "std::sync::Arc"
+        } else {
+            "std::rc::Rc"
+        })
+    }
+
+    /// Applies `cell` then `handle` to a rendered inner type.
+    ///
+    /// The slot step (`&Y`) is *not* here: whether a position owns or borrows is
+    /// a property of the slot, not of the type, and a borrowed slot stays `&T`
+    /// because the handle derefs to `T`.
+    pub fn wrap(self, inner: String) -> String {
+        let celled = match self.cell_path() {
+            Some(cell) => format!("{cell}<{inner}>"),
+            None => inner,
+        };
+        match self.handle_path() {
+            Some(handle) => format!("{handle}<{celled}>"),
+            None => celled,
+        }
+    }
+
+    /// The *construction* expression, composed the same way `wrap` composes the
+    /// type.
+    ///
+    /// `wrap` gives `Rc<RefCell<T>>`; this gives `Rc::new(RefCell::new(v))`.
+    /// They are the type and value forms of one decision, derived from the same
+    /// axes so they cannot nest differently — which is what a hand-written
+    /// construction string got wrong before this existed.
+    pub fn wrap_construction(self, inner: String) -> String {
+        let celled = match self.cell_path() {
+            Some(cell) => format!("{cell}::new({inner})"),
+            None => inner,
+        };
+        match self.handle_path() {
+            Some(handle) => format!("{handle}::new({celled})"),
+            None => celled,
+        }
+    }
+
+    /// Whether lowering can emit this placement today.
+    ///
+    /// The cell rungs need the never-hold-a-borrow-across-a-call guarantee and
+    /// are not implemented. An unimplemented placement falls back to holding the
+    /// value inline, which is today's behaviour — wrong in a known and reported
+    /// way, rather than wrong in a way that does not compile.
+    pub fn is_implemented(self) -> bool {
+        !self.interior_mutable
     }
 }
 
@@ -131,6 +363,38 @@ pub struct StoragePlan {
 impl StoragePlan {
     pub fn facts(&self, type_name: &str) -> Option<&TypeStorageFacts> {
         self.types.get(type_name)
+    }
+
+    pub fn insert(&mut self, type_name: String, facts: TypeStorageFacts) {
+        self.types.insert(type_name, facts);
+    }
+
+    pub fn extend_from(&mut self, other: StoragePlan) {
+        for (type_name, facts) in other.types {
+            self.types
+                .entry(type_name)
+                .and_modify(|existing| existing.join(facts.clone()))
+                .or_insert(facts);
+        }
+    }
+
+    /// Which pointer `type_name`'s shared handle must be. `Local` (`Rc`) for
+    /// anything unknown, which is only ever consulted for a type the plan
+    /// already says is shared.
+    pub fn handle(&self, type_name: &str) -> SharedHandle {
+        self.types
+            .get(type_name)
+            .map(TypeStorageFacts::handle)
+            .unwrap_or_default()
+    }
+
+    /// Where values of `type_name` live. `Value` (all axes false) for a type
+    /// the plan has never heard of, so "unknown" can never read as "shared".
+    pub fn placement(&self, type_name: &str) -> StoragePlacement {
+        self.types
+            .get(type_name)
+            .map(TypeStorageFacts::placement)
+            .unwrap_or_default()
     }
 
     pub fn strategy(&self, type_name: &str) -> StorageStrategy {
@@ -169,8 +433,12 @@ pub fn plan_storage_strategies(program: &Program, usage: &UsageFacts) -> Storage
     }
 
     let threaded = threaded_type_names(program, &declared);
+    let static_reachable = static_reachable_type_names(program, &declared);
     for ty in &program.types {
         collect_type_facts(ty, program, usage, &declared, &threaded, &mut types);
+    }
+    for (name, facts) in types.iter_mut() {
+        facts.static_reachable = static_reachable.contains(name);
     }
     StoragePlan { types }
 }
@@ -193,23 +461,99 @@ pub fn report_storage_disagreements(
         into.warning(
             "storage_strategy_disagreement",
             format!(
-                "{name} needs {} (escape={:?}, locally_aliased={}, mutated={}, threaded={}) \
-                 but is lowered by value, so an alias becomes a copy",
+                "{name} needs {} (escape={:?}, locally_aliased={}, mutated={}, \
+                 mutation_provably_absent={}, threaded={}, static_reachable={}) but is lowered \
+                 by value, so an alias becomes a copy",
                 strategy.name(),
                 facts.escape,
                 facts.locally_aliased,
                 facts.mutated,
+                facts.mutation_provably_absent,
                 facts.threaded,
+                facts.static_reachable,
             ),
         );
     }
 }
 
+/// Types whose *values* this lattice describes.
+///
+/// Classes only. A Java `enum` constant is a singleton by construction — there
+/// is nothing to alias and no identity question to answer — and it lowers to a
+/// Rust `enum`, where a shared handle breaks `match`, derived equality and the
+/// switch lowering. An `interface` has no values of its own. Including them
+/// cost 27 `idiom_gaps` tests, almost all of them enum or equality tests
+/// ([0002b](../claude_audits/0002b-shared-representation-design.md)).
 fn collect_declared_types(ty: &TypeDecl, into: &mut BTreeSet<String>) {
-    into.insert(ty.name.clone());
+    if matches!(ty.kind, TypeKind::Class | TypeKind::Record) {
+        into.insert(ty.name.clone());
+    }
     for member in &ty.members {
         if let Member::Type(nested) = member {
             collect_declared_types(nested, into);
+        }
+    }
+}
+
+/// Types a Java `static` field can reach, transitively through fields.
+///
+/// A `static` in Rust must be `Sync`, and a Java `static` is now a process-wide
+/// `Mutex` ([0030](../claude_audits/done/0030-java-statics-are-thread-local.md)),
+/// so anything it holds must be `Send + Sync` — and so must anything *that*
+/// holds, which is why this is a closure rather than a direct check. Those types
+/// get `Arc`; everything else keeps the cheaper `Rc`.
+fn static_reachable_type_names(program: &Program, declared: &BTreeSet<String>) -> BTreeSet<String> {
+    let mut fields_of: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut reachable = BTreeSet::new();
+    for ty in &program.types {
+        collect_static_reachability_edges(ty, declared, &mut fields_of, &mut reachable);
+    }
+    // Transitive closure: a type held by a reachable type is reachable.
+    loop {
+        let mut grew = false;
+        for (owner, fields) in &fields_of {
+            if !reachable.contains(owner) {
+                continue;
+            }
+            for field in fields {
+                if reachable.insert(field.clone()) {
+                    grew = true;
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    reachable
+}
+
+fn collect_static_reachability_edges(
+    ty: &TypeDecl,
+    declared: &BTreeSet<String>,
+    fields_of: &mut BTreeMap<String, Vec<String>>,
+    reachable: &mut BTreeSet<String>,
+) {
+    for member in &ty.members {
+        match member {
+            Member::Field(field) => {
+                let field_types = declared_storage_type_names(&field.ty, declared);
+                if field_types.is_empty() {
+                    continue;
+                }
+                if field.modifiers.contains(&Modifier::Static) {
+                    reachable.extend(field_types);
+                } else {
+                    fields_of
+                        .entry(ty.name.clone())
+                        .or_default()
+                        .extend(field_types);
+                }
+            }
+            Member::Type(nested) => {
+                collect_static_reachability_edges(nested, declared, fields_of, reachable)
+            }
+            _ => {}
         }
     }
 }
@@ -265,10 +609,14 @@ fn collect_type_facts(
         match member {
             Member::Field(field) => {
                 // A field of type T is a second place a T can be reached from.
-                if let Some(name) = declared_type_name(&field.ty, declared)
-                    && let Some(facts) = into.get_mut(&name)
-                {
-                    facts.escape = facts.escape.max(Escape::Stored);
+                // The same is true for values physically stored inside an
+                // array or generic field: `Cell[]` and `List<Cell>` both retain
+                // `Cell` values even though the field's top-level type is not a
+                // declared source class.
+                for name in declared_storage_type_names(&field.ty, declared) {
+                    if let Some(facts) = into.get_mut(&name) {
+                        facts.escape = facts.escape.max(Escape::Stored);
+                    }
                 }
             }
             Member::Method(method) => {
@@ -287,15 +635,17 @@ fn collect_type_facts(
                     {
                         facts.mutated = true;
                     }
-                    collect_unknown_boundary_escapes(method_usage, declared, into);
+                    collect_unknown_boundary_escapes(method_usage, ty, declared, into);
                 }
                 if let Some(body) = &method.body {
-                    collect_block_facts(body, ty, program, declared, false, into);
+                    let mut locals = local_types_from_params(&method.params);
+                    collect_block_facts(body, ty, program, declared, false, &mut locals, into);
                 }
             }
             Member::Constructor(constructor) => {
                 if let Some(body) = &constructor.body {
-                    collect_block_facts(body, ty, program, declared, true, into);
+                    let mut locals = local_types_from_params(&constructor.params);
+                    collect_block_facts(body, ty, program, declared, true, &mut locals, into);
                 }
             }
             Member::Type(nested) => {
@@ -325,13 +675,11 @@ fn collect_type_facts(
 /// understood.
 fn collect_unknown_boundary_escapes(
     method_usage: &MethodUsageFacts,
+    owner: &TypeDecl,
     declared: &BTreeSet<String>,
     into: &mut BTreeMap<String, TypeStorageFacts>,
 ) {
     for binding in method_usage.bindings.values() {
-        let Some(name) = declared_type_name(&binding.java_ty, declared) else {
-            continue;
-        };
         let crosses_unknown_boundary = binding.uses.iter().any(|use_site| {
             matches!(
                 use_site,
@@ -341,8 +689,27 @@ fn collect_unknown_boundary_escapes(
                 }
             )
         });
-        if crosses_unknown_boundary && let Some(facts) = into.get_mut(&name) {
-            facts.escape = facts.escape.max(Escape::UnknownBoundary);
+        if crosses_unknown_boundary {
+            for name in declared_storage_type_names(&binding.java_ty, declared) {
+                if let Some(facts) = into.get_mut(&name) {
+                    facts.escape = facts.escape.max(Escape::UnknownBoundary);
+                }
+            }
+        }
+    }
+    for field_use in &method_usage.field_uses {
+        let crate::usage::FieldUse::PassedToCall {
+            field_name,
+            boundary: CallArgumentBoundary::Unknown,
+            ..
+        } = field_use
+        else {
+            continue;
+        };
+        for name in field_storage_type_names(owner, field_name, declared) {
+            if let Some(facts) = into.get_mut(&name) {
+                facts.escape = facts.escape.max(Escape::UnknownBoundary);
+            }
         }
     }
 }
@@ -353,10 +720,11 @@ fn collect_block_facts(
     program: &Program,
     declared: &BTreeSet<String>,
     in_constructor: bool,
+    locals: &mut BTreeMap<String, JavaType>,
     into: &mut BTreeMap<String, TypeStorageFacts>,
 ) {
     for stmt in &block.statements {
-        collect_stmt_facts(stmt, owner, program, declared, in_constructor, into);
+        collect_stmt_facts(stmt, owner, program, declared, in_constructor, locals, into);
     }
 }
 
@@ -366,11 +734,14 @@ fn collect_stmt_facts(
     program: &Program,
     declared: &BTreeSet<String>,
     in_constructor: bool,
+    locals: &mut BTreeMap<String, JavaType>,
     into: &mut BTreeMap<String, TypeStorageFacts>,
 ) {
     match stmt {
         Stmt::VarDecl {
-            ty, initializer, ..
+            ty,
+            name,
+            initializer,
         } => {
             // `T b = a;` where `a` is a bare handle: a second name for one
             // object. This is exactly the shape that makes lowering insert a
@@ -383,6 +754,7 @@ fn collect_stmt_facts(
             {
                 facts.locally_aliased = true;
             }
+            locals.insert(name.clone(), ty.clone());
         }
         Stmt::Assign { target, value } => {
             if expr_is_bare_handle(value) {
@@ -429,12 +801,31 @@ fn collect_stmt_facts(
             // the harder tier: a `final`-field class whose only writes are
             // `this.v = v` was reported `SharedLocal`
             // ([0002b](../claude_audits/0002b-shared-representation-design.md)).
-            if !in_constructor
-                && let Expr::FieldAccess(receiver, _) = target
-                && let Some(name) = handle_type_name(receiver, owner, declared)
-                && let Some(facts) = into.get_mut(&name)
+            if let Expr::FieldAccess(receiver, _) = target
+                && !(in_constructor && matches!(receiver.as_ref(), Expr::This))
             {
-                facts.mutated = true;
+                match handle_type_name(receiver, owner, declared, locals) {
+                    Some(name) => {
+                        if let Some(facts) = into.get_mut(&name) {
+                            facts.mutated = true;
+                        }
+                    }
+                    // A field write through a receiver this walk cannot type —
+                    // `arr[i].f = v`, `other.f = v` — is still a *mutation of
+                    // something*. `mutated` has to over-approximate: it is what
+                    // says a type may be held as `Rc<T>` with no `RefCell`, and
+                    // being wrong that way does not cost a pointer indirection,
+                    // it emits `cannot assign to data in an Rc` and does not
+                    // compile. Under-approximating is the unsafe direction, and
+                    // the design's "over-sharing is cheap" argument does not
+                    // cover it
+                    // ([0002b](../claude_audits/0002b-shared-representation-design.md)).
+                    None => {
+                        for facts in into.values_mut() {
+                            facts.mutation_provably_absent = false;
+                        }
+                    }
+                }
             }
         }
         Stmt::If {
@@ -442,18 +833,90 @@ fn collect_stmt_facts(
             else_block,
             ..
         } => {
-            collect_block_facts(then_block, owner, program, declared, in_constructor, into);
+            let mut then_locals = locals.clone();
+            collect_block_facts(
+                then_block,
+                owner,
+                program,
+                declared,
+                in_constructor,
+                &mut then_locals,
+                into,
+            );
             if let Some(else_block) = else_block {
-                collect_block_facts(else_block, owner, program, declared, in_constructor, into);
+                let mut else_locals = locals.clone();
+                collect_block_facts(
+                    else_block,
+                    owner,
+                    program,
+                    declared,
+                    in_constructor,
+                    &mut else_locals,
+                    into,
+                );
             }
+        }
+        Stmt::For {
+            init,
+            condition: _,
+            update: _,
+            body,
+            ..
+        } => {
+            let mut nested_locals = locals.clone();
+            for init_stmt in init {
+                collect_stmt_facts(
+                    init_stmt,
+                    owner,
+                    program,
+                    declared,
+                    in_constructor,
+                    &mut nested_locals,
+                    into,
+                );
+            }
+            collect_block_facts(
+                body,
+                owner,
+                program,
+                declared,
+                in_constructor,
+                &mut nested_locals,
+                into,
+            )
+        }
+        Stmt::EnhancedFor {
+            var_type,
+            var_name,
+            body,
+            ..
+        } => {
+            let mut nested_locals = locals.clone();
+            nested_locals.insert(var_name.clone(), var_type.clone());
+            collect_block_facts(
+                body,
+                owner,
+                program,
+                declared,
+                in_constructor,
+                &mut nested_locals,
+                into,
+            )
         }
         Stmt::While { body, .. }
         | Stmt::DoWhile { body, .. }
-        | Stmt::For { body, .. }
-        | Stmt::EnhancedFor { body, .. }
         | Stmt::Block(body)
         | Stmt::LabeledBlock { body, .. } => {
-            collect_block_facts(body, owner, program, declared, in_constructor, into)
+            let mut nested_locals = locals.clone();
+            collect_block_facts(
+                body,
+                owner,
+                program,
+                declared,
+                in_constructor,
+                &mut nested_locals,
+                into,
+            )
         }
         Stmt::Try {
             resources,
@@ -462,27 +925,64 @@ fn collect_stmt_facts(
             finally_block,
         } => {
             for resource in resources {
-                collect_stmt_facts(resource, owner, program, declared, in_constructor, into);
+                collect_stmt_facts(
+                    resource,
+                    owner,
+                    program,
+                    declared,
+                    in_constructor,
+                    locals,
+                    into,
+                );
             }
-            collect_block_facts(body, owner, program, declared, in_constructor, into);
+            let mut body_locals = locals.clone();
+            collect_block_facts(
+                body,
+                owner,
+                program,
+                declared,
+                in_constructor,
+                &mut body_locals,
+                into,
+            );
             for catch in catches {
-                collect_block_facts(&catch.body, owner, program, declared, in_constructor, into);
+                let mut catch_locals = locals.clone();
+                collect_block_facts(
+                    &catch.body,
+                    owner,
+                    program,
+                    declared,
+                    in_constructor,
+                    &mut catch_locals,
+                    into,
+                );
             }
             if let Some(finally_block) = finally_block {
+                let mut finally_locals = locals.clone();
                 collect_block_facts(
                     finally_block,
                     owner,
                     program,
                     declared,
                     in_constructor,
+                    &mut finally_locals,
                     into,
                 );
             }
         }
         Stmt::Switch { cases, .. } => {
             for case in cases {
+                let mut case_locals = locals.clone();
                 for stmt in &case.statements {
-                    collect_stmt_facts(stmt, owner, program, declared, in_constructor, into);
+                    collect_stmt_facts(
+                        stmt,
+                        owner,
+                        program,
+                        declared,
+                        in_constructor,
+                        &mut case_locals,
+                        into,
+                    );
                 }
             }
         }
@@ -497,9 +997,17 @@ fn expr_is_bare_handle(expr: &Expr) -> bool {
 }
 
 /// The declared type a handle refers to, when that is cheap to see.
-fn handle_type_name(expr: &Expr, owner: &TypeDecl, declared: &BTreeSet<String>) -> Option<String> {
+fn handle_type_name(
+    expr: &Expr,
+    owner: &TypeDecl,
+    declared: &BTreeSet<String>,
+    locals: &BTreeMap<String, JavaType>,
+) -> Option<String> {
     match expr {
         Expr::This => declared.contains(&owner.name).then(|| owner.name.clone()),
+        Expr::Var(name) => locals
+            .get(name)
+            .and_then(|ty| declared_type_name(ty, declared)),
         Expr::FieldAccess(receiver, field) if matches!(receiver.as_ref(), Expr::This) => {
             field_type_name(owner, field, declared)
         }
@@ -507,11 +1015,73 @@ fn handle_type_name(expr: &Expr, owner: &TypeDecl, declared: &BTreeSet<String>) 
     }
 }
 
+fn local_types_from_params(params: &[crate::java_ir::Param]) -> BTreeMap<String, JavaType> {
+    params
+        .iter()
+        .map(|param| (param.name.clone(), param.ty.clone()))
+        .collect()
+}
+
 fn field_type_name(owner: &TypeDecl, field: &str, declared: &BTreeSet<String>) -> Option<String> {
     owner.members.iter().find_map(|member| match member {
         Member::Field(decl) if decl.name == field => declared_type_name(&decl.ty, declared),
         _ => None,
     })
+}
+
+fn field_storage_type_names(
+    owner: &TypeDecl,
+    field: &str,
+    declared: &BTreeSet<String>,
+) -> Vec<String> {
+    owner
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Field(decl) if decl.name == field => {
+                Some(declared_storage_type_names(&decl.ty, declared))
+            }
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// Declared source types that are physically reachable through a stored value of
+/// `ty`.
+///
+/// Static reachability is a `Send + Sync` question for the whole Rust static's
+/// object graph, so `Cell[]` and `List<Cell>` both carry `Cell` even though most
+/// other storage facts deliberately ask for the single nominal type a slot
+/// names.
+fn declared_storage_type_names(ty: &JavaType, declared: &BTreeSet<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_declared_storage_type_names(ty, declared, &mut out);
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn collect_declared_storage_type_names(
+    ty: &JavaType,
+    declared: &BTreeSet<String>,
+    into: &mut Vec<String>,
+) {
+    match ty {
+        JavaType::Array(inner) => collect_declared_storage_type_names(inner, declared, into),
+        JavaType::Named { args, .. } => {
+            if let Some(declared_name) = declared_type_name(ty, declared) {
+                into.push(declared_name);
+            }
+            for arg in args {
+                collect_declared_storage_type_names(arg, declared, into);
+            }
+        }
+        JavaType::Wildcard(Some(WildcardBound::Extends(bound)))
+        | JavaType::Wildcard(Some(WildcardBound::Super(bound))) => {
+            collect_declared_storage_type_names(bound, declared, into);
+        }
+        _ => {}
+    }
 }
 
 /// The declared source type a Java type names, ignoring anything external.
@@ -610,6 +1180,69 @@ mod tests {
         };
         assert_eq!(unknown.strategy(), StorageStrategy::SharedLocal);
     }
+
+    #[test]
+    fn mutated_static_reachable_shared_type_reports_sync_strategy() {
+        let facts = TypeStorageFacts {
+            escape: Escape::Stored,
+            mutated: true,
+            static_reachable: true,
+            ..Default::default()
+        };
+
+        assert_eq!(facts.strategy(), StorageStrategy::SharedSync);
+        assert_eq!(facts.handle(), SharedHandle::Sync);
+        assert_eq!(
+            facts.placement(),
+            StoragePlacement {
+                shared: true,
+                interior_mutable: true,
+                sync: true,
+            }
+        );
+    }
+
+    #[test]
+    fn storage_plan_merge_preserves_conservative_evidence() {
+        let mut base = StoragePlan::default();
+        base.insert(
+            "Node".to_string(),
+            TypeStorageFacts {
+                escape: Escape::Stored,
+                locally_aliased: true,
+                ..Default::default()
+            },
+        );
+        let mut extra = StoragePlan::default();
+        extra.insert(
+            "Node".to_string(),
+            TypeStorageFacts {
+                mutated: true,
+                mutation_provably_absent: false,
+                static_reachable: true,
+                ..Default::default()
+            },
+        );
+        extra.insert(
+            "Leaf".to_string(),
+            TypeStorageFacts {
+                escape: Escape::UnknownBoundary,
+                ..Default::default()
+            },
+        );
+
+        base.extend_from(extra);
+
+        let node = base.facts("Node").expect("merged Node facts");
+        assert_eq!(node.escape, Escape::Stored);
+        assert!(node.locally_aliased);
+        assert!(node.mutated);
+        assert!(!node.mutation_provably_absent);
+        assert!(node.static_reachable);
+        assert_eq!(node.strategy(), StorageStrategy::SharedSync);
+        assert_eq!(node.handle(), SharedHandle::Sync);
+        assert_eq!(base.strategy("Leaf"), StorageStrategy::SharedImmutable);
+    }
 }
 
 #[cfg(test)]
@@ -625,6 +1258,16 @@ mod constructor_mutation_tests {
         let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
         let usage = crate::usage::analyze_usage(&resolved.program);
         plan_storage_strategies(&resolved.program, &usage).strategy(type_name)
+    }
+
+    fn facts_of(source: &str, type_name: &str) -> TypeStorageFacts {
+        let parsed = parse_java_source(source);
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let usage = crate::usage::analyze_usage(&resolved.program);
+        plan_storage_strategies(&resolved.program, &usage)
+            .facts(type_name)
+            .unwrap_or_else(|| panic!("missing storage facts for {type_name}"))
+            .clone()
     }
 
     /// A constructor writing its own fields is **not** mutation in this
@@ -675,6 +1318,244 @@ public class Outer {
         assert_eq!(strategy, StorageStrategy::SharedLocal);
     }
 
+    #[test]
+    fn constructor_write_through_parameter_still_makes_that_type_mutable() {
+        let strategy = strategy_of(
+            r#"
+public class Outer {
+    static final class Cell {
+        int v;
+    }
+    static final class MutatesOther {
+        MutatesOther(Cell cell) { cell.v = 2; }
+    }
+    static int run(Cell a) {
+        Cell b = a;
+        new MutatesOther(a);
+        return b.v;
+    }
+}
+"#,
+            "Outer.Cell",
+        );
+        assert_eq!(strategy, StorageStrategy::SharedLocal);
+    }
+
+    #[test]
+    fn records_participate_in_the_storage_lattice() {
+        let strategy = strategy_of(
+            r#"
+record Cell(int v) {}
+
+class Outer {
+    static int run(Cell a) {
+        Cell b = a;
+        return b.v();
+    }
+}
+"#,
+            "Cell",
+        );
+        assert_eq!(strategy, StorageStrategy::SharedImmutable);
+    }
+
+    #[test]
+    fn for_initializer_locals_feed_alias_and_mutation_facts() {
+        let strategy = strategy_of(
+            r#"
+public class Outer {
+    static final class Cell {
+        int v;
+    }
+    static int run(Cell a) {
+        for (Cell b = a; b.v < 10; ) {
+            b.v = 2;
+            break;
+        }
+        return a.v;
+    }
+}
+"#,
+            "Outer.Cell",
+        );
+        assert_eq!(strategy, StorageStrategy::SharedLocal);
+    }
+
+    #[test]
+    fn static_reachability_propagates_through_instance_fields() {
+        let strategy = strategy_of(
+            r#"
+public class Outer {
+    static Holder ROOT;
+    static final class Holder {
+        Cell cell;
+    }
+    static final class Cell {
+        int v;
+        void set(int x) { this.v = x; }
+    }
+    static int run(Cell a) { Cell b = a; a.set(1); return b.v; }
+}
+"#,
+            "Outer.Cell",
+        );
+        assert_eq!(strategy, StorageStrategy::SharedSync);
+    }
+
+    #[test]
+    fn static_reachability_sees_array_element_types() {
+        let strategy = strategy_of(
+            r#"
+public class Outer {
+    static Cell[] CELLS;
+    static final class Cell {
+        int v;
+        void set(int x) { this.v = x; }
+    }
+    static int run(Cell a) { Cell b = a; a.set(1); return b.v; }
+}
+"#,
+            "Outer.Cell",
+        );
+        assert_eq!(strategy, StorageStrategy::SharedSync);
+    }
+
+    #[test]
+    fn static_reachability_propagates_through_array_fields() {
+        let strategy = strategy_of(
+            r#"
+public class Outer {
+    static Holder ROOT;
+    static final class Holder {
+        Cell[] cells;
+    }
+    static final class Cell {
+        int v;
+        void set(int x) { this.v = x; }
+    }
+    static int run(Cell a) { Cell b = a; a.set(1); return b.v; }
+}
+"#,
+            "Outer.Cell",
+        );
+        assert_eq!(strategy, StorageStrategy::SharedSync);
+    }
+
+    #[test]
+    fn field_storage_sees_array_element_types() {
+        let strategy = strategy_of(
+            r#"
+public class Outer {
+    Cell[] cells;
+    static final class Cell {
+        int v;
+    }
+    static int run(Cell a) { return a.v; }
+}
+"#,
+            "Outer.Cell",
+        );
+        assert_eq!(strategy, StorageStrategy::SharedImmutable);
+    }
+
+    #[test]
+    fn field_storage_sees_generic_argument_types() {
+        let strategy = strategy_of(
+            r#"
+import java.util.List;
+
+public class Outer {
+    List<Cell> cells;
+    static final class Cell {
+        int v;
+    }
+    static int run(Cell a) { return a.v; }
+}
+"#,
+            "Outer.Cell",
+        );
+        assert_eq!(strategy, StorageStrategy::SharedImmutable);
+    }
+
+    #[test]
+    fn field_storage_sees_wildcard_generic_bound_types() {
+        let strategy = strategy_of(
+            r#"
+import java.util.List;
+
+public class Outer {
+    List<? extends Cell> cells;
+    static final class Cell {
+        int v;
+    }
+    static int run(Cell a) { return a.v; }
+}
+"#,
+            "Outer.Cell",
+        );
+        assert_eq!(strategy, StorageStrategy::SharedImmutable);
+    }
+
+    #[test]
+    fn static_reachability_sees_wildcard_generic_bound_types() {
+        let strategy = strategy_of(
+            r#"
+import java.util.List;
+
+public class Outer {
+    static List<? super Cell> CELLS;
+    static final class Cell {
+        int v;
+        void set(int x) { this.v = x; }
+    }
+    static int run(Cell a) { Cell b = a; a.set(1); return b.v; }
+}
+"#,
+            "Outer.Cell",
+        );
+        assert_eq!(strategy, StorageStrategy::SharedSync);
+    }
+
+    #[test]
+    fn unknown_boundary_sees_field_argument_type() {
+        let facts = facts_of(
+            r#"
+public class Outer {
+    ExternalName cached;
+    void send(Helper helper) { helper.consume(cached); }
+}
+
+class ExternalName {}
+class Helper {
+    void consume(ExternalName value) {}
+}
+"#,
+            "ExternalName",
+        );
+        assert_eq!(facts.escape, Escape::UnknownBoundary);
+    }
+
+    #[test]
+    fn unknown_boundary_sees_generic_field_argument_types() {
+        let facts = facts_of(
+            r#"
+import java.util.List;
+
+public class Outer {
+    List<Cell> cached;
+    void send(Helper helper) { helper.consume(cached); }
+}
+
+class Cell {}
+class Helper {
+    void consume(Object value) {}
+}
+"#,
+            "Cell",
+        );
+        assert_eq!(facts.escape, Escape::UnknownBoundary);
+    }
+
     /// A type that is never aliased stays `Value` whichever way it is written —
     /// the escape/alias inputs still gate everything.
     #[test]
@@ -693,5 +1574,138 @@ public class Outer {
             "Outer.Local",
         );
         assert_eq!(strategy, StorageStrategy::Value);
+    }
+}
+
+#[cfg(test)]
+mod placement_law_tests {
+    use super::*;
+
+    fn all_placements() -> Vec<StoragePlacement> {
+        let mut out = Vec::new();
+        for shared in [false, true] {
+            for interior_mutable in [false, true] {
+                for sync in [false, true] {
+                    out.push(StoragePlacement {
+                        shared,
+                        interior_mutable,
+                        sync,
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// `join` is the lattice's least upper bound, so it must be commutative,
+    /// associative, idempotent and extensive.
+    ///
+    /// These four laws are what make the plan's fixpoint well defined: extensive
+    /// plus a finite domain is why it terminates, and commutative plus
+    /// associative is why the order uses are visited in cannot change the
+    /// answer. Asserting them is cheaper and stronger than enumerating the
+    /// results — the domain is 8 elements, so the laws are checked exhaustively.
+    #[test]
+    fn join_obeys_the_lattice_laws() {
+        for a in all_placements() {
+            assert_eq!(a.join(a), a, "idempotent");
+            for b in all_placements() {
+                assert_eq!(a.join(b), b.join(a), "commutative");
+                // Extensive: joining can only add requirements.
+                let j = a.join(b);
+                assert!(j.shared >= a.shared && j.shared >= b.shared);
+                assert!(j.interior_mutable >= a.interior_mutable);
+                assert!(j.sync >= a.sync && j.sync >= b.sync);
+                for c in all_placements() {
+                    assert_eq!(a.join(b).join(c), a.join(b.join(c)), "associative");
+                }
+            }
+        }
+    }
+
+    /// The wrapping is derived from the axes, so each layer appears exactly when
+    /// its axis says it should — checked as a property over the whole domain
+    /// rather than as a table of eight expected strings.
+    #[test]
+    fn wrapping_follows_the_axes() {
+        for placement in all_placements() {
+            let wrapped = placement.wrap("T".to_string());
+
+            assert_eq!(
+                wrapped.contains("Rc<") || wrapped.contains("Arc<"),
+                placement.shared,
+                "a handle appears exactly when the value is shared: {placement:?} -> {wrapped}"
+            );
+            assert_eq!(
+                wrapped.contains("RefCell<") || wrapped.contains("Mutex<"),
+                placement.shared && placement.interior_mutable,
+                "a cell appears exactly when a shared value is mutated: {placement:?} -> {wrapped}"
+            );
+            // One `sync` bit picks both, so they can never disagree.
+            if placement.shared {
+                assert_eq!(
+                    wrapped.contains("std::sync::Arc<"),
+                    placement.sync,
+                    "the atomic handle is used exactly when sync is required"
+                );
+            }
+            if placement.shared && placement.interior_mutable {
+                assert_eq!(
+                    wrapped.contains("std::sync::Mutex<"),
+                    placement.sync,
+                    "the lock and the handle agree on sync by construction"
+                );
+            }
+            // The cell nests inside the handle, never the other way round.
+            if let (Some(handle), Some(cell)) = (placement.handle_path(), placement.cell_path()) {
+                assert!(
+                    wrapped.find(handle).unwrap() < wrapped.find(cell).unwrap(),
+                    "the handle is outermost: {wrapped}"
+                );
+            }
+        }
+    }
+
+    /// The type form and the construction form must nest identically.
+    ///
+    /// `Rc<RefCell<T>>` has to be built by `Rc::new(RefCell::new(v))`, never the
+    /// other way round. Deriving both from the same axes is what makes that
+    /// true; asserting it is what keeps it true.
+    #[test]
+    fn the_type_and_construction_forms_nest_the_same_way() {
+        for placement in all_placements() {
+            let ty = placement.wrap("T".to_string());
+            let value = placement.wrap_construction("v".to_string());
+            for path in [placement.handle_path(), placement.cell_path()]
+                .into_iter()
+                .flatten()
+            {
+                assert_eq!(
+                    ty.contains(&format!("{path}<")),
+                    value.contains(&format!("{path}::new(")),
+                    "{placement:?}: {path} appears in one form and not the other"
+                );
+            }
+            if let (Some(handle), Some(cell)) = (placement.handle_path(), placement.cell_path()) {
+                assert!(
+                    value.find(handle).unwrap() < value.find(cell).unwrap(),
+                    "the handle is outermost in the construction too: {value}"
+                );
+            }
+            // An unshared value is constructed exactly as written.
+            if !placement.shared {
+                assert_eq!(value, "v");
+            }
+        }
+    }
+
+    /// An unshared value is never wrapped, whatever the other axes say.
+    #[test]
+    fn an_unshared_value_is_held_inline() {
+        for placement in all_placements().into_iter().filter(|p| !p.shared) {
+            assert_eq!(placement.wrap("T".to_string()), "T");
+            assert_eq!(placement.handle_path(), None);
+            assert_eq!(placement.cell_path(), None);
+        }
     }
 }

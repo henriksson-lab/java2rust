@@ -160,6 +160,13 @@ SIGNALS = [
         "StringBuilderFacade.java",
     ),
     Signal(
+        "noop_facade_call_sites",
+        "Call sites of no-op facade constructors",
+        r"",
+        "javalibs facade coverage",
+        "StringBuilderFacade.java",
+    ),
+    Signal(
         "unmodelled_upcast_conversions",
         "Synthesised From impls for Java upcasts with no model",
         r"Unmodelled Java upcast: ",
@@ -243,6 +250,8 @@ def enclosing_function_returns_option(text: str, offset: int) -> bool:
 
 
 def count_signal(signal: Signal, files: list[Path], source_map: dict[Path, str]) -> dict[str, object]:
+    if signal.key == "noop_facade_call_sites":
+        return count_noop_facade_call_sites_signal(signal, files, source_map)
     occurrences = 0
     matched_files = 0
     examples: list[str] = []
@@ -262,6 +271,148 @@ def count_signal(signal: Signal, files: list[Path], source_map: dict[Path, str])
         "files": matched_files,
         "examples": examples,
     }
+
+
+def count_noop_facade_call_sites_signal(
+    signal: Signal, files: list[Path], source_map: dict[Path, str]
+) -> dict[str, object]:
+    occurrences = 0
+    matched_files = 0
+    examples: list[str] = []
+    for path in files:
+        text = path.read_text(errors="replace")
+        matches = count_noop_facade_call_sites(text)
+        if matches == 0:
+            continue
+        occurrences += matches
+        matched_files += 1
+        if len(examples) < 5:
+            source = source_map.get(path.resolve(), str(path))
+            examples.append(source)
+    return {
+        "signal": signal,
+        "occurrences": occurrences,
+        "files": matched_files,
+        "examples": examples,
+    }
+
+
+def count_noop_facade_call_sites(text: str) -> int:
+    constructors = noop_facade_constructors(text)
+    if not constructors:
+        return 0
+    return sum(
+        sum(count_noop_facade_path_calls(line, path) for path in constructors)
+        for line in text.splitlines()
+        if not line_defines_noop_facade_constructor(line)
+    )
+
+
+def count_noop_facade_path_calls(line: str, path: str) -> int:
+    count = 0
+    cursor = 0
+    while cursor < len(line):
+        if line.startswith("//", cursor):
+            break
+        if line[cursor] == '"':
+            cursor += 1
+            escaped = False
+            while cursor < len(line):
+                char = line[cursor]
+                cursor += 1
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    break
+            continue
+        if line.startswith(path, cursor) and starts_on_rust_path_boundary(line, cursor):
+            count += 1
+            cursor += len(path)
+        else:
+            cursor += 1
+    return count
+
+
+def starts_on_rust_path_boundary(line: str, start: int) -> bool:
+    if start == 0:
+        return True
+    return not is_rust_ident_continue(line[start - 1])
+
+
+def is_rust_ident_continue(char: str) -> bool:
+    return char == "_" or char.isalnum()
+
+
+def noop_facade_constructors(text: str) -> list[str]:
+    owner: str | None = None
+    impl_depth = 0
+    paths: list[str] = []
+    for line in text.splitlines():
+        trimmed = line.strip()
+        if owner is None:
+            owner = inherent_impl_owner(trimmed)
+            if owner is not None:
+                impl_depth = 0
+        if not line_defines_noop_facade_constructor(line):
+            if owner is not None:
+                impl_depth += line.count("{")
+                impl_depth -= line.count("}")
+                if impl_depth <= 0:
+                    owner = None
+                    impl_depth = 0
+            continue
+        if owner is None:
+            continue
+        name_match = re.search(r"\bfn\s+([A-Za-z_][A-Za-z0-9_]*)", trimmed)
+        if name_match is None:
+            continue
+        paths.append(f"{owner}::{name_match.group(1)}(")
+        impl_depth += line.count("{")
+        impl_depth -= line.count("}")
+        if impl_depth <= 0:
+            owner = None
+            impl_depth = 0
+    return paths
+
+
+def line_defines_noop_facade_constructor(line: str) -> bool:
+    stripped = line.rstrip()
+    return " fn new" in stripped and stripped.endswith("{ Default::default() }")
+
+
+def inherent_impl_owner(trimmed: str) -> str | None:
+    if not trimmed.startswith("impl") or " for " in trimmed:
+        return None
+    rest = trimmed[len("impl") :]
+    if not rest.startswith("<") and (not rest or not rest[0].isspace()):
+        return None
+    rest = rest.lstrip()
+    if rest.startswith("<"):
+        generic_end = matching_angle_end(rest)
+        if generic_end is None:
+            return None
+        rest = rest[generic_end + 1 :].lstrip()
+    parts = rest.split()
+    if not parts:
+        return None
+    owner = parts[0].rstrip("{").strip().split("<", 1)[0].strip()
+    return owner or None
+
+
+def matching_angle_end(text: str) -> int | None:
+    depth = 0
+    for index, char in enumerate(text):
+        if char == "<":
+            depth += 1
+        elif char == ">":
+            depth -= 1
+            if depth == 0:
+                return index
+            if depth < 0:
+                return None
+    return None
 
 
 def write_tsv(path: Path, rows: list[dict[str, object]]) -> None:

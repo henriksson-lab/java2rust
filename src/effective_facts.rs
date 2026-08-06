@@ -38,6 +38,27 @@ pub struct InstanceOfTargetCapabilityPolicy {
 }
 
 impl<'a> EffectiveFacts<'a> {
+    /// Where values of `type_name` live.
+    pub fn storage_placement_for(
+        &self,
+        type_name: &str,
+    ) -> crate::storage_strategy::StoragePlacement {
+        self.facts.storage_placement_for(type_name)
+    }
+
+    /// Which pointer `type_name`'s shared handle must be.
+    pub fn shared_handle_for(&self, type_name: &str) -> crate::storage_strategy::SharedHandle {
+        self.facts.shared_handle_for(type_name)
+    }
+
+    /// How values of `type_name` are held; see [`FactSet::storage_strategy_for`].
+    pub fn storage_strategy_for(
+        &self,
+        type_name: &str,
+    ) -> crate::storage_strategy::StorageStrategy {
+        self.facts.storage_strategy_for(type_name)
+    }
+
     pub fn new(facts: &'a FactSet) -> Self {
         Self { facts }
     }

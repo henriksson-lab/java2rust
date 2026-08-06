@@ -23,8 +23,8 @@ use new_java2rust::facts::{
 use new_java2rust::java_ir::{JavaType, PrimitiveType};
 use new_java2rust::output_markers::{
     self, OUTPUT_MARKERS, OutputMarkerKind, count_compile_error_markers, count_invalid_patterns,
-    count_noop_facade_methods, count_stubbed_constants, count_unimplemented_facade_methods,
-    count_unmodelled_upcast_conversions,
+    count_noop_facade_call_sites, count_noop_facade_methods, count_stubbed_constants,
+    count_unimplemented_facade_methods, count_unmodelled_upcast_conversions,
 };
 use new_java2rust::{translate_source, translate_source_with_facts};
 
@@ -110,6 +110,7 @@ fn count_by_name(name: &str, rust: &str) -> usize {
         "invalid_patterns" => count_invalid_patterns(rust),
         "stubbed_constants" => count_stubbed_constants(rust),
         "noop_facade_methods" => count_noop_facade_methods(rust),
+        "noop_facade_call_sites" => count_noop_facade_call_sites(rust),
         "unmodelled_upcast_conversions" => count_unmodelled_upcast_conversions(rust),
         "unimplemented_facade_methods" => count_unimplemented_facade_methods(rust),
         "compile_error_markers" => count_compile_error_markers(rust),
@@ -190,6 +191,24 @@ fn each_fixture_moves_its_counter() {
             );
         }
     }
+}
+
+#[test]
+fn unsupported_inner_class_outer_capture_is_reported_as_a_translation_warning() {
+    let fixture = FIXTURES
+        .iter()
+        .find(|fixture| fixture.marker == "unsupported_inner_class_outer_capture")
+        .expect("inner-class marker fixture");
+    let translation = translate_source(fixture.java);
+
+    assert!(
+        translation
+            .diagnostics
+            .has_code("inner_class_construction_panics"),
+        "inner-class construction should be reported by the translator, not only \
+         left as a runtime panic marker:\n{:?}",
+        translation.diagnostics.iter().collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -539,4 +558,121 @@ fn unmodelled_upcasts_are_not_counted_as_noop_facade_methods() {
         "the upcast surface is emitted regardless of what the program uses, so it \
          cannot be a per-file cost signal; it is a constant offset"
     );
+}
+
+/// A facade constructor counted once may be called from many places, and the
+/// call count is the cost.
+///
+/// `claude_audits/0018` asks for `noop_facade_call_sites` and a previous pass
+/// recorded it as unbuildable from generated text. That obstacle — the
+/// surviving no-op *methods* are named `to_string`/`clone`/`into`, so matching
+/// `.to_string(` would count unrelated calls — does not apply to constructors,
+/// which are called through a qualified path.
+#[test]
+fn noop_facade_constructor_call_sites_are_counted_per_call() {
+    // `java.awt.Font` is genuinely unmodelled, so its facade constructor is a
+    // no-op. A *modelled* type such as `ZipEntry` has a real constructor body
+    // and must not be counted — which is why the fixture names a specific type
+    // rather than any external one.
+    let rust = translate_source(
+        "import java.awt.Font;\n\
+         public class Fonts {\n\
+             public static int m() {\n\
+                 Font a = new Font(\"x\", 0, 10);\n\
+                 Font b = new Font(\"y\", 0, 12);\n\
+                 Font c = new Font(\"z\", 0, 14);\n\
+                 return a.getSize() + b.getSize() + c.getSize();\n\
+             }\n\
+         }",
+    )
+    .rust;
+
+    let call_sites = count_noop_facade_call_sites(&rust);
+    assert_eq!(
+        call_sites, 3,
+        "expected exactly the three constructions to be counted\n{rust}"
+    );
+
+    // One definition, three calls: the ratio is the whole point. A definition
+    // count reports 1 for a cost of 3.
+    let font_definitions = rust
+        .lines()
+        .filter(|line| {
+            line.contains(" fn new") && line.trim_end().ends_with("{ Default::default() }")
+        })
+        .count();
+    assert!(
+        call_sites > font_definitions,
+        "call sites ({call_sites}) must exceed no-op constructor definitions \
+         ({font_definitions}), or the counter measures surface rather than cost\n{rust}"
+    );
+}
+
+/// A definition is not a call site: the counter must not count the facade's own
+/// `fn new` line.
+#[test]
+fn a_noop_facade_definition_is_not_counted_as_a_call() {
+    let clean =
+        translate_source("public class NoCalls { public int m(int a) { return a + 1; } }").rust;
+    assert_eq!(
+        count_noop_facade_call_sites(&clean),
+        0,
+        "a program that constructs no external facade has no call sites\n{clean}"
+    );
+}
+
+#[test]
+fn noop_facade_constructor_scan_survives_multiline_methods_in_impl() {
+    let rust = r#"
+impl Font {
+    pub fn size(&self) -> i32 {
+        12
+    }
+
+    pub fn new_3<T0, T1, T2>(_arg0: T0, _arg1: T1, _arg2: T2) -> Font { Default::default() }
+}
+
+pub fn build() -> Font {
+    Font::new_3("x", 0, 12)
+}
+"#;
+
+    assert_eq!(count_noop_facade_call_sites(rust), 1);
+}
+
+#[test]
+fn noop_facade_constructor_scan_handles_generic_impl_owners() {
+    let rust = r#"
+pub struct Future<T = Box<dyn std::any::Any>> {
+    _marker: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<T> Future<T> {
+    pub fn new_1<T0>(_arg0: T0) -> Future<T> { Default::default() }
+}
+
+pub fn build() -> Future<String> {
+    Future::new_1("x")
+}
+"#;
+
+    assert_eq!(count_noop_facade_call_sites(rust), 1);
+}
+
+#[test]
+fn noop_facade_constructor_scan_ignores_prefixes_comments_and_strings() {
+    let rust = r#"
+impl Font {
+    pub fn new_3<T0, T1, T2>(_arg0: T0, _arg1: T1, _arg2: T2) -> Font { Default::default() }
+}
+
+pub fn build() -> Font {
+    // Font::new_3("comment", 0, 12)
+    let _debug = "Font::new_3(\"string\", 0, 12)";
+    let _other = MyFont::new_3("prefix", 0, 12);
+    Font::new_3("real", 0, 12)
+}
+"#;
+
+    assert_eq!(count_noop_facade_call_sites(rust), 1);
 }

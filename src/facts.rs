@@ -8,6 +8,19 @@ use crate::slot_shape::TypeCapabilities;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FactSet {
+    /// How values of each source type are *held* — by value, or behind a shared
+    /// handle.
+    ///
+    /// It lives here rather than on `RepresentationPlan` for one reason: the
+    /// Rust type of a source class is decided in **49 places** that take
+    /// `(shape, facts)` and only 11 that also take the representation plan, and
+    /// `item_assembly.rs` — struct fields, parameters, return types — is in the
+    /// first group. A storage decision only lowering could see would let the
+    /// two disagree about a type's Rust spelling, which does not compile.
+    ///
+    /// Step 3 of
+    /// [0002b](../claude_audits/0002b-shared-representation-design.md).
+    pub storage_strategies: crate::storage_strategy::StoragePlan,
     pub notes: Vec<String>,
     pub captures: CaptureFacts,
     pub hierarchy_overrides: Vec<HierarchyOverride>,
@@ -1623,7 +1636,33 @@ impl FactSet {
         HierarchyFactLookupIndex::new(self)
     }
 
+    /// How values of `type_name` are held. `Value` for anything unknown, so a
+    /// caller cannot mistake "not analysed" for "shared".
+    pub fn storage_strategy_for(
+        &self,
+        type_name: &str,
+    ) -> crate::storage_strategy::StorageStrategy {
+        self.storage_strategies.strategy(type_name)
+    }
+
+    /// Where values of `type_name` live; see
+    /// [`crate::storage_strategy::StoragePlacement`].
+    pub fn storage_placement_for(
+        &self,
+        type_name: &str,
+    ) -> crate::storage_strategy::StoragePlacement {
+        self.storage_strategies.placement(type_name)
+    }
+
+    /// Which pointer `type_name`'s shared handle must be; see
+    /// [`crate::storage_strategy::SharedHandle`].
+    pub fn shared_handle_for(&self, type_name: &str) -> crate::storage_strategy::SharedHandle {
+        self.storage_strategies.handle(type_name)
+    }
+
     pub fn extend_from(&mut self, other: FactSet) {
+        self.storage_strategies
+            .extend_from(other.storage_strategies);
         self.notes.extend(other.notes);
         self.captures.owners.extend(other.captures.owners);
         self.hierarchy_overrides.extend(other.hierarchy_overrides);
@@ -3414,7 +3453,7 @@ fn external_api_argument_effects_agree(
 /// `malloc`/`free`/`realloc` as the self-time leaders. The names repeat
 /// constantly across the scan, so almost all of that work was recomputation.
 ///
-/// Safe to cache process-wide precisely because it depends on nothing but the
+/// Safe to cache per thread precisely because it depends on nothing but the
 /// string: no facts, no program, no configuration.
 fn external_type_name_aliases(type_name: &str) -> Vec<String> {
     thread_local! {

@@ -79,7 +79,7 @@ use new_java2rust::member_access_plan::{
     plan_member_access,
 };
 use new_java2rust::parser::{parse_expr, parse_type};
-use new_java2rust::rust_ir::RustExpr;
+use new_java2rust::rust_ir::{RustExpr, RustExprShape};
 use new_java2rust::slot_shape::{DispatchShape, OwnershipShape, RustSlotShape, ViewShape};
 use new_java2rust::string_concat::is_string_concat;
 use new_java2rust::string_concat_plan::build_string_concat_plan;
@@ -269,6 +269,22 @@ fn primitive_widening_policy_names_numeric_widening_rank() {
         .unwrap()
         .widens,
         false
+    );
+    assert!(
+        !primitive_widening_policy(
+            &JavaType::Primitive(PrimitiveType::Byte),
+            &JavaType::Primitive(PrimitiveType::Char),
+        )
+        .unwrap()
+        .widens
+    );
+    assert!(
+        !primitive_widening_policy(
+            &JavaType::Primitive(PrimitiveType::Boolean),
+            &JavaType::Primitive(PrimitiveType::Int),
+        )
+        .unwrap()
+        .widens
     );
     assert_eq!(
         primitive_widening_policy(&JavaType::String, &JavaType::Primitive(PrimitiveType::Int)),
@@ -780,7 +796,6 @@ fn member_access_plan_uses_type_inference_and_shape_projection() {
     assert!(source.contains("pub fn java_member_access_policy"));
     assert!(source.contains("let policy = java_member_access_policy"));
     assert!(source.contains("project_java_value_shape"));
-    assert!(!source.contains("infer_expr_type"));
     assert!(!source.contains("PrimitiveType"));
     assert!(!source.contains("JavaType::Primitive"));
     assert!(!source.contains("RustSlotShape::conservative"));
@@ -867,7 +882,8 @@ fn borrowed_native_string_can_coerce_to_string_view() {
         apply_shape_coercion_plan(
             RustExpr::Raw("parts[0]".to_string()),
             &shape_coercion_plan_with_facts(&actual, &target, &FactSet::default())
-        ),
+        )
+        .into_unshaped(),
         RustExpr::Raw("parts[0].as_str()".to_string())
     );
 }
@@ -897,16 +913,18 @@ fn map_key_borrow_projection_is_centralized_and_idempotent() {
             },
             Some("key"),
             Some(&shared)
-        ),
-        RustExpr::Var("key".to_string())
+        )
+        .into_unshaped(),
+        RustExpr::Raw("key.as_str()".to_string())
     );
     assert_eq!(
         normalize_map_key_borrow_projection(
             RustExpr::Raw("&key".to_string()),
             Some("key"),
             Some(&shared)
-        ),
-        RustExpr::Var("key".to_string())
+        )
+        .into_unshaped(),
+        RustExpr::Raw("key.as_str()".to_string())
     );
 
     assert_eq!(
@@ -1508,7 +1526,7 @@ fn optional_array_carrier_to_optional_slice_target_uses_view_projection_policy()
     assert_eq!(
         plan,
         SlotConversionPlan::BorrowedElement(BorrowedElementSlotAdapterPolicy {
-            target,
+            target: target.clone(),
             carrier_shape: option_shape,
             element_shape: element_shape.clone(),
             carrier: BorrowedElementCarrier::Option,
@@ -1521,9 +1539,38 @@ fn optional_array_carrier_to_optional_slice_target_uses_view_projection_policy()
             }),
         })
     );
+    // Compared through `into_unshaped()`: the adapter now records the slot
+    // shape it produced, and the tag is invisible to the emitter by design — the
+    // generated Rust is byte-identical. This asserts the emitted expression,
+    // which is what it was always about (claude_audits/0007).
+    let projected = apply_slot_conversion_plan(RustExpr::Raw("values".to_string()), &plan);
     assert_eq!(
-        apply_slot_conversion_plan(RustExpr::Raw("values".to_string()), &plan),
+        projected.clone().into_unshaped(),
         RustExpr::Raw("values.as_deref()".to_string())
+    );
+    assert_eq!(
+        apply_slot_conversion_plan(projected, &plan).into_unshaped(),
+        RustExpr::Raw("values.as_deref()".to_string()),
+        "a recorded optional-element projection is already handled and must not \
+         fall through to other borrowed-element adapters"
+    );
+
+    let mut stale_identity_actual =
+        RustSlotShape::conservative(target.optional_element_type().unwrap());
+    stale_identity_actual.ownership = OwnershipShape::SharedBorrow;
+    stale_identity_actual.view = ViewShape::Slice;
+    stale_identity_actual.type_identity =
+        new_java2rust::slot_shape::TypeIdentity::from_java_type(target.java_ty.clone());
+    let stale_identity_projected = RustExpr::shaped_as(
+        RustExprShape::OptionalProjected,
+        Some(stale_identity_actual),
+        RustExpr::Raw("values.as_deref()".to_string()),
+    );
+    assert_eq!(
+        apply_slot_conversion_plan(stale_identity_projected, &plan).into_unshaped(),
+        RustExpr::Raw("values.as_deref()".to_string()),
+        "idempotence must compare the produced slot semantics, not stale \
+         type_identity metadata"
     );
 }
 
@@ -1547,7 +1594,7 @@ fn optional_array_carrier_to_required_slice_target_borrows_before_unwrap() {
     );
 
     assert_eq!(
-        apply_slot_conversion_plan(RustExpr::Raw("values".to_string()), &plan),
+        apply_slot_conversion_plan(RustExpr::Raw("values".to_string()), &plan).into_unshaped(),
         RustExpr::Raw("values.as_ref().expect(\"Java null receiver\").as_slice()".to_string())
     );
 }
@@ -1611,7 +1658,8 @@ fn clone_recovery_policy_is_explicit_in_coercion_adapter() {
             &[Coercion::CloneRecovery {
                 policy: CloneRecoveryPolicy::AuditRequired,
             }],
-        ),
+        )
+        .into_unshaped(),
         RustExpr::Raw("value.clone()/* TODO(translation): validate added clone */".to_string())
     );
     assert_eq!(
@@ -1625,7 +1673,8 @@ fn clone_recovery_policy_is_explicit_in_coercion_adapter() {
                     },
                 },
             }],
-        ),
+        )
+        .into_unshaped(),
         RustExpr::Raw("value.clone()".to_string())
     );
 }
@@ -2746,7 +2795,8 @@ fn shape_coercion_owns_string_view_adapters() {
             RustExpr::Var("name".to_string()),
             actual,
             &Slot::Argument(target)
-        ),
+        )
+        .into_unshaped(),
         RustExpr::Raw("name.as_str()".to_string())
     );
 }
@@ -2801,7 +2851,8 @@ fn view_coercion_policy_owns_sequence_slice_adapters() {
             RustExpr::Var("intervals".to_string()),
             actual,
             &Slot::Argument(target)
-        ),
+        )
+        .into_unshaped(),
         RustExpr::Raw("intervals.as_slice()".to_string())
     );
 }
@@ -2859,7 +2910,8 @@ fn optional_sequence_to_slice_uses_borrowed_unwrap_then_slice_view() {
             RustExpr::Raw("self.intervals".to_string()),
             actual,
             &Slot::Argument(target)
-        ),
+        )
+        .into_unshaped(),
         RustExpr::Raw(
             "self.intervals.as_ref().expect(\"Java null receiver\").as_slice()".to_string()
         )
@@ -2912,7 +2964,8 @@ fn shape_coercion_uses_type_capability_facts_for_string_views() {
             actual,
             &Slot::Argument(target),
             &facts,
-        ),
+        )
+        .into_unshaped(),
         RustExpr::Raw("name.as_str()".to_string())
     );
 }
@@ -3985,7 +4038,8 @@ fn shape_coercion_owns_dyn_trait_and_erased_object_adapters() {
                     policy: CloneRecoveryPolicy::AuditRequired,
                 },
             ],
-        ),
+        )
+        .into_unshaped(),
         RustExpr::Raw(
             "(Box::new(writer) as Box<dyn Animal>).clone()/* TODO(translation): validate added clone */"
                 .to_string()

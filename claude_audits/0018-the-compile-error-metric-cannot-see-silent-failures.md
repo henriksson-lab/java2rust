@@ -287,7 +287,39 @@ So the agreement is asserted instead:
 script over the output, and requires the two to produce the same number for
 every shared signal.
 
-### `noop_facade_call_sites` — specified, deliberately not built
+### `noop_facade_call_sites` — now built, and the earlier reasoning was half wrong
+
+The previous pass recorded this as unbuildable from generated text. That was
+half right, and the half that was wrong is the useful part.
+
+The obstacle named — *the surviving no-op methods are called `to_string`,
+`clone`, `into`, so counting `.to_string(` would count mostly unrelated calls* —
+is real for **methods**. It does not apply to **constructors**, which are called
+through a qualified path: `Foo::new_2(…)` cannot collide with anything.
+
+So the counter counts what is soundly countable. For every facade constructor in
+a file whose body is `Default::default()`, it counts calls to that exact
+qualified path. Both halves come from one file, so there is no cross-file
+inference and no name guessing — and a *modelled* type is excluded by
+construction, because its constructor has a real body.
+
+Measured: `java.awt.Font` is genuinely unmodelled, so three `new Font(…)` in one
+method give **one** definition and **three** call sites. That ratio is the whole
+point — a definition count reports 1 for a cost of 3, which is the "erasure
+looks like a saving" problem this file is about. On a real corpus file the
+counter reports 5 definitions and 1 call site, so it distinguishes the two
+directions rather than tracking one.
+
+Reported as `noop_facade_call_sites` in the analysis profile alongside
+`noop_facade_methods`.
+
+**What is still not counted**, stated so the number is not read as complete:
+no-op facade *methods* — the `to_string`/`clone` population — remain uncounted at
+their call sites, and doing them soundly still needs a diagnostic at facade-call
+lowering rather than a text match. The counter is a lower bound on the cost, and
+the constructor share of it is exact.
+
+### The original reasoning, kept for the record
 
 The one counter from item 2 that does not exist, and the reason is worth
 recording rather than leaving as a silent omission.
@@ -357,3 +389,32 @@ Fixed by keeping what is actually inspected and dropping what is regenerable —
 `Cargo.toml` and `src/` stay, `target/` goes. A failing crate still reproduces
 by running `cargo` in its directory. Cost of a full run drops from ~450 MB to
 **1.9 MB**, measured, with the suite still at `538/146`.
+
+## Update 2026-08-06 (Codex follow-up) — the constructor counter missed generic impl owners
+
+The `noop_facade_call_sites` counter handled `impl Owner { ... }`, but generic
+facades are emitted as `impl<T> Future<T> { ... }`. That spelling has no
+whitespace after `impl`, so the scanner skipped the no-op constructor definition
+and then undercounted every qualified call to it.
+
+The Rust counter and the Python sweep now parse inherent `impl` owners with or
+without generic parameters, and strip the owner's generic arguments before
+matching `Owner::new_N(...)` call sites.
+
+The focused-package script also no longer reports zero silently when
+`analysis-profile.tsv` is absent. Legacy `--no-batch-translate` runs do not have
+the batch analysis profile, so `noop_facade_call_sites` falls back to the idiom
+sweep for that metric.
+
+## Update 2026-08-06 (Codex follow-up) — the call-site count is now boundary-aware
+
+The constructor call-site counter was still a raw substring match. That could
+count `Font::new_3` inside comments or strings, and could count the suffix of
+`MyFont::new_3` as a `Font::new_3` call. The wording above called constructor
+call sites exact; that was too strong for the implementation.
+
+The Rust counter and Python sweep now ignore line comments and quoted strings
+for this metric and require the matched owner path to start on an identifier
+boundary. The focused-package summary fallback also now handles the stale-profile
+case: if `analysis-profile.tsv` exists but lacks `noop_facade_call_sites`, the
+wrapper uses the idiom sweep instead of returning silent zero.

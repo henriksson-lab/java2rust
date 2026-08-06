@@ -3512,6 +3512,19 @@ fn replace_self_receiver_with_policy(
                 })
                 .collect(),
         },
+        RustExpr::Shaped {
+            shape,
+            actual,
+            expr,
+        } => RustExpr::Shaped {
+            shape,
+            actual,
+            expr: Box::new(replace_self_receiver_with_policy(
+                *expr,
+                replacement,
+                preserve_field_clone,
+            )),
+        },
         RustExpr::Raw(text) => {
             let replacement = if preserve_field_clone {
                 replacement.to_string()
@@ -26141,32 +26154,17 @@ fn known_arg_type_param_match_score(arg_ty: &JavaType, param_ty: &JavaType) -> O
     None
 }
 
+/// Whether an argument may reach a parameter by JLS §5.1.2 widening.
+///
+/// Was a 19-pair table — correct, but a fourth encoding of a relation three
+/// other modules also had, and the only one of the four that was right.
+/// `primitive_widening_pairs_match_the_jls` keeps the pairs as the *check* on
+/// `types::primitive_widens_to` rather than as a second definition of it.
 fn primitive_widening_arg_matches_param(arg_ty: &JavaType, param_ty: &JavaType) -> bool {
     let (JavaType::Primitive(arg), JavaType::Primitive(param)) = (arg_ty, param_ty) else {
         return false;
     };
-    matches!(
-        (arg, param),
-        (PrimitiveType::Byte, PrimitiveType::Short)
-            | (PrimitiveType::Byte, PrimitiveType::Int)
-            | (PrimitiveType::Byte, PrimitiveType::Long)
-            | (PrimitiveType::Byte, PrimitiveType::Float)
-            | (PrimitiveType::Byte, PrimitiveType::Double)
-            | (PrimitiveType::Short, PrimitiveType::Int)
-            | (PrimitiveType::Short, PrimitiveType::Long)
-            | (PrimitiveType::Short, PrimitiveType::Float)
-            | (PrimitiveType::Short, PrimitiveType::Double)
-            | (PrimitiveType::Char, PrimitiveType::Int)
-            | (PrimitiveType::Char, PrimitiveType::Long)
-            | (PrimitiveType::Char, PrimitiveType::Float)
-            | (PrimitiveType::Char, PrimitiveType::Double)
-            | (PrimitiveType::Int, PrimitiveType::Long)
-            | (PrimitiveType::Int, PrimitiveType::Float)
-            | (PrimitiveType::Int, PrimitiveType::Double)
-            | (PrimitiveType::Long, PrimitiveType::Float)
-            | (PrimitiveType::Long, PrimitiveType::Double)
-            | (PrimitiveType::Float, PrimitiveType::Double)
-    )
+    crate::types::primitive_widens_to(*arg, *param)
 }
 
 fn retarget_receiverless_current_static_call<'a>(
@@ -28670,8 +28668,11 @@ fn lower_stmt_for_body(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::emit::emit_expr;
     use crate::java_ir::{JavaType, Member, PrimitiveType};
     use crate::parser::parse_java_source;
+    use crate::rust_ir::RustExprShape;
+    use crate::slot_shape::RustSlotShape;
 
     #[test]
     fn declared_method_lookup_uses_known_arg_types_for_same_arity_overloads() {
@@ -28742,5 +28743,24 @@ class NumericBox {
         .expect("int argument can widen to long");
 
         assert_eq!(selected.name, "pick");
+    }
+
+    #[test]
+    fn replace_self_receiver_recurses_through_shaped_exprs() {
+        let actual = RustSlotShape::for_storage(JavaType::String);
+        let expr = RustExpr::shaped_as(
+            RustExprShape::StringView,
+            Some(actual.clone()),
+            RustExpr::Field(
+                Box::new(RustExpr::Var("self".to_string())),
+                "name".to_string(),
+            ),
+        );
+
+        let replaced = replace_self_receiver(expr, "__java_self.clone()");
+
+        assert_eq!(emit_expr(&replaced), "__java_self.name", "{replaced:?}");
+        assert_eq!(replaced.recorded_shape(), Some(RustExprShape::StringView));
+        assert_eq!(replaced.recorded_slot_shape(), Some(&actual));
     }
 }

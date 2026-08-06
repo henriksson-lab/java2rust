@@ -21521,6 +21521,11 @@ class ByteArrayStringRangeConstructor {
         byte [] array = new byte[128];
         return new String(array, 0, n, "UTF-8");
     }
+
+    String qualified(int n) {
+        byte [] array = new byte[128];
+        return new java.lang.String(array, 0, n);
+    }
 }
 "#,
     );
@@ -21533,7 +21538,13 @@ class ByteArrayStringRangeConstructor {
             && translation
                 .rust
                 .contains("java_string_from_byte_range(&array, 0, n)")
+            && translation
+                .rust
+                .matches("java_string_from_byte_range(&array, 0, n)")
+                .count()
+                >= 2
             && !translation.rust.contains("String::new(array)")
+            && !translation.rust.contains("JavaLangString::new")
             && !translation.rust.contains("String::new(array, \"UTF-8\")")
             && !translation.rust.contains("String::new(array, 0, n)")
             && !translation

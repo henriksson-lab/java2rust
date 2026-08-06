@@ -5835,35 +5835,17 @@ fn is_method_type_variable(name: &str, declared_method_type_params: Option<&[Str
         && chars.all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
 }
 
-fn primitive_rank(primitive: crate::java_ir::PrimitiveType) -> u8 {
-    use crate::java_ir::PrimitiveType::*;
-    match primitive {
-        Boolean => 0,
-        Byte => 1,
-        Short | Char => 2,
-        Int => 3,
-        Long => 4,
-        Float => 5,
-        Double => 6,
-    }
-}
-
+/// How far `actual` must widen to reach `target`, for ranking overloads.
+///
+/// The rank-subtraction form this replaces put `char` beside `short` on one
+/// chain, so `char`→`short` and `short`→`char` both scored **distance 0** —
+/// an exact match — and `f(short)` tied with `f(char)` for a `char` argument.
+/// Neither conversion exists in Java without a cast.
 fn primitive_widening_distance(
     actual: crate::java_ir::PrimitiveType,
     target: crate::java_ir::PrimitiveType,
 ) -> Option<u8> {
-    if matches!(actual, crate::java_ir::PrimitiveType::Boolean)
-        || matches!(target, crate::java_ir::PrimitiveType::Boolean)
-    {
-        return (actual == target).then_some(0);
-    }
-    let actual_rank = primitive_rank(actual);
-    let target_rank = primitive_rank(target);
-    if actual_rank <= target_rank {
-        Some(target_rank - actual_rank)
-    } else {
-        None
-    }
+    crate::types::primitive_widening_steps(actual, target)
 }
 
 fn primitive_can_box_to_number(primitive: crate::java_ir::PrimitiveType) -> bool {

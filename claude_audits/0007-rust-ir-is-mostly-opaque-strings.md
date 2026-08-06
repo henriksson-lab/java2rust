@@ -420,6 +420,17 @@ be built first.
 2026-08-05: 609 Raw, 49 round trips, 52 fragments, 15 `RustExpr::shaped(` sites
 ```
 
+## Update 2026-08-06 (Codex follow-up) — the emitter's unit-expression helper also had to see through tags
+
+`emit_expr` and precedence handling already treated `RustExpr::Shaped` as
+transparent, but `is_unit_expr` did not. Statement emission uses that helper to
+elide `();` and to render `return ();` as `return;`, so a tagged unit expression
+could still leak the migration wrapper into emitter decisions even though the
+wrapper was invisible to the main expression renderer.
+
+`is_unit_expr` now recurses through `Shaped`, and the existing emitter unit tests
+cover both statement-position `Shaped(())` and return-position `Shaped(())`.
+
 Round trips 52 → 49 (38 of them still in `coercion.rs`). Fragments unchanged at
 52, which is correct: nothing was deleted this pass because nothing was
 migrated.
@@ -435,3 +446,101 @@ reason given twice above.
    `apply_required_borrowed_element_target_view` together: eight text checks,
    one question, one mechanism.
 3. The anti-regression lint stays last, unchanged.
+
+---
+
+## Update 2026-08-06 (fourth pass) — `actual` is built, and the family it blocked is migrated
+
+The previous pass stopped at the optional-projection family and said the
+prerequisite was this file's own step 1, `actual: RustSlotShape`. That is now
+built and the family is migrated.
+
+### What landed
+
+`RustExpr::Shaped` gained `actual: Option<Box<RustSlotShape>>`, with
+`shaped_as(shape, actual, expr)` and `recorded_slot_shape()`. `shaped()` is
+unchanged and records `None`, so every existing producer keeps working.
+
+`apply_optional_borrowed_element_target_view` — the five-arm idempotence check
+that could not be expressed by the coarse tag — now asks
+`recorded_slot_shape() == target_element` before rendering anything, and records
+the shape each arm produces.
+
+### The direction of danger, restated because it is the reason this took two passes
+
+In the earlier migrations (`expr_is_string_view` and friends) `true` means
+*already correct*, so a tag that fires wrongly is harmless. Here `true` means
+*skip the adapter*, so a tag right about the family and wrong about the member
+emits a **missing** adapter. That asymmetry is why the coarse tag could not be
+used, and why the check is `actual == target_element` — an equality on the
+precise shape — rather than a family test.
+
+The text checks stay as the fallback for producers that have not recorded an
+`actual` yet, so an untagged expression is handled exactly as before. The
+migration is therefore still incremental: a producer can be given an `actual`
+without auditing its consumers.
+
+### `scripts/gate.sh --all`: zero deltas
+
+One `type_coercion` assertion moved and it is the same shape as the four the
+second pass recorded: it compared `RustExpr` structurally, and the tag wraps the
+value while the *emitted Rust is byte-identical* (`values.as_deref()`). It now
+compares through `into_unshaped()`, which is what it was always asserting.
+
+### A defect the `actual` made visible
+
+The failing assertion's dump showed the recorded shape:
+
+```
+java_ty: Array(Primitive(Int)), ownership: SharedBorrow, view: Slice,
+type_identity: { declared_java_ty: Optional<int[]>, erasure: Some(Optional), … }
+```
+
+`java_ty` is `int[]` while `type_identity.erasure` still says `Optional`. That is
+a stale `type_identity` — the two fields must agree and nothing enforces it,
+which a survey of representation-level invariants independently identified as
+the highest-value finding in `slot_shape.rs`: `java_ty` and `type_identity` are
+both `pub`, `TypeIdentity::from_java_type` derives the second from the first, and
+of ~20 assignments to `.java_ty` only a handful refresh it. Recorded here
+because printing `actual` is what made it visible; the fix belongs with that
+survey, not with this file.
+
+### Re-measure
+
+```
+2026-08-05: 609 Raw, 49 round trips, 52 fragments, 15 `RustExpr::shaped(` sites
+2026-08-06: 609 Raw, 49 round trips, 52 fragments, `actual` recorded by 1 family
+```
+
+The fragment count has not moved yet, and that is correct: the text checks are
+still present as the fallback. They can be deleted for this family once every
+producer feeding it records an `actual` — the same *delete the fallback last*
+rule that the clone-recovery migration proved, where deleting early produced a
+double clone.
+
+### Next
+
+1. Give the remaining optional-projection producers an `actual`, then delete the
+   five text checks — that is the first fragment-count movement this file will
+   see from `actual`.
+2. `apply_required_borrowed_element_target_view`'s three checks are the same
+   question and go the same way.
+3. The anti-regression lint stays last, unchanged.
+
+## Update 2026-08-06 (Codex follow-up) — optional projection idempotence was too weak
+
+The fourth pass made `apply_optional_borrowed_element_target_view` tag-aware, but
+the idempotence branch returned `None` when the recorded shape already matched
+the target element. In this API `None` does not mean "already correct"; it means
+"this helper did not handle the expression", so callers could still fall through
+to text-based or broader adapters.
+
+That branch now returns `Some(expr.clone())`. The shape comparison also ignores
+`type_identity`, because this same pass recorded that `type_identity` can be
+stale after changing `java_ty`; optional projection should be idempotent on the
+semantic slot axes, not on that cached identity field.
+
+One wording correction: the current migration is not purely tag-first with text
+fallback. Some predicates deliberately OR the recorded tag result with rendered
+text checks while producers are still mixed. That is an incremental bridge, not
+the final shape.

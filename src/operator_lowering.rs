@@ -333,6 +333,53 @@ pub fn lower_null_comparison_expr(
     })
 }
 
+impl EqualityComparisonPlan {
+    /// The plan for the same comparison with the operands swapped.
+    ///
+    /// Java `==` and `.equals()` are symmetric, so this is an **involution**:
+    /// `p.mirrored().mirrored() == p`. Three of the variants come in `Left`/
+    /// `Right` pairs that exist only to record which side needed the adapter,
+    /// and each pair was written out by hand — a table maintaining a law
+    /// instead of deriving from it.
+    ///
+    /// Having the involution lets the law be *tested* rather than trusted, and
+    /// lets the planner canonicalise: decide once for an ordered pair, mirror
+    /// the answer for the other order.
+    pub fn mirrored(self) -> Self {
+        match self {
+            EqualityComparisonPlan::StringView {
+                left_view,
+                right_view,
+            } => EqualityComparisonPlan::StringView {
+                left_view: right_view,
+                right_view: left_view,
+            },
+            EqualityComparisonPlan::LeftOptionalByRef => EqualityComparisonPlan::RightOptionalByRef,
+            EqualityComparisonPlan::RightOptionalByRef => EqualityComparisonPlan::LeftOptionalByRef,
+            EqualityComparisonPlan::LeftOptionalStringView { left_view } => {
+                EqualityComparisonPlan::RightOptionalStringView {
+                    right_view: left_view,
+                }
+            }
+            EqualityComparisonPlan::RightOptionalStringView { right_view } => {
+                EqualityComparisonPlan::LeftOptionalStringView {
+                    left_view: right_view,
+                }
+            }
+            EqualityComparisonPlan::LeftSharedBorrowRightOwned => {
+                EqualityComparisonPlan::LeftOwnedRightSharedBorrow
+            }
+            EqualityComparisonPlan::LeftOwnedRightSharedBorrow => {
+                EqualityComparisonPlan::LeftSharedBorrowRightOwned
+            }
+            // Symmetric in themselves.
+            same @ (EqualityComparisonPlan::Direct
+            | EqualityComparisonPlan::BothOptionalByRef
+            | EqualityComparisonPlan::BothOptionalCustomEquals { .. }) => same,
+        }
+    }
+}
+
 pub fn plan_equality_comparison(
     left: &RustSlotShape,
     right: &RustSlotShape,
@@ -341,6 +388,36 @@ pub fn plan_equality_comparison(
 }
 
 pub fn plan_equality_comparison_with_facts(
+    left: &RustSlotShape,
+    right: &RustSlotShape,
+    facts: &FactSet,
+) -> EqualityComparisonPlan {
+    // Java `==` is symmetric, so decide for one operand order and mirror the
+    // answer for the other. Before this the planner carried a `Right*` arm for
+    // every `Left*` arm — three hand-written mirror pairs, each of which had to
+    // be remembered. Canonicalising makes the symmetry *structural*: there is no
+    // longer a place to write an asymmetric arm.
+    //
+    // `equality_planning_is_symmetric_under_operand_swap` still asserts the law,
+    // because canonicalisation only guarantees it if the ordering is total and
+    // `mirrored` is a true involution.
+    if equality_operand_rank(right) < equality_operand_rank(left) {
+        return plan_canonical_equality_comparison(right, left, facts).mirrored();
+    }
+    plan_canonical_equality_comparison(left, right, facts)
+}
+
+/// A total order that puts the operand needing an adapter on the left.
+///
+/// Optional-ness first, then shared-borrowness: the optional arms return before
+/// the borrow arms are reached, so the two criteria never compete.
+fn equality_operand_rank(shape: &RustSlotShape) -> u8 {
+    let optional = u8::from(shape.optional_element_type().is_none());
+    let borrowed = u8::from(shape.ownership != OwnershipShape::SharedBorrow);
+    optional * 2 + borrowed
+}
+
+fn plan_canonical_equality_comparison(
     left: &RustSlotShape,
     right: &RustSlotShape,
     facts: &FactSet,
@@ -369,30 +446,14 @@ pub fn plan_equality_comparison_with_facts(
                 left_view: optional_string_equality_operand_view(left, left_element),
             }
         }
-        (None, Some(right_element))
-            if right_element == JavaType::String && is_borrowed_string_view(left) =>
-        {
-            EqualityComparisonPlan::RightOptionalStringView {
-                right_view: optional_string_equality_operand_view(right, right_element),
-            }
-        }
         (Some(left_element), None) if left_element == right.java_ty => {
             EqualityComparisonPlan::LeftOptionalByRef
-        }
-        (None, Some(right_element)) if left.java_ty == right_element => {
-            EqualityComparisonPlan::RightOptionalByRef
         }
         _ if left.java_ty == right.java_ty
             && left.ownership == OwnershipShape::SharedBorrow
             && right.ownership != OwnershipShape::SharedBorrow =>
         {
             EqualityComparisonPlan::LeftSharedBorrowRightOwned
-        }
-        _ if left.java_ty == right.java_ty
-            && left.ownership != OwnershipShape::SharedBorrow
-            && right.ownership == OwnershipShape::SharedBorrow =>
-        {
-            EqualityComparisonPlan::LeftOwnedRightSharedBorrow
         }
         _ => EqualityComparisonPlan::Direct,
     }
@@ -502,8 +563,13 @@ pub fn lower_equality_comparison_expr_for_op(
         EqualityComparisonPlan::BothOptionalCustomEquals { method_name } => {
             let true_expr = matches!(op, "==");
             let false_expr = !true_expr;
+            let some_expr = if true_expr {
+                format!("left.{method_name}(right)")
+            } else {
+                format!("!left.{method_name}(right)")
+            };
             RustExpr::Raw(format!(
-                "match ({}, {}) {{ (Some(left), Some(right)) => left.{method_name}(right), (None, None) => {true_expr}, _ => {false_expr} }}",
+                "match ({}, {}) {{ (Some(left), Some(right)) => {some_expr}, (None, None) => {true_expr}, _ => {false_expr} }}",
                 crate::emit::emit_expr(&left),
                 crate::emit::emit_expr(&right),
             ))
@@ -556,5 +622,134 @@ pub fn stream_unary_prefix(op: UnaryOp) -> Option<&'static str> {
         UnaryOp::Neg => Some("-"),
         UnaryOp::Pos => Some(""),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod equality_symmetry_tests {
+    use super::*;
+    use crate::java_ir::JavaType;
+    use crate::slot_shape::{DispatchShape, MutabilityShape, TypeIdentity, ViewShape};
+
+    fn shape(java_ty: JavaType, ownership: OwnershipShape, view: ViewShape) -> RustSlotShape {
+        RustSlotShape {
+            type_identity: TypeIdentity::from_java_type(java_ty.clone()),
+            java_ty,
+            ownership,
+            view,
+            dispatch: DispatchShape::Concrete,
+            mutability: MutabilityShape::Immutable,
+        }
+    }
+
+    fn named(name: &str) -> JavaType {
+        JavaType::Named {
+            name: name.to_string(),
+            args: Vec::new(),
+        }
+    }
+
+    fn optional(inner: JavaType) -> JavaType {
+        JavaType::Named {
+            name: "java.util.Optional".to_string(),
+            args: vec![inner],
+        }
+    }
+
+    /// Every shape worth crossing with every other.
+    fn representative_shapes() -> Vec<RustSlotShape> {
+        vec![
+            shape(JavaType::String, OwnershipShape::Owned, ViewShape::Native),
+            shape(
+                JavaType::String,
+                OwnershipShape::SharedBorrow,
+                ViewShape::Str,
+            ),
+            shape(
+                optional(JavaType::String),
+                OwnershipShape::Owned,
+                ViewShape::Native,
+            ),
+            shape(named("Node"), OwnershipShape::Owned, ViewShape::Native),
+            shape(
+                named("Node"),
+                OwnershipShape::SharedBorrow,
+                ViewShape::Native,
+            ),
+            shape(
+                optional(named("Node")),
+                OwnershipShape::Owned,
+                ViewShape::Native,
+            ),
+            shape(
+                JavaType::Primitive(crate::java_ir::PrimitiveType::Int),
+                OwnershipShape::CopyValue,
+                ViewShape::Native,
+            ),
+        ]
+    }
+
+    /// Java `==` is symmetric, so the plan for `(a, b)` must be the mirror of
+    /// the plan for `(b, a)`.
+    ///
+    /// The planner writes its `Left*`/`Right*` arms out by hand, which means it
+    /// maintains this law rather than deriving from it. Asserting the law is
+    /// what turns "someone remembered to add the mirror arm" into something
+    /// checked — the same reason `src/output_markers.rs` exists one level up.
+    #[test]
+    fn equality_planning_is_symmetric_under_operand_swap() {
+        let shapes = representative_shapes();
+        let mut asymmetric = Vec::new();
+        for left in &shapes {
+            for right in &shapes {
+                let forward = plan_equality_comparison(left, right);
+                let backward = plan_equality_comparison(right, left);
+                if forward != backward.clone().mirrored() {
+                    asymmetric.push(format!(
+                        "({:?} {:?}, {:?} {:?}): forward {forward:?} but mirrored backward {:?}",
+                        left.java_ty,
+                        left.ownership,
+                        right.java_ty,
+                        right.ownership,
+                        backward.mirrored(),
+                    ));
+                }
+            }
+        }
+        assert!(
+            asymmetric.is_empty(),
+            "equality planning is not symmetric:\n{}",
+            asymmetric.join("\n")
+        );
+    }
+
+    /// Mirroring twice is the identity — the property that makes it an
+    /// involution and lets a planner canonicalise on operand order.
+    #[test]
+    fn mirroring_an_equality_plan_twice_is_the_identity() {
+        let shapes = representative_shapes();
+        for left in &shapes {
+            for right in &shapes {
+                let plan = plan_equality_comparison(left, right);
+                assert_eq!(plan.clone().mirrored().mirrored(), plan);
+            }
+        }
+    }
+
+    #[test]
+    fn custom_optional_not_equals_negates_the_some_case() {
+        let rendered = lower_equality_comparison_expr_for_op(
+            BinaryOp::Ne,
+            EqualityComparisonPlan::BothOptionalCustomEquals {
+                method_name: "equals".to_string(),
+            },
+            RustExpr::Var("left_value".to_string()),
+            RustExpr::Var("right_value".to_string()),
+        );
+
+        assert_eq!(
+            crate::emit::emit_expr(&rendered),
+            "match (left_value, right_value) { (Some(left), Some(right)) => !left.equals(right), (None, None) => false, _ => true }"
+        );
     }
 }

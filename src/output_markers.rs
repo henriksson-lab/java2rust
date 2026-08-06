@@ -255,6 +255,179 @@ pub fn count_noop_facade_methods(rust: &str) -> usize {
         .count()
 }
 
+/// Call sites of facade constructors that do nothing.
+///
+/// [0018](../claude_audits/0018-the-compile-error-metric-cannot-see-silent-failures.md)
+/// asks for this counter and a previous pass recorded it as unbuildable from
+/// generated text. That was half right. The obstacle named there — that the
+/// surviving no-op methods are called `to_string`, `clone`, `into`, so counting
+/// `.to_string(` would count mostly unrelated calls — is real for *methods* and
+/// does **not** apply to constructors: a facade constructor is called through a
+/// qualified path, `Foo::new_2(…)`, which cannot collide with anything.
+///
+/// So this counts what is soundly countable: every `Type::new…(` whose facade
+/// definition in the same file has a `Default::default()` body. Both halves come
+/// from one file, so there is no cross-file inference and no name guessing.
+///
+/// The measure that matters is *cost*, not surface: a facade constructor
+/// counted once may be called from a hundred places, and this is what makes
+/// erasure visible as a cost rather than invisible as a saving.
+pub fn count_noop_facade_call_sites(rust: &str) -> usize {
+    let constructors = noop_facade_constructors(rust);
+    if constructors.is_empty() {
+        return 0;
+    }
+    rust.lines()
+        .filter(|line| !line_defines_noop_facade_constructor(line))
+        .map(|line| {
+            constructors
+                .iter()
+                .map(|path| count_noop_facade_path_calls(line, path))
+                .sum::<usize>()
+        })
+        .sum()
+}
+
+fn count_noop_facade_path_calls(line: &str, path: &str) -> usize {
+    let mut count = 0usize;
+    let mut cursor = 0usize;
+    let bytes = line.as_bytes();
+    while cursor < line.len() {
+        if bytes.get(cursor) == Some(&b'/') && bytes.get(cursor + 1) == Some(&b'/') {
+            break;
+        }
+        if bytes.get(cursor) == Some(&b'"') {
+            cursor += 1;
+            let mut escaped = false;
+            while cursor < line.len() {
+                let byte = bytes[cursor];
+                cursor += 1;
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == b'"' {
+                    break;
+                }
+            }
+            continue;
+        }
+        if line[cursor..].starts_with(path) && starts_on_rust_path_boundary(line, cursor) {
+            count += 1;
+            cursor += path.len();
+        } else {
+            cursor += line[cursor..]
+                .chars()
+                .next()
+                .map(char::len_utf8)
+                .unwrap_or(1);
+        }
+    }
+    count
+}
+
+fn starts_on_rust_path_boundary(line: &str, start: usize) -> bool {
+    line[..start]
+        .chars()
+        .next_back()
+        .is_none_or(|ch| !is_rust_ident_continue(ch))
+}
+
+fn is_rust_ident_continue(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
+}
+
+/// `Type::new…(` for every facade constructor in `rust` with a no-op body.
+fn noop_facade_constructors(rust: &str) -> Vec<String> {
+    let mut owner = None;
+    let mut impl_depth = 0isize;
+    let mut paths = Vec::new();
+    for line in rust.lines() {
+        let trimmed = line.trim();
+        if owner.is_none()
+            && let Some(name) = inherent_impl_owner(trimmed)
+        {
+            owner = Some(name);
+            impl_depth = 0;
+        }
+        if !line_defines_noop_facade_constructor(line) {
+            if owner.is_some() {
+                impl_depth += line.matches('{').count() as isize;
+                impl_depth -= line.matches('}').count() as isize;
+                if impl_depth <= 0 {
+                    owner = None;
+                    impl_depth = 0;
+                }
+            }
+            continue;
+        }
+        let Some(owner_name) = owner.as_deref() else {
+            continue;
+        };
+        let Some(rest) = trimmed.split_once("fn ").map(|(_, rest)| rest) else {
+            continue;
+        };
+        let Some(name) = rest.split(['(', '<', ' ']).next() else {
+            continue;
+        };
+        paths.push(format!("{owner_name}::{name}("));
+        impl_depth += line.matches('{').count() as isize;
+        impl_depth -= line.matches('}').count() as isize;
+        if impl_depth <= 0 {
+            owner = None;
+            impl_depth = 0;
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn inherent_impl_owner(trimmed: &str) -> Option<String> {
+    let rest = trimmed.strip_prefix("impl")?;
+    if !rest.starts_with(char::is_whitespace) && !rest.starts_with('<') {
+        return None;
+    }
+    if rest.contains(" for ") {
+        return None;
+    }
+    let rest = rest.trim_start();
+    let rest = if rest.starts_with('<') {
+        let generic_end = matching_angle_end(rest)?;
+        rest[generic_end + 1..].trim_start()
+    } else {
+        rest
+    };
+    let owner = rest.split_whitespace().next()?.trim_end_matches('{').trim();
+    let owner = owner.split('<').next()?.trim();
+    (!owner.is_empty()).then(|| owner.to_string())
+}
+
+fn matching_angle_end(text: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for (index, ch) in text.char_indices() {
+        match ch {
+            '<' => depth += 1,
+            '>' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// A facade constructor whose whole body is `Default::default()`.
+fn line_defines_noop_facade_constructor(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.contains(" fn new")
+        && trimmed.ends_with("{ Default::default() }")
+        && !trimmed.starts_with("fn from(")
+}
+
 /// `From` impls synthesised for Java upcasts with no model.
 ///
 /// Counted apart from [`count_noop_facade_methods`] because they are a

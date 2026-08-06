@@ -49,9 +49,7 @@ use crate::java_ir::{Expr, JavaType, LambdaBody, PrimitiveType};
 use crate::representation::RepresentationPlan;
 use crate::rust_ir::RustExpr;
 use crate::shape_projection::shape_is_erased_object_boundary;
-use crate::slot_render::{
-    rust_type_for_slot_with_facts, rust_type_for_slot_with_facts_and_representations,
-};
+use crate::slot_render::{rust_name_for_java_named_type, rust_type_for_slot_with_facts};
 use crate::stream_lowering::{StreamLambdaValue, emit_stream_lambda_body};
 
 pub fn apply_call_target(
@@ -975,17 +973,7 @@ fn apply_new_target_with_optional_representations(
             args,
         );
     }
-    let owner_type = crate::emit::emit_type(
-        &representations
-            .map(|representations| {
-                rust_type_for_slot_with_facts_and_representations(
-                    &target.owner_shape,
-                    facts,
-                    representations,
-                )
-            })
-            .unwrap_or_else(|| rust_type_for_slot_with_facts(&target.owner_shape, facts)),
-    );
+    let owner_type = constructor_owner_path_type(&target.owner_shape);
     if target.rust_name == "new"
         && args.len() == 1
         && boxed_primitive_constructor_owner(&target.owner_shape.java_ty)
@@ -1014,6 +1002,18 @@ fn apply_new_target_with_optional_representations(
         owner_associated_path_projection(&owner_type, &target.rust_name),
         args,
     )
+}
+
+fn constructor_owner_path_type(owner_shape: &crate::slot_shape::RustSlotShape) -> String {
+    match &owner_shape.java_ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => rust_name_for_java_named_type(
+            &crate::stdlib::canonical_external_receiver_type_key(name),
+        ),
+        _ => crate::emit::emit_type(&rust_type_for_slot_with_facts(
+            owner_shape,
+            &FactSet::default(),
+        )),
+    }
 }
 
 fn boxed_primitive_constructor_owner(java_ty: &JavaType) -> bool {

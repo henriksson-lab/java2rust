@@ -127,6 +127,43 @@ public class B {
 }
 
 #[test]
+fn batch_translation_reports_inner_class_constructor_panics() {
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &[new_java2rust::BatchSource {
+                path: "MarkerInnerCapture.java".to_string(),
+                source: r#"
+public class MarkerInnerCapture {
+    private int base = 10;
+    class Adder {
+        int add(int x) { return base + x; }
+    }
+    public int run() {
+        Adder a = new Adder();
+        return a.add(1);
+    }
+}
+"#
+                .to_string(),
+            }],
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+
+    assert_eq!(translations.len(), 1);
+    assert!(
+        translations[0]
+            .diagnostics
+            .has_code("inner_class_construction_panics"),
+        "batch translation should report the runtime panic marker as a \
+         diagnostic:\n{:?}",
+        translations[0].diagnostics.iter().collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn batch_duplicate_simple_type_names_keep_distinct_signature_keys() {
     let primary_sources = vec![
         new_java2rust::BatchSource {
@@ -660,6 +697,11 @@ public class MatrixSource {
     assert!(summary.contains("unmodelled_types\t0"), "{summary}");
     assert!(summary.contains("unmodelled_call_sites\t0"), "{summary}");
     assert!(summary.contains("noop_facade_methods\t"), "{summary}");
+    assert!(summary.contains("noop_facade_call_sites\t"), "{summary}");
+    assert!(
+        summary.contains("unmodelled_upcast_conversions\t"),
+        "{summary}"
+    );
     assert!(summary.contains("stubbed_constants\t0"), "{summary}");
     assert!(
         out.join("parse-failures.tsv").exists(),

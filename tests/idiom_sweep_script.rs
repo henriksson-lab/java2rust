@@ -2886,6 +2886,10 @@ fn the_python_sweep_and_the_rust_counters_agree_on_shared_signals() {
             new_java2rust::output_markers::count_unmodelled_upcast_conversions(&rust),
         ),
         (
+            "noop_facade_call_sites",
+            new_java2rust::output_markers::count_noop_facade_call_sites(&rust),
+        ),
+        (
             "stubbed_constants",
             new_java2rust::output_markers::count_stubbed_constants(&rust),
         ),
@@ -2896,4 +2900,30 @@ fn the_python_sweep_and_the_rust_counters_agree_on_shared_signals() {
             "the sweep and the Rust counter disagree on {signal}"
         );
     }
+}
+
+#[test]
+fn python_noop_facade_call_site_sweep_ignores_prefixes_comments_and_strings() {
+    let rust = r#"
+impl Font {
+    pub fn new_3<T0, T1, T2>(_arg0: T0, _arg1: T1, _arg2: T2) -> Font { Default::default() }
+}
+
+pub fn build() -> Font {
+    // Font::new_3("comment", 0, 12)
+    let _debug = "Font::new_3(\"string\", 0, 12)";
+    let _other = MyFont::new_3("prefix", 0, 12);
+    Font::new_3("real", 0, 12)
+}
+"#;
+
+    let dir = unique_temp_dir("sweep_noop_facade_boundaries");
+    fs::write(dir.join("generated.rs"), rust).unwrap();
+    let swept = run_idiom_sweep(&dir);
+
+    assert_eq!(
+        swept.get("noop_facade_call_sites").copied(),
+        Some(1),
+        "the Python sweep should count only the real qualified constructor call"
+    );
 }

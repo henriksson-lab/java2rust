@@ -111,6 +111,21 @@ pub fn is_known_functional_interface(name: &str) -> bool {
             | "LongSupplier"
             | "LongToDoubleFunction"
             | "LongToIntFunction"
+            // Members of the same `java.util.function` naming grammar that the
+            // list had skipped. Every `*UnaryOperator` was present and no
+            // `*BinaryOperator` was, which is the tell that this is a product
+            // being enumerated rather than a set being chosen.
+            | "IntBinaryOperator"
+            | "LongBinaryOperator"
+            | "DoubleBinaryOperator"
+            | "BiPredicate"
+            | "BooleanSupplier"
+            | "ObjIntConsumer"
+            | "ObjLongConsumer"
+            | "ObjDoubleConsumer"
+            | "ToIntBiFunction"
+            | "ToLongBiFunction"
+            | "ToDoubleBiFunction"
             | "Runnable"
             | "Callable"
             | "Comparator"
@@ -169,8 +184,10 @@ fn is_known_boxed_number_receiver(receiver: &str) -> bool {
 }
 
 pub fn is_known_java_subtype(actual: &str, target: &str) -> bool {
-    let actual = strip_java_type_modifiers(actual);
-    let target = strip_java_type_modifiers(target);
+    let actual = canonical_subtype_name(actual);
+    let target = canonical_subtype_name(target);
+    let actual = actual.as_str();
+    let target = target.as_str();
     if actual == target {
         return true;
     }
@@ -179,24 +196,7 @@ pub fn is_known_java_subtype(actual: &str, target: &str) -> bool {
         "Throwable" => is_known_throwable_type(actual),
         "Exception" => is_known_exception_type(actual),
         "Error" => is_known_error_type(actual),
-        "IOException" => matches!(
-            actual,
-            "IOException" | "FileNotFoundException" | "EOFException"
-        ),
-        "RuntimeException" => matches!(
-            actual,
-            "RuntimeException"
-                | "IllegalArgumentException"
-                | "IllegalStateException"
-                | "NoSuchElementException"
-                | "NumberFormatException"
-                | "ArithmeticException"
-                | "ArrayIndexOutOfBoundsException"
-                | "IndexOutOfBoundsException"
-                | "ConcurrentModificationException"
-                | "UnsupportedOperationException"
-                | "UncheckedIOException"
-        ),
+
         "Number" => matches!(
             actual,
             "Byte" | "Short" | "Integer" | "Long" | "Float" | "Double"
@@ -225,7 +225,133 @@ pub fn is_known_java_subtype(actual: &str, target: &str) -> bool {
         "Reader" => is_known_reader_type(actual),
         "Writer" => is_known_writer_type(actual),
         "WriteOption" => is_known_write_option_type(actual),
+        // Any exception the edge table knows, not a hand-picked pair of roots.
+        // Naming the targets was the same list-shaped mistake one level up: it
+        // meant `catch (ZipException e)` could not match a `JarException` even
+        // though the edge for it existed.
+        _ if jdk_exception_hierarchy_names(target) => jdk_exception_is_subtype(actual, target),
         _ => false,
+    }
+}
+
+fn canonical_subtype_name(name: &str) -> String {
+    let canonical = canonical_external_receiver_type_key(name);
+    canonical
+        .rsplit('.')
+        .next()
+        .unwrap_or(&canonical)
+        .to_string()
+}
+
+/// Parent edges of the JDK exception types this translator models.
+///
+/// The subtype relation is the **reflexive-transitive closure** of these edges,
+/// not a membership list per ancestor. That matters because the list form has
+/// to be updated once per ancestor and had already drifted: `catch (IOException
+/// e)` matched exactly three types, so a thrown `ZipException`,
+/// `SocketException`, `UnsupportedEncodingException` or `InterruptedIOException`
+/// did **not** match a handler Java says it must — a caught exception silently
+/// escaping is not something the generated code can report.
+///
+/// A name rule cannot do this job the way `is_known_exception_type`'s
+/// `ends_with("Exception")` can: nothing in `ZipException`'s spelling says it is
+/// an `IOException`. So this is a table on purpose — but a table of *edges*,
+/// where each entry is one checkable fact about the JDK, rather than a table of
+/// answers.
+const JDK_EXCEPTION_PARENTS: &[(&str, &str)] = &[
+    // java.io
+    ("FileNotFoundException", "IOException"),
+    ("EOFException", "IOException"),
+    ("InterruptedIOException", "IOException"),
+    ("UnsupportedEncodingException", "IOException"),
+    ("CharConversionException", "IOException"),
+    ("UTFDataFormatException", "IOException"),
+    ("SyncFailedException", "IOException"),
+    ("ObjectStreamException", "IOException"),
+    ("NotSerializableException", "ObjectStreamException"),
+    ("InvalidObjectException", "ObjectStreamException"),
+    ("StreamCorruptedException", "ObjectStreamException"),
+    ("InvalidClassException", "ObjectStreamException"),
+    ("OptionalDataException", "ObjectStreamException"),
+    ("WriteAbortedException", "ObjectStreamException"),
+    // java.util.zip / jar
+    ("ZipException", "IOException"),
+    ("JarException", "ZipException"),
+    // java.net
+    ("SocketException", "IOException"),
+    ("SocketTimeoutException", "InterruptedIOException"),
+    ("MalformedURLException", "IOException"),
+    ("UnknownHostException", "IOException"),
+    ("UnknownServiceException", "IOException"),
+    ("ProtocolException", "IOException"),
+    ("BindException", "SocketException"),
+    ("ConnectException", "SocketException"),
+    ("NoRouteToHostException", "SocketException"),
+    // java.nio
+    ("ClosedChannelException", "IOException"),
+    ("FileSystemException", "IOException"),
+    ("NoSuchFileException", "FileSystemException"),
+    ("FileAlreadyExistsException", "FileSystemException"),
+    ("AccessDeniedException", "FileSystemException"),
+    // java.lang unchecked
+    ("IllegalArgumentException", "RuntimeException"),
+    ("IllegalStateException", "RuntimeException"),
+    ("NoSuchElementException", "RuntimeException"),
+    ("NumberFormatException", "IllegalArgumentException"),
+    ("ArithmeticException", "RuntimeException"),
+    ("IndexOutOfBoundsException", "RuntimeException"),
+    (
+        "ArrayIndexOutOfBoundsException",
+        "IndexOutOfBoundsException",
+    ),
+    (
+        "StringIndexOutOfBoundsException",
+        "IndexOutOfBoundsException",
+    ),
+    ("ConcurrentModificationException", "RuntimeException"),
+    ("UnsupportedOperationException", "RuntimeException"),
+    ("UncheckedIOException", "RuntimeException"),
+    ("NullPointerException", "RuntimeException"),
+    ("ClassCastException", "RuntimeException"),
+    ("NegativeArraySizeException", "RuntimeException"),
+    ("ArrayStoreException", "RuntimeException"),
+    ("InputMismatchException", "NoSuchElementException"),
+    ("IllegalMonitorStateException", "RuntimeException"),
+];
+
+/// Whether the edge table mentions `name` at all, as a child or a parent.
+///
+/// This is what decides that a target is *this relation's* to answer, so it has
+/// to be derived from the table rather than listed beside it.
+fn jdk_exception_hierarchy_names(name: &str) -> bool {
+    JDK_EXCEPTION_PARENTS
+        .iter()
+        .any(|(child, parent)| *child == name || *parent == name)
+}
+
+/// Whether `actual` is `target` or reaches it by parent edges.
+///
+/// Walks the chain rather than materialising the closure: the depth is at most a
+/// handful, and a cycle would be a typo in the table above, so the visited set
+/// is a guard rather than an expectation.
+fn jdk_exception_is_subtype(actual: &str, target: &str) -> bool {
+    let mut current = actual;
+    let mut seen = 0usize;
+    loop {
+        if current == target {
+            return true;
+        }
+        let Some((_, parent)) = JDK_EXCEPTION_PARENTS
+            .iter()
+            .find(|(child, _)| *child == current)
+        else {
+            return false;
+        };
+        current = parent;
+        seen += 1;
+        if seen > JDK_EXCEPTION_PARENTS.len() {
+            return false;
+        }
     }
 }
 
@@ -4364,7 +4490,11 @@ pub fn canonical_external_receiver_type_key(name: &str) -> String {
         "cigar_operator" => "CigarOperator",
         "s_a_m_tag" => "SAMTag",
         "s_a_m_record" => "SAMRecord",
-        "type" => "Type",
+        // `to_snake_case` escapes the Rust keyword, so the key a producer
+        // actually generates for a receiver named `Type` is `type_`. The bare
+        // `"type"` arm could never fire — this table is the inverse of
+        // `to_snake_case`, so it has to agree with its keyword escaping.
+        "type" | "type_" => "Type",
         "s_a_m_flag" => "SAMFlag",
         "v_c_f_header_version" => "VCFHeaderVersion",
         "mark_duplicates" => "MarkDuplicates",
@@ -5550,11 +5680,11 @@ impl Graphics {
     pub fn draw_image<T0, T1, T2, T3>(&self, _image: T0, _x: T1, _y: T2, _observer: T3) -> bool {
         true
     }
-    pub fn get_clip(&self) -> Shape {
-        Shape
+    pub fn get_clip(&self) -> Option<Shape> {
+        None
     }
-    pub fn get_clip_bounds(&self) -> Rectangle {
-        Rectangle
+    pub fn get_clip_bounds(&self) -> Option<Rectangle> {
+        None
     }
     pub fn get_font_metrics<T0>(&self, _font: T0) -> FontMetrics {
         FontMetrics
@@ -6820,7 +6950,13 @@ pub fn external_api_facade_support_items_with_local_type_program(
     support.add_inherited_support_field_types(program, local_type_program, &emitted_local_types);
     support.add_external_inherited_field_types(program, facts);
     support.add_external_inherited_static_final_surfaces(program, facts);
-    support.add_used_external_constructors(facts, &used_constructors, &local_types);
+    support.add_used_external_constructors(
+        facts,
+        &used_constructors,
+        &local_types,
+        &source_summary_types,
+        source_summary_type_program,
+    );
     support.add_used_external_api_facts(
         facts,
         representations,
@@ -6859,7 +6995,13 @@ pub fn external_api_facade_support_items_with_local_type_program(
         &source_summary_types,
     );
     support.add_emitted_external_super_method_surfaces(facts, program, &used_calls);
-    support.add_imported_static_owner_calls(facts, &imported_static_owner_calls, &local_types);
+    support.add_imported_static_owner_calls(
+        facts,
+        &imported_static_owner_calls,
+        &local_types,
+        &source_summary_types,
+        source_summary_type_program,
+    );
     support.add_known_jdk_static_support_from_used_calls(&used_calls);
     support.add_known_domain_getter_surfaces_from_used_calls(facts, &used_calls);
     support.add_known_object_inherited_surfaces_from_used_calls(facts, &used_calls);
@@ -7003,6 +7145,16 @@ fn source_summary_method_hierarchy<'a>(
     ty: &'a TypeDecl,
     program: &'a Program,
 ) -> Vec<&'a MethodDecl> {
+    source_summary_method_hierarchy_with_owners(ty, program)
+        .into_iter()
+        .map(|(_, method)| method)
+        .collect()
+}
+
+fn source_summary_method_hierarchy_with_owners<'a>(
+    ty: &'a TypeDecl,
+    program: &'a Program,
+) -> Vec<(&'a TypeDecl, &'a MethodDecl)> {
     let mut methods = Vec::new();
     let mut current = Some(ty);
     let mut visited = BTreeSet::new();
@@ -7012,7 +7164,7 @@ fn source_summary_method_hierarchy<'a>(
             break;
         }
         methods.extend(ty.members.iter().filter_map(|member| match member {
-            Member::Method(method) => Some(method),
+            Member::Method(method) => Some((ty, method)),
             _ => None,
         }));
         current = ty
@@ -7093,12 +7245,7 @@ fn source_summary_supertypes_for_emitted_type<'a>(
 }
 
 /// Whether any interface `ty` implements (transitively) declares the method.
-fn source_interfaces_declare_method(
-    program: &Program,
-    ty: &TypeDecl,
-    method_name: &str,
-    arity: usize,
-) -> bool {
+fn source_interfaces_declare_method(program: &Program, ty: &TypeDecl, target: &MethodDecl) -> bool {
     let mut pending = ty.implements.clone();
     let mut visited = BTreeSet::new();
     while let Some(name) = pending.pop() {
@@ -7109,17 +7256,76 @@ fn source_interfaces_declare_method(
         let Some(interface) = find_program_type_by_key(program, &key) else {
             continue;
         };
-        if interface.members.iter().any(|member| {
-            matches!(
-                member,
-                Member::Method(method)
-                    if method.name == method_name && method.params.len() == arity
-            )
-        }) {
+        if interface
+            .members
+            .iter()
+            .any(|member| matches!(member, Member::Method(method) if source_methods_match(method, target)))
+        {
             return true;
         }
         pending.extend(interface.extends.iter().cloned());
         pending.extend(interface.implements.iter().cloned());
+    }
+    false
+}
+
+fn source_method_hierarchy_contains_method(
+    program: &Program,
+    ty: &TypeDecl,
+    target_owner: &TypeDecl,
+    target: &MethodDecl,
+) -> bool {
+    let mut current = Some(ty);
+    let mut substitutions = BTreeMap::new();
+    let mut visited = BTreeSet::new();
+    while let Some(ty) = current {
+        let type_key = canonical_external_receiver_type_key(&ty.name);
+        if !visited.insert(type_key.clone()) {
+            break;
+        }
+        let next_super = ty
+            .extends
+            .as_deref()
+            .map(crate::parser::parse_hierarchy_type)
+            .and_then(|super_type| {
+                let super_key = canonical_external_receiver_type_key(match &super_type {
+                    JavaType::Named { name, .. } | JavaType::Unknown(name) => name,
+                    _ => return None,
+                });
+                let mut next_substitutions = substitutions.clone();
+                if super_key == canonical_external_receiver_type_key(&target_owner.name) {
+                    extend_type_substitutions_for_supertype(
+                        target_owner,
+                        &super_type,
+                        &mut next_substitutions,
+                    );
+                }
+                let next_ty = find_program_type_by_key(program, &super_key);
+                Some((next_ty, next_substitutions))
+            });
+        let effective_target = next_super
+            .as_ref()
+            .map(|(_, next_substitutions)| substitute_method_decl_types(target, next_substitutions))
+            .unwrap_or_else(|| substitute_method_decl_types(target, &substitutions));
+        if ty
+            .members
+            .iter()
+            .any(|member| matches!(member, Member::Method(method) if source_methods_match(method, target) || source_methods_match(method, &effective_target)))
+        {
+            return true;
+        }
+        // An interface the type implements provides the method too — through
+        // the trait, including a `default` body.
+        if source_interfaces_declare_method(program, ty, target)
+            || source_interfaces_declare_method(program, ty, &effective_target)
+        {
+            return true;
+        }
+        let Some((next_ty, next_substitutions)) = next_super else {
+            break;
+        };
+        substitutions = next_substitutions;
+        current = next_ty;
     }
     false
 }
@@ -7146,11 +7352,6 @@ fn source_method_hierarchy_contains(
         }) {
             return true;
         }
-        // An interface the type implements provides the method too — through
-        // the trait, including a `default` body.
-        if source_interfaces_declare_method(program, ty, method_name, arity) {
-            return true;
-        }
         current = ty
             .extends
             .as_deref()
@@ -7160,13 +7361,88 @@ fn source_method_hierarchy_contains(
     false
 }
 
+fn source_methods_match(method: &MethodDecl, target: &MethodDecl) -> bool {
+    method.name == target.name
+        && crate::java_signature::erased_param_types(&method.params)
+            == crate::java_signature::erased_param_types(&target.params)
+        && crate::java_signature::method_staticness(method)
+            == crate::java_signature::method_staticness(target)
+}
+
+fn substitute_method_decl_types(
+    method: &MethodDecl,
+    substitutions: &BTreeMap<String, JavaType>,
+) -> MethodDecl {
+    if substitutions.is_empty() {
+        return method.clone();
+    }
+    let mut method = method.clone();
+    method.return_type = substitute_source_summary_type(&method.return_type, substitutions);
+    method.params = method
+        .params
+        .into_iter()
+        .map(|mut param| {
+            param.ty = substitute_source_summary_type(&param.ty, substitutions);
+            param
+        })
+        .collect();
+    method
+}
+
+fn extend_type_substitutions_for_supertype(
+    super_ty: &TypeDecl,
+    super_type: &JavaType,
+    substitutions: &mut BTreeMap<String, JavaType>,
+) {
+    let JavaType::Named { args, .. } = super_type else {
+        return;
+    };
+    for (param, arg) in super_ty.type_params.iter().zip(args) {
+        let arg = substitute_source_summary_type(arg, substitutions);
+        substitutions.insert(param.clone(), arg);
+    }
+}
+
+fn substitute_source_summary_type(
+    ty: &JavaType,
+    substitutions: &BTreeMap<String, JavaType>,
+) -> JavaType {
+    match ty {
+        JavaType::Named { name, args } if args.is_empty() => substitutions
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| ty.clone()),
+        JavaType::Named { name, args } => JavaType::Named {
+            name: name.clone(),
+            args: args
+                .iter()
+                .map(|arg| substitute_source_summary_type(arg, substitutions))
+                .collect(),
+        },
+        JavaType::Array(inner) => JavaType::Array(Box::new(substitute_source_summary_type(
+            inner,
+            substitutions,
+        ))),
+        JavaType::Wildcard(Some(WildcardBound::Extends(bound))) => {
+            JavaType::Wildcard(Some(WildcardBound::Extends(Box::new(
+                substitute_source_summary_type(bound, substitutions),
+            ))))
+        }
+        JavaType::Wildcard(Some(WildcardBound::Super(bound))) => {
+            JavaType::Wildcard(Some(WildcardBound::Super(Box::new(
+                substitute_source_summary_type(bound, substitutions),
+            ))))
+        }
+        _ => ty.clone(),
+    }
+}
+
 fn source_summary_inherited_method_will_be_lowered(
     ty: &TypeDecl,
     emitted_program: &Program,
     source_summary_program: &Program,
     source_summary_types: &BTreeSet<String>,
-    method_name: &str,
-    arity: usize,
+    target: &MethodDecl,
 ) -> bool {
     source_summary_supertypes_for_emitted_type(
         ty,
@@ -7178,7 +7454,7 @@ fn source_summary_inherited_method_will_be_lowered(
     .any(|summary_super| {
         source_summary_method_hierarchy(summary_super, source_summary_program)
             .into_iter()
-            .any(|method| method.name == method_name && method.params.len() == arity)
+            .any(|method| source_methods_match(method, target))
     })
 }
 
@@ -7271,7 +7547,7 @@ fn collect_source_method_signatures_for_type_name(
     for member in &ty.members {
         if let Member::Method(method) = member {
             methods.insert((
-                crate::parser::to_snake_case(&method.name),
+                crate::java_signature::source_method_rust_name(method),
                 method.params.len(),
             ));
         }
@@ -7346,7 +7622,7 @@ impl ExternalApiFacadeSupport {
         for member in &ty.members {
             match member {
                 Member::Method(method) => {
-                    let rust_method = crate::parser::to_snake_case(&method.name);
+                    let rust_method = crate::java_signature::source_method_rust_name(method);
                     for owner in &owners {
                         let rust_owner = rust_name_for_java_named_type(owner);
                         if valid_external_facade_type_ident(&rust_owner) {
@@ -7490,14 +7766,12 @@ impl ExternalApiFacadeSupport {
                         source_summary_types,
                         emitted_local_types,
                     );
-                    for bound in &method.type_param_bounds {
-                        if let Some(bound) = bound {
-                            self.add_source_summary_java_type(
-                                bound,
-                                source_summary_types,
-                                emitted_local_types,
-                            );
-                        }
+                    for bound in method.type_param_bounds.iter().flatten() {
+                        self.add_source_summary_java_type(
+                            bound,
+                            source_summary_types,
+                            emitted_local_types,
+                        );
                     }
                     for thrown in &method.throws {
                         self.add_source_summary_java_type(
@@ -7515,14 +7789,12 @@ impl ExternalApiFacadeSupport {
                     }
                 }
                 Member::Constructor(constructor) => {
-                    for bound in &constructor.type_param_bounds {
-                        if let Some(bound) = bound {
-                            self.add_source_summary_java_type(
-                                bound,
-                                source_summary_types,
-                                emitted_local_types,
-                            );
-                        }
+                    for bound in constructor.type_param_bounds.iter().flatten() {
+                        self.add_source_summary_java_type(
+                            bound,
+                            source_summary_types,
+                            emitted_local_types,
+                        );
                     }
                     for thrown in &constructor.throws {
                         self.add_source_summary_java_type(
@@ -7641,11 +7913,8 @@ impl ExternalApiFacadeSupport {
                 continue;
             };
             for method in source_summary_method_hierarchy(ty, source_summary_program) {
-                let rust_method = crate::parser::to_snake_case(&method.name);
-                if !used_calls
-                    .get(&rust_method)
-                    .is_some_and(|arities| arities.contains(&method.params.len()))
-                {
+                let rust_method = crate::java_signature::source_method_rust_name(method);
+                if !source_summary_method_is_used(method, &rust_method, used_calls) {
                     continue;
                 }
                 let effect = facts.external_api_effect_for_receiver_with_arity(
@@ -7685,13 +7954,25 @@ impl ExternalApiFacadeSupport {
                     self.add_java_type(&param.ty);
                 }
                 changed |= self.opaque_types.len() != opaque_count_before;
-                let method_body = source_summary_facade_instance_method(
-                    type_key,
-                    &method.name,
-                    &rust_method,
-                    method.params.len(),
-                    &return_type,
-                );
+                let method_body = if crate::java_signature::method_staticness(method)
+                    == crate::java_signature::JavaCallableStaticness::Static
+                {
+                    source_summary_facade_static_method(
+                        type_key,
+                        &method.name,
+                        &rust_method,
+                        method.params.len(),
+                        &return_type,
+                    )
+                } else {
+                    source_summary_facade_instance_method(
+                        type_key,
+                        &method.name,
+                        &rust_method,
+                        method.params.len(),
+                        &return_type,
+                    )
+                };
                 self.add_external_facade_return_opaque_type(&return_type);
                 if !weak_external_facade_return_type(&return_type) {
                     self.add_erased_object_method(
@@ -7837,17 +8118,21 @@ impl ExternalApiFacadeSupport {
                 source_summary_program,
                 source_summary_types,
             ) {
-                for method in source_summary_method_hierarchy(summary_super, source_summary_program)
-                {
-                    let rust_method = crate::parser::to_snake_case(&method.name);
-                    let arity = method.params.len();
-                    if !used_calls
-                        .get(&rust_method)
-                        .is_some_and(|arities| arities.contains(&arity))
+                for (method_owner, method) in source_summary_method_hierarchy_with_owners(
+                    summary_super,
+                    source_summary_program,
+                ) {
+                    if crate::java_signature::method_staticness(method)
+                        == crate::java_signature::JavaCallableStaticness::Static
                     {
                         continue;
                     }
-                    if source_method_hierarchy_contains(program, ty, &method.name, arity) {
+                    let rust_method = crate::java_signature::source_method_rust_name(method);
+                    let arity = method.params.len();
+                    if !source_summary_method_is_used(method, &rust_method, used_calls) {
+                        continue;
+                    }
+                    if source_method_hierarchy_contains_method(program, ty, method_owner, method) {
                         continue;
                     }
                     if source_summary_inherited_method_will_be_lowered(
@@ -7855,8 +8140,7 @@ impl ExternalApiFacadeSupport {
                         program,
                         source_summary_program,
                         source_summary_types,
-                        &method.name,
-                        arity,
+                        method,
                     ) {
                         continue;
                     }
@@ -8372,6 +8656,8 @@ impl ExternalApiFacadeSupport {
         facts: &FactSet,
         used_constructors: &BTreeMap<String, BTreeSet<usize>>,
         local_types: &BTreeSet<String>,
+        source_summary_types: &BTreeSet<String>,
+        source_summary_program: &Program,
     ) {
         for (type_name, arities) in used_constructors {
             let java_type = JavaType::Named {
@@ -8382,7 +8668,10 @@ impl ExternalApiFacadeSupport {
                 continue;
             }
             let type_key = canonical_external_receiver_type_key(type_name);
-            if local_types.contains(&type_key) {
+            let type_simple = type_key.rsplit('.').next().unwrap_or(type_key.as_str());
+            let source_is_read = source_summary_types.contains(&type_key)
+                || source_summary_types.contains(type_simple);
+            if local_types.contains(&type_key) && !source_is_read {
                 continue;
             }
             let owner = rust_name_for_java_named_type(&type_key);
@@ -8391,11 +8680,26 @@ impl ExternalApiFacadeSupport {
                 continue;
             }
             self.add_opaque_type(owner.clone());
+            let simple_owner = rust_name_for_java_named_type(type_simple);
+            if simple_owner != owner && !self.opaque_types.contains(&simple_owner) {
+                self.add_type_alias(simple_owner, owner.clone());
+            }
             let overload_by_arity =
                 arities.len() > 1 || external_constructor_fact_arity_count(facts, type_name) > 1;
             for arg_count in arities {
                 let rust_name = external_facade_constructor_name(*arg_count, overload_by_arity);
                 self.add_external_constructor_argument_types(facts, &type_key, *arg_count);
+                if source_is_read {
+                    for method_body in source_summary_constructor_methods(
+                        source_summary_program,
+                        &type_key,
+                        &rust_name,
+                        *arg_count,
+                    ) {
+                        self.add_method(owner.clone(), method_body);
+                    }
+                    continue;
+                }
                 if self.has_method_named(&owner, &rust_name) {
                     continue;
                 }
@@ -8865,7 +9169,7 @@ impl ExternalApiFacadeSupport {
                     &fact.method_name,
                     &rust_method,
                     arg_count,
-                    &fact,
+                    fact,
                 );
                 let method_body = external_facade_static_method_with_facts(
                     &merged_facts,
@@ -8978,12 +9282,30 @@ impl ExternalApiFacadeSupport {
         facts: &FactSet,
         imported_static_owner_calls: &BTreeMap<(String, String), BTreeSet<usize>>,
         local_types: &BTreeSet<String>,
+        source_summary_types: &BTreeSet<String>,
+        source_summary_program: &Program,
     ) {
         for ((owner, method), arities) in imported_static_owner_calls {
-            let owner_key = canonical_external_receiver_type_key(&owner);
+            let owner_key = canonical_external_receiver_type_key(owner);
+            // A type whose *source* the translation is reading is not an
+            // unmodelled import. Emitting the generic arity stub for one gave
+            // `pub fn pick<R, T0>(_arg0: T0) -> R { unimplemented!(…) }` under
+            // the **unsuffixed** name, while the call sites — which do resolve
+            // the overload — emitted `pick_int` and `pick_string`. The facade
+            // then provided neither name and the program failed `E0599`
+            // ([0009](../claude_audits/0009-overload-identity-collapses-onto-rust-name.md)).
+            // The owner is spelled as the importing file writes it (`dep.Util`)
+            // while a summary program's type keys are its simple names, so the
+            // simple form has to be compared too.
+            let owner_simple = owner_key.rsplit('.').next().unwrap_or(owner_key.as_str());
             if local_types.contains(&owner_key) {
                 continue;
             }
+            // The *type* is still declared — an importing file names it, so it
+            // has to exist — but its methods are not stubbed here.
+            let owner_source_is_read = source_summary_types.contains(&owner_key)
+                || source_summary_types.contains(owner_simple)
+                || local_type_set_matches_external_name(local_types, &owner_key);
             let arities = arities
                 .iter()
                 .copied()
@@ -9001,8 +9323,7 @@ impl ExternalApiFacadeSupport {
             self.add_opaque_type(owner_rust.clone());
             let simple_owner = owner_key
                 .split('.')
-                .filter(|segment| !segment.is_empty())
-                .next_back()
+                .rfind(|segment| !segment.is_empty())
                 .unwrap_or(owner_key.as_str());
             let simple_owner_rust = rust_name_for_java_named_type(simple_owner);
             if !self.opaque_types.contains(&simple_owner_rust) {
@@ -9038,6 +9359,20 @@ impl ExternalApiFacadeSupport {
                     imported_static_unmodelled_result_type(facts, &owner_key, method, *arg_count)
                 {
                     self.add_opaque_type(return_rust);
+                }
+                if owner_source_is_read {
+                    for method_body in source_summary_imported_static_methods(
+                        facts,
+                        source_summary_program,
+                        &owner_key,
+                        method,
+                        *arg_count,
+                    ) {
+                        for method_owner in &method_owners {
+                            self.add_method(method_owner.clone(), method_body.clone());
+                        }
+                    }
+                    continue;
                 }
                 let method_body = external_facade_imported_static_method_with_facts(
                     facts, &owner_key, method, *arg_count,
@@ -10949,6 +11284,7 @@ impl ExternalApiFacadeSupport {
                 continue;
             }
             let impl_header = external_facade_impl_header(&owner);
+            let methods = dedup_facade_methods_by_signature(methods);
             lines.push(format!(
                 "{impl_header} {{\n{}\n}}",
                 methods.into_iter().collect::<Vec<_>>().join("\n")
@@ -12839,12 +13175,18 @@ fn collect_expr_call_arities(expr: &Expr, calls: &mut BTreeMap<String, BTreeSet<
             receiver,
             name,
             args,
-            ..
+            resolved,
         } => {
             calls
                 .entry(crate::parser::to_snake_case(name))
                 .or_default()
                 .insert(args.len());
+            if let Some(resolved) = resolved {
+                calls
+                    .entry(resolved.rust_name.clone())
+                    .or_default()
+                    .insert(args.len());
+            }
             if let Some(receiver) = receiver {
                 collect_expr_call_arities(receiver, calls);
             }
@@ -13640,6 +13982,44 @@ fn external_facade_constructor_method_with_facts(
     format!("    pub fn {rust_name}{args} -> Self {{ Default::default() }}")
 }
 
+fn source_summary_constructor_methods(
+    source_summary_program: &Program,
+    type_key: &str,
+    rust_name: &str,
+    arg_count: usize,
+) -> Vec<String> {
+    let type_simple = type_key.rsplit('.').next().unwrap_or(type_key);
+    let Some(ty) = find_source_type_decl(source_summary_program, type_key)
+        .or_else(|| find_source_type_decl(source_summary_program, type_simple))
+    else {
+        return Vec::new();
+    };
+    ty.members
+        .iter()
+        .filter_map(|member| match member {
+            Member::Constructor(constructor) if constructor.params.len() == arg_count => {
+                let rust_name = constructor.rust_name.as_deref().unwrap_or(rust_name);
+                Some(source_summary_facade_constructor_method(
+                    type_key, rust_name, arg_count,
+                ))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn source_summary_facade_constructor_method(
+    owner: &str,
+    rust_name: &str,
+    arg_count: usize,
+) -> String {
+    let rust_name = rust_raw_ident_if_needed(rust_name);
+    format!(
+        "    pub fn {rust_name}{} -> Self {{ unimplemented!(\"source-summary constructor {owner} is not translated\") }}",
+        external_facade_args(arg_count)
+    )
+}
+
 fn external_facade_constructor_args_with_facts(
     facts: &FactSet,
     type_name: &str,
@@ -13999,6 +14379,110 @@ fn source_summary_facade_instance_method(
     )
 }
 
+fn source_summary_facade_static_method(
+    owner: &str,
+    java_name: &str,
+    rust_name: &str,
+    arg_count: usize,
+    return_type: &str,
+) -> String {
+    let rust_name = rust_raw_ident_if_needed(rust_name);
+    let body = if return_type == "()" {
+        "()".to_string()
+    } else {
+        format!(
+            "unimplemented!(\"source-summary static method {owner}.{java_name} is not translated\")"
+        )
+    };
+    format!(
+        "    pub fn {rust_name}{} -> {return_type} {{ {body} }}",
+        external_facade_args(arg_count)
+    )
+}
+
+fn source_summary_imported_static_methods(
+    facts: &FactSet,
+    source_summary_program: &Program,
+    owner_key: &str,
+    java_method: &str,
+    arg_count: usize,
+) -> Vec<String> {
+    let owner_simple = owner_key.rsplit('.').next().unwrap_or(owner_key);
+    let Some(ty) = find_source_type_decl(source_summary_program, owner_key)
+        .or_else(|| find_source_type_decl(source_summary_program, owner_simple))
+    else {
+        return Vec::new();
+    };
+    source_summary_method_hierarchy(ty, source_summary_program)
+        .into_iter()
+        .filter(|method| {
+            crate::java_signature::method_staticness(method)
+                == crate::java_signature::JavaCallableStaticness::Static
+                && method.params.len() == arg_count
+                && (method.name == java_method
+                    || crate::parser::to_snake_case(&method.name) == java_method
+                    || crate::java_signature::source_method_rust_name(method) == java_method)
+        })
+        .map(|method| {
+            let rust_method = crate::java_signature::source_method_rust_name(method);
+            let effect = facts
+                .external_api_effect_for_receiver_with_arity(
+                    Some(owner_key),
+                    &method.name,
+                    Some(method.params.len()),
+                )
+                .or_else(|| {
+                    facts.external_api_effect_for_receiver_with_arity(
+                        Some(owner_simple),
+                        &method.name,
+                        Some(method.params.len()),
+                    )
+                });
+            let effective_return_type = effect
+                .and_then(|effect| effect.return_type.as_ref())
+                .unwrap_or(&method.return_type);
+            let effective_nullability = effect
+                .map(|effect| effect.return_nullability)
+                .unwrap_or_else(|| {
+                    source_summary_method_effective_return_nullability(facts, owner_simple, method)
+                });
+            let return_type = external_facade_method_return_type_with_facts(
+                facts,
+                Some(owner_key),
+                &method.name,
+                Some(method.params.len()),
+                effective_return_type,
+                effective_nullability,
+            );
+            source_summary_facade_static_method(
+                owner_key,
+                &method.name,
+                &rust_method,
+                method.params.len(),
+                &return_type,
+            )
+        })
+        .collect()
+}
+
+fn source_summary_method_is_used(
+    method: &MethodDecl,
+    rust_method: &str,
+    used_calls: &BTreeMap<String, BTreeSet<usize>>,
+) -> bool {
+    let arity = method.params.len();
+    [
+        crate::parser::to_snake_case(&method.name),
+        rust_method.to_string(),
+    ]
+    .into_iter()
+    .any(|name| {
+        used_calls
+            .get(&name)
+            .is_some_and(|arities| arities.contains(&arity))
+    })
+}
+
 fn query_backed_external_inherited_methods_for_type(
     facts: &FactSet,
     ty: &TypeDecl,
@@ -14320,7 +14804,46 @@ fn facade_method_matches_signature(method_body: &str, method: &str, arg_count: u
     facade_method_has_name(method_body, method) && facade_method_arg_count(method_body) == arg_count
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+fn dedup_facade_methods_by_signature(methods: BTreeSet<String>) -> BTreeSet<String> {
+    let mut selected: BTreeMap<(String, usize, FacadeMethodReceiverKind), String> = BTreeMap::new();
+    let mut passthrough = BTreeSet::new();
+    for method in methods {
+        let Some(method_name) = facade_method_name(&method) else {
+            passthrough.insert(method);
+            continue;
+        };
+        let key = (
+            method_name.to_string(),
+            facade_method_arg_count(&method),
+            facade_method_receiver_kind(&method),
+        );
+        match selected.get_mut(&key) {
+            Some(existing) if facade_method_should_replace(existing, &method, method_name) => {
+                *existing = method;
+            }
+            Some(_) => {}
+            None => {
+                selected.insert(key, method);
+            }
+        }
+    }
+    passthrough.extend(selected.into_values());
+    passthrough
+}
+
+fn facade_method_should_replace(existing: &str, candidate: &str, method_name: &str) -> bool {
+    let existing_return = facade_method_return_type(existing, method_name);
+    let candidate_return = facade_method_return_type(candidate, method_name);
+    match (existing_return, candidate_return) {
+        (Some(existing), Some(candidate)) => {
+            weak_external_facade_return_type(existing)
+                && !weak_external_facade_return_type(candidate)
+        }
+        _ => false,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum FacadeMethodReceiverKind {
     Static,
     SharedSelf,
@@ -15091,7 +15614,7 @@ fn is_native_lowered_math_static_method(owner: &str, method: &str, arg_count: us
     let owner_key = canonical_external_receiver_type_key(owner);
     let owner_key =
         crate::javalibs::native_java_static_owner_alias(&owner_key).unwrap_or(&owner_key);
-    let owner_simple = owner_key.rsplit('.').next().unwrap_or(&owner_key);
+    let owner_simple = owner_key.rsplit('.').next().unwrap_or(owner_key);
     if owner_simple != "Math" {
         return false;
     }
@@ -18750,12 +19273,32 @@ pub fn external_api_receiver_mutability(role: ExternalApiRole) -> ReceiverMutabi
     }
 }
 
+/// The receiver spelling the return-type table is keyed by.
+///
+/// `canonical_external_receiver_type_key` maps a package-qualified name to its
+/// canonical form; the tables are then keyed by the *simple* name. Doing both
+/// steps in one place is what stops `System` and `java.lang.System` answering
+/// differently.
+fn canonical_nullability_receiver(receiver_type: Option<&str>) -> Option<String> {
+    let receiver = receiver_type?;
+    let canonical = canonical_external_receiver_type_key(receiver);
+    Some(
+        canonical
+            .rsplit('.')
+            .next()
+            .unwrap_or(&canonical)
+            .to_string(),
+    )
+}
+
 pub fn external_api_return_nullability(
     receiver_type: Option<&str>,
     name: &str,
     arg_count: usize,
     role: ExternalApiRole,
 ) -> NullabilityState {
+    let canonical_receiver = canonical_nullability_receiver(receiver_type);
+    let receiver_type = canonical_receiver.as_deref();
     if matches!(role, ExternalApiRole::BooleanGetter) {
         return NullabilityState::DefinitelyNonNull;
     }
@@ -18797,8 +19340,9 @@ pub fn external_api_return_nullability(
         (Some("Class" | "JavaClass"), "getResourceAsStream" | "get_resource_as_stream", 1) => {
             NullabilityState::MaybeNull
         }
+        // Null for a bootstrap-loaded class, which every `java.*` type is.
         (Some("Class" | "JavaClass"), "getClassLoader" | "get_class_loader", 0) => {
-            NullabilityState::DefinitelyNonNull
+            NullabilityState::MaybeNull
         }
         (Some("Class" | "JavaClass"), "isArray" | "is_array", 0) => {
             NullabilityState::DefinitelyNonNull
@@ -18814,13 +19358,19 @@ pub fn external_api_return_nullability(
         (Some("JarURLConnection"), "getJarFile" | "get_jar_file", 0) => {
             NullabilityState::DefinitelyNonNull
         }
-        (Some("JarFile"), "entries" | "getManifest" | "get_manifest", 0) => {
-            NullabilityState::DefinitelyNonNull
-        }
+        (Some("JarFile"), "entries", 0) => NullabilityState::DefinitelyNonNull,
+        // `getManifest` returns null for a jar with no manifest. It was folded
+        // into the same arm as `entries`, which genuinely cannot be null — and
+        // a wrong `DefinitelyNonNull` is not a missed optimisation: it is the
+        // only thing standing between the call and an `Option`, so the null
+        // check is dropped (`call_plan::known_external_call_lowered_type` wraps
+        // for `MaybeNull`/`DefinitelyNull` only).
+        (Some("JarFile"), "getManifest" | "get_manifest", 0) => NullabilityState::MaybeNull,
         (Some("Manifest"), "getMainAttributes" | "get_main_attributes", 0) => {
             NullabilityState::DefinitelyNonNull
         }
-        (Some("Attributes"), "getValue" | "get_value", 1) => NullabilityState::DefinitelyNonNull,
+        // Null when the attribute is absent — a map lookup, not a total function.
+        (Some("Attributes"), "getValue" | "get_value", 1) => NullabilityState::MaybeNull,
         (
             Some("BufferedImage"),
             "createGraphics" | "create_graphics" | "getGraphics" | "get_graphics",
@@ -18839,10 +19389,9 @@ pub fn external_api_return_nullability(
             NullabilityState::DefinitelyNonNull
         }
         (Some("Graphics"), "dispose", 0) => NullabilityState::DefinitelyNonNull,
-        (Some("Graphics"), "getClip" | "get_clip", 0) => NullabilityState::DefinitelyNonNull,
-        (Some("Graphics"), "getClipBounds" | "get_clip_bounds", 0) => {
-            NullabilityState::DefinitelyNonNull
-        }
+        // Null when no clip has been set on the graphics context.
+        (Some("Graphics"), "getClip" | "get_clip", 0) => NullabilityState::MaybeNull,
+        (Some("Graphics"), "getClipBounds" | "get_clip_bounds", 0) => NullabilityState::MaybeNull,
         (Some("Graphics"), "getFontMetrics" | "get_font_metrics", 1) => {
             NullabilityState::DefinitelyNonNull
         }
@@ -18952,7 +19501,27 @@ pub fn external_api_return_nullability(
         (Some(_), "phredToFastq", 1) => NullabilityState::DefinitelyNonNull,
         (Some(_), "getBasesReverseComplement", 1) => NullabilityState::DefinitelyNonNull,
         (Some(_), "getAttributeAsString", 1 | 2) => NullabilityState::MaybeNull,
-        _ => NullabilityState::Unknown,
+        // Derived, not listed: a `primitive` or `void` return cannot be null,
+        // whatever any table says about the method.
+        //
+        // `known_external_method_return_type` (185 keys) and this function (154)
+        // enumerate the same key space, and had drifted apart — 14 keys were in
+        // the first and not the second, and the two used three different
+        // receiver-matching disciplines, so `java.lang.System` got a return type
+        // and `Unknown` nullability. Reading the *kind* of the answer the other
+        // table already gives closes that gap by construction, and cannot be
+        // wrong: it is a property of the type, not a fact about the API
+        // ([0008](../claude_audits/0008-inference-machinery-does-not-reach-lowering.md)).
+        // The receiver is canonicalised before this match because the two
+        // tables do not agree on how to spell one: this arm would otherwise
+        // answer for `Integer` and not for `java.lang.Integer`, which is the
+        // drift it exists to close.
+        _ => match known_external_method_return_type(receiver_type, name, arg_count) {
+            Some(JavaType::Primitive(_)) | Some(JavaType::Void) => {
+                NullabilityState::DefinitelyNonNull
+            }
+            _ => NullabilityState::Unknown,
+        },
     }
 }
 
@@ -19186,4 +19755,337 @@ fn is_map_like_receiver(receiver_type: Option<&str>) -> bool {
         receiver_type,
         Some("Map") | Some("HashMap") | Some("LinkedHashMap")
     )
+}
+
+#[cfg(test)]
+mod source_summary_method_identity_tests {
+    use super::*;
+
+    #[test]
+    fn source_method_hierarchy_uses_erased_signature_not_arity() {
+        let summary_parsed = crate::parser::parse_java_source(
+            r#"
+class Base {
+    int f(int x) { return x + 1; }
+    int f(String s) { return s.length(); }
+}
+"#,
+        );
+        let summary_resolved =
+            crate::resolve::resolve_program(&summary_parsed.program, summary_parsed.diagnostics);
+        let child_parsed = crate::parser::parse_java_source(
+            r#"
+class Child extends Base {
+    int f(int x) { return x + 10; }
+}
+"#,
+        );
+        let child_resolved =
+            crate::resolve::resolve_program(&child_parsed.program, child_parsed.diagnostics);
+        let child = find_program_type_by_key(&child_resolved.program, "Child").expect("Child");
+        let base = find_program_type_by_key(&summary_resolved.program, "Base").expect("Base");
+        let base_f_int = base
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method)
+                    if method.name == "f"
+                        && matches!(
+                            method.params.first().map(|param| &param.ty),
+                            Some(JavaType::Primitive(PrimitiveType::Int))
+                        ) =>
+                {
+                    Some(method)
+                }
+                _ => None,
+            })
+            .expect("Base.f(int)");
+        let base_f_string = base
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method)
+                    if method.name == "f"
+                        && matches!(
+                            method.params.first().map(|param| &param.ty),
+                            Some(JavaType::String)
+                        ) =>
+                {
+                    Some(method)
+                }
+                _ => None,
+            })
+            .expect("Base.f(String)");
+
+        assert!(source_method_hierarchy_contains_method(
+            &child_resolved.program,
+            child,
+            base,
+            base_f_int
+        ));
+        assert!(
+            !source_method_hierarchy_contains_method(
+                &child_resolved.program,
+                child,
+                base,
+                base_f_string
+            ),
+            "Child.f(int) must not suppress an inherited Base.f(String) surface"
+        );
+    }
+
+    #[test]
+    fn source_method_hierarchy_substitutes_generic_supertype_arguments() {
+        let summary_parsed = crate::parser::parse_java_source(
+            r#"
+class Base<T> {
+    int f(T value) { return 1; }
+}
+"#,
+        );
+        let summary_resolved =
+            crate::resolve::resolve_program(&summary_parsed.program, summary_parsed.diagnostics);
+        let child_parsed = crate::parser::parse_java_source(
+            r#"
+class Child extends Base<String> {
+    int f(String value) { return value.length(); }
+}
+"#,
+        );
+        let child_resolved =
+            crate::resolve::resolve_program(&child_parsed.program, child_parsed.diagnostics);
+        let child = find_program_type_by_key(&child_resolved.program, "Child").expect("Child");
+        let base = find_program_type_by_key(&summary_resolved.program, "Base").expect("Base");
+        let base_f_t = base
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) if method.name == "f" => Some(method),
+                _ => None,
+            })
+            .expect("Base.f(T)");
+
+        assert!(
+            source_method_hierarchy_contains_method(&child_resolved.program, child, base, base_f_t),
+            "Child extends Base<String>; Child.f(String) must suppress inherited Base<T>.f(T)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod jdk_exception_hierarchy_tests {
+    use super::*;
+
+    /// Everything the old membership lists answered `true` for still does.
+    ///
+    /// The edge table replaced two hand-written lists, so this pins that the
+    /// closure is a *superset* of what they covered rather than a rewrite that
+    /// happens to look similar.
+    #[test]
+    fn the_closure_covers_everything_the_old_lists_did() {
+        for actual in ["IOException", "FileNotFoundException", "EOFException"] {
+            assert!(is_known_java_subtype(actual, "IOException"), "{actual}");
+        }
+        for actual in [
+            "RuntimeException",
+            "IllegalArgumentException",
+            "IllegalStateException",
+            "NoSuchElementException",
+            "NumberFormatException",
+            "ArithmeticException",
+            "ArrayIndexOutOfBoundsException",
+            "IndexOutOfBoundsException",
+            "ConcurrentModificationException",
+            "UnsupportedOperationException",
+            "UncheckedIOException",
+        ] {
+            assert!(
+                is_known_java_subtype(actual, "RuntimeException"),
+                "{actual}"
+            );
+        }
+    }
+
+    /// The bug the edge form fixes: a `catch (IOException e)` has to match the
+    /// `IOException` subclasses that actually occur, and the membership list
+    /// covered three of them.
+    #[test]
+    fn common_io_exception_subclasses_match_their_handler() {
+        for actual in [
+            "ZipException",
+            "SocketException",
+            "UnsupportedEncodingException",
+            "InterruptedIOException",
+            "MalformedURLException",
+            "UnknownHostException",
+            "NotSerializableException",
+            "NoSuchFileException",
+        ] {
+            assert!(
+                is_known_java_subtype(actual, "IOException"),
+                "{actual} must match catch (IOException e)"
+            );
+        }
+    }
+
+    /// Transitivity is what the edge form buys: one edge reaches every
+    /// ancestor. `JarException -> ZipException -> IOException`, and
+    /// `SocketTimeoutException -> InterruptedIOException -> IOException`.
+    #[test]
+    fn one_edge_reaches_every_ancestor() {
+        assert!(is_known_java_subtype("JarException", "ZipException"));
+        assert!(is_known_java_subtype("JarException", "IOException"));
+        assert!(is_known_java_subtype(
+            "java.util.jar.JarException",
+            "java.io.IOException"
+        ));
+        assert!(is_known_java_subtype(
+            "SocketTimeoutException",
+            "IOException"
+        ));
+        assert!(is_known_java_subtype(
+            "NumberFormatException",
+            "IllegalArgumentException"
+        ));
+        assert!(is_known_java_subtype(
+            "NumberFormatException",
+            "RuntimeException"
+        ));
+        assert!(is_known_java_subtype(
+            "InputMismatchException",
+            "RuntimeException"
+        ));
+    }
+
+    /// The relation must stay *anti*-symmetric: a supertype is not a subtype of
+    /// its own subclass, and the two exception roots do not mix.
+    #[test]
+    fn the_relation_does_not_run_backwards_or_across() {
+        assert!(!is_known_java_subtype("IOException", "ZipException"));
+        assert!(!is_known_java_subtype(
+            "RuntimeException",
+            "NumberFormatException"
+        ));
+        // Checked and unchecked are disjoint below Exception.
+        assert!(!is_known_java_subtype("ZipException", "RuntimeException"));
+        assert!(!is_known_java_subtype(
+            "NumberFormatException",
+            "IOException"
+        ));
+    }
+
+    /// Every edge's parent must itself be a known exception name, or the table
+    /// has a typo that would silently truncate a chain.
+    #[test]
+    fn every_edge_names_a_reachable_parent() {
+        for (child, parent) in JDK_EXCEPTION_PARENTS {
+            assert!(
+                is_known_exception_type(child),
+                "{child} is not recognised as an exception type"
+            );
+            assert!(
+                is_known_exception_type(parent),
+                "{parent} is not recognised as an exception type"
+            );
+            // And the edge is usable in the direction it is written.
+            assert!(is_known_java_subtype(child, parent), "{child} -> {parent}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod external_nullability_derivation_tests {
+    use super::*;
+
+    /// A primitive or void return can never be null, so the two tables cannot
+    /// disagree about it however far their key sets drift apart.
+    ///
+    /// This is the property that used to be maintained by listing the same
+    /// method in both tables: `known_external_method_return_type` had 185 keys
+    /// and `external_api_return_nullability` 154, and the difference was silent.
+    #[test]
+    fn a_primitive_or_void_return_is_never_null() {
+        for (receiver, name, arity) in [
+            (Some("Math"), "abs", 1),
+            (Some("Math"), "max", 2),
+            (Some("String"), "length", 0),
+            (Some("String"), "indexOf", 1),
+            (Some("System"), "currentTimeMillis", 0),
+            (Some("java.lang.System"), "currentTimeMillis", 0),
+        ] {
+            let Some(return_ty) = known_external_method_return_type(receiver, name, arity) else {
+                continue;
+            };
+            if !matches!(return_ty, JavaType::Primitive(_) | JavaType::Void) {
+                continue;
+            }
+            assert_eq!(
+                external_api_return_nullability(receiver, name, arity, ExternalApiRole::Getter),
+                NullabilityState::DefinitelyNonNull,
+                "{receiver:?}.{name}/{arity} returns {return_ty:?} and cannot be null"
+            );
+        }
+    }
+
+    /// The receiver-matching drift this closes: the same method spelled with a
+    /// package-qualified receiver must answer the same way.
+    #[test]
+    fn a_qualified_receiver_answers_like_its_simple_name() {
+        for (simple, qualified, name, arity) in [
+            ("System", "java.lang.System", "currentTimeMillis", 0),
+            ("Integer", "java.lang.Integer", "parseInt", 1),
+            ("JarFile", "java.util.jar.JarFile", "getManifest", 0),
+            ("Attributes", "java.util.jar.Attributes", "getValue", 1),
+            ("Graphics", "java.awt.Graphics", "getClip", 0),
+            ("Class", "java.lang.Class", "getClassLoader", 0),
+        ] {
+            let simple_answer =
+                external_api_return_nullability(Some(simple), name, arity, ExternalApiRole::Getter);
+            let qualified_answer = external_api_return_nullability(
+                Some(qualified),
+                name,
+                arity,
+                ExternalApiRole::Getter,
+            );
+            if simple_answer == NullabilityState::Unknown {
+                continue;
+            }
+            assert_eq!(
+                simple_answer, qualified_answer,
+                "{simple} and {qualified} disagree about {name}/{arity}"
+            );
+        }
+    }
+
+    /// The four entries that claimed a non-null for a method that returns null.
+    ///
+    /// A wrong `DefinitelyNonNull` is not a missed optimisation: `Option` is
+    /// applied only for `MaybeNull`/`DefinitelyNull`, so it is a dropped null
+    /// check.
+    #[test]
+    fn methods_that_return_null_are_not_claimed_non_null() {
+        for (receiver, name, arity) in [
+            ("Attributes", "getValue", 1),
+            ("JarFile", "getManifest", 0),
+            ("Graphics", "getClip", 0),
+            ("Graphics", "getClipBounds", 0),
+            ("Class", "getClassLoader", 0),
+        ] {
+            assert_ne!(
+                external_api_return_nullability(
+                    Some(receiver),
+                    name,
+                    arity,
+                    ExternalApiRole::Getter
+                ),
+                NullabilityState::DefinitelyNonNull,
+                "{receiver}.{name} can return null"
+            );
+        }
+        // And the sibling it was folded in with genuinely cannot.
+        assert_eq!(
+            external_api_return_nullability(Some("JarFile"), "entries", 0, ExternalApiRole::Getter),
+            NullabilityState::DefinitelyNonNull
+        );
+    }
 }

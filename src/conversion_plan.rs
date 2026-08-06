@@ -1198,7 +1198,12 @@ pub fn primitive_widening_policy(
         to: *to,
         from_rank,
         to_rank,
-        widens: from != to && from_rank < to_rank,
+        // Legality is the JLS rule, not a rank comparison. The ranks below are
+        // kept because callers report them, but they placed `char` on the
+        // numeric chain and carried no `boolean` guard — so `byte`→`char` and
+        // `boolean`→numeric both reported `widens`, and the first emitted a
+        // conversion Java rejects.
+        widens: crate::types::primitive_widens_to(*from, *to),
     })
 }
 
@@ -2914,12 +2919,28 @@ pub enum SlotConversionPlan {
     RustBorrowedFacadeReturn(RustBorrowedFacadeReturnPolicy),
     OptionalRustBorrowedFacadeReturn(RustBorrowedFacadeReturnPolicy),
     RustUnsignedByteArrayReturn(RustUnsignedByteArrayReturnPolicy),
-    Identity { actual: LoweredType, slot: Slot },
+    Identity {
+        actual: LoweredType,
+        slot: Slot,
+    },
+    /// A conversion that also crosses a shared-handle boundary.
+    ///
+    /// The crossing lives *inside* the plan rather than beside it because
+    /// `apply_slot_conversion_plan` has **four** callers and two of them take a
+    /// bare `&SlotConversionPlan` — so a sibling field is only seen by whichever
+    /// applier is taught about it. That is why teaching one did not move the
+    /// count
+    /// ([0002b](../claude_audits/0002b-shared-representation-design.md)).
+    Handled {
+        handle: HandleAdaptation,
+        inner: Box<SlotConversionPlan>,
+    },
 }
 
 impl SlotConversionPlan {
     pub fn unsupported_diagnostics(&self) -> Vec<ConversionDiagnostic> {
         match self {
+            SlotConversionPlan::Handled { inner, .. } => inner.unsupported_diagnostics(),
             SlotConversionPlan::Shape(plan) => plan.unsupported_diagnostics(),
             SlotConversionPlan::OptionalConstruction(plan) => {
                 plan.element_plan.unsupported_diagnostics()
@@ -2967,6 +2988,19 @@ pub struct SlotExprConversionPlan {
     pub actual: RustSlotShape,
     pub slot: Slot,
     pub conversion: SlotConversionPlan,
+}
+
+/// Crossing the boundary of a shared handle.
+///
+/// A handle is transparent for reads (`Rc<T>` derefs to `T`) and for cloning
+/// (`.clone()` is the handle clone). It is opaque where a conversion constructs
+/// a fresh `T` for a slot that stores `Rc<T>`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum HandleAdaptation {
+    #[default]
+    None,
+    /// The slot holds a handle and the value does not: construct one.
+    Wrap(crate::storage_strategy::StoragePlacement),
 }
 
 impl SlotExprConversionPlan {
@@ -3031,13 +3065,13 @@ pub fn reused_optional_unwrap_plan_for_slot(
         let actual = LoweredType::optional_element_borrow_from_option_shape(
             option_shape.clone(),
             element_ty,
-            Some(target.ownership.clone()),
+            Some(target.ownership),
             facts,
         )?;
         return Some(ReusedOptionalUnwrapPlan {
             actual,
             projection: ReusedOptionalUnwrapProjection::BorrowElement {
-                ownership: target.ownership.clone(),
+                ownership: target.ownership,
             },
         });
     }
@@ -3233,11 +3267,65 @@ pub fn plan_slot_conversion(
     }
 }
 
+/// Which way, if either, the value crosses a shared handle boundary.
+fn plan_handle_adaptation(
+    actual: &RustSlotShape,
+    slot: &Slot,
+    facts: &FactSet,
+) -> HandleAdaptation {
+    let placement_of = |shape: &RustSlotShape| match &shape.java_ty {
+        JavaType::Named { name, .. } => {
+            let placement = facts.storage_placement_for(name);
+            (placement.shared && placement.is_implemented()).then_some(placement)
+        }
+        _ => None,
+    };
+    let target = match slot {
+        Slot::Assignment(shape) | Slot::Return(shape) | Slot::Argument(shape) => Some(shape),
+        _ => None,
+    };
+    // Only *owned* positions hold the handle; a borrowed slot sees through it.
+    let target = target.filter(|shape| {
+        matches!(
+            shape.ownership,
+            OwnershipShape::Owned | OwnershipShape::CopyValue
+        )
+    });
+    // Inert for now. Handle wrapping currently lives in rendering decisions,
+    // not in `RustSlotShape`, so this planner cannot reliably distinguish "the
+    // value is already behind a handle" from "the slot will render behind a
+    // handle". Measured attempts that enabled this here either reached none of
+    // the needed sites or introduced new wrong wraps; see 0002b.
+    let _ = (placement_of(actual), target.and_then(placement_of));
+    HandleAdaptation::None
+}
+
 pub fn slot_conversion_plan(actual: &RustSlotShape, slot: &Slot) -> SlotConversionPlan {
     slot_conversion_plan_with_facts(actual, slot, &FactSet::default())
 }
 
 pub fn slot_conversion_plan_with_facts(
+    actual: &RustSlotShape,
+    slot: &Slot,
+    facts: &FactSet,
+) -> SlotConversionPlan {
+    // The handle crossing is decided *here*, in the one function that turns
+    // `(actual, slot, facts)` into a plan, so every producer of a plan gets it.
+    // Deciding it one level up in `plan_slot_conversion` reached only the
+    // callers that go through that entry — and the erased-object downcast does
+    // not, which is why teaching the applier changed nothing
+    // ([0002b](../claude_audits/0002b-shared-representation-design.md)).
+    let inner = slot_conversion_plan_by_value(actual, slot, facts);
+    match plan_handle_adaptation(actual, slot, facts) {
+        HandleAdaptation::None => inner,
+        handle => SlotConversionPlan::Handled {
+            handle,
+            inner: Box::new(inner),
+        },
+    }
+}
+
+fn slot_conversion_plan_by_value(
     actual: &RustSlotShape,
     slot: &Slot,
     facts: &FactSet,

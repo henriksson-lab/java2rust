@@ -267,3 +267,127 @@ The predicate count barely moved, and that is the honest reading: this pass
 spent its effort on correctness (a diverging fixpoint, a mis-keyed override
 group, a dropped array dimension) rather than on the count. The count is a proxy;
 the relations row is the thing it was a proxy for.
+
+---
+
+## Update 2026-08-05 (third pass) — the tables were surveyed, and several encode a rule they have drifted from
+
+Step 4 asked for the hardcoded library predicates to be moved. A survey of the
+*enumerated* decisions found something more useful than a relocation target:
+several of these tables are the extension of a rule, and at least four have
+drifted from it in ways that are silent defects rather than verbosity.
+
+### Fixed this pass
+
+**`is_known_java_subtype`'s exception arms were membership lists, and
+`catch (IOException e)` matched three types.** A thrown `ZipException`,
+`SocketException`, `UnsupportedEncodingException`, `InterruptedIOException`,
+`MalformedURLException`, `UnknownHostException`, `NotSerializableException` or
+`NoSuchFileException` did **not** match a handler Java says it must — and a
+caught exception silently escaping is not something the generated program can
+report.
+
+Replaced by `JDK_EXCEPTION_PARENTS`: parent **edges**, with the relation as
+their reflexive-transitive closure. This is still a table, deliberately — no
+name rule can know that `ZipException` is an `IOException`, unlike
+`is_known_exception_type`'s `ends_with("Exception")` — but it is a table of
+*facts* rather than of *answers*, and one edge now reaches every ancestor
+instead of needing an entry per ancestor.
+
+The tests caught a second instance of the same mistake **in the replacement**:
+the dispatch still named `"IOException" | "RuntimeException"` as the targets it
+would answer, so `catch (ZipException e)` could not match a `JarException` even
+though the edge existed. The target set is now derived from the table too.
+That is the argument for the edge form in miniature — the list shape reappeared
+one level up and only a law-shaped test found it.
+
+**Four nullability entries claimed `DefinitelyNonNull` for methods that return
+null.** `Attributes.getValue` (absent attribute), `JarFile.getManifest` (no
+manifest — folded into the same arm as `entries`, which genuinely is non-null),
+`Graphics.getClip` / `getClipBounds` (no clip set), and
+`Class.getClassLoader` (bootstrap-loaded classes, i.e. every `java.*` type).
+
+This direction is not benign: `known_external_call_lowered_type` wraps in
+`Option` only for `MaybeNull`/`DefinitelyNull`, so a wrong non-null is a
+**dropped null check**, not a missed optimisation.
+
+### Also fixed this pass
+
+**The JLS §5.1.2 widening relation was encoded four times, and three were
+wrong.** `types::primitive_widens_to` is now the single definition; the three
+rank scales and the 19-pair table all delegate to it, and the pairs survive as
+`primitive_widening_pairs_match_the_jls` — the table is now the *check* on the
+rule rather than a fourth copy of it.
+
+The three facts the ranks got wrong, each with its own test so a regression says
+which one returned:
+
+- **nothing widens to `char`.** The rank form made `char`→`short` and
+  `short`→`char` distance **0** — scored as *exact* matches — so `f(short)` tied
+  with `f(char)` for a `char` argument, and `byte`→`char` reported `widens` and
+  emitted a conversion Java rejects.
+- **`char` widens only to `int` and above.** It is a separate root, not a point
+  on the numeric chain.
+- **`boolean` participates in nothing.** `resolve.rs` guarded it;
+  `conversion_plan.rs` did not, so `boolean`→numeric reported `widens`.
+
+Also asserted as laws rather than cases: widening is a strict partial order
+(irreflexive, antisymmetric, transitive), and the distance is defined *exactly*
+where widening is — which is what stops an illegal conversion outranking a legal
+one.
+
+**Three smaller omissions, each behind a fallback that hid it.**
+`canonical_external_receiver_type_key`'s `"type" => "Type"` arm was dead — the
+table is the inverse of `to_snake_case`, which escapes the keyword to `type_`,
+so the key a producer generates was not in the table and fell through
+`other => other`. `is_known_functional_interface` was missing eleven members of
+its own naming grammar — every `*UnaryOperator` present, no `*BinaryOperator`,
+which is the tell that a product was being enumerated. And
+`native_java_call_lowered_type` had `IntegerParseInt` and `FloatParseFloat` but
+not `DoubleParseDouble`, behind a `_ => None`.
+
+Checked and **not** a defect: `to_snake_case` escapes only five keywords, but
+`rust_raw_ident_if_needed` raw-escapes downstream, so a Java field named `move`,
+`ref`, `mut`, `fn` or `impl` compiles correctly as `r#move` and friends —
+verified end to end rather than assumed from the list's length.
+
+### The last recorded item: the two enumerations of one key space
+
+`known_external_method_return_type` (185 keys) and `external_api_return_nullability`
+(154) enumerate the same `(receiver, name, arity)` space and had drifted: 14 keys
+in the first were absent from the second, and the two used three different
+receiver-matching disciplines, so `java.lang.System` got a return type and
+`Unknown` nullability.
+
+Closed by **deriving** rather than listing. A `primitive` or `void` return
+cannot be null, whatever any table says about the method — that is a property of
+the type, not a fact about the API — so the nullability fallback now reads the
+kind of the answer the *other* table already gives, with the receiver
+canonicalised once so the two spellings cannot diverge again.
+
+This is axis (a) of the survey's suggested decomposition. Axis (b) —
+`ExternalApiRole`, which `external_api_receiver_mutability` already uses this way
+for mutability — is still available if the residue proves large enough to be
+worth it; it is now a size question rather than a correctness one.
+
+The test written for it caught the drift immediately: `Integer.parseInt` answered
+`DefinitelyNonNull` while `java.lang.Integer.parseInt` answered `Unknown`, which
+is exactly the receiver-discipline split the survey predicted.
+
+**One test moved and it was a stale expectation, not a regression.**
+`external_numeric_domain_getters_are_read_only_facts` asserted `Unknown` for four
+numeric getters; three of them have a modelled `int`/`long` return and now
+correctly derive `DefinitelyNonNull`. The fourth exposed something worth
+recording: `ExternalApiEffectFact` is keyed by `(receiver, method)` with **no
+arity**, while nullability is now per-arity, so what the fact holds depends on
+the arity the source called with. The assertion was scoped to what the test is
+named for — read-only-ness — and the arity-keying gap is noted here rather than
+papered over.
+
+### The shape of the finding
+
+The survey's own summary is the useful part: `slot_render.rs`'s
+`slot_rust_type_policy` is the counter-example — it composes
+`ownership × (view, dispatch, java_ty)` with each axis matched once and no
+cross-product enumerated. Every defect above is a cross-product that was
+enumerated instead.

@@ -17,14 +17,14 @@ use new_java2rust::call_plan::{
     TrivialAccessorCallPlan, apply_fallback_receiver_rust_name, external_call_lowered_type,
     external_call_returns_rust_result, external_constructor_arg_shapes, facade_receiver_slot_plan,
     native_collection_arg_shapes, native_collection_arg_shapes_with_facts,
-    native_collection_lowered_type, native_java_instance_receiver_type_hint,
-    optional_borrowed_receiver_slot_plan, optional_receiver_slot_plan, plan_call_arguments,
-    plan_call_arguments_with_facts, plan_call_arguments_with_facts_and_args,
-    plan_call_exception_propagation, plan_call_expr, plan_call_statement, plan_call_target,
-    plan_call_target_with_external_index_and_args, plan_call_target_with_facts,
-    plan_call_target_with_facts_and_arity, plan_constructor_arguments, plan_new_target,
-    plan_new_target_with_facts, plan_trivial_accessor_call, resolved_call_arg_shapes,
-    resolved_constructor_arg_shapes,
+    native_collection_lowered_type, native_java_call_lowered_type,
+    native_java_instance_receiver_type_hint, optional_borrowed_receiver_slot_plan,
+    optional_receiver_slot_plan, plan_call_arguments, plan_call_arguments_with_facts,
+    plan_call_arguments_with_facts_and_args, plan_call_exception_propagation, plan_call_expr,
+    plan_call_statement, plan_call_target, plan_call_target_with_external_index_and_args,
+    plan_call_target_with_facts, plan_call_target_with_facts_and_arity, plan_constructor_arguments,
+    plan_new_target, plan_new_target_with_facts, plan_trivial_accessor_call,
+    resolved_call_arg_shapes, resolved_constructor_arg_shapes,
 };
 use new_java2rust::coercion::{
     Coercion, OptionalReceiverProjection, RenderedMutableAliasProjection,
@@ -4074,7 +4074,7 @@ class VariantLikeTool extends SummaryWalker {
     source_type_modes.insert("SummaryWalker".to_string(), DependencyMode::SourceSummary);
 
     let policy = source_summary_superclass_boundary_policy(
-        [&resolved.program].into_iter(),
+        [&resolved.program],
         &source_type_modes,
         &resolved.facts,
     );
@@ -4086,7 +4086,7 @@ class VariantLikeTool extends SummaryWalker {
 
     let mut facts = resolved.facts.clone();
     extend_representation_facts_for_source_summary_superclass_boundaries(
-        [&resolved.program].into_iter(),
+        [&resolved.program],
         &source_type_modes,
         &mut facts,
     );
@@ -4112,7 +4112,7 @@ class VariantLikeTool extends SummaryWalker {
         DependencyMode::CoTranslateSource,
     );
     let cotranslated_policy = source_summary_superclass_boundary_policy(
-        [&resolved.program].into_iter(),
+        [&resolved.program],
         &cotranslated_modes,
         &resolved.facts,
     );
@@ -4133,7 +4133,7 @@ class VariantLikeTool extends FrameworkBase<Payload> {}
     source_type_modes.insert("FrameworkBase".to_string(), DependencyMode::SourceSummary);
 
     let policy = source_summary_superclass_boundary_policy(
-        [&resolved.program].into_iter(),
+        [&resolved.program],
         &source_type_modes,
         &resolved.facts,
     );
@@ -4167,7 +4167,7 @@ class VCFInfoHeaderLine extends VCFCompoundHeaderLine {}
 
     let mut facts = resolved.facts.clone();
     let boundary_policy = extend_representation_facts_for_source_summary_superclass_boundaries(
-        [&resolved.program].into_iter(),
+        [&resolved.program],
         &source_type_modes,
         &mut facts,
     );
@@ -26533,9 +26533,13 @@ fn call_lowering_renders_constructor_owner_types_with_facts() {
     let lower_source = include_str!("../src/lower.rs");
 
     assert!(source.contains("pub fn apply_new_target_with_facts"));
-    assert!(source.contains("rust_type_for_slot_with_facts"));
+    assert!(source.contains("pub fn apply_new_target_with_facts_and_representations"));
+    assert!(source.contains("constructor_owner_path_type(&target.owner_shape)"));
+    assert!(source.contains("canonical_external_receiver_type_key(name)"));
+    assert!(!source.contains("emit_type(&rust_type_for_slot_with_facts(&target.owner_shape"));
     assert!(!source.contains("rust_type_for_slot(&target.owner_shape)"));
-    assert!(lower_source.contains("apply_new_target_with_facts(&target, rust_args, ctx.facts)"));
+    assert!(lower_source.contains("apply_new_target_with_facts_and_representations("));
+    assert!(lower_source.contains("ctx.representations"));
 }
 
 #[test]
@@ -34298,7 +34302,7 @@ fn stdlib_signature_facts_drive_math_max_owned_arg_shapes() {
         "Math.floorMod(long,int) should keep Java's int return overload: {floor_mod_target:?}"
     );
     assert_eq!(
-        new_java2rust::call_plan::native_java_call_lowered_type(&floor_mod_target),
+        native_java_call_lowered_type(&floor_mod_target),
         Some(LoweredType::from_java(JavaType::Primitive(
             PrimitiveType::Int
         )))
@@ -34319,9 +34323,17 @@ fn stdlib_signature_facts_drive_math_max_owned_arg_shapes() {
         &types,
     );
     assert_eq!(
-        new_java2rust::call_plan::native_java_call_lowered_type(&floor_div_target),
+        native_java_call_lowered_type(&floor_div_target),
         Some(LoweredType::from_java(JavaType::Primitive(
             PrimitiveType::Long
+        )))
+    );
+    assert_eq!(
+        native_java_call_lowered_type(&CallTargetPlan::NativeJavaStatic {
+            method: NativeJavaStaticMethod::DoubleParseDouble,
+        }),
+        Some(LoweredType::from_java(JavaType::Primitive(
+            PrimitiveType::Double
         )))
     );
 }
@@ -38982,6 +38994,8 @@ public class Caller {
         "Util::pick_string(",
         "u.inst_int(1)",
         "u.inst_string(",
+        "fn inst_int<T0>",
+        "fn inst_string<T0>",
     ] {
         assert!(
             translation.rust.contains(expected),
@@ -38993,6 +39007,11 @@ public class Caller {
     assert!(
         !translation.rust.contains("u.inst(") && !translation.rust.contains("Util::pick("),
         "an overload still collapsed onto its bare name:\n{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("fn inst<T0>"),
+        "the erased-object facade must not collapse overloads either:\n{}",
         translation.rust
     );
 }
@@ -39091,5 +39110,145 @@ public class Eq {
             .has_code("java_inherited_equals_identity"),
         "an equals inherited from a source superclass is still an override:\n{:?}",
         translation.diagnostics
+    );
+}
+
+/// A type whose source the translation is reading is not an unmodelled import.
+///
+/// The facade emitter synthesised a generic arity stub for it —
+/// `pub fn pick<R, T0>(_arg0: T0) -> R { unimplemented!(…) }` under the
+/// **unsuffixed** name — while the call sites, which do resolve the overload,
+/// emitted `pick_int` and `pick_string`. The facade provided neither name, so
+/// the program failed `E0599`. That was the half of
+/// [0009](../claude_audits/0009-overload-identity-collapses-onto-rust-name.md)
+/// left open after the call-site naming was fixed: a *fourth* place that names
+/// methods, disagreeing with the other three.
+#[test]
+fn a_summary_source_type_gets_no_unmodelled_import_stub() {
+    let summary = r#"
+package dep;
+
+public class Util {
+    public static int pick(int x) { return x + 1; }
+    public static int pick(String s) { return s.length() + 100; }
+}
+"#;
+    let source = r#"
+import dep.Util;
+
+public class Caller {
+    public static int run() { return Util.pick(1) + Util.pick("ab"); }
+}
+"#;
+    let translation = translate_source_with_context_summary_sources(
+        source,
+        &[summary.to_string()],
+        &FactSet::default(),
+    );
+
+    assert!(
+        !translation.rust.contains("imported static method pick"),
+        "a type whose source is read must not get an unmodelled-import stub:\n{}",
+        translation.rust
+    );
+    // The type itself is still declared — an importing file names it.
+    assert!(
+        translation.rust.contains("pub type Util = DepUtil;"),
+        "the type must still be emitted:\n{}",
+        translation.rust
+    );
+    // And the call sites keep the resolved overload names.
+    assert!(
+        translation.rust.contains("Util::pick_int(1)")
+            && translation.rust.contains("Util::pick_string("),
+        "call sites must keep their resolved names:\n{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn pick_int<T0>(_arg0: T0) -> i32")
+            && translation
+                .rust
+                .contains("pub fn pick_string<T0>(_arg0: T0) -> i32"),
+        "source-summary static methods must be provided as static facade methods:\n{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("pub fn pick_int<T0>(&self")
+            && !translation.rust.contains("pub fn pick_string<T0>(&self"),
+        "source-summary static methods must not be emitted as instance methods:\n{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn a_cotranslated_source_type_gets_no_unmodelled_import_stub() {
+    let support = r#"
+package dep;
+
+public class Util {
+    public static int pick(int x) { return x + 1; }
+    public static int pick(String s) { return s.length() + 100; }
+}
+"#;
+    let source = r#"
+import dep.Util;
+
+public class Caller {
+    public static int run() { return Util.pick(1) + Util.pick("ab"); }
+}
+"#;
+    let translation =
+        translate_source_with_context_sources(source, &[support.to_string()], &FactSet::default());
+
+    assert!(
+        !translation.rust.contains("imported static method pick"),
+        "a co-translated source type must not get an unmodelled-import stub:\n{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn a_summary_source_constructor_gets_source_summary_surface_not_external_stub() {
+    let summary = r#"
+package dep;
+
+public class Util {
+    public Util(int value) {}
+}
+"#;
+    let source = r#"
+import dep.Util;
+
+public class Caller {
+    public static int run() {
+        Util u = new Util(1);
+        return 1;
+    }
+}
+"#;
+    let translation = translate_source_with_context_summary_sources(
+        source,
+        &[summary.to_string()],
+        &FactSet::default(),
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn new<T0>(_arg0: T0) -> Self")
+            && translation
+                .rust
+                .contains("source-summary constructor Util is not translated"),
+        "source-summary constructors should get an explicit source-summary surface:\n{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("pub fn new<T0>(_arg0: T0) -> Self { Default::default() }"),
+        "source-summary constructors must not be emitted as no-op external constructors:\n{}",
+        translation.rust
     );
 }

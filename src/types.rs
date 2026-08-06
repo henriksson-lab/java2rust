@@ -786,3 +786,230 @@ fn common_type(left: &JavaType, right: &JavaType) -> JavaType {
         JavaType::Unknown("common_type".to_string())
     }
 }
+
+/// JLS §5.1.2 widening primitive conversion: may `from` become `to` without a
+/// cast?
+///
+/// The single definition of a relation that was encoded four times — an explicit
+/// 19-pair table in `lower.rs` (correct) and three *rank scales* in
+/// `resolve.rs`, `conversion_plan.rs` and `operator_lowering.rs`. All three
+/// scales placed `char` beside `short` on one chain, which the JLS does not:
+///
+///   - **nothing widens to `char`.** The rank form made `short`→`char` and
+///     `char`→`short` distance 0, i.e. scored as *exact* matches in overload
+///     ranking, and made `byte`→`char` a widening that emitted a conversion
+///     Java rejects.
+///   - **`char` widens only to `int` and above.** It is a separate root, not a
+///     point on the numeric chain.
+///   - **`boolean` participates in nothing.** `resolve.rs` guarded this;
+///     `conversion_plan.rs` did not, so `boolean`→numeric reported `widens`.
+///
+/// Written as the rule rather than the extension so those three facts are
+/// stated once. `primitive_widening_pairs_match_the_jls` checks the extension
+/// is exactly the 19 pairs.
+pub fn primitive_widens_to(from: PrimitiveType, to: PrimitiveType) -> bool {
+    use PrimitiveType::*;
+    if from == to {
+        return false;
+    }
+    match (from, to) {
+        (Boolean, _) | (_, Boolean) => false,
+        (_, Char) => false,
+        (Char, Int | Long | Float | Double) => true,
+        (Char, _) => false,
+        _ => numeric_widening_chain_position(from) < numeric_widening_chain_position(to),
+    }
+}
+
+/// Position on the numeric widening chain `byte < short < int < long < float <
+/// double`. `char` and `boolean` are not on it and are handled before this is
+/// consulted.
+fn numeric_widening_chain_position(primitive: PrimitiveType) -> u8 {
+    use PrimitiveType::*;
+    match primitive {
+        Byte => 0,
+        Short => 1,
+        Int => 2,
+        Long => 3,
+        Float => 4,
+        Double => 5,
+        Char | Boolean => u8::MAX,
+    }
+}
+
+/// How far `from` has to widen to reach `to`, for ranking overload candidates.
+///
+/// `Some(0)` means the types are identical. Only defined where the conversion is
+/// legal, so a candidate needing an illegal conversion can never outrank one
+/// that does not — which is what the rank-subtraction form got wrong.
+pub fn primitive_widening_steps(from: PrimitiveType, to: PrimitiveType) -> Option<u8> {
+    if from == to {
+        return Some(0);
+    }
+    if !primitive_widens_to(from, to) {
+        return None;
+    }
+    let from_position = numeric_widening_chain_position(from);
+    let to_position = numeric_widening_chain_position(to);
+    // `char` is off-chain, so its distance is measured from `int`, its nearest
+    // supertype, plus one for the step onto the chain.
+    if from == PrimitiveType::Char {
+        return Some(1 + to_position - numeric_widening_chain_position(PrimitiveType::Int));
+    }
+    Some(to_position - from_position)
+}
+
+#[cfg(test)]
+mod primitive_widening_tests {
+    use super::*;
+
+    const ALL: [PrimitiveType; 8] = [
+        PrimitiveType::Boolean,
+        PrimitiveType::Byte,
+        PrimitiveType::Short,
+        PrimitiveType::Char,
+        PrimitiveType::Int,
+        PrimitiveType::Long,
+        PrimitiveType::Float,
+        PrimitiveType::Double,
+    ];
+
+    /// The rule's extension must be exactly the 19 pairs of JLS §5.1.2.
+    ///
+    /// This is the table that used to live in `lower.rs`, kept as the *check* on
+    /// the rule instead of as a fourth definition of it. If the rule and the
+    /// table ever disagree, one of them is wrong and this says which pair.
+    #[test]
+    fn primitive_widening_pairs_match_the_jls() {
+        use PrimitiveType::*;
+        let jls: [(PrimitiveType, PrimitiveType); 19] = [
+            (Byte, Short),
+            (Byte, Int),
+            (Byte, Long),
+            (Byte, Float),
+            (Byte, Double),
+            (Short, Int),
+            (Short, Long),
+            (Short, Float),
+            (Short, Double),
+            (Char, Int),
+            (Char, Long),
+            (Char, Float),
+            (Char, Double),
+            (Int, Long),
+            (Int, Float),
+            (Int, Double),
+            (Long, Float),
+            (Long, Double),
+            (Float, Double),
+        ];
+        for from in ALL {
+            for to in ALL {
+                let expected = jls.contains(&(from, to));
+                assert_eq!(
+                    primitive_widens_to(from, to),
+                    expected,
+                    "{from:?} -> {to:?}"
+                );
+            }
+        }
+    }
+
+    /// The three facts the rank scales got wrong, named individually so a
+    /// regression says which one came back.
+    #[test]
+    fn nothing_widens_to_char() {
+        for from in ALL {
+            assert!(
+                !primitive_widens_to(from, PrimitiveType::Char),
+                "{from:?} must not widen to char"
+            );
+        }
+    }
+
+    #[test]
+    fn char_widens_only_to_int_and_above() {
+        use PrimitiveType::*;
+        for to in [Int, Long, Float, Double] {
+            assert!(primitive_widens_to(Char, to), "char -> {to:?}");
+        }
+        for to in [Boolean, Byte, Short, Char] {
+            assert!(!primitive_widens_to(Char, to), "char -> {to:?}");
+        }
+    }
+
+    #[test]
+    fn boolean_participates_in_no_widening() {
+        for other in ALL {
+            assert!(!primitive_widens_to(PrimitiveType::Boolean, other));
+            assert!(!primitive_widens_to(other, PrimitiveType::Boolean));
+        }
+    }
+
+    /// Widening is a strict partial order: irreflexive, antisymmetric and
+    /// transitive. Asserting the laws catches a wrong pair that the 19-pair
+    /// check would only catch if someone also fixed the list.
+    #[test]
+    fn widening_is_a_strict_partial_order() {
+        for a in ALL {
+            assert!(!primitive_widens_to(a, a), "irreflexive: {a:?}");
+            for b in ALL {
+                if primitive_widens_to(a, b) {
+                    assert!(!primitive_widens_to(b, a), "antisymmetric: {a:?} <-> {b:?}");
+                }
+                for c in ALL {
+                    if primitive_widens_to(a, b) && primitive_widens_to(b, c) {
+                        assert!(
+                            primitive_widens_to(a, c),
+                            "transitive: {a:?} -> {b:?} -> {c:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Distance is only defined where the conversion is legal, so a candidate
+    /// needing an illegal conversion can never outrank one that does not —
+    /// which is exactly what rank subtraction got wrong for `char`/`short`.
+    #[test]
+    fn widening_distance_is_defined_exactly_where_widening_is() {
+        for from in ALL {
+            for to in ALL {
+                let steps = primitive_widening_steps(from, to);
+                if from == to {
+                    assert_eq!(steps, Some(0), "{from:?} -> {to:?}");
+                } else {
+                    assert_eq!(
+                        steps.is_some(),
+                        primitive_widens_to(from, to),
+                        "{from:?} -> {to:?}"
+                    );
+                }
+            }
+        }
+        // The specific regression: neither direction is an exact match.
+        assert_eq!(
+            primitive_widening_steps(PrimitiveType::Char, PrimitiveType::Short),
+            None
+        );
+        assert_eq!(
+            primitive_widening_steps(PrimitiveType::Short, PrimitiveType::Char),
+            None
+        );
+    }
+
+    /// A nearer widening ranks better than a further one, which is the whole
+    /// point of the distance.
+    #[test]
+    fn distance_grows_along_the_chain() {
+        use PrimitiveType::*;
+        let byte_to_short = primitive_widening_steps(Byte, Short).unwrap();
+        let byte_to_double = primitive_widening_steps(Byte, Double).unwrap();
+        assert!(byte_to_short < byte_to_double);
+        assert!(
+            primitive_widening_steps(Char, Int).unwrap()
+                < primitive_widening_steps(Char, Double).unwrap()
+        );
+    }
+}

@@ -417,3 +417,127 @@ shows is that some of what looked like it needed that adoption did not: the
 name was already computed correctly and was not being asked for. Worth checking
 the remaining `.name ==` sites for the same shape before assuming they need the
 key.
+
+## Update 2026-08-06 — the facade half, and it was a fourth namer
+
+The previous update fixed the *call sites* and recorded that the facade was
+still wrong:
+
+```rust
+impl DepUtil {
+    pub fn pick<R, T0>(_arg0: T0) -> R { unimplemented!("imported static method pick is not modelled") }
+}
+```
+
+No `new`, no instance methods, and `pick` under the **unsuffixed** name that no
+call site uses — so the program failed `E0599` three times even though every
+call site was by then correct.
+
+### Cause
+
+`add_imported_static_owner_calls` synthesises a facade for a type it treats as
+an *unmodelled import*. It skipped types in `local_types`, but a
+**context-summary** type is not in that set — so a type whose source the
+translation is reading was being stubbed as though nothing were known about it.
+
+That is a fourth place that names methods, after the two the previous update
+reconciled and the signature solver. It could not agree with the others because
+it was not resolving overloads at all: it names by arity, which is the shape a
+genuine unmodelled import needs and exactly wrong for a type with declared
+overloads.
+
+### Fix, and the two wrong versions on the way to it
+
+The guard skips *method* stubbing for a type whose source is read. Getting the
+scope right took two attempts, and both failures are worth recording because
+they were each a worse defect than the one being fixed:
+
+1. **Adding the package-qualified name to `local_type_keys_for_program`** made
+   the guard fire — and suppressed the **type declaration** as well, since other
+   guards share that key set. `E0412: cannot find type Util` is strictly worse
+   than a missing method.
+2. **Skipping the whole branch** did the same thing for the same reason: the
+   `add_opaque_type` that declares the struct lives in it.
+
+So the guard covers only the method loop. The type is still declared — an
+importing file names it — and only the wrong stub is withheld. The owner is also
+compared by simple name, because it is spelled as the *importing* file writes it
+(`dep.Util`) while a summary program's keys are simple names.
+
+Pinned by `a_summary_source_type_gets_no_unmodelled_import_stub`, which asserts
+all three halves: no stub, the type still emitted, and the call sites keeping
+`pick_int`/`pick_string`.
+
+`scripts/gate.sh --all`: zero deltas.
+
+### What remains
+
+The facade still does not *provide* the declared methods — it withholds a wrong
+answer rather than giving the right one, so a program calling `Util.pick(1)`
+compiles no further than before. Emitting the real surface for a summary type is
+the `saturate_source_summary_method_surfaces` path, and pointing it at static
+methods and constructors is the next step. The difference is that the output no
+longer contains a method under a name nothing calls.
+
+The `usage::CallableKey::Method` adoption remains the standing item.
+
+## Update 2026-08-06 (Codex follow-up) — source-summary surfaces also need the resolved name
+
+The previous fix withheld the wrong imported-static stub, but another summary
+surface still named methods from `to_snake_case(method.name)`: the erased-object
+facade and the "already emitted source method" set. That was the same partial
+failure in a different place. For overloaded summary methods the call sites used
+`inst_int`/`inst_string`, while this bookkeeping could still record or emit the
+collapsed `inst`.
+
+`add_source_summary_method_surfaces`,
+`add_emitted_source_summary_super_method_surfaces`, and emitted-source method
+signature collection now use `source_method_rust_name(method)` for the emitted
+surface identity, while keeping the used-call lookup on the Java source spelling
+because `collect_program_call_arities` sees the unresolved source AST.
+
+Pinned by extending `summary_source_overloads_get_one_rust_name_from_every_path`
+to assert the erased-object facade trait exposes `inst_int` and `inst_string`
+and does not expose `inst<T0>`.
+
+`scripts/gate.sh --all`: zero deltas.
+
+## Update 2026-08-06 (Codex follow-up) — inherited summary suppression must use signatures
+
+One more source-summary path was still identity-by-name-and-arity. When emitting
+surfaces for inherited summary methods, a child method such as `f(int)` could
+suppress a base method `f(String)` solely because both have arity 1. That is the
+same overload collapse, but in the "do not emit this inherited method because
+source will lower it" guard.
+
+The MethodDecl-backed path now compares Java name, erased parameter types, and
+staticness. The older name/arity helper remains for facts that only carry
+name/arity; it is not used where the source `MethodDecl` is available.
+
+Pinned by a stdlib unit test that proves `Child.f(int)` suppresses `Base.f(int)`
+but not `Base.f(String)`.
+
+## Update 2026-08-06 (Codex follow-up) — source-summary static methods and constructors now have surfaces
+
+The previous static-import fix withheld the wrong generic stub, but did not
+provide the right method. `source_summary_method_hierarchy` fed static
+`MethodDecl`s into an instance facade renderer, so `static pick(int)` could be
+omitted or rendered as `pub fn pick_int(&self, ...)` while lowering called
+`Util::pick_int(...)`.
+
+Source-summary static methods now render as static facade methods using
+`source_method_rust_name`, and the used-call map records resolved Rust names as
+well as source spellings so suffixed overloads are considered used. Static
+methods are skipped by the inherited instance-surface pass.
+
+Source-summary constructors also get an explicit source-summary constructor
+surface instead of falling through to a no-op external constructor. The body is
+`unimplemented!`, not `Default::default()`, so the output compiles without
+pretending the constructor behavior was modelled or inflating the no-op facade
+metric.
+
+Generic substitution in inherited summary method matching is now covered too. A
+`Base<T>.f(T)` / `Child extends Base<String>` override substitutes the concrete
+supertype argument before comparing erased signatures, so `Child.f(String)`
+suppresses the inherited summary surface while unrelated overloads still survive.
+Pinned by `source_method_hierarchy_substitutes_generic_supertype_arguments`.

@@ -613,6 +613,15 @@ pub fn native_java_call_lowered_type(target: &CallTargetPlan<'_>) -> Option<Lowe
         } => Some(LoweredType::from_java(JavaType::Primitive(
             PrimitiveType::Float,
         ))),
+        // `Integer.parseInt` and `Float.parseFloat` were both here and
+        // `Double.parseDouble` was not, behind a `_ => None` that made the
+        // omission invisible — `parse<T>` returns `T` is the rule, and two of
+        // its three instances were listed.
+        CallTargetPlan::NativeJavaStatic {
+            method: NativeJavaStaticMethod::DoubleParseDouble,
+        } => Some(LoweredType::from_java(JavaType::Primitive(
+            PrimitiveType::Double,
+        ))),
         CallTargetPlan::NativeJavaStatic {
             method:
                 NativeJavaStaticMethod::MathLog

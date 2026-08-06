@@ -465,7 +465,11 @@ fn strip_one_balanced_outer_parentheses(raw: &str) -> Option<&str> {
 }
 
 fn is_unit_expr(expr: &RustExpr) -> bool {
-    matches!(expr, RustExpr::Raw(raw) if strip_redundant_outer_parentheses(raw) == "()")
+    match expr {
+        RustExpr::Shaped { expr, .. } => is_unit_expr(expr),
+        RustExpr::Raw(raw) => strip_redundant_outer_parentheses(raw) == "()",
+        _ => false,
+    }
 }
 
 fn expr_precedence(expr: &RustExpr) -> u8 {
@@ -705,6 +709,16 @@ mod tests {
             emit_stmt(&RustStmt::Expr(RustExpr::Raw("(())".to_string())), 1),
             ""
         );
+        assert_eq!(
+            emit_stmt(
+                &RustStmt::Expr(RustExpr::shaped(
+                    RustExprShape::ResultPropagated,
+                    RustExpr::Raw("()".to_string())
+                )),
+                1
+            ),
+            ""
+        );
     }
 
     #[test]
@@ -719,6 +733,16 @@ mod tests {
                 1
             ),
             "    return Ok(());\n"
+        );
+        assert_eq!(
+            emit_stmt(
+                &RustStmt::Return(Some(RustExpr::shaped(
+                    RustExprShape::ResultPropagated,
+                    RustExpr::Raw("()".to_string())
+                ))),
+                1
+            ),
+            "    return;\n"
         );
     }
 }

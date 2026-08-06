@@ -174,3 +174,44 @@ classes that are outer types of inner classes — remains the right first consum
 and is now better supported: the diagnostic above enumerates exactly that set of
 types, so the blast radius can be measured before the representation work
 starts rather than guessed at.
+
+### Update 2026-08-06 — the narrow option does not shrink the change as much as it reads
+
+Checked while working 0002b step 3. Restricting the shared representation to
+outer types *does* shrink the set of types affected — `src/inner_class_capture.rs`
+enumerates them — but it does not shrink the *kind* of change required, and the
+difference matters for sequencing.
+
+The construction site is inside an instance method of the outer class:
+
+```rust
+impl InnerCapture {
+    pub fn run(&mut self) -> i32 {            // <-- receiver is `&mut InnerCapture`
+        let a = InnerCaptureAdder::new(/* needs Rc<RefCell<InnerCapture>> */);
+```
+
+Declaring `InnerCapture` "shared" changes how it is stored in *slots*. It does
+not change this receiver: an inherent method still takes `&mut Self`, and no
+shared handle can be recovered from a `&mut` — that is the same direction
+0002b measured as impossible (`Unwrap`) and for the same reason. Producing the
+handle here needs the *receiver* to be the handle (`self: &Rc<RefCell<Self>>`,
+or a stored weak self-reference), which is a strictly larger change than storing
+the type behind a handle.
+
+So the narrow option is a good first *consumer* of the shared representation, as
+this file says, but it is not a way to get the feature before that representation
+exists. The order is fixed: handle in `RustSlotShape` → shared slots → shared
+receivers → inner-class construction.
+
+### Codex follow-up 2026-08-06 — batch diagnostics used a narrower path
+
+The direct translator reported `inner_class_construction_panics`, but batch
+translation did not run the same post-lowering diagnostic reporters. That left
+batch artifacts with the runtime panic marker but no diagnostic code for the
+status/reporting layer to consume.
+
+`src/lib.rs` now funnels aliasing, storage-disagreement, and inner-class panic
+warnings through one post-lowering helper used by both single-file and batch
+translation. `tests/batch_translation.rs` adds a regression for the non-static
+inner-class case, and `scripts/gate.sh --all` is clean with the updated
+`batch_translation 10/1` baseline.

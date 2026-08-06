@@ -822,6 +822,23 @@ pub fn apply_syntax_coercion_plan(expr: RustExpr, plan: &SyntaxCoercionPlan) -> 
     apply_coercions(expr, &plan.coercions())
 }
 
+/// Executes a shared-handle crossing.
+///
+/// Transparent for reads and cloning; opaque where a conversion constructs a
+/// fresh value for a slot that stores a shared handle.
+fn apply_handle_adaptation(
+    expr: RustExpr,
+    adaptation: &crate::conversion_plan::HandleAdaptation,
+) -> RustExpr {
+    use crate::conversion_plan::HandleAdaptation;
+    match adaptation {
+        HandleAdaptation::None => expr,
+        HandleAdaptation::Wrap(placement) => {
+            RustExpr::Raw(placement.wrap_construction(emit::emit_expr(&expr)))
+        }
+    }
+}
+
 pub fn apply_slot_conversion_plan(expr: RustExpr, plan: &SlotConversionPlan) -> RustExpr {
     match plan {
         SlotConversionPlan::Shape(plan) => apply_shape_coercion_plan(expr, plan),
@@ -843,6 +860,13 @@ pub fn apply_slot_conversion_plan(expr: RustExpr, plan: &SlotConversionPlan) -> 
             apply_rust_unsigned_byte_array_return(expr, policy)
         }
         SlotConversionPlan::Identity { .. } => expr,
+        // The handle crossing wraps the inner conversion, so every caller of
+        // this function gets it — there are four, and a sibling field on the
+        // outer plan reached only one.
+        SlotConversionPlan::Handled { handle, inner } => {
+            let converted = apply_slot_conversion_plan(expr, inner);
+            apply_handle_adaptation(converted, handle)
+        }
     }
 }
 
@@ -4363,8 +4387,7 @@ fn apply_borrowed_element_slot_adapter(
             let adapted = apply_borrowed_element_borrow_adapter(expr, adapter, policy);
             return apply_borrowed_element_target_view(adapted, policy);
         }
-        let adapted = apply_borrowed_element_adapter(expr, adapter);
-        adapted
+        apply_borrowed_element_adapter(expr, adapter)
     } else {
         expr
     }
@@ -4544,8 +4567,25 @@ fn apply_optional_borrowed_element_target_view(
     let target_element_ty = policy.target.optional_element_type()?;
     let target_element =
         crate::conversion_plan::optional_element_slot_shape(&policy.target, target_element_ty);
+    // The question every arm below asks is "has *this* adapter already been
+    // applied", and `RustExprShape::OptionalProjected` cannot answer it: all
+    // five arms are in that one family. The recorded **slot shape** can, because
+    // it is what each arm produces.
+    //
+    // Note the direction of the danger here, which is the opposite of the other
+    // migrations in 0007: `true` means *skip the adapter*, so a tag that is
+    // right about the family and wrong about the member emits a **missing**
+    // adapter. The text check stays as the fallback for producers that have not
+    // recorded an `actual` yet, so an untagged expression is still handled
+    // exactly as before.
+    let already_applied = expr
+        .recorded_slot_shape()
+        .is_some_and(|actual| slot_shapes_match_ignoring_identity(actual, &target_element));
+    if already_applied {
+        return Some(expr.clone());
+    }
     let rendered = emit::emit_expr(expr);
-    match (target_element.ownership, &target_element.view) {
+    let adapted = match (target_element.ownership, &target_element.view) {
         (OwnershipShape::SharedBorrow, ViewShape::Slice)
             if matches!(target_element.java_ty, crate::java_ir::JavaType::Array(_)) =>
         {
@@ -4569,7 +4609,22 @@ fn apply_optional_borrowed_element_target_view(
         (OwnershipShape::MutableBorrow, ViewShape::Native) => (!rendered.ends_with(".as_mut()"))
             .then(|| RustExpr::Raw(format!("{rendered}.as_mut()"))),
         _ => None,
-    }
+    }?;
+    // Record what this arm produced, so the next consumer asks the tag rather
+    // than the text.
+    Some(RustExpr::shaped_as(
+        RustExprShape::OptionalProjected,
+        Some(target_element),
+        adapted,
+    ))
+}
+
+fn slot_shapes_match_ignoring_identity(actual: &RustSlotShape, target: &RustSlotShape) -> bool {
+    actual.java_ty == target.java_ty
+        && actual.ownership == target.ownership
+        && actual.view == target.view
+        && actual.dispatch == target.dispatch
+        && actual.mutability == target.mutability
 }
 
 fn apply_required_borrowed_element_target_view(
@@ -5189,11 +5244,23 @@ fn normalize_emitted_java_type_name(target_type: &str) -> String {
     }
 }
 
+/// Whether a rendered type name is a plausible downcast target.
+///
+/// The question is about the *nominal* name, so a qualified or wrapped name is
+/// judged by its innermost identifier: `std::rc::Rc<FormatLine>` is as nominal
+/// as `FormatLine`. Judging it by its first character instead rejected every
+/// handle-wrapped target (0002b), and rejection here is silent -- the downcast
+/// is dropped and the value flows on with the wrong type.
 fn plausible_rust_nominal_type_name(target_type: &str) -> bool {
+    let innermost = target_type
+        .rsplit_once('<')
+        .map(|(_, inner)| inner.trim_end_matches('>'))
+        .unwrap_or(target_type);
+    let innermost = innermost.rsplit("::").next().unwrap_or(innermost);
     matches!(
-        target_type,
+        innermost,
         "bool" | "i8" | "i16" | "char" | "i32" | "i64" | "f32" | "f64"
-    ) || target_type
+    ) || innermost
         .chars()
         .next()
         .is_some_and(|ch| ch == '_' || ch.is_ascii_uppercase())
@@ -5243,7 +5310,7 @@ fn render_clone_recovery_expr(rendered: &str, policy: &CloneRecoveryPolicy) -> S
             render_clone_recovery_policy(policy)
         );
     }
-    let receiver = if rust_method_receiver_needs_parentheses(&rendered) {
+    let receiver = if rust_method_receiver_needs_parentheses(rendered) {
         format!("({rendered})")
     } else {
         rendered.to_string()
@@ -5304,6 +5371,46 @@ pub fn rust_primitive_type_name_policy(primitive: PrimitiveType) -> RustPrimitiv
     RustPrimitiveTypeNamePolicy {
         primitive,
         rust_name,
+    }
+}
+
+#[cfg(test)]
+mod nominal_downcast_target_tests {
+    use super::plausible_rust_nominal_type_name;
+
+    /// A downcast target is judged by its innermost identifier, not by the
+    /// first character of the rendered string.
+    ///
+    /// Rejection here is silent: `apply_erased_object_downcast` returns the
+    /// expression unchanged, so the value keeps flowing at the wrong type with
+    /// no diagnostic. Judging `std::rc::Rc<FormatLine>` by its leading `s` --
+    /// which is what this did -- dropped the cast on every qualified or
+    /// wrapped target. See claude_audits/0002b.
+    #[test]
+    fn qualified_and_wrapped_targets_are_nominal() {
+        for target in [
+            "FormatLine",
+            "std::rc::Rc<FormatLine>",
+            "std::sync::Arc<Standards>",
+            "crate::Foo",
+            "_Anon",
+            "i32",
+        ] {
+            assert!(
+                plausible_rust_nominal_type_name(target),
+                "expected a nominal target: {target}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_nominal_targets_are_still_rejected() {
+        for target in ["", "dyn", "&str", "(i32, i32)", "std::rc::Rc<dyn>"] {
+            assert!(
+                !plausible_rust_nominal_type_name(target),
+                "expected a non-nominal target: {target}"
+            );
+        }
     }
 }
 
@@ -5759,7 +5866,7 @@ mod tests {
                 RustExpr::Var("left".to_string()),
                 RustExpr::Var("right".to_string()),
             )),
-            "left == right"
+            "java_arrays_equals(left, right)"
         );
         assert_eq!(
             emit::emit_expr(&collections_empty_list_projection()),

@@ -494,6 +494,31 @@ idiom_signal_count() {
   awk -F '\t' -v signal="$signal" 'NR > 1 && $1 == signal { found = 1; print $2 } END { if (!found) print 0 }' "$path"
 }
 
+analysis_profile_metric() {
+  local path="$1"
+  local metric="$2"
+  if [[ ! -f "$path" ]]; then
+    printf '0\n'
+    return
+  fi
+  awk -F '\t' -v metric="$metric" 'NR > 1 && $1 == metric { found = 1; print $2 } END { if (!found) print 0 }' "$path"
+}
+
+analysis_profile_metric_or_idiom_signal() {
+  local profile_path="$1"
+  local idiom_path="$2"
+  local metric="$3"
+  local value
+  if [[ -f "$profile_path" ]]; then
+    value="$(awk -F '\t' -v metric="$metric" 'NR > 1 && $1 == metric { print $2; found = 1; exit }' "$profile_path")"
+    if [[ -n "$value" ]]; then
+      printf '%s\n' "$value"
+      return
+    fi
+  fi
+  idiom_signal_count "$idiom_path" "$metric"
+}
+
 status_column_sum() {
   local path="$1"
   local column="$2"
@@ -2810,6 +2835,7 @@ unsupported_expression_count="$(idiom_signal_count "$idiom_sweep_tsv" "unsupport
 unmodelled_type_count="$(idiom_signal_count "$idiom_sweep_tsv" "unmodelled_types")"
 unmodelled_call_site_count="$(idiom_signal_count "$idiom_sweep_tsv" "unmodelled_call_sites")"
 noop_facade_method_count="$(idiom_signal_count "$idiom_sweep_tsv" "noop_facade_methods")"
+noop_facade_call_site_count="$(analysis_profile_metric_or_idiom_signal "$analysis_profile_path" "$idiom_sweep_tsv" "noop_facade_call_sites")"
 unmodelled_upcast_count="$(idiom_signal_count "$idiom_sweep_tsv" "unmodelled_upcast_conversions")"
 stubbed_constant_count="$(idiom_signal_count "$idiom_sweep_tsv" "stubbed_constants")"
 total_elapsed_ms="$(elapsed_ms_since "$script_start_ms")"
@@ -2856,6 +2882,7 @@ printf "total\tok\t%s\t%s\n" "$total_elapsed_ms" "$out_dir" >> "$phase_events_pa
   printf "unmodelled_types\t%s\n" "$unmodelled_type_count"
   printf "unmodelled_call_sites\t%s\n" "$unmodelled_call_site_count"
   printf "noop_facade_methods\t%s\n" "$noop_facade_method_count"
+  printf "noop_facade_call_sites\t%s\n" "$noop_facade_call_site_count"
   printf "unmodelled_upcast_conversions\t%s\n" "$unmodelled_upcast_count"
   printf "stubbed_constants\t%s\n" "$stubbed_constant_count"
   printf "invalid_pattern_files\t%s\n" "$invalid_pattern_files"

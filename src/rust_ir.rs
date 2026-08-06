@@ -167,6 +167,22 @@ pub enum RustExpr {
     /// the payload stays a string, the answer rides alongside it.
     Shaped {
         shape: RustExprShape,
+        /// The slot shape the adapter *produced*, when the producer knew it.
+        ///
+        /// [`RustExprShape`] is a coarse tag: it names a family
+        /// (`OptionalProjected`) where several distinct adapters live
+        /// (`.as_ref()`, `.as_mut()`, `.as_deref()`, `.as_deref_mut()`,
+        /// `.as_ref().map(|v| v.as_str())`). That is enough to answer "what kind
+        /// of thing is this" and **not** enough to answer "which of these has
+        /// already been applied" — the question the idempotence checks in
+        /// `apply_optional_borrowed_element_target_view` actually ask.
+        ///
+        /// Recording the resulting slot shape answers it exactly, which is
+        /// [0007](../claude_audits/0007-rust-ir-is-mostly-opaque-strings.md)'s
+        /// step 1: `LoweredExpr { expr, shape, actual }`. `None` means the
+        /// producer did not record one — never "no shape" — so a query stays
+        /// monotone.
+        actual: Option<Box<crate::slot_shape::RustSlotShape>>,
         expr: Box<RustExpr>,
     },
 }
@@ -200,12 +216,33 @@ impl RustExpr {
     /// previous tag rather than nesting: the shape of an expression is what the
     /// *last* adapter made it.
     pub fn shaped(shape: RustExprShape, expr: RustExpr) -> RustExpr {
+        RustExpr::shaped_as(shape, None, expr)
+    }
+
+    /// Tag an expression with its family *and* the slot shape it produced.
+    ///
+    /// The `actual` is what lets a consumer ask "is this already the shape I
+    /// want" instead of "is this in the family of things that might be".
+    pub fn shaped_as(
+        shape: RustExprShape,
+        actual: Option<crate::slot_shape::RustSlotShape>,
+        expr: RustExpr,
+    ) -> RustExpr {
         RustExpr::Shaped {
             shape,
+            actual: actual.map(Box::new),
             expr: Box::new(match expr {
                 RustExpr::Shaped { expr, .. } => *expr,
                 other => other,
             }),
+        }
+    }
+
+    /// The slot shape the last adapter produced, if it recorded one.
+    pub fn recorded_slot_shape(&self) -> Option<&crate::slot_shape::RustSlotShape> {
+        match self {
+            RustExpr::Shaped { actual, .. } => actual.as_deref(),
+            _ => None,
         }
     }
 

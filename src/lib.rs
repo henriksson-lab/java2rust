@@ -537,11 +537,13 @@ fn build_batch_translation_context(
         "semantic_analysis::analyze_program",
     );
     let semantic_start = Instant::now();
-    let semantic = semantic_analysis::analyze_program(
+    let mut semantic = semantic_analysis::analyze_program(
         &resolved_context.program,
         &resolved_context.facts,
         external_facts,
     );
+    semantic.facts.storage_strategies =
+        storage_strategy::plan_storage_strategies(&resolved_context.program, &semantic.usage);
     timings.global_semantic_ms = semantic_start.elapsed().as_millis();
     emit_batch_phase_progress(
         event_sink,
@@ -781,6 +783,12 @@ fn translate_parsed_source_with_batch_context(
             .diagnostics
             .warning(diagnostic.code, diagnostic.message.clone());
     }
+    report_post_lowering_translation_diagnostics(
+        &resolved.program,
+        &context.semantic.usage,
+        &context.semantic.facts,
+        &mut lowered.diagnostics,
+    );
     let rust = emit::emit_file(&lowered.file);
     Translation {
         rust,
@@ -935,8 +943,14 @@ fn translate_parsed_source_with_context(
     } else {
         resolved.program.clone()
     };
-    let semantic =
+    let mut semantic =
         semantic_analysis::analyze_program(&semantic_program, &resolved.facts, external_facts);
+    // Step 3 of the 0002b design: the storage decision has to be visible to
+    // *every* place that renders a type, or a struct field and a parameter of
+    // the same Java type get different Rust spellings and the output does not
+    // compile. The fact set is the only thing all of them already have.
+    semantic.facts.storage_strategies =
+        storage_strategy::plan_storage_strategies(&semantic_program, &semantic.usage);
     let representations = representation::plan_representations(&semantic_program, &semantic.facts);
     let support_program = support_program_context
         .as_ref()
@@ -969,28 +983,9 @@ fn translate_parsed_source_with_context(
             .diagnostics
             .warning(diagnostic.code, diagnostic.message);
     }
-    // Lowering copies where Java aliased, because there is no shared
-    // representation to lower an alias into. Where that copy is observable the
-    // output compiles and computes a different answer, so it is reported here
-    // rather than left to be discovered downstream.
-    aliasing::report_observable_aliases(
+    report_post_lowering_translation_diagnostics(
         &resolved.program,
         &semantic.usage,
-        &mut lowered.diagnostics,
-    );
-    // Step 2 of the 0002b design: the decision rule runs, lowering does not
-    // change, and every type the plan says should be shared while lowering
-    // holds it by value is reported. That list is the work queue for the
-    // representation change and the size estimate it needs first.
-    storage_strategy::report_storage_disagreements(
-        &resolved.program,
-        &semantic.usage,
-        &mut lowered.diagnostics,
-    );
-    // A non-static inner class compiles and then panics on construction. The
-    // translator has to say so; a compile-error count cannot see it.
-    inner_class_capture::report_unconstructable_inner_classes(
-        &resolved.program,
         &semantic.facts,
         &mut lowered.diagnostics,
     );
@@ -999,6 +994,27 @@ fn translate_parsed_source_with_context(
         rust,
         diagnostics: lowered.diagnostics,
     }
+}
+
+fn report_post_lowering_translation_diagnostics(
+    program: &Program,
+    usage: &usage::UsageFacts,
+    facts: &FactSet,
+    diagnostics: &mut DiagnosticBag,
+) {
+    // Lowering copies where Java aliased, because there is no shared
+    // representation to lower an alias into. Where that copy is observable the
+    // output compiles and computes a different answer, so it is reported here
+    // rather than left to be discovered downstream.
+    aliasing::report_observable_aliases(program, usage, diagnostics);
+    // Step 2 of the 0002b design: the decision rule runs, lowering does not
+    // change, and every type the plan says should be shared while lowering
+    // holds it by value is reported. That list is the work queue for the
+    // representation change and the size estimate it needs first.
+    storage_strategy::report_storage_disagreements(program, usage, diagnostics);
+    // A non-static inner class compiles and then panics on construction. The
+    // translator has to say so; a compile-error count cannot see it.
+    inner_class_capture::report_unconstructable_inner_classes(program, facts, diagnostics);
 }
 
 fn merge_program_context(target: &mut Program, source: Program) {
