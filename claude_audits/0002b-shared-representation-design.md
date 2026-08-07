@@ -3,7 +3,7 @@
 Status: **design, not implemented**
 Blocks: [0002b](0002-object-aliasing-has-no-representation.md),
 [0023](0023-inner-class-construction-always-panics.md),
-[0028](0028-reference-equality-lowered-as-structural-equality.md),
+[0028](done/0028-reference-equality-lowered-as-structural-equality.md),
 and all of [CONCURRENCY-SCOPE](../CONCURRENCY-SCOPE.md)
 
 This exists because three separate documents all stop at the same sentence —
@@ -374,7 +374,7 @@ return b.get() + "," + (a == b) + "," + (a == c) + "," + a.equals(c);
 | `a.equals(c)` — distinct objects | `false` | **`true`** |
 
 Everything that is not an identity comparison already agrees. Both divergences
-are [0028](0028-reference-equality-lowered-as-structural-equality.md).
+are [0028](done/0028-reference-equality-lowered-as-structural-equality.md).
 
 ### What that means for the plan
 

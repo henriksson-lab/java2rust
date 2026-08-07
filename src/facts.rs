@@ -46,6 +46,7 @@ pub struct FactSet {
     pub external_constructor_facts: Vec<ExternalConstructorFact>,
     pub external_field_facts: Vec<ExternalFieldFact>,
     pub external_field_value_facts: Vec<ExternalFieldValueFact>,
+    pub source_equals_override_facts: Vec<SourceEqualsOverrideFact>,
     pub method_effect_facts: Vec<MethodEffectFact>,
     pub recursion_facts: Vec<RecursionFact>,
     pub constructor_recursion_facts: Vec<ConstructorRecursionFact>,
@@ -1319,6 +1320,12 @@ pub struct MethodEffectFact {
     pub provenance: FactProvenance,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceEqualsOverrideFact {
+    pub type_name: String,
+    pub provenance: FactProvenance,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecursionKind {
     Direct,
@@ -1706,6 +1713,8 @@ impl FactSet {
         self.external_field_facts.extend(other.external_field_facts);
         self.external_field_value_facts
             .extend(other.external_field_value_facts);
+        self.source_equals_override_facts
+            .extend(other.source_equals_override_facts);
         self.method_effect_facts.extend(other.method_effect_facts);
         self.recursion_facts.extend(other.recursion_facts);
         self.constructor_recursion_facts
@@ -2913,6 +2922,13 @@ impl FactSet {
                     .rev()
                     .find(|fact| method_key_matches(&fact.method, type_name, method_name))
             })
+    }
+
+    pub fn source_equals_override_for(&self, type_name: &str) -> Option<&SourceEqualsOverrideFact> {
+        self.source_equals_override_facts
+            .iter()
+            .rev()
+            .find(|fact| external_type_name_matches(&fact.type_name, type_name))
     }
 
     pub fn method_has_thrown_exceptions(&self, type_name: &str, method_name: &str) -> bool {

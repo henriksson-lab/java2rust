@@ -93,7 +93,7 @@ handling the idioms we currently fail, grounded in corpus error counts.
 | [0025](done/0025-interface-default-methods-are-discarded.md) | `default` method bodies dropped → runtime panic | runtime | small — Rust supports it natively |
 | [0026](done/0026-assignment-evaluation-order-differs-from-java.md) | Rust evaluates assignment RHS before the target; Java is the reverse | runtime | small |
 | [0027](done/0027-compound-assignment-implicit-narrowing-missing.md) | `byte b; b += 300;` → `E0308`; missing JLS 15.26.2 narrowing cast | rustc | **tiny** |
-| [0028](0028-reference-equality-lowered-as-structural-equality.md) | `==` on classes is structural, not identity — **violates decision 2** | runtime | blocked on 0002b + warning now |
+| [0028](done/0028-reference-equality-lowered-as-structural-equality.md) | `==` on classes was structural, not identity — **violated decision 2** | runtime | fixed: `Rc`/`Arc::ptr_eq`, two differential fixtures |
 | [0029](done/0029-static-field-mutation-emits-invalid-rust.md) | `static n; n++;` → `E0067` invalid left-hand side | rustc | small |
 | [0030](done/0030-java-statics-are-thread-local.md) | Java `static` fields are `thread_local!` — per-thread copies | inspection | split 0030a/b |
 | [0031](done/0031-stubbed-constant-census.md) | **`Math.PI` is `0.0`**; full census of 27 stubbed constants across 3 corpora | corpus | **tiny for the fix** |

@@ -5196,18 +5196,38 @@ pub fn erased_object_borrowed_downcast_ref_projection(
 ) -> RustExpr {
     let rendered = emit::emit_expr(&expr);
     let target_type = normalize_emitted_java_type_name(target_type);
+    let handled_inner = shared_handle_inner_type(&target_type);
     if optional_carrier {
+        if handled_inner.is_some() {
+            return RustExpr::Raw(format!(
+                "{rendered}.as_ref().and_then(|value| value.downcast_ref::<{target_type}>().map(|value| value.as_ref())){}",
+                crate::output_markers::invalid_java_cast_expect()
+            ));
+        }
         RustExpr::Raw(format!(
             "{rendered}.as_ref().and_then(|value| value.downcast_ref::<{target_type}>()){}",
             crate::output_markers::invalid_java_cast_expect()
         ))
     } else {
         let rendered = parenthesize_cast_method_receiver(&rendered);
+        if handled_inner.is_some() {
+            return RustExpr::Raw(format!(
+                "{rendered}.downcast_ref::<{target_type}>().map(|value| value.as_ref()){}",
+                crate::output_markers::invalid_java_cast_expect()
+            ));
+        }
         RustExpr::Raw(format!(
             "{rendered}.downcast_ref::<{target_type}>(){}",
             crate::output_markers::invalid_java_cast_expect()
         ))
     }
+}
+
+fn shared_handle_inner_type(target_type: &str) -> Option<&str> {
+    target_type
+        .strip_prefix("std::rc::Rc<")
+        .or_else(|| target_type.strip_prefix("std::sync::Arc<"))
+        .and_then(|inner| inner.strip_suffix('>'))
 }
 
 fn apply_erased_object_downcast(
@@ -5221,8 +5241,11 @@ fn apply_erased_object_downcast(
     }
     let rendered = parenthesize_cast_method_receiver(&emit::emit_expr(&expr));
     match invalid_cast {
+        // Parenthesised: `.` binds tighter than unary `*`, so an appended field
+        // access turned `*x.downcast::<T>().expect(..).v` into a deref of the
+        // *field* -- `error[E0614]: type i32 cannot be dereferenced`.
         InvalidCastPolicy::Panic => RustExpr::Raw(format!(
-            "*{rendered}.downcast::<{target_type}>(){}",
+            "(*{rendered}.downcast::<{target_type}>(){})",
             crate::output_markers::invalid_java_cast_expect()
         )),
     }

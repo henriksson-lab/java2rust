@@ -24196,8 +24196,9 @@ fn nullable_custom_equals_method_uses_null_safe_custom_equals() {
     );
     assert!(
         translation.rust.contains("match (left, right)")
-            && (translation.rust.contains("left.equals(right)")
-                || translation.rust.contains("left.equals(&right)"))
+            && translation
+                .rust
+                .contains("left.equals(Box::new(std::rc::Rc::new((*right).clone())))")
             && !translation.rust.contains("left.as_ref() == right.as_ref()"),
         "{}",
         translation.rust

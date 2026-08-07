@@ -494,12 +494,25 @@ pub fn report_storage_disagreements(
     let plan = plan_storage_strategies(program, usage);
     for (name, strategy) in plan.shared_types() {
         let facts = plan.facts(name).expect("shared type has facts");
+        // "needs sharing" and "is still lowered by value" stopped being the same
+        // statement when the handle landed: an implemented placement *is* behind
+        // an `Rc`/`Arc` now, and reporting it as a copy misdescribes the thing
+        // 0028's identity lowering is built on. Only the unimplemented tiers --
+        // the `RefCell`/`Mutex` rungs -- are still held inline.
+        let placement = facts.placement();
+        let consequence = if placement.is_implemented() {
+            format!(
+                "and is stored behind {}",
+                placement.handle_path().unwrap_or("a shared handle")
+            )
+        } else {
+            "but is lowered by value, so an alias becomes a copy".to_string()
+        };
         into.warning(
             "storage_strategy_disagreement",
             format!(
                 "{name} needs {} (escape={:?}, locally_aliased={}, mutated={}, \
-                 mutation_provably_absent={}, threaded={}, static_reachable={}) but is lowered \
-                 by value, so an alias becomes a copy",
+                 mutation_provably_absent={}, threaded={}, static_reachable={}) {consequence}",
                 strategy.name(),
                 facts.escape,
                 facts.locally_aliased,

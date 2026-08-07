@@ -14,7 +14,7 @@ output_markers	19	0
 parser_gaps	33	0
 parser_tree_sitter	43	1
 resolve_calls	280	10
-semantic_facts	165	4
-slot_shape_design	516	80
-type_coercion	109	0
---lib	178	0
+semantic_facts	166	4
+slot_shape_design	518	79
+type_coercion	111	0
+--lib	188	0

@@ -17,7 +17,11 @@ class NullableValue {
         this.id = id;
     }
 
-    boolean equals(NullableValue other) {
-        return id == other.id;
+    boolean equals(Object other) {
+        if (!(other instanceof NullableValue)) {
+            return false;
+        }
+        NullableValue that = (NullableValue) other;
+        return id == that.id;
     }
 }

@@ -151,8 +151,8 @@ use crate::method_reference_plan::{
 use crate::nullability_plan::{TernaryNullRefinementPlan, plan_ternary_null_refinement};
 use crate::operator_lowering::lower_equality_comparison_expr_for_op;
 use crate::operator_lowering::{
-    EqualityComparisonPlan, lower_numeric_binary_expr, plan_equality_comparison,
-    plan_equality_comparison_with_facts, plan_numeric_binary_promotion,
+    EqualityComparisonPlan, lower_numeric_binary_expr, plan_equality_comparison_with_facts,
+    plan_numeric_binary_promotion,
 };
 use crate::operator_lowering::{lower_null_comparison_expr, lower_unary_expr};
 use crate::rewrite::{MethodControlFlowPlan, method_has_tail_recursive_loop_rewrite};
@@ -12776,7 +12776,12 @@ fn lower_binary_expr(
                 plan,
             );
         }
-        let equality_plan = plan_equality_comparison(&left_shape, &right_shape);
+        // With facts: the planner needs the storage placement to know whether
+        // these operands are behind a shared handle, which decides reference
+        // identity versus structural equality (0028). Without them every `==`
+        // planned as if nothing were shared.
+        let equality_plan =
+            plan_equality_comparison_with_facts(&left_shape, &right_shape, ctx.facts);
         let equality_expr = lower_equality_comparison_expr_for_op(
             op,
             equality_plan.clone(),
@@ -16850,9 +16855,20 @@ fn lower_exact_erased_object_cast_for_slot(
     }
     let rust_type =
         crate::slot_render::rust_name_for_java_named_type(concrete_java_type_name(exact_ty)?);
+    let runtime_type = match exact_ty {
+        JavaType::Named { name, .. } => {
+            let placement = ctx.facts.storage_placement_for(name);
+            if placement.shared && placement.is_implemented() {
+                placement.wrap(rust_type)
+            } else {
+                rust_type
+            }
+        }
+        _ => rust_type,
+    };
     Some(erased_object_borrowed_downcast_ref_projection(
         RustExpr::Var(local_name.to_string()),
-        &rust_type,
+        &runtime_type,
         exact_erased_object_local_is_optional(local_name, env, ctx),
     ))
 }
@@ -18594,11 +18610,10 @@ fn plan_call_exception_propagation_with_lower_context(
     {
         return CallExceptionPropagationPlan::PropagateResult;
     }
-    // Deliberately the *external-only* entry point. The source-method probes in
-    // `plan_call_exception_propagation_with_external_index` re-derive
-    // fallibility from the fact set, and everything above has already asked the
-    // solved plan — so reaching them here would let a probe contradict the
-    // solver. See 0010.
+    // Deliberately the *external-only* entry point. The source-method
+    // fallibility probes re-derive from the fact set, and everything above has
+    // already asked the solved plan — so reaching them here would let a probe
+    // contradict the solver. See 0010.
     crate::call_plan::plan_external_call_exception_propagation(
         receiver,
         name,
@@ -21326,7 +21341,12 @@ fn lower_java_equality_call_expr_for_op(
     };
     let left_shape = equality_operand_shape(left, env, ctx, shape_ctx);
     let right_shape = equality_operand_shape(right, env, ctx, shape_ctx);
-    let plan = plan_equality_comparison_with_facts(&left_shape, &right_shape, ctx.facts);
+    let plan = crate::operator_lowering::plan_equality_comparison_for_source(
+        &left_shape,
+        &right_shape,
+        ctx.facts,
+        crate::operator_lowering::EqualityComparisonSource::EqualsCall,
+    );
     Some(lower_equality_comparison_expr_for_op(
         op,
         plan,

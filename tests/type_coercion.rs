@@ -81,6 +81,7 @@ use new_java2rust::member_access_plan::{
 use new_java2rust::parser::{parse_expr, parse_type};
 use new_java2rust::rust_ir::{RustExpr, RustExprShape};
 use new_java2rust::slot_shape::{DispatchShape, OwnershipShape, RustSlotShape, ViewShape};
+use new_java2rust::storage_strategy::{Escape, StoragePlan, TypeStorageFacts};
 use new_java2rust::string_concat::is_string_concat;
 use new_java2rust::string_concat_plan::build_string_concat_plan;
 use new_java2rust::string_concat_render::render_string_concat;
@@ -3170,6 +3171,80 @@ fn coercion_owns_dyn_boxed_dyn_and_erased_instanceof_predicates() {
 }
 
 #[test]
+fn optional_erased_instanceof_uses_shared_handle_carrier_for_shared_targets() {
+    let mut optional_erased_actual = RustSlotShape::conservative(JavaType::Named {
+        name: "Optional".to_string(),
+        args: vec![JavaType::Named {
+            name: "Dog".to_string(),
+            args: Vec::new(),
+        }],
+    });
+    optional_erased_actual.dispatch = DispatchShape::ErasedObject;
+
+    let target = RustSlotShape::conservative(JavaType::Named {
+        name: "Dog".to_string(),
+        args: Vec::new(),
+    });
+    let mut storage_plan = StoragePlan::default();
+    storage_plan.insert(
+        "Dog".to_string(),
+        TypeStorageFacts {
+            escape: Escape::Stored,
+            locally_aliased: true,
+            mutated: false,
+            mutation_provably_absent: true,
+            threaded: false,
+            static_reachable: false,
+            surface_forwardable: true,
+        },
+    );
+    let facts = FactSet {
+        storage_strategies: storage_plan,
+        ..FactSet::default()
+    };
+
+    let check = plan_instanceof_check_with_facts(&optional_erased_actual, &target, &facts);
+    assert_eq!(
+        check,
+        InstanceOfCheck::OptionalErasedObjectType {
+            target_type: "std::rc::Rc<Dog>".to_string(),
+        }
+    );
+    assert_eq!(
+        render_instanceof_check(RustExpr::Var("object".to_string()), &check),
+        RustExpr::Raw(
+            "object.as_ref().is_some_and(|value| value.is::<std::rc::Rc<Dog>>())".to_string()
+        )
+    );
+}
+
+#[test]
+fn erased_borrowed_downcast_ref_projects_shared_handle_carrier_to_inner_ref() {
+    assert_eq!(
+        instanceof_pattern_downcast_ref_projection(
+            RustExpr::Var("object".to_string()),
+            &InstanceOfCheck::ErasedObjectType {
+                target_type: "std::rc::Rc<Dog>".to_string(),
+            },
+        ),
+        Some(RustExpr::Raw(
+            "object.downcast_ref::<std::rc::Rc<Dog>>()".to_string()
+        ))
+    );
+    assert_eq!(
+        new_java2rust::coercion::erased_object_borrowed_downcast_ref_projection(
+            RustExpr::Var("object".to_string()),
+            "std::rc::Rc<Dog>",
+            false,
+        ),
+        RustExpr::Raw(
+            "object.downcast_ref::<std::rc::Rc<Dog>>().map(|value| value.as_ref()).expect(\"invalid Java cast\")"
+                .to_string()
+        )
+    );
+}
+
+#[test]
 fn instanceof_target_policy_names_supported_runtime_target_shapes() {
     let concrete = RustSlotShape::conservative(JavaType::Named {
         name: "Dog".to_string(),
@@ -3998,7 +4073,9 @@ fn shape_coercion_owns_dyn_trait_and_erased_object_adapters() {
             erased_actual,
             &Slot::Argument(downcast_target)
         ),
-        RustExpr::Raw("*object.downcast::<Dog>().expect(\"invalid Java cast\")".to_string())
+        // Parenthesised: `.` binds tighter than unary `*`, so an appended field
+        // access would otherwise deref the *field* rather than the box.
+        RustExpr::Raw("(*object.downcast::<Dog>().expect(\"invalid Java cast\"))".to_string())
     );
 
     let mut boxed_actual = RustSlotShape::conservative(JavaType::Named {

@@ -87,8 +87,9 @@ use new_java2rust::facts::{
     HierarchyEdgeFact, HierarchyOverride, HierarchyStrategy, MethodEffectFact,
     MethodKey as FactMethodKey, NullabilityState, ObjectSafetyViolation, OwnedRecoveryCapability,
     OwnedRecoveryCapabilityFact, ReceiverAbi, ReceiverMutabilityFact, RecursionKind, ResultAbi,
-    Staticness, TrivialAccessorFact, TrivialAccessorKind, TypeCapabilityOverride, TypeKey,
-    TypePattern, type_pattern_for_external_java_type, type_pattern_matches_external_java_type,
+    SourceEqualsOverrideFact, Staticness, TrivialAccessorFact, TrivialAccessorKind,
+    TypeCapabilityOverride, TypeKey, TypePattern, type_pattern_for_external_java_type,
+    type_pattern_matches_external_java_type,
 };
 use new_java2rust::item_assembly::{
     constructor_default_field_value, constructor_function_shell, constructor_return_body,
@@ -33656,11 +33657,10 @@ class SpecificProblem extends BaseProblem {}
             .contains("plan_program_exceptions_with_fallibility(support_local_type_program")
     );
     assert!(lower_source.contains("exceptions.support.emit_support_item"));
-    assert!(lower_source.contains("method_ctx.exceptions.method_plan"));
-    assert!(lower_source.contains("method_function_shell_with_facts_and_exception_plan"));
+    assert!(lower_source.contains(".method_exception_plan("));
+    assert!(lower_source.contains("method_function_shell_with_facts_exception_plan"));
     assert!(!exception_lowering_source.contains("RuntimeException"));
     assert!(!exception_lowering_source.contains("ExceptionKind"));
-    assert!(!exception_plan_source.contains("RuntimeException"));
     assert!(!exception_plan_source.contains("ExceptionKind"));
     assert!(!exception_plan_source.contains("method.throws"));
     assert!(!item_assembly_source.contains("method.throws"));
@@ -37674,16 +37674,12 @@ fn operator_lowering_owns_binary_and_unary_rust_spelling() {
     };
     let optional_value_shape = RustSlotShape::conservative(optional_java_type(nullable_value_ty));
     let mut equality_facts = FactSet::default();
-    equality_facts.method_effect_facts.push(MethodEffectFact {
-        method: FactMethodKey {
+    equality_facts
+        .source_equals_override_facts
+        .push(SourceEqualsOverrideFact {
             type_name: "NullableValue".to_string(),
-            method_name: "equals".to_string(),
-        },
-        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
-        return_nullability: NullabilityState::DefinitelyNonNull,
-        thrown: Vec::new(),
-        provenance: FactProvenance::ParsedSource,
-    });
+            provenance: FactProvenance::ParsedSource,
+        });
     assert_eq!(
         plan_equality_comparison_with_facts(
             &optional_value_shape,
@@ -37691,19 +37687,21 @@ fn operator_lowering_owns_binary_and_unary_rust_spelling() {
             &equality_facts,
         ),
         EqualityComparisonPlan::BothOptionalCustomEquals {
+            erased_arg_handle_path: None,
             method_name: "equals".to_string(),
         }
     );
     assert_eq!(
         lower_equality_comparison_expr(
             EqualityComparisonPlan::BothOptionalCustomEquals {
+                erased_arg_handle_path: None,
                 method_name: "equals".to_string(),
             },
             RustExpr::Var("left".to_string()),
             RustExpr::Var("right".to_string()),
         ),
         RustExpr::Raw(
-            "match (left, right) { (Some(left), Some(right)) => left.equals(right), (None, None) => true, _ => false }"
+            "match (left, right) { (Some(left), Some(right)) => left.equals(Box::new((*right).clone())), (None, None) => true, _ => false }"
                 .to_string(),
         )
     );
@@ -39933,7 +39931,7 @@ public class Caller {
 /// Java keeps apart. The fix needs object identity and is therefore blocked on
 /// [0002b](../claude_audits/0002b-shared-representation-design.md); until then
 /// the divergence is *reported*, which is the interim measure
-/// [0028](../claude_audits/0028-reference-equality-lowered-as-structural-equality.md)
+/// [0028](../claude_audits/done/0028-reference-equality-lowered-as-structural-equality.md)
 /// asks for.
 #[test]
 fn inherited_equals_on_a_source_class_is_reported_as_identity() {
@@ -39987,6 +39985,35 @@ public class Eq {
             .diagnostics
             .has_code("java_inherited_equals_identity"),
         "an overridden equals is correct and must not be reported:\n{:?}",
+        translation.diagnostics
+    );
+}
+
+#[test]
+fn an_overloaded_equals_is_still_reported_as_inherited_object_identity() {
+    let translation = translate_source(
+        r#"
+public class Eq {
+    static final class Key {
+        final int v;
+        Key(int v) { this.v = v; }
+        public boolean equals(Key other) { return other != null && other.v == v; }
+    }
+
+    public static boolean run() {
+        Key a = new Key(5);
+        Key b = new Key(5);
+        return a.equals(b);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .diagnostics
+            .has_code("java_inherited_equals_identity"),
+        "equals(Key) is an overload, so Object.equals is still inherited:\n{:?}",
         translation.diagnostics
     );
 }

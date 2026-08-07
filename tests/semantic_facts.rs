@@ -129,6 +129,38 @@ class Path {
 }
 
 #[test]
+fn source_equals_override_facts_require_object_parameter() {
+    let parsed = parse_java_source(
+        r#"
+class Eq {
+    static final class Key {
+        public boolean equals(Key other) { return true; }
+    }
+
+    static final class RealKey {
+        public boolean equals(Object other) { return true; }
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let semantic =
+        semantic_analysis::analyze_program(&resolved.program, &resolved.facts, &FactSet::default());
+
+    assert!(
+        semantic
+            .facts
+            .source_equals_override_for("RealKey")
+            .is_some(),
+        "equals(Object) must be recorded as the Object.equals override"
+    );
+    assert!(
+        semantic.facts.source_equals_override_for("Key").is_none(),
+        "equals(Key) is an overload, not an Object.equals override"
+    );
+}
+
+#[test]
 fn indexed_hierarchy_reachability_matches_legacy_worklist() {
     let mut facts = FactSet::default();
     facts

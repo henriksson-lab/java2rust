@@ -2,8 +2,8 @@ use crate::conversion_plan::ConversionDiagnostic;
 use crate::diagnostics::Severity;
 use crate::facts::FactSet;
 use crate::java_ir::{
-    BinaryOp, Block, CatchClause, Expr, JavaType, LambdaBody, Member, Program, Stmt, SwitchCase,
-    TypeDecl,
+    BinaryOp, Block, CatchClause, Expr, JavaType, LambdaBody, Member, MethodDecl, Program, Stmt,
+    SwitchCase, TypeDecl,
 };
 use crate::representation::RepresentationPlan;
 use crate::rewrite::{MethodControlFlowPlan, control_flow_rewrite_diagnostics};
@@ -98,7 +98,7 @@ fn collect_java_reference_identity_equality_diagnostics(
 /// as `a == b`. Lowering compares structurally either way, which answers `true`
 /// where Java says `false` — and in the wrong direction: a `HashMap` or a
 /// `contains` built on it **merges entries Java keeps apart**
-/// ([0028](../claude_audits/0028-reference-equality-lowered-as-structural-equality.md)).
+/// ([0028](../claude_audits/done/0028-reference-equality-lowered-as-structural-equality.md)).
 #[derive(Debug, Default)]
 struct SourceIdentityFacts {
     declared: std::collections::BTreeSet<String>,
@@ -124,7 +124,7 @@ impl SourceIdentityFacts {
         }
         for member in &ty.members {
             match member {
-                Member::Method(method) if method.name == "equals" && method.params.len() == 1 => {
+                Member::Method(method) if method_overrides_object_equals(method) => {
                     self.declares_equals.insert(simple.clone());
                 }
                 Member::Type(nested) => self.collect_type(nested),
@@ -159,6 +159,12 @@ impl SourceIdentityFacts {
 
 fn simple_type_name(name: &str) -> &str {
     name.rsplit('.').next().unwrap_or(name)
+}
+
+fn method_overrides_object_equals(method: &MethodDecl) -> bool {
+    method.name == "equals"
+        && method.params.len() == 1
+        && matches!(&method.params[0].ty, JavaType::Named { name, args } if args.is_empty() && simple_type_name(name) == "Object")
 }
 
 fn collect_type_reference_identity_equality_diagnostics(

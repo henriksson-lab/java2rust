@@ -26,8 +26,44 @@ pub enum EqualityComparisonPlan {
     },
     LeftSharedBorrowRightOwned,
     LeftOwnedRightSharedBorrow,
+    /// Java reference identity on a type stored behind a shared handle
+    /// ([0028](../claude_audits/done/0028-reference-equality-lowered-as-structural-equality.md)).
+    ///
+    /// `==` on `Rc<T>` is *structural* — `Rc`'s `PartialEq` delegates to `T` —
+    /// so two distinct objects with equal fields compared equal where Java says
+    /// they differ. `ptr_eq` asks the question Java asks.
+    ///
+    /// `handle_path` rather than a hardcoded `Rc`: a type reachable from a Java
+    /// `static` is stored in an `Arc`, and the placement already decides which.
+    /// The `*_borrowed` flags say whether an operand is already a reference, so
+    /// `ptr_eq` gets `&Rc<T>` either way; swapping them is what makes this arm
+    /// its own mirror.
+    SharedHandleIdentity {
+        handle_path: String,
+        left_borrowed: bool,
+        right_borrowed: bool,
+    },
+    /// Identity where one side may be null. Java's `null == null` is `true`, and
+    /// a null never equals a live reference.
+    LeftOptionalSharedHandleIdentity {
+        handle_path: String,
+        right_borrowed: bool,
+    },
+    RightOptionalSharedHandleIdentity {
+        handle_path: String,
+        left_borrowed: bool,
+    },
+    BothOptionalSharedHandleIdentity {
+        handle_path: String,
+    },
+    CustomEquals {
+        method_name: String,
+        right_borrowed: bool,
+        erased_arg_handle_path: Option<String>,
+    },
     BothOptionalCustomEquals {
         method_name: String,
+        erased_arg_handle_path: Option<String>,
     },
 }
 
@@ -366,6 +402,32 @@ impl EqualityComparisonPlan {
                     left_view: right_view,
                 }
             }
+            EqualityComparisonPlan::SharedHandleIdentity {
+                handle_path,
+                left_borrowed,
+                right_borrowed,
+            } => EqualityComparisonPlan::SharedHandleIdentity {
+                handle_path,
+                left_borrowed: right_borrowed,
+                right_borrowed: left_borrowed,
+            },
+            EqualityComparisonPlan::LeftOptionalSharedHandleIdentity {
+                handle_path,
+                right_borrowed,
+            } => EqualityComparisonPlan::RightOptionalSharedHandleIdentity {
+                handle_path,
+                left_borrowed: right_borrowed,
+            },
+            EqualityComparisonPlan::RightOptionalSharedHandleIdentity {
+                handle_path,
+                left_borrowed,
+            } => EqualityComparisonPlan::LeftOptionalSharedHandleIdentity {
+                handle_path,
+                right_borrowed: left_borrowed,
+            },
+            EqualityComparisonPlan::BothOptionalSharedHandleIdentity { handle_path } => {
+                EqualityComparisonPlan::BothOptionalSharedHandleIdentity { handle_path }
+            }
             EqualityComparisonPlan::LeftSharedBorrowRightOwned => {
                 EqualityComparisonPlan::LeftOwnedRightSharedBorrow
             }
@@ -375,9 +437,29 @@ impl EqualityComparisonPlan {
             // Symmetric in themselves.
             same @ (EqualityComparisonPlan::Direct
             | EqualityComparisonPlan::BothOptionalByRef
+            | EqualityComparisonPlan::CustomEquals { .. }
             | EqualityComparisonPlan::BothOptionalCustomEquals { .. }) => same,
         }
     }
+}
+
+/// Which Java comparison is being lowered.
+///
+/// Java's two equality operators disagree on a source object, and the
+/// disagreement is exactly what 0028 is about:
+///
+///   - `==` is **reference identity**, whatever `equals` says;
+///   - `.equals()` is the override if there is one, and identity if there is not.
+///
+/// Most overridden `.equals()` calls never reach this planner — the call plan
+/// routes them to the source method. Optional receivers do arrive here, because
+/// they need the null-safe wrapper, and there the two must not be conflated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EqualityComparisonSource {
+    /// `a == b` / `a != b`.
+    ReferenceOperator,
+    /// `a.equals(b)` or `Objects.equals(a, b)`.
+    EqualsCall,
 }
 
 pub fn plan_equality_comparison(
@@ -392,6 +474,20 @@ pub fn plan_equality_comparison_with_facts(
     right: &RustSlotShape,
     facts: &FactSet,
 ) -> EqualityComparisonPlan {
+    plan_equality_comparison_for_source(
+        left,
+        right,
+        facts,
+        EqualityComparisonSource::ReferenceOperator,
+    )
+}
+
+pub fn plan_equality_comparison_for_source(
+    left: &RustSlotShape,
+    right: &RustSlotShape,
+    facts: &FactSet,
+    source: EqualityComparisonSource,
+) -> EqualityComparisonPlan {
     // Java `==` is symmetric, so decide for one operand order and mirror the
     // answer for the other. Before this the planner carried a `Right*` arm for
     // every `Left*` arm — three hand-written mirror pairs, each of which had to
@@ -402,9 +498,9 @@ pub fn plan_equality_comparison_with_facts(
     // because canonicalisation only guarantees it if the ordering is total and
     // `mirrored` is a true involution.
     if equality_operand_rank(right) < equality_operand_rank(left) {
-        return plan_canonical_equality_comparison(right, left, facts).mirrored();
+        return plan_canonical_equality_comparison(right, left, facts, source).mirrored();
     }
-    plan_canonical_equality_comparison(left, right, facts)
+    plan_canonical_equality_comparison(left, right, facts, source)
 }
 
 /// A total order that puts the operand needing an adapter on the left.
@@ -421,6 +517,7 @@ fn plan_canonical_equality_comparison(
     left: &RustSlotShape,
     right: &RustSlotShape,
     facts: &FactSet,
+    source: EqualityComparisonSource,
 ) -> EqualityComparisonPlan {
     if left.optional_element_type().is_none()
         && right.optional_element_type().is_none()
@@ -432,10 +529,51 @@ fn plan_canonical_equality_comparison(
             right_view: string_equality_operand_view(right),
         };
     }
+    if let Some(handle_path) = shared_handle_identity_path(left, right, facts, source) {
+        return match (
+            left.optional_element_type().is_some(),
+            right.optional_element_type().is_some(),
+        ) {
+            (true, true) => {
+                EqualityComparisonPlan::BothOptionalSharedHandleIdentity { handle_path }
+            }
+            (true, false) => EqualityComparisonPlan::LeftOptionalSharedHandleIdentity {
+                handle_path,
+                right_borrowed: right.ownership == OwnershipShape::SharedBorrow,
+            },
+            (false, true) => EqualityComparisonPlan::RightOptionalSharedHandleIdentity {
+                handle_path,
+                left_borrowed: left.ownership == OwnershipShape::SharedBorrow,
+            },
+            (false, false) => EqualityComparisonPlan::SharedHandleIdentity {
+                handle_path,
+                left_borrowed: left.ownership == OwnershipShape::SharedBorrow,
+                right_borrowed: right.ownership == OwnershipShape::SharedBorrow,
+            },
+        };
+    }
+    if source == EqualityComparisonSource::EqualsCall
+        && left.optional_element_type().is_none()
+        && right.optional_element_type().is_none()
+        && left.java_ty == right.java_ty
+        && let Some(method_name) = custom_equals_method(&left.java_ty, facts)
+    {
+        return EqualityComparisonPlan::CustomEquals {
+            method_name,
+            right_borrowed: right.ownership == OwnershipShape::SharedBorrow,
+            erased_arg_handle_path: custom_equals_erased_arg_handle_path(&left.java_ty, facts),
+        };
+    }
     match (left.optional_element_type(), right.optional_element_type()) {
         (Some(left_element), Some(right_element)) if left_element == right_element => {
             if let Some(method_name) = custom_equals_method(&left_element, facts) {
-                return EqualityComparisonPlan::BothOptionalCustomEquals { method_name };
+                return EqualityComparisonPlan::BothOptionalCustomEquals {
+                    erased_arg_handle_path: custom_equals_erased_arg_handle_path(
+                        &left_element,
+                        facts,
+                    ),
+                    method_name,
+                };
             }
             EqualityComparisonPlan::BothOptionalByRef
         }
@@ -483,13 +621,100 @@ fn is_borrowed_string_view(shape: &RustSlotShape) -> bool {
     shape_is_borrowed_string_content(shape)
 }
 
+/// The handle path to compare with `ptr_eq`, when both operands are the same
+/// source type stored behind one.
+///
+/// For `==`, this is deliberately not conditioned on whether the type overrides
+/// `equals`: Java reference equality ignores the override. For `.equals()` and
+/// `Objects.equals`, a custom override suppresses identity and the planner emits
+/// a call instead.
+fn shared_handle_identity_path(
+    left: &RustSlotShape,
+    right: &RustSlotShape,
+    facts: &FactSet,
+    source: EqualityComparisonSource,
+) -> Option<String> {
+    // An optional operand is a nullable Java reference; identity still applies,
+    // so compare the *element* types on each side.
+    let left_ty = left
+        .optional_element_type()
+        .unwrap_or_else(|| left.java_ty.clone());
+    let right_ty = right
+        .optional_element_type()
+        .unwrap_or_else(|| right.java_ty.clone());
+    if left_ty != right_ty {
+        return None;
+    }
+    let JavaType::Named { name, .. } = &left_ty else {
+        return None;
+    };
+    // `.equals()` on a type that overrides it is the override, not identity.
+    // `==` ignores the override entirely, which is why this is asked only for
+    // the call.
+    if source == EqualityComparisonSource::EqualsCall
+        && custom_equals_method(&left_ty, facts).is_some()
+    {
+        return None;
+    }
+    let placement = facts.storage_placement_for(name);
+    if !placement.shared || !placement.is_implemented() {
+        return None;
+    }
+    placement.handle_path().map(str::to_string)
+}
+
+/// Renders an operand as `&Rc<T>`, which is what `ptr_eq` takes.
+fn borrowed_handle_operand(expr: &RustExpr, already_borrowed: bool) -> String {
+    let rendered = crate::emit::emit_expr(expr);
+    if already_borrowed {
+        rendered
+    } else {
+        format!("&{rendered}")
+    }
+}
+
+fn erased_custom_equals_arg(expr: &RustExpr, borrowed: bool, handle_path: Option<&str>) -> String {
+    let rendered = crate::emit::emit_expr(expr);
+    if let Some(handle_path) = handle_path {
+        if borrowed {
+            return format!("Box::new({handle_path}::new((*({rendered})).clone()))");
+        }
+        return format!("Box::new(({rendered}).clone())");
+    }
+    if borrowed {
+        format!("Box::new((*({rendered})).clone())")
+    } else {
+        format!("Box::new(({rendered}).clone())")
+    }
+}
+
+fn erased_optional_custom_equals_arg(handle_path: Option<&str>) -> String {
+    if let Some(handle_path) = handle_path {
+        format!("Box::new({handle_path}::new((*right).clone()))")
+    } else {
+        "Box::new((*right).clone())".to_string()
+    }
+}
+
 fn custom_equals_method(java_ty: &JavaType, facts: &FactSet) -> Option<String> {
     let JavaType::Named { name, .. } = java_ty else {
         return None;
     };
     facts
-        .method_effect_for(name, "equals")
+        .source_equals_override_for(name)
         .map(|_| "equals".to_string())
+}
+
+fn custom_equals_erased_arg_handle_path(java_ty: &JavaType, facts: &FactSet) -> Option<String> {
+    let JavaType::Named { name, .. } = java_ty else {
+        return None;
+    };
+    let placement = facts.storage_placement_for(name);
+    if placement.shared && placement.is_implemented() {
+        placement.handle_path().map(str::to_string)
+    } else {
+        None
+    }
 }
 
 pub fn lower_equality_comparison_expr(
@@ -550,6 +775,75 @@ pub fn lower_equality_comparison_expr_for_op(
             crate::emit::emit_expr(&left),
             crate::emit::emit_expr(&option_as_string_view(right, right_view))
         )),
+        EqualityComparisonPlan::SharedHandleIdentity {
+            handle_path,
+            left_borrowed,
+            right_borrowed,
+        } => {
+            let call = format!(
+                "{handle_path}::ptr_eq({}, {})",
+                borrowed_handle_operand(&left, left_borrowed),
+                borrowed_handle_operand(&right, right_borrowed)
+            );
+            RustExpr::Raw(if op == "!=" { format!("!{call}") } else { call })
+        }
+        EqualityComparisonPlan::LeftOptionalSharedHandleIdentity {
+            handle_path,
+            right_borrowed,
+        } => {
+            let other = borrowed_handle_operand(&right, right_borrowed);
+            let call = format!(
+                "{}.as_ref().is_some_and(|value| {handle_path}::ptr_eq(value, {other}))",
+                crate::emit::emit_expr(&left)
+            );
+            RustExpr::Raw(if op == "!=" {
+                format!("!({call})")
+            } else {
+                call
+            })
+        }
+        EqualityComparisonPlan::RightOptionalSharedHandleIdentity {
+            handle_path,
+            left_borrowed,
+        } => {
+            let other = borrowed_handle_operand(&left, left_borrowed);
+            let call = format!(
+                "{}.as_ref().is_some_and(|value| {handle_path}::ptr_eq(value, {other}))",
+                crate::emit::emit_expr(&right)
+            );
+            RustExpr::Raw(if op == "!=" {
+                format!("!({call})")
+            } else {
+                call
+            })
+        }
+        EqualityComparisonPlan::BothOptionalSharedHandleIdentity { handle_path } => {
+            // `null == null` is `true` in Java, and a null never equals a live
+            // reference -- so this is not `Option::eq`, which would compare the
+            // pointees structurally.
+            let call = format!(
+                "match ({}.as_ref(), {}.as_ref()) {{ (Some(left), Some(right)) => {handle_path}::ptr_eq(left, right), (None, None) => true, _ => false }}",
+                crate::emit::emit_expr(&left),
+                crate::emit::emit_expr(&right)
+            );
+            RustExpr::Raw(if op == "!=" {
+                format!("!({call})")
+            } else {
+                call
+            })
+        }
+        EqualityComparisonPlan::CustomEquals {
+            method_name,
+            right_borrowed,
+            erased_arg_handle_path,
+        } => {
+            let call = format!(
+                "{}.{method_name}({})",
+                crate::emit::emit_expr(&left),
+                erased_custom_equals_arg(&right, right_borrowed, erased_arg_handle_path.as_deref())
+            );
+            RustExpr::Raw(if op == "!=" { format!("!{call}") } else { call })
+        }
         EqualityComparisonPlan::LeftSharedBorrowRightOwned => RustExpr::Raw(format!(
             "({} {op} &{})",
             crate::emit::emit_expr(&left),
@@ -560,13 +854,17 @@ pub fn lower_equality_comparison_expr_for_op(
             crate::emit::emit_expr(&left),
             crate::emit::emit_expr(&right)
         )),
-        EqualityComparisonPlan::BothOptionalCustomEquals { method_name } => {
+        EqualityComparisonPlan::BothOptionalCustomEquals {
+            method_name,
+            erased_arg_handle_path,
+        } => {
             let true_expr = matches!(op, "==");
             let false_expr = !true_expr;
+            let right_arg = erased_optional_custom_equals_arg(erased_arg_handle_path.as_deref());
             let some_expr = if true_expr {
-                format!("left.{method_name}(right)")
+                format!("left.{method_name}({right_arg})")
             } else {
-                format!("!left.{method_name}(right)")
+                format!("!left.{method_name}({right_arg})")
             };
             RustExpr::Raw(format!(
                 "match ({}, {}) {{ (Some(left), Some(right)) => {some_expr}, (None, None) => {true_expr}, _ => {false_expr} }}",
@@ -741,6 +1039,7 @@ mod equality_symmetry_tests {
         let rendered = lower_equality_comparison_expr_for_op(
             BinaryOp::Ne,
             EqualityComparisonPlan::BothOptionalCustomEquals {
+                erased_arg_handle_path: None,
                 method_name: "equals".to_string(),
             },
             RustExpr::Var("left_value".to_string()),
@@ -749,7 +1048,212 @@ mod equality_symmetry_tests {
 
         assert_eq!(
             crate::emit::emit_expr(&rendered),
-            "match (left_value, right_value) { (Some(left), Some(right)) => !left.equals(right), (None, None) => false, _ => true }"
+            "match (left_value, right_value) { (Some(left), Some(right)) => !left.equals(Box::new((*right).clone())), (None, None) => false, _ => true }"
         );
+    }
+}
+
+#[cfg(test)]
+mod shared_handle_identity_tests {
+    use super::*;
+    use crate::facts::{FactProvenance, SourceEqualsOverrideFact};
+    use crate::java_ir::JavaType;
+    use crate::slot_shape::{DispatchShape, MutabilityShape, OwnershipShape, ViewShape};
+    use crate::storage_strategy::{Escape, StoragePlan, TypeStorageFacts};
+
+    fn shared_node_facts() -> FactSet {
+        shared_node_facts_with_static_reachability(false)
+    }
+
+    fn shared_node_facts_with_static_reachability(static_reachable: bool) -> FactSet {
+        let mut plan = StoragePlan::default();
+        plan.insert(
+            "Node".to_string(),
+            TypeStorageFacts {
+                escape: Escape::Stored,
+                locally_aliased: true,
+                mutated: false,
+                mutation_provably_absent: true,
+                threaded: false,
+                static_reachable,
+                surface_forwardable: true,
+            },
+        );
+        FactSet {
+            storage_strategies: plan,
+            ..FactSet::default()
+        }
+    }
+
+    fn shared_node_facts_with_custom_equals() -> FactSet {
+        let mut facts = shared_node_facts();
+        facts
+            .source_equals_override_facts
+            .push(SourceEqualsOverrideFact {
+                type_name: "Node".to_string(),
+                provenance: FactProvenance::ParsedSource,
+            });
+        facts
+    }
+
+    fn node(ownership: OwnershipShape, optional: bool) -> RustSlotShape {
+        let java_ty = if optional {
+            JavaType::Named {
+                name: "Optional".to_string(),
+                args: vec![JavaType::Named {
+                    name: "Node".to_string(),
+                    args: Vec::new(),
+                }],
+            }
+        } else {
+            JavaType::Named {
+                name: "Node".to_string(),
+                args: Vec::new(),
+            }
+        };
+        RustSlotShape {
+            type_identity: crate::slot_shape::TypeIdentity::from_java_type(java_ty.clone()),
+            java_ty,
+            ownership,
+            view: ViewShape::Native,
+            dispatch: DispatchShape::Concrete,
+            mutability: MutabilityShape::Immutable,
+        }
+    }
+
+    fn render(plan: EqualityComparisonPlan, op: BinaryOp) -> String {
+        crate::emit::emit_expr(&lower_equality_comparison_expr_for_op(
+            op,
+            plan,
+            RustExpr::Var("a".to_string()),
+            RustExpr::Var("b".to_string()),
+        ))
+    }
+
+    /// `==` on `Rc<T>` is structural -- `Rc`'s `PartialEq` delegates to `T` --
+    /// so two distinct objects with equal fields compared equal where Java says
+    /// they differ. See claude_audits/0028.
+    #[test]
+    fn reference_equality_on_a_shared_type_is_pointer_identity() {
+        let facts = shared_node_facts();
+        let owned = node(OwnershipShape::Owned, false);
+        let plan = plan_equality_comparison_with_facts(&owned, &owned, &facts);
+        assert_eq!(render(plan, BinaryOp::Eq), "std::rc::Rc::ptr_eq(&a, &b)");
+    }
+
+    #[test]
+    fn reference_inequality_negates_the_identity_test() {
+        let facts = shared_node_facts();
+        let owned = node(OwnershipShape::Owned, false);
+        let plan = plan_equality_comparison_with_facts(&owned, &owned, &facts);
+        assert_eq!(render(plan, BinaryOp::Ne), "!std::rc::Rc::ptr_eq(&a, &b)");
+    }
+
+    #[test]
+    fn static_reachable_shared_identity_uses_arc_ptr_eq() {
+        let facts = shared_node_facts_with_static_reachability(true);
+        let owned = node(OwnershipShape::Owned, false);
+        let plan = plan_equality_comparison_with_facts(&owned, &owned, &facts);
+        assert_eq!(render(plan, BinaryOp::Eq), "std::sync::Arc::ptr_eq(&a, &b)");
+    }
+
+    #[test]
+    fn equals_call_on_custom_equals_type_calls_the_override() {
+        let facts = shared_node_facts_with_custom_equals();
+        let owned = node(OwnershipShape::Owned, false);
+        let plan = plan_equality_comparison_for_source(
+            &owned,
+            &owned,
+            &facts,
+            EqualityComparisonSource::EqualsCall,
+        );
+        assert_eq!(
+            plan,
+            EqualityComparisonPlan::CustomEquals {
+                method_name: "equals".to_string(),
+                right_borrowed: false,
+                erased_arg_handle_path: Some("std::rc::Rc".to_string()),
+            }
+        );
+        assert_eq!(
+            render(plan, BinaryOp::Eq),
+            "a.equals(Box::new((b).clone()))"
+        );
+    }
+
+    #[test]
+    fn reference_operator_ignores_custom_equals_override() {
+        let facts = shared_node_facts_with_custom_equals();
+        let owned = node(OwnershipShape::Owned, false);
+        let plan = plan_equality_comparison_with_facts(&owned, &owned, &facts);
+        assert_eq!(render(plan, BinaryOp::Eq), "std::rc::Rc::ptr_eq(&a, &b)");
+    }
+
+    /// An operand that is already a reference must not be borrowed twice.
+    #[test]
+    fn a_borrowed_operand_is_not_borrowed_again() {
+        let facts = shared_node_facts();
+        let plan = plan_equality_comparison_with_facts(
+            &node(OwnershipShape::SharedBorrow, false),
+            &node(OwnershipShape::Owned, false),
+            &facts,
+        );
+        assert_eq!(render(plan, BinaryOp::Eq), "std::rc::Rc::ptr_eq(a, &b)");
+    }
+
+    /// Java's `null == null` is `true`, and a null never equals a live
+    /// reference -- so this cannot be `Option::eq`, which compares the pointees.
+    #[test]
+    fn both_nullable_compares_identity_and_treats_two_nulls_as_equal() {
+        let facts = shared_node_facts();
+        let optional = node(OwnershipShape::Owned, true);
+        let plan = plan_equality_comparison_with_facts(&optional, &optional, &facts);
+        assert_eq!(
+            render(plan, BinaryOp::Eq),
+            "match (a.as_ref(), b.as_ref()) { (Some(left), Some(right)) => std::rc::Rc::ptr_eq(left, right), (None, None) => true, _ => false }"
+        );
+    }
+
+    #[test]
+    fn one_nullable_side_compares_identity_through_the_option() {
+        let facts = shared_node_facts();
+        let plan = plan_equality_comparison_with_facts(
+            &node(OwnershipShape::Owned, true),
+            &node(OwnershipShape::Owned, false),
+            &facts,
+        );
+        assert_eq!(
+            render(plan, BinaryOp::Eq),
+            "a.as_ref().is_some_and(|value| std::rc::Rc::ptr_eq(value, &b))"
+        );
+    }
+
+    /// A type that is *not* shared has no pointer to compare, so it keeps
+    /// structural equality -- the scope line 0002b draws.
+    #[test]
+    fn an_unshared_type_keeps_structural_equality() {
+        let owned = node(OwnershipShape::Owned, false);
+        let plan = plan_equality_comparison_with_facts(&owned, &owned, &FactSet::default());
+        assert_eq!(plan, EqualityComparisonPlan::Direct);
+    }
+
+    /// The involution still holds with the identity arms in play: swapping the
+    /// operands and mirroring must be the identity function.
+    #[test]
+    fn identity_planning_is_symmetric_under_operand_swap() {
+        let facts = shared_node_facts();
+        let shapes = [
+            node(OwnershipShape::Owned, false),
+            node(OwnershipShape::SharedBorrow, false),
+            node(OwnershipShape::Owned, true),
+        ];
+        for left in &shapes {
+            for right in &shapes {
+                let direct = plan_equality_comparison_with_facts(left, right, &facts);
+                let swapped = plan_equality_comparison_with_facts(right, left, &facts).mirrored();
+                assert_eq!(direct, swapped, "{left:?} vs {right:?}");
+                assert_eq!(direct.clone().mirrored().mirrored(), direct);
+            }
+        }
     }
 }

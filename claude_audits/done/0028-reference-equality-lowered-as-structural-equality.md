@@ -39,14 +39,14 @@ return a == b;                 // derived PartialEq -> field comparison
 
 Two distinct objects with equal fields compare equal, and `!=` inverts to the
 wrong answer. Compiles cleanly, so invisible to corpus error counts
-([0018](0018-the-compile-error-metric-cannot-see-silent-failures.md)).
+([0018](../0018-the-compile-error-metric-cannot-see-silent-failures.md)).
 
 ## Root cause
 
 `==` on a reference type is lowered to Rust `==`, which resolves to the derived
 `PartialEq`. There is no notion of object identity, because there is no object
 identity to have: values are represented inline
-([0002](0002-object-aliasing-has-no-representation.md)), so two variables holding
+([0002](../0002-object-aliasing-has-no-representation.md)), so two variables holding
 "the same object" are two copies with equal fields — indistinguishable from two
 distinct objects that happen to be equal.
 
@@ -56,7 +56,7 @@ answers are right by coincidence, from the same underlying error.
 ## Fix requires the shared representation
 
 Pointer equality is not expressible until objects have identity. Once
-[0002](0002-object-aliasing-has-no-representation.md)'s shared representation
+[0002](../0002-object-aliasing-has-no-representation.md)'s shared representation
 exists (`Rc`/`Arc`), `==` on references lowers to a pointer comparison:
 
 ```rust
@@ -116,7 +116,7 @@ String s = new String("x");                s == "x" // Java false; documented di
 ## Update 2026-08-05 — the `.equals()` half has a reproducer, and this issue is now on the critical path
 
 Two things found while probing
-[0002b](0002b-shared-representation-design.md)'s step-3 sequencing.
+[0002b](../0002b-shared-representation-design.md)'s step-3 sequencing.
 
 ### 1. `.equals()` diverges for the same reason, and it was undesigned
 
@@ -145,8 +145,9 @@ Note the direction of the error: it answers `true` where Java says `false`, so a
 `HashMap`/`contains`/dedup built on `.equals()` **merges entries Java keeps
 apart**. That is data loss, not just a wrong boolean.
 
-Pinned by `tests/differential/known-gaps/Identity.java`, which covers `==` and
-`.equals()`, both the true-identity and distinct-object cases.
+Originally pinned by `tests/differential/known-gaps/Identity.java`; after this
+fix it is promoted to `tests/differential/Identity.java`. The fixture covers
+`==` and `.equals()`, both the true-identity and distinct-object cases.
 
 **The interim measure is now applied to this half too.** This file argues that
 an audit warning at every reference-identity comparison is "worth doing
@@ -176,6 +177,82 @@ Which makes the dependency mutual:
 - 0028 is **unimplementable** without the shared representation;
 - 0002b step 3 is **untestable** without 0028.
 
-They are one change, and `known-gaps/Identity.java` is its acceptance test —
-failing on two of four cases today, passing when both land. Recorded in 0002b
-as a correction to its sequencing.
+They were one change, and the now-promoted `tests/differential/Identity.java`
+is the acceptance test. Before the handle representation and identity lowering
+landed together, it failed on two of four cases; it now passes. Recorded in
+0002b as a correction to its sequencing.
+
+---
+
+## Update 2026-08-07 — implemented
+
+Reference identity is lowered. `scripts/gate.sh --all` is at baseline on all 18
+targets, and both acceptance fixtures pass against the Java oracle:
+
+- `tests/differential/Identity.java` — **promoted out of `known-gaps/`**, prints
+  `5,true,false,false` on both sides.
+- `tests/differential/IdentityCustomEquals.java` — new, prints
+  `true,false,true,false,true` on both sides.
+
+```rust
+std::rc::Rc::ptr_eq(&a, &b)                                        // a == b
+holder.kept.as_ref().is_some_and(|value| Rc::ptr_eq(value, &c))    // nullable == live
+match (a.as_ref(), b.as_ref()) {                                   // both nullable
+    (Some(left), Some(right)) => Rc::ptr_eq(left, right),
+    (None, None) => true,                                          // Java: null == null
+    _ => false,
+}
+```
+
+### The mutual dependency above is discharged
+
+The section before this called 0028 and 0002b "one change": 0028 unimplementable
+without the representation, 0002b step 3 untestable without 0028. 0002b landed
+first, so this pass was purely the operator — and `Identity.java` then validated
+*both*, exactly as predicted.
+
+### Where it lives, and why not where the plan said
+
+Not `src/lower.rs`. The decision is `plan_equality_comparison_for_source` in
+`src/operator_lowering.rs`, which already canonicalises operand order and mirrors
+the result so an asymmetric arm has nowhere to be written. The identity arms go
+through that same path; `identity_planning_is_symmetric_under_operand_swap`
+asserts the involution over the new arms specifically.
+
+`handle_path()` supplies `std::rc::Rc` or `std::sync::Arc` from the placement, so
+a type reachable from a Java `static` compares with `Arc::ptr_eq` without the
+lowering knowing which.
+
+### The two operators had to be told apart after all
+
+Java's `==` is reference identity *whatever* `equals` says; `.equals()` is the
+override when there is one. Mostly this needs no attention — the call plan routes
+an overridden `.equals()` to the source method, so it never reaches this planner.
+**Optional receivers are the exception**: they arrive here for the null-safe
+wrapper, which is what `BothOptionalCustomEquals` already existed for. Planning
+identity unconditionally broke
+`nullable_custom_equals_method_uses_null_safe_custom_equals`, correctly.
+
+Hence `EqualityComparisonSource::{ReferenceOperator, EqualsCall}`. The custom-
+`equals` question is asked only for the call, never for `==`.
+
+### Two pre-existing defects the new fixture exposed
+
+Neither is about identity; both were invisible until a fixture overrode `equals`,
+which is what forces an erased `Object` parameter through a cast.
+
+- **`error[E0614]: type i32 cannot be dereferenced`.** The erased-object downcast
+  rendered `*x.downcast::<T>().expect(..)`, and `.` binds tighter than unary `*`,
+  so an appended field access made it a deref of the *field*. Now parenthesised.
+- **The runtime type test named a type the carrier never stores.** With a shared
+  element the carrier holds `Rc<T>`, and the downcast already asked for `Rc<T>`,
+  but `instanceof` still asked `is::<T>()` — always false, so the guard silently
+  rejected every value and `equals` always returned `false`. Both now go through
+  `erased_runtime_target_type`.
+
+### Still structural, deliberately
+
+Primitives, `String`, enums, an overridden `.equals()`, and any type that is not
+shared. A type with no aliases has no pointer to compare; `an_unshared_type_keeps_structural_equality`
+pins that boundary. `SharedLocal`/`SharedSync` remain off, so nothing here
+touches the `RefCell`/`Mutex` rungs.

@@ -32,7 +32,7 @@
  * lowering (`Rc::ptr_eq`), which is what makes this file pass.
  *
  * See claude_audits/0002b-shared-representation-design.md and
- * claude_audits/0028-reference-equality-lowered-as-structural-equality.md.
+ * claude_audits/done/0028-reference-equality-lowered-as-structural-equality.md.
  */
 public class Identity {
     static final class Key {

@@ -90,6 +90,7 @@ pub fn analyze_program_with_config(
 
     collect_builtin_external_representation_facts(&mut facts, config.enable_builtin_external_packs);
     collect_trivial_accessor_facts(program, &mut facts);
+    collect_source_equals_override_facts(program, &mut facts);
     if config.enable_external_api_guesses {
         collect_java_platform_api_argument_effect_facts(&mut facts);
         collect_builtin_external_api_argument_effect_facts(
@@ -2225,6 +2226,41 @@ fn collect_method_effect_facts(program: &Program, usage: &UsageFacts, facts: &mu
     for ty in &program.types {
         collect_type_method_effect_facts(ty, usage, facts);
     }
+}
+
+fn collect_source_equals_override_facts(program: &Program, facts: &mut FactSet) {
+    for ty in &program.types {
+        collect_type_source_equals_override_facts(ty, facts);
+    }
+}
+
+fn collect_type_source_equals_override_facts(ty: &TypeDecl, facts: &mut FactSet) {
+    for member in &ty.members {
+        match member {
+            Member::Method(method) if method_overrides_object_equals(method) => {
+                facts
+                    .source_equals_override_facts
+                    .push(crate::facts::SourceEqualsOverrideFact {
+                        type_name: simple_type_name(&ty.name).to_string(),
+                        provenance: FactProvenance::ParsedSource,
+                    });
+            }
+            Member::Type(nested) => collect_type_source_equals_override_facts(nested, facts),
+            _ => {}
+        }
+    }
+}
+
+fn method_overrides_object_equals(method: &MethodDecl) -> bool {
+    method.name == "equals" && method.params.len() == 1 && java_type_is_object(&method.params[0].ty)
+}
+
+fn java_type_is_object(ty: &JavaType) -> bool {
+    matches!(ty, JavaType::Named { name, args } if args.is_empty() && name.rsplit('.').next() == Some("Object"))
+}
+
+fn simple_type_name(name: &str) -> &str {
+    name.rsplit('.').next().unwrap_or(name)
 }
 
 fn propagate_source_call_thrown_effects(program: &Program, facts: &mut FactSet) {

@@ -2729,6 +2729,26 @@ pub fn instanceof_target_policy(target: &RustSlotShape, facts: &FactSet) -> Inst
     }
 }
 
+/// The type an erased carrier actually stores for `target`.
+///
+/// A shared source type is boxed as its handle, so both the runtime type test
+/// and the downcast have to name `Rc<T>`/`Arc<T>` rather than `T`.
+fn erased_runtime_target_type(
+    target: &RustSlotShape,
+    target_type: String,
+    facts: &FactSet,
+) -> String {
+    let JavaType::Named { name, .. } = &target.java_ty else {
+        return target_type;
+    };
+    let placement = facts.storage_placement_for(name);
+    if placement.shared && placement.is_implemented() {
+        placement.wrap(target_type)
+    } else {
+        target_type
+    }
+}
+
 pub fn plan_instanceof_check_with_facts(
     actual: &RustSlotShape,
     target: &RustSlotShape,
@@ -2777,7 +2797,9 @@ pub fn plan_instanceof_check_with_facts(
         {
             match runtime_type_target_policy(&target.java_ty) {
                 RuntimeTypeTargetPolicy::Nominal { target_type } => {
-                    return InstanceOfCheck::OptionalErasedObjectType { target_type };
+                    return InstanceOfCheck::OptionalErasedObjectType {
+                        target_type: erased_runtime_target_type(target, target_type, facts),
+                    };
                 }
                 RuntimeTypeTargetPolicy::MissingNominalTarget { java_ty } => {
                     return unsupported_instanceof_check(
@@ -2838,7 +2860,13 @@ pub fn plan_instanceof_check_with_facts(
         (DispatchShape::ErasedObject, DispatchShape::Concrete) => {
             match runtime_type_target_policy(&target.java_ty) {
                 RuntimeTypeTargetPolicy::Nominal { target_type } => {
-                    return InstanceOfCheck::ErasedObjectType { target_type };
+                    // The same handle the *downcast* asks for. An erased carrier
+                    // holding a shared type stores `Rc<T>`, so `is::<T>()` is
+                    // always false and the guard silently rejects every value --
+                    // the two must name one type. See claude_audits/0002b.
+                    return InstanceOfCheck::ErasedObjectType {
+                        target_type: erased_runtime_target_type(target, target_type, facts),
+                    };
                 }
                 RuntimeTypeTargetPolicy::MissingNominalTarget { java_ty } => {
                     return unsupported_instanceof_check(
