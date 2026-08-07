@@ -1049,7 +1049,7 @@ fn lower_type(
     for item in source_external_supertype_conversion_impls_for_type(ty, ctx) {
         file.items.push(raw_item(item));
     }
-    if let Some(item) = source_hierarchy_carrier_item_for_type(ctx.representations, ty) {
+    if let Some(item) = source_hierarchy_carrier_item_for_type(ctx.representations, ty, ctx.facts) {
         file.items.push(raw_item(item));
     }
 }
@@ -1517,7 +1517,13 @@ fn static_storage_accessors_for_field(
     let getter_name = format!("__static_{}", crate::parser::to_snake_case(&field.name));
     let setter_name = format!("__set_static_{}", crate::parser::to_snake_case(&field.name));
     let storage_name = static_storage_symbol_name(ty, &field.name);
-    let initial = static_storage_initial_value_expr(ty, field, &shape, ctx);
+    // The accessor's return type is handle-wrapped, so its initial value must be
+    // too. A static field initializer is a fresh construction (0002b).
+    let initial = crate::slot_render::shared_handle_construction_expr(
+        &shape,
+        &crate::effective_facts::EffectiveFacts::new(ctx.facts),
+        static_storage_initial_value_expr(ty, field, &shape, ctx),
+    );
     vec![
         RustFunction {
             name: getter_name,
@@ -1995,6 +2001,7 @@ fn source_supertype_conversion_impls_for_type(ty: &TypeDecl, ctx: LowerCtx) -> V
                 ctx.support_local_type_program,
                 ctx.source_summary_type_program,
                 ctx.representations,
+                ctx.facts,
             )
         {
             impls.push(item);
@@ -2071,14 +2078,44 @@ fn source_supertype_conversion_target_is_emitted(super_ty: &TypeDecl, ctx: Lower
                     .is_some()))
 }
 
+/// `From<Rc<Sub>>` / `From<Arc<Sub>>` beside the generated `From<Sub>`. `None`
+/// for a non-local target: these handles are not `#[fundamental]`, so
+/// `impl From<Rc<Sub>> for Box<dyn Any>` is E0117.
+fn shared_handle_conversion_companion(sub_name: &str, to_name: &str) -> Option<String> {
+    if to_name.starts_with("Box<") || to_name.contains("dyn ") {
+        return None;
+    }
+    Some(
+        ["std::rc::Rc", "std::sync::Arc"]
+            .into_iter()
+            .map(|handle| {
+                format!(
+                    "impl From<{handle}<{sub_name}>> for {to_name} {{\n    fn from(value: {handle}<{sub_name}>) -> Self {{\n        <{to_name}>::from((*value).clone())\n    }}\n}}"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+    )
+}
+
 fn source_supertype_conversion_impl_for_pair(
     sub_ty: &TypeDecl,
     super_ty: &TypeDecl,
     support_program: &Program,
     source_summary_program: &Program,
     representations: &RepresentationPlan,
+    facts: &FactSet,
 ) -> Option<String> {
     let sub_name = crate::slot_render::rust_name_for_java_named_type(&sub_ty.name);
+    let sub_is_shared = {
+        let placement = facts.storage_placement_for(&sub_ty.name);
+        placement.shared && placement.is_implemented()
+    };
+    let companion = |to_name: &str| -> Option<String> {
+        sub_is_shared
+            .then(|| shared_handle_conversion_companion(&sub_name, to_name))
+            .flatten()
+    };
     let super_ty_java = JavaType::Named {
         name: super_ty.name.clone(),
         args: Vec::new(),
@@ -2087,9 +2124,20 @@ fn source_supertype_conversion_impl_for_pair(
         if sub_name == enum_name {
             return None;
         }
+        // The carrier stores the payload behind its handle, so the conversion
+        // puts it there; `value` arrives owned and bare.
+        let payload = {
+            let placement = facts.storage_placement_for(&sub_ty.name);
+            if placement.shared && placement.is_implemented() {
+                placement.wrap_construction("value".to_string())
+            } else {
+                "value".to_string()
+            }
+        };
         let mut impls = vec![format!(
-            "impl From<{sub_name}> for {enum_name} {{\n    fn from(value: {sub_name}) -> Self {{\n        {enum_name}::{sub_name}(value)\n    }}\n}}"
+            "impl From<{sub_name}> for {enum_name} {{\n    fn from(value: {sub_name}) -> Self {{\n        {enum_name}::{sub_name}({payload})\n    }}\n}}"
         )];
+        impls.extend(companion(&enum_name));
         let super_name = crate::slot_render::rust_name_for_java_named_type(&super_ty.name);
         if sub_name != super_name
             && matches!(
@@ -2137,9 +2185,11 @@ fn source_supertype_conversion_impl_for_pair(
         .map(|name| format!("            {name}: value.{name},"))
         .collect::<Vec<_>>()
         .join("\n");
-    Some(format!(
+    let mut impls = vec![format!(
         "impl From<{sub_name}> for {super_name} {{\n    fn from(value: {sub_name}) -> Self {{\n        {super_name} {{\n{fields}\n        }}\n    }}\n}}"
-    ))
+    )];
+    impls.extend(companion(&super_name));
+    Some(impls.join("\n\n"))
 }
 
 fn source_instance_field_names_for_conversion(
@@ -4154,6 +4204,8 @@ fn adapt_inherited_super_field_value_for_child_shape(
             child_shape,
             false,
             ctx.facts,
+            // An already-lowered enum value, never a fresh construction.
+            false,
         );
     }
     let construction =
@@ -5593,6 +5645,21 @@ fn lower_stmt(
                             .then(|| RustExpr::Raw("Default::default()".to_string()))
                     })
                 });
+            // A local of a shared type is declared behind its handle, so a fresh
+            // construction initialising it has to be put there. Restricted to a
+            // bare `T::new(..)`, the one producer structurally known not to be a
+            // handle already (claude_audits/0002b).
+            if let Some(initializer) = lowered_initializer.take() {
+                lowered_initializer = Some(if rust_expr_is_bare_constructor_call(&initializer) {
+                    crate::slot_render::shared_handle_construction_expr(
+                        &local_plan.shape,
+                        &crate::effective_facts::EffectiveFacts::new(ctx.facts),
+                        initializer,
+                    )
+                } else {
+                    initializer
+                });
+            }
             if let Some(initializer) = lowered_initializer.as_mut() {
                 hoist_borrowed_string_temporaries_in_initializer(name, initializer, out);
             }
@@ -6176,6 +6243,7 @@ fn wrap_optional_assignment_value_if_needed(
         &target,
         already_optional_result,
         ctx.facts,
+        matches!(value, Expr::New { .. }),
     )
 }
 
@@ -9025,6 +9093,30 @@ fn lower_return_stmt(
     )
 }
 
+/// Whether a lowered expression is a bare `Owner::new(..)` construction.
+///
+/// The value side cannot ask a `RustSlotShape` whether a value is already behind
+/// a handle, so the wrap is restricted to producers whose answer is structural.
+/// A constructor call is one: it returns the bare type, always.
+/// See claude_audits/0002b.
+fn rust_expr_is_bare_constructor_call(expr: &RustExpr) -> bool {
+    let rendered = crate::emit::emit_expr(expr);
+    let Some(head) = rendered.split('(').next() else {
+        return false;
+    };
+    let Some((owner, method)) = head.rsplit_once("::") else {
+        return false;
+    };
+    (method == "new"
+        || method
+            .strip_prefix("new_")
+            .is_some_and(|rest| !rest.is_empty()))
+        && owner
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_uppercase())
+}
+
 fn lower_return_stmt_with_refinements(
     expr: Option<&Expr>,
     env: &ShapeEnv,
@@ -9035,7 +9127,22 @@ fn lower_return_stmt_with_refinements(
     let value = expr.map(|expr| {
         let lowered = match return_value_plan(ctx.current_return_shape) {
             ReturnValuePlan::Slot(slot) => {
-                lower_expr_for_slot_with_refinements(expr, env, slot, ctx, refinements)
+                let lowered =
+                    lower_expr_for_slot_with_refinements(expr, env, slot.clone(), ctx, refinements);
+                // A static read can be folded to the field's initializer, which
+                // is a bare construction while the return slot is handle-wrapped.
+                // Restricted to that shape: any other return expression may
+                // already be a handle, and wrapping it gives `Arc<Arc<T>>`.
+                match slot_target_shape(&slot) {
+                    Some(target) if rust_expr_is_bare_constructor_call(&lowered) => {
+                        crate::slot_render::shared_handle_construction_expr(
+                            &target,
+                            &crate::effective_facts::EffectiveFacts::new(ctx.facts),
+                            lowered,
+                        )
+                    }
+                    _ => lowered,
+                }
             }
             ReturnValuePlan::Raw => lower_expr_with_refinements(expr, env, ctx, refinements),
         };
@@ -15746,6 +15853,41 @@ fn static_owner_receiver_is_emitted_program_type(
         .any(|owner| ctx.program.types.iter().any(|ty| ty.name == *owner))
 }
 
+/// Puts a value recovered out of a borrow back behind its shared handle.
+///
+/// Keyed on the **actual** type: a generic method parameter is still `T` at the
+/// call site, never substituted with the receiver's type argument, so the target
+/// answers nothing. The two agree either way -- a concrete shared target is
+/// wrapped, and a type-parameter target is instantiated with the wrapped form
+/// because generic arguments are wrapped. See claude_audits/0002b.
+fn rewrap_recovered_shared_argument(
+    lowered: RustExpr,
+    target_shape: &RustSlotShape,
+    actual_shape: &RustSlotShape,
+    ctx: LowerCtx,
+) -> RustExpr {
+    if !matches!(
+        actual_shape.ownership,
+        OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+    ) || target_shape.ownership != OwnershipShape::Owned
+        || target_shape.optional_element_type().is_some()
+    {
+        return lowered;
+    }
+    let JavaType::Named { name, .. } = &actual_shape.java_ty else {
+        return lowered;
+    };
+    let placement = ctx.facts.storage_placement_for(name);
+    if !placement.shared || !placement.is_implemented() {
+        return lowered;
+    }
+    let rendered = crate::emit::emit_expr(&lowered);
+    if rendered.starts_with("std::rc::Rc::new(") || rendered.starts_with("std::sync::Arc::new(") {
+        return lowered;
+    }
+    RustExpr::Raw(placement.wrap_construction(rendered))
+}
+
 fn lower_args_with_plan(
     args: &[Expr],
     env: &ShapeEnv,
@@ -15817,13 +15959,14 @@ fn lower_args_with_plan(
                         env,
                         ctx,
                     );
-                    apply_source_type_param_optional_unwrap_result_upcast(
+                    let lowered = apply_source_type_param_optional_unwrap_result_upcast(
                         lowered,
                         actual_shape,
                         &argument_slot(shape.clone()),
                         env,
                         ctx,
-                    )
+                    );
+                    rewrap_recovered_shared_argument(lowered, shape, actual_shape, ctx)
                 })
                 .collect()
         }
@@ -19408,10 +19551,53 @@ fn adapt_source_subtype_to_supertype_argument(
     } else {
         lowered
     };
+    if matches!(target_shape.dispatch, DispatchShape::ErasedObject)
+        && slot_java_type_is_shared_handle(&actual_shape.java_ty, ctx.facts)
+    {
+        let placement = ctx.facts.storage_placement_for(actual_name);
+        let owned = match actual_shape.ownership {
+            OwnershipShape::Owned | OwnershipShape::CopyValue => {
+                if rust_expr_is_bare_constructor_call(&lowered) {
+                    RustExpr::Raw(placement.wrap_construction(crate::emit::emit_expr(&lowered)))
+                } else {
+                    lowered
+                }
+            }
+            _ => RustExpr::Raw(placement.wrap_construction(crate::emit::emit_expr(
+                &clone_source_subtype_value_for_owned_supertype(lowered),
+            ))),
+        };
+        let target_ty = crate::emit::emit_type(&crate::slot_render::rust_type_for_slot_with_facts(
+            target_shape,
+            ctx.facts,
+        ));
+        return RustExpr::Raw(format!(
+            "Box::new({}) as {target_ty}",
+            crate::emit::emit_expr(&owned)
+        ));
+    }
+    // An upcast produces a *fresh* supertype value, so when the target slot holds
+    // a handle the result has to be put behind it. Structurally safe for the
+    // same reason a constructor is: `.into()` cannot return something already
+    // wrapped. See claude_audits/0002b.
+    let into_supertype = |expr: RustExpr| {
+        let converted = into_projection(expr);
+        let JavaType::Named { name, .. } = &target_shape.java_ty else {
+            return converted;
+        };
+        let placement = ctx.facts.storage_placement_for(name);
+        if !placement.shared
+            || !placement.is_implemented()
+            || target_shape.optional_element_type().is_some()
+        {
+            return converted;
+        }
+        RustExpr::Raw(placement.wrap_construction(crate::emit::emit_expr(&converted)))
+    };
     match (actual_shape.ownership, target_shape.ownership) {
-        (OwnershipShape::Owned, OwnershipShape::Owned) => into_projection(lowered),
+        (OwnershipShape::Owned, OwnershipShape::Owned) => into_supertype(lowered),
         (OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow, OwnershipShape::Owned) => {
-            into_projection(clone_source_subtype_value_for_owned_supertype(lowered))
+            into_supertype(clone_source_subtype_value_for_owned_supertype(lowered))
         }
         (OwnershipShape::Owned, OwnershipShape::SharedBorrow) => ensure_borrow_projection(
             into_projection(lowered),
@@ -21851,6 +22037,15 @@ fn lower_external_crate_constructor_expr_for_slot(
     ))
 }
 
+/// Whether a Java type is stored behind a shared handle (0002/0002b).
+fn slot_java_type_is_shared_handle(java_ty: &JavaType, facts: &FactSet) -> bool {
+    let JavaType::Named { name, .. } = java_ty else {
+        return false;
+    };
+    let placement = facts.storage_placement_for(name);
+    placement.shared && placement.is_implemented()
+}
+
 fn lower_source_subtype_to_supertype_slot(
     lowered_expr: &RustExpr,
     actual: &RustSlotShape,
@@ -21869,6 +22064,23 @@ fn lower_source_subtype_to_supertype_slot(
     let target_name = concrete_java_type_name(&target.java_ty)?;
     if same_concrete_java_type_name(&actual.java_ty, target_name) {
         return None;
+    }
+    // No `From<Rc<Sub>> for Box<dyn Any>` can exist (E0117), and boxing the
+    // handle is what keeps identity across the erasure anyway.
+    if matches!(target.dispatch, DispatchShape::ErasedObject)
+        && slot_java_type_is_shared_handle(&actual.java_ty, ctx.facts)
+    {
+        let boxed = if rust_expr_is_bare_constructor_call(lowered_expr) {
+            ctx.facts
+                .storage_placement_for(actual_name)
+                .wrap_construction(crate::emit::emit_expr(lowered_expr))
+        } else {
+            crate::emit::emit_expr(lowered_expr)
+        };
+        let target_ty = crate::emit::emit_type(&crate::slot_render::rust_type_for_slot_with_facts(
+            &target, ctx.facts,
+        ));
+        return Some(RustExpr::Raw(format!("Box::new({boxed}) as {target_ty}")));
     }
     if type_param_source_subtype_conversion_available(actual_name, target_name, env, ctx) {
         return Some(into_projection(lowered_expr.clone()));
@@ -23916,6 +24128,7 @@ fn planned_optional_assignment_value_for_target(
     target: &RustSlotShape,
     already_optional_result: bool,
     facts: &FactSet,
+    value_is_fresh_construction: bool,
 ) -> RustExpr {
     let conversion_plan = plan_slot_conversion(actual.clone(), slot, facts);
     let preconverted_some_plan =
@@ -23926,6 +24139,7 @@ fn planned_optional_assignment_value_for_target(
         conversion_plan,
         preconverted_some_plan,
         already_optional_result,
+        value_is_fresh_construction,
     )
 }
 
@@ -28762,5 +28976,24 @@ class NumericBox {
         assert_eq!(emit_expr(&replaced), "__java_self.name", "{replaced:?}");
         assert_eq!(replaced.recorded_shape(), Some(RustExprShape::StringView));
         assert_eq!(replaced.recorded_slot_shape(), Some(&actual));
+    }
+
+    #[test]
+    fn shared_handle_conversion_companion_covers_rc_and_arc() {
+        let impls = shared_handle_conversion_companion("Leaf", "Base").expect("local target");
+
+        assert!(
+            impls.contains("impl From<std::rc::Rc<Leaf>> for Base"),
+            "{impls}"
+        );
+        assert!(
+            impls.contains("impl From<std::sync::Arc<Leaf>> for Base"),
+            "{impls}"
+        );
+    }
+
+    #[test]
+    fn shared_handle_conversion_companion_skips_dyn_targets() {
+        assert!(shared_handle_conversion_companion("Leaf", "Box<dyn std::any::Any>").is_none());
     }
 }

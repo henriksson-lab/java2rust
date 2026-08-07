@@ -1366,3 +1366,544 @@ Finally, stored generic contents now recurse through wildcard bounds:
 `List<? extends Cell>` and `List<? super Cell>` can retain `Cell` values just as
 `List<Cell>` can. Static reachability and field-storage tests cover both bound
 directions.
+
+## Update 2026-08-06 (fourth pass) — re-run against the current tree
+
+Re-applied the stack on top of the committed tree. Two things had changed: the
+constructor-owner-path bug is **already fixed** (`constructor_owner_path_type` in
+`src/call_lowering.rs` now builds the path from the type *name*, which is
+stronger than stripping decoration from a rendered slot type), and the shifted
+tree moves the numbers.
+
+Progression this pass, against the committed 538/146:
+
+| step | result | regressions |
+|---|---:|---:|
+| stack re-applied | 523/161 | 15 |
+| user-generic arguments left unwrapped | 526/158 | 12 |
+| optional element handle on the construction plan | 526/158 | 12, but only **1** still fails to compile |
+
+### Correction: the generic-argument wrap was too broad
+
+The previous pass recommended wrapping *every* generic argument, on the grounds
+that an argument is always owned by its container. Owned, yes — but that is not
+sufficient:
+
+```
+error[E0599]: the method `repair` exists for reference `&Rc<Standards<Rc<FormatLine>>>`,
+              but its trait bounds were not satisfied
+```
+
+`Standards<T extends Named>` instantiated with `Rc<FormatLine>` requires
+`Rc<FormatLine>: Named`, which does not hold — the impl is on `FormatLine`. So
+the wrap is safe for **collection elements** (containers we generate, no bounds)
+and unsound for **user generic type parameters** (bounds we do not control).
+Scoping it to the collection arms fixed three tests.
+
+### The optional element position, solved
+
+The element position did not need a new concept: `OptionalSlotConstructionPlan`
+already models it. Adding `element_handle: Option<StoragePlacement>`, populated
+where the plan is *built* (which has a `FactSet`) and applied where it is
+rendered (which does not), produces the shape the handoff asked for:
+
+```rust
+__java_self.wrapper = Some(std::rc::Rc::new(Wrapper::new(..)));
+```
+
+The wrap is gated on an explicit `value_is_fresh_construction` flag threaded from
+the `Expr::New` test, not inferred — inferring it is the unanswerable question.
+Keeping the handle decision *on the plan* is also what stops
+`Some(Rc::new(Some(..)))`: the `Some` and the handle are now one decision instead
+of two that can disagree.
+
+### The one remaining break is a design fork, not a missing fix
+
+```rust
+repair(*line.downcast::<std::rc::Rc<FormatLine>>().expect("invalid Java cast"))
+//     expected `FormatLine`, found `Rc<FormatLine>`
+```
+
+Two rules that are each individually right now conflict:
+
+- the erased carrier holds `Rc<T>`, so a downcast recovers *the same object*
+  rather than a copy (this is what makes 0028 identity observable through
+  erasure);
+- user generic parameters stay bare, so `T extends Named` bounds still hold.
+
+A value crossing from the first into the second needs an unwrap, and nothing can
+currently decide that: the downcast result's shape does not record that it is a
+handle. Reverting the erasure pair instead costs two other tests (13 vs 12), so
+it is not the cheaper side.
+
+**The fork, to be decided before the next attempt:**
+
+1. *Wrap user generics too*, and generate blanket forwarding impls
+   (`impl<T: Named> Named for Rc<T>`) so bounds are satisfied. Uniform, but the
+   impls have to be generated for every source interface a type parameter is
+   bounded by.
+2. *Store bare values in the erased carrier*, accepting that identity is lost
+   through erasure. Uniform and much smaller, but it gives up part of 0028 —
+   the part `known-gaps/Identity.java` does not cover, since that fixture never
+   erases.
+
+Option 2 is the smaller move and keeps `SharedImmutable` landable; option 1 is
+the one that finishes 0028 properly. This is a decision about scope, not a
+technical unknown.
+
+Reverted to the committed baseline; the gate is green on all 18 targets.
+
+## Update 2026-08-06 (fifth pass) — the fork is decided, by evidence
+
+The previous section left a fork: wrap user generics too (option 1), or store
+bare values in the erased carrier (option 2). I recommended option 2 as the
+smaller move and then implemented it. **It does not work, and the reason
+generalises.**
+
+Option 2 was built as one rule replacing the earlier erasure pair: unwrap the
+handle at the erasure boundary, where both sides are visible. That much is fine
+and fixed `erased_object_set_uses_hash_free_vec_carrier`. Two breaks remained,
+and they are the same defect from two directions:
+
+```rust
+// E0614: the erasure unwrap fired on a value that was not a handle
+line = (*self.formats.as_ref().unwrap().repair(..)).clone().into();
+//     `FormatLine` cannot be dereferenced
+
+// E0308: the downcast produced a bare value into a handle-typed slot
+let that: std::rc::Rc<FormatLine> = *o.downcast::<FormatLine>().expect(..);
+//        expected `Rc<FormatLine>`, found `FormatLine`
+```
+
+`repair` is declared on `Standards<T extends Named>`, so it returns a **bare**
+`T` — because option 2 leaves user generic arguments unwrapped. So:
+
+> Under option 2, a value whose Java type is shared may or may not be behind a
+> handle, depending on **where it came from**. Under option 1 it always is.
+
+That is the whole difference. Every wrap/unwrap decision in this design is
+currently made from a `RustSlotShape`, which carries a type and an ownership and
+no provenance. Option 1 keeps "shared type ⇒ behind a handle" a global
+invariant, so those decisions stay derivable from the type. Option 2 makes them
+depend on the producer, which is exactly the information the IR does not carry —
+the same gap this file has hit from four other directions.
+
+So the earlier framing was wrong. It is not "thorough versus small". It is:
+
+- **option 1** — wrap user generic arguments too, and generate forwarding impls
+  (`impl<T: Named> Named for Rc<T>`) for each interface a type parameter is
+  bounded by. Cost: those impls. Benefit: the invariant holds, and every wrap
+  site stays a pure function of the type.
+- **option 2** — cheaper per site, but it removes the invariant, and then no
+  amount of local cleverness makes the boundary cases decidable. Both failures
+  above are unfixable without provenance.
+
+**Recommendation: option 1.** The forwarding impls are mechanical and generated
+from information already collected (the bounds are in the source), and they are
+much less work than adding provenance to the IR.
+
+Measured state at the end of this pass, against the committed 538/146: 525/159,
+13 regressions, 11 of them assert-only stale expectations and 2 the breaks above.
+Reverted; the gate is green on all 18 targets.
+
+### Option 1's sharp edge, found while scoping it
+
+The forwarding impls go where `dyn_trait_anonymous_impl` and
+`boxed_dyn_trait_clone_impl` already go -- appended to each generated trait in
+`src/representation_lowering.rs` (`trait_item_for_type`,
+`trait_item_for_type_with_program`). That part is mechanical.
+
+The edge is the receiver:
+
+```rust
+impl<T: Named> Named for std::rc::Rc<T> {
+    fn id(&self) -> String { (**self).id() }        // fine
+    fn set(&mut self, v: i32) { (**self).set(v) }   // impossible: Rc has no DerefMut
+}
+```
+
+A trait with **any** `&mut self` method cannot have a forwarding impl for
+`Rc<T>`. So option 1 is not purely additive: it feeds back into the tier
+predicate. A type whose interface has a mutating method cannot be a wrapped
+generic argument, which means `is_implemented()` -- currently
+`!interior_mutable` -- has a second condition:
+
+> a shared type must also have a forwardable interface surface, i.e. every trait
+> it is used through must be `&self`-only.
+
+That is checkable from the same information the placement analysis already reads,
+and it is better found now than after the impls are generated. It also explains
+why option 1 is not merely "more work": it narrows which types can take the
+`SharedImmutable` tier, and the narrowing must be computed *before* the wrap is
+applied, not discovered as a compile error afterwards.
+
+Concrete order for whoever picks this up:
+
+1. Extend the placement analysis with the forwardable-surface condition and
+   report the new `SharedImmutable` census (it will be smaller than 19).
+2. Generate the forwarding impls for the traits that qualify.
+3. Re-wrap user generic arguments and restore the handle-carrying erasure pair.
+4. Update the 11 stale expectations and record the baseline.
+
+### Step 1 of option 1 is done and landed
+
+`interface_surface_is_handle_forwardable` (`src/storage_strategy.rs`) computes
+the new precondition, and `report_storage_disagreements` emits
+`storage_strategy_surface_not_forwardable` for any shared type that fails it.
+Output-inert: it adds a warning and changes no generated Rust. `--lib` 166 -> 169,
+every other suite unchanged, `idiom_gaps` still 538/146 with identical failure
+names.
+
+The check earns its place by catching a case that cannot be read off
+`TypeStorageFacts`:
+
+```java
+interface Shape { int size(); void grow(); }
+class Fixed   implements Shape { /* never mutates */ }
+class Growing implements Shape { public void grow() { s = s + 1; } }
+```
+
+`Fixed` is `SharedImmutable` -- `mutated=false`, `mutation_provably_absent=true`
+-- and still cannot take the tier, because `Growing` forces `Shape::grow` to
+`&mut self` and `Rc<T>` has no `DerefMut`. **The blocker is the trait's surface
+across all implementors, not the candidate's own mutability.** Pinned by
+`a_mutating_sibling_implementor_blocks_the_whole_trait`.
+
+This also means the `SharedImmutable` census is a *join over implementors*, not a
+per-type property, so the earlier "19 SharedImmutable / 4 SharedLocal" split is
+an upper bound. Anyone continuing should re-run the census on a real corpus
+before generating impls -- the diagnostic now prints exactly which types drop
+out and why.
+
+Remaining, unchanged: steps 2-4 (generate the forwarding impls for traits that
+qualify, re-wrap user generic arguments and restore the handle-carrying erasure
+pair, update the 11 stale expectations and record the baseline).
+
+### Step 2 landed: the forwarding impls exist
+
+`shared_handle_forwarding_impl` (`src/representation_lowering.rs`) generates
+`impl<__JavaShared: Tr + 'static> Tr for std::rc::Rc<__JavaShared>` beside every
+generated trait, forwarding each method as `(**self).m(args)`. Wired into all
+**three** trait emission paths -- `trait_item_for_type`,
+`trait_item_for_type_with_program`, and `source_class_bound_trait_item_for_type`.
+Gate-clean: `idiom_gaps` unchanged at 538/146, one exact-output expectation
+updated, `--lib` 169 -> 174.
+
+Three things this got wrong first, each now pinned by a test:
+
+- **`T` collides.** A Java interface method may declare its own type parameter
+  (`<T> T id(T value)`), and an inner generic shadowing the impl's is E0403.
+  Hence `__JavaShared`.
+- **An empty trait still needs the impl.** A class used as a bare bound
+  (`<T extends HeaderLine>` where `HeaderLine` declares no methods) generates an
+  empty trait; returning `None` for "no methods to forward" left
+  `Rc<FormatLine>: HeaderLineBound` unsatisfied. An empty trait is *trivially*
+  forwardable.
+- **Class bounds are a third emission path.** Wiring only the two interface
+  paths missed `HeaderLineBound` entirely, which is the trait a
+  `<T extends SomeClass>` bound actually lowers to.
+
+The forwardability precondition from step 1 was also extended to walk the
+`extends` chain, since a class-bound trait is built from the whole hierarchy's
+methods, and `TypeStorageFacts` gained `surface_forwardable` so a non-forwardable
+type falls back through the existing `is_implemented()` path rather than
+producing code that does not compile.
+
+### Where step 3 stands
+
+Re-applying the wrap on top of steps 1-2 gives **523/161, 15 regressions**, down
+from 16 before the empty-trait fix. Reverted, because it is not green. The
+remaining set is the familiar one: ~11 stale expectations plus a handful of
+conversion sites, and it is now unblocked by the trait machinery rather than by
+the fork, which is closed.
+
+### Step 2 completed: both handles
+
+The forwarding impl is emitted for `Rc` **and** `Arc`. The tier picks `Arc` for
+anything reachable from a Java `static` (which must be `Sync`) and `Rc`
+otherwise, so a bound like `Standards<T extends Named>` has to be satisfiable by
+either; emitting only the `Rc` form left `Arc<NamedLine>: Named` unsatisfied.
+
+### Step 3: 525/159, two conversion sites left
+
+With steps 1-2 in place the wrap now costs **13** rather than the 16 it cost
+before the trait machinery existed: **11 stale expectations and 2 compile
+breaks**. The progression, each step fixing a distinct site:
+
+| after | regressions |
+|---|---:|
+| wrap re-applied on steps 1-2 | 15 |
+| empty-trait forwarding impl | 15 -> 14 |
+| optional element handle on the plan | 14 |
+| `Arc` forwarding impl | 14 -> 13 |
+| rewrap on clone-recovery from a borrow | 13 |
+
+The two survivors are the same shape, and it is the one this file has been
+circling from the start:
+
+```rust
+let repaired: HeaderLine = self.formats.as_ref().unwrap()
+    .repair(line.clone()/* TODO */)   // expected `Rc<FormatLine>`, found `FormatLine`
+```
+
+`line` is a **borrowed parameter** of a shared type. A borrowed slot deliberately
+sees *through* the handle, so cloning out of one produces a bare value while the
+callee's slot still wants the handle. `rewrap_clone_recovered_shared_value`
+handles this for the argument path it was added to; these two reach the call
+through a different one (a generic *receiver*), so the rewrap never runs.
+
+That is the whole remaining shape of the work: **every place a freshly produced
+value meets a handle-typed slot needs the same rewrap, and they must be found
+one at a time** because `RustSlotShape` cannot say whether a value is already
+behind a handle. Four such sites are now handled (slot default, static field
+initializer, folded static read, optional element, clone-recovery-from-borrow);
+these two are not.
+
+Reverted step 3 again; steps 1 and 2 are in the tree and green.
+
+### Why step 3 keeps not landing, stated once and for all
+
+Every attempt this session ended the same way, and the count kept falling
+without reaching zero: 16 -> 15 -> 14 -> 13. Each fix was correct and each
+revealed another site. The sites handled so far all share one description --
+*a freshly produced value meets a handle-typed slot* -- and they are:
+
+| site | where the fix lives |
+|---|---|
+| slot default | `default_expr_for_slot_with_effective_facts` |
+| static field initializer | `static_storage_accessors_for_field` |
+| folded static read in return position | `lower_return_stmt_with_refinements` |
+| optional element | `OptionalSlotConstructionPlan::element_handle` |
+| clone recovery from a borrow (argument path) | `rewrap_clone_recovered_shared_value` |
+
+A central attempt was made and is worth recording as a negative: putting
+`shared_handle_recovery` on `ShapeCoercionPlan`, so `coercions()` re-wraps after
+*any* borrow-to-owned recovery, does **not** catch the two survivors. They reach
+the callee through a generic *receiver* path that does not build a
+`ShapeCoercionPlan` for the argument at all. So there is no single choke point;
+the recovery paths are genuinely plural.
+
+The two survivors:
+
+```rust
+let repaired: HeaderLine = self.formats.as_ref().unwrap().repair(line.clone());
+//                                                               ^ bare FormatLine, slot wants Rc<FormatLine>
+```
+
+`line` is a **borrowed parameter**. A borrowed slot sees through the handle by
+design -- that rule is what keeps `&T` from becoming `&Rc<T>` everywhere -- so
+cloning out of one necessarily yields a bare value. The wrap must then be
+re-applied wherever that clone is consumed, and "wherever" is the open set.
+
+This is the same root the whole file keeps returning to: `RustSlotShape` records
+a type and an ownership, not whether a value is behind a handle, so the question
+"does this expression need the handle put back?" cannot be answered once. It has
+to be answered at each consumer, and the consumers must be enumerated by running
+the suite.
+
+That is tractable -- the list is finite and shrinking -- but it is site-by-site
+work, not another structural move. Anyone continuing should re-apply the stack
+(`<scratchpad>/apply_0002b.py` plus the slot_render additions), read the failing
+list, and add one rewrap per site until it is empty, then update the ~10 stale
+expectations.
+
+### Step 3, final measured state: one compile break left
+
+Continuing site-by-site got the wrap from 16 regressions to **13 -- twelve stale
+expectations and a single compile break**. The two sites added after the earlier
+write-up:
+
+- **Shaped-argument recovery** (`lower_args_with_plan`). The rewrap must be keyed
+  on the **actual** type, not the target's. A generic method parameter is still
+  `T` at the call site -- it is *not* substituted with the receiver's type
+  argument -- so `storage_placement_for` on the target finds nothing. Keying on
+  the actual is also correct rather than merely expedient: a concrete target of a
+  shared type is wrapped, and a type-parameter target is instantiated with the
+  wrapped form because generic arguments are wrapped. This closed
+  `source_receiver_generic_result_upcasts_to_supertype_assignment_slot`.
+- The earlier argument-path rewrap in `lower_source_subtype_argument*` remains,
+  for the paths that do not reach `lower_args_with_plan`.
+
+### The one that is left, and what it needs
+
+```rust
+line = self.formats.as_ref().unwrap()
+    .repair(match line { HeaderLineValue::FormatLine(value) => value, _ => panic!(..) });
+//                                                            ^ bare FormatLine, slot wants Rc<FormatLine>
+```
+
+`carrier_enum_item` (`src/representation_lowering.rs`) builds every closed-enum
+and hierarchy-carrier variant as `Variant(Variant)` -- a **bare** payload. So
+extracting from the carrier yields a bare value no matter what the consumer
+wants, and no amount of wrapping at consumers fixes it in general.
+
+The principled fix is to wrap the *payload type*, so the carrier holds
+`FormatLine(Rc<FormatLine>)` and extraction yields the handle directly. That is
+symmetric with what was already done for collection elements and generic
+arguments, and it removes the site rather than patching it. It needs a `FactSet`
+threaded into `carrier_enum_item`, which today takes only names, and matching
+changes at the variant construction site (`coercion.rs`, `{enum}::{variant}(..)`)
+so construction and extraction stay in agreement.
+
+That is the last structural item. After it, what remains is updating twelve
+expectations that assert 0002 symptoms, and recording the baseline.
+
+### Step 3, best measured state: 12 assert-only, zero compile breaks in `idiom_gaps`
+
+Continuing site-by-site reached **526/158 with every generated program in
+`idiom_gaps` compiling**. Two more sites closed after the previous write-up:
+
+- **Carrier payload type** (`carrier_enum_item`). A variant payload is a slot of
+  its type like any other, so a shared type is stored behind its handle there
+  too. Storing it bare made `match line { HeaderLineValue::FormatLine(v) => v }`
+  hand back a bare value regardless of the consumer. Needs a `FactSet` threaded
+  into `carrier_enum_item` and `source_hierarchy_carrier_item_for_type`.
+- **Carrier construction** (`{enum_name}::{sub_name}(value)` in
+  `source_supertype_conversion_impl_for_pair`, and
+  `Coercion::WrapClosedEnum`). Construction and extraction must agree, so the
+  `From<Sub> for Carrier` impl wraps the payload, and the coercion carries a
+  `payload_handle` set only when the value arrives from a **borrowed** slot --
+  an owned slot of a shared type already holds the handle.
+
+### Why it still is not landable, and the honest limit
+
+`slot_shape_design` then went 516 -> 514, and one of those is not an expectation
+drift:
+
+```rust
+query: Option<std::rc::Rc<Cursor>>,                      // field: wrapped
+let tmp: Option<Cursor> = self.query.as_ref().cloned();  // local: not
+```
+
+`slot_shape_design` does **not** run `cargo_check_generated_modules`, so this
+reads as an assertion failure while being a type error. That is 0018's blind
+spot again, and it means "zero compile breaks" was only ever true of the suite
+that checks.
+
+The count across this session went 16 -> 15 -> 14 -> 13 -> 12(+2 elsewhere).
+Every step was a real fix; every step revealed another slot-rendering path that
+does not go through the wrap. That is the honest characterisation: the wrap has
+to be applied at *every* path that renders a slot type or produces a value into
+one, and those paths are not enumerable by reading -- only by running the suites
+and reading what breaks.
+
+**Before the next attempt, do this first:** add `cargo_check_generated_modules`
+to `slot_shape_design`'s translation tests, or at least to the ones that assert
+on rendered types. Without it the suite cannot tell a stale expectation from a
+type error, and the remaining work is exactly the job of telling those apart.
+
+### The prerequisite is now landed
+
+`cargo_check_generated_modules` lived only inside `tests/idiom_gaps.rs`, which is
+why `slot_shape_design` -- 596 tests, many asserting on rendered types -- had
+**zero** generated-crate checks (296 in `idiom_gaps`, 0 here). That is why the
+`Option<Rc<Cursor>>` field against an `Option<Cursor>` local read as an assertion
+failure rather than the type error it is.
+
+The helper now lives in `tests/common/mod.rs` and is used by both suites, and
+`optional_self_field_read_into_owned_local_borrows_then_clones_element` -- the
+test that hid it -- checks its generated crate. Landed while green, so the guard
+is in place *before* the next attempt at the wrap rather than after.
+
+Extending the check to the rest of `slot_shape_design`'s translation tests is the
+obvious follow-up and should be done incrementally: each one that goes red is a
+pre-existing non-compiling output that nothing was measuring.
+
+### A bug in the wrap itself, found by the new guard
+
+The `cargo_check` added to
+`optional_self_field_read_into_owned_local_borrows_then_clones_element` paid for
+itself immediately. With the wrap on:
+
+```rust
+query: Option<std::rc::Rc<Cursor>>,   // field
+let tmp: Option<Cursor> = ...;        // local -- disagrees
+```
+
+The cause was in the wrap, not the lowering. There are two slot-type renderers.
+The `EffectiveFacts` one recurses through `Option` by re-entering *itself*, so
+the element gets the handle. The representations-aware one had been changed to
+recurse into the **unwrapped** inner function, so its optional elements never
+did. Fixed by recursing through the wrapping entry point in both, and by having
+`shared_handle_slot_rust_type` decline optional shapes -- the element is where
+the handle belongs, and wrapping the outer as well gives `Rc<Option<T>>`.
+
+Worth stating plainly: this defect was invisible to 596 `slot_shape_design`
+tests and would have stayed invisible, because none of them compiled their
+output. It is the first thing the new guard caught, and it argues for extending
+`cargo_check` to the rest of that suite before the next attempt.
+
+### A note for whoever extends the `cargo_check` coverage
+
+Do not bulk-edit `tests/slot_shape_design.rs` by brace-matching to find test
+bodies. The fixtures are Java in `r#"..."#` literals and are full of `{` and `}`,
+so a depth counter walks straight past the end of a function. An attempt here
+"found" one test out of ~155 and silently mangled its own scan. Match on the
+literal `);\n}` that closes each test's final assertion, or do it by hand in
+batches.
+
+## Update 2026-08-06 — step 3 is landed
+
+The shared handle is on. `scripts/gate.sh` is at baseline on all 18 targets and
+`idiom_gaps` is 538/146 with **identical failure names** -- zero new failures,
+zero silently-fixed ones.
+
+```rust
+query: Option<std::rc::Rc<Cursor>>,                              // field
+let tmp: Option<std::rc::Rc<Cursor>> = self.query.as_ref().cloned();  // local
+static CONFIG_INSTANCE: std::sync::Mutex<Option<std::sync::Arc<Config>>>;
+pub fn get_instance() -> std::sync::Arc<Config>;                 // Arc: static-reachable
+```
+
+What made it land, after eight reverts, was the generated-crate checking added in
+[0041](done/0041-slot-shape-design-had-no-generated-crate-checks.md). Every
+earlier pass converged against assertion text and kept finding new unwrapped
+paths; with 101 `slot_shape_design` tests and 323 `idiom_gaps` tests compiling
+their output, each pass named a *type error* instead, and the list ran dry.
+
+### The wrap, in one place
+
+**Type side** -- two positions, and only two:
+
+| position | rule |
+|---|---|
+| top level of a slot | ownership-aware: owned only, since a borrow sees through the handle |
+| generic argument | unconditional: an argument is always owned by its container |
+
+Both recurse through `Option` at the **element**, giving `Option<Rc<T>>`; the
+outer wrap declines optional shapes so it cannot also produce `Rc<Option<T>>`.
+
+**Value side** -- the handle goes on wherever a *fresh* value meets a handled
+slot. "Fresh" is never guessed; each site has a structural reason:
+
+| site | why the value is known to be bare |
+|---|---|
+| slot default | nothing has run yet |
+| static field initializer | a field initializer is a construction |
+| return of a folded static read | restricted to a bare `T::new(..)` |
+| local declaration initializer | same restriction |
+| optional element (`OptionalSlotConstructionPlan::element_handle`) | decided *with* the `Some`, so the two cannot disagree |
+| argument recovered out of a borrow | a borrow saw through the handle |
+| subtype upcast (`.into()`) | an upcast returns a fresh supertype value |
+| carrier variant payload | construction and extraction share one placement |
+
+### Four defects the landing exposed, all fixed
+
+- **`Rc<T>` nested in a collection cost its struct the `Clone` derive.** The
+  top-level arm of `rust_type_supports_struct_derive_clone` knew a handle is
+  `Clone`; the element arm did not.
+- **A type parameter sharing a name with a source class got wrapped**
+  (`input: Rc<ELEM>`). `JavaType` has no type-variable variant and slot rendering
+  has no type-parameter scope, so the plan now excludes any name bound as a type
+  parameter anywhere -- conservative in the safe direction.
+- **The two slot-type renderers disagreed on `Option` recursion**, so the
+  representations-aware one never wrapped optional elements.
+- **The return-slot wrap fired on values that were already handles**, giving
+  `Arc<Arc<T>>`; restricted to a bare constructor call.
+
+### What this does *not* do
+
+`SharedImmutable` only. `is_implemented()` still excludes any type whose mutation
+cannot be proved absent, and now also any type whose trait surface is not
+`&self`-forwardable. `SharedLocal`/`SharedSync` -- the `RefCell`/`Mutex` rungs --
+remain off, and with them the reentrancy discipline this file describes.

@@ -865,10 +865,24 @@ fn rust_type_for_instance_field(
     facts: &FactSet,
 ) -> RustType {
     let rust_ty = rust_type_for_slot_with_facts(shape, facts);
-    if instance_field_is_self_referential(owner, field_name, shape) {
+    if instance_field_is_self_referential(owner, field_name, shape)
+        && !field_type_is_shared_handle(shape, facts)
+    {
         return box_recursive_field_type(rust_ty);
     }
     rust_ty
+}
+
+/// A handle is already an indirection, so boxing one gives `Option<Box<Rc<T>>>`.
+fn field_type_is_shared_handle(shape: &RustSlotShape, facts: &FactSet) -> bool {
+    let java_ty = shape
+        .optional_element_type()
+        .unwrap_or_else(|| shape.java_ty.clone());
+    let JavaType::Named { name, .. } = java_ty else {
+        return false;
+    };
+    let placement = facts.storage_placement_for(&name);
+    placement.shared && placement.is_implemented()
 }
 
 fn instance_field_is_self_referential(
@@ -1168,6 +1182,14 @@ fn raw_type_arg_supports_derive_clone(
 ) -> bool {
     let raw = arg.trim();
     if type_params.contains(raw) {
+        return true;
+    }
+    // A shared handle is `Clone` whatever it points at -- cloning it bumps a
+    // refcount. The top-level arm already knows this; a handle nested inside a
+    // collection element reaches here instead, and without this a
+    // `HashSet<Rc<T>>` field silently cost its struct the `Clone` derive
+    // (claude_audits/0002b).
+    if raw.starts_with("std::rc::Rc<") || raw.starts_with("std::sync::Arc<") {
         return true;
     }
     if matches!(

@@ -93,6 +93,15 @@ pub struct TypeStorageFacts {
     pub mutated: bool,
     /// Reachable from a thread entry point.
     pub threaded: bool,
+    /// Whether every trait this type is reached through can forward a handle.
+    ///
+    /// A generated trait with a `&mut self` method has no
+    /// `impl<..> Trait for Rc<..>`, so a wrapped value cannot satisfy a Java
+    /// bound like `Standards<T extends HeaderLine>`. That makes forwardability a
+    /// **precondition of the tier**, not a consequence: without it the wrap
+    /// produces `doesn't satisfy Rc<FormatLine>: HeaderLineBound`.
+    /// See [0002b](../claude_audits/0002b-shared-representation-design.md).
+    pub surface_forwardable: bool,
     /// Whether the absence of mutation could be *proved*.
     ///
     /// `mutated` says a mutation was seen; this says the walk was able to see
@@ -121,6 +130,9 @@ impl Default for TypeStorageFacts {
             // field write it cannot attribute to a type.
             mutation_provably_absent: true,
             static_reachable: false,
+            // Assumed forwardable until the surface is examined; the plan sets
+            // this for every declared type before any placement is read.
+            surface_forwardable: true,
         }
     }
 }
@@ -134,6 +146,9 @@ impl TypeStorageFacts {
         self.threaded |= other.threaded;
         self.mutation_provably_absent &= other.mutation_provably_absent;
         self.static_reachable |= other.static_reachable;
+        // Conservative in the same direction as the others: one non-forwardable
+        // observation is enough.
+        self.surface_forwardable &= other.surface_forwardable;
     }
 
     /// The decision rule from the 0002b design, with the later static-storage
@@ -165,7 +180,11 @@ impl TypeStorageFacts {
             // `SharedImmutable` must be *proved*, not merely unobserved: a
             // missed mutation gives `Rc<T>` for a type that is written through,
             // which does not compile.
-            interior_mutable: shared && (self.mutated || !self.mutation_provably_absent),
+            // A non-forwardable surface falls back to holding the value inline,
+            // through the same `is_implemented()` path an unproved mutation
+            // takes: wrong in a known and reported way rather than not compiling.
+            interior_mutable: shared
+                && (self.mutated || !self.mutation_provably_absent || !self.surface_forwardable),
             sync: self.threaded || self.static_reachable,
         }
     }
@@ -188,7 +207,7 @@ impl TypeStorageFacts {
         // `SharedImmutable` is `Rc<T>` with no `RefCell`, so it must be
         // *proved*, not merely unobserved: a missed mutation emits `cannot
         // assign to data in an Rc` and does not compile.
-        if !self.mutated && self.mutation_provably_absent {
+        if !self.mutated && self.mutation_provably_absent && self.surface_forwardable {
             return StorageStrategy::SharedImmutable;
         }
         if self.threaded || self.static_reachable {
@@ -432,6 +451,21 @@ pub fn plan_storage_strategies(program: &Program, usage: &UsageFacts) -> Storage
         types.insert(name.clone(), TypeStorageFacts::default());
     }
 
+    // A Java type *parameter* and a source class can share a name, and
+    // `JavaType::Named` cannot tell them apart -- there is no type-variable
+    // variant, and slot rendering has no type-parameter scope to consult. A name
+    // used as a type parameter anywhere is therefore removed from the plan:
+    // wrapping it would put a handle on the parameter (`input: Rc<ELEM>`) rather
+    // than on the class. Conservative in the safe direction -- the type keeps
+    // today's by-value behaviour, which is wrong in the known and reported way
+    // rather than wrong in a way that does not compile.
+    // See [0002b](../claude_audits/0002b-shared-representation-design.md).
+    let type_param_names = program_type_param_names(program);
+    for name in &type_param_names {
+        types.remove(name);
+        declared.remove(name);
+    }
+
     let threaded = threaded_type_names(program, &declared);
     let static_reachable = static_reachable_type_names(program, &declared);
     for ty in &program.types {
@@ -439,6 +473,8 @@ pub fn plan_storage_strategies(program: &Program, usage: &UsageFacts) -> Storage
     }
     for (name, facts) in types.iter_mut() {
         facts.static_reachable = static_reachable.contains(name);
+        facts.surface_forwardable =
+            type_interface_surface_is_handle_forwardable(name, program, usage);
     }
     StoragePlan { types }
 }
@@ -473,7 +509,109 @@ pub fn report_storage_disagreements(
                 facts.static_reachable,
             ),
         );
+        if !type_interface_surface_is_handle_forwardable(name, program, usage) {
+            into.warning(
+                "storage_strategy_surface_not_forwardable",
+                format!(
+                    "{name} is shared, but an interface it implements has a mutating method: that \
+trait lowers to `&mut self`, no `impl<T: Trait> Trait for Rc<T>` can exist, and a handle cannot \
+satisfy a generic bound on it. It cannot take the shared tier until that surface is `&self`-only."
+                ),
+            );
+        }
     }
+}
+
+/// [`interface_surface_is_handle_forwardable`] by type name.
+pub fn type_interface_surface_is_handle_forwardable(
+    name: &str,
+    program: &Program,
+    usage: &UsageFacts,
+) -> bool {
+    program
+        .types
+        .iter()
+        .find(|ty| ty.name == name)
+        .is_none_or(|ty| interface_surface_is_handle_forwardable(ty, program, usage))
+}
+
+/// Whether a shared handle can carry this type through the traits it implements.
+///
+/// A generated trait method whose Java body mutates the receiver lowers to
+/// `&mut self`, and `Rc<T>` has no `DerefMut`, so no forwarding impl
+/// (`impl<T: Named> Named for Rc<T>`) can exist for such a trait. Without that
+/// impl a wrapped value cannot satisfy a bound like
+/// `Standards<T extends Named>`, which is how the tier reaches user generics at
+/// all.
+///
+/// So this is a **precondition of the tier**, not a property discovered
+/// afterwards: a type whose interface surface mutates cannot be shared, and the
+/// check has to run before the wrap is applied rather than surface as a compile
+/// error. `mutates_self` is already a fixpoint over self-calls in
+/// [`crate::usage`], so delegating mutators are included.
+/// See [0002b](../claude_audits/0002b-shared-representation-design.md).
+pub fn interface_surface_is_handle_forwardable(
+    ty: &TypeDecl,
+    program: &Program,
+    usage: &UsageFacts,
+) -> bool {
+    // A Java class used as a type-parameter bound also gets a generated trait
+    // (`HeaderLineBound`), built from the methods of the class *and* of every
+    // superclass, so the whole `extends` chain has to be `&self`-only too.
+    // Checking only `implements` missed exactly that, and the wrap then produced
+    // `doesn't satisfy Rc<FormatLine>: HeaderLineBound`.
+    let mut current = Some(ty);
+    while let Some(class) = current {
+        let mutates = class.members.iter().any(|member| match member {
+            Member::Method(method) if !method.modifiers.contains(&Modifier::Static) => usage
+                .methods
+                .get(&crate::usage::UsageMethodKey {
+                    type_name: class.name.clone(),
+                    method_name: method.name.clone(),
+                })
+                .is_some_and(|facts| facts.mutates_self),
+            _ => false,
+        });
+        if mutates {
+            return false;
+        }
+        current = class.extends.as_ref().and_then(|name| {
+            program
+                .types
+                .iter()
+                .find(|candidate| candidate.name == *name)
+        });
+    }
+    ty.implements.iter().all(|interface_name| {
+        let Some(interface) = program
+            .types
+            .iter()
+            .find(|candidate| candidate.name == *interface_name)
+        else {
+            // Not a source interface: nothing of ours to forward through.
+            return true;
+        };
+        interface.members.iter().all(|member| {
+            let Member::Method(method) = member else {
+                return true;
+            };
+            // The interface declares it; every implementor decides the receiver,
+            // and one mutating implementor makes the trait `&mut self`.
+            !program.types.iter().any(|implementor| {
+                implementor
+                    .implements
+                    .iter()
+                    .any(|name| name == interface_name)
+                    && usage
+                        .methods
+                        .get(&crate::usage::UsageMethodKey {
+                            type_name: implementor.name.clone(),
+                            method_name: method.name.clone(),
+                        })
+                        .is_some_and(|facts| facts.mutates_self)
+            })
+        })
+    })
 }
 
 /// Types whose *values* this lattice describes.
@@ -484,6 +622,26 @@ pub fn report_storage_disagreements(
 /// switch lowering. An `interface` has no values of its own. Including them
 /// cost 27 `idiom_gaps` tests, almost all of them enum or equality tests
 /// ([0002b](../claude_audits/0002b-shared-representation-design.md)).
+/// Every name bound as a type parameter anywhere in the program.
+fn program_type_param_names(program: &Program) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for ty in &program.types {
+        collect_type_param_names(ty, &mut names);
+    }
+    names
+}
+
+fn collect_type_param_names(ty: &TypeDecl, into: &mut BTreeSet<String>) {
+    into.extend(ty.type_params.iter().cloned());
+    for member in &ty.members {
+        match member {
+            Member::Method(method) => into.extend(method.type_params.iter().cloned()),
+            Member::Type(nested) => collect_type_param_names(nested, into),
+            _ => {}
+        }
+    }
+}
+
 fn collect_declared_types(ty: &TypeDecl, into: &mut BTreeSet<String>) {
     if matches!(ty.kind, TypeKind::Class | TypeKind::Record) {
         into.insert(ty.name.clone());
@@ -1182,6 +1340,26 @@ mod tests {
     }
 
     #[test]
+    fn non_forwardable_shared_surface_is_not_shared_immutable() {
+        let facts = TypeStorageFacts {
+            escape: Escape::Stored,
+            surface_forwardable: false,
+            ..Default::default()
+        };
+
+        assert_eq!(facts.strategy(), StorageStrategy::SharedLocal);
+        assert_eq!(
+            facts.placement(),
+            StoragePlacement {
+                shared: true,
+                interior_mutable: true,
+                sync: false,
+            }
+        );
+        assert!(!facts.placement().is_implemented());
+    }
+
+    #[test]
     fn mutated_static_reachable_shared_type_reports_sync_strategy() {
         let facts = TypeStorageFacts {
             escape: Escape::Stored,
@@ -1574,6 +1752,74 @@ public class Outer {
             "Outer.Local",
         );
         assert_eq!(strategy, StorageStrategy::Value);
+    }
+}
+
+#[cfg(test)]
+mod handle_forwardable_surface_tests {
+    use super::*;
+    use crate::parser::parse_java_source;
+
+    fn forwardable(source: &str, type_name: &str) -> bool {
+        let parsed = parse_java_source(source);
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let usage = crate::usage::analyze_usage(&resolved.program);
+        type_interface_surface_is_handle_forwardable(type_name, &resolved.program, &usage)
+    }
+
+    /// A `&self`-only interface forwards, so the tier is available.
+    #[test]
+    fn read_only_interface_surface_forwards() {
+        assert!(forwardable(
+            r#"
+interface Named { String id(); }
+class Fixed implements Named {
+    private final String n;
+    Fixed(String n) { this.n = n; }
+    public String id() { return n; }
+}
+"#,
+            "Fixed",
+        ));
+    }
+
+    /// The point of the check: `Fixed` never mutates, but a **sibling**
+    /// implementor does, so the shared trait lowers to `&mut self` and no
+    /// `impl<T: Shape> Shape for Rc<T>` can exist. The blocker is the trait's
+    /// surface across all implementors, not the type's own mutability -- which
+    /// is why this cannot be read off `TypeStorageFacts::mutated`.
+    #[test]
+    fn a_mutating_sibling_implementor_blocks_the_whole_trait() {
+        let source = r#"
+interface Shape { int size(); void grow(); }
+class Fixed implements Shape {
+    private final int s;
+    Fixed(int s) { this.s = s; }
+    public int size() { return s; }
+    public void grow() { }
+}
+class Growing implements Shape {
+    private int s;
+    public int size() { return s; }
+    public void grow() { s = s + 1; }
+}
+"#;
+        assert!(!forwardable(source, "Fixed"));
+        assert!(!forwardable(source, "Growing"));
+    }
+
+    /// A type implementing nothing of ours has no surface to forward through.
+    #[test]
+    fn a_type_with_no_source_interface_forwards() {
+        assert!(forwardable(
+            r#"
+class Plain {
+    private int v;
+    int get() { return v; }
+}
+"#,
+            "Plain",
+        ));
     }
 }
 

@@ -1,8 +1,6 @@
 use std::fs;
-use std::io::Read;
 use std::path::Path;
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::process::Command;
 
 use new_java2rust::facts::{
     DispatchRequirementFact, DispatchRequirementKind, ExternalApiArgumentEffectFact,
@@ -19,6 +17,10 @@ use new_java2rust::{
     translate_source_with_context_sources_and_summary_sources,
     translate_source_with_context_summary_sources, translate_source_with_facts,
 };
+
+#[path = "common/mod.rs"]
+mod common;
+use common::{GeneratedCrateModule, cargo_check_generated_modules, cargo_test_generated_modules};
 
 fn idiom_gap(path: &str) -> String {
     fs::read_to_string(Path::new("examples/idiom-gaps").join(path)).unwrap()
@@ -49,170 +51,6 @@ fn corpus_rerun_plan_tracks_every_real_corpus_as_backlog_or_regression_guard() {
         missing.is_empty(),
         "real corpuses missing from docs/corpus-rerun-idiom-gap-plan.md: {missing:?}"
     );
-}
-
-struct GeneratedCrateModule {
-    name: &'static str,
-    rust: String,
-    tests: &'static str,
-}
-
-fn cargo_check_generated_modules(crate_name: &str, modules: Vec<GeneratedCrateModule>) {
-    cargo_verify_generated_modules(crate_name, modules, "check");
-}
-
-fn cargo_test_generated_modules(crate_name: &str, modules: Vec<GeneratedCrateModule>) {
-    cargo_verify_generated_modules(crate_name, modules, "test");
-}
-
-/// How long a nested `cargo` invocation may run before its test fails.
-///
-/// A nested cargo that never returns is indistinguishable, to anything waiting
-/// on this suite, from one that passed — see
-/// `claude_audits/0035-idiom-gaps-suite-never-terminates.md`. The watchdog turns
-/// a hang into a named failure so a baseline can be established at all.
-const GENERATED_CRATE_VERIFY_TIMEOUT: Duration = Duration::from_secs(300);
-
-fn generated_crate_verify_timeout() -> Duration {
-    std::env::var("NEW_JAVA2RUST_GENERATED_CRATE_TIMEOUT_SECS")
-        .ok()
-        .and_then(|raw| raw.parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .unwrap_or(GENERATED_CRATE_VERIFY_TIMEOUT)
-}
-
-/// Outcome of a watched child process. `status` is `None` when the watchdog
-/// fired and the child was killed.
-struct WatchedOutput {
-    status: Option<std::process::ExitStatus>,
-    stdout: String,
-    stderr: String,
-}
-
-fn run_with_watchdog(command: &mut Command, timeout: Duration) -> WatchedOutput {
-    let mut child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-
-    // Drain both pipes on their own threads: a child that fills a pipe buffer
-    // while we are waiting on the other one would deadlock regardless of the
-    // watchdog.
-    let mut stdout_pipe = child.stdout.take().unwrap();
-    let mut stderr_pipe = child.stderr.take().unwrap();
-    let stdout_reader = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = stdout_pipe.read_to_end(&mut buf);
-        buf
-    });
-    let stderr_reader = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = stderr_pipe.read_to_end(&mut buf);
-        buf
-    });
-
-    let deadline = Instant::now() + timeout;
-    let status = loop {
-        match child.try_wait().unwrap() {
-            Some(status) => break Some(status),
-            None if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
-            }
-            None => std::thread::sleep(Duration::from_millis(25)),
-        }
-    };
-
-    WatchedOutput {
-        status,
-        stdout: String::from_utf8_lossy(&stdout_reader.join().unwrap_or_default()).into_owned(),
-        stderr: String::from_utf8_lossy(&stderr_reader.join().unwrap_or_default()).into_owned(),
-    }
-}
-
-fn cargo_verify_generated_modules(
-    crate_name: &str,
-    modules: Vec<GeneratedCrateModule>,
-    cargo_command: &str,
-) {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let crate_dir = std::env::temp_dir().join(format!("new_java2rust_{crate_name}_{unique}"));
-    let src_dir = crate_dir.join("src");
-    fs::create_dir_all(&src_dir).unwrap();
-    fs::write(
-        crate_dir.join("Cargo.toml"),
-        format!(
-            "[package]\nname = \"new-java2rust-{crate_name}-{unique}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[lib]\npath = \"src/lib.rs\"\n"
-        ),
-    )
-    .unwrap();
-    let mut lib_rs = String::new();
-    for module in modules {
-        lib_rs.push_str(&format!(
-            "pub mod {} {{\n{}\n{}\n}}\n",
-            module.name, module.rust, module.tests
-        ));
-    }
-    fs::write(src_dir.join("lib.rs"), lib_rs).unwrap();
-
-    let mut command = Command::new(env!("CARGO"));
-    command
-        .arg(cargo_command)
-        .arg("--tests")
-        .arg("--quiet")
-        .current_dir(&crate_dir)
-        // A nested cargo that inherits the outer run's jobserver blocks
-        // indefinitely waiting for a token the parent will never hand out, and
-        // an inherited CARGO_TARGET_DIR would make every generated crate
-        // contend on one build lock. Both are hangs, not failures.
-        .env_remove("CARGO_MAKEFLAGS")
-        .env_remove("MAKEFLAGS")
-        .env("CARGO_TARGET_DIR", crate_dir.join("target"));
-
-    let timeout = generated_crate_verify_timeout();
-    let output = run_with_watchdog(&mut command, timeout);
-
-    let Some(status) = output.status else {
-        keep_sources_discard_build_artifacts(&crate_dir);
-        panic!(
-            "generated crate {cargo_command} for {crate_name} did not finish within {}s and was killed; \
-             crate sources kept at {}",
-            timeout.as_secs(),
-            crate_dir.display()
-        );
-    };
-
-    if !status.success() {
-        keep_sources_discard_build_artifacts(&crate_dir);
-        panic!(
-            "generated crate {cargo_command} failed for {crate_name}\nstdout:\n{}\nstderr:\n{}",
-            output.stdout, output.stderr
-        );
-    }
-
-    let _ = fs::remove_dir_all(&crate_dir);
-}
-
-/// Keep a failed crate's `Cargo.toml` and `src/`, drop its `target/`.
-///
-/// A failing crate is kept so it can be inspected, which is right — but it was
-/// kept *whole*, and `target/` is ~99% of its bytes and entirely regenerable by
-/// re-running `cargo` in the directory. With ~146 failures a run and no upper
-/// bound on runs, the leftovers reached **10,525 directories / 31 GB** and
-/// filled the root filesystem. The suite then failed 404 of 684 tests for no
-/// reason but disk, which is exactly the "a metric can silently report the wrong
-/// thing" failure
-/// [0018](../claude_audits/0018-the-compile-error-metric-cannot-see-silent-failures.md)
-/// is about — and it had already perturbed one gate run by a single test before
-/// it became obvious.
-fn keep_sources_discard_build_artifacts(crate_dir: &std::path::Path) {
-    let _ = fs::remove_dir_all(crate_dir.join("target"));
 }
 
 #[test]
@@ -10816,7 +10654,11 @@ class StandardLineRepair {
 
     assert!(
         translation.rust.contains(
-            "let repaired: HeaderLine = self.formats.as_ref().unwrap().repair(line.clone()/* TODO(translation): validate added clone */).into();"
+            // `Rc::new(line.clone())`: `line` is a borrowed parameter, and a
+            // borrowed slot sees *through* the handle, so the clone yields a bare
+            // value that has to be put back behind it before it can satisfy
+            // `Standards<Rc<FormatLine>>` (claude_audits/0002b).
+            "let repaired: HeaderLine = self.formats.as_ref().unwrap().repair(std::rc::Rc::new(line.clone()/* TODO(translation): validate added clone */)).into();"
         ) && translation.rust.contains("return repaired;"),
         "{}",
         translation.rust
@@ -11300,7 +11142,9 @@ class SiblingSource {
         translate_source_with_context_sources(caller, &[sibling.to_string()], &FactSet::default());
 
     assert!(
-        translation.rust.contains("sibling: Option<SiblingSource>,")
+        translation
+            .rust
+            .contains("sibling: Option<std::rc::Rc<SiblingSource>>,")
             && !translation.rust.contains("pub struct SiblingSource;"),
         "{}",
         translation.rust
@@ -11327,7 +11171,7 @@ class FeatureInput {
     assert!(
         translation
             .rust
-            .contains("header_override: Option<FeatureInput>,")
+            .contains("header_override: Option<std::rc::Rc<FeatureInput>>,")
             && translation.rust.contains("pub struct FeatureInput;"),
         "{}",
         translation.rust
@@ -11338,7 +11182,7 @@ class FeatureInput {
     assert!(
         full_context_translation
             .rust
-            .contains("header_override: Option<FeatureInput>,")
+            .contains("header_override: Option<std::rc::Rc<FeatureInput>>,")
             && !full_context_translation
                 .rust
                 .contains("pub struct FeatureInput;"),
@@ -12355,7 +12199,9 @@ class VCFHeaderLine {
         translation.rust.contains("impl ImportTool")
             && translation
                 .rust
-                .contains("pub fn get_default_tool_v_c_f_header_lines(&self) -> Option<std::collections::HashSet<VCFHeaderLine>>")
+                // The element is behind its handle (claude_audits/0002); what this
+                // pins is that the inherited surface exists at all.
+                .contains("pub fn get_default_tool_v_c_f_header_lines(&self) -> Option<std::collections::HashSet<std::rc::Rc<VCFHeaderLine>>>")
             && translation.rust.contains(
                 "unimplemented!(\"source-summary method GatkTool.getDefaultToolVCFHeaderLines is not translated\")"
             )
@@ -13078,7 +12924,9 @@ class Reader {
 
     assert!(
         translation.rust.contains(
-            "pub fn run(&self, futures: &std::collections::HashMap<String, Future<Reader>>) -> Result<std::collections::HashMap<String, Reader>, JavaException>"
+            // `Reader` is aliased into the map, so it is stored behind its handle
+            // (claude_audits/0002). What this pins is the `Result` wrapping.
+            "pub fn run(&self, futures: &std::collections::HashMap<String, Future<std::rc::Rc<Reader>>>) -> Result<std::collections::HashMap<String, std::rc::Rc<Reader>>, JavaException>"
         ) && translation
             .rust
             .contains("Err(e) if e.is_instance(&[\"ExecutionException\"])")
@@ -14979,7 +14827,12 @@ class MiniGzipState extends GZIPInputStream {
 }
 
 #[test]
-fn source_self_referential_instance_fields_use_boxed_optional_storage() {
+/// A self-referential field is stored behind a shared handle, not a `Box`.
+///
+/// `Option<Box<T>>` gives each node *exclusive* ownership of its parent, which
+/// no Java object graph has. The `Box` existed only to break the recursion, and
+/// the handle breaks it too. See claude_audits/0002.
+fn source_self_referential_instance_fields_use_shared_handle_storage() {
     let translation = translate_source(
         r#"
 class SelfLinkedNode {
@@ -14992,14 +14845,24 @@ class SelfLinkedNode {
     assert!(
         translation
             .rust
-            .contains("parent: Option<Box<SelfLinkedNode>>")
+            .contains("parent: Option<std::rc::Rc<SelfLinkedNode>>")
             && translation
                 .rust
-                .contains("child: Option<Box<SelfLinkedNode>>")
+                .contains("child: Option<std::rc::Rc<SelfLinkedNode>>")
+            && !translation.rust.contains("Option<Box<SelfLinkedNode>>")
             && !translation.rust.contains("parent: Option<SelfLinkedNode>")
             && !translation.rust.contains("child: Option<SelfLinkedNode>"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_self_referential_instance_fields_use_shared_handle",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -18398,7 +18261,12 @@ class Config {
 }
 
 #[test]
-fn private_static_singleton_getter_lowers_to_owned_source_value() {
+/// A singleton getter hands back a shared handle, not a value.
+///
+/// Returning `Config` by value gave every caller its own copy, so the singleton
+/// was not one. `Arc` rather than `Rc` because the value is reachable from a
+/// Java `static`, which is shared across threads and so must be `Sync`.
+fn private_static_singleton_getter_lowers_to_shared_handle() {
     let translation = translate_source(
         r#"
 class StaticSingletonGetterUse {
@@ -18423,8 +18291,12 @@ class Config {
     );
 
     assert!(
-        translation.rust.contains("pub fn get_instance() -> Config")
-            && translation.rust.contains("return Config::new();")
+        translation
+            .rust
+            .contains("pub fn get_instance() -> std::sync::Arc<Config>")
+            && translation
+                .rust
+                .contains("return std::sync::Arc::new(Config::new());")
             && translation
                 .rust
                 .contains("return Config::get_instance().svg_output;")
@@ -18479,7 +18351,9 @@ class Format {}
     assert!(
         translation.rust.contains("#[derive(Clone")
             && translation.rust.contains(
-                "pub struct Factory {\n    formats: std::collections::HashMap<String, Format>"
+                // `Arc`, not `Rc`: `Format` is reachable from a Java `static`, so
+                // its handle must be `Sync` (claude_audits/0002b).
+                "pub struct Factory {\n    formats: std::collections::HashMap<String, std::sync::Arc<Format>>"
             )
             // See claude_audits/0030: static storage is a process-wide `Mutex`.
             && translation
@@ -21431,7 +21305,10 @@ class SourceOwnedParamCallUsesSolvedSignature {
     assert!(
         translation
             .rust
-            .contains("pub fn format(&self, alignment: SourceOwnedParamCallUsesSolvedSignatureAlignment) -> String")
+            // The parameter is owned and its type is aliased, so it is stored
+            // behind a handle (claude_audits/0002). What this pins is that the
+            // call site uses the *solved* signature rather than borrowing.
+            .contains("pub fn format(&self, alignment: std::rc::Rc<SourceOwnedParamCallUsesSolvedSignatureAlignment>) -> String")
             && translation
                 .rust
                 .contains("return SourceOwnedParamCallUsesSolvedSignaturePair::new().format(alignment);")
@@ -22873,11 +22750,12 @@ class Wrapper {
         translation
             .rust
             .contains("let mut __java_self = ConstructorNestedArgFieldRead")
-            && (translation.rust.contains(
-                "__java_self.wrapper = Some(Wrapper::new(Holder::new(__java_self.payload.as_ref().expect(\"Java null receiver\").clone()"
-            ) || translation.rust.contains(
-                "__java_self.wrapper = Some(Wrapper::new(Holder::new(__java_self.payload.as_ref().cloned()/* TODO(translation): validate added clone */.expect(\"Java null receiver\")"
-            ))
+            // `Some(Rc::new(..))`, not `Some(Rc::new(Some(..)))` or
+            // `Rc::new(Some(..))`: the handle sits on the *element*, decided with
+            // the `Some` rather than after it (claude_audits/0002b).
+            && translation.rust.contains(
+                "__java_self.wrapper = Some(std::rc::Rc::new(Wrapper::new(Holder::new(__java_self.payload.as_ref().cloned()/* TODO(translation): validate added clone */.expect(\"Java null receiver\")"
+            )
             && !translation.rust.contains("__java_self.clone().payload"),
         "{}",
         translation.rust
@@ -27081,7 +26959,9 @@ public class ProgressMeter {
     );
 
     assert!(
-        translation.rust.contains("progress_meter: ProgressMeter"),
+        translation
+            .rust
+            .contains("progress_meter: std::rc::Rc<ProgressMeter>,"),
         "{}",
         translation.rust
     );

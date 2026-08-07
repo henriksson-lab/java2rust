@@ -139,7 +139,9 @@ pub fn type_emission_for_with_facts_and_exceptions(
         ObjectRepresentation::ClosedEnum {
             enum_name,
             variants,
-        } => RepresentationTypeEmission::RawRustItem(closed_enum_carrier_item(enum_name, variants)),
+        } => RepresentationTypeEmission::RawRustItem(closed_enum_carrier_item(
+            enum_name, variants, facts,
+        )),
         ObjectRepresentation::SourceHierarchyCarrier { .. } => {
             RepresentationTypeEmission::LowerAsConcreteStruct
         }
@@ -153,6 +155,7 @@ pub fn type_emission_for_with_facts_and_exceptions(
 pub fn source_hierarchy_carrier_item_for_type(
     representations: &RepresentationPlan,
     ty: &TypeDecl,
+    facts: &FactSet,
 ) -> Option<String> {
     let representation = representations.type_representation(&ty.name)?;
     let ObjectRepresentation::SourceHierarchyCarrier {
@@ -162,24 +165,52 @@ pub fn source_hierarchy_carrier_item_for_type(
     else {
         return None;
     };
-    Some(source_hierarchy_carrier_item(carrier_name, variants))
+    Some(source_hierarchy_carrier_item(carrier_name, variants, facts))
 }
 
-fn closed_enum_carrier_item(enum_name: &str, variants: &[String]) -> String {
-    carrier_enum_item("#[derive(Clone, PartialEq)]", enum_name, variants)
+fn closed_enum_carrier_item(enum_name: &str, variants: &[String], facts: &FactSet) -> String {
+    carrier_enum_item("#[derive(Clone, PartialEq)]", enum_name, variants, facts)
 }
 
-fn source_hierarchy_carrier_item(enum_name: &str, variants: &[String]) -> String {
-    carrier_enum_item("#[derive(Clone)]", enum_name, variants)
+fn source_hierarchy_carrier_item(enum_name: &str, variants: &[String], facts: &FactSet) -> String {
+    carrier_enum_item("#[derive(Clone)]", enum_name, variants, facts)
 }
 
-fn carrier_enum_item(derive: &str, enum_name: &str, variants: &[String]) -> String {
+fn carrier_enum_item(
+    derive: &str,
+    enum_name: &str,
+    variants: &[String],
+    facts: &FactSet,
+) -> String {
     let variants = variants
         .iter()
-        .map(|variant| format!("    {variant}({variant}),"))
+        .map(|variant| {
+            format!(
+                "    {variant}({}),",
+                carrier_variant_payload_type(variant, facts)
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
     format!("{derive}\npub enum {enum_name} {{\n{variants}\n}}")
+}
+
+/// The payload a carrier variant stores.
+///
+/// A variant payload is a *slot* of its type like any other, so a shared type
+/// sits behind its handle here too. Storing it bare made extraction hand back a
+/// bare value regardless of the consumer --
+/// `match line { HeaderLineValue::FormatLine(v) => v }` typed `FormatLine` into
+/// a slot expecting `Rc<FormatLine>` -- and no wrapping at consumers fixes that
+/// in general. Construction uses the same placement, so the two agree.
+/// See [0002b](../claude_audits/0002b-shared-representation-design.md).
+fn carrier_variant_payload_type(variant: &str, facts: &FactSet) -> String {
+    let placement = facts.storage_placement_for(variant);
+    if placement.shared && placement.is_implemented() {
+        placement.wrap(variant.to_string())
+    } else {
+        variant.to_string()
+    }
 }
 
 fn java_enum_payload_accessor_methods(ty: &TypeDecl, variants: &[String]) -> String {
@@ -512,8 +543,14 @@ pub fn source_class_bound_trait_item_for_type(
             _ => None,
         })
         .collect::<Vec<_>>();
+    // Class-bound traits need the handle forwarding just as interface traits do:
+    // this is the trait a Java `<T extends SomeClass>` bound lowers to, so
+    // `Standards<Rc<FormatLine>>` fails without it (claude_audits/0002b).
+    let forwarding = shared_handle_forwarding_impl(&trait_name, &methods)
+        .map(|item| format!("\n\n{item}"))
+        .unwrap_or_default();
     Some(format!(
-        "pub trait {trait_name} {{\n{}\n}}",
+        "pub trait {trait_name} {{\n{}\n}}{forwarding}",
         methods.join("\n")
     ))
 }
@@ -804,8 +841,11 @@ fn trait_item_for_type(
         })
         .collect::<Vec<_>>();
     methods.extend(trait_object_support_method_signatures(&trait_name));
+    let forwarding = shared_handle_forwarding_impl(&trait_name, &methods)
+        .map(|item| format!("\n\n{item}"))
+        .unwrap_or_default();
     format!(
-        "pub trait {trait_name} {{\n{}\n}}\n\n{}\n\n{}",
+        "pub trait {trait_name} {{\n{}\n}}\n\n{}\n\n{}{forwarding}",
         methods.join("\n"),
         dyn_trait_anonymous_impl(&trait_name),
         boxed_dyn_trait_clone_impl(&trait_name)
@@ -839,8 +879,11 @@ fn trait_item_for_type_with_program(
         })
         .collect::<Vec<_>>();
     methods.extend(trait_object_support_method_signatures(&trait_name));
+    let forwarding = shared_handle_forwarding_impl(&trait_name, &methods)
+        .map(|item| format!("\n\n{item}"))
+        .unwrap_or_default();
     format!(
-        "pub trait {trait_name} {{\n{}\n}}\n\n{}\n\n{}",
+        "pub trait {trait_name} {{\n{}\n}}\n\n{}\n\n{}{forwarding}",
         methods.join("\n"),
         dyn_trait_anonymous_impl(&trait_name),
         boxed_dyn_trait_clone_impl(&trait_name)
@@ -906,6 +949,135 @@ pub(crate) fn boxed_dyn_trait_clone_impl(trait_name: &str) -> String {
     // whose return type matches this `Box`.
     format!(
         "impl Clone for Box<dyn {trait_name}> {{\n    fn clone(&self) -> Self {{ {trait_name}::clone_box(&**self) }}\n}}"
+    )
+}
+
+/// Forwards a trait through a shared handle: `impl<T: Trait> Trait for Rc<T>`.
+///
+/// `Rc<T>` does not implement what `T` implements, so without this a wrapped
+/// value cannot satisfy a Java bound like `Standards<T extends Named>` --
+/// which is how the shared representation reaches user generics at all
+/// ([0002b](../claude_audits/0002b-shared-representation-design.md)).
+///
+/// `None` when any method takes `&mut self`: `Rc` has no `DerefMut`. That is the
+/// same precondition `storage_strategy::interface_surface_is_handle_forwardable`
+/// reports, checked here against the rendered surface so the two cannot drift.
+pub(crate) fn shared_handle_forwarding_impl(
+    trait_name: &str,
+    signatures: &[String],
+) -> Option<String> {
+    let methods = signatures
+        .iter()
+        .map(|signature| forwarded_trait_method(signature))
+        .collect::<Option<Vec<_>>>()?;
+    // An empty trait is *trivially* forwardable, and the impl is still required:
+    // a Java class used as a bare type-parameter bound (`<T extends HeaderLine>`)
+    // may declare no methods at all, and without `impl .. for Rc<..>` the bound
+    // `Rc<FormatLine>: HeaderLineBound` still fails. Returning `None` here was a
+    // bug that made exactly that case unfixable.
+    // `__JavaShared`, not `T`: a Java interface method may declare its own type
+    // parameter (`<T> T id(T value)`), and an inner generic that shadows the
+    // impl's is E0403. Pinned by `does_not_shadow_a_method_type_parameter`.
+    //
+    // Both handles: the tier picks `Arc` for anything reachable from a Java
+    // `static` (which must be `Sync`) and `Rc` otherwise, so a bound like
+    // `Standards<T extends Named>` can be met by either.
+    //
+    // No `?Sized`: a forwarded method may need `Self: Sized`, and the wrap only
+    // ever targets concrete source types, never `Rc<dyn Trait>`. The `'static`
+    // bound is required by the trait-object support methods (`as_any` and
+    // `clone_box`) once the handle itself can be boxed as `dyn Trait`.
+    let body = methods.join("\n");
+    Some(
+        ["std::rc::Rc", "std::sync::Arc"]
+            .into_iter()
+            .map(|handle| {
+                format!(
+                    "impl<__JavaShared: {trait_name} + 'static> {trait_name} for {handle}<__JavaShared> {{\n{body}\n}}"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+    )
+}
+
+/// Turns one rendered trait-method signature into a forwarding implementation.
+///
+/// The signature is text this module just produced, so the parse is closed over
+/// our own output rather than arbitrary Rust: `    fn name<generics>(&self, a: A) -> R;`
+fn forwarded_trait_method(signature: &str) -> Option<String> {
+    let trimmed = signature.trim();
+    let body = trimmed.strip_prefix("fn ")?.strip_suffix(';')?;
+    if trimmed.contains("&mut self") || !trimmed.contains("&self") {
+        return None;
+    }
+    let open = body.find('(')?;
+    let name = body[..open].split('<').next()?.trim();
+    let close = matching_paren(body, open)?;
+    let args = forwarded_argument_names(&body[open + 1..close])?;
+    let signature_without_semicolon = trimmed.strip_suffix(';')?;
+    if name == "clone_box" && args.is_empty() {
+        return Some(format!(
+            "    {signature_without_semicolon} {{ Box::new(self.clone()) }}"
+        ));
+    }
+    Some(format!(
+        "    {signature_without_semicolon} {{ (**self).{name}({}) }}",
+        args.join(", ")
+    ))
+}
+
+fn matching_paren(text: &str, open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (index, ch) in text.char_indices().skip(open) {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Parameter names after the receiver, splitting on commas that are not inside
+/// a generic argument list or a nested parameter list.
+fn forwarded_argument_names(params: &str) -> Option<Vec<String>> {
+    let mut names = Vec::new();
+    let mut depth = 0usize;
+    let mut current = String::new();
+    for ch in params.chars() {
+        match ch {
+            '<' | '(' | '[' => {
+                depth += 1;
+                current.push(ch);
+            }
+            '>' | ')' | ']' => {
+                depth = depth.checked_sub(1)?;
+                current.push(ch);
+            }
+            ',' if depth == 0 => {
+                names.push(std::mem::take(&mut current));
+            }
+            _ => current.push(ch),
+        }
+    }
+    names.push(current);
+    Some(
+        names
+            .into_iter()
+            .filter_map(|param| {
+                let param = param.trim();
+                if param.is_empty() || param.ends_with("self") {
+                    return None;
+                }
+                Some(param.split(':').next()?.trim().to_string())
+            })
+            .collect(),
     )
 }
 
@@ -1737,4 +1909,100 @@ fn find_type_decl_in_type<'a>(ty: &'a TypeDecl, type_name: &str) -> Option<&'a T
         Member::Type(nested) => find_type_decl_in_type(nested, type_name),
         _ => None,
     })
+}
+
+#[cfg(test)]
+mod shared_handle_forwarding_tests {
+    use super::shared_handle_forwarding_impl;
+
+    #[test]
+    fn forwards_a_read_only_surface() {
+        let rendered = shared_handle_forwarding_impl(
+            "Named",
+            &[
+                "    fn id(&self) -> String;".to_string(),
+                "    fn as_any(&self) -> &dyn std::any::Any;".to_string(),
+            ],
+        )
+        .expect("a &self-only surface forwards");
+        assert!(
+            rendered.contains(
+                "impl<__JavaShared: Named + 'static> Named for std::rc::Rc<__JavaShared>"
+            )
+        );
+        assert!(rendered.contains("fn id(&self) -> String { (**self).id() }"));
+        assert!(rendered.contains("fn as_any(&self) -> &dyn std::any::Any { (**self).as_any() }"));
+    }
+
+    #[test]
+    fn clone_box_forwarding_preserves_the_handle() {
+        let rendered = shared_handle_forwarding_impl(
+            "Named",
+            &["    fn clone_box(&self) -> Box<dyn Named>;".to_string()],
+        )
+        .expect("forwards");
+
+        assert!(
+            rendered.contains("fn clone_box(&self) -> Box<dyn Named> { Box::new(self.clone()) }"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("(**self).clone_box()"), "{rendered}");
+    }
+
+    /// Arguments are forwarded by name, and a generic parameter list must not be
+    /// mistaken for one: the comma in `HashMap<K, V>` is inside `<>`.
+    #[test]
+    fn forwards_arguments_without_splitting_generics() {
+        let rendered = shared_handle_forwarding_impl(
+            "Sink",
+            &["    fn put<T0: ?Sized>(&self, key: std::collections::HashMap<i32, String>, value: &T0) -> bool;"
+                .to_string()],
+        )
+        .expect("forwards");
+        assert!(
+            rendered.contains("{ (**self).put(key, value) }"),
+            "{rendered}"
+        );
+    }
+
+    /// `Rc` has no `DerefMut`, so a mutating surface has no forwarding impl at
+    /// all -- the whole trait is rejected, not the single method.
+    #[test]
+    fn a_mutating_method_rejects_the_whole_surface() {
+        assert!(
+            shared_handle_forwarding_impl(
+                "Shape",
+                &[
+                    "    fn size(&self) -> i32;".to_string(),
+                    "    fn grow(&mut self);".to_string(),
+                ],
+            )
+            .is_none()
+        );
+    }
+
+    /// A Java interface method may declare its own type parameter; the impl's
+    /// must not collide with it (E0403).
+    #[test]
+    fn does_not_shadow_a_method_type_parameter() {
+        let rendered = shared_handle_forwarding_impl(
+            "Mapper",
+            &["    fn id<T>(&self, value: T) -> T where Self: Sized;".to_string()],
+        )
+        .expect("forwards");
+        assert!(!rendered.contains("impl<T:"), "{rendered}");
+        assert!(
+            rendered.contains("for std::rc::Rc<__JavaShared>"),
+            "{rendered}"
+        );
+    }
+
+    /// A static (receiverless) method cannot be reached through a handle either.
+    #[test]
+    fn a_receiverless_method_rejects_the_surface() {
+        assert!(
+            shared_handle_forwarding_impl("Factory", &["    fn make() -> i32;".to_string()])
+                .is_none()
+        );
+    }
 }

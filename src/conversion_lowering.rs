@@ -131,6 +131,22 @@ pub fn construct_preconverted_optional_value_for_target(
     value: RustExpr,
     construction: OptionalSlotConstructionPlan,
 ) -> RustExpr {
+    construct_preconverted_optional_value_for_target_from(value, construction, false)
+}
+
+/// `value_is_fresh_construction` says the element came from `new X(..)` -- the
+/// one producer structurally guaranteed not to be behind a handle already.
+pub fn construct_preconverted_optional_value_for_target_from(
+    value: RustExpr,
+    construction: OptionalSlotConstructionPlan,
+    value_is_fresh_construction: bool,
+) -> RustExpr {
+    let value = match (&construction.element_handle, value_is_fresh_construction) {
+        (Some(placement), true) => {
+            RustExpr::Raw(placement.wrap_construction(crate::emit::emit_expr(&value)))
+        }
+        _ => value,
+    };
     let plan = LoweredSlotExprConversionPlan {
         actual: LoweredType::Slot(Box::new(construction.element_shape.clone())),
         slot: Slot::Assignment(construction.target.clone()),
@@ -151,6 +167,7 @@ pub fn adapt_optional_assignment_value_for_target(
     conversion_plan: SlotExprConversionPlan,
     preconverted_some_plan: OptionalSlotConstructionPlan,
     already_optional_result: bool,
+    value_is_fresh_construction: bool,
 ) -> RustExpr {
     if already_optional_result {
         if let Some(inner) = crate::coercion::unwrap_some_expr(&lowered_value) {
@@ -164,8 +181,22 @@ pub fn adapt_optional_assignment_value_for_target(
         return lowered_value;
     }
     if let Some(inner) = crate::coercion::unwrap_some_expr(&lowered_value) {
-        return construct_preconverted_optional_value_for_target(inner, preconverted_some_plan);
+        return construct_preconverted_optional_value_for_target_from(
+            inner,
+            preconverted_some_plan,
+            value_is_fresh_construction,
+        );
     }
+    // Still bare, so the handle goes on *before* the plan adds the `Some`.
+    let lowered_value = match (
+        &preconverted_some_plan.element_handle,
+        value_is_fresh_construction,
+    ) {
+        (Some(placement), true) => {
+            RustExpr::Raw(placement.wrap_construction(crate::emit::emit_expr(&lowered_value)))
+        }
+        _ => lowered_value,
+    };
     apply_slot_expr_conversion(lowered_value, &conversion_plan)
 }
 

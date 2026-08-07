@@ -1,6 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 
+#[path = "common/mod.rs"]
+mod common;
+use common::{GeneratedCrateModule, cargo_check_generated_modules};
+
 use new_java2rust::access_lowering::{
     lower_bare_name, lower_field_access, lower_field_access_with_facts,
 };
@@ -1650,6 +1654,15 @@ class NativeMapFinalFacadeValueUse {
                 .contains("let payload: Box<dyn std::any::Any>"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "native_map_get_into_final_facade_local_keeps_value_shape",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -4520,6 +4533,15 @@ class VCFInfoHeaderLine extends VCFCompoundHeaderLine {}
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "source_class_fields_beat_external_erased_and_closed_facts",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -4579,6 +4601,15 @@ abstract class VCFCompoundHeaderLine {
         translation.rust.contains("other.name"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "parsed_source_declared_peer_param_keeps_concrete_signature_u",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -4992,6 +5023,15 @@ class PlatformBoundaryUse {
     assert!(translation.rust.contains("path.to_uri().get_raw_path()"));
     assert!(translation.rust.contains("file.to_path()"));
     assert!(translation.rust.contains("IOUtils::get_path(value)"));
+
+    cargo_check_generated_modules(
+        "java_platform_facade_support_covers_path_uri_and_file_bounda",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -5024,6 +5064,15 @@ class LoggingBoundaryUse {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "java_logging_facade_supports_inherited_logger_calls",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -5055,6 +5104,15 @@ class StaticLoggerBoundaryUse {
         !translation.rust.contains("Self::logger"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "java_logging_facade_supports_static_logger_field_calls",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -5234,6 +5292,15 @@ class AnonymousFeatureReaderFactory {
         "anonymous external facade returns should keep declared concrete shape:\n{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "anonymous_external_facade_return_keeps_declared_concrete_sha",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -5271,6 +5338,15 @@ class DuplicateReaderLocalMapPut {
             && !translation.rust.contains("invalid Java cast"),
         "map value conversion should see the concrete reader occurrence, not the earlier erased declaration:\n{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "duplicate_local_names_use_scoped_occurrence_shape_before_map",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -5518,7 +5594,12 @@ interface Mapper {
             &ProgramExceptionPlan::default(),
         ),
         RepresentationTypeEmission::RawRustItem(
-            "pub trait Mapper {\n    fn id<T>(&self, value: T) -> T where Self: Sized;\n    fn as_any(&self) -> &dyn std::any::Any;\n    fn clone_box(&self) -> Box<dyn Mapper>;\n}\n\nimpl dyn Mapper {\n    pub fn anonymous() -> Box<dyn Mapper> { panic!(\"java2rust: anonymous class body for Mapper requires object lowering\") }\n}\n\nimpl Clone for Box<dyn Mapper> {\n    fn clone(&self) -> Self { Mapper::clone_box(&**self) }\n}"
+            // The trailing `impl .. for Rc<..>` forwards the trait through a
+            // shared handle, so a wrapped value can satisfy a Java bound
+            // (claude_audits/0002b). `__JavaShared` rather than `T`: `id`
+            // declares its own `T` and an inner generic shadowing the impl's is
+            // E0403.
+            "pub trait Mapper {\n    fn id<T>(&self, value: T) -> T where Self: Sized;\n    fn as_any(&self) -> &dyn std::any::Any;\n    fn clone_box(&self) -> Box<dyn Mapper>;\n}\n\nimpl dyn Mapper {\n    pub fn anonymous() -> Box<dyn Mapper> { panic!(\"java2rust: anonymous class body for Mapper requires object lowering\") }\n}\n\nimpl Clone for Box<dyn Mapper> {\n    fn clone(&self) -> Self { Mapper::clone_box(&**self) }\n}\n\nimpl<__JavaShared: Mapper + 'static> Mapper for std::rc::Rc<__JavaShared> {\n    fn id<T>(&self, value: T) -> T where Self: Sized { (**self).id(value) }\n    fn as_any(&self) -> &dyn std::any::Any { (**self).as_any() }\n    fn clone_box(&self) -> Box<dyn Mapper> { Box::new(self.clone()) }\n}\n\nimpl<__JavaShared: Mapper + 'static> Mapper for std::sync::Arc<__JavaShared> {\n    fn id<T>(&self, value: T) -> T where Self: Sized { (**self).id(value) }\n    fn as_any(&self) -> &dyn std::any::Any { (**self).as_any() }\n    fn clone_box(&self) -> Box<dyn Mapper> { Box::new(self.clone()) }\n}"
                 .to_string()
         )
     );
@@ -5592,6 +5673,15 @@ class GenericStandards<T extends Mid> {
             .contains("impl<T: MidBound + Into<Base> + 'static> GenericStandards<T>"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "generic_source_supertype_into_bound_gets_static_for_erased_b",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -11381,6 +11471,15 @@ class NullableArrayParamMutation {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "nullable_array_param_mutation_uses_optional_mutable_borrow_s",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -11761,6 +11860,15 @@ class StaticImportBorrowedArg {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "static_import_lowering_borrows_arguments_from_external_effec",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -11843,6 +11951,15 @@ class StaticImportTypedReturn {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "static_import_support_uses_external_return_facts_without_ins",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -11874,6 +11991,15 @@ class StaticImportNoFacts {
             && !translation.rust.contains("-> R { Default::default() }"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "static_import_without_return_fact_is_loud_generic_fallback",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -11941,6 +12067,15 @@ class NullableExternalArgument {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "static_external_facade_uses_nullable_argument_fact_without_c",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -12007,6 +12142,15 @@ class ExternalValidationUse {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "external_static_validation_facade_uses_side_effect_fact_retu",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -12047,6 +12191,15 @@ class JavaPlatformFileWrite {
         !translation.rust.contains("pub fn write_string<R: Default"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "java_platform_files_write_string_facade_uses_known_path_retu",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -12093,6 +12246,15 @@ class SameNameBranchLocalTypes {
         translation.rust.contains("let header: i32 = self.count();"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "branch_scoped_same_name_locals_keep_declared_type_specific_s",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -12177,6 +12339,15 @@ class StaticImportFqnFactReturn {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "static_import_support_reuses_fqn_return_facts_for_simple_own",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -12248,6 +12419,15 @@ class ExternalConstructorCaller {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "external_constructor_support_uses_arity_names_for_overloaded",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -12297,6 +12477,15 @@ class ExternalChoiceConstructorCaller {
             .contains("pub fn new(_arg0: String) -> Self"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "external_constructor_support_keeps_generic_args_for_same_ari",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -12356,6 +12545,15 @@ class ExternalConstantConstructorCaller {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "external_constant_facade_shells_are_defaultable_for_construc",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -12397,6 +12595,15 @@ class BuiltinExternalConstructorCaller {
         !translation.rust.contains("SimpleInterval::new(interval"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "builtin_external_constructor_calls_use_arity_names_for_overl",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -12449,6 +12656,15 @@ class BuiltinHtsjdkIntervalCaller {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "builtin_htsjdk_interval_facade_support_matches_overloaded_co",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -12484,6 +12700,15 @@ class BoundReceiverMethodReferenceCaller {
             && !translation.rust.contains("interval_list::add"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "bound_receiver_method_reference_uses_local_receiver_closure",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -12568,6 +12793,15 @@ class GenomicsLikeTool extends GATKTool {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "external_inherited_instance_fields_lower_as_self_fields",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -12622,6 +12856,15 @@ class OuterWithNestedClass {
         .find("impl OuterWithNestedClassWrapper")
         .unwrap();
     assert!(struct_pos < impl_pos, "{}", translation.rust);
+
+    cargo_check_generated_modules(
+        "static_nested_class_with_fields_emits_struct_before_impl",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -12669,6 +12912,15 @@ class OuterWithExternalNestedClass {
             .contains("impl OuterWithExternalNestedClassWrapper"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "static_nested_class_implementing_external_interface_keeps_co",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -12757,6 +13009,15 @@ class ExternalMethodCaller {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "external_method_support_uses_arity_names_for_overloaded_faca",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -12825,6 +13086,15 @@ class DomainCollectionConstructorUse {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "domain_collection_facade_constructor_is_not_native_collectio",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -12883,6 +13153,15 @@ class PackEnabledDomainFacadeUse {
             .contains("intervals.add(Interval::new_3(\"chr1\".to_string(), 1, 2));"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "pack_enabled_final_domain_facade_local_stays_concrete_not_er",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -13020,6 +13299,15 @@ class ExternalFacadeDisplayEquality {
             .contains("impl std::fmt::Display for ExternalToken"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "external_opaque_facades_support_equality_and_display_fallbac",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -14128,6 +14416,15 @@ class ArraysSortUse {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "arrays_sort_statement_lowers_to_mutating_rust_sort",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -14167,6 +14464,15 @@ class CollectionsSortUse {
         !translation.rust.contains("JavaUtilCollections::sort"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "collections_sort_statement_lowers_to_mutating_rust_sort",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -15259,6 +15565,15 @@ class Holder {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "erased_object_external_handle_lowers_store_pass_and_return_t",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -15284,6 +15599,15 @@ class Holder {
                 .contains("self.workspace = self.incremental_import_workspace;"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "borrowed_self_field_owned_recovery_applies_to_mutable_receiv",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -15337,6 +15661,15 @@ class Holder {
             && !translation.rust.contains("values.push(Self::NAME.clone())"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_static_string_constant_push_to_vec_string_uses_to_str",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -15496,6 +15829,15 @@ class Holder {
             && !translation.rust.contains("return self.workspace;"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "optional_self_field_return_recovers_owned_option_without_mov",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -15872,7 +16214,9 @@ class Holder {
     assert!(
         translation
             .rust
-            .contains("let tmp: Option<Cursor> = self.query.as_ref().cloned()")
+            // `Option<Rc<Cursor>>`: the handle sits on the element, matching the
+            // field it is read from (claude_audits/0002b).
+            .contains("let tmp: Option<std::rc::Rc<Cursor>> = self.query.as_ref().cloned()")
             && translation.rust.contains("self.query.take();")
             && translation
                 .rust
@@ -15885,6 +16229,19 @@ class Holder {
                 .contains("let tmp: Cursor = self.query.unwrap();"),
         "{}",
         translation.rust
+    );
+
+    // The generated crate is checked here because this test asserts on rendered
+    // *types*: without it a field/local disagreement (`Option<Rc<Cursor>>` vs
+    // `Option<Cursor>`) reads as an assertion failure while actually being a
+    // type error. See claude_audits/0018 and 0002b.
+    cargo_check_generated_modules(
+        "optional_self_field_read_into_owned_local",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -15924,6 +16281,15 @@ class Node {
         ) && !translation.rust.contains(".name.as_ref().expect(\"Java null receiver\").clone()"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "optional_receiver_field_element_recovery_uses_borrowed_carri",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -19405,6 +19771,15 @@ class EffectOnlyThrows {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "method_effect_facts_drive_exception_result_shell_and_return_",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -19509,6 +19884,15 @@ class StaticInitAudit {
             .rust
             .contains("pub fn __static_b() -> i32 {\n        Self::__java_class_init();")
     );
+
+    cargo_check_generated_modules(
+        "static_initializer_blocks_lower_in_order_and_trigger_from_ac",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 /// A Java `static` is one variable shared by every thread.
@@ -19558,6 +19942,15 @@ public class SharedStatics {
         "the class-init guard must be an atomic:\n{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "static_storage_is_shared_across_threads_not_per_thread",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 /// A nested class reads an enclosing class's `static` through the declaring
@@ -19601,6 +19994,15 @@ public class OuterStatics {
         translation.rust.contains("Self::__static_n()"),
         "a same-type read stays on `Self`:\n{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "nested_class_reads_enclosing_static_through_its_owner",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -23048,6 +23450,15 @@ class LoopLivenessAudit {
     assert!(liveness_source.contains("pub fn live_out_for"));
     assert!(liveness_source.contains("pub struct Binding"));
     assert!(liveness_source.contains("fn loop_fixpoint"));
+
+    cargo_check_generated_modules(
+        "loop_liveness_keeps_owned_value_live_across_back_edge",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -23080,6 +23491,15 @@ class Payload {
         translation.rust.contains("self.take(value.clone()"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "for_each_expression_lambda_keeps_outer_value_live_across_bac",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -23322,6 +23742,15 @@ class FallibleCalls {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "lowering_uses_callable_fallibility_for_source_call_result_pr",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -23362,6 +23791,15 @@ class UncheckedFallibleCalls {
                 .contains("pub fn increment(&self) -> Result<(), JavaException>"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "callable_fallibility_uses_unchecked_method_throw_facts",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -23405,6 +23843,15 @@ class FallibleCastCalls {
         translation.rust.contains("self.leaf(x)?"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "cast_wrapped_fallible_source_call_uses_inner_result_propagat",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -25562,6 +26009,15 @@ class Shelter {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "lowering_uses_boxed_dyn_coercion_for_concrete_interface_fiel",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -25584,6 +26040,15 @@ class Shelter {
             .contains("return Box::new(dog) as Box<dyn Animal>;"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "lowering_uses_boxed_dyn_coercion_for_concrete_interface_retu",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -25609,6 +26074,15 @@ class Shelter {
             .contains("self.visit(self.resident.as_ref().expect(\"Java null receiver\").as_ref() as &dyn Animal);"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "lowering_borrows_boxed_dyn_field_for_interface_arguments",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -25696,6 +26170,15 @@ class Registry {
         !translation.rust.contains("compile_error!"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "lowering_emits_dyn_trait_methods_impls_and_owned_interface_b",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -26410,6 +26893,15 @@ class StringCalls {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "call_lowering_uses_callee_param_shape_for_argument_coercion",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -26447,6 +26939,15 @@ class Caller {
         translation.rust.contains("helper.score(value.as_str())"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "cross_class_call_lowering_uses_declaring_type_param_shape",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -26511,6 +27012,18 @@ class MethodElemUse {
                 .contains("pub fn concrete(&self, value: &ELEM) -> String"),
         "{}",
         translation.rust
+    );
+
+    // Asserts on rendered types, so it needs the generated crate checked: a
+    // type-parameter/source-class collision is a compile error, not a text
+    // difference. See claude_audits/0018.
+    cargo_check_generated_modules(
+        "scoped_type_param_same_named_source_class",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -26584,6 +27097,15 @@ class UseExternalConstant {
         translation.rust.contains("ExternalConstants::NAME"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "external_static_string_constant_support_is_generated_from_fi",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -26702,6 +27224,15 @@ class BuiltinBooleanConstant {
         "{}",
         builtin_boolean_translation.rust
     );
+
+    cargo_check_generated_modules(
+        "external_static_primitive_constant_support_is_generated_from",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -26741,6 +27272,15 @@ class BuiltinErasedStaticFacadeMethod {
         translation.rust.contains("::from_g_l_field"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "erased_external_static_facade_method_support_is_generated_fr",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -26898,6 +27438,15 @@ class BuiltinExternalStaticFactoryOverloads {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "external_static_facade_factory_overloads_use_arity_specific_",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -26983,6 +27532,15 @@ class BuiltinNamedConstant {
         "{}",
         builtin_translation.rust
     );
+
+    cargo_check_generated_modules(
+        "external_static_named_constant_support_is_generated_from_fie",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -27029,6 +27587,15 @@ class ExternalConstantFacadeCollision {
             .contains("impl ExternalConstants {\n    pub const NAME: &'static str = \"NAME\";"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "static_string_constant_support_extends_existing_opaque_facad",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -27171,6 +27738,15 @@ class UseExternalStringConstants {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "conventional_external_static_string_constants_are_typed_and_",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -27209,6 +27785,15 @@ class ExternalVersionAppend {
             && !translation.rust.contains("invalid Java cast"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "conventional_external_version_constant_append_does_not_downc",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -27268,6 +27853,15 @@ class UseGenomicsDbPackFields {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "genomicsdb_imported_constants_and_nested_type_fields_use_pac",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -27322,6 +27916,15 @@ class UseExternalRecord {
         translation.rust.contains("pub total_batch_count: i32,"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "external_support_struct_fields_are_generated_from_field_fact",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -27855,6 +28458,15 @@ class UseExternalBuilder {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "external_nested_builder_facade_support_is_generated_from_fac",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -27921,6 +28533,15 @@ class UseExternalBuilderMissingReturnFact {
             .contains("pub fn build(&self) -> Box<dyn std::any::Any>"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "external_builder_build_without_return_fact_uses_named_opaque",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -28200,6 +28821,15 @@ class UseExternalNewBuilderMissingReturnFact {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "external_new_builder_without_return_fact_uses_named_builder_",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -28360,6 +28990,15 @@ class ErasedVoidFacadeUse {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "erased_object_facade_includes_modeled_void_methods",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -28464,6 +29103,15 @@ class ObjectBoundary {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "java_object_return_type_lowers_to_erased_any_boundary",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -28554,6 +29202,15 @@ class ConcreteFacadeNullableReturn {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "concrete_external_facade_strategy_preserves_typed_nullable_r",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -28623,6 +29280,15 @@ class MakesBox {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "new_expression_uses_constructor_param_shape_for_argument_coe",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -28670,6 +29336,15 @@ class StringFlow {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "shape_env_prevents_redundant_string_view_adapters",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -28710,6 +29385,15 @@ class StringReturnFlow {
                 .contains("return Self::id(value).to_string();"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "call_return_shape_drives_return_slot_coercion",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -28814,6 +29498,15 @@ class StringReturnFlow {
             .contains("return Self::id(value).to_string();"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "signature_fixpoint_propagates_private_internal_call_return_s",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -29993,6 +30686,15 @@ class UsesArrowConstructorArgumentFacts {
         "borrowed constructor argument should not be recovered through clone:\n{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "external_constructor_argument_fact_borrows_facade_parameter",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -30029,6 +30731,15 @@ class UsesMappedRustTypeName {
             .contains("htsjdk_facade::SAMSequenceRecord"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "external_crate_mapped_type_uses_constructor_rust_type_name",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -30122,6 +30833,15 @@ class UsesMappedSequenceStorage {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "external_crate_mapped_sequence_type_keeps_facade_storage_typ",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -30209,6 +30929,15 @@ class UsesArrowConstructorUnknownNullability {
                 .contains("Option<arrow_facade::RootAllocator>"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "external_constructor_argument_unknown_nullability_defaults_t",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -30787,6 +31516,15 @@ class BorrowedAndPrivateCrateReturnSupport {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "external_facade_support_qualifies_borrowed_and_private_crate",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -30879,6 +31617,15 @@ class PreservedFacadeTypeNameSupport {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "external_facade_support_preserves_digit_and_sqlite_crate_typ",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -30937,6 +31684,15 @@ class ExternalDynTraitFacadeSupport {
         !translation.rust.contains("as &dyn Locatable"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "external_dyn_trait_facade_support_uses_impl_trait_arguments",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -31000,6 +31756,15 @@ class ExternalDynTraitSourceSignatures {
         !translation.rust.contains("Box<dyn dep_facade::Locatable>"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "external_dyn_trait_source_signatures_use_crate_qualified_tra",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -31211,6 +31976,15 @@ class BorrowedArrowGetterReturn {
         ),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "borrowed_external_facade_return_recovers_owned_value_before_",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -32934,6 +33708,15 @@ class SlotThrowingCallPropagation {
             .contains("let value: String = self.read()?;"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "slot_lowering_does_not_double_propagate_throwing_call_result",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -35912,6 +36695,15 @@ class OptionalSequenceLoop {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "enhanced_for_over_optional_sequence_unwraps_before_iteration",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -36446,6 +37238,15 @@ class ExternalConstructorCallbackUse {
         "callback slot conversion should not downcast a target-typed method reference:\n{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "nullable_external_constructor_callback_slot_wraps_method_ref",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -36545,6 +37346,15 @@ class ExternalConstructorSetUse {
         ) && !translation.rust.contains("self.lines.unwrap()"),
         "typed external constructor set parameter should recover owned value without moving self field:\n{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "external_constructor_owned_set_param_clones_optional_self_fi",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -37115,6 +37925,15 @@ class FieldNameFlow {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "source_instance_field_access_uses_rust_field_names",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -37614,6 +38433,15 @@ class IntStreamRangeSource {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "translation_lowers_int_stream_range_source_without_static_fa",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -37647,6 +38475,15 @@ class EnhancedForIntStreamRange {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "translation_lowers_enhanced_for_over_int_stream_range_as_rus",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -37677,6 +38514,15 @@ class IntStreamRangeForEach {
         !translation.rust.contains("(0..limit).iter()"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "translation_lowers_int_stream_range_for_each_as_rust_range_l",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -37709,6 +38555,15 @@ class ForEachLambdaResolvedOverload {
             && !translation.rust.contains("self.add(i);"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "for_each_lambda_receiverless_call_uses_resolved_overload_tar",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -37916,6 +38771,15 @@ class StreamExternalElementCalls {
             .contains("pub fn get_tiledb_column_offset(&self) -> i64"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "translation_emits_external_surfaces_for_stream_lambda_elemen",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -38733,6 +39597,15 @@ public class Reader {
         "a constant whose value is in the summary source must not be stubbed:\n{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "static_final_constants_from_summary_sources_carry_their_decl",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 /// The other half of the same rule: a value that genuinely is not a constant
@@ -38808,6 +39681,15 @@ public class Order {
         "the index must be evaluated before the value:\n{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "a_side_effecting_value_hoists_a_stable_looking_index",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 /// A literal index needs no hoist, however side-effecting the value is: nothing
@@ -38831,6 +39713,15 @@ public class Order {
         !translation.rust.contains("__java_assignment_index"),
         "a literal index is stable across evaluating the value:\n{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "a_literal_index_is_not_hoisted_for_a_side_effecting_value",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -38868,6 +39759,15 @@ public class Order {
             .contains("arr[__java_assignment_index as usize].field ="),
         "the write must go through the hoisted index:\n{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "a_field_place_hoists_its_receivers_array_index",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -38920,6 +39820,15 @@ public class Ragged {
             .contains("g[__java_assignment_row][__java_assignment_col] ="),
         "and the write goes through both temporaries:\n{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "ragged_two_dimensional_assignment_hoists_both_indices",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -39180,6 +40089,15 @@ public class Caller {
         "source-summary static methods must not be emitted as instance methods:\n{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "a_summary_source_type_gets_no_unmodelled_import_stub",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -39250,5 +40168,14 @@ public class Caller {
             .contains("pub fn new<T0>(_arg0: T0) -> Self { Default::default() }"),
         "source-summary constructors must not be emitted as no-op external constructors:\n{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "a_summary_source_constructor_gets_source_summary_surface_not",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }

@@ -626,6 +626,21 @@ pub struct OptionalSlotConstructionPlan {
     pub element_shape: RustSlotShape,
     pub element_plan: ShapeCoercionPlan,
     pub wrapper_ownership: OwnershipShape,
+    /// The handle the **element** is stored behind, if any (0002/0002b). On the
+    /// plan because the renderer has no `FactSet`, and because deciding the
+    /// `Some` and the handle together prevents `Some(Rc::new(Some(..)))`.
+    pub element_handle: Option<crate::storage_strategy::StoragePlacement>,
+}
+
+fn optional_element_handle_placement(
+    target: &RustSlotShape,
+    facts: &FactSet,
+) -> Option<crate::storage_strategy::StoragePlacement> {
+    let JavaType::Named { name, .. } = target.optional_element_type()? else {
+        return None;
+    };
+    let placement = facts.storage_placement_for(&name);
+    (placement.shared && placement.is_implemented()).then_some(placement)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -672,6 +687,7 @@ pub fn optional_slot_construction_plan_with_actual_element(
         element_shape: actual_element_shape.clone(),
         element_plan,
         wrapper_ownership: OwnershipShape::Owned,
+        element_handle: optional_element_handle_placement(target, facts),
     })
 }
 
@@ -748,6 +764,7 @@ pub fn preconverted_optional_slot_construction_plan(
         element_shape: element_shape.clone(),
         element_plan: shape_coercion_plan_with_facts(&element_shape, &element_shape, facts),
         wrapper_ownership: OwnershipShape::Owned,
+        element_handle: optional_element_handle_placement(target, facts),
     }
 }
 
@@ -2191,6 +2208,17 @@ pub fn dispatch_coercion_policy_with_facts(
         (DispatchShape::ErasedObject, DispatchShape::Concrete) => {
             match runtime_type_target_policy(&target.java_ty) {
                 RuntimeTypeTargetPolicy::Nominal { target_type } => {
+                    // The carrier holds the handle, so the downcast must ask for
+                    // it; recovering `T` would hand back a copy.
+                    let placement = match &target.java_ty {
+                        JavaType::Named { name, .. } => facts.storage_placement_for(name),
+                        _ => Default::default(),
+                    };
+                    let target_type = if placement.shared && placement.is_implemented() {
+                        placement.wrap(target_type)
+                    } else {
+                        target_type
+                    };
                     DispatchCoercionPolicy::DowncastErasedObject {
                         target_type,
                         invalid_cast: InvalidCastPolicy::Panic,

@@ -120,12 +120,24 @@ pub fn rust_type_for_slot_with_facts_and_representations(
     facts: &FactSet,
     representations: &RepresentationPlan,
 ) -> RustType {
+    let rendered =
+        rust_type_for_slot_with_facts_and_representations_unwrapped(shape, facts, representations);
+    shared_handle_slot_rust_type(shape, &EffectiveFacts::new(facts), rendered)
+}
+
+fn rust_type_for_slot_with_facts_and_representations_unwrapped(
+    shape: &RustSlotShape,
+    facts: &FactSet,
+    representations: &RepresentationPlan,
+) -> RustType {
     let effective_facts = EffectiveFacts::new(facts);
     if let Some(element_ty) = shape.optional_element_type() {
         let mut element_shape = shape.clone();
         element_shape.java_ty = element_ty;
         element_shape.type_identity =
             crate::slot_shape::TypeIdentity::from_java_type(element_shape.java_ty.clone());
+        // Through the wrapping entry point: the element is where the handle
+        // belongs, giving `Option<Rc<T>>`.
         return RustType::Option(Box::new(rust_type_for_slot_with_facts_and_representations(
             &element_shape,
             facts,
@@ -180,7 +192,34 @@ pub fn rust_type_for_slot_with_effective_facts(
             facts,
         )));
     }
-    render_slot_rust_type_policy(&slot_rust_type_policy_with_effective_facts(shape, facts))
+    let rendered =
+        render_slot_rust_type_policy(&slot_rust_type_policy_with_effective_facts(shape, facts));
+    shared_handle_slot_rust_type(shape, facts, rendered)
+}
+
+/// Wraps an **owned** slot of a shared type in its handle (0002/0002b).
+fn shared_handle_slot_rust_type(
+    shape: &RustSlotShape,
+    facts: &EffectiveFacts<'_>,
+    rendered: RustType,
+) -> RustType {
+    if !matches!(
+        shape.ownership,
+        OwnershipShape::Owned | OwnershipShape::CopyValue
+    ) || shape.optional_element_type().is_some()
+    {
+        // An optional slot is wrapped at its element by the recursion above;
+        // wrapping here too would give `Rc<Option<T>>`.
+        return rendered;
+    }
+    let JavaType::Named { name, .. } = &shape.java_ty else {
+        return rendered;
+    };
+    let placement = facts.storage_placement_for(name);
+    if !placement.is_implemented() || !placement.shared {
+        return rendered;
+    }
+    RustType::Raw(placement.wrap(crate::emit::emit_type(&rendered)))
 }
 
 pub fn slot_rust_type_policy(shape: &RustSlotShape, facts: &FactSet) -> SlotRustTypePolicy {
@@ -426,7 +465,36 @@ pub fn default_expr_for_slot_with_effective_facts(
     shape: &RustSlotShape,
     facts: &EffectiveFacts<'_>,
 ) -> RustExpr {
-    render_slot_default_policy(&slot_default_policy_with_effective_facts(shape, facts))
+    let rendered =
+        render_slot_default_policy(&slot_default_policy_with_effective_facts(shape, facts));
+    shared_handle_construction_expr(shape, facts, rendered)
+}
+
+/// Value-form counterpart of the type wrap, for **fresh constructions** only.
+pub fn shared_handle_construction_expr(
+    shape: &RustSlotShape,
+    facts: &EffectiveFacts<'_>,
+    rendered: RustExpr,
+) -> RustExpr {
+    if !matches!(
+        shape.ownership,
+        OwnershipShape::Owned | OwnershipShape::CopyValue
+    ) || shape.optional_element_type().is_some()
+    {
+        return rendered;
+    }
+    let JavaType::Named { name, .. } = &shape.java_ty else {
+        return rendered;
+    };
+    let placement = facts.storage_placement_for(name);
+    if !placement.is_implemented() || !placement.shared {
+        return rendered;
+    }
+    let emitted = crate::emit::emit_expr(&rendered);
+    if emitted.starts_with("std::rc::Rc::new(") || emitted.starts_with("std::sync::Arc::new(") {
+        return rendered;
+    }
+    RustExpr::Raw(placement.wrap_construction(emitted))
 }
 
 pub fn slot_default_policy(shape: &RustSlotShape, facts: &FactSet) -> SlotDefaultPolicy {
@@ -1006,10 +1074,25 @@ fn erased_facade_concrete_dispatch_should_keep_named_type(
     )
 }
 
+/// Renders a generic argument, wrapping a shared type in its handle. Sound for
+/// user generics because every generated trait carries the `Rc`/`Arc` forwarding
+/// impls.
 fn rust_type_for_java_generic_arg_with_effective_facts(
     ty: &JavaType,
     facts: &EffectiveFacts<'_>,
 ) -> RustType {
+    let rendered = rust_type_for_java_generic_arg_unwrapped(ty, facts);
+    let JavaType::Named { name, .. } = ty else {
+        return rendered;
+    };
+    let placement = facts.storage_placement_for(name);
+    if !placement.is_implemented() || !placement.shared {
+        return rendered;
+    }
+    RustType::Raw(placement.wrap(crate::emit::emit_type(&rendered)))
+}
+
+fn rust_type_for_java_generic_arg_unwrapped(ty: &JavaType, facts: &EffectiveFacts<'_>) -> RustType {
     if let Some(enum_name) = closed_runtime_case_split_enum_name(ty, facts) {
         return RustType::Named(enum_name);
     }

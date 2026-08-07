@@ -2428,6 +2428,8 @@ fn optional_assignment_adapter_preserves_structured_none_without_rendering() {
             conversion_plan,
             preconverted,
             false,
+            // not a fresh construction
+            false,
         ),
         RustExpr::Var("None".to_string())
     );

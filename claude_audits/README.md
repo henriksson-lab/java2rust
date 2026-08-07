@@ -34,6 +34,7 @@ Already fixed and moved:
 | [0038](done/0038-two-dimensional-object-array-carrier-disagrees.md) | `String[][]` was declared, built, written and read as three different carriers |
 | [0039](done/0039-static-array-fields-lose-their-value-and-their-writes.md) | `static int[] a = new int[3]` had length 0, and every `a[i] = v` was silently discarded |
 | [0040](done/0040-external-type-name-matching-recomputes-on-the-hot-path.md) | External type-name matching rebuilt its alias lists per pack member — **81 s to translate 7 methods** | performance | fixed, memo |
+| [0041](done/0041-slot-shape-design-had-no-generated-crate-checks.md) | `slot_shape_design` asserted on rendered Rust with **no** check that it compiled — 596 tests, 0 generated-crate checks | test coverage | 99 checked; 21 genuine failures and 31 harness-only ones enumerated |
 
 Issues 0012 and 0013 were the parse-error pair in Tier 0 of
 [SUGGESTIONS.md](SUGGESTIONS.md), so that step is complete: corpus error counts
