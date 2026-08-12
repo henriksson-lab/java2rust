@@ -68,7 +68,7 @@ Two independent detectors both missed it:
    still missing.
 
 This is the failure mode audit
-[0018](../0018-the-compile-error-metric-cannot-see-silent-failures.md) is about,
+[0018](0018-the-compile-error-metric-cannot-see-silent-failures.md) is about,
 with an extra turn of the screw: the guard that should have caught it was
 looking for a string nothing produced.
 

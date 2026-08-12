@@ -116,6 +116,10 @@ pub const UNTRANSLATED_JAVA_ADD_ALL_CALL: &str = ".add_all(";
 /// A `Map.put` that kept its Java name instead of becoming `insert`.
 pub const UNTRANSLATED_JAVA_PUT_CALL: &str = ".put(";
 
+/// Emitted at a call site whose facade target returns a default or cloned
+/// receiver value instead of modelling Java behaviour.
+pub const NOOP_FACADE_METHOD_CALL_SITE: &str = "noop Java facade method call";
+
 /// `.expect("invalid Java cast")`, spelled once.
 pub fn invalid_java_cast_expect() -> String {
     format!(".expect({INVALID_JAVA_CAST_MESSAGE:?})")
@@ -129,6 +133,21 @@ pub fn invalid_java_cast_panic() -> String {
 /// The diagnostic message for an external constant with no modelled value.
 pub fn unmodelled_static_constant_message(owner: &str, field: &str) -> String {
     format!("{UNMODELLED_STATIC_CONSTANT_PREFIX}{owner}.{field}{UNMODELLED_STATIC_CONSTANT_SUFFIX}")
+}
+
+pub fn noop_facade_method_call_site_marker(
+    receiver_type: &str,
+    method_name: &str,
+    arg_count: usize,
+) -> String {
+    format!(
+        "{}{receiver_type}.{method_name}/{arg_count} */",
+        noop_facade_method_call_site_marker_prefix()
+    )
+}
+
+pub fn noop_facade_method_call_site_marker_prefix() -> String {
+    format!("/* {NOOP_FACADE_METHOD_CALL_SITE}: ")
 }
 
 /// The diagnostic message for a source-summary method with no translated body.
@@ -216,27 +235,128 @@ pub fn marker_by_name(name: &str) -> Option<&'static OutputMarker> {
 /// is exactly the drift this module exists to prevent.
 pub fn count_invalid_patterns(rust: &str) -> usize {
     let cast_expect = invalid_java_cast_expect();
+    let mut open_raw_terminator = None;
     rust.lines()
+        .map(|line| line_with_multiline_raw_strings_elided(line, &mut open_raw_terminator))
         .filter(|line| {
-            line.contains(COMPILE_ERROR_MACRO)
-                || (line.contains(DOWNCAST_TURBOFISH) && line.contains(&cast_expect))
-                || line.contains(UNTRANSLATED_JAVA_ADD_ALL_CALL)
-                || line.contains(UNTRANSLATED_JAVA_PUT_CALL)
-                || line.contains(UNSUPPORTED_JAVA_ARRAY_CREATION)
-                || line.contains(UNSUPPORTED_INNER_CLASS_OUTER_CAPTURE)
-                || (line.contains("= None;")
-                    && !line.contains("let mut ")
-                    && !line.contains(": Option<"))
+            line_contains_outside_literals(line, COMPILE_ERROR_MACRO)
+                || (line_contains_outside_literals(line, DOWNCAST_TURBOFISH)
+                    && line_contains_outside_literals(line, &cast_expect))
+                || line_contains_outside_literals(line, UNTRANSLATED_JAVA_ADD_ALL_CALL)
+                || line_contains_outside_literals(line, UNTRANSLATED_JAVA_PUT_CALL)
+                || line_contains_outside_literals(line, UNSUPPORTED_JAVA_ARRAY_CREATION)
+                || line_contains_outside_literals(line, UNSUPPORTED_INNER_CLASS_OUTER_CAPTURE)
+                || (line_contains_outside_literals(line, "panic!(")
+                    && line.contains(UNSUPPORTED_INNER_CLASS_OUTER_CAPTURE))
+                || (line_contains_outside_literals(line, "= None;")
+                    && !line_contains_outside_literals(line, "let mut ")
+                    && !line_contains_outside_literals(line, ": Option<"))
         })
         .count()
 }
 
+fn line_contains_outside_literals(line: &str, pattern: &str) -> bool {
+    line_count_outside_literals(line, pattern) > 0
+}
+
+fn line_count_outside_literals(line: &str, pattern: &str) -> usize {
+    let mut count = 0usize;
+    let mut in_string = false;
+    let mut in_char = false;
+    let mut escaped = false;
+    let mut skip_until = 0usize;
+    for (idx, ch) in line.char_indices() {
+        if idx < skip_until {
+            continue;
+        }
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if in_string || in_char {
+            if ch == '\\' {
+                escaped = true;
+            } else if in_string && ch == '"' {
+                in_string = false;
+            } else if in_char && ch == '\'' {
+                in_char = false;
+            }
+            continue;
+        }
+        if let Some(end) = raw_string_literal_end_at(line, idx) {
+            skip_until = end;
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '\'' => in_char = true,
+            _ if line[idx..].starts_with(pattern) => count += 1,
+            _ => {}
+        }
+    }
+    count
+}
+
+fn raw_string_literal_end_at(line: &str, start: usize) -> Option<usize> {
+    let rest = line.get(start..)?;
+    if !rest.starts_with('r') {
+        return None;
+    }
+    let mut hashes = 0usize;
+    for ch in rest[1..].chars() {
+        if ch == '#' {
+            hashes += 1;
+            continue;
+        }
+        if ch != '"' {
+            return None;
+        }
+        let content_start = start + 1 + hashes + 1;
+        let terminator = format!("\"{}", "#".repeat(hashes));
+        return Some(
+            line[content_start..]
+                .find(&terminator)
+                .map(|relative_end| content_start + relative_end + terminator.len())
+                .unwrap_or(line.len()),
+        );
+    }
+    None
+}
+
+fn line_with_multiline_raw_strings_elided(
+    line: &str,
+    open_terminator: &mut Option<String>,
+) -> String {
+    let mut visible = String::new();
+    let mut cursor = 0usize;
+    while cursor < line.len() {
+        if let Some(terminator) = open_terminator.as_deref() {
+            let Some(relative_end) = line[cursor..].find(terminator) else {
+                return visible;
+            };
+            cursor += relative_end + terminator.len();
+            *open_terminator = None;
+            continue;
+        }
+        let Some((start, terminator)) = unterminated_raw_string_on_line(line, cursor) else {
+            visible.push_str(&line[cursor..]);
+            return visible;
+        };
+        visible.push_str(&line[cursor..start]);
+        *open_terminator = Some(terminator);
+        cursor = line.len();
+    }
+    visible
+}
+
 /// External constants emitted with no modelled value.
 pub fn count_stubbed_constants(rust: &str) -> usize {
+    let mut open_raw_terminator = None;
     rust.lines()
+        .map(|line| line_with_multiline_raw_strings_elided(line, &mut open_raw_terminator))
         .filter(|line| {
-            line.contains("pub const ")
-                && line.contains(COMPILE_ERROR_MACRO)
+            line_contains_outside_literals(line, "pub const ")
+                && line_contains_outside_literals(line, COMPILE_ERROR_MACRO)
                 && line.contains(UNMODELLED_STATIC_CONSTANT_PREFIX)
                 && line.contains(UNMODELLED_STATIC_CONSTANT_SUFFIX)
         })
@@ -246,13 +366,16 @@ pub fn count_stubbed_constants(rust: &str) -> usize {
 /// Facade methods whose whole body is a default value — they compile and do
 /// nothing.
 pub fn count_noop_facade_methods(rust: &str) -> usize {
-    rust.lines()
-        .filter(|line| {
-            let line = line.trim_end();
-            !line_is_unmodelled_upcast_conversion(line)
-                && (line.ends_with("Default::default() }") || line.ends_with("self.clone() }"))
-        })
-        .count()
+    let mut open_raw_terminator = None;
+    let mut count = 0usize;
+    for line in rust.lines() {
+        let line = line_with_multiline_raw_strings_elided(line, &mut open_raw_terminator);
+        let line = line.trim_end();
+        if !line_is_unmodelled_upcast_conversion(line) && line_defines_noop_facade_method(line) {
+            count += 1;
+        }
+    }
+    count
 }
 
 /// Call sites of facade constructors that do nothing.
@@ -274,18 +397,27 @@ pub fn count_noop_facade_methods(rust: &str) -> usize {
 /// erasure visible as a cost rather than invisible as a saving.
 pub fn count_noop_facade_call_sites(rust: &str) -> usize {
     let constructors = noop_facade_constructors(rust);
-    if constructors.is_empty() {
-        return 0;
-    }
-    rust.lines()
+    let mut open_raw_terminator = None;
+    let constructor_calls = rust
+        .lines()
+        .map(|line| line_with_multiline_raw_strings_elided(line, &mut open_raw_terminator))
         .filter(|line| !line_defines_noop_facade_constructor(line))
         .map(|line| {
             constructors
                 .iter()
-                .map(|path| count_noop_facade_path_calls(line, path))
+                .map(|path| count_noop_facade_path_calls(&line, path))
                 .sum::<usize>()
         })
-        .sum()
+        .sum::<usize>();
+    let mut open_raw_terminator = None;
+    constructor_calls
+        + rust
+            .lines()
+            .map(|line| line_with_multiline_raw_strings_elided(line, &mut open_raw_terminator))
+            .filter(|line| {
+                line_contains_outside_literals(line, &noop_facade_method_call_site_marker_prefix())
+            })
+            .count()
 }
 
 fn count_noop_facade_path_calls(line: &str, path: &str) -> usize {
@@ -295,6 +427,10 @@ fn count_noop_facade_path_calls(line: &str, path: &str) -> usize {
     while cursor < line.len() {
         if bytes.get(cursor) == Some(&b'/') && bytes.get(cursor + 1) == Some(&b'/') {
             break;
+        }
+        if let Some(end) = raw_string_literal_end_at(line, cursor) {
+            cursor = end;
+            continue;
         }
         if bytes.get(cursor) == Some(&b'"') {
             cursor += 1;
@@ -342,7 +478,9 @@ fn noop_facade_constructors(rust: &str) -> Vec<String> {
     let mut owner = None;
     let mut impl_depth = 0isize;
     let mut paths = Vec::new();
+    let mut open_raw_terminator = None;
     for line in rust.lines() {
+        let line = line_with_multiline_raw_strings_elided(line, &mut open_raw_terminator);
         let trimmed = line.trim();
         if owner.is_none()
             && let Some(name) = inherent_impl_owner(trimmed)
@@ -350,29 +488,25 @@ fn noop_facade_constructors(rust: &str) -> Vec<String> {
             owner = Some(name);
             impl_depth = 0;
         }
-        if !line_defines_noop_facade_constructor(line) {
+        let constructor_name =
+            line_noop_facade_function_name(&line).filter(|name| name.starts_with("new"));
+        let Some(constructor_name) = constructor_name else {
             if owner.is_some() {
-                impl_depth += line.matches('{').count() as isize;
-                impl_depth -= line.matches('}').count() as isize;
+                impl_depth += line_count_syntax_char(&line, '{') as isize;
+                impl_depth -= line_count_syntax_char(&line, '}') as isize;
                 if impl_depth <= 0 {
                     owner = None;
                     impl_depth = 0;
                 }
             }
             continue;
-        }
+        };
         let Some(owner_name) = owner.as_deref() else {
             continue;
         };
-        let Some(rest) = trimmed.split_once("fn ").map(|(_, rest)| rest) else {
-            continue;
-        };
-        let Some(name) = rest.split(['(', '<', ' ']).next() else {
-            continue;
-        };
-        paths.push(format!("{owner_name}::{name}("));
-        impl_depth += line.matches('{').count() as isize;
-        impl_depth -= line.matches('}').count() as isize;
+        paths.push(format!("{owner_name}::{constructor_name}("));
+        impl_depth += line_count_syntax_char(&line, '{') as isize;
+        impl_depth -= line_count_syntax_char(&line, '}') as isize;
         if impl_depth <= 0 {
             owner = None;
             impl_depth = 0;
@@ -383,12 +517,134 @@ fn noop_facade_constructors(rust: &str) -> Vec<String> {
     paths
 }
 
+fn unterminated_raw_string_on_line(line: &str, start: usize) -> Option<(usize, String)> {
+    let mut in_string = false;
+    let mut in_char = false;
+    let mut escaped = false;
+    let mut cursor = start;
+    while cursor < line.len() {
+        let ch = line[cursor..]
+            .chars()
+            .next()
+            .expect("cursor is inside the line");
+        if escaped {
+            escaped = false;
+            cursor += ch.len_utf8();
+            continue;
+        }
+        if in_string || in_char {
+            if ch == '\\' {
+                escaped = true;
+            } else if in_string && ch == '"' {
+                in_string = false;
+            } else if in_char && ch == '\'' {
+                in_char = false;
+            }
+            cursor += ch.len_utf8();
+            continue;
+        }
+        if line[cursor..].starts_with("//") {
+            return None;
+        }
+        if line[cursor..].starts_with("/*") {
+            let Some(relative_end) = line[cursor + 2..].find("*/") else {
+                return None;
+            };
+            cursor += 2 + relative_end + "*/".len();
+            continue;
+        }
+        if let Some((content_start, terminator)) = raw_string_literal_parts_at(line, cursor) {
+            if line[content_start..].find(&terminator).is_none() {
+                return Some((cursor, terminator));
+            }
+            cursor = raw_string_literal_end_at(line, cursor).unwrap_or(line.len());
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '\'' => in_char = true,
+            _ => {}
+        }
+        cursor += ch.len_utf8();
+    }
+    None
+}
+
+fn raw_string_literal_parts_at(line: &str, start: usize) -> Option<(usize, String)> {
+    let rest = line.get(start..)?;
+    if !rest.starts_with('r') {
+        return None;
+    }
+    let mut hashes = 0usize;
+    for ch in rest[1..].chars() {
+        if ch == '#' {
+            hashes += 1;
+            continue;
+        }
+        if ch != '"' {
+            return None;
+        }
+        let content_start = start + 1 + hashes + 1;
+        return Some((content_start, format!("\"{}", "#".repeat(hashes))));
+    }
+    None
+}
+
+fn line_count_syntax_char(line: &str, target: char) -> usize {
+    let mut count = 0usize;
+    let mut in_string = false;
+    let mut in_char = false;
+    let mut escaped = false;
+    let mut cursor = 0usize;
+    while cursor < line.len() {
+        if let Some(end) = raw_string_literal_end_at(line, cursor) {
+            cursor = end;
+            continue;
+        }
+        let ch = line[cursor..]
+            .chars()
+            .next()
+            .expect("cursor is inside the line");
+        if escaped {
+            escaped = false;
+            cursor += ch.len_utf8();
+            continue;
+        }
+        if in_string || in_char {
+            if ch == '\\' {
+                escaped = true;
+            } else if in_string && ch == '"' {
+                in_string = false;
+            } else if in_char && ch == '\'' {
+                in_char = false;
+            }
+            cursor += ch.len_utf8();
+            continue;
+        }
+        if line[cursor..].starts_with("//") {
+            break;
+        }
+        if line[cursor..].starts_with("/*") {
+            let Some(relative_end) = line[cursor + 2..].find("*/") else {
+                break;
+            };
+            cursor += 2 + relative_end + "*/".len();
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '\'' => in_char = true,
+            _ if ch == target => count += 1,
+            _ => {}
+        }
+        cursor += ch.len_utf8();
+    }
+    count
+}
+
 fn inherent_impl_owner(trimmed: &str) -> Option<String> {
     let rest = trimmed.strip_prefix("impl")?;
     if !rest.starts_with(char::is_whitespace) && !rest.starts_with('<') {
-        return None;
-    }
-    if rest.contains(" for ") {
         return None;
     }
     let rest = rest.trim_start();
@@ -398,9 +654,22 @@ fn inherent_impl_owner(trimmed: &str) -> Option<String> {
     } else {
         rest
     };
-    let owner = rest.split_whitespace().next()?.trim_end_matches('{').trim();
-    let owner = owner.split('<').next()?.trim();
-    (!owner.is_empty()).then(|| owner.to_string())
+    let owner = rest
+        .split(|ch: char| ch == '<' || ch == '{' || ch.is_whitespace())
+        .next()
+        .unwrap_or_default();
+    if owner.is_empty() {
+        return None;
+    }
+    let mut after_owner = rest[owner.len()..].trim_start();
+    if after_owner.starts_with('<') {
+        let generic_end = matching_angle_end(after_owner)?;
+        after_owner = after_owner[generic_end + 1..].trim_start();
+    }
+    if after_owner.starts_with("for ") {
+        return None;
+    }
+    Some(owner.to_string())
 }
 
 fn matching_angle_end(text: &str) -> Option<usize> {
@@ -422,10 +691,23 @@ fn matching_angle_end(text: &str) -> Option<usize> {
 
 /// A facade constructor whose whole body is `Default::default()`.
 fn line_defines_noop_facade_constructor(line: &str) -> bool {
+    line_noop_facade_function_name(line).is_some_and(|name| name.starts_with("new"))
+}
+
+fn line_defines_noop_facade_method(line: &str) -> bool {
+    line_noop_facade_function_name(line).is_some()
+}
+
+fn line_noop_facade_function_name(line: &str) -> Option<&str> {
     let trimmed = line.trim();
-    trimmed.contains(" fn new")
-        && trimmed.ends_with("{ Default::default() }")
-        && !trimmed.starts_with("fn from(")
+    let rest = trimmed
+        .strip_prefix("pub fn ")
+        .or_else(|| trimmed.strip_prefix("fn "))?;
+    if !(trimmed.ends_with("{ Default::default() }") || trimmed.ends_with("{ self.clone() }")) {
+        return None;
+    }
+    let name = rest.split(['(', '<', ' ']).next()?;
+    (!name.is_empty()).then_some(name)
 }
 
 /// `From` impls synthesised for Java upcasts with no model.
@@ -437,8 +719,10 @@ fn line_defines_noop_facade_constructor(line: &str) -> bool {
 /// program and hid the signal it exists to show
 /// ([0018](../claude_audits/0018-the-compile-error-metric-cannot-see-silent-failures.md)).
 pub fn count_unmodelled_upcast_conversions(rust: &str) -> usize {
+    let mut open_raw_terminator = None;
     rust.lines()
-        .filter(|line| line.contains(UNMODELLED_JAVA_UPCAST_PREFIX))
+        .map(|line| line_with_multiline_raw_strings_elided(line, &mut open_raw_terminator))
+        .filter(|line| line_contains_outside_literals(line, UNMODELLED_JAVA_UPCAST_PREFIX))
         .count()
 }
 
@@ -453,15 +737,19 @@ fn line_is_unmodelled_upcast_conversion(line: &str) -> bool {
 
 /// Facade methods that panic when reached.
 pub fn count_unimplemented_facade_methods(rust: &str) -> usize {
+    let mut open_raw_terminator = None;
     rust.lines()
-        .filter(|line| line.contains(UNIMPLEMENTED_MACRO))
+        .map(|line| line_with_multiline_raw_strings_elided(line, &mut open_raw_terminator))
+        .filter(|line| line_contains_outside_literals(line, UNIMPLEMENTED_MACRO))
         .count()
 }
 
 /// Total `compile_error!` invocations, counting more than one per line.
 pub fn count_compile_error_markers(rust: &str) -> usize {
+    let mut open_raw_terminator = None;
     rust.lines()
-        .map(|line| line.matches(COMPILE_ERROR_MACRO_CALL).count())
+        .map(|line| line_with_multiline_raw_strings_elided(line, &mut open_raw_terminator))
+        .map(|line| line_count_outside_literals(&line, COMPILE_ERROR_MACRO_CALL))
         .sum()
 }
 
@@ -510,5 +798,155 @@ mod tests {
         assert!(summary.starts_with(UNTRANSLATED_SOURCE_SUMMARY_PREFIX));
         assert!(summary.ends_with(UNTRANSLATED_SOURCE_SUMMARY_SUFFIX));
         assert!(summary.contains("Pt.x"));
+    }
+
+    #[test]
+    fn invalid_pattern_count_ignores_literal_marker_text() {
+        let cast_expect = invalid_java_cast_expect();
+        let rust = format!(
+            "let text = \"{COMPILE_ERROR_MACRO} {DOWNCAST_TURBOFISH} {cast_expect} {UNTRANSLATED_JAVA_ADD_ALL_CALL} = None;\";\n\
+             let raw = r#\"{UNTRANSLATED_JAVA_PUT_CALL}\"#;\n\
+             let array = \"{UNSUPPORTED_JAVA_ARRAY_CREATION}\";\n\
+             let inner = r#\"{UNSUPPORTED_INNER_CLASS_OUTER_CAPTURE}\"#;\n\
+             let ch = '=';\n"
+        );
+        assert_eq!(count_invalid_patterns(&rust), 0);
+
+        let real = format!(
+            "compile_error!(\"unsupported Java expression\");\n\
+             value.downcast::<Target>(){cast_expect};\n\
+             /* {UNTRANSLATED_JAVA_PUT_CALL} */\n\
+             /* {UNSUPPORTED_JAVA_ARRAY_CREATION} */\n\
+             /* {UNSUPPORTED_INNER_CLASS_OUTER_CAPTURE} */\n\
+             field = None;\n"
+        );
+        assert_eq!(count_invalid_patterns(&real), 6);
+
+        assert_eq!(
+            count_invalid_patterns("let mut field = None;\nlet opt: Option<i32> = None;\n"),
+            0
+        );
+    }
+
+    #[test]
+    fn invalid_pattern_count_ignores_multiline_raw_string_opening_line() {
+        let rust = format!(
+            "let text = r#\"{COMPILE_ERROR_MACRO} {UNTRANSLATED_JAVA_ADD_ALL_CALL}\n\
+             {UNTRANSLATED_JAVA_PUT_CALL} {COMPILE_ERROR_MACRO_CALL} still literal\"#;\n"
+        );
+
+        assert_eq!(count_invalid_patterns(&rust), 0);
+    }
+
+    #[test]
+    fn shared_marker_counters_skip_multiline_raw_string_bodies() {
+        let rust = format!(
+            "let text = r#\"start\n\
+             {COMPILE_ERROR_MACRO_CALL} {UNIMPLEMENTED_MACRO}\n\
+             {UNMODELLED_JAVA_UPCAST_PREFIX}A -> B\n\
+             pub const VALUE: i32 = {COMPILE_ERROR_MACRO}(\"{UNMODELLED_STATIC_CONSTANT_PREFIX}Owner.VALUE{UNMODELLED_STATIC_CONSTANT_SUFFIX}\");\n\
+             \"#; {COMPILE_ERROR_MACRO_CALL}\"real\");\n"
+        );
+
+        assert_eq!(count_compile_error_markers(&rust), 1);
+        assert_eq!(count_unimplemented_facade_methods(&rust), 0);
+        assert_eq!(count_unmodelled_upcast_conversions(&rust), 0);
+        assert_eq!(count_stubbed_constants(&rust), 0);
+        assert_eq!(count_invalid_patterns(&rust), 1);
+    }
+
+    #[test]
+    fn noop_facade_method_count_requires_function_line_shape() {
+        let rust = r#"
+// pub fn fake(&self) -> Font { Default::default() }
+let text = "pub fn fake(&self) -> Font { Default::default() }";
+pub fn real(&self) -> Font { Default::default() }
+pub fn cloned(&self) -> Font { self.clone() }
+"#;
+
+        assert_eq!(count_noop_facade_methods(rust), 2);
+    }
+
+    #[test]
+    fn noop_facade_method_count_skips_multiline_raw_string_contents() {
+        let rust = r##"
+let doc = r#"
+pub fn fake(&self) -> Font { Default::default() }
+impl Font {
+    pub fn new() -> Font { Default::default() }
+}
+Font::new();
+"#;
+pub fn real(&self) -> Font { Default::default() }
+"##;
+
+        assert_eq!(count_noop_facade_methods(rust), 1);
+        assert_eq!(count_noop_facade_call_sites(rust), 0);
+    }
+
+    #[test]
+    fn noop_facade_constructor_owner_parses_hrtbs_without_trait_impls() {
+        assert_eq!(
+            inherent_impl_owner("impl<T> Widget<T> where T: for <'a> Parser<'a> {"),
+            Some("Widget".to_string())
+        );
+        assert_eq!(
+            inherent_impl_owner("impl<T> Display<T> for Widget<T> {"),
+            None
+        );
+
+        let rust = r#"
+impl<T> Widget<T> where T: for <'a> Parser<'a> {
+    pub fn new() -> Widget<T> { Default::default() }
+}
+let built = Widget::new();
+impl<T> Display<T> for Gadget<T> {
+    pub fn new() -> Gadget<T> { Default::default() }
+}
+let ignored = Gadget::new();
+"#;
+
+        assert_eq!(count_noop_facade_call_sites(rust), 1);
+    }
+
+    #[test]
+    fn stubbed_constant_count_requires_syntactic_const_and_compile_error() {
+        let literal = format!(
+            "let text = \"pub const VALUE: i32 = {COMPILE_ERROR_MACRO}({UNMODELLED_STATIC_CONSTANT_PREFIX}Owner.VALUE{UNMODELLED_STATIC_CONSTANT_SUFFIX});\";\n"
+        );
+        assert_eq!(count_stubbed_constants(&literal), 0);
+
+        let real = format!(
+            "pub const VALUE: i32 = {COMPILE_ERROR_MACRO}(\"{UNMODELLED_STATIC_CONSTANT_PREFIX}Owner.VALUE{UNMODELLED_STATIC_CONSTANT_SUFFIX}\");\n"
+        );
+        assert_eq!(count_stubbed_constants(&real), 1);
+    }
+
+    #[test]
+    fn unimplemented_facade_count_ignores_literal_marker_text() {
+        let literal = format!(
+            "let text = \"{UNIMPLEMENTED_MACRO}\";\n\
+             let raw = r#\"{UNIMPLEMENTED_MACRO}\"#;\n"
+        );
+        assert_eq!(count_unimplemented_facade_methods(&literal), 0);
+
+        let real = format!(
+            "pub fn missing(&self) -> i32 {{ {UNIMPLEMENTED_MACRO}\"missing\") }}\n\
+             /* {UNIMPLEMENTED_MACRO} still visible in comments */\n"
+        );
+        assert_eq!(count_unimplemented_facade_methods(&real), 2);
+    }
+
+    #[test]
+    fn compile_error_marker_count_ignores_literal_marker_text() {
+        let literal = format!(
+            "let text = \"{COMPILE_ERROR_MACRO_CALL}\";\n\
+             let raw = r#\"{COMPILE_ERROR_MACRO_CALL}\"#;\n"
+        );
+        assert_eq!(count_compile_error_markers(&literal), 0);
+
+        let real =
+            format!("{COMPILE_ERROR_MACRO_CALL}\"first\"); {COMPILE_ERROR_MACRO_CALL}\"second\");");
+        assert_eq!(count_compile_error_markers(&real), 2);
     }
 }

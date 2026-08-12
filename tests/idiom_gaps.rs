@@ -5237,7 +5237,9 @@ class JavaIntArithmeticArrayIndex {
     );
 
     assert!(
-        translation.rust.contains("values[(left + right) as usize]")
+        translation
+            .rust
+            .contains("values[(left).wrapping_add(right) as usize]")
             && !translation.rust.contains("values[left + right as usize]"),
         "{}",
         translation.rust
@@ -8437,7 +8439,7 @@ class BufferPutUse {
             && translation.rust.contains("pub fn remaining(&self) -> i32")
             && translation
                 .rust
-                .contains("{ let _ = char::from_u32(((encoded[0 as usize] as i32 & 255) as u32) & 0xffff).unwrap_or('\\0'); };")
+                .contains("{ let _ = char::from_u32((encoded[0 as usize] as i32 & 255) as u32 & 0xffff).unwrap_or('\\0'); };")
             && !translation.rust.contains(".put("),
         "{}",
         translation.rust
@@ -16513,6 +16515,9 @@ class InnerOuterFieldCapture {
             sb.append(value);
             return value;
         }
+        void setLimit(int value) {
+            limit = value;
+        }
     }
 }
 "#,
@@ -16532,6 +16537,9 @@ class InnerOuterFieldCapture {
     );
     assert!(
         translation.rust.contains("self.__outer.borrow().limit")
+            && translation
+                .rust
+                .contains("self.__outer.borrow_mut().limit = value")
             && translation.rust.contains("self.__outer.borrow().sb")
             && translation
                 .rust
@@ -16546,6 +16554,208 @@ class InnerOuterFieldCapture {
         "inner_outer_field_capture",
         vec![GeneratedCrateModule {
             name: "inner_outer_field_capture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn non_static_inner_class_constructor_has_outer_handle_companion() {
+    let translation = translate_source(
+        r#"
+class InnerConstructionCompanion {
+    int value = 7;
+
+    class Inner {
+        int get() {
+            return value;
+        }
+    }
+
+    Inner make() {
+        return new Inner();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn new() -> InnerConstructionCompanionInner")
+            && translation.rust.contains("unsupported Java inner-class outer capture construction")
+            && translation.rust.contains(
+                "pub fn new_with_outer(__outer: std::rc::Rc<std::cell::RefCell<InnerConstructionCompanion>>) -> InnerConstructionCompanionInner"
+            )
+            && translation.rust.contains("__outer: __outer.clone()")
+            && translation
+                .rust
+                .contains("return InnerConstructionCompanionInner::new();"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "inner_construction_companion",
+        vec![GeneratedCrateModule {
+            name: "inner_construction_companion",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn sibling_inner_class_construction_reuses_captured_outer_handle() {
+    let translation = translate_source(
+        r#"
+class SiblingInnerConstruction {
+    int value = 7;
+
+    class A {
+        int seen() {
+            return value;
+        }
+
+        B make() {
+            return new B();
+        }
+    }
+
+    class B {
+        int get() {
+            return value;
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn new_with_outer(__outer: std::rc::Rc<std::cell::RefCell<SiblingInnerConstruction>>) -> SiblingInnerConstructionB")
+            && translation.rust.contains(
+                "return SiblingInnerConstructionB::new_with_outer(self.__outer.clone());"
+            ),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "sibling_inner_construction",
+        vec![GeneratedCrateModule {
+            name: "sibling_inner_construction",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn sibling_inner_delegating_constructor_reuses_captured_outer_handle() {
+    let translation = translate_source(
+        r#"
+class SiblingInnerDelegatingConstruction {
+    int value = 7;
+
+    class A {
+        B make() {
+            return new B();
+        }
+
+        int seen() {
+            return value;
+        }
+    }
+
+    class B {
+        B() {
+            this(1);
+        }
+
+        B(int ignored) {
+        }
+
+        int get() {
+            return value;
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn new_with_outer(__outer: std::rc::Rc<std::cell::RefCell<SiblingInnerDelegatingConstruction>>) -> SiblingInnerDelegatingConstructionB")
+            && translation.rust.contains(
+                "return Self::new_int_with_outer(__outer.clone(), 1);"
+            )
+            && translation.rust.contains(
+                "return SiblingInnerDelegatingConstructionB::new_with_outer(self.__outer.clone());"
+            ),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "sibling_inner_delegating_construction",
+        vec![GeneratedCrateModule {
+            name: "sibling_inner_delegating_construction",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn sibling_inner_field_initializer_reuses_captured_outer_handle() {
+    let translation = translate_source(
+        r#"
+class SiblingInnerFieldInitializer {
+    int value = 7;
+
+    A make() {
+        return new A();
+    }
+
+    class A {
+        B b = new B();
+
+        int seen() {
+            return value + b.get();
+        }
+    }
+
+    class B {
+        int get() {
+            return value;
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn new_with_outer(__outer: std::rc::Rc<std::cell::RefCell<SiblingInnerFieldInitializer>>) -> SiblingInnerFieldInitializerA")
+            && translation.rust.contains(
+                "b: std::rc::Rc::new(SiblingInnerFieldInitializerB::new_with_outer(__outer.clone()))"
+            )
+            && translation.rust.contains(
+                "__outer: __outer.clone(), b: std::rc::Rc::new(SiblingInnerFieldInitializerB::new_with_outer(__outer.clone()))"
+            ),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "sibling_inner_field_initializer",
+        vec![GeneratedCrateModule {
+            name: "sibling_inner_field_initializer",
             rust: translation.rust,
             tests: "",
         }],
@@ -24874,7 +25084,15 @@ fn documents_core_functional_interfaces_gap() {
 fn nonescaping_biconsumer_parameter_lowers_to_callback_slot() {
     let translation = translate_source(&idiom_gap("FunctionalBiConsumerSlot.java"));
 
-    assert!(translation.rust.contains("|s, n|"), "{}", translation.rust);
+    // The lambda's parameters carry the interface's declared types now, so the
+    // body can lower calls on them at all: untyped, `s` was
+    // `JavaType::Unknown("lambda_param:s")` and `s.length()` never reached `len`.
+    // See claude_audits/done/0041.
+    assert!(
+        translation.rust.contains("|s: String, n: i32|"),
+        "{}",
+        translation.rust
+    );
     assert!(
         translation
             .rust
@@ -24898,6 +25116,29 @@ fn nonescaping_biconsumer_parameter_lowers_to_callback_slot() {
     assert!(
         !translation.rust.contains("callback.accept("),
         "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn callback_called_only_inside_nested_lambda_is_not_nonescaping() {
+    let translation = translate_source(
+        r#"
+import java.util.function.Consumer;
+
+class NestedCallbackCapture {
+    Runnable wrap(Consumer<String> callback) {
+        return () -> callback.accept("x");
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.rust.contains("callback: impl FnMut")
+            && !translation.rust.contains("mut callback: impl FnMut"),
+        "a callback captured by a nested lambda escapes the current call and \
+         must not be lowered as a non-escaping closure parameter\n{}",
         translation.rust
     );
 }
@@ -27285,7 +27526,7 @@ class StaticFinalMatrixSliceUse {
                 .contains("return values[[row as usize, col as usize]];")
             && translation
                 .rust
-                .contains("let row: Vec<f64> = (Self::COEF[1 as usize]).to_vec()")
+                .contains("let row: Vec<f64> = Self::COEF[1 as usize].to_vec()")
             && translation
                 .rust
                 .contains("pub fn load() -> ndarray::Array2<f64>")

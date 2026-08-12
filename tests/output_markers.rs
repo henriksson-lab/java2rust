@@ -17,15 +17,18 @@
 //! because it reports success. See
 //! `claude_audits/0018-the-compile-error-metric-cannot-see-silent-failures.md`.
 
+use new_java2rust::call_lowering::apply_call_target;
+use new_java2rust::call_plan::CallTargetPlan;
 use new_java2rust::facts::{
-    ExternalFieldFact, ExternalFieldKind, FactProvenance, FactSet, FieldKey,
+    ExternalFieldFact, ExternalFieldKind, FactProvenance, FactSet, FieldKey, ReceiverAbi,
 };
-use new_java2rust::java_ir::{JavaType, PrimitiveType};
+use new_java2rust::java_ir::{Expr, JavaType, PrimitiveType};
 use new_java2rust::output_markers::{
     self, OUTPUT_MARKERS, OutputMarkerKind, count_compile_error_markers, count_invalid_patterns,
     count_noop_facade_call_sites, count_noop_facade_methods, count_stubbed_constants,
     count_unimplemented_facade_methods, count_unmodelled_upcast_conversions,
 };
+use new_java2rust::rust_ir::RustExpr;
 use new_java2rust::{translate_source, translate_source_with_facts};
 
 /// A Java source that must make its marker appear, and the counter that must
@@ -72,7 +75,9 @@ const FIXTURES: &[MarkerFixture] = &[
         marker: "unsupported_inner_class_outer_capture",
         // A non-static inner class: its constructor cannot obtain a shared
         // handle to the enclosing instance, so it is emitted as a `panic!`.
-        java: "public class MarkerInnerCapture { private int base = 10; class Adder { int add(int x) { return base + x; } } public int run() { Adder a = new Adder(); return a.add(1); } }",
+        // The mutate-after-construction step is the semantic reason a copy
+        // would not be a valid repair: Java must observe base = 20 here.
+        java: "public class MarkerInnerCapture { private int base = 10; class Adder { int add(int x) { return base + x; } } public int run() { Adder a = new Adder(); base = 20; return a.add(1); } }",
         counters: &["invalid_patterns"],
     },
     MarkerFixture {
@@ -560,6 +565,22 @@ fn unmodelled_upcasts_are_not_counted_as_noop_facade_methods() {
     );
 }
 
+#[test]
+fn unmodelled_upcast_count_ignores_literal_marker_text() {
+    let prefix = output_markers::UNMODELLED_JAVA_UPCAST_PREFIX;
+    let literal_only = format!(
+        "let text = \"{prefix}Leaf -> Base\";\n\
+         let raw = r#\"{prefix}Leaf -> Base\"#;\n"
+    );
+    assert_eq!(count_unmodelled_upcast_conversions(&literal_only), 0);
+
+    let real_marker = format!(
+        "/// {prefix}Leaf -> Base\n\
+         impl From<Leaf> for Base {{ fn from(_value: Leaf) -> Base {{ Default::default() }} }}\n"
+    );
+    assert_eq!(count_unmodelled_upcast_conversions(&real_marker), 1);
+}
+
 /// A facade constructor counted once may be called from many places, and the
 /// call count is the cost.
 ///
@@ -608,6 +629,65 @@ fn noop_facade_constructor_call_sites_are_counted_per_call() {
     );
 }
 
+#[test]
+fn noop_facade_method_call_sites_are_marked_at_lowering_time() {
+    let receiver = Expr::Var("o".to_string());
+    let rust = new_java2rust::emit::emit_expr(&apply_call_target(
+        &CallTargetPlan::ExternalFacadeReceiver {
+            receiver: &receiver,
+            rust_path: "put".to_string(),
+            receiver_abi: ReceiverAbi::BorrowedSelf,
+            mutates_receiver: false,
+            noop_facade_method_call: true,
+            receiver_type: "org.json.JSONObject".to_string(),
+            method_name: "put".to_string(),
+            arg_count: 2,
+        },
+        Some(RustExpr::Var("o".to_string())),
+        vec![
+            RustExpr::Literal("\"x\"".to_string()),
+            RustExpr::Literal("1".to_string()),
+        ],
+    ));
+
+    assert!(
+        rust.contains(&output_markers::noop_facade_method_call_site_marker_prefix()),
+        "expected lowered no-op facade method calls to carry an explicit marker\n{rust}"
+    );
+    assert_eq!(
+        count_noop_facade_call_sites(&rust),
+        1,
+        "expected the marked facade method call to be counted\n{rust}"
+    );
+}
+
+#[test]
+fn noop_facade_method_call_site_counter_requires_marker_prefix() {
+    let rust = r##"
+pub fn doc() {
+    let _text = "noop Java facade method call";
+    let _raw = r#"noop Java facade method call: JsonObject.put/2"#;
+    // noop Java facade method call
+    /* noop Java facade method call: JsonObject.put/2 */ receiver.put("x", 1);
+}
+"##;
+
+    assert_eq!(
+        count_noop_facade_call_sites(rust),
+        1,
+        "only the emitted marker comment prefix should count"
+    );
+
+    let literal_only = r##"
+pub fn doc() {
+    let _text = "noop Java facade method call: JsonObject.put/2";
+    let _raw = r#"noop Java facade method call: JsonObject.put/2"#;
+}
+"##;
+
+    assert_eq!(count_noop_facade_call_sites(literal_only), 0);
+}
+
 /// A definition is not a call site: the counter must not count the facade's own
 /// `fn new` line.
 #[test]
@@ -622,10 +702,31 @@ fn a_noop_facade_definition_is_not_counted_as_a_call() {
 }
 
 #[test]
-fn noop_facade_constructor_scan_survives_multiline_methods_in_impl() {
+fn noop_facade_constructor_collection_requires_function_line_shape() {
     let rust = r#"
 impl Font {
+    // pub fn new_3<T0, T1, T2>(_arg0: T0, _arg1: T1, _arg2: T2) -> Font { Default::default() }
+    let_text!("pub fn new_3<T0, T1, T2>(_arg0: T0, _arg1: T1, _arg2: T2) -> Font { Default::default() }");
+}
+
+pub fn build() -> Font {
+    Font::new_3("x", 0, 12)
+}
+"#;
+
+    assert_eq!(count_noop_facade_call_sites(rust), 0);
+}
+
+#[test]
+fn noop_facade_constructor_scan_survives_multiline_methods_in_impl() {
+    let rust = r##"
+impl Font {
     pub fn size(&self) -> i32 {
+        let _debug = "}";
+        let _raw = r#"}"#;
+        let _ch = '}';
+        // }
+        /* } */
         12
     }
 
@@ -635,7 +736,7 @@ impl Font {
 pub fn build() -> Font {
     Font::new_3("x", 0, 12)
 }
-"#;
+"##;
 
     assert_eq!(count_noop_facade_call_sites(rust), 1);
 }
@@ -661,7 +762,7 @@ pub fn build() -> Future<String> {
 
 #[test]
 fn noop_facade_constructor_scan_ignores_prefixes_comments_and_strings() {
-    let rust = r#"
+    let rust = r##"
 impl Font {
     pub fn new_3<T0, T1, T2>(_arg0: T0, _arg1: T1, _arg2: T2) -> Font { Default::default() }
 }
@@ -669,10 +770,11 @@ impl Font {
 pub fn build() -> Font {
     // Font::new_3("comment", 0, 12)
     let _debug = "Font::new_3(\"string\", 0, 12)";
+    let _raw = r#"Font::new_3("raw string", 0, 12)"#;
     let _other = MyFont::new_3("prefix", 0, 12);
     Font::new_3("real", 0, 12)
 }
-"#;
+"##;
 
     assert_eq!(count_noop_facade_call_sites(rust), 1);
 }

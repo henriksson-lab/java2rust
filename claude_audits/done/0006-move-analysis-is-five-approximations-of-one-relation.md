@@ -144,7 +144,7 @@ Replace all five read/mutate sets with a single backward dataflow result:
 3. **Liveness fixpoint.** `live_out(n) = ⋃ live_in(s) for s ∈ succ(n)`;
    `live_in(n) = use(n) ∪ (live_out(n) − def(n))`. Iterate to a fixpoint.
    `src/lattice.rs` and `src/graph.rs` already provide the shape for this; see
-   [0008](../0008-inference-machinery-does-not-reach-lowering.md).
+   [0008](0008-inference-machinery-does-not-reach-lowering.md).
 4. **One query surface.** `is_live_after(binding, point) -> bool`, plus
    `use_count_at(point, binding)` for the within-statement case. Collapse the
    ~17 predicates onto it.

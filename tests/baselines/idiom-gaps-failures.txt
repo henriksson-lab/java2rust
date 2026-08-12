@@ -4,7 +4,7 @@
 # and the suite never returned, so no baseline could exist and regressions in
 # it were undetectable (claude_audits/done/0035).
 #
-# 684 tests: 538 passed, 146 failed, 0 hung.
+# 689 tests: 544 passed, 145 failed, 0 hung.
 #
 # Diff failure *names* against this file after any change. A name here is a
 # known defect; a name that is new is a regression.
@@ -52,7 +52,6 @@ inherited_context_method_body_sees_declaring_static_imports
 inherited_context_trailing_call_uses_context_field_and_shared_varargs_plan
 inherited_external_field_setter_does_not_become_static_owner
 inherited_source_summary_instance_fields_are_flattened_into_primary_struct
-java_int_arithmetic_array_index_casts_whole_expression_to_usize
 java_integer_binary_ops_wrap_and_mask_shift_distance
 java_integer_result_propagation_in_call_arguments_uses_context_policy
 java_numeric_char_casts_use_valid_rust_char_conversions

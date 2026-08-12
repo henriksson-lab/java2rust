@@ -5,7 +5,7 @@ Recorded 2026-08-06.
 `cargo_check_generated_modules` lived only in `tests/idiom_gaps.rs` (296 call
 sites). `slot_shape_design` had **none**, so 596 tests could assert on rendered
 Rust without anything checking that the Rust compiled. That is
-[0018](../0018-the-compile-error-metric-cannot-see-silent-failures.md)'s blind spot
+[0018](0018-the-compile-error-metric-cannot-see-silent-failures.md)'s blind spot
 inside the suite itself, and it hid a real defect: an `Option<Rc<Cursor>>` field
 against an `Option<Cursor>` local read as an assertion failure.
 
@@ -102,3 +102,119 @@ Relevant to [0002b](../0002b-shared-representation-design.md): its remaining ste
 needs exactly this signal. Every previous attempt converged against assertion
 text rather than against the compiler, which is why unwrapped slot-rendering
 paths kept surfacing one at a time.
+
+---
+
+## Update 2026-08-07 — the backlog clusters, and one cluster is fixed
+
+The 21 genuine failures are not 21 defects. Grouped by name and error kind:
+
+| cluster | count | shape |
+|---|---:|---|
+| `*_uses_named_unmodelled_result_shim` | 5 | the shim struct is emitted; its caller does not type-check |
+| `reused_local_recovery_*`, `borrowed_self_field_owned_recovery_*` | 4 | all `E0282`, one inference hole around unshaped external arguments |
+| `collections_sort_comparator_*` | 3 | fixed in this pass |
+| overload naming (`E0592` duplicate definitions) | 2 | this is **0009**, overload identity collapsing onto one Rust name |
+| singles | 7 | |
+
+So four root causes cover 14 of 21.
+
+## Functional-interface parameter shapes — fixed
+
+Scouting the `collections_sort_comparator_*` cluster found **eight** hand-written
+lists that had to agree about the same product and did not:
+
+| list | where | entries |
+|---|---|---:|
+| `is_known_functional_interface` | `stdlib.rs` | ~50 |
+| closure-param arity | `item_assembly.rs` | 8 |
+| closure-param result | `item_assembly.rs` | 5 |
+| callback-call method names | `item_assembly.rs` | 6 |
+| `(interface, method)` input shapes | `lower.rs` | 3 arms |
+| `is_known_apply_functional_interface` | `stdlib.rs` | 2 |
+
+`Supplier` is the tell: it had an arity arm (0) and **no result arm**, so it fell
+to the catch-all and `Supplier<String>` lowered to `impl FnMut()` — its
+`-> String` dropped, `error[E0308]`. Nothing in any suite compiled that output,
+so nothing saw it, and it is a very common idiom.
+
+These names are a *product*: an optional primitive prefix, a root, and an
+optional `To`-primitive result. `functional_interface_shape` now derives the
+whole shape — method name, inputs, result — from the name, and the closure type,
+the callback-call test and the input shapes all read it. Pinned by five tests
+checking one name per corner of the grammar against the real `java.util.function`
+signatures, plus `a_zero_argument_interface_still_carries_its_return`.
+
+Fixed by it, verified with `rustc`:
+
+```rust
+pub fn sup(mut s: impl FnMut() -> String) -> String        // was impl FnMut()      E0308
+pub fn cmp(mut c: impl FnMut(String, String) -> i32)       // was `c: Comparator`   E0599
+pub fn isup(mut s: impl FnMut() -> i32) -> i32             // was `s: &IntSupplier`
+pub fn toint(mut f: impl FnMut(String) -> i32) -> i32      // was `f: ToIntFunction<String>`
+```
+
+`tests/differential/FunctionalParams.java` covers one case per corner and passes
+against the oracle.
+
+## Comparator parameters passed through `Collections.sort` — fixed
+
+The three `collections_sort_comparator_*` tests had a second shape: the
+comparator is passed **to another call** — `Collections.sort(values, comparator)`
+— so `method_param_is_nonescaping_functional_callback` saw the bare parameter as
+an argument and marked it *escaped*. It therefore never became a closure, and the
+sort projection emitted `__java_comparator.compare(..)` against an opaque struct.
+
+That path now has the two coupled pieces it needed:
+
+1. the callback scanner recognises `Collections.sort(values, comparatorParam)` as
+   a consuming call, not an escaping use of the comparator parameter;
+2. the native sort lowering uses a closure-specific projection for such
+   parameters, emitting `__java_comparator(a.clone(), b.clone()).cmp(&0)` while
+   leaving true opaque comparator objects on the existing `.compare(..)` path.
+
+The three comparator-sort tests now include generated-crate checks, so this
+cluster is compiler-backed rather than string-only.
+
+## Two further defects the fixture surfaced — also fixed
+
+Both were in the lambda **body** rather than the closure shape, and both had one
+cause: a lambda written *directly* at a functional-interface parameter reached
+its body with untyped parameters. `lower_callback_lambda_expr_with_shapes`
+already accepted `param_shapes`, but nothing supplied them for a bare lambda, so
+each parameter became `JavaType::Unknown("lambda_param:v")`. Consequences:
+
+- `v.length()` never mapped to `len` — `error[E0599]`;
+- `String.valueOf(v)` treated `v` as an erased object and returned the **empty
+  string** — silent, because it compiles, which is the worse of the two.
+
+The cast form `(Comparator<String>) (a, b) -> ..` already had this via
+`lower_functional_cast_callback_for_slot`; the bare form did not.
+`lower_functional_slot_lambda` now supplies the shapes from the same
+`functional_interface_shape` table, so the interface's declared parameter types
+reach the body:
+
+```rust
+|v: String| v.len() as i32      // was |v| v.length()
+|v: String| v.to_string()       // was |v| java_erased_object_to_string(&v)
+```
+
+`nonescaping_biconsumer_parameter_lowers_to_callback_slot` asserted the untyped
+`|s, n|` and now asserts `|s: String, n: i32|`. `FunctionalParams.java` calls
+methods on its lambda parameters on purpose, so it would notice a regression.
+
+## Codex audit follow-up — keep the functional-interface grammar and escape boundary honest
+
+Two small overgeneralizations in the functional-interface fix are now pinned.
+
+First, the name grammar is bounded by the real known-interface set. The grammar
+can spell `BooleanConsumer`, `BooleanPredicate`, and `ObjBooleanConsumer`, but
+those are not Java functional interfaces in the supported set. So
+`functional_interface_shape` now refuses names that `is_known_functional_interface`
+does not know, and the negative test covers the Boolean spellings.
+
+Second, a callback call found inside a nested lambda or anonymous-class body is
+not evidence that the parameter is non-escaping in the current method. The
+scanner now treats such nested captures as escapes instead of descending into
+the body and counting `callback.accept(..)` as a synchronous use. The regression
+fixture is `callback_called_only_inside_nested_lambda_is_not_nonescaping`.

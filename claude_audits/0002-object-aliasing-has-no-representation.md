@@ -178,7 +178,7 @@ calls solved as writing through their receiver — `MethodUsageFacts.mutates_sel
 in `src/usage.rs`, which is already a fixpoint over self-calls, so a method that
 mutates only by delegating counts. This is a second consumer for the liveness
 relation and the first consumer for `mutates_self` outside signature planning,
-which is the wiring [0008](0008-inference-machinery-does-not-reach-lowering.md)
+which is the wiring [0008](done/0008-inference-machinery-does-not-reach-lowering.md)
 asks for.
 
 Reported as an `observable_alias` warning from `translate_parsed_source_with_context`.
@@ -189,12 +189,13 @@ the one file written to exercise this. No other file produced a warning, so the
 diagnostic is not noise.
 
 Conservative in three places. The first is deliberate — a diagnostic that
-over-fires gets ignored — the other two are scope limits worth lifting:
+over-fires gets ignored — the other two were scope limits worth lifting:
 
 - an **unresolved call** answers "does not mutate" rather than "unknown", so an
   external mutator is a miss rather than a false alarm;
-- only **local declarations** count as alias points, so `cell[0] = a` and
-  `this.f = a` (an alias stored into an element or a field) are not detected;
+- originally, only **local declarations** counted as alias points, so
+  `cell[0] = a` and `this.f = a` (an alias stored into an element or a field)
+  were not detected;
 - **mutations inside a block-bodied lambda** are not walked, since the lambda's
   statements are nested in an expression rather than reached by the statement
   walk. `LivenessAnalysis::for_loop_body` already exists for exactly this shape
@@ -209,8 +210,8 @@ the analysis can only name the defect. The two-part split above stands: 0002b is
 the representation work, unchanged.
 
 `tests/differential/known-gaps/Aliasing.java` reproduces four cases against the
-Java oracle (`5|7|3|9` vs `0|0|0|0`). Three are detected; the array-element case
-is the one that is not.
+Java oracle (`5|7|3|9` vs `0|0|0|0`). The original implementation detected
+three; the array-element case is lifted below.
 
 
 ---
@@ -239,3 +240,67 @@ change. Neither is the other.
 
 The escape input behind that 47 is deliberately shallow and does not yet produce
 `UnknownBoundary`, so 47 is a floor.
+
+## Update 2026-08-11 (Codex follow-up) — block-lambda mutation detection lifted
+
+One of the detection limits above is now narrower. `observable_alias` still
+reports diagnostics rather than repairing representation, but block-bodied
+lambdas are no longer invisible to the mutation half of the join. When a lambda
+body is nested inside an expression statement such as
+`values.forEach(x -> { a.v = 5; })`, aliasing now walks the lambda block and
+attributes its writes to the enclosing statement for the liveness query.
+
+This originally covered only the immediate-execution lambda shape where the
+statement's live-out set is the right observation point. A later follow-up below
+lifts the `Runnable r = () -> { a.v = 5; }; r.run();` case too.
+
+## Update 2026-08-11 (Codex follow-up) — storage alias points are detected
+
+Another detection limit above is lifted. `cell[0] = a` and `holder.f = a` now
+record alias points when the assigned source local is an object type and is still
+live after the assignment. The alias handle recorded for the diagnostic is the
+storage receiver (`cell` or `holder`), which is the name liveness can observe
+later at `cell[0].v` or `holder.f.v`.
+
+Primitive storage assignments stay excluded: `int` copied into `int[]` or an
+`int` field is copy semantics in Java too.
+
+## Update 2026-08-11 (Codex follow-up) — this-field storage aliases are detected
+
+The remaining storage alias shape above is lifted too. `this.f = a` now records
+`this.f` as the alias handle, and later reads are detected structurally in
+subsequent statements instead of asking local liveness for a `this` binding that
+does not exist. Assignment targets such as a later `this.f = new Node()` are not
+counted as reads of the previous value.
+
+## Update 2026-08-11 (Codex follow-up) — external receiver mutators feed the diagnostic
+
+The unresolved-call detection limit above is narrower too. `observable_alias`
+previously recognised receiver-mutating calls only when the call resolved to a
+source method and `UsageFacts` proved `mutates_self`. Fact-backed external APIs
+already know the same thing through `ExternalApiEffectFact.receiver_mutability`,
+but the alias detector did not receive `FactSet`, so `a.setFlag(...)` on an
+external `Record` was treated as non-mutating even when the external pack marked
+the method `mutates-receiver`.
+
+Post-lowering alias diagnostics now pass `FactSet` into aliasing. The call
+mutation scan still uses source `UsageFacts` for resolved source methods, and
+falls back to external API effects using the receiver binding's Java type and
+argument count. A read-only external fact remains non-mutating; the new
+regression pins both sides.
+
+This still does not repair representation.
+
+## Update 2026-08-11 (Codex follow-up) — stored `Runnable.run()` callbacks are detected
+
+The stored-callback caveat above is narrower. `observable_alias` now records the
+captured mutation in a local lambda initializer without treating the declaration
+as an execution site. When the stored lambda is later invoked through
+`r.run()`, those captured writes are attributed to that call statement, so
+`Runnable r = () -> { a.v = 5; }; r.run(); return b.v;` reports the same
+observable alias as a direct field write.
+
+The regression also pins the inverse: declaring the callback without invoking it
+does not report a mutation.
+
+This still does not repair representation.

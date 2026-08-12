@@ -1769,7 +1769,7 @@ fn implementing_method_candidates<'a>(
 /// See the note on the `lower.rs` twin: candidates stay name-collected so a
 /// differently-spelled parameter type cannot lose a real implementation, but the
 /// exact signature match is tried first so an inherited overload cannot displace
-/// an override ([0009](../claude_audits/0009-overload-identity-collapses-onto-rust-name.md)).
+/// an override ([0009](../claude_audits/done/0009-overload-identity-collapses-onto-rust-name.md)).
 fn order_candidates_by_signature_identity<'a>(
     mut candidates: Vec<&'a MethodDecl>,
     interface_method: &MethodDecl,

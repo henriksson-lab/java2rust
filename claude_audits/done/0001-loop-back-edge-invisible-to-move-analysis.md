@@ -144,7 +144,7 @@ iff it is live-out at that point.
 
 `src/graph.rs` and `src/lattice.rs` already exist and provide the shape for a
 fixpoint solver; neither is currently reachable from `src/lower.rs`. See
-[0008](../0008-inference-machinery-does-not-reach-lowering.md).
+[0008](0008-inference-machinery-does-not-reach-lowering.md).
 
 ## Notes for whoever picks this up
 

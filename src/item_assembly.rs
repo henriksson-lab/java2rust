@@ -518,6 +518,13 @@ fn rust_expr_reads_var(expr: &RustExpr, var_name: &str) -> bool {
                 || rust_expr_reads_var(then_expr, var_name)
                 || rust_expr_reads_var(else_expr, var_name)
         }
+        RustExpr::Tuple(items) | RustExpr::ArrayLiteral(items) => {
+            items.iter().any(|item| rust_expr_reads_var(item, var_name))
+        }
+        RustExpr::VecLiteral(items) => items.iter().any(|item| rust_expr_reads_var(item, var_name)),
+        RustExpr::VecRepeat { value, len } => {
+            rust_expr_reads_var(value, var_name) || rust_expr_reads_var(len, var_name)
+        }
         RustExpr::Call { function, args } => {
             rust_expr_reads_var(function, var_name)
                 || args.iter().any(|arg| rust_expr_reads_var(arg, var_name))
@@ -530,7 +537,7 @@ fn rust_expr_reads_var(expr: &RustExpr, var_name: &str) -> bool {
             .iter()
             .any(|(_, field_expr)| rust_expr_reads_var(field_expr, var_name)),
         RustExpr::Raw(text) => raw_rust_expr_mentions_identifier(text, var_name),
-        RustExpr::Literal(_) => false,
+        RustExpr::Path(_) | RustExpr::Literal(_) => false,
     }
 }
 
@@ -2185,100 +2192,175 @@ fn array_access_root_var(expr: &Expr) -> Option<&str> {
     }
 }
 
+/// The Rust closure type a functional-interface parameter lowers to.
+///
+/// Arity and result both come from one [`crate::stdlib::functional_interface_shape`]
+/// lookup. They used to be two hand-written matches that had to agree and did
+/// not: `Supplier` had an arity arm and no result arm, so `Supplier<String>`
+/// became `impl FnMut()` and its `-> String` vanished (`E0308`), and every name
+/// missing from the shorter match stayed an opaque struct with no methods —
+/// `Comparator<T>` reached `.compare(..)` on `pub struct Comparator;` (`E0599`).
 fn functional_callback_param_type(java_ty: &JavaType, facts: &FactSet) -> Option<RustType> {
     let JavaType::Named { name, args } = java_ty else {
         return None;
     };
     let canonical = crate::stdlib::canonical_external_receiver_type_key(name);
     let simple = canonical.rsplit('.').next().unwrap_or(name.as_str());
-    let input_count = match simple {
-        "Supplier" | "Runnable" => 0,
-        "Consumer" | "Function" | "Predicate" | "UnaryOperator" => 1,
-        "BiConsumer" | "BiFunction" | "BinaryOperator" => 2,
-        _ => return None,
+    let shape = crate::stdlib::functional_interface_shape(simple)?;
+
+    let render = |source: &crate::stdlib::FunctionalTypeSource| match source {
+        crate::stdlib::FunctionalTypeSource::TypeArgument(index) => args
+            .get(*index)
+            .map(|ty| crate::emit::emit_type(&rust_type_for_java_type_with_facts(ty, facts))),
+        crate::stdlib::FunctionalTypeSource::Primitive(primitive) => Some(crate::emit::emit_type(
+            &rust_type_for_java_type_with_facts(&JavaType::Primitive(*primitive), facts),
+        )),
     };
-    if args.len() < input_count {
-        return None;
-    }
-    let inputs = args
+
+    let inputs = shape
+        .inputs
         .iter()
-        .take(input_count)
-        .map(|arg| crate::emit::emit_type(&rust_type_for_java_type_with_facts(arg, facts)))
-        .collect::<Vec<_>>()
+        .map(render)
+        .collect::<Option<Vec<_>>>()?
         .join(", ");
-    let return_ty = match simple {
-        "Function" | "UnaryOperator" => args
-            .get(1)
-            .map(|ty| crate::emit::emit_type(&rust_type_for_java_type_with_facts(ty, facts))),
-        "BiFunction" | "BinaryOperator" => args
-            .get(2)
-            .map(|ty| crate::emit::emit_type(&rust_type_for_java_type_with_facts(ty, facts))),
-        "Predicate" => Some("bool".to_string()),
-        _ => None,
+    // A missing result *type argument* means the source did not spell the
+    // generic out; keep the previous behaviour rather than guess.
+    let rendered = match shape.returns.as_ref().map(render) {
+        Some(Some(result)) => format!("impl FnMut({inputs}) -> {result}"),
+        Some(None) => return None,
+        None => format!("impl FnMut({inputs})"),
     };
-    let rendered = return_ty
-        .map(|ret| format!("impl FnMut({inputs}) -> {ret}"))
-        .unwrap_or_else(|| format!("impl FnMut({inputs})"));
     Some(RustType::Raw(rendered))
 }
 
-fn method_param_is_nonescaping_functional_callback(method: &MethodDecl, param_name: &str) -> bool {
-    if !method.params.iter().any(|param| {
-        param.name == param_name
-            && functional_callback_param_type(&param.ty, &FactSet::default()).is_some()
-    }) {
+pub(crate) fn method_param_is_nonescaping_functional_callback(
+    method: &MethodDecl,
+    param_name: &str,
+) -> bool {
+    let Some(callback_method) = method.params.iter().find_map(|param| {
+        (param.name == param_name
+            && functional_callback_param_type(&param.ty, &FactSet::default()).is_some())
+        .then(|| functional_interface_method_name(&param.ty))
+        .flatten()
+    }) else {
         return false;
-    }
+    };
     let Some(body) = &method.body else {
         return false;
     };
     let mut saw_callback_call = false;
     let mut escaped = false;
-    scan_block_for_callback_param(body, param_name, &mut saw_callback_call, &mut escaped);
+    scan_block_for_callback_param(
+        body,
+        param_name,
+        callback_method,
+        &mut saw_callback_call,
+        &mut escaped,
+    );
     saw_callback_call && !escaped
+}
+
+/// The single abstract method a functional-interface parameter is called through.
+fn functional_interface_method_name(java_ty: &JavaType) -> Option<&'static str> {
+    let JavaType::Named { name, .. } = java_ty else {
+        return None;
+    };
+    let canonical = crate::stdlib::canonical_external_receiver_type_key(name);
+    let simple = canonical.rsplit('.').next().unwrap_or(name.as_str());
+    crate::stdlib::functional_interface_shape(simple).map(|shape| shape.method)
 }
 
 fn scan_block_for_callback_param(
     block: &crate::java_ir::Block,
     param_name: &str,
+    callback_method: &str,
     saw_callback_call: &mut bool,
     escaped: &mut bool,
 ) {
     for stmt in &block.statements {
-        scan_stmt_for_callback_param(stmt, param_name, saw_callback_call, escaped);
+        scan_stmt_for_callback_param(
+            stmt,
+            param_name,
+            callback_method,
+            saw_callback_call,
+            escaped,
+        );
     }
 }
 
 fn scan_stmt_for_callback_param(
     stmt: &crate::java_ir::Stmt,
     param_name: &str,
+    callback_method: &str,
     saw_callback_call: &mut bool,
     escaped: &mut bool,
 ) {
     match stmt {
         crate::java_ir::Stmt::VarDecl { initializer, .. } => {
             if let Some(expr) = initializer {
-                scan_expr_for_callback_param(expr, param_name, saw_callback_call, escaped);
+                scan_expr_for_callback_param(
+                    expr,
+                    param_name,
+                    callback_method,
+                    saw_callback_call,
+                    escaped,
+                );
             }
         }
         crate::java_ir::Stmt::Assign { target, value } => {
-            scan_expr_for_callback_param(target, param_name, saw_callback_call, escaped);
-            scan_expr_for_callback_param(value, param_name, saw_callback_call, escaped);
+            scan_expr_for_callback_param(
+                target,
+                param_name,
+                callback_method,
+                saw_callback_call,
+                escaped,
+            );
+            scan_expr_for_callback_param(
+                value,
+                param_name,
+                callback_method,
+                saw_callback_call,
+                escaped,
+            );
         }
         crate::java_ir::Stmt::Expr(expr)
         | crate::java_ir::Stmt::Return(Some(expr))
         | crate::java_ir::Stmt::Throw(expr) => {
-            scan_expr_for_callback_param(expr, param_name, saw_callback_call, escaped);
+            scan_expr_for_callback_param(
+                expr,
+                param_name,
+                callback_method,
+                saw_callback_call,
+                escaped,
+            );
         }
         crate::java_ir::Stmt::If {
             condition,
             then_block,
             else_block,
         } => {
-            scan_expr_for_callback_param(condition, param_name, saw_callback_call, escaped);
-            scan_block_for_callback_param(then_block, param_name, saw_callback_call, escaped);
+            scan_expr_for_callback_param(
+                condition,
+                param_name,
+                callback_method,
+                saw_callback_call,
+                escaped,
+            );
+            scan_block_for_callback_param(
+                then_block,
+                param_name,
+                callback_method,
+                saw_callback_call,
+                escaped,
+            );
             if let Some(block) = else_block {
-                scan_block_for_callback_param(block, param_name, saw_callback_call, escaped);
+                scan_block_for_callback_param(
+                    block,
+                    param_name,
+                    callback_method,
+                    saw_callback_call,
+                    escaped,
+                );
             }
         }
         crate::java_ir::Stmt::While {
@@ -2287,8 +2369,20 @@ fn scan_stmt_for_callback_param(
         | crate::java_ir::Stmt::DoWhile {
             condition, body, ..
         } => {
-            scan_expr_for_callback_param(condition, param_name, saw_callback_call, escaped);
-            scan_block_for_callback_param(body, param_name, saw_callback_call, escaped);
+            scan_expr_for_callback_param(
+                condition,
+                param_name,
+                callback_method,
+                saw_callback_call,
+                escaped,
+            );
+            scan_block_for_callback_param(
+                body,
+                param_name,
+                callback_method,
+                saw_callback_call,
+                escaped,
+            );
         }
         crate::java_ir::Stmt::For {
             init,
@@ -2298,30 +2392,84 @@ fn scan_stmt_for_callback_param(
             ..
         } => {
             for stmt in init {
-                scan_stmt_for_callback_param(stmt, param_name, saw_callback_call, escaped);
+                scan_stmt_for_callback_param(
+                    stmt,
+                    param_name,
+                    callback_method,
+                    saw_callback_call,
+                    escaped,
+                );
             }
             if let Some(expr) = condition {
-                scan_expr_for_callback_param(expr, param_name, saw_callback_call, escaped);
+                scan_expr_for_callback_param(
+                    expr,
+                    param_name,
+                    callback_method,
+                    saw_callback_call,
+                    escaped,
+                );
             }
             for expr in update {
-                scan_expr_for_callback_param(expr, param_name, saw_callback_call, escaped);
+                scan_expr_for_callback_param(
+                    expr,
+                    param_name,
+                    callback_method,
+                    saw_callback_call,
+                    escaped,
+                );
             }
-            scan_block_for_callback_param(body, param_name, saw_callback_call, escaped);
+            scan_block_for_callback_param(
+                body,
+                param_name,
+                callback_method,
+                saw_callback_call,
+                escaped,
+            );
         }
         crate::java_ir::Stmt::EnhancedFor { iterable, body, .. } => {
-            scan_expr_for_callback_param(iterable, param_name, saw_callback_call, escaped);
-            scan_block_for_callback_param(body, param_name, saw_callback_call, escaped);
+            scan_expr_for_callback_param(
+                iterable,
+                param_name,
+                callback_method,
+                saw_callback_call,
+                escaped,
+            );
+            scan_block_for_callback_param(
+                body,
+                param_name,
+                callback_method,
+                saw_callback_call,
+                escaped,
+            );
         }
         crate::java_ir::Stmt::Switch { selector, cases } => {
-            scan_expr_for_callback_param(selector, param_name, saw_callback_call, escaped);
+            scan_expr_for_callback_param(
+                selector,
+                param_name,
+                callback_method,
+                saw_callback_call,
+                escaped,
+            );
             for case in cases {
                 for label in &case.labels {
                     if let crate::java_ir::SwitchLabel::Expr(expr) = label {
-                        scan_expr_for_callback_param(expr, param_name, saw_callback_call, escaped);
+                        scan_expr_for_callback_param(
+                            expr,
+                            param_name,
+                            callback_method,
+                            saw_callback_call,
+                            escaped,
+                        );
                     }
                 }
                 for stmt in &case.statements {
-                    scan_stmt_for_callback_param(stmt, param_name, saw_callback_call, escaped);
+                    scan_stmt_for_callback_param(
+                        stmt,
+                        param_name,
+                        callback_method,
+                        saw_callback_call,
+                        escaped,
+                    );
                 }
             }
         }
@@ -2332,23 +2480,59 @@ fn scan_stmt_for_callback_param(
             finally_block,
         } => {
             for stmt in resources {
-                scan_stmt_for_callback_param(stmt, param_name, saw_callback_call, escaped);
+                scan_stmt_for_callback_param(
+                    stmt,
+                    param_name,
+                    callback_method,
+                    saw_callback_call,
+                    escaped,
+                );
             }
-            scan_block_for_callback_param(body, param_name, saw_callback_call, escaped);
+            scan_block_for_callback_param(
+                body,
+                param_name,
+                callback_method,
+                saw_callback_call,
+                escaped,
+            );
             for catch in catches {
-                scan_block_for_callback_param(&catch.body, param_name, saw_callback_call, escaped);
+                scan_block_for_callback_param(
+                    &catch.body,
+                    param_name,
+                    callback_method,
+                    saw_callback_call,
+                    escaped,
+                );
             }
             if let Some(block) = finally_block {
-                scan_block_for_callback_param(block, param_name, saw_callback_call, escaped);
+                scan_block_for_callback_param(
+                    block,
+                    param_name,
+                    callback_method,
+                    saw_callback_call,
+                    escaped,
+                );
             }
         }
         crate::java_ir::Stmt::ConstructorInvocation { args, .. } => {
             for arg in args {
-                scan_expr_for_callback_param(arg, param_name, saw_callback_call, escaped);
+                scan_expr_for_callback_param(
+                    arg,
+                    param_name,
+                    callback_method,
+                    saw_callback_call,
+                    escaped,
+                );
             }
         }
         crate::java_ir::Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
-            scan_block_for_callback_param(block, param_name, saw_callback_call, escaped);
+            scan_block_for_callback_param(
+                block,
+                param_name,
+                callback_method,
+                saw_callback_call,
+                escaped,
+            );
         }
         crate::java_ir::Stmt::Return(None)
         | crate::java_ir::Stmt::LocalType(_)
@@ -2361,6 +2545,7 @@ fn scan_stmt_for_callback_param(
 fn scan_expr_for_callback_param(
     expr: &Expr,
     param_name: &str,
+    callback_method: &str,
     saw_callback_call: &mut bool,
     escaped: &mut bool,
 ) {
@@ -2372,14 +2557,54 @@ fn scan_expr_for_callback_param(
             args,
             ..
         } if matches!(receiver.as_ref(), Expr::Var(receiver_name) if receiver_name == param_name)
-            && matches!(
-                name.as_str(),
-                "accept" | "apply" | "test" | "get" | "run" | "call"
-            ) =>
+            // The interface's own single abstract method, from
+            // `functional_interface_shape` -- not a list of names kept beside
+            // it. The list held six and stopped at `Comparator::compare`, so a
+            // comparator parameter was never recognised as a callback and stayed
+            // an opaque struct that `.compare(..)` could not be called on.
+            && name.as_str() == callback_method =>
         {
             *saw_callback_call = true;
             for arg in args {
-                scan_expr_for_callback_param(arg, param_name, saw_callback_call, escaped);
+                scan_expr_for_callback_param(
+                    arg,
+                    param_name,
+                    callback_method,
+                    saw_callback_call,
+                    escaped,
+                );
+            }
+        }
+        Expr::Call {
+            receiver,
+            name,
+            args,
+            ..
+        } if native_collections_sort_consumes_callback_param(
+            receiver.as_deref(),
+            name,
+            args,
+            param_name,
+        ) =>
+        {
+            *saw_callback_call = true;
+            if let Some(receiver) = receiver {
+                scan_expr_for_callback_param(
+                    receiver,
+                    param_name,
+                    callback_method,
+                    saw_callback_call,
+                    escaped,
+                );
+            }
+            if let Some(target) = args.first() {
+                scan_expr_for_callback_param(
+                    target,
+                    param_name,
+                    callback_method,
+                    saw_callback_call,
+                    escaped,
+                );
             }
         }
         Expr::FieldAccess(receiver, _)
@@ -2387,52 +2612,121 @@ fn scan_expr_for_callback_param(
         | Expr::Unary { expr: receiver, .. }
         | Expr::Cast { expr: receiver, .. }
         | Expr::InstanceOf { expr: receiver, .. } => {
-            scan_expr_for_callback_param(receiver, param_name, saw_callback_call, escaped);
+            scan_expr_for_callback_param(
+                receiver,
+                param_name,
+                callback_method,
+                saw_callback_call,
+                escaped,
+            );
         }
         Expr::Binary { left, right, .. } => {
-            scan_expr_for_callback_param(left, param_name, saw_callback_call, escaped);
-            scan_expr_for_callback_param(right, param_name, saw_callback_call, escaped);
+            scan_expr_for_callback_param(
+                left,
+                param_name,
+                callback_method,
+                saw_callback_call,
+                escaped,
+            );
+            scan_expr_for_callback_param(
+                right,
+                param_name,
+                callback_method,
+                saw_callback_call,
+                escaped,
+            );
         }
         Expr::Ternary {
             condition,
             then_expr,
             else_expr,
         } => {
-            scan_expr_for_callback_param(condition, param_name, saw_callback_call, escaped);
-            scan_expr_for_callback_param(then_expr, param_name, saw_callback_call, escaped);
-            scan_expr_for_callback_param(else_expr, param_name, saw_callback_call, escaped);
+            scan_expr_for_callback_param(
+                condition,
+                param_name,
+                callback_method,
+                saw_callback_call,
+                escaped,
+            );
+            scan_expr_for_callback_param(
+                then_expr,
+                param_name,
+                callback_method,
+                saw_callback_call,
+                escaped,
+            );
+            scan_expr_for_callback_param(
+                else_expr,
+                param_name,
+                callback_method,
+                saw_callback_call,
+                escaped,
+            );
         }
         Expr::Switch { selector, cases } => {
-            scan_expr_for_callback_param(selector, param_name, saw_callback_call, escaped);
+            scan_expr_for_callback_param(
+                selector,
+                param_name,
+                callback_method,
+                saw_callback_call,
+                escaped,
+            );
             for case in cases {
                 for label in &case.labels {
                     if let crate::java_ir::SwitchLabel::Expr(expr) = label {
-                        scan_expr_for_callback_param(expr, param_name, saw_callback_call, escaped);
+                        scan_expr_for_callback_param(
+                            expr,
+                            param_name,
+                            callback_method,
+                            saw_callback_call,
+                            escaped,
+                        );
                     }
                 }
-                scan_expr_for_callback_param(&case.value, param_name, saw_callback_call, escaped);
+                scan_expr_for_callback_param(
+                    &case.value,
+                    param_name,
+                    callback_method,
+                    saw_callback_call,
+                    escaped,
+                );
             }
         }
         Expr::Call { receiver, args, .. } => {
             if let Some(receiver) = receiver {
-                scan_expr_for_callback_param(receiver, param_name, saw_callback_call, escaped);
+                scan_expr_for_callback_param(
+                    receiver,
+                    param_name,
+                    callback_method,
+                    saw_callback_call,
+                    escaped,
+                );
             }
             for arg in args {
-                scan_expr_for_callback_param(arg, param_name, saw_callback_call, escaped);
+                scan_expr_for_callback_param(
+                    arg,
+                    param_name,
+                    callback_method,
+                    saw_callback_call,
+                    escaped,
+                );
             }
         }
         Expr::New { args, body, .. } => {
             for arg in args {
-                scan_expr_for_callback_param(arg, param_name, saw_callback_call, escaped);
+                scan_expr_for_callback_param(
+                    arg,
+                    param_name,
+                    callback_method,
+                    saw_callback_call,
+                    escaped,
+                );
             }
-            if let Some(members) = body {
-                for member in members {
-                    if let Member::Method(method) = member
-                        && let Some(body) = &method.body
-                    {
-                        scan_block_for_callback_param(body, param_name, saw_callback_call, escaped);
-                    }
-                }
+            if body
+                .as_ref()
+                .is_some_and(|members| members_capture_callback_param(members, param_name))
+            {
+                *escaped = true;
             }
         }
         Expr::ArrayCreation {
@@ -2441,27 +2735,42 @@ fn scan_expr_for_callback_param(
             ..
         } => {
             for expr in dimensions {
-                scan_expr_for_callback_param(expr, param_name, saw_callback_call, escaped);
+                scan_expr_for_callback_param(
+                    expr,
+                    param_name,
+                    callback_method,
+                    saw_callback_call,
+                    escaped,
+                );
             }
             if let Some(initializer) = initializer {
                 for expr in initializer {
-                    scan_expr_for_callback_param(expr, param_name, saw_callback_call, escaped);
+                    scan_expr_for_callback_param(
+                        expr,
+                        param_name,
+                        callback_method,
+                        saw_callback_call,
+                        escaped,
+                    );
                 }
             }
         }
         Expr::ArrayInitializer(values) => {
             for expr in values {
-                scan_expr_for_callback_param(expr, param_name, saw_callback_call, escaped);
+                scan_expr_for_callback_param(
+                    expr,
+                    param_name,
+                    callback_method,
+                    saw_callback_call,
+                    escaped,
+                );
             }
         }
-        Expr::Lambda { body, .. } => match body {
-            crate::java_ir::LambdaBody::Expr(expr) => {
-                scan_expr_for_callback_param(expr, param_name, saw_callback_call, escaped)
+        Expr::Lambda { body, .. } => {
+            if lambda_body_captures_callback_param(body, param_name) {
+                *escaped = true;
             }
-            crate::java_ir::LambdaBody::Block(block) => {
-                scan_block_for_callback_param(block, param_name, saw_callback_call, escaped)
-            }
-        },
+        }
         Expr::Literal(_)
         | Expr::Var(_)
         | Expr::This
@@ -2471,6 +2780,234 @@ fn scan_expr_for_callback_param(
         | Expr::Raw(_)
         | Expr::Unsupported { .. } => {}
     }
+}
+
+fn members_capture_callback_param(members: &[Member], param_name: &str) -> bool {
+    members.iter().any(|member| match member {
+        Member::Field(field) => field
+            .initializer
+            .as_ref()
+            .is_some_and(|expr| expr_references_callback_param(expr, param_name)),
+        Member::Method(method) => method
+            .body
+            .as_ref()
+            .is_some_and(|body| block_references_callback_param(body, param_name)),
+        Member::Constructor(ctor) => ctor
+            .body
+            .as_ref()
+            .is_some_and(|body| block_references_callback_param(body, param_name)),
+        Member::Type(_) | Member::Unsupported { .. } => false,
+    })
+}
+
+fn lambda_body_captures_callback_param(
+    body: &crate::java_ir::LambdaBody,
+    param_name: &str,
+) -> bool {
+    match body {
+        crate::java_ir::LambdaBody::Expr(expr) => expr_references_callback_param(expr, param_name),
+        crate::java_ir::LambdaBody::Block(block) => {
+            block_references_callback_param(block, param_name)
+        }
+    }
+}
+
+fn block_references_callback_param(block: &crate::java_ir::Block, param_name: &str) -> bool {
+    block
+        .statements
+        .iter()
+        .any(|stmt| stmt_references_callback_param(stmt, param_name))
+}
+
+fn stmt_references_callback_param(stmt: &crate::java_ir::Stmt, param_name: &str) -> bool {
+    match stmt {
+        crate::java_ir::Stmt::VarDecl { initializer, .. } => initializer
+            .as_ref()
+            .is_some_and(|expr| expr_references_callback_param(expr, param_name)),
+        crate::java_ir::Stmt::Assign { target, value } => {
+            expr_references_callback_param(target, param_name)
+                || expr_references_callback_param(value, param_name)
+        }
+        crate::java_ir::Stmt::Expr(expr)
+        | crate::java_ir::Stmt::Return(Some(expr))
+        | crate::java_ir::Stmt::Throw(expr) => expr_references_callback_param(expr, param_name),
+        crate::java_ir::Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            expr_references_callback_param(condition, param_name)
+                || block_references_callback_param(then_block, param_name)
+                || else_block
+                    .as_ref()
+                    .is_some_and(|block| block_references_callback_param(block, param_name))
+        }
+        crate::java_ir::Stmt::While {
+            condition, body, ..
+        }
+        | crate::java_ir::Stmt::DoWhile {
+            condition, body, ..
+        } => {
+            expr_references_callback_param(condition, param_name)
+                || block_references_callback_param(body, param_name)
+        }
+        crate::java_ir::Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            init.iter()
+                .any(|stmt| stmt_references_callback_param(stmt, param_name))
+                || condition
+                    .as_ref()
+                    .is_some_and(|expr| expr_references_callback_param(expr, param_name))
+                || update
+                    .iter()
+                    .any(|expr| expr_references_callback_param(expr, param_name))
+                || block_references_callback_param(body, param_name)
+        }
+        crate::java_ir::Stmt::EnhancedFor { iterable, body, .. } => {
+            expr_references_callback_param(iterable, param_name)
+                || block_references_callback_param(body, param_name)
+        }
+        crate::java_ir::Stmt::Switch { selector, cases } => {
+            expr_references_callback_param(selector, param_name)
+                || cases.iter().any(|case| {
+                    case.labels.iter().any(|label| match label {
+                        crate::java_ir::SwitchLabel::Expr(expr) => {
+                            expr_references_callback_param(expr, param_name)
+                        }
+                        crate::java_ir::SwitchLabel::Default => false,
+                    }) || case
+                        .statements
+                        .iter()
+                        .any(|stmt| stmt_references_callback_param(stmt, param_name))
+                })
+        }
+        crate::java_ir::Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            resources
+                .iter()
+                .any(|resource| stmt_references_callback_param(resource, param_name))
+                || block_references_callback_param(body, param_name)
+                || catches
+                    .iter()
+                    .any(|catch| block_references_callback_param(&catch.body, param_name))
+                || finally_block
+                    .as_ref()
+                    .is_some_and(|block| block_references_callback_param(block, param_name))
+        }
+        crate::java_ir::Stmt::ConstructorInvocation { args, .. } => args
+            .iter()
+            .any(|expr| expr_references_callback_param(expr, param_name)),
+        crate::java_ir::Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            block_references_callback_param(block, param_name)
+        }
+        crate::java_ir::Stmt::Return(None)
+        | crate::java_ir::Stmt::LocalType(_)
+        | crate::java_ir::Stmt::Break(_)
+        | crate::java_ir::Stmt::Continue(_)
+        | crate::java_ir::Stmt::Unsupported(_) => false,
+    }
+}
+
+fn expr_references_callback_param(expr: &Expr, param_name: &str) -> bool {
+    match expr {
+        Expr::Var(name) => name == param_name,
+        Expr::FieldAccess(receiver, _)
+        | Expr::ArrayAccess(receiver, _)
+        | Expr::Unary { expr: receiver, .. }
+        | Expr::Cast { expr: receiver, .. }
+        | Expr::InstanceOf { expr: receiver, .. } => {
+            expr_references_callback_param(receiver, param_name)
+        }
+        Expr::Binary { left, right, .. } => {
+            expr_references_callback_param(left, param_name)
+                || expr_references_callback_param(right, param_name)
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            expr_references_callback_param(condition, param_name)
+                || expr_references_callback_param(then_expr, param_name)
+                || expr_references_callback_param(else_expr, param_name)
+        }
+        Expr::Switch { selector, cases } => {
+            expr_references_callback_param(selector, param_name)
+                || cases.iter().any(|case| {
+                    case.labels.iter().any(|label| match label {
+                        crate::java_ir::SwitchLabel::Expr(expr) => {
+                            expr_references_callback_param(expr, param_name)
+                        }
+                        crate::java_ir::SwitchLabel::Default => false,
+                    }) || expr_references_callback_param(&case.value, param_name)
+                })
+        }
+        Expr::Call { receiver, args, .. } => {
+            receiver
+                .as_ref()
+                .is_some_and(|receiver| expr_references_callback_param(receiver, param_name))
+                || args
+                    .iter()
+                    .any(|arg| expr_references_callback_param(arg, param_name))
+        }
+        Expr::New { args, body, .. } => {
+            args.iter()
+                .any(|arg| expr_references_callback_param(arg, param_name))
+                || body
+                    .as_ref()
+                    .is_some_and(|members| members_capture_callback_param(members, param_name))
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            dimensions
+                .iter()
+                .any(|expr| expr_references_callback_param(expr, param_name))
+                || initializer.as_ref().is_some_and(|values| {
+                    values
+                        .iter()
+                        .any(|expr| expr_references_callback_param(expr, param_name))
+                })
+        }
+        Expr::ArrayInitializer(values) => values
+            .iter()
+            .any(|expr| expr_references_callback_param(expr, param_name)),
+        Expr::Lambda { body, .. } => lambda_body_captures_callback_param(body, param_name),
+        Expr::Literal(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::MethodReference { .. }
+        | Expr::ClassLiteral(_)
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => false,
+    }
+}
+
+fn native_collections_sort_consumes_callback_param(
+    receiver: Option<&Expr>,
+    name: &str,
+    args: &[Expr],
+    param_name: &str,
+) -> bool {
+    if name != "sort" || args.len() != 2 {
+        return false;
+    }
+    let Some(Expr::Var(receiver_name)) = receiver else {
+        return false;
+    };
+    crate::stdlib::canonical_external_receiver_type_key(receiver_name) == "Collections"
+        && matches!(&args[1], Expr::Var(arg_name) if arg_name == param_name)
 }
 
 fn maybe_add_lifetime_to_refs(ty: RustType, lifetime: bool) -> RustType {

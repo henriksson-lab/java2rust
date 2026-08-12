@@ -2824,6 +2824,7 @@ printf "invalid_pattern_scan\tok\t%s\t%s\n" "$invalid_scan_elapsed_ms" "$invalid
 idiom_sweep_start_ms="$(now_ms)"
 python3 "$repo_root/scripts/sweep-generated-idioms.py" \
   --generated-root "$generated_dir" \
+  --extra-rust "$shared_support_path" \
   --status "$status_path" \
   --out-tsv "$idiom_sweep_tsv" \
   --out-md "$idiom_sweep_md"

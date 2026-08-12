@@ -17,7 +17,7 @@ cause produces many differently-worded messages. Regrouped by cause:
 |---|---|---|
 | 271 (19%) | unmodelled external types erased to `Box<dyn Any>`, failing at every method call — almost all AWT/Swing | [0011](done/0011-dyn-any-fallback-fails-at-every-use.md) |
 | 214 (15%) | `?` inserted where neither callee nor caller returns `Result` | [0010](done/0010-fallibility-is-decided-three-times-and-disagrees.md) |
-| 164 (11%) | overload identity collapse — inherited body under the child's signature | [0009](0009-overload-identity-collapses-onto-rust-name.md) |
+| 164 (11%) | overload identity collapse — inherited body under the child's signature | [0009](done/0009-overload-identity-collapses-onto-rust-name.md) |
 | 279 (19%) | `E0308` mismatched types — mostly Option-carrier and unit-return, see below | — |
 
 ### htsjdk (today's active target) — 343 errors
@@ -59,7 +59,7 @@ numbers, and it should be the top priority once the cheap items are cleared.
 > `StringBuilder` being a no-op with 181 live call sites
 > ([0016](done/0016-core-jdk-facades-are-no-op-stubs.md)). Worse, several failure
 > modes *reduce* the error count, so the metric can reward erasure. See
-> [0018](0018-the-compile-error-metric-cannot-see-silent-failures.md). Tier 0
+> [0018](done/0018-the-compile-error-metric-cannot-see-silent-failures.md). Tier 0
 > below is revised accordingly.
 
 ### Tier 0 — the metric is lying to you (do first, ~1–2 days)
@@ -143,7 +143,7 @@ it will teach you what the migration ergonomics are.
 
 These are the same defect at two levels: **identity modelled as a name string**.
 
-- **Method identity** ([0009](0009-overload-identity-collapses-onto-rust-name.md)) —
+- **Method identity** ([0009](done/0009-overload-identity-collapses-onto-rust-name.md)) —
   key inheritance and override matching on `(name, erased param types)`, never on
   the Rust name or arity. Assign Rust names as a late, total function of the
   resolved signature set. This is the **most severe correctness bug found**: a

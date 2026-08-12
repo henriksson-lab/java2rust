@@ -65,7 +65,7 @@ impl CallableKey {
     /// ([0010](../claude_audits/0010-fallibility-is-decided-three-times-and-disagrees.md)).
     ///
     /// Identity spelled two ways is
-    /// [0009](../claude_audits/0009-overload-identity-collapses-onto-rust-name.md)'s
+    /// [0009](../claude_audits/done/0009-overload-identity-collapses-onto-rust-name.md)'s
     /// defect; this constructor makes that particular instance of it
     /// unrepresentable.
     pub fn source_method(

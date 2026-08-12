@@ -35,6 +35,9 @@ Already fixed and moved:
 | [0039](done/0039-static-array-fields-lose-their-value-and-their-writes.md) | `static int[] a = new int[3]` had length 0, and every `a[i] = v` was silently discarded |
 | [0040](done/0040-external-type-name-matching-recomputes-on-the-hot-path.md) | External type-name matching rebuilt its alias lists per pack member — **81 s to translate 7 methods** | performance | fixed, memo |
 | [0041](done/0041-slot-shape-design-had-no-generated-crate-checks.md) | `slot_shape_design` asserted on rendered Rust with **no** check that it compiled — 596 tests, 0 generated-crate checks | test coverage | 99 checked; 21 genuine failures and 31 harness-only ones enumerated |
+| [0018](done/0018-the-compile-error-metric-cannot-see-silent-failures.md) | Compile-error counts were blind to silent wrong output and could reward erasure; fixed with marker/counter ownership, differential tests, a terminating idiom baseline, shared-support sweep coverage, and no-op facade call-site accounting |
+| [0008](done/0008-inference-machinery-does-not-reach-lowering.md) | Inference stayed upstream while lowering re-derived facts locally; fixed for the audited scope by routing solved relations through `CallableAnalysis`, consolidating slot-shape specificity, landing storage strategy as a whole-program relation, and replacing drifted hardcoded library/enumeration tables with rule-backed queries |
+| [0009](done/0009-overload-identity-collapses-onto-rust-name.md) | Overload identity collapse fixed: source method identity now uses erased Java signature/staticness across inherited suppression, summary surfaces, exception override equalization, interface candidates, and usage/call planning |
 
 Issues 0012 and 0013 were the parse-error pair in Tier 0 of
 [SUGGESTIONS.md](SUGGESTIONS.md), so that step is complete: corpus error counts
@@ -77,7 +80,7 @@ handling the idioms we currently fail, grounded in corpus error counts.
 | [0003](done/0003-java-integer-arithmetic-semantics-not-preserved.md) | Integer overflow panics in debug, wraps in release; `/ 0` not a Java exception; shift distance unmasked | runtime | medium, self-contained |
 | [0004](done/0004-string-concat-absorbs-nested-arithmetic.md) | `"t " + (a + b)` → `"t 12"` instead of `"t 3"` | runtime | **small — exact fix given** |
 | [0005](done/0005-unsigned-right-shift-collapsed-to-arithmetic-shift.md) | `>>>` parsed as `>>`; wrong for all negative operands | runtime | small, mechanical |
-| [0009](0009-overload-identity-collapses-onto-rust-name.md) | Child's own method body **silently replaced** by an inherited overload; 14 files | corpus (FastQC) | medium — better key |
+| [0009](done/0009-overload-identity-collapses-onto-rust-name.md) | Child's own method body **silently replaced** by an inherited overload; fixed by Java signature identity | corpus (FastQC) | done |
 | [0010](done/0010-fallibility-is-decided-three-times-and-disagrees.md) | `?` emitted where neither callee nor caller returns `Result`; 214 errors | corpus (FastQC) | medium — fixpoint |
 | [0011](done/0011-dyn-any-fallback-fails-at-every-use.md) | `Box<dyn Any>` fallback fails at every method call; 271 errors | corpus (FastQC) | medium — fallback shape |
 | [0012](done/0012-unsupported-diagnostics-emit-invalid-rust.md) | `compile_error!` with unescaped quotes → file fails to **parse**, hiding all its other errors | corpus (biojava) | **tiny** |
@@ -108,9 +111,9 @@ machinery to add.
 |---|---|
 | [0006](done/0006-move-analysis-is-five-approximations-of-one-relation.md) | **Closed.** One backward liveness fixpoint over binding identity; no name-set approximation left on `LowerCtx` |
 | [0007](0007-rust-ir-is-mostly-opaque-strings.md) | 58% of `RustExpr` is `Raw(String)`, forcing 55 distinct substring checks — including parsing operators with `contains(" + ")` and matching on an emitted comment. **Partly addressed**: `RustExpr::Shaped` records the answer at the producer; 4 adapter families migrated, queries monotone so migration cannot regress |
-| [0008](0008-inference-machinery-does-not-reach-lowering.md) | `lattice.rs` / `fact_saturation.rs` / `graph.rs` are unreachable from `lower.rs`; 206 ad-hoc `-> bool` predicates re-derive them locally. **Partly addressed**: 206 → 159 predicates, `CallableAnalysis` is the single handle, two whole-program relations now consumed. The lattice grep is still 0 *deliberately* — read the update before using it as a score |
+| [0008](done/0008-inference-machinery-does-not-reach-lowering.md) | **Closed for the audited scope.** Lowering consumes solved relations through `CallableAnalysis`; slot-shape specificity is centralized; storage strategy is a whole-program lattice consumer; and the recorded hardcoded library/enumeration drift has rule-backed tests |
 | [0022](done/0022-types-are-reparsed-from-source-text.md) | `parse_type_node` re-parsed types from text. **Closed for the source route**, not for the file: the ~4.9M remaining `parse_type_text` calls are all `javalibs`/manifest input (the correct use), and four defensive fallbacks stay in `parser.rs`, documented and measured at 0 hits over the corpus |
-| [0018](0018-the-compile-error-metric-cannot-see-silent-failures.md) | **8 of 14 validated defects produce zero compile errors**, and several failure modes *lower* the error count — the metric can reward erasure |
+| [0018](done/0018-the-compile-error-metric-cannot-see-silent-failures.md) | **Closed.** The compile metric is no longer the only quality signal: marker/counter ownership, fixture-backed detector tests, the differential harness, the `idiom_gaps` failure-name baseline, shared-support sweep inputs, and no-op facade call-site accounting are all gate-covered |
 
 ## Suggested order
 
@@ -119,7 +122,7 @@ In brief:
 
 0. **0014 silent-drop prohibition** — make every unhandled construct emit
    `compile_error!` instead of vanishing. Cheapest change here and it prevents a
-   whole class ([0018](0018-the-compile-error-metric-cannot-see-silent-failures.md)).
+   whole class ([0018](done/0018-the-compile-error-metric-cannot-see-silent-failures.md)).
    Then the **0012, 0013** parse errors: a file that fails to parse reports zero
    type errors, so these distort the corpus measurements today.
 1. **0004, 0005, 0014, 0016** — small, exact, verified; each a silent wrong
@@ -129,9 +132,9 @@ In brief:
 3. **0003**, **0002a** — arithmetic policy; `Clone` obligation tracking.
 4. **0010** — fallibility as a fixpoint. Cheapest end-to-end demonstration that
    routing an analysis through the pipeline works; the call graph already exists.
-5. **0009** — method identity by Java signature. Most severe correctness bug.
+5. **0009** — method identity by Java signature. Done; keep new callable surfaces keyed by erased signature/staticness.
 6. **Optional carriers** — largest genuine defect class (~40 of htsjdk's E0308).
-7. **0006 → 0001**, **0007**, **0002b**, **0008** — binding identity and CFG
+7. **0006 → 0001**, **0007**, **0002b** — binding identity and CFG
    liveness, mandatory shape tags, shared representation. Design-heavy.
 
 ## Scope note

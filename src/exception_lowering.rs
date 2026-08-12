@@ -252,7 +252,7 @@ pub fn throw_stmt_with_result_policy(exception: RustExpr, wrap_in_result: bool) 
         ));
     }
     RustStmt::Return(Some(RustExpr::Call {
-        function: Box::new(RustExpr::Raw("Err".to_string())),
+        function: Box::new(RustExpr::path(["Err"])),
         args: vec![exception],
     }))
 }
@@ -365,13 +365,16 @@ fn wrap_ok_returns_in_some(stmts: Vec<RustStmt>) -> Vec<RustStmt> {
 fn wrap_ok_return_in_some(stmt: RustStmt) -> RustStmt {
     match stmt {
         RustStmt::Return(Some(RustExpr::Call { function, mut args }))
-            if matches!(&*function, RustExpr::Raw(name) if name == "Ok") && args.len() == 1 =>
+            if rust_expr_is_path_or_raw_name(&function, &["Ok"]) && args.len() == 1 =>
         {
             let value = args.remove(0);
-            RustStmt::Return(Some(RustExpr::Raw(format!(
-                "Ok(Some({}))",
-                crate::emit::emit_expr(&value)
-            ))))
+            RustStmt::Return(Some(RustExpr::Call {
+                function: Box::new(RustExpr::path(["Ok"])),
+                args: vec![RustExpr::Call {
+                    function: Box::new(RustExpr::path(["Some"])),
+                    args: vec![value],
+                }],
+            }))
         }
         RustStmt::If {
             condition,
@@ -398,8 +401,7 @@ fn plain_return_catch_body(body: Vec<RustStmt>) -> Vec<RustStmt> {
     body.into_iter()
         .map(|stmt| match stmt {
             RustStmt::Return(Some(RustExpr::Call { function, mut args }))
-                if matches!(&*function, RustExpr::Raw(name) if name == "Err")
-                    && args.len() == 1 =>
+                if rust_expr_is_path_or_raw_name(&function, &["Err"]) && args.len() == 1 =>
             {
                 let exception = args.remove(0);
                 RustStmt::Raw(format!(
@@ -410,6 +412,20 @@ fn plain_return_catch_body(body: Vec<RustStmt>) -> Vec<RustStmt> {
             other => other,
         })
         .collect()
+}
+
+fn rust_expr_is_path_or_raw_name(expr: &RustExpr, segments: &[&str]) -> bool {
+    match expr.unshaped() {
+        RustExpr::Path(actual) => {
+            actual.len() == segments.len()
+                && actual
+                    .iter()
+                    .zip(segments)
+                    .all(|(actual, expected)| actual == expected)
+        }
+        RustExpr::Raw(name) => segments.len() == 1 && name == segments[0],
+        _ => false,
+    }
 }
 
 pub fn try_with_resources_scope_stmt(
@@ -559,7 +575,7 @@ pub fn try_catch_finally_scope_stmt(
 
 pub fn new_exception_expr(class_name: &str, message: RustExpr) -> RustExpr {
     RustExpr::Call {
-        function: Box::new(RustExpr::Raw("JavaException::new".to_string())),
+        function: Box::new(RustExpr::path(["JavaException", "new"])),
         args: vec![
             RustExpr::Literal(format!("{class_name:?}")),
             exception_message_expr(message),
@@ -573,7 +589,7 @@ pub fn new_exception_expr_with_cause(
     cause: RustExpr,
 ) -> RustExpr {
     RustExpr::Call {
-        function: Box::new(RustExpr::Raw("JavaException::with_cause".to_string())),
+        function: Box::new(RustExpr::path(["JavaException", "with_cause"])),
         args: vec![
             RustExpr::Literal(format!("{class_name:?}")),
             exception_message_expr(message),
@@ -583,19 +599,36 @@ pub fn new_exception_expr_with_cause(
 }
 
 fn exception_message_expr(message: RustExpr) -> RustExpr {
+    if !matches!(message.unshaped(), RustExpr::Raw(_)) {
+        return RustExpr::MethodCall {
+            receiver: Box::new(message),
+            method: "to_string".to_string(),
+            args: Vec::new(),
+        };
+    }
     RustExpr::Raw(format!("{}.to_string()", crate::emit::emit_expr(&message)))
 }
 
 pub fn fallback_exception_expr(value: RustExpr) -> RustExpr {
     RustExpr::Call {
-        function: Box::new(RustExpr::Raw("JavaException::new".to_string())),
+        function: Box::new(RustExpr::path(["JavaException", "new"])),
         args: vec![
             RustExpr::Literal("\"JavaException\"".to_string()),
-            RustExpr::Raw(format!(
-                "format!(\"{{:?}}\", {})",
-                crate::emit::emit_expr(&value)
-            )),
+            fallback_exception_message_expr(value),
         ],
+    }
+}
+
+fn fallback_exception_message_expr(value: RustExpr) -> RustExpr {
+    if matches!(value.unshaped(), RustExpr::Raw(_)) {
+        return RustExpr::Raw(format!(
+            "format!(\"{{:?}}\", {})",
+            crate::emit::emit_expr(&value)
+        ));
+    }
+    RustExpr::Call {
+        function: Box::new(RustExpr::Raw("format!".to_string())),
+        args: vec![RustExpr::Literal("\"{:?}\"".to_string()), value],
     }
 }
 
@@ -654,12 +687,15 @@ fn combined_exception_message(first: RustExpr, rest: Vec<RustExpr>) -> RustExpr 
 }
 
 pub fn empty_exception_message() -> RustExpr {
-    RustExpr::Raw("String::new()".to_string())
+    RustExpr::Call {
+        function: Box::new(RustExpr::path(["String", "new"])),
+        args: Vec::new(),
+    }
 }
 
 fn ok_expr(value: RustExpr) -> RustExpr {
     RustExpr::Call {
-        function: Box::new(RustExpr::Raw("Ok".to_string())),
+        function: Box::new(RustExpr::path(["Ok"])),
         args: vec![value],
     }
 }
@@ -677,14 +713,14 @@ mod tests {
         let rendered = try_catch_stmt(
             RustType::Raw("i32".to_string()),
             vec![RustStmt::Return(Some(RustExpr::Call {
-                function: Box::new(RustExpr::Raw("Ok".to_string())),
+                function: Box::new(RustExpr::path(["Ok"])),
                 args: vec![RustExpr::Raw("1".to_string())],
             }))],
             vec![CatchRenderArm {
                 variable_name: "e".to_string(),
                 class_names: vec!["IOException".to_string()],
                 body: vec![RustStmt::Return(Some(RustExpr::Call {
-                    function: Box::new(RustExpr::Raw("Err".to_string())),
+                    function: Box::new(RustExpr::path(["Err"])),
                     args: vec![RustExpr::Raw(
                         "JavaException::new(\"WrappedProblem\", e.to_string())".to_string(),
                     )],
@@ -702,5 +738,27 @@ mod tests {
             ) && !rendered.contains("return Err(JavaException::new(\"WrappedProblem\""),
             "{rendered}"
         );
+    }
+
+    #[test]
+    fn fallback_exception_message_keeps_structured_value() {
+        let structured = fallback_exception_message_expr(RustExpr::Var("value".to_string()));
+        assert_eq!(
+            crate::emit::emit_expr(&structured),
+            "format!(\"{:?}\", value)"
+        );
+        assert_eq!(
+            structured,
+            RustExpr::Call {
+                function: Box::new(RustExpr::Raw("format!".to_string())),
+                args: vec![
+                    RustExpr::Literal("\"{:?}\"".to_string()),
+                    RustExpr::Var("value".to_string())
+                ],
+            }
+        );
+
+        let raw = fallback_exception_message_expr(RustExpr::Raw("value + 1".to_string()));
+        assert_eq!(crate::emit::emit_expr(&raw), "format!(\"{:?}\", value + 1)");
     }
 }

@@ -1,4 +1,4 @@
-//! How values of a source type are held — steps 1 and 2 of
+//! How values of a source type are held for
 //! [0002b](../claude_audits/0002b-shared-representation-design.md).
 //!
 //! Java is a reference-semantics language for every non-primitive type, and
@@ -7,10 +7,12 @@
 //! the output compiles and computes a different answer
 //! ([0002](../claude_audits/0002-object-aliasing-has-no-representation.md)).
 //!
-//! This module is deliberately **not** the repair. It computes the decision and
-//! reports where lowering disagrees with it, which is what turns "we do not know
-//! how big 0002b is" into a number. Nothing here changes the emitted Rust; the
-//! representation work is sequenced after the measurement, on purpose.
+//! This module started as the measurement layer: compute the decision and report
+//! where lowering disagrees with it, turning "we do not know how big 0002b is"
+//! into a number. It now also supplies the storage placement consumed by slot
+//! rendering and handle wrapping for the implemented `SharedImmutable` tier.
+//! `SharedLocal`/`SharedSync` remain deliberately unimplemented until the
+//! `RefCell`/`Mutex` receiver and reentrancy rules land.
 //!
 //! ## Per type, not per allocation site
 //!
@@ -362,6 +364,11 @@ impl StoragePlacement {
         }
     }
 
+    pub fn construction_expr_is_wrapped(self, rendered: &str) -> bool {
+        self.handle_path()
+            .is_some_and(|handle| rendered.starts_with(&format!("{handle}::new(")))
+    }
+
     /// Whether lowering can emit this placement today.
     ///
     /// The cell rungs need the never-hold-a-borrow-across-a-call guarantee and
@@ -500,28 +507,23 @@ pub fn report_storage_disagreements(
         // 0028's identity lowering is built on. Only the unimplemented tiers --
         // the `RefCell`/`Mutex` rungs -- are still held inline.
         let placement = facts.placement();
-        let consequence = if placement.is_implemented() {
-            format!(
-                "and is stored behind {}",
-                placement.handle_path().unwrap_or("a shared handle")
-            )
-        } else {
-            "but is lowered by value, so an alias becomes a copy".to_string()
-        };
-        into.warning(
-            "storage_strategy_disagreement",
-            format!(
-                "{name} needs {} (escape={:?}, locally_aliased={}, mutated={}, \
-                 mutation_provably_absent={}, threaded={}, static_reachable={}) {consequence}",
-                strategy.name(),
-                facts.escape,
-                facts.locally_aliased,
-                facts.mutated,
-                facts.mutation_provably_absent,
-                facts.threaded,
-                facts.static_reachable,
-            ),
-        );
+        if !placement.is_implemented() {
+            into.warning(
+                "storage_strategy_disagreement",
+                format!(
+                    "{name} needs {} (escape={:?}, locally_aliased={}, mutated={}, \
+                     mutation_provably_absent={}, threaded={}, static_reachable={}) \
+                     but is lowered by value, so an alias becomes a copy",
+                    strategy.name(),
+                    facts.escape,
+                    facts.locally_aliased,
+                    facts.mutated,
+                    facts.mutation_provably_absent,
+                    facts.threaded,
+                    facts.static_reachable,
+                ),
+            );
+        }
         if !type_interface_surface_is_handle_forwardable(name, program, usage) {
             into.warning(
                 "storage_strategy_surface_not_forwardable",
@@ -1955,6 +1957,19 @@ mod placement_law_tests {
             if !placement.shared {
                 assert_eq!(value, "v");
             }
+        }
+    }
+
+    #[test]
+    fn wrapped_construction_detection_follows_handle_axis() {
+        for placement in all_placements() {
+            let value = placement.wrap_construction("v".to_string());
+            assert_eq!(
+                placement.construction_expr_is_wrapped(&value),
+                placement.shared,
+                "{placement:?}: wrapped construction detection should match the handle axis"
+            );
+            assert!(!placement.construction_expr_is_wrapped("v"));
         }
     }
 

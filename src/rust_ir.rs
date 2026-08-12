@@ -122,6 +122,7 @@ pub enum RustStmt {
 pub enum RustExpr {
     Literal(String),
     Var(String),
+    Path(Vec<String>),
     Field(Box<RustExpr>, String),
     Index(Box<RustExpr>, Box<RustExpr>),
     Binary {
@@ -141,6 +142,13 @@ pub enum RustExpr {
         condition: Box<RustExpr>,
         then_expr: Box<RustExpr>,
         else_expr: Box<RustExpr>,
+    },
+    Tuple(Vec<RustExpr>),
+    ArrayLiteral(Vec<RustExpr>),
+    VecLiteral(Vec<RustExpr>),
+    VecRepeat {
+        value: Box<RustExpr>,
+        len: Box<RustExpr>,
     },
     Call {
         function: Box<RustExpr>,
@@ -205,13 +213,27 @@ pub enum RustExprShape {
     OwnedRecovery,
     /// An `Option` projected to borrow or deref its element.
     OptionalProjected,
-    /// A slice view: `.as_slice()`, `.as_mut_slice()`.
+    /// An `Option` constructed around a present element.
+    OptionalConstructed,
+    /// A shared slice view: `.as_slice()`.
     SliceView,
+    /// A mutable slice view: `.as_mut_slice()`.
+    MutableSliceView,
+    /// An anonymous dyn-trait placeholder constructor.
+    AnonymousDynTrait,
     /// A fallible expression with `?` already applied.
     ResultPropagated,
 }
 
 impl RustExpr {
+    pub fn path<I, S>(segments: I) -> RustExpr
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        RustExpr::Path(segments.into_iter().map(Into::into).collect())
+    }
+
     /// Tag an expression with what an adapter made it. Re-tagging replaces the
     /// previous tag rather than nesting: the shape of an expression is what the
     /// *last* adapter made it.

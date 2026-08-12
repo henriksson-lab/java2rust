@@ -158,7 +158,7 @@ pub fn source_symbols_from_program(source_program: &Program) -> SourceSymbols {
 ///
 /// The static path escaped because it re-solves signatures on an isolated
 /// one-type program, which does name them. Two answers to one question, which is
-/// what [0009](../claude_audits/0009-overload-identity-collapses-onto-rust-name.md)
+/// what [0009](../claude_audits/done/0009-overload-identity-collapses-onto-rust-name.md)
 /// is about — and the naming pass was already correct, it was simply not applied
 /// here.
 ///

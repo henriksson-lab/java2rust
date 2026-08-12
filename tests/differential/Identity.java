@@ -8,27 +8,20 @@
  * tier has **no observable behaviour of its own**: if a type is never mutated
  * after being aliased, a copy and a shared handle are indistinguishable.
  *
- * Everything except identity already agrees. Java prints
+ * This fixture is the acceptance check for the `SharedImmutable` handle plus
+ * identity lowering. Java prints
  *
  *     5,true,false,false
  *
- * and the translation prints
- *
- *     5,true,true,true
- *
- * so the alias read (`5`) and the true-identity case (`a == b`) match, and the
- * two divergences are both identity comparisons on *distinct* objects:
- *
- *   - `a == c` is structural, so two distinct objects with equal fields compare
- *     equal — claude_audits/0028;
- *   - `a.equals(c)` is the same defect through the other operator. Java's
- *     `Object.equals` **is** identity unless overridden, and this class does not
- *     override it. 0028 names this as its "other half" and does not design it;
- *     this is the reproducer for it.
+ * and the translation now prints the same. The alias read (`5`) checks that the
+ * shared handle still exposes the field value, `a == b` checks identity for the
+ * same object, and the two false cases check identity for distinct objects with
+ * equal fields. The `.equals(c)` case matters because Java's inherited
+ * `Object.equals` is identity too.
  *
  * The consequence for sequencing: `SharedImmutable` cannot be validated by a
  * differential fixture on its own — the gate would report "nothing changed",
- * which is also what a no-op reports. It has to land together with identity
+ * which is also what a no-op reports. It had to land together with identity
  * lowering (`Rc::ptr_eq`), which is what makes this file pass.
  *
  * See claude_audits/0002b-shared-representation-design.md and

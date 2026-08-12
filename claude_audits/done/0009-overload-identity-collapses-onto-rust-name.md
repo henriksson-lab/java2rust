@@ -231,7 +231,7 @@ Making `usage::CallableKey::Method` carry a `JavaCallableSlotKey` is the real
 adoption step. It was deliberately not attempted in this pass: it touches the
 call graph, the fallibility fixpoint, signature planning and the 20 name
 comparisons in `lower.rs` at once, and this file's own guidance — echoed by
-[0008](0008-inference-machinery-does-not-reach-lowering.md)'s caution — is that a
+[0008](done/0008-inference-machinery-does-not-reach-lowering.md)'s caution — is that a
 broad simultaneous change produces an error movement that cannot be attributed.
 The constructor above is the seam to migrate behind, one caller at a time.
 
@@ -541,3 +541,37 @@ Generic substitution in inherited summary method matching is now covered too. A
 supertype argument before comparing erased signatures, so `Child.f(String)`
 suppresses the inherited summary surface while unrelated overloads still survive.
 Pinned by `source_method_hierarchy_substitutes_generic_supertype_arguments`.
+
+## Update 2026-08-11 (Codex follow-up) — exception override groups use erased slots
+
+One remaining override equalization path still matched source methods by Java
+name plus arity. `override_groups_for_program` in `exception_plan.rs` could treat
+`Child.f(int)` as overriding `Base.f(String)`, then build a parent
+`CallableKey` from the child method declaration. For overloaded children that
+invented phantom keys such as `Base.f_int`.
+
+That path now compares `JavaCallableSlotKey::source_method` and builds the
+declaring key from the actual supertype method declaration. The regression
+`callable_fallibility_override_sets_use_erased_signature_not_arity` pins both
+halves: the throwing child overload stays fallible, but no parent overload is
+equalized by arity and no phantom parent key appears.
+
+## Update 2026-08-11 (Codex follow-up) — moved to done
+
+The remaining overload-identity paths have converged on Java callable signature
+identity rather than Rust spelling or arity. The audited surfaces now use erased
+signature/staticness where the collapse recurred: source usage keys, inherited
+summary suppression, source-summary instance/static/constructor surfaces,
+exception override equalization, and interface implementation candidate ordering.
+
+The closure is pinned by:
+
+- `overloaded_override_preserves_child_body_and_inherited_overload`
+- `source_method_usage_is_keyed_by_erased_overload_signature`
+- `summary_source_overloads_get_one_rust_name_from_every_path`
+- `source_method_hierarchy_substitutes_generic_supertype_arguments`
+- `callable_fallibility_override_sets_use_erased_signature_not_arity`
+- `tests/differential/Overloads.java` and the interface overload fixture
+
+The remaining `.name ==` checks are not this audited collapse by default; future
+work should require a concrete reproduced path before reopening 0009.

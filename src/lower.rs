@@ -16,8 +16,8 @@ use crate::call_plan::{
     ArgumentLoweringPlan, CallExceptionPropagationPlan, CallExprPlan, CallStatementPlan,
     CallTargetPlan, NativeCollectionExtendArgPlan, NativeCollectionMethod,
     NativeCollectionNewTarget, NativeJavaInstanceMethod, NativePrintStreamMethod,
-    NativeSystemStream, apply_fallback_receiver_rust_name, apply_fallback_self_rust_name,
-    apply_fallback_static_owner_rust_name,
+    NativeSystemStream, NewTargetPlan, apply_fallback_receiver_rust_name,
+    apply_fallback_self_rust_name, apply_fallback_static_owner_rust_name,
     external_call_lowered_type_from_static_owner_plan_with_external_index,
     external_call_lowered_type_with_external_index,
     external_call_returns_rust_result_with_external_index,
@@ -41,31 +41,32 @@ use crate::coercion::{
     array_fill_projection, array_fill_range_projection, array2_rows_i32_projection,
     borrow_as_dyn_trait, borrowed_sequence_extend_arg, borrowed_string_literal_temporary_plan,
     boxed_dyn_trait_projection, char_sequence_collect_string_projection,
-    clone_erased_object_ref_once, collection_sort_by_comparator_projection,
-    collection_sort_projection, collection_sort_range_projection,
-    constructor_self_field_projection, constructor_self_field_replacement,
-    deref_borrowed_projection, ensure_borrow_projection,
+    clone_erased_object_ref_once, collection_sort_by_callback_projection,
+    collection_sort_by_comparator_projection, collection_sort_projection,
+    collection_sort_range_projection, constructor_self_field_projection,
+    constructor_self_field_replacement, deref_borrowed_projection, ensure_borrow_projection,
     erased_object_borrowed_downcast_ref_projection, erased_object_box_projection,
     erased_object_sequence_iter_cloned_projection,
     exception_self_as_supertype_facade_boundary_projection,
-    explicit_java_facade_cast_placeholder_projection, force_shared_borrow_projection,
-    function_call_projection, if_err_panic_uncaught_java_exception_stmt,
-    instanceof_pattern_downcast_ref_projection, into_projection, iterator_next_expect_projection,
-    java_integral_literal_char, java_primitive_update_expression_projection,
-    java_primitive_updated_value_projection, java_update_expression_projection,
-    java_value_hash_code_projection, len_i32_projection, literal_slot_plan, logical_not_projection,
-    map_get_expect_projection, map_get_mut_expect_projection, map_get_projection,
-    normalize_map_key_borrow_projection, normalize_reused_clone_for_borrowed_argument,
-    optional_clone_recovery_owned_element_projection, optional_copied_expect_projection,
+    explicit_java_facade_cast_placeholder_projection, field_projection,
+    force_shared_borrow_projection, function_call_projection,
+    if_err_panic_uncaught_java_exception_stmt, instanceof_pattern_downcast_ref_projection,
+    into_projection, iterator_next_expect_projection, java_integral_literal_char,
+    java_primitive_update_expression_projection, java_primitive_updated_value_projection,
+    java_update_expression_projection, java_value_hash_code_projection, len_i32_projection,
+    literal_slot_plan, logical_not_projection, map_get_expect_projection,
+    map_get_mut_expect_projection, map_get_projection, normalize_map_key_borrow_projection,
+    normalize_reused_clone_for_borrowed_argument, optional_clone_recovery_owned_element_projection,
+    optional_copied_expect_projection, outer_this_field_mut_projection,
     outer_this_field_projection, owned_map_keys_set_projection, owner_associated_path_projection,
     parenthesize_borrowed_method_receiver, print_macro_projection,
-    project_optional_element_borrow_carrier, project_optional_sequence_receiver,
-    propagate_result_projection, qualified_static_storage_accessor_projection,
-    qualified_static_storage_setter_path_projection, reborrow_optional_mut_projection,
-    receiver_method_call_projection_exact, render_sequence_iteration_source,
-    rendered_expr_has_clone_recovery, rendered_expr_has_direct_clone_recovery,
-    rendered_expr_has_optional_unwrap_or_java_null_expect, rendered_expr_is_mutable_alias,
-    replace_optional_clone_recovery_unwrap, rewrite_downcast_expect_message,
+    project_optional_element_borrow_carrier, project_optional_element_borrow_carrier_with_shape,
+    project_optional_sequence_receiver, propagate_result_projection,
+    qualified_static_storage_accessor_projection, qualified_static_storage_setter_path_projection,
+    reborrow_optional_mut_projection, receiver_method_call_projection_exact,
+    render_sequence_iteration_source, rendered_expr_has_optional_unwrap_or_java_null_expect,
+    rendered_expr_is_mutable_alias, replace_optional_clone_recovery_unwrap,
+    rewrite_downcast_expect_message, rust_expr_has_direct_clone_recovery,
     rust_expr_is_constructed_optional_value, rust_expr_mentions_constructor_self_temporary,
     self_associated_path_projection, sequence_get_expect_projection,
     sequence_iter_cloned_projection, sequence_iter_copied_projection,
@@ -630,29 +631,128 @@ fn occupied_inherent_methods_for_items(items: &[RustItem]) -> BTreeSet<(String, 
 
 fn collect_raw_inherent_methods(raw: &str, occupied: &mut BTreeSet<(String, String)>) {
     let mut current_owner: Option<String> = None;
+    let mut impl_depth = 0isize;
+    let mut scan_state = RawInherentMethodScanState::default();
     for line in raw.lines() {
-        let trimmed = line.trim_start();
-        if let Some(owner) = raw_inherent_impl_owner(trimmed) {
+        let code = raw_code_line_for_inherent_method_scan(line, &mut scan_state);
+        let trimmed = code.trim_start();
+        if current_owner.is_none()
+            && let Some(owner) = raw_inherent_impl_owner(trimmed)
+        {
             current_owner = Some(owner);
+            impl_depth = 0;
         }
         if let Some(owner) = current_owner.as_ref()
             && let Some(method_name) = raw_impl_method_name(trimmed)
         {
             occupied.insert((owner.clone(), method_name));
         }
-        if trimmed == "}" {
-            current_owner = None;
+        if current_owner.is_some() {
+            impl_depth += code.matches('{').count() as isize;
+            impl_depth -= code.matches('}').count() as isize;
+            if impl_depth <= 0 {
+                current_owner = None;
+                impl_depth = 0;
+            }
         }
     }
 }
 
-fn raw_inherent_impl_owner(trimmed: &str) -> Option<String> {
-    let rest = trimmed.strip_prefix("impl ")?;
-    if rest.contains(" for ") {
+#[derive(Default)]
+struct RawInherentMethodScanState {
+    in_block_comment: bool,
+    open_raw_terminator: Option<String>,
+}
+
+fn raw_code_line_for_inherent_method_scan(
+    line: &str,
+    state: &mut RawInherentMethodScanState,
+) -> String {
+    let mut code = String::new();
+    let mut cursor = 0usize;
+    while cursor < line.len() {
+        if let Some(terminator) = state.open_raw_terminator.as_deref() {
+            let Some(relative_end) = line[cursor..].find(terminator) else {
+                return code;
+            };
+            cursor += relative_end + terminator.len();
+            state.open_raw_terminator = None;
+            continue;
+        }
+        if state.in_block_comment {
+            let Some(relative_end) = line[cursor..].find("*/") else {
+                return code;
+            };
+            cursor += relative_end + "*/".len();
+            state.in_block_comment = false;
+            continue;
+        }
+        if line[cursor..].starts_with("//") {
+            return code;
+        }
+        if line[cursor..].starts_with("/*") {
+            let Some(relative_end) = line[cursor + 2..].find("*/") else {
+                state.in_block_comment = true;
+                return code;
+            };
+            cursor += 2 + relative_end + "*/".len();
+            continue;
+        }
+        if let Some((content_start, terminator)) = raw_string_literal_parts_at(line, cursor) {
+            if let Some(relative_end) = line[content_start..].find(&terminator) {
+                cursor = content_start + relative_end + terminator.len();
+            } else {
+                state.open_raw_terminator = Some(terminator);
+                return code;
+            }
+            continue;
+        }
+        let ch = line[cursor..]
+            .chars()
+            .next()
+            .expect("cursor is inside the line");
+        if ch == '"' || ch == '\'' {
+            cursor = quoted_literal_end(line, cursor, ch);
+            continue;
+        }
+        code.push(ch);
+        cursor += ch.len_utf8();
+    }
+    code
+}
+
+fn raw_string_literal_parts_at(text: &str, start: usize) -> Option<(usize, String)> {
+    let rest = text.get(start..)?;
+    if !rest.starts_with('r') {
         return None;
     }
+    let mut hashes = 0usize;
+    for ch in rest[1..].chars() {
+        if ch == '#' {
+            hashes += 1;
+            continue;
+        }
+        if ch != '"' {
+            return None;
+        }
+        let content_start = start + 1 + hashes + 1;
+        return Some((content_start, format!("\"{}", "#".repeat(hashes))));
+    }
+    None
+}
+
+fn raw_inherent_impl_owner(trimmed: &str) -> Option<String> {
+    let rest = trimmed.strip_prefix("impl")?;
+    if !rest
+        .chars()
+        .next()
+        .is_some_and(|ch| ch == '<' || ch.is_whitespace())
+    {
+        return None;
+    }
+    let rest = rest.trim_start();
     let rest = if rest.starts_with('<') {
-        let generic_end = rest.find('>')?;
+        let generic_end = matching_angle_end(rest)?;
         rest[generic_end + 1..].trim_start()
     } else {
         rest
@@ -661,7 +761,35 @@ fn raw_inherent_impl_owner(trimmed: &str) -> Option<String> {
         .split(|ch: char| ch == '<' || ch == '{' || ch.is_whitespace())
         .next()
         .unwrap_or_default();
-    (!owner.is_empty()).then(|| owner.to_string())
+    if owner.is_empty() {
+        return None;
+    }
+    let mut after_owner = rest[owner.len()..].trim_start();
+    if after_owner.starts_with('<') {
+        let generic_end = matching_angle_end(after_owner)?;
+        after_owner = after_owner[generic_end + 1..].trim_start();
+    }
+    if after_owner.starts_with("for ") {
+        return None;
+    }
+    Some(owner.to_string())
+}
+
+fn matching_angle_end(text: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for (index, ch) in text.char_indices() {
+        match ch {
+            '<' => depth += 1,
+            '>' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn raw_impl_method_name(trimmed: &str) -> Option<String> {
@@ -1003,7 +1131,12 @@ fn lower_type(
             continue;
         }
         match member {
-            Member::Constructor(ctor) => functions.push(lower_constructor(program, ty, ctor, ctx)),
+            Member::Constructor(ctor) => push_constructor_with_outer_handle_companion(
+                &mut functions,
+                lower_constructor(program, ty, ctor, ctx),
+                ty,
+                ctx,
+            ),
             Member::Method(method) => functions.push(lower_method(program, ty, method, ctx)),
             _ => {}
         }
@@ -1015,7 +1148,12 @@ fn lower_type(
         functions.push(lower_inherited_method(program, ty, inherited, ctx));
     }
     if type_has_implicit_default_constructor(ty, ctx.support_local_type_program) {
-        functions.push(lower_implicit_default_constructor(program, ty, ctx));
+        push_constructor_with_outer_handle_companion(
+            &mut functions,
+            lower_implicit_default_constructor(program, ty, ctx),
+            ty,
+            ctx,
+        );
     }
     functions.extend(static_storage_accessor_functions_for_type(ty, ctx));
     functions.extend(abstract_interface_method_stubs(ty, ctx));
@@ -1129,7 +1267,8 @@ fn rewrite_erased_source_static_helper_calls_for_trait(
     mut rendered: String,
 ) -> String {
     let prefix = format!("{}_", crate::parser::to_snake_case(owner));
-    while let Some(start) = rendered.find(&prefix) {
+    let mut search_start = 0usize;
+    while let Some(start) = find_raw_pattern_outside_literals(&rendered, &prefix, search_start) {
         let name_start = start + prefix.len();
         let Some(paren_offset) = rendered[name_start..].find('(') else {
             break;
@@ -1140,9 +1279,11 @@ fn rewrite_erased_source_static_helper_calls_for_trait(
             .chars()
             .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
         {
+            let rust_name_len = rust_name.len();
             rendered.replace_range(start..name_start, "Self::");
+            search_start = start + "Self::".len() + rust_name_len;
         } else {
-            break;
+            search_start = name_start;
         }
     }
     rendered
@@ -1458,9 +1599,10 @@ fn class_init_function_for_type(ty: &TypeDecl, ctx: LowerCtx) -> Option<RustFunc
         }
         let shape = ctx.signatures.required_field_shape(&ty.name, &field.name);
         let initial = static_storage_initial_value_expr(ty, field, &shape, type_ctx);
+        let setter = static_storage_setter_path_projection(&field.name);
         body.push(RustStmt::Raw(format!(
-            "Self::__set_static_{}({});",
-            crate::parser::to_snake_case(&field.name),
+            "{}({});",
+            emit::emit_expr(&setter),
             emit::emit_expr(&initial)
         )));
     }
@@ -1671,9 +1813,21 @@ fn static_storage_array_initial_value_expr(
             let length = crate::source_constant_values::fold_constant_expr(&dimensions[0], &scope)?
                 .rust_value_for(&JavaType::Primitive(PrimitiveType::Int))?;
             let default = crate::array_lowering::default_array_element_expr(element_ty)?;
-            Some(RustExpr::Raw(format!("vec![{default}; {length} as usize]")))
+            Some(static_storage_array_default_initial_value_expr(
+                length, default,
+            ))
         }
         _ => None,
+    }
+}
+
+fn static_storage_array_default_initial_value_expr(length: String, default: &str) -> RustExpr {
+    RustExpr::VecRepeat {
+        value: Box::new(RustExpr::Raw(default.to_string())),
+        len: Box::new(RustExpr::Cast {
+            expr: Box::new(RustExpr::Raw(length)),
+            ty: "usize".to_string(),
+        }),
     }
 }
 
@@ -1736,7 +1890,9 @@ fn render_array_literal(
         .iter()
         .map(render_element)
         .collect::<Option<Vec<_>>>()?;
-    Some(RustExpr::Raw(format!("vec![{}]", rendered.join(", "))))
+    Some(RustExpr::VecLiteral(
+        rendered.into_iter().map(RustExpr::Raw).collect(),
+    ))
 }
 
 fn static_primitive_storage_initial_value_expr(
@@ -2129,7 +2285,10 @@ fn source_supertype_conversion_impl_for_pair(
         let payload = {
             let placement = facts.storage_placement_for(&sub_ty.name);
             if placement.shared && placement.is_implemented() {
-                placement.wrap_construction("value".to_string())
+                crate::emit::emit_expr(&crate::slot_render::storage_placement_construction_expr(
+                    placement,
+                    RustExpr::Var("value".to_string()),
+                ))
             } else {
                 "value".to_string()
             }
@@ -2319,7 +2478,7 @@ fn lower_implementing_method_candidates<'a>(
 /// candidate outright would lose a real implementation. But when a type
 /// overrides one overload and inherits another, name order alone can hand the
 /// wrong body to the trait slot — that is
-/// [0009](../claude_audits/0009-overload-identity-collapses-onto-rust-name.md).
+/// [0009](../claude_audits/done/0009-overload-identity-collapses-onto-rust-name.md).
 /// Sorting by signature identity makes the correct overload win without
 /// narrowing the candidate set.
 fn order_candidates_by_signature_identity<'a>(
@@ -2626,6 +2785,678 @@ fn java_type_matches_name(ty: &JavaType, type_name: &str) -> bool {
                 == crate::stdlib::canonical_external_receiver_type_key(type_name)
         }
         _ => false,
+    }
+}
+
+fn push_constructor_with_outer_handle_companion(
+    functions: &mut Vec<RustFunction>,
+    mut function: RustFunction,
+    ty: &TypeDecl,
+    ctx: LowerCtx,
+) {
+    if let Some(outer_type) = ctx.facts.captures.outer_this_type_for_type(&ty.name) {
+        for stmt in &mut function.body {
+            wrap_same_outer_inner_constructor_calls_for_storage(stmt, outer_type, ctx);
+        }
+    }
+    if let Some(companion) = outer_this_handle_constructor_companion(&function, ty, ctx) {
+        functions.push(function);
+        functions.push(companion);
+    } else {
+        functions.push(function);
+    }
+}
+
+fn outer_this_handle_constructor_companion(
+    function: &RustFunction,
+    ty: &TypeDecl,
+    ctx: LowerCtx,
+) -> Option<RustFunction> {
+    let outer_type = ctx.facts.captures.outer_this_type_for_type(&ty.name)?;
+    let mut companion = function.clone();
+    let mut replaced_outer_field = false;
+    for stmt in &mut companion.body {
+        replaced_outer_field |= replace_outer_this_panic_field_initializer(stmt);
+    }
+    let mut replaced_constructor_call = false;
+    for stmt in &mut companion.body {
+        replaced_constructor_call |=
+            replace_same_outer_inner_constructor_calls_for_companion(stmt, outer_type, ty, ctx);
+    }
+    if !replaced_outer_field && !replaced_constructor_call {
+        return None;
+    }
+    companion.name = format!("{}_with_outer", companion.name);
+    companion.params.insert(
+        0,
+        RustParam {
+            name: "__outer".to_string(),
+            ty: RustType::Raw(format!(
+                "std::rc::Rc<std::cell::RefCell<{}>>",
+                crate::slot_render::rust_name_for_java_named_type(outer_type)
+            )),
+        },
+    );
+    Some(companion)
+}
+
+fn wrap_same_outer_inner_constructor_calls_for_storage(
+    stmt: &mut RustStmt,
+    outer_type: &str,
+    ctx: LowerCtx,
+) -> bool {
+    match stmt {
+        RustStmt::Let { value, .. } => value.as_mut().is_some_and(|value| {
+            wrap_same_outer_inner_constructor_calls_expr(value, outer_type, ctx)
+        }),
+        RustStmt::Assign { target, value } => {
+            wrap_same_outer_inner_constructor_calls_expr(target, outer_type, ctx)
+                | wrap_same_outer_inner_constructor_calls_expr(value, outer_type, ctx)
+        }
+        RustStmt::Expr(expr) | RustStmt::Return(Some(expr)) => {
+            wrap_same_outer_inner_constructor_calls_expr(expr, outer_type, ctx)
+        }
+        RustStmt::If {
+            condition,
+            then_body,
+            else_body,
+        } => {
+            wrap_same_outer_inner_constructor_calls_expr(condition, outer_type, ctx)
+                | then_body.iter_mut().any(|stmt| {
+                    wrap_same_outer_inner_constructor_calls_for_storage(stmt, outer_type, ctx)
+                })
+                | else_body.iter_mut().any(|stmt| {
+                    wrap_same_outer_inner_constructor_calls_for_storage(stmt, outer_type, ctx)
+                })
+        }
+        RustStmt::While { condition, body } => {
+            wrap_same_outer_inner_constructor_calls_expr(condition, outer_type, ctx)
+                | body.iter_mut().any(|stmt| {
+                    wrap_same_outer_inner_constructor_calls_for_storage(stmt, outer_type, ctx)
+                })
+        }
+        RustStmt::Loop { body, .. } => body
+            .iter_mut()
+            .any(|stmt| wrap_same_outer_inner_constructor_calls_for_storage(stmt, outer_type, ctx)),
+        RustStmt::Return(None) | RustStmt::Break(_) | RustStmt::Continue(_) | RustStmt::Raw(_) => {
+            false
+        }
+    }
+}
+
+fn wrap_same_outer_inner_constructor_calls_expr(
+    expr: &mut RustExpr,
+    outer_type: &str,
+    ctx: LowerCtx,
+) -> bool {
+    match expr {
+        RustExpr::Call { function, args } => {
+            let mut replaced = args
+                .iter_mut()
+                .any(|arg| wrap_same_outer_inner_constructor_calls_expr(arg, outer_type, ctx));
+            replaced |= wrap_same_outer_inner_constructor_calls_expr(function, outer_type, ctx);
+            if let Some(placement) = same_outer_inner_constructor_storage_placement_for_function(
+                function, outer_type, ctx,
+            ) {
+                *expr = crate::slot_render::storage_placement_construction_expr(
+                    placement,
+                    expr.clone(),
+                );
+                replaced = true;
+            }
+            replaced
+        }
+        RustExpr::StructLit { fields, .. } => fields
+            .iter_mut()
+            .any(|(_, value)| wrap_same_outer_inner_constructor_calls_expr(value, outer_type, ctx)),
+        RustExpr::Field(receiver, _) | RustExpr::Unary { expr: receiver, .. } => {
+            wrap_same_outer_inner_constructor_calls_expr(receiver, outer_type, ctx)
+        }
+        RustExpr::Index(target, index) => {
+            wrap_same_outer_inner_constructor_calls_expr(target, outer_type, ctx)
+                | wrap_same_outer_inner_constructor_calls_expr(index, outer_type, ctx)
+        }
+        RustExpr::Binary { left, right, .. } => {
+            wrap_same_outer_inner_constructor_calls_expr(left, outer_type, ctx)
+                | wrap_same_outer_inner_constructor_calls_expr(right, outer_type, ctx)
+        }
+        RustExpr::Cast { expr, .. } => {
+            wrap_same_outer_inner_constructor_calls_expr(expr, outer_type, ctx)
+        }
+        RustExpr::If {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            wrap_same_outer_inner_constructor_calls_expr(condition, outer_type, ctx)
+                | wrap_same_outer_inner_constructor_calls_expr(then_expr, outer_type, ctx)
+                | wrap_same_outer_inner_constructor_calls_expr(else_expr, outer_type, ctx)
+        }
+        RustExpr::Tuple(items) | RustExpr::ArrayLiteral(items) => items
+            .iter_mut()
+            .any(|item| wrap_same_outer_inner_constructor_calls_expr(item, outer_type, ctx)),
+        RustExpr::VecLiteral(items) => items
+            .iter_mut()
+            .any(|item| wrap_same_outer_inner_constructor_calls_expr(item, outer_type, ctx)),
+        RustExpr::VecRepeat { value, len } => {
+            wrap_same_outer_inner_constructor_calls_expr(value, outer_type, ctx)
+                | wrap_same_outer_inner_constructor_calls_expr(len, outer_type, ctx)
+        }
+        RustExpr::MethodCall { receiver, args, .. } => {
+            wrap_same_outer_inner_constructor_calls_expr(receiver, outer_type, ctx)
+                | args
+                    .iter_mut()
+                    .any(|arg| wrap_same_outer_inner_constructor_calls_expr(arg, outer_type, ctx))
+        }
+        RustExpr::Shaped { expr, .. } => {
+            wrap_same_outer_inner_constructor_calls_expr(expr, outer_type, ctx)
+        }
+        RustExpr::Literal(_) | RustExpr::Var(_) | RustExpr::Path(_) | RustExpr::Raw(_) => false,
+    }
+}
+
+fn same_outer_inner_constructor_storage_placement_for_function(
+    function: &RustExpr,
+    outer_type: &str,
+    ctx: LowerCtx,
+) -> Option<crate::storage_strategy::StoragePlacement> {
+    match function.unshaped() {
+        RustExpr::Raw(path) => {
+            same_outer_inner_constructor_storage_placement(path, outer_type, ctx)
+        }
+        RustExpr::Path(segments) => {
+            same_outer_inner_constructor_storage_placement_for_segments(segments, outer_type, ctx)
+        }
+        _ => None,
+    }
+}
+
+fn same_outer_inner_constructor_storage_placement(
+    path: &str,
+    outer_type: &str,
+    ctx: LowerCtx,
+) -> Option<crate::storage_strategy::StoragePlacement> {
+    let (owner, constructor) = path.rsplit_once("::")?;
+    same_outer_inner_constructor_storage_placement_for_owner_constructor(
+        owner,
+        constructor,
+        outer_type,
+        ctx,
+    )
+}
+
+fn same_outer_inner_constructor_storage_placement_for_segments(
+    segments: &[String],
+    outer_type: &str,
+    ctx: LowerCtx,
+) -> Option<crate::storage_strategy::StoragePlacement> {
+    let (constructor, owner_segments) = segments.split_last()?;
+    let owner = owner_segments.last()?;
+    same_outer_inner_constructor_storage_placement_for_owner_constructor(
+        owner,
+        constructor,
+        outer_type,
+        ctx,
+    )
+}
+
+fn same_outer_inner_constructor_storage_placement_for_owner_constructor(
+    owner: &str,
+    constructor: &str,
+    outer_type: &str,
+    ctx: LowerCtx,
+) -> Option<crate::storage_strategy::StoragePlacement> {
+    if !constructor.starts_with("new") {
+        return None;
+    }
+    let constructed_ty = same_outer_inner_constructor_owner(owner, outer_type, ctx)?;
+    let placement = ctx.facts.storage_placement_for(&constructed_ty.name);
+    (placement.shared && placement.is_implemented()).then_some(placement)
+}
+
+fn replace_same_outer_inner_constructor_calls_for_companion(
+    stmt: &mut RustStmt,
+    outer_type: &str,
+    ty: &TypeDecl,
+    ctx: LowerCtx,
+) -> bool {
+    match stmt {
+        RustStmt::Let { value, .. } => value.as_mut().is_some_and(|value| {
+            replace_same_outer_inner_constructor_calls_expr(value, outer_type, ty, ctx)
+        }),
+        RustStmt::Assign { target, value } => {
+            replace_same_outer_inner_constructor_calls_expr(target, outer_type, ty, ctx)
+                | replace_same_outer_inner_constructor_calls_expr(value, outer_type, ty, ctx)
+        }
+        RustStmt::Expr(expr) | RustStmt::Return(Some(expr)) => {
+            replace_same_outer_inner_constructor_calls_expr(expr, outer_type, ty, ctx)
+        }
+        RustStmt::If {
+            condition,
+            then_body,
+            else_body,
+        } => {
+            replace_same_outer_inner_constructor_calls_expr(condition, outer_type, ty, ctx)
+                | then_body.iter_mut().any(|stmt| {
+                    replace_same_outer_inner_constructor_calls_for_companion(
+                        stmt, outer_type, ty, ctx,
+                    )
+                })
+                | else_body.iter_mut().any(|stmt| {
+                    replace_same_outer_inner_constructor_calls_for_companion(
+                        stmt, outer_type, ty, ctx,
+                    )
+                })
+        }
+        RustStmt::While { condition, body } => {
+            replace_same_outer_inner_constructor_calls_expr(condition, outer_type, ty, ctx)
+                | body.iter_mut().any(|stmt| {
+                    replace_same_outer_inner_constructor_calls_for_companion(
+                        stmt, outer_type, ty, ctx,
+                    )
+                })
+        }
+        RustStmt::Loop { body, .. } => body.iter_mut().any(|stmt| {
+            replace_same_outer_inner_constructor_calls_for_companion(stmt, outer_type, ty, ctx)
+        }),
+        RustStmt::Return(None) | RustStmt::Break(_) | RustStmt::Continue(_) | RustStmt::Raw(_) => {
+            false
+        }
+    }
+}
+
+fn replace_same_outer_inner_constructor_calls_expr(
+    expr: &mut RustExpr,
+    outer_type: &str,
+    ty: &TypeDecl,
+    ctx: LowerCtx,
+) -> bool {
+    match expr {
+        RustExpr::Call { function, args } => {
+            let mut replaced =
+                replace_same_outer_inner_constructor_calls_expr(function, outer_type, ty, ctx);
+            replaced |= args.iter_mut().any(|arg| {
+                replace_same_outer_inner_constructor_calls_expr(arg, outer_type, ty, ctx)
+            });
+            if let Some(rewritten) =
+                same_outer_inner_constructor_companion_function(function, outer_type, ty, ctx)
+            {
+                *function.as_mut() = rewritten;
+                args.insert(0, RustExpr::Raw("__outer.clone()".to_string()));
+                replaced = true;
+            }
+            replaced
+        }
+        RustExpr::StructLit { fields, .. } => fields.iter_mut().any(|(_, value)| {
+            replace_same_outer_inner_constructor_calls_expr(value, outer_type, ty, ctx)
+        }),
+        RustExpr::Field(receiver, _) | RustExpr::Unary { expr: receiver, .. } => {
+            replace_same_outer_inner_constructor_calls_expr(receiver, outer_type, ty, ctx)
+        }
+        RustExpr::Index(target, index) => {
+            replace_same_outer_inner_constructor_calls_expr(target, outer_type, ty, ctx)
+                | replace_same_outer_inner_constructor_calls_expr(index, outer_type, ty, ctx)
+        }
+        RustExpr::Binary { left, right, .. } => {
+            replace_same_outer_inner_constructor_calls_expr(left, outer_type, ty, ctx)
+                | replace_same_outer_inner_constructor_calls_expr(right, outer_type, ty, ctx)
+        }
+        RustExpr::Cast { expr, .. } => {
+            replace_same_outer_inner_constructor_calls_expr(expr, outer_type, ty, ctx)
+        }
+        RustExpr::If {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            replace_same_outer_inner_constructor_calls_expr(condition, outer_type, ty, ctx)
+                | replace_same_outer_inner_constructor_calls_expr(then_expr, outer_type, ty, ctx)
+                | replace_same_outer_inner_constructor_calls_expr(else_expr, outer_type, ty, ctx)
+        }
+        RustExpr::Tuple(items) | RustExpr::ArrayLiteral(items) => items
+            .iter_mut()
+            .any(|item| replace_same_outer_inner_constructor_calls_expr(item, outer_type, ty, ctx)),
+        RustExpr::VecLiteral(items) => items
+            .iter_mut()
+            .any(|item| replace_same_outer_inner_constructor_calls_expr(item, outer_type, ty, ctx)),
+        RustExpr::VecRepeat { value, len } => {
+            replace_same_outer_inner_constructor_calls_expr(value, outer_type, ty, ctx)
+                | replace_same_outer_inner_constructor_calls_expr(len, outer_type, ty, ctx)
+        }
+        RustExpr::MethodCall { receiver, args, .. } => {
+            replace_same_outer_inner_constructor_calls_expr(receiver, outer_type, ty, ctx)
+                | args.iter_mut().any(|arg| {
+                    replace_same_outer_inner_constructor_calls_expr(arg, outer_type, ty, ctx)
+                })
+        }
+        RustExpr::Shaped { expr, .. } => {
+            replace_same_outer_inner_constructor_calls_expr(expr, outer_type, ty, ctx)
+        }
+        RustExpr::Raw(raw) => {
+            if let Some(rewritten) =
+                rewrite_same_outer_inner_constructor_calls_text(raw, outer_type, Some(ty), ctx)
+            {
+                *raw = rewritten;
+                true
+            } else {
+                false
+            }
+        }
+        RustExpr::Literal(_) | RustExpr::Var(_) | RustExpr::Path(_) => false,
+    }
+}
+
+fn same_outer_inner_constructor_companion_function(
+    function: &RustExpr,
+    outer_type: &str,
+    ty: &TypeDecl,
+    ctx: LowerCtx,
+) -> Option<RustExpr> {
+    match function.unshaped() {
+        RustExpr::Raw(path) => {
+            same_outer_inner_constructor_companion_path(path, outer_type, Some(ty), ctx)
+                .map(RustExpr::Raw)
+        }
+        RustExpr::Path(segments) => {
+            same_outer_inner_constructor_companion_segments(segments, outer_type, Some(ty), ctx)
+                .map(RustExpr::Path)
+        }
+        _ => None,
+    }
+}
+
+fn same_outer_inner_constructor_companion_path(
+    path: &str,
+    outer_type: &str,
+    self_ty: Option<&TypeDecl>,
+    ctx: LowerCtx,
+) -> Option<String> {
+    let (owner, constructor) = path.rsplit_once("::")?;
+    if constructor.ends_with("_with_outer") || !constructor.starts_with("new") {
+        return None;
+    }
+    if owner == "Self" {
+        let ty = self_ty?;
+        let self_outer = ctx.facts.captures.outer_this_type_for_type(&ty.name)?;
+        if crate::stdlib::canonical_external_receiver_type_key(self_outer)
+            != crate::stdlib::canonical_external_receiver_type_key(outer_type)
+        {
+            return None;
+        }
+        return Some(format!("Self::{constructor}_with_outer"));
+    }
+    same_outer_inner_constructor_owner(owner, outer_type, ctx)?;
+    Some(format!("{owner}::{constructor}_with_outer"))
+}
+
+fn same_outer_inner_constructor_companion_segments(
+    segments: &[String],
+    outer_type: &str,
+    self_ty: Option<&TypeDecl>,
+    ctx: LowerCtx,
+) -> Option<Vec<String>> {
+    let (constructor, owner_segments) = segments.split_last()?;
+    if constructor.ends_with("_with_outer") || !constructor.starts_with("new") {
+        return None;
+    }
+    let owner = owner_segments.last()?;
+    if owner == "Self" {
+        let ty = self_ty?;
+        let self_outer = ctx.facts.captures.outer_this_type_for_type(&ty.name)?;
+        if crate::stdlib::canonical_external_receiver_type_key(self_outer)
+            != crate::stdlib::canonical_external_receiver_type_key(outer_type)
+        {
+            return None;
+        }
+    } else {
+        same_outer_inner_constructor_owner(owner, outer_type, ctx)?;
+    }
+    let mut rewritten = owner_segments.to_vec();
+    rewritten.push(format!("{constructor}_with_outer"));
+    Some(rewritten)
+}
+
+fn same_outer_inner_constructor_owner<'a>(
+    owner: &str,
+    outer_type: &str,
+    ctx: LowerCtx<'a>,
+) -> Option<&'a TypeDecl> {
+    let constructed_ty = find_context_type_by_rust_name(ctx.program, owner)
+        .or_else(|| find_context_type_by_rust_name(ctx.support_local_type_program, owner))
+        .or_else(|| find_context_type_by_rust_name(ctx.source_summary_type_program, owner))?;
+    let constructed_outer = ctx
+        .facts
+        .captures
+        .outer_this_type_for_type(&constructed_ty.name)?;
+    if crate::stdlib::canonical_external_receiver_type_key(constructed_outer)
+        != crate::stdlib::canonical_external_receiver_type_key(outer_type)
+    {
+        return None;
+    }
+    Some(constructed_ty)
+}
+
+fn rewrite_same_outer_inner_constructor_calls_text(
+    text: &str,
+    outer_type: &str,
+    self_ty: Option<&TypeDecl>,
+    ctx: LowerCtx,
+) -> Option<String> {
+    rewrite_same_outer_inner_constructor_calls_text_with_resolver(text, |path| {
+        same_outer_inner_constructor_companion_path(path, outer_type, self_ty, ctx).is_some()
+    })
+}
+
+fn rewrite_same_outer_inner_constructor_calls_text_with_resolver(
+    text: &str,
+    mut has_companion_path: impl FnMut(&str) -> bool,
+) -> Option<String> {
+    let mut rewritten = String::with_capacity(text.len() + "__outer.clone(), ".len());
+    let mut cursor = 0usize;
+    let mut changed = false;
+    while let Some(marker) = find_raw_pattern_outside_literals(text, "::new", cursor) {
+        let owner_start = text[..marker]
+            .char_indices()
+            .rev()
+            .find(|(_, ch)| !rust_path_name_char(*ch))
+            .map(|(index, ch)| index + ch.len_utf8())
+            .unwrap_or(0);
+        let constructor_start = marker + "::".len();
+        let Some(open_relative) = text[constructor_start..].find('(') else {
+            break;
+        };
+        let open = constructor_start + open_relative;
+        let owner = &text[owner_start..marker];
+        let constructor_call = &text[constructor_start..open];
+        let Some(parsed) = parse_raw_constructor_call_head(constructor_call) else {
+            rewritten.push_str(&text[cursor..open + 1]);
+            cursor = open + 1;
+            continue;
+        };
+        let path = format!("{owner}::{}", parsed.name);
+        if owner.is_empty()
+            || !parsed.name.starts_with("new")
+            || parsed.name.ends_with("_with_outer")
+            || !has_companion_path(&path)
+        {
+            rewritten.push_str(&text[cursor..open + 1]);
+            cursor = open + 1;
+            continue;
+        }
+        rewritten.push_str(&text[cursor..owner_start]);
+        rewritten.push_str(owner);
+        rewritten.push_str("::");
+        rewritten.push_str(parsed.name);
+        rewritten.push_str("_with_outer");
+        rewritten.push_str(parsed.generic_suffix);
+        rewritten.push_str(parsed.whitespace_before_paren);
+        rewritten.push_str("(__outer.clone()");
+        if text[open + 1..].starts_with(')') {
+            cursor = open + 1;
+        } else {
+            rewritten.push_str(", ");
+            cursor = open + 1;
+        }
+        changed = true;
+    }
+    if !changed {
+        return None;
+    }
+    rewritten.push_str(&text[cursor..]);
+    Some(rewritten)
+}
+
+struct RawConstructorCallHead<'a> {
+    name: &'a str,
+    generic_suffix: &'a str,
+    whitespace_before_paren: &'a str,
+}
+
+fn parse_raw_constructor_call_head(head: &str) -> Option<RawConstructorCallHead<'_>> {
+    let significant_end = head
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| !ch.is_whitespace())
+        .map(|(index, ch)| index + ch.len_utf8())
+        .unwrap_or(0);
+    let significant = &head[..significant_end];
+    let whitespace_before_paren = &head[significant_end..];
+    let name_end = significant
+        .char_indices()
+        .find(|(_, ch)| !rust_path_name_char(*ch))
+        .map(|(index, _)| index)
+        .unwrap_or(significant.len());
+    let name = &significant[..name_end];
+    if name.is_empty() {
+        return None;
+    }
+    let generic_suffix = &significant[name_end..];
+    if !generic_suffix.is_empty() && !generic_suffix.starts_with("::<") {
+        return None;
+    }
+    Some(RawConstructorCallHead {
+        name,
+        generic_suffix,
+        whitespace_before_paren,
+    })
+}
+
+fn find_raw_pattern_outside_literals(text: &str, pattern: &str, start: usize) -> Option<usize> {
+    let mut cursor = start;
+    while cursor < text.len() {
+        if let Some(end) = raw_string_literal_end_at(text, cursor) {
+            cursor = end;
+            continue;
+        }
+        let ch = text[cursor..]
+            .chars()
+            .next()
+            .expect("cursor is inside the string");
+        if ch == '"' || ch == '\'' {
+            cursor = quoted_literal_end(text, cursor, ch);
+            continue;
+        }
+        if text[cursor..].starts_with(pattern) {
+            return Some(cursor);
+        }
+        cursor += ch.len_utf8();
+    }
+    None
+}
+
+fn rust_path_name_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
+}
+
+fn replace_outer_this_panic_field_initializer(stmt: &mut RustStmt) -> bool {
+    match stmt {
+        RustStmt::Let { value, .. } => value
+            .as_mut()
+            .is_some_and(replace_outer_this_panic_field_expr),
+        RustStmt::Assign { target, value } => {
+            replace_outer_this_panic_field_expr(target) | replace_outer_this_panic_field_expr(value)
+        }
+        RustStmt::Expr(expr) | RustStmt::Return(Some(expr)) => {
+            replace_outer_this_panic_field_expr(expr)
+        }
+        RustStmt::If {
+            condition,
+            then_body,
+            else_body,
+        } => {
+            replace_outer_this_panic_field_expr(condition)
+                | then_body
+                    .iter_mut()
+                    .any(replace_outer_this_panic_field_initializer)
+                | else_body
+                    .iter_mut()
+                    .any(replace_outer_this_panic_field_initializer)
+        }
+        RustStmt::While { condition, body } => {
+            replace_outer_this_panic_field_expr(condition)
+                | body
+                    .iter_mut()
+                    .any(replace_outer_this_panic_field_initializer)
+        }
+        RustStmt::Loop { body, .. } => body
+            .iter_mut()
+            .any(replace_outer_this_panic_field_initializer),
+        RustStmt::Return(None) | RustStmt::Break(_) | RustStmt::Continue(_) | RustStmt::Raw(_) => {
+            false
+        }
+    }
+}
+
+fn replace_outer_this_panic_field_expr(expr: &mut RustExpr) -> bool {
+    match expr {
+        RustExpr::StructLit { fields, .. } => {
+            let mut replaced = false;
+            for (field_name, field_expr) in fields {
+                if field_name == "__outer" {
+                    *field_expr = RustExpr::Raw("__outer.clone()".to_string());
+                    replaced = true;
+                } else {
+                    replaced |= replace_outer_this_panic_field_expr(field_expr);
+                }
+            }
+            replaced
+        }
+        RustExpr::Field(receiver, _) | RustExpr::Unary { expr: receiver, .. } => {
+            replace_outer_this_panic_field_expr(receiver)
+        }
+        RustExpr::Index(target, index) => {
+            replace_outer_this_panic_field_expr(target) | replace_outer_this_panic_field_expr(index)
+        }
+        RustExpr::Binary { left, right, .. } => {
+            replace_outer_this_panic_field_expr(left) | replace_outer_this_panic_field_expr(right)
+        }
+        RustExpr::Cast { expr, .. } => replace_outer_this_panic_field_expr(expr),
+        RustExpr::If {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            replace_outer_this_panic_field_expr(condition)
+                | replace_outer_this_panic_field_expr(then_expr)
+                | replace_outer_this_panic_field_expr(else_expr)
+        }
+        RustExpr::Tuple(items) | RustExpr::ArrayLiteral(items) => {
+            items.iter_mut().any(replace_outer_this_panic_field_expr)
+        }
+        RustExpr::VecLiteral(items) => items.iter_mut().any(replace_outer_this_panic_field_expr),
+        RustExpr::VecRepeat { value, len } => {
+            replace_outer_this_panic_field_expr(value) | replace_outer_this_panic_field_expr(len)
+        }
+        RustExpr::Call { function, args } => {
+            replace_outer_this_panic_field_expr(function)
+                | args.iter_mut().any(replace_outer_this_panic_field_expr)
+        }
+        RustExpr::MethodCall { receiver, args, .. } => {
+            replace_outer_this_panic_field_expr(receiver)
+                | args.iter_mut().any(replace_outer_this_panic_field_expr)
+        }
+        RustExpr::Shaped { expr, .. } => replace_outer_this_panic_field_expr(expr),
+        RustExpr::Literal(_) | RustExpr::Var(_) | RustExpr::Path(_) | RustExpr::Raw(_) => false,
     }
 }
 
@@ -3519,6 +4350,42 @@ fn replace_self_receiver_with_policy(
                 preserve_field_clone,
             )),
         },
+        RustExpr::Tuple(items) => RustExpr::Tuple(
+            items
+                .into_iter()
+                .map(|item| {
+                    replace_self_receiver_with_policy(item, replacement, preserve_field_clone)
+                })
+                .collect(),
+        ),
+        RustExpr::ArrayLiteral(items) => RustExpr::ArrayLiteral(
+            items
+                .into_iter()
+                .map(|item| {
+                    replace_self_receiver_with_policy(item, replacement, preserve_field_clone)
+                })
+                .collect(),
+        ),
+        RustExpr::VecLiteral(items) => RustExpr::VecLiteral(
+            items
+                .into_iter()
+                .map(|item| {
+                    replace_self_receiver_with_policy(item, replacement, preserve_field_clone)
+                })
+                .collect(),
+        ),
+        RustExpr::VecRepeat { value, len } => RustExpr::VecRepeat {
+            value: Box::new(replace_self_receiver_with_policy(
+                *value,
+                replacement,
+                preserve_field_clone,
+            )),
+            len: Box::new(replace_self_receiver_with_policy(
+                *len,
+                replacement,
+                preserve_field_clone,
+            )),
+        },
         RustExpr::Call { function, args } => RustExpr::Call {
             function: Box::new(replace_self_receiver_with_policy(
                 *function,
@@ -3581,10 +4448,82 @@ fn replace_self_receiver_with_policy(
             } else {
                 constructor_self_field_replacement(replacement)
             };
-            RustExpr::Raw(text.replace("self.", &format!("{replacement}.")))
+            RustExpr::Raw(replace_self_field_prefixes_in_raw(&text, &replacement))
         }
         other => other,
     }
+}
+
+fn replace_self_field_prefixes_in_raw(text: &str, replacement: &str) -> String {
+    let mut rewritten = String::with_capacity(text.len() + replacement.len());
+    let mut cursor = 0usize;
+    while cursor < text.len() {
+        if let Some(end) = raw_string_literal_end_at(text, cursor) {
+            rewritten.push_str(&text[cursor..end]);
+            cursor = end;
+            continue;
+        }
+        let ch = text[cursor..]
+            .chars()
+            .next()
+            .expect("cursor is inside the string");
+        if ch == '"' || ch == '\'' {
+            let end = quoted_literal_end(text, cursor, ch);
+            rewritten.push_str(&text[cursor..end]);
+            cursor = end;
+            continue;
+        }
+        if text[cursor..].starts_with("self.")
+            && text[..cursor]
+                .chars()
+                .next_back()
+                .is_none_or(|ch| !rust_path_name_char(ch))
+        {
+            rewritten.push_str(replacement);
+            rewritten.push('.');
+            cursor += "self.".len();
+            continue;
+        }
+        rewritten.push(ch);
+        cursor += ch.len_utf8();
+    }
+    rewritten
+}
+
+fn quoted_literal_end(text: &str, start: usize, quote: char) -> usize {
+    let mut escaped = false;
+    for (offset, ch) in text[start + quote.len_utf8()..].char_indices() {
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == quote {
+            return start + quote.len_utf8() + offset + quote.len_utf8();
+        }
+    }
+    text.len()
+}
+
+fn raw_string_literal_end_at(text: &str, start: usize) -> Option<usize> {
+    let rest = text.get(start..)?;
+    if !rest.starts_with('r') {
+        return None;
+    }
+    let mut hashes = 0usize;
+    for ch in rest[1..].chars() {
+        if ch == '#' {
+            hashes += 1;
+            continue;
+        }
+        if ch != '"' {
+            return None;
+        }
+        let content_start = start + 1 + hashes + 1;
+        let terminator = format!("\"{}", "#".repeat(hashes));
+        let relative_end = text[content_start..].find(&terminator)?;
+        return Some(content_start + relative_end + terminator.len());
+    }
+    None
 }
 
 fn constructor_self_field_replacement_expr(replacement: &str) -> RustExpr {
@@ -5061,7 +6000,10 @@ fn replace_self_receiver_in_stmt(stmt: RustStmt, replacement: &str) -> RustStmt 
                 .map(|stmt| replace_self_receiver_in_stmt(stmt, replacement))
                 .collect(),
         },
-        RustStmt::Raw(text) => RustStmt::Raw(text.replace("self.", &format!("{replacement}."))),
+        RustStmt::Raw(text) => RustStmt::Raw(replace_self_field_prefixes_in_raw(
+            &text,
+            &constructor_self_field_replacement(replacement),
+        )),
         RustStmt::Break(_) | RustStmt::Continue(_) => stmt,
     }
 }
@@ -5639,11 +6581,8 @@ fn lower_stmt(
                     adapt_reused_owned_value_for_slot(lowered, expr, &initializer_slot, env, ctx)
                 })
                 .or_else(|| {
-                    ctx.try_capture_preinitialized_names.and_then(|names| {
-                        names
-                            .contains(name)
-                            .then(|| RustExpr::Raw("Default::default()".to_string()))
-                    })
+                    ctx.try_capture_preinitialized_names
+                        .and_then(|names| names.contains(name).then(default_trait_expr))
                 });
             // A local of a shared type is declared behind its handle, so a fresh
             // construction initialising it has to be put there. Restricted to a
@@ -5774,6 +6713,7 @@ fn lower_stmt(
                 );
                 let lowered_target =
                     lower_array_assignment_target_for_stmt(target, env, ctx, refinements)
+                        .or_else(|| lower_outer_this_field_assignment_target(target, env, ctx))
                         .unwrap_or_else(|| lower_expr(target, env, ctx));
                 out.push(assignment_stmt(
                     lowered_target,
@@ -7490,6 +8430,20 @@ fn hoist_borrowed_string_temporaries_in_expr(
             hoist_borrowed_string_temporaries_in_expr(local_name, then_expr, out, counter);
             hoist_borrowed_string_temporaries_in_expr(local_name, else_expr, out, counter);
         }
+        RustExpr::Tuple(items) | RustExpr::ArrayLiteral(items) => {
+            for item in items {
+                hoist_borrowed_string_temporaries_in_expr(local_name, item, out, counter);
+            }
+        }
+        RustExpr::VecLiteral(items) => {
+            for item in items {
+                hoist_borrowed_string_temporaries_in_expr(local_name, item, out, counter);
+            }
+        }
+        RustExpr::VecRepeat { value, len } => {
+            hoist_borrowed_string_temporaries_in_expr(local_name, value, out, counter);
+            hoist_borrowed_string_temporaries_in_expr(local_name, len, out, counter);
+        }
         RustExpr::Call { function, args } => {
             hoist_borrowed_string_temporaries_in_expr(local_name, function, out, counter);
             for arg in args {
@@ -7507,7 +8461,7 @@ fn hoist_borrowed_string_temporaries_in_expr(
                 hoist_borrowed_string_temporaries_in_expr(local_name, value, out, counter);
             }
         }
-        RustExpr::Literal(_) | RustExpr::Var(_) | RustExpr::Raw(_) => {}
+        RustExpr::Literal(_) | RustExpr::Var(_) | RustExpr::Path(_) | RustExpr::Raw(_) => {}
     }
 }
 
@@ -9100,21 +10054,62 @@ fn lower_return_stmt(
 /// A constructor call is one: it returns the bare type, always.
 /// See claude_audits/0002b.
 fn rust_expr_is_bare_constructor_call(expr: &RustExpr) -> bool {
-    let rendered = crate::emit::emit_expr(expr);
+    match expr.unshaped() {
+        RustExpr::Call { function, .. } => rust_path_is_bare_constructor_function(function),
+        RustExpr::Raw(rendered) => rendered_expr_is_bare_constructor_call(rendered),
+        _ => false,
+    }
+}
+
+fn rust_path_is_bare_constructor_function(function: &RustExpr) -> bool {
+    match function.unshaped() {
+        RustExpr::Path(segments) => rust_path_segments_are_bare_constructor_function(segments),
+        RustExpr::Var(path) | RustExpr::Raw(path) => {
+            rust_path_text_is_bare_constructor_function(path)
+        }
+        _ => false,
+    }
+}
+
+fn rust_path_segments_are_bare_constructor_function(segments: &[String]) -> bool {
+    let Some((method, owners)) = segments.split_last() else {
+        return false;
+    };
+    rust_method_name_is_constructor(method)
+        && owners
+            .last()
+            .and_then(|owner| owner.chars().next())
+            .is_some_and(|ch| ch.is_ascii_uppercase())
+}
+
+fn rendered_expr_is_bare_constructor_call(rendered: &str) -> bool {
     let Some(head) = rendered.split('(').next() else {
         return false;
     };
-    let Some((owner, method)) = head.rsplit_once("::") else {
+    rust_path_text_is_bare_constructor_function(head)
+}
+
+fn rust_path_text_is_bare_constructor_function(path: &str) -> bool {
+    let path = path
+        .trim()
+        .split_once("::<")
+        .map_or_else(|| path.trim(), |(path, _)| path.trim());
+    let Some((owner, method)) = path.rsplit_once("::") else {
         return false;
     };
-    (method == "new"
-        || method
-            .strip_prefix("new_")
-            .is_some_and(|rest| !rest.is_empty()))
+    let method = method.trim();
+    rust_method_name_is_constructor(method)
         && owner
             .chars()
             .next()
             .is_some_and(|ch| ch.is_ascii_uppercase())
+}
+
+fn rust_method_name_is_constructor(method: &str) -> bool {
+    method == "new"
+        || method
+            .strip_prefix("new_")
+            .is_some_and(|rest| !rest.is_empty())
 }
 
 fn lower_return_stmt_with_refinements(
@@ -10956,10 +11951,13 @@ fn lower_planned_call_expr_stmt(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> O
         }
         CallStatementPlan::NativeCollectionsSort { target, comparator } => {
             let expr = if let Some(comparator) = comparator {
-                collection_sort_by_comparator_projection(
-                    lower_expr(target, env, ctx),
-                    lower_expr(comparator, env, ctx),
-                )
+                let target = lower_expr(target, env, ctx);
+                let comparator_expr = lower_expr(comparator, env, ctx);
+                if native_collections_sort_comparator_is_callback_param(comparator, ctx) {
+                    collection_sort_by_callback_projection(target, comparator_expr)
+                } else {
+                    collection_sort_by_comparator_projection(target, comparator_expr)
+                }
             } else {
                 collection_sort_projection(lower_expr(target, env, ctx))
             };
@@ -10997,6 +11995,15 @@ fn lower_planned_call_expr_stmt(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> O
             )))
         }
     }
+}
+
+fn native_collections_sort_comparator_is_callback_param(expr: &Expr, ctx: LowerCtx) -> bool {
+    let Expr::Var(name) = expr else {
+        return false;
+    };
+    ctx.current_method_decl.is_some_and(|method| {
+        crate::item_assembly::method_param_is_nonescaping_functional_callback(method, name)
+    })
 }
 
 fn render_native_system_print_stream_stmt(
@@ -11516,6 +12523,23 @@ fn lower_outer_this_field_name(name: &str, env: &ShapeEnv, ctx: LowerCtx) -> Opt
     let outer_type = ctx.facts.captures.outer_this_type_for_type(current_type)?;
     signature_field_shape_for_type_aliases(ctx.signatures, outer_type, name)?;
     Some(outer_this_field_projection(name))
+}
+
+fn lower_outer_this_field_assignment_target(
+    target: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<RustExpr> {
+    let Expr::Var(name) = target else {
+        return None;
+    };
+    if env.local_shape(name).is_some() {
+        return None;
+    }
+    let current_type = ctx.current_type?;
+    let outer_type = ctx.facts.captures.outer_this_type_for_type(current_type)?;
+    signature_field_shape_for_type_aliases(ctx.signatures, outer_type, name)?;
+    Some(outer_this_field_mut_projection(name))
 }
 
 fn lower_expr(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> RustExpr {
@@ -12164,7 +13188,7 @@ fn lower_expr_with_refinements(
                 );
                 return apply_result_value_policy_from_ctx(lowered, ctx);
             }
-            let target = plan_new_target_for_args_with_facts(
+            let mut target = plan_new_target_for_args_with_facts(
                 ty,
                 resolved.as_ref(),
                 ctx.representations,
@@ -12190,7 +13214,12 @@ fn lower_expr_with_refinements(
                     ctx.facts,
                 )
             };
-            let rust_args = lower_constructor_args_with_plan(args, env, constructor_arg_plan, ctx);
+            let mut rust_args =
+                lower_constructor_args_with_plan(args, env, constructor_arg_plan, ctx);
+            if sibling_inner_constructor_can_reuse_outer_handle(&target, resolved.as_ref(), ctx) {
+                target.rust_name = format!("{}_with_outer", target.rust_name);
+                rust_args.insert(0, RustExpr::Raw("self.__outer.clone()".to_string()));
+            }
             let mut lowered = apply_new_target_with_facts_and_representations(
                 &target,
                 rust_args,
@@ -12313,6 +13342,48 @@ fn lower_java_string_constructor_expr(
     let chars =
         lower_expr_for_slot_with_refinements(arg, env, Slot::Argument(target), ctx, refinements);
     Some(char_sequence_collect_string_projection(chars))
+}
+
+fn sibling_inner_constructor_can_reuse_outer_handle(
+    target: &NewTargetPlan,
+    resolved: Option<&ResolvedConstructor>,
+    ctx: LowerCtx,
+) -> bool {
+    if target.external_crate.is_some() || target.native_collection.is_some() {
+        return false;
+    }
+    if ctx.current_receiver.is_none() {
+        return false;
+    }
+    let Some(current_type) = ctx.current_type else {
+        return false;
+    };
+    let Some(current_outer) = ctx.facts.captures.outer_this_type_for_type(current_type) else {
+        return false;
+    };
+    let Some(constructed_type) = resolved
+        .map(|resolved| resolved.declaring_type.clone())
+        .or_else(|| {
+            concrete_java_type_name(&target.owner_shape.java_ty).map(|name| {
+                if name.contains('.') {
+                    name.to_string()
+                } else {
+                    format!("{current_outer}.{name}")
+                }
+            })
+        })
+    else {
+        return false;
+    };
+    let Some(constructed_outer) = ctx
+        .facts
+        .captures
+        .outer_this_type_for_type(&constructed_type)
+    else {
+        return false;
+    };
+    crate::stdlib::canonical_external_receiver_type_key(current_outer)
+        == crate::stdlib::canonical_external_receiver_type_key(constructed_outer)
 }
 
 fn lower_boxed_primitive_string_constructor_expr(
@@ -15886,11 +16957,7 @@ fn rewrap_recovered_shared_argument(
     if !placement.shared || !placement.is_implemented() {
         return lowered;
     }
-    let rendered = crate::emit::emit_expr(&lowered);
-    if rendered.starts_with("std::rc::Rc::new(") || rendered.starts_with("std::sync::Arc::new(") {
-        return lowered;
-    }
-    RustExpr::Raw(placement.wrap_construction(rendered))
+    crate::slot_render::storage_placement_construction_expr(placement, lowered)
 }
 
 fn lower_args_with_plan(
@@ -18098,11 +19165,44 @@ fn preserve_local_callback_argument(
     apply_audited_clone_recovery(lowered)
 }
 
+/// The declared input shapes of a functional-interface call, when the call is
+/// really an invocation of the interface's single abstract method.
+///
+/// Arity and the method name both come from
+/// [`crate::stdlib::functional_interface_shape`]. They used to be one
+/// hand-written table of `(interface, method)` pairs, which is a *product* --
+/// so it listed `IntConsumer`/`applyAsInt` and omitted `Comparator`/`compare`,
+/// `IntSupplier`/`getAsInt` and every `To*Function`. Those calls then kept their
+/// method-call form against a parameter that had become a closure, giving
+/// `no method named apply_as_int found for type parameter impl FnMut(..)`.
 fn functional_interface_input_shapes_for_method(
     ty: &JavaType,
     method: &str,
     arity: usize,
 ) -> Option<Vec<RustSlotShape>> {
+    let JavaType::Named { name, args: _ } = ty else {
+        return None;
+    };
+    let simple = crate::stdlib::canonical_external_receiver_type_key(name)
+        .rsplit('.')
+        .next()
+        .unwrap_or(name.as_str())
+        .to_string();
+    let shape = crate::stdlib::functional_interface_shape(&simple)?;
+    if shape.method != method || shape.inputs.len() != arity {
+        return None;
+    }
+    functional_interface_input_shapes(ty)
+}
+
+/// The declared shapes of a functional interface's inputs, from its type alone.
+///
+/// A lambda body only lowers correctly if its parameters carry their Java types.
+/// Without them the parameter becomes `JavaType::Unknown("lambda_param:v")`, and
+/// then `v.length()` never maps to `len` (`E0599`) and `String.valueOf(v)` treats
+/// `v` as an erased object and returns the **empty string** -- silently, because
+/// it compiles.
+fn functional_interface_input_shapes(ty: &JavaType) -> Option<Vec<RustSlotShape>> {
     let JavaType::Named { name, args } = ty else {
         return None;
     };
@@ -18111,25 +19211,21 @@ fn functional_interface_input_shapes_for_method(
         .next()
         .unwrap_or(name.as_str())
         .to_string();
-    let input_count = match (simple.as_str(), method) {
-        ("Supplier", "get") | ("Runnable", "run") | ("Callable", "call") => 0,
-        (
-            "Consumer" | "Function" | "Predicate" | "UnaryOperator" | "DoubleConsumer"
-            | "IntConsumer" | "LongConsumer",
-            "accept" | "apply" | "test" | "applyAsDouble" | "applyAsInt" | "applyAsLong",
-        ) => 1,
-        ("BiConsumer" | "BiFunction" | "BinaryOperator", "accept" | "apply") => 2,
-        _ => return None,
-    };
-    if input_count != arity || args.len() < input_count {
-        return None;
-    }
-    Some(
-        args.iter()
-            .take(input_count)
-            .map(fallback_local_shape_from_declared_type)
-            .collect(),
-    )
+    let shape = crate::stdlib::functional_interface_shape(&simple)?;
+    // Every input reading a *type argument* has to be present for the call to be
+    // shaped; a primitive input carries its own type.
+    shape
+        .inputs
+        .iter()
+        .map(|input| match input {
+            crate::stdlib::FunctionalTypeSource::TypeArgument(index) => args
+                .get(*index)
+                .map(fallback_local_shape_from_declared_type),
+            crate::stdlib::FunctionalTypeSource::Primitive(primitive) => {
+                Some(RustSlotShape::conservative(JavaType::Primitive(*primitive)))
+            }
+        })
+        .collect()
 }
 
 fn lower_typed_single_input_method_reference(
@@ -19322,6 +20418,16 @@ fn lower_optional_owned_argument_for_owned_target(
         return None;
     }
     let slot = argument_slot(target_shape.clone());
+    if let Some(lowered) = lower_optional_receiver_field_access_for_slot(
+        arg,
+        env,
+        &slot,
+        actual_shape,
+        ctx,
+        &ExprRefinements::default(),
+    ) {
+        return Some(lowered);
+    }
     if borrowed_self_receiver_can_read_fields(ctx)
         && shared_self_field_read_name_with_ctx(arg, env, ctx).is_some()
         && (!matches!(target_shape.java_ty, JavaType::Primitive(_))
@@ -19456,7 +20562,12 @@ fn optional_element_borrow_lowered_expr(
         element_ty,
         Some(element_ownership),
     )?;
-    let expr = project_optional_element_borrow_carrier(option_expr, element_ownership)?;
+    let expr = match &actual {
+        LoweredType::OptionalElementBorrow { element_shape, .. } => {
+            project_optional_element_borrow_carrier_with_shape(option_expr, element_shape)?
+        }
+        _ => project_optional_element_borrow_carrier(option_expr, element_ownership)?,
+    };
     Some(crate::coercion::LoweredExpr { expr, actual })
 }
 
@@ -19473,7 +20584,12 @@ fn optional_element_borrow_lowered_expr_with_facts(
         Some(element_ownership),
         facts,
     )?;
-    let expr = project_optional_element_borrow_carrier(option_expr, element_ownership)?;
+    let expr = match &actual {
+        LoweredType::OptionalElementBorrow { element_shape, .. } => {
+            project_optional_element_borrow_carrier_with_shape(option_expr, element_shape)?
+        }
+        _ => project_optional_element_borrow_carrier(option_expr, element_ownership)?,
+    };
     Some(crate::coercion::LoweredExpr { expr, actual })
 }
 
@@ -19573,14 +20689,15 @@ fn adapt_source_subtype_to_supertype_argument(
         let owned = match actual_shape.ownership {
             OwnershipShape::Owned | OwnershipShape::CopyValue => {
                 if rust_expr_is_bare_constructor_call(&lowered) {
-                    RustExpr::Raw(placement.wrap_construction(crate::emit::emit_expr(&lowered)))
+                    crate::slot_render::storage_placement_construction_expr(placement, lowered)
                 } else {
                     lowered
                 }
             }
-            _ => RustExpr::Raw(placement.wrap_construction(crate::emit::emit_expr(
-                &clone_source_subtype_value_for_owned_supertype(lowered),
-            ))),
+            _ => crate::slot_render::storage_placement_construction_expr(
+                placement,
+                clone_source_subtype_value_for_owned_supertype(lowered),
+            ),
         };
         let target_ty = crate::emit::emit_type(&crate::slot_render::rust_type_for_slot_with_facts(
             target_shape,
@@ -19607,7 +20724,7 @@ fn adapt_source_subtype_to_supertype_argument(
         {
             return converted;
         }
-        RustExpr::Raw(placement.wrap_construction(crate::emit::emit_expr(&converted)))
+        crate::slot_render::storage_placement_construction_expr(placement, converted)
     };
     match (actual_shape.ownership, target_shape.ownership) {
         (OwnershipShape::Owned, OwnershipShape::Owned) => into_supertype(lowered),
@@ -19713,7 +20830,7 @@ fn adapt_reused_owned_optional_argument(
         true,
         optional_shape_contains_erased_object(&actual_shape),
     ) {
-        return Some(RustExpr::Raw(recovered));
+        return Some(optional_clone_recovery_expr(recovered));
     }
     if let Some(recovered) = replace_optional_clone_recovery_unwrap(
         &rendered,
@@ -19721,7 +20838,7 @@ fn adapt_reused_owned_optional_argument(
         false,
         optional_shape_contains_erased_object(&actual_shape),
     ) {
-        return Some(RustExpr::Raw(recovered));
+        return Some(optional_clone_recovery_expr(recovered));
     }
     if rendered_expr_has_optional_unwrap_or_java_null_expect(&rendered) {
         return Some(lowered);
@@ -19956,7 +21073,7 @@ fn apply_clone_recovery_decision(lowered: RustExpr, decision: CloneRecoveryDecis
         if let Some(recovered) =
             replace_optional_clone_recovery_unwrap(&rendered, &name, false, erased_object)
         {
-            return RustExpr::Raw(recovered);
+            return optional_clone_recovery_expr(recovered);
         }
         return apply_audited_clone_recovery(lowered);
     }
@@ -19967,20 +21084,28 @@ fn apply_clone_recovery_decision(lowered: RustExpr, decision: CloneRecoveryDecis
     else {
         return lowered;
     };
-    let rendered = emit::emit_expr(&lowered);
-    if clone_recovery_idempotence_matches(&rendered, idempotence) {
+    if clone_recovery_idempotence_matches(&lowered, idempotence) {
         return lowered;
     }
     apply_coercions(lowered, &[coercion])
 }
 
+fn optional_clone_recovery_expr(rendered: String) -> RustExpr {
+    RustExpr::shaped(
+        crate::rust_ir::RustExprShape::OwnedRecovery,
+        RustExpr::Raw(rendered),
+    )
+}
+
 fn clone_recovery_idempotence_matches(
-    rendered: &str,
+    lowered: &RustExpr,
     idempotence: CloneRecoveryIdempotence,
 ) -> bool {
     match idempotence {
-        CloneRecoveryIdempotence::DirectClone => rendered_expr_has_direct_clone_recovery(rendered),
-        CloneRecoveryIdempotence::AnyCloneRecovery => rendered_expr_has_clone_recovery(rendered),
+        CloneRecoveryIdempotence::DirectClone => rust_expr_has_direct_clone_recovery(lowered),
+        CloneRecoveryIdempotence::AnyCloneRecovery => {
+            crate::coercion::rust_expr_has_clone_recovery(lowered)
+        }
     }
 }
 
@@ -20004,7 +21129,7 @@ fn reborrow_reused_optional_mut_borrow_argument(
     {
         return None;
     }
-    reborrow_optional_mut_projection(lowered)
+    reborrow_optional_mut_projection(lowered, target_shape)
 }
 
 fn normalize_reused_local_clone_for_borrowed_argument(
@@ -21550,6 +22675,9 @@ fn lower_expr_for_slot_with_refinements(
     {
         return callback_expr;
     }
+    if let Some(callback) = lower_functional_slot_lambda(expr, env, &slot, ctx) {
+        return callback;
+    }
     if let Some(current_self) = lower_current_self_cast_for_slot(expr, &slot, ctx) {
         return current_self;
     }
@@ -21985,7 +23113,7 @@ fn lower_source_constructor_expr_for_concrete_slot(
         return None;
     }
 
-    let target = plan_new_target_for_args_with_facts(
+    let mut target = plan_new_target_for_args_with_facts(
         ty,
         resolved.as_ref(),
         ctx.representations,
@@ -22005,7 +23133,11 @@ fn lower_source_constructor_expr_for_concrete_slot(
         &target.rust_name,
         ctx.facts,
     );
-    let rust_args = lower_constructor_args_with_plan(args, env, constructor_arg_plan, ctx);
+    let mut rust_args = lower_constructor_args_with_plan(args, env, constructor_arg_plan, ctx);
+    if sibling_inner_constructor_can_reuse_outer_handle(&target, resolved.as_ref(), ctx) {
+        target.rust_name = format!("{}_with_outer", target.rust_name);
+        rust_args.insert(0, RustExpr::Raw("self.__outer.clone()".to_string()));
+    }
     let owner_type = crate::slot_render::rust_name_for_java_named_type(type_name);
     let lowered = function_call_projection(
         owner_associated_path_projection(&owner_type, &target.rust_name),
@@ -22091,9 +23223,10 @@ fn lower_source_subtype_to_supertype_slot(
         && slot_java_type_is_shared_handle(&actual.java_ty, ctx.facts)
     {
         let boxed = if rust_expr_is_bare_constructor_call(lowered_expr) {
-            ctx.facts
-                .storage_placement_for(actual_name)
-                .wrap_construction(crate::emit::emit_expr(lowered_expr))
+            crate::emit::emit_expr(&crate::slot_render::storage_placement_construction_expr(
+                ctx.facts.storage_placement_for(actual_name),
+                lowered_expr.clone(),
+            ))
         } else {
             crate::emit::emit_expr(lowered_expr)
         };
@@ -22323,13 +23456,23 @@ fn lower_optional_receiver_field_access_for_slot(
     ctx: LowerCtx,
     refinements: &ExprRefinements,
 ) -> Option<RustExpr> {
-    let Expr::FieldAccess(receiver, field) = expr else {
-        return None;
+    let dotted_receiver;
+    let (receiver, field) = match expr {
+        Expr::FieldAccess(receiver, field) => (receiver.as_ref(), field.as_str()),
+        Expr::Var(path) => {
+            let (receiver, field) = path.split_once('.')?;
+            if receiver.is_empty() || field.is_empty() || field.contains('.') {
+                return None;
+            }
+            dotted_receiver = Expr::Var(receiver.to_string());
+            (&dotted_receiver, field)
+        }
+        _ => return None,
     };
     if is_this_receiver_expr(receiver) {
         return None;
     }
-    if matches!(receiver.as_ref(), Expr::Var(name) if bare_name_looks_like_static_owner(name)) {
+    if matches!(receiver, Expr::Var(name) if bare_name_looks_like_static_owner(name)) {
         return None;
     }
     let shape_ctx = ExprShapeContext {
@@ -22337,7 +23480,12 @@ fn lower_optional_receiver_field_access_for_slot(
         representations: Some(ctx.representations),
         facts: Some(ctx.facts),
     };
-    let receiver_shape = infer_expr_shape_with_context(receiver, env, shape_ctx);
+    let inferred_receiver_shape = infer_expr_shape_with_context(receiver, env, shape_ctx);
+    let current_field_receiver_shape = current_instance_field_shape_with_env(receiver, env, ctx);
+    let receiver_shape = current_field_receiver_shape
+        .as_ref()
+        .filter(|shape| shape.optional_element_type().is_some())
+        .unwrap_or(&inferred_receiver_shape);
     let receiver_ty = crate::types::optional_element_type(&receiver_shape.java_ty)?;
     let receiver_owner = concrete_java_type_name(&receiver_ty).map(str::to_string);
     let lowered_receiver = lower_expr_with_refinements(receiver, env, ctx, refinements);
@@ -22403,10 +23551,7 @@ fn lower_optional_receiver_field_access_for_slot(
         false,
         false,
     );
-    let mut lowered = RustExpr::Raw(format!(
-        "{}.{field_name}",
-        emit::emit_expr(&lowered_receiver)
-    ));
+    let mut lowered = field_projection(lowered_receiver, &field_name);
     if let Some(field_shape) = field_shape.as_ref()
         && field_shape.optional_element_type().is_some()
         && optional_field_borrowed_carrier_slot_is_element_projection(field_shape, slot)
@@ -22644,6 +23789,37 @@ fn lower_static_initialized_singleton_field_for_slot(
     Some(function_call_projection(
         owner_associated_path_projection(&rust_name, "new"),
         Vec::new(),
+    ))
+}
+
+/// Lowers a lambda written directly at a functional-interface parameter, giving
+/// its parameters the Java types the interface declares.
+///
+/// The cast form -- `(Comparator<String>) (a, b) -> ..` -- already had this via
+/// `lower_functional_cast_callback_for_slot`. A bare lambda did not, so its
+/// parameters reached the body untyped. See claude_audits/done/0041.
+fn lower_functional_slot_lambda(
+    expr: &Expr,
+    env: &ShapeEnv,
+    slot: &Slot,
+    ctx: LowerCtx,
+) -> Option<RustExpr> {
+    let Expr::Lambda { params, body } = expr else {
+        return None;
+    };
+    let target = slot_target_shape(slot)?;
+    let shapes = functional_interface_input_shapes(&target.java_ty)?;
+    if shapes.len() != params.len() {
+        return None;
+    }
+    Some(lower_callback_lambda_expr_with_shapes(
+        params,
+        body,
+        env,
+        ctx,
+        None,
+        false,
+        Some(&shapes),
     ))
 }
 
@@ -24083,7 +25259,7 @@ fn lower_external_constructor_expr_for_concrete_slot(
         return None;
     }
     if body.is_some() && shape_is_concrete_native(target_shape) {
-        return Some(RustExpr::Raw("Default::default()".to_string()));
+        return Some(default_trait_expr());
     }
     if !external_constructor_is_modeled(ctx.facts, type_name, args.len()) {
         return None;
@@ -24112,6 +25288,13 @@ fn lower_external_constructor_expr_for_concrete_slot(
     let lowered = named_constructor_expr(type_name, &target.rust_name, rust_args);
     let plan = plan_slot_conversion(actual, slot.clone(), ctx.facts);
     Some(apply_slot_expr_conversion(lowered, &plan))
+}
+
+fn default_trait_expr() -> RustExpr {
+    RustExpr::Call {
+        function: Box::new(RustExpr::path(["Default", "default"])),
+        args: Vec::new(),
+    }
 }
 
 fn constructor_result_can_flow_into_concrete_slot(
@@ -28909,6 +30092,127 @@ mod tests {
     use crate::slot_shape::RustSlotShape;
 
     #[test]
+    fn raw_inherent_impl_owner_skips_nested_generic_bounds() {
+        assert_eq!(
+            raw_inherent_impl_owner("impl<T: Into<Foo>> Boxed<T> {"),
+            Some("Boxed".to_string())
+        );
+        assert_eq!(
+            raw_inherent_impl_owner(
+                "impl<'a, T: Iterator<Item = Result<Foo, Bar>>> Cursor<'a, T> {"
+            ),
+            Some("Cursor".to_string())
+        );
+        assert_eq!(
+            raw_inherent_impl_owner("impl<T: for<'a> Parser<'a>> Boxed<T> {"),
+            Some("Boxed".to_string())
+        );
+        assert_eq!(
+            raw_inherent_impl_owner("impl<T> Boxed<T> where T: for<'a> Parser<'a> {"),
+            Some("Boxed".to_string())
+        );
+        assert_eq!(
+            raw_inherent_impl_owner("impl Display for Boxed {"),
+            None,
+            "trait impls are not inherent methods"
+        );
+        assert_eq!(
+            raw_inherent_impl_owner("impl<T> Display<T> for Boxed<T> {"),
+            None,
+            "generic trait impls are not inherent methods"
+        );
+    }
+
+    #[test]
+    fn raw_inherent_methods_use_nested_generic_impl_owner() {
+        let occupied = occupied_inherent_methods_for_items(&[RustItem::Raw(
+            r#"
+            impl<T: Into<Foo>> Boxed<T> {
+                pub fn to_string(&self) -> String {
+                    String::new()
+                }
+            }
+            "#
+            .to_string(),
+        )]);
+
+        assert!(occupied.contains(&("Boxed".to_string(), "to_string".to_string())));
+        assert!(!occupied.contains(&(">".to_string(), "to_string".to_string())));
+    }
+
+    #[test]
+    fn raw_inherent_methods_ignore_literal_and_comment_mentions() {
+        let occupied = occupied_inherent_methods_for_items(&[RustItem::Raw(
+            r##"
+            const DOC: &str = r#"
+            impl Widget {
+                pub fn to_string(&self) -> String {
+                    String::new()
+                }
+            }
+            "#;
+            /* impl Widget {
+                pub fn get_class(&self) -> JavaClass<Widget> { todo!() }
+            } */
+            impl Widget {
+                pub fn real(&self) -> i32 {
+                    1
+                }
+            }
+            "##
+            .to_string(),
+        )]);
+
+        assert!(!occupied.contains(&("Widget".to_string(), "to_string".to_string())));
+        assert!(!occupied.contains(&("Widget".to_string(), "get_class".to_string())));
+        assert!(occupied.contains(&("Widget".to_string(), "real".to_string())));
+    }
+
+    #[test]
+    fn raw_inherent_method_scan_ignores_literal_braces_for_impl_depth() {
+        let occupied = occupied_inherent_methods_for_items(&[RustItem::Raw(
+            r##"
+            impl Widget {
+                pub fn first(&self) -> String {
+                    let text = "}";
+                    let raw = r#"}"#;
+                    String::new()
+                }
+                pub fn second(&self) -> String {
+                    String::new()
+                }
+            }
+            "##
+            .to_string(),
+        )]);
+
+        assert!(occupied.contains(&("Widget".to_string(), "first".to_string())));
+        assert!(occupied.contains(&("Widget".to_string(), "second".to_string())));
+    }
+
+    #[test]
+    fn erased_static_trait_helper_rewrite_ignores_literal_mentions() {
+        let rendered = r##"
+fn value(&self) -> String {
+    let text = "owner_type_helper()";
+    let raw = r#"owner_type_helper()"#;
+    return owner_type_helper();
+}
+"##;
+
+        assert_eq!(
+            rewrite_erased_source_static_helper_calls_for_trait("OwnerType", rendered.to_string()),
+            r##"
+fn value(&self) -> String {
+    let text = "owner_type_helper()";
+    let raw = r#"owner_type_helper()"#;
+    return Self::helper();
+}
+"##
+        );
+    }
+
+    #[test]
     fn declared_method_lookup_uses_known_arg_types_for_same_arity_overloads() {
         let parsed = parse_java_source(
             r#"
@@ -28999,6 +30303,158 @@ class NumericBox {
     }
 
     #[test]
+    fn replace_self_receiver_recurses_through_vec_repeat_lengths() {
+        let expr = RustExpr::VecRepeat {
+            value: Box::new(RustExpr::Literal("0".to_string())),
+            len: Box::new(RustExpr::Cast {
+                expr: Box::new(RustExpr::Field(
+                    Box::new(RustExpr::Var("self".to_string())),
+                    "width".to_string(),
+                )),
+                ty: "usize".to_string(),
+            }),
+        };
+
+        let replaced = replace_self_receiver(expr, "__java_self");
+
+        assert_eq!(emit_expr(&replaced), "vec![0; __java_self.width as usize]");
+    }
+
+    #[test]
+    fn static_storage_array_literals_keep_vec_structure() {
+        let elements = vec![
+            crate::parser::parse_expr("1"),
+            crate::parser::parse_expr("2"),
+        ];
+        let rendered = render_array_literal(&elements, &|expr| match expr {
+            Expr::Literal(literal) => Some(emit_expr(&literal_expr(literal))),
+            _ => None,
+        })
+        .expect("literal array should render");
+
+        assert_eq!(emit_expr(&rendered), "vec![1, 2]");
+        assert!(matches!(rendered, RustExpr::VecLiteral(_)));
+    }
+
+    #[test]
+    fn static_storage_array_default_values_keep_vec_repeat_structure() {
+        let rendered =
+            static_storage_array_default_initial_value_expr("Self::LEN".to_string(), "0");
+
+        assert_eq!(emit_expr(&rendered), "vec![0; Self::LEN as usize]");
+        assert!(matches!(rendered, RustExpr::VecRepeat { .. }));
+    }
+
+    #[test]
+    fn replace_self_receiver_raw_fallback_ignores_literals_and_identifier_suffixes() {
+        let expr = RustExpr::Raw(
+            "self.value + myself.value + format!(\"self.value\") + r#\"self.raw\"# + 's'"
+                .to_string(),
+        );
+
+        let replaced = replace_self_receiver(expr, "__java_self");
+
+        assert_eq!(
+            emit_expr(&replaced),
+            "__java_self.value + myself.value + format!(\"self.value\") + r#\"self.raw\"# + 's'"
+        );
+    }
+
+    #[test]
+    fn replace_self_receiver_raw_stmt_fallback_ignores_literals_and_identifier_suffixes() {
+        let stmt = RustStmt::Raw(
+            "self.value = myself.value + format!(\"self.value\") + r#\"self.raw\"#;".to_string(),
+        );
+
+        let replaced = replace_self_receiver_in_stmt(stmt, "__java_self");
+
+        let RustStmt::Raw(rendered) = replaced else {
+            panic!("expected raw statement after replacement");
+        };
+        assert_eq!(
+            rendered,
+            "__java_self.value = myself.value + format!(\"self.value\") + r#\"self.raw\"#;"
+        );
+    }
+
+    fn assert_bare_constructor_detection_uses_structured_call_paths_before_raw_text() {
+        let structured = RustExpr::Call {
+            function: Box::new(RustExpr::Raw("OuterB::new_1".to_string())),
+            args: vec![RustExpr::Var("value".to_string())],
+        };
+        assert!(rust_expr_is_bare_constructor_call(&structured));
+
+        let structured_path = RustExpr::Call {
+            function: Box::new(RustExpr::Path(vec![
+                "OuterB".to_string(),
+                "new_1".to_string(),
+            ])),
+            args: vec![RustExpr::Var("value".to_string())],
+        };
+        assert!(rust_expr_is_bare_constructor_call(&structured_path));
+
+        let shaped = RustExpr::shaped(RustExprShape::OwnedRecovery, structured.clone());
+        assert!(rust_expr_is_bare_constructor_call(&shaped));
+
+        let helper = RustExpr::Call {
+            function: Box::new(RustExpr::Raw("java_make_outer".to_string())),
+            args: Vec::new(),
+        };
+        assert!(!rust_expr_is_bare_constructor_call(&helper));
+
+        let raw_compat = RustExpr::Raw("OuterB::new_1(value)".to_string());
+        assert!(rust_expr_is_bare_constructor_call(&raw_compat));
+
+        let structured_generic = RustExpr::Call {
+            function: Box::new(RustExpr::Raw("OuterB::new_1::<T>".to_string())),
+            args: vec![RustExpr::Var("value".to_string())],
+        };
+        assert!(rust_expr_is_bare_constructor_call(&structured_generic));
+
+        let raw_generic = RustExpr::Raw("OuterB::new_1::<T>(value)".to_string());
+        assert!(rust_expr_is_bare_constructor_call(&raw_generic));
+
+        let raw_spaced = RustExpr::Raw("OuterB::new (value)".to_string());
+        assert!(rust_expr_is_bare_constructor_call(&raw_spaced));
+    }
+
+    #[test]
+    fn same_outer_inner_constructor_raw_rewrite_ignores_literals_and_keeps_real_calls() {
+        assert_bare_constructor_detection_uses_structured_call_paths_before_raw_text();
+
+        let rewritten = rewrite_same_outer_inner_constructor_calls_text_with_resolver(
+            r##"let text = "OuterB::new()";
+let raw = r#"OuterB::new()"#;
+let ch = '(';
+let a = OuterB::new();
+let b = OuterB::new_1(value);
+let spaced = OuterB::new ();
+let generic = OuterB::new_1::<T>(value);
+let c = OtherB::new();
+let d = OuterB::new_with_outer(__outer.clone());
+let e = OuterB::new_with_outer::<T>(__outer.clone());
+"##,
+            |path| path == "OuterB::new" || path == "OuterB::new_1",
+        )
+        .expect("real constructor calls should be rewritten");
+
+        assert_eq!(
+            rewritten,
+            r##"let text = "OuterB::new()";
+let raw = r#"OuterB::new()"#;
+let ch = '(';
+let a = OuterB::new_with_outer(__outer.clone());
+let b = OuterB::new_1_with_outer(__outer.clone(), value);
+let spaced = OuterB::new_with_outer (__outer.clone());
+let generic = OuterB::new_1_with_outer::<T>(__outer.clone(), value);
+let c = OtherB::new();
+let d = OuterB::new_with_outer(__outer.clone());
+let e = OuterB::new_with_outer::<T>(__outer.clone());
+"##
+        );
+    }
+
+    #[test]
     fn shared_handle_conversion_companion_covers_rc_and_arc() {
         let impls = shared_handle_conversion_companion("Leaf", "Base").expect("local target");
 
@@ -29014,6 +30470,7 @@ class NumericBox {
 
     #[test]
     fn shared_handle_conversion_companion_skips_dyn_targets() {
-        assert!(shared_handle_conversion_companion("Leaf", "Box<dyn std::any::Any>").is_none());
+        let dyn_target = ["Box", "<dyn std::any::Any>"].concat();
+        assert!(shared_handle_conversion_companion("Leaf", &dyn_target).is_none());
     }
 }

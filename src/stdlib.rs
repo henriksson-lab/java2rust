@@ -76,6 +76,185 @@ pub fn is_known_object_inherited_method(name: &str, arg_count: usize) -> bool {
     )
 }
 
+/// Where one parameter or return of a functional interface's method gets its
+/// type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FunctionalTypeSource {
+    /// The n-th Java type argument of the interface (`Function<A, B>` → 0, 1).
+    TypeArgument(usize),
+    /// A primitive fixed by the interface's *name* (`IntPredicate` → `int`).
+    Primitive(PrimitiveType),
+}
+
+/// The single abstract method of a `java.util.function`-style interface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionalInterfaceShape {
+    pub method: &'static str,
+    pub inputs: Vec<FunctionalTypeSource>,
+    pub returns: Option<FunctionalTypeSource>,
+}
+
+/// Reads a functional interface's shape out of its **name**.
+///
+/// These names are a product, not a set: a primitive prefix, a root, and an
+/// optional `To`-primitive result, in a small grammar. Enumerating the product
+/// by hand is what let `Supplier` end up with an arity but no return — it had an
+/// arm in one hand-written match and none in the other, so `Supplier<String>`
+/// lowered to `impl FnMut()` and dropped its `-> String` (`E0308`). Deriving the
+/// whole shape in one place means arity and return cannot disagree, because
+/// there is only one answer.
+///
+/// `None` for a name outside the grammar; the caller keeps its previous
+/// behaviour. Interfaces whose method throws (`Callable`) are deliberately
+/// excluded — a closure parameter would have to carry the `Result` too, which is
+/// a different change.
+pub fn functional_interface_shape(name: &str) -> Option<FunctionalInterfaceShape> {
+    let simple = name.rsplit('.').next().unwrap_or(name);
+    if !is_known_functional_interface(simple) {
+        return None;
+    }
+    let shape = |method, inputs: Vec<FunctionalTypeSource>, returns| FunctionalInterfaceShape {
+        method,
+        inputs,
+        returns,
+    };
+    use FunctionalTypeSource::{Primitive, TypeArgument};
+
+    // `Obj{P}Consumer<T>`: an object and a primitive, no result.
+    if let Some(rest) = simple.strip_prefix("Obj")
+        && let Some((primitive, "Consumer")) = split_leading_primitive(rest)
+    {
+        return Some(shape(
+            "accept",
+            vec![TypeArgument(0), Primitive(primitive)],
+            None,
+        ));
+    }
+    // `To{P}Function<T>` / `To{P}BiFunction<T, U>`: object inputs, primitive result.
+    if let Some(rest) = simple.strip_prefix("To")
+        && let Some((primitive, root)) = split_leading_primitive(rest)
+    {
+        let inputs = match root {
+            "Function" => vec![TypeArgument(0)],
+            "BiFunction" => vec![TypeArgument(0), TypeArgument(1)],
+            _ => return None,
+        };
+        return Some(shape(
+            primitive_functional_method(primitive, "applyAs"),
+            inputs,
+            Some(Primitive(primitive)),
+        ));
+    }
+    // `{P}...`: a primitive-specialised form.
+    if let Some((primitive, root)) = split_leading_primitive(simple) {
+        // `{P}To{Q}Function`: primitive in, a *different* primitive out.
+        if let Some(rest) = root.strip_prefix("To")
+            && let Some((result, "Function")) = split_leading_primitive(rest)
+        {
+            return Some(shape(
+                primitive_functional_method(result, "applyAs"),
+                vec![Primitive(primitive)],
+                Some(Primitive(result)),
+            ));
+        }
+        return Some(match root {
+            "Supplier" => shape(
+                primitive_functional_method(primitive, "getAs"),
+                Vec::new(),
+                Some(Primitive(primitive)),
+            ),
+            "Consumer" => shape("accept", vec![Primitive(primitive)], None),
+            "Predicate" => shape(
+                "test",
+                vec![Primitive(primitive)],
+                Some(Primitive(PrimitiveType::Boolean)),
+            ),
+            "UnaryOperator" => shape(
+                primitive_functional_method(primitive, "applyAs"),
+                vec![Primitive(primitive)],
+                Some(Primitive(primitive)),
+            ),
+            "BinaryOperator" => shape(
+                primitive_functional_method(primitive, "applyAs"),
+                vec![Primitive(primitive), Primitive(primitive)],
+                Some(Primitive(primitive)),
+            ),
+            // `{P}Function<R>`: primitive in, an *object* out.
+            "Function" => shape("apply", vec![Primitive(primitive)], Some(TypeArgument(0))),
+            _ => return None,
+        });
+    }
+
+    Some(match simple {
+        "Runnable" => shape("run", Vec::new(), None),
+        "Supplier" => shape("get", Vec::new(), Some(TypeArgument(0))),
+        "Consumer" => shape("accept", vec![TypeArgument(0)], None),
+        "BiConsumer" => shape("accept", vec![TypeArgument(0), TypeArgument(1)], None),
+        "Function" => shape("apply", vec![TypeArgument(0)], Some(TypeArgument(1))),
+        "BiFunction" => shape(
+            "apply",
+            vec![TypeArgument(0), TypeArgument(1)],
+            Some(TypeArgument(2)),
+        ),
+        "Predicate" => shape(
+            "test",
+            vec![TypeArgument(0)],
+            Some(Primitive(PrimitiveType::Boolean)),
+        ),
+        "BiPredicate" => shape(
+            "test",
+            vec![TypeArgument(0), TypeArgument(1)],
+            Some(Primitive(PrimitiveType::Boolean)),
+        ),
+        "UnaryOperator" => shape("apply", vec![TypeArgument(0)], Some(TypeArgument(0))),
+        "BinaryOperator" => shape(
+            "apply",
+            vec![TypeArgument(0), TypeArgument(0)],
+            Some(TypeArgument(0)),
+        ),
+        // Both arguments are the element type, and the result is an `int`
+        // ordering — not a `bool`, which is why `Comparator` cannot be folded
+        // into the `Bi*` roots above.
+        "Comparator" => shape(
+            "compare",
+            vec![TypeArgument(0), TypeArgument(0)],
+            Some(Primitive(PrimitiveType::Int)),
+        ),
+        _ => return None,
+    })
+}
+
+/// Splits a leading primitive name off a functional interface name.
+fn split_leading_primitive(name: &str) -> Option<(PrimitiveType, &str)> {
+    for (prefix, primitive) in [
+        ("Int", PrimitiveType::Int),
+        ("Long", PrimitiveType::Long),
+        ("Double", PrimitiveType::Double),
+        ("Boolean", PrimitiveType::Boolean),
+    ] {
+        if let Some(rest) = name.strip_prefix(prefix)
+            && !rest.is_empty()
+        {
+            return Some((primitive, rest));
+        }
+    }
+    None
+}
+
+/// `getAsInt`, `applyAsLong`, and so on.
+fn primitive_functional_method(primitive: PrimitiveType, stem: &str) -> &'static str {
+    match (stem, primitive) {
+        ("getAs", PrimitiveType::Int) => "getAsInt",
+        ("getAs", PrimitiveType::Long) => "getAsLong",
+        ("getAs", PrimitiveType::Double) => "getAsDouble",
+        ("getAs", PrimitiveType::Boolean) => "getAsBoolean",
+        ("applyAs", PrimitiveType::Int) => "applyAsInt",
+        ("applyAs", PrimitiveType::Long) => "applyAsLong",
+        ("applyAs", PrimitiveType::Double) => "applyAsDouble",
+        _ => "apply",
+    }
+}
+
 pub fn is_known_functional_interface(name: &str) -> bool {
     matches!(
         name,
@@ -9293,7 +9472,7 @@ impl ExternalApiFacadeSupport {
             // the **unsuffixed** name, while the call sites — which do resolve
             // the overload — emitted `pick_int` and `pick_string`. The facade
             // then provided neither name and the program failed `E0599`
-            // ([0009](../claude_audits/0009-overload-identity-collapses-onto-rust-name.md)).
+            // ([0009](../claude_audits/done/0009-overload-identity-collapses-onto-rust-name.md)).
             // The owner is spelled as the importing file writes it (`dep.Util`)
             // while a summary program's type keys are its simple names, so the
             // simple form has to be compared too.
@@ -14699,6 +14878,26 @@ fn external_facade_method_is_self_returning_fluent(
         })
 }
 
+pub fn external_facade_receiver_call_is_noop_method(
+    facts: &FactSet,
+    receiver_key: &str,
+    java_method: &str,
+    arg_count: usize,
+) -> bool {
+    let receiver_simple = canonical_external_receiver_type_key(receiver_key)
+        .rsplit('.')
+        .next()
+        .unwrap_or(receiver_key)
+        .to_string();
+    if matches!(
+        receiver_simple.as_str(),
+        "StringBuilder" | "StringBuffer" | "Appendable"
+    ) {
+        return false;
+    }
+    external_facade_method_is_self_returning_fluent(facts, receiver_key, java_method, arg_count)
+}
+
 fn external_facade_trait_method(name: &str, arg_count: usize, return_type: &str) -> String {
     let rust_name = rust_raw_ident_if_needed(name);
     format!(
@@ -19511,7 +19710,7 @@ pub fn external_api_return_nullability(
         // and `Unknown` nullability. Reading the *kind* of the answer the other
         // table already gives closes that gap by construction, and cannot be
         // wrong: it is a property of the type, not a fact about the API
-        // ([0008](../claude_audits/0008-inference-machinery-does-not-reach-lowering.md)).
+        // ([0008](../claude_audits/done/0008-inference-machinery-does-not-reach-lowering.md)).
         // The receiver is canonicalised before this match because the two
         // tables do not agree on how to spell one: this arm would otherwise
         // answer for `Integer` and not for `java.lang.Integer`, which is the
@@ -20087,5 +20286,256 @@ mod external_nullability_derivation_tests {
             external_api_return_nullability(Some("JarFile"), "entries", 0, ExternalApiRole::Getter),
             NullabilityState::DefinitelyNonNull
         );
+    }
+}
+
+#[cfg(test)]
+mod functional_interface_shape_tests {
+    use super::{
+        FunctionalTypeSource::{Primitive, TypeArgument},
+        functional_interface_shape, is_known_functional_interface,
+    };
+    use crate::java_ir::PrimitiveType;
+
+    fn shape_of(
+        name: &str,
+    ) -> (
+        &'static str,
+        Vec<super::FunctionalTypeSource>,
+        Option<super::FunctionalTypeSource>,
+    ) {
+        let shape = functional_interface_shape(name)
+            .unwrap_or_else(|| panic!("no shape derived for {name}"));
+        (shape.method, shape.inputs, shape.returns)
+    }
+
+    /// The shapes are checked against the real `java.util.function` signatures,
+    /// one per corner of the grammar. Getting these from the name is only sound
+    /// if the name really does determine them, which is what this asserts.
+    #[test]
+    fn object_roots_match_the_java_signatures() {
+        assert_eq!(shape_of("Runnable"), ("run", vec![], None));
+        assert_eq!(shape_of("Supplier"), ("get", vec![], Some(TypeArgument(0))));
+        assert_eq!(
+            shape_of("Consumer"),
+            ("accept", vec![TypeArgument(0)], None)
+        );
+        assert_eq!(
+            shape_of("Function"),
+            ("apply", vec![TypeArgument(0)], Some(TypeArgument(1)))
+        );
+        assert_eq!(
+            shape_of("BiFunction"),
+            (
+                "apply",
+                vec![TypeArgument(0), TypeArgument(1)],
+                Some(TypeArgument(2))
+            )
+        );
+        assert_eq!(
+            shape_of("Predicate"),
+            (
+                "test",
+                vec![TypeArgument(0)],
+                Some(Primitive(PrimitiveType::Boolean))
+            )
+        );
+        // Both operands are the element type and the result is an `int`
+        // ordering, which is why it cannot be folded into `BiPredicate`.
+        assert_eq!(
+            shape_of("Comparator"),
+            (
+                "compare",
+                vec![TypeArgument(0), TypeArgument(0)],
+                Some(Primitive(PrimitiveType::Int))
+            )
+        );
+        // `UnaryOperator<T>` is `Function<T, T>`: the result reads argument 0,
+        // not argument 1.
+        assert_eq!(
+            shape_of("UnaryOperator"),
+            ("apply", vec![TypeArgument(0)], Some(TypeArgument(0)))
+        );
+    }
+
+    /// The primitive families are a product of prefix and root. Enumerating them
+    /// by hand is what let `Supplier` keep an arity and lose its return type.
+    #[test]
+    fn primitive_families_are_derived_from_the_name() {
+        assert_eq!(
+            shape_of("IntSupplier"),
+            ("getAsInt", vec![], Some(Primitive(PrimitiveType::Int)))
+        );
+        assert_eq!(
+            shape_of("BooleanSupplier"),
+            (
+                "getAsBoolean",
+                vec![],
+                Some(Primitive(PrimitiveType::Boolean))
+            )
+        );
+        assert_eq!(
+            shape_of("LongConsumer"),
+            ("accept", vec![Primitive(PrimitiveType::Long)], None)
+        );
+        assert_eq!(
+            shape_of("DoubleBinaryOperator"),
+            (
+                "applyAsDouble",
+                vec![
+                    Primitive(PrimitiveType::Double),
+                    Primitive(PrimitiveType::Double)
+                ],
+                Some(Primitive(PrimitiveType::Double))
+            )
+        );
+        // `IntFunction<R>` is primitive in, *object* out -- the one root where
+        // the result is a type argument despite a primitive prefix.
+        assert_eq!(
+            shape_of("IntFunction"),
+            (
+                "apply",
+                vec![Primitive(PrimitiveType::Int)],
+                Some(TypeArgument(0))
+            )
+        );
+        // `{P}To{Q}Function`: two *different* primitives.
+        assert_eq!(
+            shape_of("IntToLongFunction"),
+            (
+                "applyAsLong",
+                vec![Primitive(PrimitiveType::Int)],
+                Some(Primitive(PrimitiveType::Long))
+            )
+        );
+        // `To{P}Function<T>`: object in, primitive out.
+        assert_eq!(
+            shape_of("ToIntFunction"),
+            (
+                "applyAsInt",
+                vec![TypeArgument(0)],
+                Some(Primitive(PrimitiveType::Int))
+            )
+        );
+        assert_eq!(
+            shape_of("ToDoubleBiFunction"),
+            (
+                "applyAsDouble",
+                vec![TypeArgument(0), TypeArgument(1)],
+                Some(Primitive(PrimitiveType::Double))
+            )
+        );
+        // `Obj{P}Consumer<T>`: an object *and* a primitive.
+        assert_eq!(
+            shape_of("ObjIntConsumer"),
+            (
+                "accept",
+                vec![TypeArgument(0), Primitive(PrimitiveType::Int)],
+                None
+            )
+        );
+    }
+
+    /// A zero-argument interface may still return something. This is the case
+    /// the two hand-written tables disagreed on: `Supplier` had an arity arm and
+    /// no return arm, so `Supplier<String>` lowered to `impl FnMut()` and its
+    /// `-> String` was dropped (`E0308`).
+    #[test]
+    fn a_zero_argument_interface_still_carries_its_return() {
+        for name in ["Supplier", "IntSupplier", "LongSupplier", "BooleanSupplier"] {
+            let shape = functional_interface_shape(name).expect(name);
+            assert!(shape.inputs.is_empty(), "{name}");
+            assert!(shape.returns.is_some(), "{name} lost its return type");
+        }
+        // `Runnable` is the genuine void case, and must stay one.
+        assert!(
+            functional_interface_shape("Runnable")
+                .unwrap()
+                .returns
+                .is_none()
+        );
+    }
+
+    /// Anything the grammar derives must also be a functional interface by the
+    /// membership list, or the two have drifted apart again.
+    #[test]
+    fn every_derived_shape_is_a_known_functional_interface() {
+        let derived = [
+            "Runnable",
+            "Supplier",
+            "Consumer",
+            "BiConsumer",
+            "Function",
+            "BiFunction",
+            "Predicate",
+            "BiPredicate",
+            "UnaryOperator",
+            "BinaryOperator",
+            "Comparator",
+            "IntSupplier",
+            "LongSupplier",
+            "DoubleSupplier",
+            "BooleanSupplier",
+            "IntConsumer",
+            "LongConsumer",
+            "DoubleConsumer",
+            "IntPredicate",
+            "LongPredicate",
+            "DoublePredicate",
+            "IntUnaryOperator",
+            "LongUnaryOperator",
+            "DoubleUnaryOperator",
+            "IntBinaryOperator",
+            "LongBinaryOperator",
+            "DoubleBinaryOperator",
+            "IntFunction",
+            "LongFunction",
+            "DoubleFunction",
+            "IntToLongFunction",
+            "IntToDoubleFunction",
+            "LongToIntFunction",
+            "LongToDoubleFunction",
+            "DoubleToIntFunction",
+            "DoubleToLongFunction",
+            "ToIntFunction",
+            "ToLongFunction",
+            "ToDoubleFunction",
+            "ToIntBiFunction",
+            "ToLongBiFunction",
+            "ToDoubleBiFunction",
+            "ObjIntConsumer",
+            "ObjLongConsumer",
+            "ObjDoubleConsumer",
+        ];
+        for name in derived {
+            assert!(
+                functional_interface_shape(name).is_some(),
+                "{name} is not derived"
+            );
+            assert!(
+                is_known_functional_interface(name),
+                "{name} derives a shape but is not a known functional interface"
+            );
+        }
+    }
+
+    /// A name outside the grammar answers `None` rather than guessing, so the
+    /// caller keeps whatever it did before.
+    #[test]
+    fn names_outside_the_grammar_are_declined() {
+        for name in [
+            "String",
+            "ArrayList",
+            "Iterable",
+            "Integer",
+            "MapFunction",
+            "BooleanConsumer",
+            "BooleanPredicate",
+            "BooleanUnaryOperator",
+            "BooleanBinaryOperator",
+            "ObjBooleanConsumer",
+        ] {
+            assert!(functional_interface_shape(name).is_none(), "{name}");
+        }
     }
 }

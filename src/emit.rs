@@ -209,6 +209,11 @@ fn emit_expr_prec(
         }
         RustExpr::Literal(value) => value.clone(),
         RustExpr::Var(name) => rust_ident(name),
+        RustExpr::Path(segments) => segments
+            .iter()
+            .map(|segment| rust_ident(segment))
+            .collect::<Vec<_>>()
+            .join("::"),
         RustExpr::Field(receiver, field) => {
             format!(
                 "{}.{}",
@@ -254,6 +259,25 @@ fn emit_expr_prec(
             emit_expr_prec(then_expr, 0, None, ExprChildSide::None),
             emit_expr_prec(else_expr, 0, None, ExprChildSide::None)
         ),
+        RustExpr::Tuple(items) => match items.as_slice() {
+            [] => "()".to_string(),
+            [item] => format!("({},)", emit_expr(item)),
+            _ => format!(
+                "({})",
+                items.iter().map(emit_expr).collect::<Vec<_>>().join(", ")
+            ),
+        },
+        RustExpr::ArrayLiteral(items) => format!(
+            "[{}]",
+            items.iter().map(emit_expr).collect::<Vec<_>>().join(", ")
+        ),
+        RustExpr::VecLiteral(items) => format!(
+            "vec![{}]",
+            items.iter().map(emit_expr).collect::<Vec<_>>().join(", ")
+        ),
+        RustExpr::VecRepeat { value, len } => {
+            format!("vec![{}; {}]", emit_expr(value), emit_expr(len))
+        }
         RustExpr::Call { function, args } => format!(
             "{}({})",
             emit_expr_prec(function, 11, None, ExprChildSide::None),
@@ -483,9 +507,15 @@ fn expr_precedence(expr: &RustExpr) -> u8 {
         | RustExpr::Call { .. }
         | RustExpr::MethodCall { .. } => 11,
         RustExpr::Raw(raw) if raw_contains_top_level_cast(raw) => 6,
-        RustExpr::Literal(_) | RustExpr::Var(_) | RustExpr::StructLit { .. } | RustExpr::Raw(_) => {
-            12
-        }
+        RustExpr::Literal(_)
+        | RustExpr::Var(_)
+        | RustExpr::Path(_)
+        | RustExpr::Tuple(_)
+        | RustExpr::ArrayLiteral(_)
+        | RustExpr::VecLiteral(_)
+        | RustExpr::VecRepeat { .. }
+        | RustExpr::StructLit { .. }
+        | RustExpr::Raw(_) => 12,
         RustExpr::If { .. } => 1,
     }
 }
@@ -634,6 +664,59 @@ mod tests {
         };
 
         assert_eq!(emit_expr(&expr), "!done");
+    }
+
+    #[test]
+    fn tuple_expressions_keep_required_parentheses() {
+        assert_eq!(emit_expr(&RustExpr::Tuple(Vec::new())), "()");
+        assert_eq!(emit_expr(&RustExpr::Tuple(vec![var("only")])), "(only,)");
+        assert_eq!(
+            emit_expr(&RustExpr::Tuple(vec![
+                RustExpr::Cast {
+                    expr: Box::new(var("rows")),
+                    ty: "usize".to_string(),
+                },
+                RustExpr::Cast {
+                    expr: Box::new(var("cols")),
+                    ty: "usize".to_string(),
+                },
+            ])),
+            "(rows as usize, cols as usize)"
+        );
+    }
+
+    #[test]
+    fn array_literal_expressions_render_bracketed_items() {
+        assert_eq!(emit_expr(&RustExpr::ArrayLiteral(Vec::new())), "[]");
+        assert_eq!(
+            emit_expr(&RustExpr::ArrayLiteral(vec![
+                RustExpr::Literal("1".to_string()),
+                RustExpr::Tuple(vec![var("key"), var("value")]),
+            ])),
+            "[1, (key, value)]"
+        );
+    }
+
+    #[test]
+    fn vec_macro_expressions_render_literal_and_repeat_forms() {
+        assert_eq!(emit_expr(&RustExpr::VecLiteral(Vec::new())), "vec![]");
+        assert_eq!(
+            emit_expr(&RustExpr::VecLiteral(vec![
+                RustExpr::Literal("1".to_string()),
+                RustExpr::Literal("2".to_string()),
+            ])),
+            "vec![1, 2]"
+        );
+        assert_eq!(
+            emit_expr(&RustExpr::VecRepeat {
+                value: Box::new(RustExpr::Literal("0".to_string())),
+                len: Box::new(RustExpr::Cast {
+                    expr: Box::new(var("len")),
+                    ty: "usize".to_string(),
+                }),
+            }),
+            "vec![0; len as usize]"
+        );
     }
 
     #[test]

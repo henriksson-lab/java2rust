@@ -39,7 +39,7 @@ return a == b;                 // derived PartialEq -> field comparison
 
 Two distinct objects with equal fields compare equal, and `!=` inverts to the
 wrong answer. Compiles cleanly, so invisible to corpus error counts
-([0018](../0018-the-compile-error-metric-cannot-see-silent-failures.md)).
+([0018](0018-the-compile-error-metric-cannot-see-silent-failures.md)).
 
 ## Root cause
 
@@ -235,6 +235,14 @@ identity unconditionally broke
 
 Hence `EqualityComparisonSource::{ReferenceOperator, EqualsCall}`. The custom-
 `equals` question is asked only for the call, never for `==`.
+
+Follow-up correction: the first implementation gated the non-optional
+custom-`equals` arm, but the both-optional arm still asked the custom-`equals`
+question before checking the source. Shared optional operands were masked by the
+earlier `ptr_eq` arm, but non-shared nullable custom-equals types could still
+route `==` through `BothOptionalCustomEquals`. That branch is now gated to
+`EqualityComparisonSource::EqualsCall`; `==` falls back to the existing optional
+by-reference plan when no shared handle exists.
 
 ### Two pre-existing defects the new fixture exposed
 

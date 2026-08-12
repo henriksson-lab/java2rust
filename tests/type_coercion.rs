@@ -10,30 +10,35 @@ use new_java2rust::coercion::{
     dispatch_coercion_fallback_message_policy, instanceof_fallback_message_policy,
     instanceof_pattern_downcast_ref_projection, into_projection, java_integral_literal_char,
     literal_slot_plan, normalize_map_key_borrow_projection,
-    ownership_coercion_fallback_message_policy, parenthesize_borrowed_method_receiver,
-    plan_coercion, plan_coercion_with_facts, plan_shape_coercion, plan_shape_coercion_with_facts,
-    render_index_to_usize_projection, render_instanceof_check,
-    rust_expr_is_constructed_optional_value, rust_primitive_type_name_policy, unwrap_some_expr,
+    normalize_reused_clone_for_borrowed_argument, optional_string_view_projection,
+    owned_collection_to_vec_projection, owned_collection_to_vec_projection_for_receiver_type,
+    owned_map_keys_set_projection, owned_map_keys_vec_projection, owned_map_values_set_projection,
+    owned_map_values_vec_projection, ownership_coercion_fallback_message_policy,
+    parenthesize_borrowed_method_receiver, plan_coercion, plan_coercion_with_facts,
+    plan_shape_coercion, plan_shape_coercion_with_facts, project_optional_element_borrow_carrier,
+    project_optional_element_borrow_carrier_with_shape, render_index_to_usize_projection,
+    render_instanceof_check, rust_expr_is_constructed_optional_value,
+    rust_primitive_type_name_policy, unwrap_some_expr,
 };
 use new_java2rust::conversion_lowering::{
-    adapt_optional_assignment_value_for_target, apply_lowered_slot_expr_conversion,
-    apply_slot_expr_conversion,
+    adapt_optional_assignment_value_for_target, apply_cast_conversion,
+    apply_lowered_slot_expr_conversion, apply_slot_expr_conversion,
 };
 use new_java2rust::conversion_plan::{
     AssignmentValuePlan, BorrowedDynToOwnedBoxedDynRecoveryPolicy, BorrowedElementAdapterPolicy,
     BorrowedElementCarrier, BorrowedElementRecoveryFallbackPolicy, BorrowedElementRecoveryPolicy,
-    BorrowedElementSlotAdapterPolicy, CloneRecoveryPolicy, CoercionContentPolicy,
-    CoercionOwnedRecoveryCapabilityPolicy, CoercionShapeContentPolicy, ConversionDiagnostic,
-    DispatchCoercionFallbackPolicy, DispatchCoercionPolicy, DynCloneBoxAdapterAvailability,
-    DynCloneBoxAdapterDeferralReason, DynCloneBoxAdapterGenerationPolicy,
-    DynCloneBoxAdapterRequirement, InstanceOfCheck, InstanceOfFallbackPolicy,
-    InstanceOfTargetPolicy, InvalidCastPolicy, JavaCastSemanticsPolicy, JavaTypeConversionKind,
-    LoweredSlotExprConversionPlan, LoweredType, OptionalElementTargetMatchPolicy,
-    OptionalPresentConstructionSource, OptionalShapeCoercionPolicy,
-    OwnershipCoercionFallbackPolicy, OwnershipCoercionPolicy, PrimitiveRankPolicy,
-    PrimitiveWideningPolicy, ReturnValuePlan, RuntimeTypeTargetPolicy, RustNominalTypeNamePolicy,
-    ShapeCoercionPlan, Slot, SlotConversionPlan, SlotExprConversionPlan, SyntaxCoercionPlan,
-    SyntaxSlotCoercionPolicy, VecElementTargetMatchPolicy, ViewCoercionPolicy,
+    BorrowedElementSlotAdapterPolicy, CastConversionPlan, CloneRecoveryPolicy,
+    CoercionContentPolicy, CoercionOwnedRecoveryCapabilityPolicy, CoercionShapeContentPolicy,
+    ConversionDiagnostic, DispatchCoercionFallbackPolicy, DispatchCoercionPolicy,
+    DynCloneBoxAdapterAvailability, DynCloneBoxAdapterDeferralReason,
+    DynCloneBoxAdapterGenerationPolicy, DynCloneBoxAdapterRequirement, InstanceOfCheck,
+    InstanceOfFallbackPolicy, InstanceOfTargetPolicy, InvalidCastPolicy, JavaCastSemanticsPolicy,
+    JavaTypeConversionKind, LoweredSlotExprConversionPlan, LoweredType,
+    OptionalElementTargetMatchPolicy, OptionalPresentConstructionSource,
+    OptionalShapeCoercionPolicy, OwnershipCoercionFallbackPolicy, OwnershipCoercionPolicy,
+    PrimitiveRankPolicy, PrimitiveWideningPolicy, ReturnValuePlan, RuntimeTypeTargetPolicy,
+    RustNominalTypeNamePolicy, ShapeCoercionPlan, Slot, SlotConversionPlan, SlotExprConversionPlan,
+    SyntaxCoercionPlan, SyntaxSlotCoercionPolicy, VecElementTargetMatchPolicy, ViewCoercionPolicy,
     actual_shape_for_slot_expr, argument_slot, assignment_slot, assignment_slot_for_target,
     assignment_value_plan_for_shape, assignment_value_plan_for_target,
     borrowed_element_adapter_policy, borrowed_element_recovery_policy,
@@ -64,6 +69,7 @@ use new_java2rust::diagnostics::Severity;
 use new_java2rust::effective_facts::{
     CastTypeCapabilityPolicy, EffectiveFacts, InstanceOfTargetCapabilityPolicy,
 };
+use new_java2rust::emit::emit_expr;
 use new_java2rust::expr_shape::{ExprShapeContext, ShapeEnv, infer_expr_shape};
 use new_java2rust::external_packs::{hdf5_pack_facts, parse_external_pack_manifest};
 use new_java2rust::facts::{
@@ -120,6 +126,9 @@ fn rust_get_projection_counts_as_existing_optional_carrier() {
     assert!(rust_expr_is_constructed_optional_value(&RustExpr::Raw(
         "values.get(index).copied()".to_string()
     )));
+    assert!(rust_expr_is_constructed_optional_value(&RustExpr::Raw(
+        "fields.get(r#\"ID \" )\"#).cloned()".to_string()
+    )));
     assert!(rust_expr_is_constructed_optional_value(
         &RustExpr::MethodCall {
             receiver: Box::new(RustExpr::MethodCall {
@@ -131,6 +140,61 @@ fn rust_get_projection_counts_as_existing_optional_carrier() {
             args: Vec::new(),
         }
     ));
+    assert!(rust_expr_is_constructed_optional_value(
+        &RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::shaped(
+                RustExprShape::OptionalProjected,
+                RustExpr::MethodCall {
+                    receiver: Box::new(RustExpr::Var("fields".to_string())),
+                    method: "get".to_string(),
+                    args: vec![RustExpr::Literal("\"ID\"".to_string())],
+                },
+            )),
+            method: "cloned".to_string(),
+            args: Vec::new(),
+        }
+    ));
+}
+
+#[test]
+fn chained_get_projection_does_not_count_as_existing_optional_carrier() {
+    assert!(!rust_expr_is_constructed_optional_value(&RustExpr::Raw(
+        "values.get(index).into_iter().cloned()".to_string()
+    )));
+    assert!(!rust_expr_is_constructed_optional_value(&RustExpr::Raw(
+        "values.get(index).iter().copied()".to_string()
+    )));
+    assert!(!rust_expr_is_constructed_optional_value(&RustExpr::Raw(
+        "format!(r#\"values.get(index)\"#).cloned()".to_string()
+    )));
+}
+
+#[test]
+fn raw_if_optional_construction_detection_ignores_literal_text() {
+    assert!(rust_expr_is_constructed_optional_value(&RustExpr::Raw(
+        "Some(call(\"value)\"))".to_string()
+    )));
+    assert!(rust_expr_is_constructed_optional_value(&RustExpr::Raw(
+        "Some(r#\"value)\"#)".to_string()
+    )));
+    assert!(!rust_expr_is_constructed_optional_value(&RustExpr::Raw(
+        "Some(value".to_string()
+    )));
+    assert!(!rust_expr_is_constructed_optional_value(&RustExpr::Raw(
+        "Some(value).map(|value| value)".to_string()
+    )));
+    assert!(!rust_expr_is_constructed_optional_value(&RustExpr::Raw(
+        "Some(value))".to_string()
+    )));
+    assert!(rust_expr_is_constructed_optional_value(&RustExpr::Raw(
+        "if ready { Some(value) } else { None }".to_string()
+    )));
+    assert!(!rust_expr_is_constructed_optional_value(&RustExpr::Raw(
+        "if ready { format!(\"{ Some(value)\") } else { None }".to_string()
+    )));
+    assert!(!rust_expr_is_constructed_optional_value(&RustExpr::Raw(
+        "if ready { r#\"{ Some(value)\"# } else { None }".to_string()
+    )));
 }
 
 #[test]
@@ -326,6 +390,78 @@ fn cast_semantics_policy_names_primitive_and_impossible_casts() {
             actual: JavaType::Primitive(PrimitiveType::Int),
             target: JavaType::String,
         }
+    );
+}
+
+#[test]
+fn primitive_char_cast_lowering_keeps_structured_operands() {
+    let int_shape = RustSlotShape::conservative(JavaType::Primitive(PrimitiveType::Int));
+    let char_shape = RustSlotShape::conservative(JavaType::Primitive(PrimitiveType::Char));
+    let long_shape = RustSlotShape::conservative(JavaType::Primitive(PrimitiveType::Long));
+
+    let int_to_char_coercion = shape_coercion_plan(&int_shape, &char_shape);
+    let int_to_char = CastConversionPlan {
+        actual: int_shape.clone(),
+        target: char_shape.clone(),
+        semantics: java_cast_semantics_policy(&int_shape, &char_shape, &int_to_char_coercion),
+        coercion: int_to_char_coercion,
+    };
+    let lowered_char = apply_cast_conversion(RustExpr::Var("value".to_string()), &int_to_char);
+    assert_eq!(
+        lowered_char,
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Call {
+                function: Box::new(RustExpr::path(["char", "from_u32"])),
+                args: vec![RustExpr::Binary {
+                    op: "&".to_string(),
+                    left: Box::new(RustExpr::Cast {
+                        expr: Box::new(RustExpr::Var("value".to_string())),
+                        ty: "u32".to_string(),
+                    }),
+                    right: Box::new(RustExpr::Literal("0xffff".to_string())),
+                }],
+            }),
+            method: "unwrap_or".to_string(),
+            args: vec![RustExpr::Literal("'\\0'".to_string())],
+        }
+    );
+    assert_eq!(
+        emit_expr(&lowered_char),
+        "char::from_u32(value as u32 & 0xffff).unwrap_or('\\0')"
+    );
+    assert_eq!(
+        emit_expr(&apply_cast_conversion(
+            RustExpr::Raw("value + 1".to_string()),
+            &int_to_char,
+        )),
+        "char::from_u32(((value + 1) as u32) & 0xffff).unwrap_or('\\0')"
+    );
+
+    let char_to_long_coercion = shape_coercion_plan(&char_shape, &long_shape);
+    let char_to_long = CastConversionPlan {
+        actual: char_shape.clone(),
+        target: long_shape.clone(),
+        semantics: java_cast_semantics_policy(&char_shape, &long_shape, &char_to_long_coercion),
+        coercion: char_to_long_coercion,
+    };
+    let lowered_long = apply_cast_conversion(RustExpr::Var("ch".to_string()), &char_to_long);
+    assert_eq!(
+        lowered_long,
+        RustExpr::Cast {
+            expr: Box::new(RustExpr::Cast {
+                expr: Box::new(RustExpr::Var("ch".to_string())),
+                ty: "u32".to_string(),
+            }),
+            ty: "i64".to_string(),
+        }
+    );
+    assert_eq!(emit_expr(&lowered_long), "(ch as u32) as i64");
+    assert_eq!(
+        emit_expr(&apply_cast_conversion(
+            RustExpr::Raw("next_char()".to_string()),
+            &char_to_long,
+        )),
+        "((next_char()) as u32) as i64"
     );
 }
 
@@ -939,6 +1075,97 @@ fn map_key_borrow_projection_is_centralized_and_idempotent() {
 }
 
 #[test]
+fn reused_clone_normalization_records_plain_shared_borrow_shape() {
+    let recovered = RustExpr::shaped(
+        RustExprShape::OwnedRecovery,
+        RustExpr::Raw("value.clone()".to_string()),
+    );
+    let mut target = RustSlotShape::conservative(JavaType::Named {
+        name: "Node".to_string(),
+        args: Vec::new(),
+    });
+    target.ownership = OwnershipShape::SharedBorrow;
+
+    let normalized = normalize_reused_clone_for_borrowed_argument(&recovered, "value", &target)
+        .expect("clone-recovered shared target should reuse the local borrow");
+    assert_eq!(emit_expr(&normalized), "&value");
+    assert_eq!(
+        normalized.clone().into_unshaped(),
+        RustExpr::Unary {
+            op: "&".to_string(),
+            expr: Box::new(RustExpr::Var("value".to_string())),
+        }
+    );
+    assert_eq!(normalized.recorded_shape(), Some(RustExprShape::Borrowed));
+    assert_eq!(
+        apply_expr_to_slot(normalized, target.clone(), &Slot::Argument(target)).into_unshaped(),
+        RustExpr::Unary {
+            op: "&".to_string(),
+            expr: Box::new(RustExpr::Var("value".to_string())),
+        },
+        "the normalized borrow is tagged, so a second slot pass must not render &&value"
+    );
+
+    let mut string_target = RustSlotShape::conservative(JavaType::String);
+    string_target.ownership = OwnershipShape::SharedBorrow;
+    string_target.view = ViewShape::Str;
+    let string_view =
+        normalize_reused_clone_for_borrowed_argument(&recovered, "name", &string_target)
+            .expect("clone-recovered string target should reuse the local string view");
+    assert_eq!(emit_expr(&string_view), "name.as_str()");
+    assert_eq!(
+        string_view.clone().into_unshaped(),
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("name".to_string())),
+            method: "as_str".to_string(),
+            args: Vec::new(),
+        }
+    );
+    assert_eq!(
+        string_view.recorded_shape(),
+        Some(RustExprShape::StringView)
+    );
+
+    let array_ty = JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Int)));
+    let mut slice_target = RustSlotShape::conservative(array_ty.clone());
+    slice_target.ownership = OwnershipShape::SharedBorrow;
+    slice_target.view = ViewShape::Slice;
+    let slice_view =
+        normalize_reused_clone_for_borrowed_argument(&recovered, "values", &slice_target)
+            .expect("clone-recovered array target should reuse the local slice view");
+    assert_eq!(emit_expr(&slice_view), "values.as_slice()");
+    assert_eq!(
+        slice_view.clone().into_unshaped(),
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("values".to_string())),
+            method: "as_slice".to_string(),
+            args: Vec::new(),
+        }
+    );
+    assert_eq!(slice_view.recorded_shape(), Some(RustExprShape::SliceView));
+
+    let mut mutable_slice_target = RustSlotShape::conservative(array_ty);
+    mutable_slice_target.ownership = OwnershipShape::MutableBorrow;
+    mutable_slice_target.view = ViewShape::Slice;
+    let mutable_slice_view =
+        normalize_reused_clone_for_borrowed_argument(&recovered, "values", &mutable_slice_target)
+            .expect("clone-recovered array target should reuse the local mutable slice view");
+    assert_eq!(emit_expr(&mutable_slice_view), "values.as_mut_slice()");
+    assert_eq!(
+        mutable_slice_view.clone().into_unshaped(),
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("values".to_string())),
+            method: "as_mut_slice".to_string(),
+            args: Vec::new(),
+        }
+    );
+    assert_eq!(
+        mutable_slice_view.recorded_shape(),
+        Some(RustExprShape::MutableSliceView)
+    );
+}
+
+#[test]
 fn literal_slot_plan_owns_borrowed_string_and_numeric_char_adaptation() {
     let mut borrowed_str = RustSlotShape::conservative(JavaType::String);
     borrowed_str.ownership = OwnershipShape::SharedBorrow;
@@ -954,9 +1181,14 @@ fn literal_slot_plan_owns_borrowed_string_and_numeric_char_adaptation() {
             value: "id".to_string()
         }
     );
+    let borrowed_expr = apply_literal_slot_plan(&borrowed_plan);
     assert_eq!(
-        apply_literal_slot_plan(&borrowed_plan),
+        borrowed_expr.clone().into_unshaped(),
         RustExpr::Literal("\"id\"".to_string())
+    );
+    assert_eq!(
+        borrowed_expr.recorded_shape(),
+        Some(RustExprShape::StringView)
     );
 
     let char_slot = argument_slot(RustSlotShape::conservative(JavaType::Primitive(
@@ -1033,9 +1265,11 @@ fn shape_coercion_plan_keeps_axis_policy_decisions_inspectable() {
         plan.coercions(),
         vec![Coercion::Borrow, Coercion::WrapOption]
     );
+    let applied = apply_shape_coercion_plan(RustExpr::Var("name".to_string()), &plan);
+    assert_eq!(new_java2rust::emit::emit_expr(&applied), "Some(&name)");
     assert_eq!(
-        apply_shape_coercion_plan(RustExpr::Var("name".to_string()), &plan),
-        RustExpr::Raw("Some(&name)".to_string())
+        applied.recorded_shape(),
+        Some(RustExprShape::OptionalConstructed)
     );
 
     let int_actual = RustSlotShape::conservative(JavaType::Primitive(PrimitiveType::Int));
@@ -1075,10 +1309,12 @@ fn owned_to_mutable_borrow_is_an_ownership_coercion() {
 
     assert_eq!(plan.ownership, OwnershipCoercionPolicy::BorrowOwnedMutably);
     assert_eq!(plan.coercions(), vec![Coercion::BorrowMut]);
+    let borrowed = apply_shape_coercion_plan(RustExpr::Var("config".to_string()), &plan);
     assert_eq!(
-        apply_shape_coercion_plan(RustExpr::Var("config".to_string()), &plan),
+        borrowed.clone().into_unshaped(),
         RustExpr::Raw("&mut config".to_string())
     );
+    assert_eq!(borrowed.recorded_shape(), Some(RustExprShape::MutBorrowed));
 }
 
 #[test]
@@ -1094,10 +1330,24 @@ fn optional_owned_to_mutable_borrow_uses_mutable_optional_projection() {
     let plan = shape_coercion_plan(&actual, &target);
 
     assert_eq!(plan.coercions(), vec![Coercion::UnwrapOptionMutBorrowed]);
+    let borrowed = apply_shape_coercion_plan(RustExpr::Var("config".to_string()), &plan);
     assert_eq!(
-        apply_shape_coercion_plan(RustExpr::Var("config".to_string()), &plan),
-        RustExpr::Raw("config.as_mut().expect(\"Java null receiver\")".to_string())
+        borrowed.clone().into_unshaped(),
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Var("config".to_string())),
+                method: "as_mut".to_string(),
+                args: Vec::new(),
+            }),
+            method: "expect".to_string(),
+            args: vec![RustExpr::Literal("\"Java null receiver\"".to_string())],
+        }
     );
+    assert_eq!(
+        emit_expr(&borrowed),
+        "config.as_mut().expect(\"Java null receiver\")"
+    );
+    assert_eq!(borrowed.recorded_shape(), Some(RustExprShape::MutBorrowed));
 }
 
 #[test]
@@ -1167,7 +1417,10 @@ fn syntax_slot_coercion_policy_owns_index_condition_and_concat_segments() {
             RustExpr::Var("i".to_string()),
             &syntax_coercion_plan(&JavaType::Primitive(PrimitiveType::Int), &Slot::Index),
         ),
-        RustExpr::Raw("i as usize".to_string())
+        RustExpr::Cast {
+            expr: Box::new(RustExpr::Var("i".to_string())),
+            ty: "usize".to_string(),
+        }
     );
     assert_eq!(
         apply_syntax_coercion_plan(
@@ -1334,7 +1587,10 @@ fn conversion_plan_wraps_slot_conversion_decisions_before_application() {
     );
     assert_eq!(
         apply_slot_expr_conversion(RustExpr::Var("i".to_string()), &slot_plan),
-        RustExpr::Raw("i as usize".to_string())
+        RustExpr::Cast {
+            expr: Box::new(RustExpr::Var("i".to_string())),
+            ty: "usize".to_string(),
+        }
     );
 
     let lowered_actual = LoweredType::optional_element_borrow(JavaType::String);
@@ -1506,6 +1762,83 @@ fn optional_owned_recovery_capability_follows_element_capability() {
 }
 
 #[test]
+fn ownership_only_optional_carrier_projection_records_family_shape() {
+    let shared = project_optional_element_borrow_carrier(
+        RustExpr::Var("items".to_string()),
+        OwnershipShape::SharedBorrow,
+    )
+    .expect("shared optional element borrow should project carrier");
+    assert_eq!(emit_expr(&shared), "items.as_ref()");
+    assert_eq!(
+        shared.clone().into_unshaped(),
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("items".to_string())),
+            method: "as_ref".to_string(),
+            args: Vec::new(),
+        }
+    );
+    assert_eq!(
+        shared.recorded_shape(),
+        Some(RustExprShape::OptionalProjected)
+    );
+    assert!(
+        shared.recorded_slot_shape().is_none(),
+        "the ownership-only helper must not claim a precise element slot shape"
+    );
+
+    let mutable = project_optional_element_borrow_carrier(
+        RustExpr::Var("items".to_string()),
+        OwnershipShape::MutableBorrow,
+    )
+    .expect("mutable optional element borrow should project carrier");
+    assert_eq!(emit_expr(&mutable), "items.as_mut()");
+    assert_eq!(
+        mutable.clone().into_unshaped(),
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("items".to_string())),
+            method: "as_mut".to_string(),
+            args: Vec::new(),
+        }
+    );
+    assert_eq!(
+        mutable.recorded_shape(),
+        Some(RustExprShape::OptionalProjected)
+    );
+    assert!(mutable.recorded_slot_shape().is_none());
+}
+
+#[test]
+fn optional_string_view_projection_records_projected_family_shape() {
+    let projected = optional_string_view_projection(RustExpr::Var("name".to_string()));
+
+    assert_eq!(
+        projected.clone().into_unshaped(),
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Var("name".to_string())),
+                method: "as_ref".to_string(),
+                args: Vec::new(),
+            }),
+            method: "map".to_string(),
+            args: vec![RustExpr::Raw("|value| value.as_str()".to_string())],
+        }
+    );
+    assert_eq!(
+        projected.recorded_shape(),
+        Some(RustExprShape::OptionalProjected)
+    );
+    assert!(
+        projected.recorded_slot_shape().is_none(),
+        "the operator helper has no target slot in scope, so it must not claim \
+         a precise optional element shape"
+    );
+    assert_eq!(
+        optional_string_view_projection(RustExpr::Raw("make_name()".to_string())).into_unshaped(),
+        RustExpr::Raw("make_name().as_ref().map(|value| value.as_str())".to_string())
+    );
+}
+
+#[test]
 fn optional_array_carrier_to_optional_slice_target_uses_view_projection_policy() {
     let array_ty = JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Int)));
     let option_shape = RustSlotShape::conservative(optional_java_type(array_ty.clone()));
@@ -1576,6 +1909,182 @@ fn optional_array_carrier_to_optional_slice_target_uses_view_projection_policy()
 }
 
 #[test]
+fn optional_string_carrier_to_optional_string_view_records_projection_shape() {
+    let actual = RustSlotShape::conservative(optional_java_type(JavaType::String));
+    let mut target = RustSlotShape::conservative(optional_java_type(JavaType::String));
+    target.ownership = OwnershipShape::SharedBorrow;
+    target.view = ViewShape::Str;
+
+    let plan = shape_coercion_plan(&actual, &target);
+    assert!(matches!(
+        plan.optional,
+        OptionalShapeCoercionPolicy::MapElement { .. }
+    ));
+
+    let projected = apply_shape_coercion_plan(RustExpr::Var("name".to_string()), &plan);
+    assert_eq!(
+        projected.clone().into_unshaped(),
+        RustExpr::Raw("name.as_ref().map(|value| value.as_str())".to_string())
+    );
+    let produced = projected
+        .recorded_slot_shape()
+        .expect("optional string-view projection should record its produced element shape");
+    assert_eq!(produced.java_ty, JavaType::String);
+    assert_eq!(produced.ownership, OwnershipShape::SharedBorrow);
+    assert_eq!(produced.view, ViewShape::Str);
+    assert_eq!(
+        apply_shape_coercion_plan(projected, &plan).into_unshaped(),
+        RustExpr::Raw("name.as_ref().map(|value| value.as_str())".to_string()),
+        "a recorded optional string projection is already handled and must not \
+         depend on recognising the rendered adapter suffix"
+    );
+}
+
+#[test]
+fn optional_shape_map_to_optional_slice_records_projection_shape() {
+    let array_ty = JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Int)));
+    let actual = RustSlotShape::conservative(optional_java_type(array_ty.clone()));
+    let mut target = RustSlotShape::conservative(optional_java_type(array_ty.clone()));
+    target.ownership = OwnershipShape::SharedBorrow;
+    target.view = ViewShape::Slice;
+
+    let plan = shape_coercion_plan(&actual, &target);
+    assert!(matches!(
+        plan.optional,
+        OptionalShapeCoercionPolicy::MapElement { .. }
+    ));
+
+    let projected = apply_shape_coercion_plan(RustExpr::Var("values".to_string()), &plan);
+    assert_eq!(emit_expr(&projected), "values.as_deref()");
+    assert_eq!(
+        projected.clone().into_unshaped(),
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("values".to_string())),
+            method: "as_deref".to_string(),
+            args: Vec::new(),
+        }
+    );
+    let produced = projected
+        .recorded_slot_shape()
+        .expect("optional slice projection should record its produced element shape");
+    assert_eq!(produced.java_ty, array_ty);
+    assert_eq!(produced.ownership, OwnershipShape::SharedBorrow);
+    assert_eq!(produced.view, ViewShape::Slice);
+    assert_eq!(
+        emit_expr(&apply_shape_coercion_plan(projected.clone(), &plan)),
+        "values.as_deref()",
+        "a recorded optional slice projection is already handled and must not \
+         depend on recognising the rendered adapter suffix"
+    );
+    assert_eq!(
+        apply_shape_coercion_plan(projected, &plan).into_unshaped(),
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("values".to_string())),
+            method: "as_deref".to_string(),
+            args: Vec::new(),
+        },
+        "a recorded optional slice projection is already handled and must not \
+         depend on recognising the rendered adapter suffix"
+    );
+}
+
+#[test]
+fn optional_shape_map_to_optional_mut_slice_records_projection_shape() {
+    let array_ty = JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Int)));
+    let actual = RustSlotShape::conservative(optional_java_type(array_ty.clone()));
+    let mut target = RustSlotShape::conservative(optional_java_type(array_ty.clone()));
+    target.ownership = OwnershipShape::MutableBorrow;
+    target.view = ViewShape::Slice;
+
+    let plan = shape_coercion_plan(&actual, &target);
+    assert!(matches!(
+        plan.optional,
+        OptionalShapeCoercionPolicy::MapElement { .. }
+    ));
+
+    let projected = apply_shape_coercion_plan(RustExpr::Var("values".to_string()), &plan);
+    assert_eq!(emit_expr(&projected), "values.as_deref_mut()");
+    assert_eq!(
+        projected.clone().into_unshaped(),
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("values".to_string())),
+            method: "as_deref_mut".to_string(),
+            args: Vec::new(),
+        }
+    );
+    let produced = projected
+        .recorded_slot_shape()
+        .expect("optional mutable-slice projection should record its produced element shape");
+    assert_eq!(produced.java_ty, array_ty);
+    assert_eq!(produced.ownership, OwnershipShape::MutableBorrow);
+    assert_eq!(produced.view, ViewShape::Slice);
+    assert_eq!(
+        emit_expr(&apply_shape_coercion_plan(projected.clone(), &plan)),
+        "values.as_deref_mut()",
+        "a recorded optional mutable-slice projection is already handled and must \
+         not depend on recognising the rendered adapter suffix"
+    );
+    assert_eq!(
+        apply_shape_coercion_plan(projected, &plan).into_unshaped(),
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("values".to_string())),
+            method: "as_deref_mut".to_string(),
+            args: Vec::new(),
+        },
+        "a recorded optional mutable-slice projection is already handled and must \
+         not depend on recognising the rendered adapter suffix"
+    );
+}
+
+#[test]
+fn optional_element_borrow_carrier_projection_records_element_shape() {
+    let element_ty = JavaType::Named {
+        name: "ExternalValue".to_string(),
+        args: Vec::new(),
+    };
+    let mut element_shape = RustSlotShape::conservative(element_ty.clone());
+    element_shape.ownership = OwnershipShape::MutableBorrow;
+
+    let projected = project_optional_element_borrow_carrier_with_shape(
+        RustExpr::Var("value".to_string()),
+        &element_shape,
+    )
+    .expect("mutable optional element borrow should project the carrier");
+
+    assert_eq!(emit_expr(&projected), "value.as_mut()");
+    assert_eq!(
+        projected.clone().into_unshaped(),
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("value".to_string())),
+            method: "as_mut".to_string(),
+            args: Vec::new(),
+        }
+    );
+    let produced = projected
+        .recorded_slot_shape()
+        .expect("optional element borrow projection should record its produced shape");
+    assert_eq!(produced.java_ty, element_ty);
+    assert_eq!(produced.ownership, OwnershipShape::MutableBorrow);
+    assert_eq!(produced.view, element_shape.view);
+
+    element_shape.ownership = OwnershipShape::SharedBorrow;
+    let shared_projected = project_optional_element_borrow_carrier_with_shape(
+        RustExpr::Var("value".to_string()),
+        &element_shape,
+    )
+    .expect("shared optional element borrow should project the carrier");
+    assert_eq!(emit_expr(&shared_projected), "value.as_ref()");
+    assert_eq!(
+        shared_projected.into_unshaped(),
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("value".to_string())),
+            method: "as_ref".to_string(),
+            args: Vec::new(),
+        }
+    );
+}
+
+#[test]
 fn optional_array_carrier_to_required_slice_target_borrows_before_unwrap() {
     let array_ty = JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Int)));
     let option_shape = RustSlotShape::conservative(optional_java_type(array_ty.clone()));
@@ -1590,13 +2099,27 @@ fn optional_array_carrier_to_required_slice_target_borrows_before_unwrap() {
             element_shape: Box::new(element_shape),
             recovery: None,
         },
-        &Slot::Argument(target),
+        &Slot::Argument(target.clone()),
         &FactSet::default(),
     );
 
+    let projected = apply_slot_conversion_plan(RustExpr::Raw("values".to_string()), &plan);
     assert_eq!(
-        apply_slot_conversion_plan(RustExpr::Raw("values".to_string()), &plan).into_unshaped(),
+        projected.clone().into_unshaped(),
         RustExpr::Raw("values.as_ref().expect(\"Java null receiver\").as_slice()".to_string())
+    );
+    let actual = projected
+        .recorded_slot_shape()
+        .expect("required borrowed-element projection should record its produced slot shape");
+    assert_eq!(actual.java_ty, target.java_ty);
+    assert_eq!(actual.ownership, target.ownership);
+    assert_eq!(actual.view, target.view);
+    assert_eq!(actual.dispatch, target.dispatch);
+    assert_eq!(
+        apply_slot_conversion_plan(projected, &plan).into_unshaped(),
+        RustExpr::Raw("values.as_ref().expect(\"Java null receiver\").as_slice()".to_string()),
+        "a recorded required-element projection is already handled and must not \
+         depend on recognising the rendered adapter suffix"
     );
 }
 
@@ -1663,20 +2186,36 @@ fn clone_recovery_policy_is_explicit_in_coercion_adapter() {
         .into_unshaped(),
         RustExpr::Raw("value.clone()/* TODO(translation): validate added clone */".to_string())
     );
-    assert_eq!(
-        apply_coercions(
-            RustExpr::Var("value".to_string()),
-            &[Coercion::CloneRecovery {
-                policy: CloneRecoveryPolicy::ProvenCloneCapability {
-                    java_ty: JavaType::Named {
-                        name: "ExternalValue".to_string(),
-                        args: Vec::new(),
-                    },
+    let proven = apply_coercions(
+        RustExpr::Var("value".to_string()),
+        &[Coercion::CloneRecovery {
+            policy: CloneRecoveryPolicy::ProvenCloneCapability {
+                java_ty: JavaType::Named {
+                    name: "ExternalValue".to_string(),
+                    args: Vec::new(),
                 },
-            }],
-        )
-        .into_unshaped(),
+            },
+        }],
+    );
+    assert_eq!(
+        proven.clone().into_unshaped(),
         RustExpr::Raw("value.clone()".to_string())
+    );
+    assert_eq!(proven.recorded_shape(), Some(RustExprShape::OwnedRecovery));
+
+    let already_recovered = apply_coercions(
+        RustExpr::Raw("value.clone()".to_string()),
+        &[Coercion::CloneRecovery {
+            policy: CloneRecoveryPolicy::AuditRequired,
+        }],
+    );
+    assert_eq!(
+        already_recovered.clone().into_unshaped(),
+        RustExpr::Raw("value.clone()".to_string())
+    );
+    assert_eq!(
+        already_recovered.recorded_shape(),
+        Some(RustExprShape::OwnedRecovery)
     );
 }
 
@@ -1793,15 +2332,20 @@ fn shape_coercion_uses_copy_capability_for_borrowed_to_owned_recovery() {
         plan_shape_coercion_with_facts(&actual, &target, &facts),
         vec![Coercion::CopyBorrowedValue]
     );
-    assert_eq!(
-        apply_expr_to_slot_with_facts(
-            RustExpr::Var("external_id".to_string()),
-            actual,
-            &Slot::Argument(target),
-            &facts,
-        ),
-        RustExpr::Raw("*external_id".to_string())
+    let copied = apply_expr_to_slot_with_facts(
+        RustExpr::Var("external_id".to_string()),
+        actual,
+        &Slot::Argument(target),
+        &facts,
     );
+    assert_eq!(
+        copied,
+        RustExpr::Unary {
+            op: "*".to_string(),
+            expr: Box::new(RustExpr::Var("external_id".to_string())),
+        }
+    );
+    assert_eq!(emit_expr(&copied), "*external_id");
 }
 
 #[test]
@@ -2307,16 +2851,17 @@ fn optional_shape_coercion_policy_records_structural_element_coercions() {
         vec![Coercion::Borrow]
     );
     let optional_construction = SlotConversionPlan::OptionalConstruction(construction);
+    let applied =
+        apply_slot_conversion_plan(RustExpr::Var("name".to_string()), &optional_construction);
+    assert_eq!(new_java2rust::emit::emit_expr(&applied), "Some(&name)");
     assert_eq!(
-        apply_slot_conversion_plan(RustExpr::Var("name".to_string()), &optional_construction),
-        RustExpr::Call {
-            function: Box::new(RustExpr::Var("Some".to_string())),
-            args: vec![RustExpr::Unary {
-                op: "&".to_string(),
-                expr: Box::new(RustExpr::Var("name".to_string())),
-            }],
-        }
+        applied.recorded_shape(),
+        Some(RustExprShape::OptionalConstructed)
     );
+    let RustExpr::Call { args, .. } = applied.unshaped() else {
+        panic!("optional construction should stay a Some call");
+    };
+    assert_eq!(args[0].recorded_shape(), Some(RustExprShape::Borrowed));
     let preconverted =
         preconverted_optional_slot_construction_plan(&target, JavaType::String, &facts);
     assert_eq!(preconverted.wrapper_ownership, OwnershipShape::Owned);
@@ -2331,9 +2876,15 @@ fn optional_shape_coercion_policy_records_structural_element_coercions() {
         vec![Coercion::Identity]
     );
     let optional_preconverted = SlotConversionPlan::OptionalConstruction(preconverted);
+    let applied =
+        apply_slot_conversion_plan(RustExpr::Raw("&name".to_string()), &optional_preconverted);
     assert_eq!(
-        apply_slot_conversion_plan(RustExpr::Raw("&name".to_string()), &optional_preconverted),
-        RustExpr::Call {
+        applied.recorded_shape(),
+        Some(RustExprShape::OptionalConstructed)
+    );
+    assert_eq!(
+        applied.unshaped(),
+        &RustExpr::Call {
             function: Box::new(RustExpr::Var("Some".to_string())),
             args: vec![RustExpr::Raw("&name".to_string())],
         }
@@ -2433,6 +2984,65 @@ fn optional_assignment_adapter_preserves_structured_none_without_rendering() {
             false,
         ),
         RustExpr::Var("None".to_string())
+    );
+
+    let shared_node = JavaType::Named {
+        name: "SharedNode".to_string(),
+        args: Vec::new(),
+    };
+    let mut storage_plan = StoragePlan::default();
+    storage_plan.insert(
+        "SharedNode".to_string(),
+        TypeStorageFacts {
+            escape: Escape::Stored,
+            mutated: false,
+            mutation_provably_absent: true,
+            surface_forwardable: true,
+            ..TypeStorageFacts::default()
+        },
+    );
+    let facts = FactSet {
+        storage_strategies: storage_plan,
+        ..FactSet::default()
+    };
+    let actual = RustSlotShape::conservative(shared_node.clone());
+    let target = RustSlotShape::conservative(optional_java_type(shared_node));
+    let conversion_plan = SlotExprConversionPlan {
+        actual: actual.clone(),
+        slot: Slot::Assignment(target.clone()),
+        conversion: SlotConversionPlan::OptionalConstruction(
+            optional_slot_construction_plan_for_actual(&actual, &target, &facts),
+        ),
+    };
+    let preconverted =
+        preconverted_optional_slot_construction_plan(&target, actual.java_ty.clone(), &facts);
+    let adapted = adapt_optional_assignment_value_for_target(
+        RustExpr::Call {
+            function: Box::new(RustExpr::Raw("SharedNode::new".to_string())),
+            args: Vec::new(),
+        },
+        actual,
+        conversion_plan,
+        preconverted,
+        false,
+        true,
+    );
+    assert_eq!(
+        new_java2rust::emit::emit_expr(&adapted),
+        "Some(std::rc::Rc::new(SharedNode::new()))"
+    );
+    let RustExpr::Call { args, .. } = adapted.unshaped() else {
+        panic!("optional construction should stay a Some call");
+    };
+    assert_eq!(
+        args,
+        &[RustExpr::Call {
+            function: Box::new(RustExpr::path(["std", "rc", "Rc", "new"])),
+            args: vec![RustExpr::Call {
+                function: Box::new(RustExpr::Raw("SharedNode::new".to_string())),
+                args: Vec::new(),
+            }],
+        }]
     );
 }
 
@@ -2535,14 +3145,19 @@ fn optional_shape_coercion_wraps_after_erased_element_conversion() {
         policy.coercions(),
         vec![Coercion::EraseObject, Coercion::WrapOption]
     );
+    let applied = apply_expr_to_slot_with_facts(
+        RustExpr::Var("vid_map".to_string()),
+        actual,
+        &Slot::Assignment(target),
+        &facts,
+    );
     assert_eq!(
-        apply_expr_to_slot_with_facts(
-            RustExpr::Var("vid_map".to_string()),
-            actual,
-            &Slot::Assignment(target),
-            &facts,
-        ),
-        RustExpr::Raw("Some(Box::new(vid_map) as Box<dyn std::any::Any>)".to_string())
+        new_java2rust::emit::emit_expr(&applied),
+        "Some(Box::new(vid_map) as Box<dyn std::any::Any>)"
+    );
+    assert_eq!(
+        applied.recorded_shape(),
+        Some(RustExprShape::OptionalConstructed)
     );
 }
 
@@ -2599,7 +3214,15 @@ fn optional_display_segments_use_java_null_string_policy_before_rendering() {
             RustExpr::Var("value".to_string()),
             &slot_conversion_plan(&optional_string, &Slot::StringConcatSegment),
         ),
-        RustExpr::Raw("value.as_deref().unwrap_or(\"null\")".to_string())
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Var("value".to_string())),
+                method: "as_deref".to_string(),
+                args: Vec::new(),
+            }),
+            method: "unwrap_or".to_string(),
+            args: vec![RustExpr::Literal("\"null\"".to_string())],
+        }
     );
 }
 
@@ -2633,10 +3256,19 @@ fn optional_platform_facade_display_segments_use_display_value_policy() {
             RustExpr::Var("uri".to_string()),
             &slot_conversion_plan(&optional_uri, &Slot::StringConcatSegment),
         ),
-        RustExpr::Raw(
-            "uri.as_ref().map(|value| value.to_string()).unwrap_or_else(|| \"null\".to_string())"
-                .to_string(),
-        )
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::MethodCall {
+                    receiver: Box::new(RustExpr::Var("uri".to_string())),
+                    method: "as_ref".to_string(),
+                    args: Vec::new(),
+                }),
+                method: "map".to_string(),
+                args: vec![RustExpr::Raw("|value| value.to_string()".to_string())],
+            }),
+            method: "unwrap_or_else".to_string(),
+            args: vec![RustExpr::Raw("|| \"null\".to_string()".to_string())],
+        }
     );
     assert_eq!(
         apply_java_display_plan(
@@ -2793,15 +3425,26 @@ fn shape_coercion_owns_string_view_adapters() {
 
     assert_eq!(plan_shape_coercion(&actual, &target), vec![Coercion::AsStr]);
 
-    assert_eq!(
-        apply_expr_to_slot(
-            RustExpr::Var("name".to_string()),
-            actual,
-            &Slot::Argument(target)
-        )
-        .into_unshaped(),
-        RustExpr::Raw("name.as_str()".to_string())
+    let projected = apply_expr_to_slot(
+        RustExpr::Var("name".to_string()),
+        actual,
+        &Slot::Argument(target.clone()),
     );
+    assert_eq!(emit_expr(&projected), "name.as_str()");
+    assert_eq!(
+        projected.clone().into_unshaped(),
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("name".to_string())),
+            method: "as_str".to_string(),
+            args: Vec::new(),
+        }
+    );
+    let produced = projected
+        .recorded_slot_shape()
+        .expect("string view projection should record its target shape");
+    assert_eq!(produced.java_ty, target.java_ty);
+    assert_eq!(produced.ownership, target.ownership);
+    assert_eq!(produced.view, target.view);
 }
 
 #[test]
@@ -2824,6 +3467,36 @@ fn view_coercion_policy_owns_string_view_adapters() {
         view_coercion_policy(&int_shape, &int_shape, &FactSet::default()),
         ViewCoercionPolicy::NoViewChange
     );
+
+    let recovered = apply_expr_to_slot(
+        RustExpr::Raw("name.as_str()".to_string()),
+        borrowed_str.clone(),
+        &Slot::Argument(owned.clone()),
+    );
+    assert_eq!(
+        recovered.clone().into_unshaped(),
+        RustExpr::Raw("name.as_str().to_string()".to_string())
+    );
+    assert_eq!(
+        recovered.recorded_shape(),
+        Some(RustExprShape::OwnedRecovery)
+    );
+    assert_eq!(recovered.recorded_slot_shape(), Some(&owned));
+
+    let already_owned = apply_expr_to_slot(
+        RustExpr::Raw("name.to_string()".to_string()),
+        borrowed_str,
+        &Slot::Argument(owned.clone()),
+    );
+    assert_eq!(
+        already_owned.clone().into_unshaped(),
+        RustExpr::Raw("name.to_string()".to_string())
+    );
+    assert_eq!(
+        already_owned.recorded_shape(),
+        Some(RustExprShape::OwnedRecovery)
+    );
+    assert_eq!(already_owned.recorded_slot_shape(), Some(&owned));
 }
 
 #[test]
@@ -2849,14 +3522,51 @@ fn view_coercion_policy_owns_sequence_slice_adapters() {
         plan_shape_coercion_with_facts(&actual, &target, &FactSet::default()),
         vec![Coercion::AsSlice]
     );
+    let projected = apply_expr_to_slot(
+        RustExpr::Var("intervals".to_string()),
+        actual.clone(),
+        &Slot::Argument(target.clone()),
+    );
+    assert_eq!(emit_expr(&projected), "intervals.as_slice()");
     assert_eq!(
-        apply_expr_to_slot(
-            RustExpr::Var("intervals".to_string()),
-            actual,
-            &Slot::Argument(target)
-        )
-        .into_unshaped(),
-        RustExpr::Raw("intervals.as_slice()".to_string())
+        projected.clone().into_unshaped(),
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("intervals".to_string())),
+            method: "as_slice".to_string(),
+            args: Vec::new(),
+        }
+    );
+    let produced = projected
+        .recorded_slot_shape()
+        .expect("slice view projection should record its target shape");
+    assert_eq!(produced.java_ty, target.java_ty);
+    assert_eq!(produced.ownership, target.ownership);
+    assert_eq!(produced.view, target.view);
+
+    let mut mutable_target = target.clone();
+    mutable_target.ownership = OwnershipShape::MutableBorrow;
+    let mutable_plan =
+        shape_coercion_plan_with_facts(&actual, &mutable_target, &FactSet::default());
+    assert_eq!(
+        mutable_plan.view,
+        ViewCoercionPolicy::BorrowSequenceMutSliceView
+    );
+    let mutable_projected = apply_coercions(
+        RustExpr::Var("intervals".to_string()),
+        &[Coercion::AsMutSlice],
+    );
+    assert_eq!(emit_expr(&mutable_projected), "intervals.as_mut_slice()");
+    assert_eq!(
+        mutable_projected.clone().into_unshaped(),
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("intervals".to_string())),
+            method: "as_mut_slice".to_string(),
+            args: Vec::new(),
+        }
+    );
+    assert_eq!(
+        mutable_projected.recorded_shape(),
+        Some(RustExprShape::MutableSliceView)
     );
 }
 
@@ -2879,13 +3589,121 @@ fn set_to_borrowed_slice_collects_temporary_vec_view() {
     let plan = shape_coercion_plan_with_facts(&actual, &target, &FactSet::default());
 
     assert_eq!(plan.view, ViewCoercionPolicy::BorrowSequenceSliceView);
+    let projected = apply_expr_to_slot(
+        RustExpr::Raw("self.lines".to_string()),
+        actual.clone(),
+        &Slot::Argument(target.clone()),
+    );
+    assert_eq!(
+        projected.clone().into_unshaped(),
+        RustExpr::Raw("&(self.lines).iter().cloned().collect::<Vec<_>>()".to_string())
+    );
+    let produced = projected
+        .recorded_slot_shape()
+        .expect("set-to-slice projection should record its produced slot shape");
+    assert_eq!(produced.java_ty, target.java_ty);
+    assert_eq!(produced.ownership, target.ownership);
+    assert_eq!(produced.view, target.view);
+    assert_eq!(
+        apply_expr_to_slot(projected, actual, &Slot::Argument(target.clone())).into_unshaped(),
+        RustExpr::Raw("&(self.lines).iter().cloned().collect::<Vec<_>>()".to_string()),
+        "a recorded set-to-slice projection is already handled and must not depend \
+         on recognising the rendered adapter suffix"
+    );
+
+    let tagged_slice = RustExpr::shaped_as(
+        RustExprShape::SliceView,
+        Some(target.clone()),
+        RustExpr::Raw("temporary.as_slice()".to_string()),
+    );
     assert_eq!(
         apply_expr_to_slot(
-            RustExpr::Raw("self.lines".to_string()),
-            actual,
-            &Slot::Argument(target)
+            tagged_slice,
+            RustSlotShape::conservative(JavaType::Named {
+                name: "Set".to_string(),
+                args: vec![JavaType::Named {
+                    name: "SimpleInterval".to_string(),
+                    args: Vec::new(),
+                }],
+            }),
+            &Slot::Argument(target.clone()),
+        )
+        .into_unshaped(),
+        RustExpr::Raw("temporary.as_slice()".to_string()),
+        "a recorded target shape, not the rendered suffix, proves idempotence"
+    );
+
+    let untagged_suffix = apply_expr_to_slot(
+        RustExpr::Raw("temporary.as_slice()".to_string()),
+        RustSlotShape::conservative(JavaType::Named {
+            name: "Set".to_string(),
+            args: vec![JavaType::Named {
+                name: "SimpleInterval".to_string(),
+                args: Vec::new(),
+            }],
+        }),
+        &Slot::Argument(target.clone()),
+    );
+    assert_eq!(
+        untagged_suffix.clone().into_unshaped(),
+        RustExpr::Raw("&(temporary.as_slice()).iter().cloned().collect::<Vec<_>>()".to_string())
+    );
+    let produced = untagged_suffix
+        .recorded_slot_shape()
+        .expect("set-to-slice adaptation should record the produced shape");
+    assert_eq!(produced.java_ty, target.java_ty);
+    assert_eq!(produced.ownership, target.ownership);
+    assert_eq!(produced.view, target.view);
+}
+
+#[test]
+fn map_view_owned_snapshots_record_recovery_shape() {
+    let structured_cases = [
+        (
+            owned_map_keys_vec_projection(RustExpr::Var("values".to_string())),
+            "values.keys().cloned().collect::<Vec<_>>()",
         ),
-        RustExpr::Raw("&(self.lines).iter().cloned().collect::<Vec<_>>()".to_string())
+        (
+            owned_map_keys_set_projection(RustExpr::Var("values".to_string())),
+            "values.keys().cloned().collect::<std::collections::HashSet<_>>()",
+        ),
+        (
+            owned_map_values_vec_projection(RustExpr::Var("values".to_string())),
+            "values.values().cloned().collect::<Vec<_>>()",
+        ),
+        (
+            owned_map_values_set_projection(RustExpr::Var("values".to_string())),
+            "values.values().cloned().collect::<std::collections::HashSet<_>>()",
+        ),
+        (
+            owned_collection_to_vec_projection(RustExpr::Var("values".to_string())),
+            "values.iter().cloned().collect::<Vec<_>>()",
+        ),
+    ];
+
+    for (expr, rendered) in structured_cases {
+        assert_eq!(emit_expr(&expr), rendered);
+        assert!(!matches!(expr.clone().into_unshaped(), RustExpr::Raw(_)));
+        assert_eq!(expr.recorded_shape(), Some(RustExprShape::OwnedRecovery));
+    }
+
+    let erased_object_snapshot = owned_collection_to_vec_projection_for_receiver_type(
+        RustExpr::Var("values".to_string()),
+        Some(&JavaType::Named {
+            name: "List".to_string(),
+            args: Vec::new(),
+        }),
+    );
+    assert_eq!(
+        erased_object_snapshot.clone().into_unshaped(),
+        RustExpr::Raw(
+            "values.iter().map(|value| java_clone_erased_object_ref(value)).collect::<Vec<_>>()"
+                .to_string()
+        )
+    );
+    assert_eq!(
+        erased_object_snapshot.recorded_shape(),
+        Some(RustExprShape::OwnedRecovery)
     );
 }
 
@@ -2908,17 +3726,23 @@ fn optional_sequence_to_slice_uses_borrowed_unwrap_then_slice_view() {
         plan_shape_coercion_with_facts(&actual, &target, &FactSet::default()),
         vec![Coercion::UnwrapOptionBorrowed, Coercion::AsSlice]
     );
+    let projected = apply_expr_to_slot(
+        RustExpr::Raw("self.intervals".to_string()),
+        actual,
+        &Slot::Argument(target.clone()),
+    );
     assert_eq!(
-        apply_expr_to_slot(
-            RustExpr::Raw("self.intervals".to_string()),
-            actual,
-            &Slot::Argument(target)
-        )
-        .into_unshaped(),
+        projected.clone().into_unshaped(),
         RustExpr::Raw(
             "self.intervals.as_ref().expect(\"Java null receiver\").as_slice()".to_string()
         )
     );
+    let produced = projected
+        .recorded_slot_shape()
+        .expect("optional unwrap plus slice view should record its target shape");
+    assert_eq!(produced.java_ty, target.java_ty);
+    assert_eq!(produced.ownership, target.ownership);
+    assert_eq!(produced.view, target.view);
 }
 
 #[test]
@@ -2961,15 +3785,20 @@ fn shape_coercion_uses_type_capability_facts_for_string_views() {
         view_coercion_policy(&actual, &target, &facts)
     );
 
+    let projected = apply_expr_to_slot_with_facts(
+        RustExpr::Var("name".to_string()),
+        actual,
+        &Slot::Argument(target),
+        &facts,
+    );
+    assert_eq!(emit_expr(&projected), "name.as_str()");
     assert_eq!(
-        apply_expr_to_slot_with_facts(
-            RustExpr::Var("name".to_string()),
-            actual,
-            &Slot::Argument(target),
-            &facts,
-        )
-        .into_unshaped(),
-        RustExpr::Raw("name.as_str()".to_string())
+        projected.into_unshaped(),
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("name".to_string())),
+            method: "as_str".to_string(),
+            args: Vec::new(),
+        }
     );
 }
 
@@ -3977,14 +4806,13 @@ fn shape_coercion_owns_dyn_trait_and_erased_object_adapters() {
             trait_name: "Animal".to_string(),
         }]
     );
-    assert_eq!(
-        apply_expr_to_slot(
-            RustExpr::Var("dog".to_string()),
-            actual.clone(),
-            &Slot::Argument(dyn_target)
-        ),
-        RustExpr::Raw("&dog as &dyn Animal".to_string())
+    let dyn_borrow = apply_expr_to_slot(
+        RustExpr::Var("dog".to_string()),
+        actual.clone(),
+        &Slot::Argument(dyn_target),
     );
+    assert_eq!(emit_expr(&dyn_borrow), "&dog as &dyn Animal");
+    assert_eq!(dyn_borrow.recorded_shape(), Some(RustExprShape::Borrowed));
 
     let mut boxed_target = RustSlotShape::conservative(JavaType::Named {
         name: "Animal".to_string(),
@@ -4098,13 +4926,18 @@ fn shape_coercion_owns_dyn_trait_and_erased_object_adapters() {
             trait_name: "Animal".to_string(),
         }]
     );
+    let boxed_dyn_borrow = apply_expr_to_slot(
+        RustExpr::Var("animal".to_string()),
+        boxed_actual,
+        &Slot::Argument(borrowed_dyn_target),
+    );
     assert_eq!(
-        apply_expr_to_slot(
-            RustExpr::Var("animal".to_string()),
-            boxed_actual,
-            &Slot::Argument(borrowed_dyn_target)
-        ),
-        RustExpr::Raw("animal.as_ref() as &dyn Animal".to_string())
+        new_java2rust::emit::emit_expr(&boxed_dyn_borrow),
+        "animal.as_ref() as &dyn Animal"
+    );
+    assert_eq!(
+        boxed_dyn_borrow.recorded_shape(),
+        Some(RustExprShape::Borrowed)
     );
     assert_eq!(
         apply_coercions(
@@ -4192,13 +5025,18 @@ fn shape_coercion_owns_dyn_trait_and_erased_object_adapters() {
             trait_name: "Animal".to_string(),
         }]
     );
+    let cloned_box = apply_expr_to_slot(
+        RustExpr::Var("animal".to_string()),
+        borrowed_dyn_actual,
+        &Slot::Argument(owned_boxed_target),
+    );
     assert_eq!(
-        apply_expr_to_slot(
-            RustExpr::Var("animal".to_string()),
-            borrowed_dyn_actual,
-            &Slot::Argument(owned_boxed_target)
-        ),
+        cloned_box.clone().into_unshaped(),
         RustExpr::Raw("animal.clone_box()".to_string())
+    );
+    assert_eq!(
+        cloned_box.recorded_shape(),
+        Some(RustExprShape::OwnedRecovery)
     );
 }
 
@@ -4638,13 +5476,14 @@ fn coercion_owns_borrowed_optional_to_owned_optional_slot() {
     );
 
     assert_eq!(
-        expr,
+        expr.clone().into_unshaped(),
         RustExpr::MethodCall {
             receiver: Box::new(RustExpr::Raw("values.iter().next()".to_string())),
             method: "cloned".to_string(),
             args: Vec::new(),
         }
     );
+    assert_eq!(expr.recorded_shape(), Some(RustExprShape::OwnedRecovery));
 }
 
 #[test]
@@ -4710,13 +5549,14 @@ fn coercion_uses_copy_capability_for_borrowed_optional_elements() {
     );
 
     assert_eq!(
-        expr,
+        expr.clone().into_unshaped(),
         RustExpr::MethodCall {
             receiver: Box::new(RustExpr::Raw("values.iter().next()".to_string())),
             method: "copied".to_string(),
             args: Vec::new(),
         }
     );
+    assert_eq!(expr.recorded_shape(), Some(RustExprShape::OwnedRecovery));
 }
 
 #[test]
@@ -4750,13 +5590,14 @@ fn coercion_uses_type_capability_facts_for_borrowed_optional_elements() {
     );
 
     assert_eq!(
-        expr,
+        expr.clone().into_unshaped(),
         RustExpr::MethodCall {
             receiver: Box::new(RustExpr::Raw("values.iter().next()".to_string())),
             method: "copied".to_string(),
             args: Vec::new(),
         }
     );
+    assert_eq!(expr.recorded_shape(), Some(RustExprShape::OwnedRecovery));
 }
 
 #[test]
@@ -4929,18 +5770,39 @@ fn borrowed_sequence_ownership_recovery_uses_to_vec() {
             policy: CloneRecoveryPolicy::AuditRequired,
         }]
     );
+    let recovered = apply_lowered_expr_to_slot(
+        LoweredExpr {
+            expr: RustExpr::Raw("Table::VALUES[index as usize]".to_string()),
+            actual: LoweredType::Slot(Box::new(actual.clone())),
+        },
+        &Slot::Return(target.clone()),
+    );
     assert_eq!(
-        apply_lowered_expr_to_slot(
-            LoweredExpr {
-                expr: RustExpr::Raw("Table::VALUES[index as usize]".to_string()),
-                actual: LoweredType::Slot(Box::new(actual)),
-            },
-            &Slot::Return(target),
-        ),
+        recovered.clone().into_unshaped(),
         RustExpr::Raw(
             "(Table::VALUES[index as usize]).to_vec()/* TODO(translation): validate added clone */"
                 .to_string()
         )
+    );
+    assert_eq!(
+        recovered.recorded_shape(),
+        Some(RustExprShape::OwnedRecovery)
+    );
+
+    let already_recovered = apply_lowered_expr_to_slot(
+        LoweredExpr {
+            expr: RustExpr::Raw("values.to_vec()".to_string()),
+            actual: LoweredType::Slot(Box::new(actual)),
+        },
+        &Slot::Return(target),
+    );
+    assert_eq!(
+        already_recovered.clone().into_unshaped(),
+        RustExpr::Raw("values.to_vec()".to_string())
+    );
+    assert_eq!(
+        already_recovered.recorded_shape(),
+        Some(RustExprShape::OwnedRecovery)
     );
 }
 
@@ -5172,9 +6034,101 @@ fn optional_borrowed_element_adapter_unwraps_to_concrete_copy_target() {
             }),
         })
     );
+    let projected =
+        apply_slot_conversion_plan(RustExpr::Raw("values.get(&key)".to_string()), &plan);
     assert_eq!(
-        apply_slot_conversion_plan(RustExpr::Raw("values.get(&key)".to_string()), &plan),
-        RustExpr::Raw("values.get(&key).copied().expect(\"Java null receiver\")".to_string())
+        emit_expr(&projected),
+        "values.get(&key).copied().expect(\"Java null receiver\")"
+    );
+    assert_eq!(
+        projected.clone().into_unshaped(),
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::shaped(
+                RustExprShape::OwnedRecovery,
+                RustExpr::MethodCall {
+                    receiver: Box::new(RustExpr::Raw("values.get(&key)".to_string())),
+                    method: "copied".to_string(),
+                    args: Vec::new(),
+                },
+            )),
+            method: "expect".to_string(),
+            args: vec![RustExpr::Literal("\"Java null receiver\"".to_string())],
+        }
+    );
+    assert_eq!(
+        projected.recorded_shape(),
+        Some(RustExprShape::OwnedRecovery)
+    );
+}
+
+#[test]
+fn optional_borrowed_element_unwrap_records_same_target_shape() {
+    let external_value = JavaType::Named {
+        name: "ExternalValue".to_string(),
+        args: Vec::new(),
+    };
+    let mut element_shape = RustSlotShape::conservative(external_value.clone());
+    element_shape.ownership = OwnershipShape::SharedBorrow;
+    let option_shape = RustSlotShape::conservative(optional_java_type(external_value.clone()));
+    let mut target = RustSlotShape::conservative(external_value.clone());
+    target.ownership = OwnershipShape::SharedBorrow;
+
+    let plan = lowered_slot_conversion_plan_with_facts(
+        &LoweredType::OptionalElementBorrow {
+            option_shape: Box::new(option_shape),
+            element_shape: Box::new(element_shape),
+            recovery: None,
+        },
+        &Slot::Argument(target.clone()),
+        &FactSet::default(),
+    );
+
+    let projected =
+        apply_slot_conversion_plan(RustExpr::Raw("values.get(&key)".to_string()), &plan);
+    assert_eq!(
+        projected.clone().into_unshaped(),
+        RustExpr::Raw("values.get(&key).expect(\"Java null receiver\")".to_string())
+    );
+    let produced = projected
+        .recorded_slot_shape()
+        .expect("optional borrowed unwrap should record its produced shape");
+    assert_eq!(produced.java_ty, external_value);
+    assert_eq!(produced.ownership, OwnershipShape::SharedBorrow);
+    assert_eq!(produced.view, target.view);
+}
+
+#[test]
+fn optional_owned_element_move_unwrap_preserves_expr_structure() {
+    let external_value = JavaType::Named {
+        name: "ExternalValue".to_string(),
+        args: Vec::new(),
+    };
+    let element_shape = RustSlotShape::conservative(external_value.clone());
+    let option_shape = RustSlotShape::conservative(optional_java_type(external_value.clone()));
+    let target = RustSlotShape::conservative(external_value);
+
+    let plan = lowered_slot_conversion_plan_with_facts(
+        &LoweredType::OptionalElementBorrow {
+            option_shape: Box::new(option_shape),
+            element_shape: Box::new(element_shape),
+            recovery: None,
+        },
+        &Slot::Assignment(target),
+        &FactSet::default(),
+    );
+
+    let projected = apply_slot_conversion_plan(RustExpr::Var("maybe".to_string()), &plan);
+    assert_eq!(
+        emit_expr(&projected),
+        "maybe.expect(\"Java null receiver\")"
+    );
+    assert_eq!(
+        projected.into_unshaped(),
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("maybe".to_string())),
+            method: "expect".to_string(),
+            args: vec![RustExpr::Literal("\"Java null receiver\"".to_string())],
+        }
     );
 }
 
@@ -5213,7 +6167,7 @@ fn optional_borrowed_concrete_element_unwraps_to_dyn_trait_target() {
     assert_eq!(
         plan,
         SlotConversionPlan::BorrowedElement(BorrowedElementSlotAdapterPolicy {
-            target,
+            target: target.clone(),
             carrier_shape: option_shape,
             element_shape,
             carrier: BorrowedElementCarrier::Option,
@@ -5226,8 +6180,23 @@ fn optional_borrowed_concrete_element_unwraps_to_dyn_trait_target() {
             }),
         })
     );
+    let projected =
+        apply_slot_conversion_plan(RustExpr::Raw("intervals.get(0)".to_string()), &plan);
     assert_eq!(
-        apply_slot_conversion_plan(RustExpr::Raw("intervals.get(0)".to_string()), &plan),
+        projected.clone().into_unshaped(),
+        RustExpr::Raw(
+            "intervals.get(0).expect(\"Java null receiver\") as &dyn Locatable".to_string()
+        )
+    );
+    let produced = projected
+        .recorded_slot_shape()
+        .expect("dyn trait target adapter should record the produced target slot");
+    assert_eq!(produced.java_ty, target.java_ty);
+    assert_eq!(produced.ownership, target.ownership);
+    assert_eq!(produced.view, target.view);
+    assert_eq!(produced.dispatch, target.dispatch);
+    assert_eq!(
+        apply_slot_conversion_plan(projected, &plan).into_unshaped(),
         RustExpr::Raw(
             "intervals.get(0).expect(\"Java null receiver\") as &dyn Locatable".to_string()
         )
@@ -5257,7 +6226,7 @@ fn optional_borrowed_concrete_element_unwraps_to_concrete_facade_target() {
             element_shape: Box::new(element_shape),
             recovery: None,
         },
-        &Slot::Argument(target),
+        &Slot::Argument(target.clone()),
         &facts,
     );
 
@@ -5273,8 +6242,24 @@ fn optional_borrowed_concrete_element_unwraps_to_concrete_facade_target() {
             ..
         })
     ));
+    let projected =
+        apply_slot_conversion_plan(RustExpr::Raw("intervals.get(0)".to_string()), &plan);
     assert_eq!(
-        apply_slot_conversion_plan(RustExpr::Raw("intervals.get(0)".to_string()), &plan),
+        projected.clone().into_unshaped(),
+        RustExpr::Raw(
+            "{ let _java_value = intervals.get(0).expect(\"Java null receiver\"); &Locatable }"
+                .to_string()
+        )
+    );
+    let produced = projected
+        .recorded_slot_shape()
+        .expect("concrete facade target adapter should record the produced target slot");
+    assert_eq!(produced.java_ty, target.java_ty);
+    assert_eq!(produced.ownership, target.ownership);
+    assert_eq!(produced.view, target.view);
+    assert_eq!(produced.dispatch, target.dispatch);
+    assert_eq!(
+        apply_slot_conversion_plan(projected, &plan).into_unshaped(),
         RustExpr::Raw(
             "{ let _java_value = intervals.get(0).expect(\"Java null receiver\"); &Locatable }"
                 .to_string()
@@ -5340,11 +6325,38 @@ fn coercion_uses_element_shape_for_borrowed_vec_string_view() {
     );
 
     assert_eq!(
-        expr,
+        expr.clone().into_unshaped(),
         RustExpr::Raw(
             "values.iter().map(|v| v.trim()).collect::<Vec<_>>().into_iter().map(|v| v.to_string()).collect::<Vec<_>>()"
                 .to_string()
         )
+    );
+    assert_eq!(expr.recorded_shape(), Some(RustExprShape::OwnedRecovery));
+
+    let mut copied_element_shape =
+        RustSlotShape::conservative(JavaType::Primitive(PrimitiveType::Int));
+    copied_element_shape.ownership = OwnershipShape::SharedBorrow;
+    let copied_set = apply_lowered_expr_to_slot(
+        LoweredExpr {
+            expr: RustExpr::Raw(
+                "values.iter().collect::<std::collections::HashSet<_>>()".to_string(),
+            ),
+            actual: LoweredType::set_element_borrow(copied_element_shape),
+        },
+        &Slot::Return(RustSlotShape::conservative(set_java_type(
+            JavaType::Primitive(PrimitiveType::Int),
+        ))),
+    );
+    assert_eq!(
+        copied_set.clone().into_unshaped(),
+        RustExpr::Raw(
+            "values.iter().collect::<std::collections::HashSet<_>>().into_iter().copied().collect::<std::collections::HashSet<_>>()"
+                .to_string()
+        )
+    );
+    assert_eq!(
+        copied_set.recorded_shape(),
+        Some(RustExprShape::OwnedRecovery)
     );
 }
 
@@ -5366,8 +6378,52 @@ fn coercion_fuses_borrowed_collection_clone_recovery_into_terminal_collect() {
     // `RustExprShape::OwnedRecovery`, which the emitter ignores, so the Rust
     // asserted here is unchanged.
     assert_eq!(
-        vec_expr.into_unshaped(),
+        vec_expr.clone().into_unshaped(),
         RustExpr::Raw("values.iter().cloned().collect::<Vec<_>>()".to_string())
+    );
+    assert_eq!(
+        vec_expr.recorded_shape(),
+        Some(RustExprShape::OwnedRecovery)
+    );
+
+    let already_cloned_vec_expr = apply_lowered_expr_to_slot(
+        LoweredExpr {
+            expr: RustExpr::Raw("values.iter().cloned().collect::<Vec<_>>()".to_string()),
+            actual: LoweredType::vec_element_borrow(element_shape.clone()),
+        },
+        &Slot::Return(RustSlotShape::conservative(list_java_type(
+            JavaType::String,
+        ))),
+    );
+    assert_eq!(
+        already_cloned_vec_expr.clone().into_unshaped(),
+        RustExpr::Raw("values.iter().cloned().collect::<Vec<_>>()".to_string())
+    );
+    assert_eq!(
+        already_cloned_vec_expr.recorded_shape(),
+        Some(RustExprShape::OwnedRecovery)
+    );
+
+    let tagged_vec_expr = apply_lowered_expr_to_slot(
+        LoweredExpr {
+            expr: RustExpr::shaped(
+                RustExprShape::OwnedRecovery,
+                RustExpr::Raw("recover_values(values)".to_string()),
+            ),
+            actual: LoweredType::vec_element_borrow(element_shape.clone()),
+        },
+        &Slot::Return(RustSlotShape::conservative(list_java_type(
+            JavaType::String,
+        ))),
+    );
+    assert_eq!(
+        tagged_vec_expr.clone().into_unshaped(),
+        RustExpr::Raw("recover_values(values)".to_string())
+    );
+    assert_eq!(
+        tagged_vec_expr.recorded_shape(),
+        Some(RustExprShape::OwnedRecovery),
+        "a recorded owned recovery must not depend on a rendered clone suffix"
     );
 
     let set_expr = apply_lowered_expr_to_slot(
@@ -5376,16 +6432,62 @@ fn coercion_fuses_borrowed_collection_clone_recovery_into_terminal_collect() {
                 "groups.iter().flat_map(|item| item.iter()).collect::<std::collections::HashSet<_>>()"
                     .to_string(),
             ),
+            actual: LoweredType::set_element_borrow(element_shape.clone()),
+        },
+        &Slot::Return(RustSlotShape::conservative(set_java_type(JavaType::String))),
+    );
+    assert_eq!(
+        set_expr.clone().into_unshaped(),
+        RustExpr::Raw(
+            "groups.iter().flat_map(|item| item.iter()).cloned().collect::<std::collections::HashSet<_>>()"
+                .to_string()
+        )
+    );
+    assert_eq!(
+        set_expr.recorded_shape(),
+        Some(RustExprShape::OwnedRecovery)
+    );
+
+    let already_cloned_set_expr = apply_lowered_expr_to_slot(
+        LoweredExpr {
+            expr: RustExpr::Raw(
+                "groups.iter().flat_map(|item| item.iter()).cloned().collect::<std::collections::HashSet<_>>()"
+                    .to_string(),
+            ),
+            actual: LoweredType::set_element_borrow(element_shape.clone()),
+        },
+        &Slot::Return(RustSlotShape::conservative(set_java_type(JavaType::String))),
+    );
+    assert_eq!(
+        already_cloned_set_expr.clone().into_unshaped(),
+        RustExpr::Raw(
+            "groups.iter().flat_map(|item| item.iter()).cloned().collect::<std::collections::HashSet<_>>()"
+                .to_string()
+        )
+    );
+    assert_eq!(
+        already_cloned_set_expr.recorded_shape(),
+        Some(RustExprShape::OwnedRecovery)
+    );
+
+    let tagged_set_expr = apply_lowered_expr_to_slot(
+        LoweredExpr {
+            expr: RustExpr::shaped(
+                RustExprShape::OwnedRecovery,
+                RustExpr::Raw("recover_groups(groups)".to_string()),
+            ),
             actual: LoweredType::set_element_borrow(element_shape),
         },
         &Slot::Return(RustSlotShape::conservative(set_java_type(JavaType::String))),
     );
     assert_eq!(
-        set_expr.into_unshaped(),
-        RustExpr::Raw(
-            "groups.iter().flat_map(|item| item.iter()).cloned().collect::<std::collections::HashSet<_>>()"
-                .to_string()
-        )
+        tagged_set_expr.clone().into_unshaped(),
+        RustExpr::Raw("recover_groups(groups)".to_string())
+    );
+    assert_eq!(
+        tagged_set_expr.recorded_shape(),
+        Some(RustExprShape::OwnedRecovery),
+        "a recorded set recovery must not depend on a rendered clone suffix"
     );
 }
 

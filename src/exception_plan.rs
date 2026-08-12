@@ -5,7 +5,7 @@ use crate::java_ir::{
     BinaryOp, Block, CatchClause, Expr, JavaType, Member, MethodDecl, Modifier, Program, Stmt,
     TypeDecl,
 };
-use crate::java_signature::source_method_rust_name;
+use crate::java_signature::{JavaCallableSlotKey, source_method_rust_name};
 use crate::usage::{CallGraph, CallableKey};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -725,14 +725,14 @@ fn override_groups_for_program(program: &Program) -> Vec<Vec<CallableKey>> {
             // camelCased or overloaded they do not. The equalization therefore
             // did nothing for most methods, and `trait_method_exception_plan`
             // carried a second `|=` pass to compensate. Same defect as
-            // [0009](../claude_audits/0009-overload-identity-collapses-onto-rust-name.md),
+            // [0009](../claude_audits/done/0009-overload-identity-collapses-onto-rust-name.md),
             // one layer down: identity spelled two ways.
-            let rust_name = source_method_rust_name(method);
-            for supertype in supertype_names_declaring_method(ty, method, &by_name) {
+            for (supertype, super_method) in supertype_methods_matching_slot(ty, method, &by_name) {
+                let rust_name = source_method_rust_name(super_method);
                 let entry = groups
                     .entry((supertype.clone(), rust_name.clone()))
                     .or_default();
-                let declaring = CallableKey::source_method(supertype, method);
+                let declaring = CallableKey::source_method(supertype, super_method);
                 if !entry.contains(&declaring) {
                     entry.push(declaring);
                 }
@@ -749,14 +749,14 @@ fn override_groups_for_program(program: &Program) -> Vec<Vec<CallableKey>> {
         .collect()
 }
 
-/// Transitive supertypes of `ty` that declare a method matching `method` by
-/// name and parameter count.
-fn supertype_names_declaring_method(
+/// Transitive supertype methods matching `method` by erased Java signature.
+fn supertype_methods_matching_slot<'a>(
     ty: &TypeDecl,
     method: &MethodDecl,
-    by_name: &HashMap<&str, &TypeDecl>,
-) -> Vec<String> {
+    by_name: &HashMap<&str, &'a TypeDecl>,
+) -> Vec<(String, &'a MethodDecl)> {
     let mut matches = Vec::new();
+    let wanted = JavaCallableSlotKey::source_method(method);
     let mut pending = ty
         .extends
         .iter()
@@ -771,16 +771,13 @@ fn supertype_names_declaring_method(
         let Some(supertype) = by_name.get(name.as_str()) else {
             continue;
         };
-        let declares = supertype.members.iter().any(|member| match member {
-            Member::Method(candidate) => {
-                candidate.name == method.name
-                    && candidate.params.len() == method.params.len()
-                    && !candidate.modifiers.contains(&Modifier::Static)
+        for member in &supertype.members {
+            let Member::Method(candidate) = member else {
+                continue;
+            };
+            if JavaCallableSlotKey::source_method(candidate) == wanted {
+                matches.push((name.clone(), candidate));
             }
-            _ => false,
-        });
-        if declares {
-            matches.push(name.clone());
         }
         pending.extend(supertype.extends.iter().cloned());
         pending.extend(supertype.implements.iter().cloned());

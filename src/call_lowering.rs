@@ -46,6 +46,7 @@ use crate::coercion::{
 use crate::facts::FactSet;
 use crate::facts::ReceiverAbi;
 use crate::java_ir::{Expr, JavaType, LambdaBody, PrimitiveType};
+use crate::output_markers::noop_facade_method_call_site_marker;
 use crate::representation::RepresentationPlan;
 use crate::rust_ir::RustExpr;
 use crate::shape_projection::shape_is_erased_object_boundary;
@@ -142,19 +143,43 @@ pub fn apply_call_target(
         CallTargetPlan::ExternalFacadeReceiver {
             rust_path,
             receiver_abi,
+            noop_facade_method_call,
+            receiver_type,
+            method_name,
+            arg_count,
             ..
-        } => apply_external_facade_receiver_call(
-            lowered_receiver.expect("external facade target must provide receiver"),
-            rust_path,
-            *receiver_abi,
-            args,
-        ),
+        } => {
+            let lowered = apply_external_facade_receiver_call(
+                lowered_receiver.expect("external facade target must provide receiver"),
+                rust_path,
+                *receiver_abi,
+                args,
+            );
+            if *noop_facade_method_call {
+                mark_noop_facade_method_call_site(lowered, receiver_type, method_name, *arg_count)
+            } else {
+                lowered
+            }
+        }
         CallTargetPlan::SuperBoundary {
             return_type,
             propagates_result,
             ..
         } => apply_super_boundary_call(return_type, *propagates_result),
     }
+}
+
+fn mark_noop_facade_method_call_site(
+    expr: RustExpr,
+    receiver_type: &str,
+    method_name: &str,
+    arg_count: usize,
+) -> RustExpr {
+    RustExpr::Raw(format!(
+        "{{ {} {} }}",
+        noop_facade_method_call_site_marker(receiver_type, method_name, arg_count),
+        crate::emit::emit_expr(&expr)
+    ))
 }
 
 fn apply_external_facade_receiver_call(
@@ -191,7 +216,14 @@ fn apply_super_boundary_call(return_type: &JavaType, propagates_result: bool) ->
         (JavaType::Primitive(PrimitiveType::Long), _) => RustExpr::Literal("0i64".to_string()),
         (JavaType::Primitive(PrimitiveType::Float), _) => RustExpr::Literal("0.0f32".to_string()),
         (JavaType::Primitive(PrimitiveType::Double), _) => RustExpr::Literal("0.0f64".to_string()),
-        _ => RustExpr::Raw("Default::default()".to_string()),
+        _ => default_trait_expr(),
+    }
+}
+
+fn default_trait_expr() -> RustExpr {
+    RustExpr::Call {
+        function: Box::new(RustExpr::path(["Default", "default"])),
+        args: Vec::new(),
     }
 }
 
@@ -802,7 +834,7 @@ fn apply_native_collection_static_method(
             .first()
             .cloned()
             .map(collections_unmodifiable_projection)
-            .unwrap_or_else(|| RustExpr::Raw("Default::default()".to_string())),
+            .unwrap_or_else(default_trait_expr),
         NativeCollectionStaticMethod::CollectionsSingleton => {
             let value = args
                 .first()

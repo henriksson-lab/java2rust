@@ -24,12 +24,13 @@
 //! does not have, so until then the honest output is a diagnostic rather than a
 //! clone that compiles and lies.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::diagnostics::{DiagnosticBag, Severity};
+use crate::facts::{FactSet, ReceiverMutabilityFact};
 use crate::java_ir::{Block, Expr, JavaType, Member, Program, Stmt, TypeDecl, UnaryOp};
 use crate::liveness::LivenessAnalysis;
-use crate::usage::{UsageFacts, UsageMethodKey};
+use crate::usage::{MethodUsageFacts, UsageConstructorKey, UsageFacts, UsageMethodKey};
 
 /// A clone that Java would not have made, where the difference is observable.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,9 +73,18 @@ impl MutationKind {
 
 /// Every observable alias in the program, in source order per callable.
 pub fn observable_aliases(program: &Program, usage: &UsageFacts) -> Vec<ObservableAlias> {
+    observable_aliases_with_facts(program, usage, &FactSet::default())
+}
+
+/// Every observable alias, including fact-backed external receiver mutations.
+pub fn observable_aliases_with_facts(
+    program: &Program,
+    usage: &UsageFacts,
+    facts: &FactSet,
+) -> Vec<ObservableAlias> {
     let mut found = Vec::new();
     for ty in &program.types {
-        collect_in_type(ty, usage, &mut found);
+        collect_in_type(ty, usage, facts, &mut found);
     }
     found
 }
@@ -82,8 +92,13 @@ pub fn observable_aliases(program: &Program, usage: &UsageFacts) -> Vec<Observab
 /// Report observable aliases as warnings. The message names both handles and
 /// the write, because the fix is a source-level or representation-level
 /// decision that a human has to make.
-pub fn report_observable_aliases(program: &Program, usage: &UsageFacts, into: &mut DiagnosticBag) {
-    for alias in observable_aliases(program, usage) {
+pub fn report_observable_aliases(
+    program: &Program,
+    usage: &UsageFacts,
+    facts: &FactSet,
+    into: &mut DiagnosticBag,
+) {
+    for alias in observable_aliases_with_facts(program, usage, facts) {
         let ObservableAlias {
             callable,
             original,
@@ -106,20 +121,46 @@ pub fn report_observable_aliases(program: &Program, usage: &UsageFacts, into: &m
     }
 }
 
-fn collect_in_type(ty: &TypeDecl, usage: &UsageFacts, found: &mut Vec<ObservableAlias>) {
+fn collect_in_type(
+    ty: &TypeDecl,
+    usage: &UsageFacts,
+    facts: &FactSet,
+    found: &mut Vec<ObservableAlias>,
+) {
     for member in &ty.members {
         match member {
             Member::Method(method) => {
                 if let Some(body) = &method.body {
-                    collect_in_body(body, &format!("{}.{}", ty.name, method.name), usage, found);
+                    collect_in_body(
+                        body,
+                        &format!("{}.{}", ty.name, method.name),
+                        usage,
+                        facts,
+                        usage.source_method_usage(ty, method),
+                        found,
+                    );
                 }
             }
             Member::Constructor(constructor) => {
                 if let Some(body) = &constructor.body {
-                    collect_in_body(body, &format!("{}.<init>", ty.name), usage, found);
+                    let constructor_usage = usage.constructors.get(&UsageConstructorKey {
+                        type_name: ty.name.clone(),
+                        rust_name: constructor
+                            .rust_name
+                            .clone()
+                            .unwrap_or_else(|| "new".to_string()),
+                    });
+                    collect_in_body(
+                        body,
+                        &format!("{}.<init>", ty.name),
+                        usage,
+                        facts,
+                        constructor_usage,
+                        found,
+                    );
                 }
             }
-            Member::Type(nested) => collect_in_type(nested, usage, found),
+            Member::Type(nested) => collect_in_type(nested, usage, facts, found),
             _ => {}
         }
     }
@@ -129,6 +170,8 @@ fn collect_in_body(
     body: &Block,
     callable: &str,
     usage: &UsageFacts,
+    facts: &FactSet,
+    method_usage: Option<&MethodUsageFacts>,
     found: &mut Vec<ObservableAlias>,
 ) {
     // Statement identity in the analysis is the address of the `Stmt`, so the
@@ -142,24 +185,33 @@ fn collect_in_body(
     if aliases.is_empty() {
         return;
     }
-    let mutations = mutation_sites(&statements, usage);
+    let mutations = mutation_sites(&statements, usage, facts, method_usage);
 
     for point in &aliases {
         // One report per alias point. A loop body that writes through the same
         // handle ten times is one defect, and ten copies of the same sentence
         // is how a diagnostic gets ignored.
+        let Some(point_index) = statement_index(&statements, point.stmt) else {
+            continue;
+        };
         let Some((site, other)) = mutations.iter().find_map(|site| {
+            let Some(site_index) = statement_index(&statements, site.stmt) else {
+                return None;
+            };
+            if site_index <= point_index {
+                return None;
+            }
             let other = if site.handle == point.original {
-                &point.alias
-            } else if site.handle == point.alias {
-                &point.original
+                point.alias.clone()
+            } else if point.alias.local_name() == Some(site.handle.as_str()) {
+                AliasHandle::Local(point.original.clone())
             } else {
                 return None;
             };
             // The write is only observable if the *other* handle is still read
             // after it. Ordering falls out of this: a write that precedes the
             // declaration of `alias` cannot have `alias` live after it.
-            (liveness.binding_is_live_after(site.stmt, other) == Some(true))
+            alias_handle_is_observed_after(&other, &statements, &liveness, site.stmt)
                 .then_some((site, other))
         }) else {
             continue;
@@ -167,17 +219,46 @@ fn collect_in_body(
         found.push(ObservableAlias {
             callable: callable.to_string(),
             original: point.original.clone(),
-            alias: point.alias.clone(),
+            alias: point.alias.display(),
             mutated_through: site.handle.clone(),
-            observed_through: other.clone(),
+            observed_through: other.display(),
             mutation: site.kind.clone(),
         });
     }
 }
 
-struct AliasPoint {
+fn statement_index(statements: &[&Stmt], needle: &Stmt) -> Option<usize> {
+    statements
+        .iter()
+        .position(|stmt| std::ptr::eq(*stmt, needle))
+}
+
+struct AliasPoint<'a> {
+    stmt: &'a Stmt,
     original: String,
-    alias: String,
+    alias: AliasHandle,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AliasHandle {
+    Local(String),
+    ThisField(String),
+}
+
+impl AliasHandle {
+    fn local_name(&self) -> Option<&str> {
+        match self {
+            AliasHandle::Local(name) => Some(name),
+            AliasHandle::ThisField(_) => None,
+        }
+    }
+
+    fn display(&self) -> String {
+        match self {
+            AliasHandle::Local(name) => name.clone(),
+            AliasHandle::ThisField(field) => format!("this.{field}"),
+        }
+    }
 }
 
 /// `T b = a;` where `a` is read again afterwards — exactly the shape that makes
@@ -185,29 +266,97 @@ struct AliasPoint {
 ///
 /// Restricted to declarations: the new handle is introduced here, which is what
 /// lets a liveness query stand in for "after this point".
-fn alias_points(statements: &[&Stmt], liveness: &LivenessAnalysis) -> Vec<AliasPoint> {
+fn alias_points<'a>(statements: &[&'a Stmt], liveness: &LivenessAnalysis) -> Vec<AliasPoint<'a>> {
     let mut points = Vec::new();
+    let mut local_types = HashMap::new();
     for stmt in statements {
-        let Stmt::VarDecl {
-            ty,
-            name,
-            initializer: Some(Expr::Var(source)),
-        } = stmt
-        else {
-            continue;
-        };
-        if java_type_is_value_like(ty) || source == name {
-            continue;
+        match stmt {
+            Stmt::VarDecl {
+                ty,
+                name,
+                initializer,
+            } => {
+                if let Some(Expr::Var(source)) = initializer
+                    && !java_type_is_value_like(ty)
+                    && source != name
+                    && liveness.binding_is_live_after(stmt, source) == Some(true)
+                {
+                    points.push(AliasPoint {
+                        stmt,
+                        original: source.clone(),
+                        alias: AliasHandle::Local(name.clone()),
+                    });
+                }
+                local_types.insert(name.clone(), ty.clone());
+            }
+            Stmt::Assign {
+                target,
+                value: Expr::Var(source),
+            } => {
+                let Some(source_ty) = local_types.get(source) else {
+                    continue;
+                };
+                let Some(alias) = alias_storage_receiver(target) else {
+                    continue;
+                };
+                if java_type_is_value_like(source_ty) || alias.local_name() == Some(source) {
+                    continue;
+                }
+                if liveness.binding_is_live_after(stmt, source) != Some(true) {
+                    continue;
+                }
+                points.push(AliasPoint {
+                    stmt,
+                    original: source.clone(),
+                    alias,
+                });
+            }
+            _ => {}
         }
-        if liveness.binding_is_live_after(stmt, source) != Some(true) {
-            continue;
-        }
-        points.push(AliasPoint {
-            original: source.clone(),
-            alias: name.clone(),
-        });
     }
     points
+}
+
+fn alias_storage_receiver(target: &Expr) -> Option<AliasHandle> {
+    match target {
+        Expr::FieldAccess(receiver, field) if matches!(receiver.as_ref(), Expr::This) => {
+            Some(AliasHandle::ThisField(field.clone()))
+        }
+        Expr::ArrayAccess(receiver, _) | Expr::FieldAccess(receiver, _) => {
+            alias_handle_for_storage_receiver(receiver)
+        }
+        _ => None,
+    }
+}
+
+fn alias_handle_for_storage_receiver(receiver: &Expr) -> Option<AliasHandle> {
+    match receiver {
+        Expr::Var(alias) => Some(AliasHandle::Local(alias.clone())),
+        Expr::This => None,
+        Expr::FieldAccess(inner, field) if matches!(inner.as_ref(), Expr::This) => {
+            Some(AliasHandle::ThisField(field.clone()))
+        }
+        _ => None,
+    }
+}
+
+fn alias_handle_is_observed_after(
+    handle: &AliasHandle,
+    statements: &[&Stmt],
+    liveness: &LivenessAnalysis,
+    after: &Stmt,
+) -> bool {
+    match handle {
+        AliasHandle::Local(name) => liveness.binding_is_live_after(after, name) == Some(true),
+        AliasHandle::ThisField(field) => statements
+            .iter()
+            .position(|stmt| std::ptr::eq(*stmt, after))
+            .is_some_and(|index| {
+                statements[index + 1..]
+                    .iter()
+                    .any(|stmt| stmt_reads_this_field(stmt, field))
+            }),
+    }
 }
 
 /// A primitive assignment copies in Java too, so it is never an alias.
@@ -230,19 +379,17 @@ struct MutationSite<'a> {
 /// Reassignment (`a = other`) rebinds the name and is already modelled by
 /// liveness; it is the writes that reach the pointed-to object that a copy
 /// fails to share.
-fn mutation_sites<'a>(statements: &[&'a Stmt], usage: &UsageFacts) -> Vec<MutationSite<'a>> {
+fn mutation_sites<'a>(
+    statements: &[&'a Stmt],
+    usage: &UsageFacts,
+    facts: &FactSet,
+    method_usage: Option<&MethodUsageFacts>,
+) -> Vec<MutationSite<'a>> {
     let mut sites = Vec::new();
+    let stored_lambdas = stored_lambda_mutations(statements, usage, facts, method_usage);
     for stmt in statements {
         let mut here = Vec::new();
-        match stmt {
-            Stmt::Assign { target, value } => {
-                push_write_target(target, &mut here);
-                collect_expr_mutations(value, usage, &mut here);
-            }
-            _ => visit_stmt_exprs(stmt, &mut |expr| {
-                collect_expr_mutations(expr, usage, &mut here)
-            }),
-        }
+        collect_stmt_mutations(stmt, usage, facts, method_usage, &stored_lambdas, &mut here);
         for (handle, kind) in here {
             sites.push(MutationSite { stmt, handle, kind });
         }
@@ -250,7 +397,96 @@ fn mutation_sites<'a>(statements: &[&'a Stmt], usage: &UsageFacts) -> Vec<Mutati
     sites
 }
 
-fn collect_expr_mutations(expr: &Expr, usage: &UsageFacts, out: &mut Vec<(String, MutationKind)>) {
+fn stored_lambda_mutations(
+    statements: &[&Stmt],
+    usage: &UsageFacts,
+    facts: &FactSet,
+    method_usage: Option<&MethodUsageFacts>,
+) -> HashMap<String, Vec<(String, MutationKind)>> {
+    let mut stored = HashMap::new();
+    for stmt in statements {
+        if let Stmt::VarDecl {
+            name,
+            initializer: Some(Expr::Lambda { body, .. }),
+            ..
+        } = stmt
+        {
+            let mut mutations = Vec::new();
+            collect_lambda_body_mutations(body, usage, facts, method_usage, &mut mutations);
+            if !mutations.is_empty() {
+                stored.insert(name.clone(), mutations);
+            }
+        }
+    }
+    stored
+}
+
+fn collect_stmt_mutations(
+    stmt: &Stmt,
+    usage: &UsageFacts,
+    facts: &FactSet,
+    method_usage: Option<&MethodUsageFacts>,
+    stored_lambdas: &HashMap<String, Vec<(String, MutationKind)>>,
+    out: &mut Vec<(String, MutationKind)>,
+) {
+    match stmt {
+        Stmt::Assign { target, value } => {
+            push_write_target(target, out);
+            if !matches!(value, Expr::Lambda { .. }) {
+                collect_expr_mutations(value, usage, facts, method_usage, stored_lambdas, out);
+            }
+        }
+        Stmt::VarDecl {
+            initializer: Some(Expr::Lambda { .. }),
+            ..
+        } => {}
+        _ => visit_stmt_exprs(stmt, &mut |expr| {
+            collect_expr_mutations(expr, usage, facts, method_usage, stored_lambdas, out)
+        }),
+    }
+}
+
+fn collect_lambda_body_mutations(
+    body: &crate::java_ir::LambdaBody,
+    usage: &UsageFacts,
+    facts: &FactSet,
+    method_usage: Option<&MethodUsageFacts>,
+    out: &mut Vec<(String, MutationKind)>,
+) {
+    let stored_lambdas = HashMap::new();
+    match body {
+        crate::java_ir::LambdaBody::Expr(expr) => {
+            collect_expr_mutations(expr, usage, facts, method_usage, &stored_lambdas, out)
+        }
+        crate::java_ir::LambdaBody::Block(block) => {
+            collect_block_mutations(block, usage, facts, method_usage, &stored_lambdas, out)
+        }
+    }
+}
+
+fn collect_block_mutations(
+    block: &Block,
+    usage: &UsageFacts,
+    facts: &FactSet,
+    method_usage: Option<&MethodUsageFacts>,
+    stored_lambdas: &HashMap<String, Vec<(String, MutationKind)>>,
+    out: &mut Vec<(String, MutationKind)>,
+) {
+    let mut statements = Vec::new();
+    collect_statements(block, &mut statements);
+    for stmt in statements {
+        collect_stmt_mutations(stmt, usage, facts, method_usage, stored_lambdas, out);
+    }
+}
+
+fn collect_expr_mutations(
+    expr: &Expr,
+    usage: &UsageFacts,
+    facts: &FactSet,
+    method_usage: Option<&MethodUsageFacts>,
+    stored_lambdas: &HashMap<String, Vec<(String, MutationKind)>>,
+    out: &mut Vec<(String, MutationKind)>,
+) {
     match expr {
         Expr::Binary {
             op: crate::java_ir::BinaryOp::Assign,
@@ -258,14 +494,14 @@ fn collect_expr_mutations(expr: &Expr, usage: &UsageFacts, out: &mut Vec<(String
             right,
         } => {
             push_write_target(left, out);
-            collect_expr_mutations(right, usage, out);
+            collect_expr_mutations(right, usage, facts, method_usage, stored_lambdas, out);
         }
         Expr::Unary {
             op: UnaryOp::PreInc | UnaryOp::PreDec | UnaryOp::PostInc | UnaryOp::PostDec,
             expr,
         } => {
             push_write_target(expr, out);
-            collect_expr_mutations(expr, usage, out);
+            collect_expr_mutations(expr, usage, facts, method_usage, stored_lambdas, out);
         }
         Expr::Call {
             receiver: Some(receiver),
@@ -273,23 +509,44 @@ fn collect_expr_mutations(expr: &Expr, usage: &UsageFacts, out: &mut Vec<(String
             args,
             resolved,
         } => {
-            if let Expr::Var(handle) = receiver.as_ref()
-                && call_writes_through_receiver(resolved.as_ref(), name, usage)
-            {
-                out.push((
-                    handle.clone(),
-                    MutationKind::MutatingCall {
-                        method: name.clone(),
-                    },
-                ));
+            if let Expr::Var(handle) = receiver.as_ref() {
+                if lambda_invocation_name(name)
+                    && let Some(mutations) = stored_lambdas.get(handle)
+                {
+                    out.extend(mutations.iter().cloned());
+                }
+                if call_writes_through_receiver(
+                    resolved.as_ref(),
+                    name,
+                    args.len(),
+                    receiver_java_type_for_handle(handle, method_usage).as_ref(),
+                    usage,
+                    facts,
+                ) {
+                    out.push((
+                        handle.clone(),
+                        MutationKind::MutatingCall {
+                            method: name.clone(),
+                        },
+                    ));
+                }
             }
-            collect_expr_mutations(receiver, usage, out);
+            collect_expr_mutations(receiver, usage, facts, method_usage, stored_lambdas, out);
             for arg in args {
-                collect_expr_mutations(arg, usage, out);
+                collect_expr_mutations(arg, usage, facts, method_usage, stored_lambdas, out);
             }
         }
-        _ => visit_subexpressions(expr, &mut |inner| collect_expr_mutations(inner, usage, out)),
+        Expr::Lambda { body, .. } => {
+            collect_lambda_body_mutations(body, usage, facts, method_usage, out)
+        }
+        _ => visit_subexpressions(expr, &mut |inner| {
+            collect_expr_mutations(inner, usage, facts, method_usage, stored_lambdas, out)
+        }),
     }
+}
+
+fn lambda_invocation_name(name: &str) -> bool {
+    matches!(name, "run")
 }
 
 fn push_write_target(target: &Expr, out: &mut Vec<(String, MutationKind)>) {
@@ -322,18 +579,50 @@ fn push_write_target(target: &Expr, out: &mut Vec<(String, MutationKind)>) {
 fn call_writes_through_receiver(
     resolved: Option<&crate::java_ir::ResolvedCall>,
     name: &str,
+    arg_count: usize,
+    receiver_ty: Option<&JavaType>,
     usage: &UsageFacts,
+    facts: &FactSet,
 ) -> bool {
-    let Some(resolved) = resolved else {
-        return false;
-    };
-    usage
-        .methods
-        .get(&UsageMethodKey {
-            type_name: resolved.declaring_type.clone(),
-            method_name: name.to_string(),
-        })
-        .is_some_and(|facts| facts.mutates_self)
+    if let Some(resolved) = resolved
+        && usage
+            .methods
+            .get(&UsageMethodKey {
+                type_name: resolved.declaring_type.clone(),
+                method_name: name.to_string(),
+            })
+            .is_some_and(|facts| facts.mutates_self)
+    {
+        return true;
+    }
+    let receiver_type = receiver_ty.and_then(external_receiver_type_name);
+    facts
+        .external_api_effect_for_receiver_with_arity_or_rust_name(
+            receiver_type.as_deref(),
+            name,
+            Some(arg_count),
+        )
+        .is_some_and(|effect| effect.receiver_mutability == ReceiverMutabilityFact::MutatesReceiver)
+}
+
+fn receiver_java_type_for_handle(
+    handle: &str,
+    method_usage: Option<&MethodUsageFacts>,
+) -> Option<JavaType> {
+    method_usage
+        .and_then(|usage| usage.bindings.get(handle))
+        .map(|binding| binding.java_ty.clone())
+}
+
+fn external_receiver_type_name(java_ty: &JavaType) -> Option<String> {
+    match java_ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(name.clone()),
+        JavaType::String => Some("String".to_string()),
+        JavaType::Array(element) => {
+            external_receiver_type_name(element).map(|element| format!("{element}[]"))
+        }
+        JavaType::Primitive(_) | JavaType::Void | JavaType::Wildcard(_) => None,
+    }
 }
 
 fn collect_statements<'a>(block: &'a Block, out: &mut Vec<&'a Stmt>) {
@@ -514,6 +803,124 @@ fn visit_subexpressions(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
     }
 }
 
+fn stmt_reads_this_field(stmt: &Stmt, field: &str) -> bool {
+    match stmt {
+        Stmt::VarDecl { initializer, .. } => initializer
+            .as_ref()
+            .is_some_and(|expr| expr_reads_this_field(expr, field)),
+        Stmt::Assign { value, .. } => expr_reads_this_field(value, field),
+        Stmt::Expr(expr) | Stmt::Throw(expr) => expr_reads_this_field(expr, field),
+        Stmt::Return(expr) => expr
+            .as_ref()
+            .is_some_and(|expr| expr_reads_this_field(expr, field)),
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            expr_reads_this_field(condition, field)
+                || block_reads_this_field(then_block, field)
+                || else_block
+                    .as_ref()
+                    .is_some_and(|block| block_reads_this_field(block, field))
+        }
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => expr_reads_this_field(condition, field) || block_reads_this_field(body, field),
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            init.iter().any(|stmt| stmt_reads_this_field(stmt, field))
+                || condition
+                    .as_ref()
+                    .is_some_and(|expr| expr_reads_this_field(expr, field))
+                || update.iter().any(|expr| expr_reads_this_field(expr, field))
+                || block_reads_this_field(body, field)
+        }
+        Stmt::EnhancedFor { iterable, body, .. } => {
+            expr_reads_this_field(iterable, field) || block_reads_this_field(body, field)
+        }
+        Stmt::Switch { selector, cases } => {
+            expr_reads_this_field(selector, field)
+                || cases.iter().any(|case| {
+                    case.labels.iter().any(|label| match label {
+                        crate::java_ir::SwitchLabel::Expr(expr) => {
+                            expr_reads_this_field(expr, field)
+                        }
+                        _ => false,
+                    }) || case
+                        .statements
+                        .iter()
+                        .any(|stmt| stmt_reads_this_field(stmt, field))
+                })
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            resources
+                .iter()
+                .any(|stmt| stmt_reads_this_field(stmt, field))
+                || block_reads_this_field(body, field)
+                || catches
+                    .iter()
+                    .any(|catch| block_reads_this_field(&catch.body, field))
+                || finally_block
+                    .as_ref()
+                    .is_some_and(|block| block_reads_this_field(block, field))
+        }
+        Stmt::ConstructorInvocation { args, .. } => {
+            args.iter().any(|arg| expr_reads_this_field(arg, field))
+        }
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            block_reads_this_field(block, field)
+        }
+        Stmt::LocalType(_) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => false,
+    }
+}
+
+fn block_reads_this_field(block: &Block, field: &str) -> bool {
+    block
+        .statements
+        .iter()
+        .any(|stmt| stmt_reads_this_field(stmt, field))
+}
+
+fn expr_reads_this_field(expr: &Expr, field: &str) -> bool {
+    match expr {
+        Expr::FieldAccess(receiver, name)
+            if name == field && matches!(receiver.as_ref(), Expr::This) =>
+        {
+            true
+        }
+        Expr::Lambda { body, .. } => match body {
+            crate::java_ir::LambdaBody::Expr(expr) => expr_reads_this_field(expr, field),
+            crate::java_ir::LambdaBody::Block(block) => block
+                .statements
+                .iter()
+                .any(|stmt| stmt_reads_this_field(stmt, field)),
+        },
+        _ => {
+            let mut found = false;
+            visit_subexpressions(expr, &mut |inner| {
+                if expr_reads_this_field(inner, field) {
+                    found = true;
+                }
+            });
+            found
+        }
+    }
+}
+
 /// Names of the locals a body aliases observably — the projection lowering
 /// would need if it ever gains a shared representation to spend the answer on.
 pub fn observably_aliased_locals(program: &Program, usage: &UsageFacts) -> HashSet<String> {
@@ -526,6 +933,7 @@ pub fn observably_aliased_locals(program: &Program, usage: &UsageFacts) -> HashS
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::facts::{ExternalApiEffectFact, ExternalApiRole, FactProvenance, NullabilityState};
     use crate::parser::parse_java_source;
 
     /// Resolve first: a mutating-call mutation site is only visible once calls
@@ -535,6 +943,30 @@ mod tests {
         let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
         let usage = crate::usage::analyze_usage(&resolved.program);
         observable_aliases(&resolved.program, &usage)
+    }
+
+    fn aliases_in_with_facts(source: &str, facts: &FactSet) -> Vec<ObservableAlias> {
+        let parsed = parse_java_source(source);
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let usage = crate::usage::analyze_usage_with_facts(&resolved.program, facts);
+        observable_aliases_with_facts(&resolved.program, &usage, facts)
+    }
+
+    fn external_record_set_flag_fact(mutability: ReceiverMutabilityFact) -> FactSet {
+        let mut facts = FactSet::default();
+        facts.external_api_effect_facts.push(ExternalApiEffectFact {
+            method_name: "setFlag".to_string(),
+            receiver_type: Some("Record".to_string()),
+            arg_count: Some(1),
+            parameter_patterns: None,
+            role: ExternalApiRole::Setter,
+            receiver_mutability: mutability,
+            return_type: Some(JavaType::Void),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: Vec::new(),
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+        facts
     }
 
     /// The archetype from audit 0002. Java prints 5; a copy prints 0.
@@ -638,6 +1070,179 @@ mod tests {
         assert!(found.is_empty(), "primitives copy in Java: {found:?}");
     }
 
+    /// Storing a reference into an array element also creates a second live
+    /// handle, even though the handle is the array carrier rather than a local
+    /// declaration initialized from the source.
+    #[test]
+    fn array_element_alias_is_observed_after_original_field_write() {
+        let found = aliases_in(
+            r#"
+            public class Shared {
+                static class Node { int v; }
+                public int run() {
+                    Node a = new Node();
+                    Node[] cell = new Node[1];
+                    cell[0] = a;
+                    a.v = 9;
+                    return cell[0].v;
+                }
+            }
+            "#,
+        );
+        assert_eq!(
+            found.len(),
+            1,
+            "array element assignment should create an observable alias: {found:?}"
+        );
+        assert_eq!(found[0].original, "a");
+        assert_eq!(found[0].alias, "cell");
+        assert_eq!(found[0].mutated_through, "a");
+        assert_eq!(found[0].observed_through, "cell");
+    }
+
+    #[test]
+    fn primitive_array_element_assignment_is_not_an_object_alias() {
+        let found = aliases_in(
+            r#"
+            public class Shared {
+                public int run() {
+                    int a = 1;
+                    int[] cell = new int[1];
+                    cell[0] = a;
+                    a = 9;
+                    return cell[0];
+                }
+            }
+            "#,
+        );
+        assert!(found.is_empty(), "primitive values copy in Java: {found:?}");
+    }
+
+    /// Storing a reference through a local receiver's field is the same alias
+    /// shape as an array element: the receiver local is the later observed
+    /// handle.
+    #[test]
+    fn field_storage_alias_is_observed_after_original_field_write() {
+        let found = aliases_in(
+            r#"
+            public class Shared {
+                static class Node { int v; }
+                static class Holder { Node node; }
+                public int run() {
+                    Node a = new Node();
+                    Holder holder = new Holder();
+                    holder.node = a;
+                    a.v = 11;
+                    return holder.node.v;
+                }
+            }
+            "#,
+        );
+        assert_eq!(
+            found.len(),
+            1,
+            "field storage should create an observable alias: {found:?}"
+        );
+        assert_eq!(found[0].original, "a");
+        assert_eq!(found[0].alias, "holder");
+        assert_eq!(found[0].mutated_through, "a");
+        assert_eq!(found[0].observed_through, "holder");
+    }
+
+    #[test]
+    fn primitive_field_storage_is_not_an_object_alias() {
+        let found = aliases_in(
+            r#"
+            public class Shared {
+                static class Holder { int value; }
+                public int run() {
+                    int a = 1;
+                    Holder holder = new Holder();
+                    holder.value = a;
+                    a = 11;
+                    return holder.value;
+                }
+            }
+            "#,
+        );
+        assert!(
+            found.is_empty(),
+            "primitive field values copy in Java: {found:?}"
+        );
+    }
+
+    #[test]
+    fn this_field_storage_alias_is_observed_after_original_field_write() {
+        let found = aliases_in(
+            r#"
+            public class Shared {
+                static class Node { int v; }
+                Node node;
+                public int run() {
+                    Node a = new Node();
+                    this.node = a;
+                    a.v = 13;
+                    return this.node.v;
+                }
+            }
+            "#,
+        );
+        assert_eq!(
+            found.len(),
+            1,
+            "this-field storage should create an observable alias: {found:?}"
+        );
+        assert_eq!(found[0].original, "a");
+        assert_eq!(found[0].alias, "this.node");
+        assert_eq!(found[0].mutated_through, "a");
+        assert_eq!(found[0].observed_through, "this.node");
+    }
+
+    #[test]
+    fn this_field_assignment_target_is_not_a_read_observation() {
+        let found = aliases_in(
+            r#"
+            public class Shared {
+                static class Node { int v; }
+                Node node;
+                public int run() {
+                    Node a = new Node();
+                    this.node = a;
+                    a.v = 13;
+                    this.node = new Node();
+                    return 0;
+                }
+            }
+            "#,
+        );
+        assert!(
+            found.is_empty(),
+            "rewriting the this-field should not count as observing the old value: {found:?}"
+        );
+    }
+
+    #[test]
+    fn this_field_storage_after_original_write_is_not_reported() {
+        let found = aliases_in(
+            r#"
+            public class Shared {
+                static class Node { int v; }
+                Node node;
+                public int run() {
+                    Node a = new Node();
+                    a.v = 13;
+                    this.node = a;
+                    return this.node.v;
+                }
+            }
+            "#,
+        );
+        assert!(
+            found.is_empty(),
+            "a copy made after the write still observes the written value: {found:?}"
+        );
+    }
+
     /// A method solved as writing through its receiver is a mutation site, so
     /// the same divergence is found without a syntactic field write.
     #[test]
@@ -668,5 +1273,132 @@ mod tests {
             found[0].mutation,
             MutationKind::MutatingCall { .. }
         ));
+    }
+
+    #[test]
+    fn external_receiver_mutability_fact_marks_alias_mutation_site() {
+        let source = r#"
+            import dep.Record;
+            public class Shared {
+                public int run(Record a) {
+                    Record b = a;
+                    a.setFlag(true);
+                    return b.hashCode();
+                }
+            }
+            "#;
+        let found = aliases_in_with_facts(
+            source,
+            &external_record_set_flag_fact(ReceiverMutabilityFact::MutatesReceiver),
+        );
+        assert_eq!(
+            found.len(),
+            1,
+            "external mutator should create an observable alias: {found:?}"
+        );
+        assert_eq!(found[0].original, "a");
+        assert_eq!(found[0].alias, "b");
+        assert_eq!(found[0].mutated_through, "a");
+        assert_eq!(found[0].observed_through, "b");
+        assert_eq!(
+            found[0].mutation,
+            MutationKind::MutatingCall {
+                method: "setFlag".to_string()
+            }
+        );
+
+        let read_only = aliases_in_with_facts(
+            source,
+            &external_record_set_flag_fact(ReceiverMutabilityFact::ReadOnly),
+        );
+        assert!(
+            read_only.is_empty(),
+            "read-only external facts must not report aliases: {read_only:?}"
+        );
+    }
+
+    /// A block-bodied lambda is nested inside an expression statement, so the
+    /// ordinary statement walk used to skip its field write completely.
+    #[test]
+    fn block_lambda_field_write_is_an_observable_alias_mutation_site() {
+        let found = aliases_in(
+            r#"
+            import java.util.Arrays;
+            public class Shared {
+                static class Node { int v; }
+                public int run() {
+                    Node a = new Node();
+                    Node b = a;
+                    Arrays.asList(1).forEach(value -> { a.v = 5; });
+                    return b.v;
+                }
+            }
+            "#,
+        );
+        assert_eq!(
+            found.len(),
+            1,
+            "block lambda field write should be observable: {found:?}"
+        );
+        assert_eq!(found[0].mutated_through, "a");
+        assert_eq!(found[0].observed_through, "b");
+        assert_eq!(
+            found[0].mutation,
+            MutationKind::FieldWrite {
+                field: "v".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn stored_lambda_declaration_is_not_a_mutation_site() {
+        let found = aliases_in(
+            r#"
+            public class Shared {
+                static class Node { int v; }
+                public int run() {
+                    Node a = new Node();
+                    Node b = a;
+                    Runnable r = () -> { a.v = 5; };
+                    return b.v;
+                }
+            }
+            "#,
+        );
+        assert!(
+            found.is_empty(),
+            "creating a callback must not execute its write: {found:?}"
+        );
+    }
+
+    #[test]
+    fn stored_runnable_run_is_an_observable_alias_mutation_site() {
+        let found = aliases_in(
+            r#"
+            public class Shared {
+                static class Node { int v; }
+                public int run() {
+                    Node a = new Node();
+                    Node b = a;
+                    Runnable r = () -> { a.v = 5; };
+                    r.run();
+                    return b.v;
+                }
+            }
+            "#,
+        );
+        assert_eq!(
+            found.len(),
+            1,
+            "calling a stored runnable should expose its captured write: {found:?}"
+        );
+        assert_eq!(found[0].mutated_through, "a");
+        assert_eq!(found[0].observed_through, "b");
+        assert_eq!(
+            found[0].mutation,
+            MutationKind::FieldWrite {
+                field: "v".to_string()
+            }
+        );
     }
 }

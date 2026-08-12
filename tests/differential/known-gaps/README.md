@@ -46,11 +46,7 @@ translation: 0|0|0|0
 ```
 
 See `claude_audits/0002-object-aliasing-has-no-representation.md`. The
-translator now *reports* three of these four cases as `observable_alias`
-warnings (`src/aliasing.rs`), so they are no longer silent — but reporting is
-not repair, and the output still computes the wrong answer. Closing this needs a
-shared representation in `ObjectRepresentation`.
-
-The fourth case (`cell[0] = a`, an alias stored in an array element rather than
-a second local) is not yet detected: the analysis only treats a local
-declaration as an alias point.
+translator now *reports* all four cases as `observable_alias` warnings
+(`src/aliasing.rs`), so they are no longer silent — but reporting is not repair,
+and the output still computes the wrong answer. Closing this needs a shared
+representation in `ObjectRepresentation`.

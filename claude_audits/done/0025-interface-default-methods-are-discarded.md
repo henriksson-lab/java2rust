@@ -39,7 +39,7 @@ missing Java interface method implementation: Q5.greet
 ```
 
 Java prints `"hello world"`. The output compiles cleanly, so this is invisible
-to the corpus error count ([0018](../0018-the-compile-error-metric-cannot-see-silent-failures.md)).
+to the corpus error count ([0018](0018-the-compile-error-metric-cannot-see-silent-failures.md)).
 
 ## Why this one should be cheap
 
@@ -81,7 +81,7 @@ The `panic!`-as-placeholder pattern here is the same as
 *translator* gap is encoded as a *runtime* failure in generated code, which
 means it compiles and the corpus metric scores it as success. Whatever emits
 these should raise a translator diagnostic as well — see
-[0018](../0018-the-compile-error-metric-cannot-see-silent-failures.md).
+[0018](0018-the-compile-error-metric-cannot-see-silent-failures.md).
 
 ## Regression tests worth adding
 

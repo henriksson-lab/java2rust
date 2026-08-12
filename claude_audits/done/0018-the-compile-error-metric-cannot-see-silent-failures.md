@@ -418,3 +418,36 @@ for this metric and require the matched owner path to start on an identifier
 boundary. The focused-package summary fallback also now handles the stale-profile
 case: if `analysis-profile.tsv` exists but lacks `noop_facade_call_sites`, the
 wrapper uses the idiom sweep instead of returning silent zero.
+
+## Update 2026-08-11 (Codex follow-up) — the focused sweep includes shared support
+
+The sweep no longer silently ignores markers emitted only into shared support.
+`sweep-generated-idioms.py` accepts repeated `--extra-rust` files, and
+`translate-focused-package.sh` passes `generated-shared-support.rs` alongside the
+`generated/` root.
+
+This closes the lower-bound caveat recorded above for support-code markers: a
+focused-package summary now sees unmodelled upcasts and other idiom signals that
+were promoted out of per-source modules into shared support. The regression test
+uses the same layout as focused-package output (`generated/` plus sibling
+`generated-shared-support.rs`) so the old generated-root-only behavior stays
+observable.
+
+## Update 2026-08-11 (Codex follow-up) — no-op method call sites are marked while lowering
+
+The `noop_facade_call_sites` counter no longer stops at constructor calls.
+Receiver calls that resolve to generated fluent facade bodies such as
+`JSONObject::put(...) -> self.clone()` are marked at lowering time with an
+owned output marker, and both the Rust counter and Python idiom sweep count that
+marker.
+
+The important boundary is that this is not a textual `.to_string()`/`.clone()`
+scan. The planner only marks calls already resolved through a facade ABI and
+known to target a generated no-op fluent facade body; the marker path does not
+create a new call target just to make the metric visible. It also excludes the
+real StringBuilder/StringBuffer/Appendable support methods so their stateful
+append implementations are not reported as no-ops.
+
+A follow-up audit tightened the detector too: the Rust counter and Python sweep
+now count the exact emitted comment prefix (`/* noop Java facade method call:`),
+not arbitrary prose containing the marker phrase.

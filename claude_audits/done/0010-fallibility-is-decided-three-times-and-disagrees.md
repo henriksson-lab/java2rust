@@ -86,7 +86,7 @@ which is what the 214 errors are.
 
 The pieces exist; they are not composed into one fallibility solve, and
 `fact_saturation` is not reachable from `src/lower.rs`
-(see [0008](../0008-inference-machinery-does-not-reach-lowering.md)).
+(see [0008](0008-inference-machinery-does-not-reach-lowering.md)).
 
 ## Fix direction
 
@@ -130,7 +130,7 @@ not pin down.
 Still open: those fallback probes are still name-based, and they answer "not
 fallible" when they fail to find a declaration, which is the unsound direction.
 Making them conservative needs the overload-identity work in
-[0009](../0009-overload-identity-collapses-onto-rust-name.md).
+[0009](0009-overload-identity-collapses-onto-rust-name.md).
 
 ## Update — legacy probes centralized, but not retired
 
@@ -175,7 +175,7 @@ load-bearing** is the finding of this pass:
 > `cumulative_probability`) and for every overload the equalization looked up
 > keys that were not in the plan and silently did nothing.
 
-That is [0009](../0009-overload-identity-collapses-onto-rust-name.md)'s thesis one
+That is [0009](0009-overload-identity-collapses-onto-rust-name.md)'s thesis one
 layer down: identity spelled two ways. With the group keys agreeing, the
 fixpoint's equalization takes effect, and `trait_method_exception_plan` is a
 plain lookup. All thirteen suites hold their numbers with the `|=` gone —
@@ -196,7 +196,7 @@ named analysis failure rather than two anonymous `rustc` errors per call site.
 the check can actually fire (a fallible callee in an infallible caller *is*
 reported), that a fallible caller is not, and that a locally handled boundary is
 not — because a detector nobody has seen fire is the failure mode
-[0018](../0018-the-compile-error-metric-cannot-see-silent-failures.md) is about,
+[0018](0018-the-compile-error-metric-cannot-see-silent-failures.md) is about,
 and two of `count_invalid_patterns`'s clauses had exactly that shape.
 
 ### What is still open

@@ -111,7 +111,7 @@ return sb.toString();          // must be "one2x", must never be ""
 
 A test that asserts on *values* rather than on compilation. Note that no
 compile-error-based gate can catch this issue — see
-[0018](../0018-the-compile-error-metric-cannot-see-silent-failures.md).
+[0018](0018-the-compile-error-metric-cannot-see-silent-failures.md).
 
 ## Status 2026-08-01 — core defect fixed
 

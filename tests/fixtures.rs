@@ -1300,7 +1300,7 @@ fn collection_capacity_constructor_uses_with_capacity() {
     assert!(
         translation
             .rust
-            .contains("Vec::with_capacity(self.names.as_ref().unwrap().len() as i32 as usize)")
+            .contains("Vec::with_capacity((self.names.as_ref().unwrap().len() as i32) as usize)")
     );
     assert!(!translation.rust.contains("self.names.size()"));
 }

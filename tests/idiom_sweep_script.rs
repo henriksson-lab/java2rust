@@ -17,16 +17,23 @@ fn unique_temp_dir(name: &str) -> PathBuf {
 }
 
 fn run_idiom_sweep(root: &Path) -> HashMap<String, usize> {
+    run_idiom_sweep_with_extra(root, &[])
+}
+
+fn run_idiom_sweep_with_extra(root: &Path, extra_rust: &[&Path]) -> HashMap<String, usize> {
     let out_tsv = root.join("idiom-sweep.tsv");
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/sweep-generated-idioms.py");
-    let output = Command::new("python3")
+    let mut command = Command::new("python3");
+    command
         .arg(script)
         .arg("--generated-root")
         .arg(root)
         .arg("--out-tsv")
-        .arg(&out_tsv)
-        .output()
-        .expect("run idiom sweep");
+        .arg(&out_tsv);
+    for path in extra_rust {
+        command.arg("--extra-rust").arg(path);
+    }
+    let output = command.output().expect("run idiom sweep");
     assert!(
         output.status.success(),
         "idiom sweep failed\nstdout:\n{}\nstderr:\n{}",
@@ -2925,5 +2932,41 @@ pub fn build() -> Font {
         swept.get("noop_facade_call_sites").copied(),
         Some(1),
         "the Python sweep should count only the real qualified constructor call"
+    );
+}
+
+#[test]
+fn idiom_sweep_includes_shared_support_file_signals() {
+    let dir = unique_temp_dir("idiom_sweep_shared_support");
+    let generated = dir.join("generated");
+    fs::create_dir_all(&generated).unwrap();
+    fs::write(generated.join("generated.rs"), "pub fn local() {}\n").unwrap();
+    let shared_support = dir.join("generated-shared-support.rs");
+    fs::write(
+        &shared_support,
+        r#"
+impl From<ZipOutputStream> for OutputStream {
+    /// Unmodelled Java upcast: ZipOutputStream -> OutputStream.
+    fn from(_value: ZipOutputStream) -> Self { Default::default() }
+}
+"#,
+    )
+    .unwrap();
+
+    let without_support = run_idiom_sweep(&generated);
+    assert_eq!(
+        without_support
+            .get("unmodelled_upcast_conversions")
+            .copied()
+            .unwrap_or(0),
+        0,
+        "the generated root alone should not see support-only markers"
+    );
+
+    let with_support = run_idiom_sweep_with_extra(&generated, &[&shared_support]);
+    assert_eq!(
+        with_support.get("unmodelled_upcast_conversions").copied(),
+        Some(1),
+        "support-only markers must be included in focused-package sweep metrics"
     );
 }

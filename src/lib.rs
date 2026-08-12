@@ -1006,7 +1006,7 @@ fn report_post_lowering_translation_diagnostics(
     // representation to lower an alias into. Where that copy is observable the
     // output compiles and computes a different answer, so it is reported here
     // rather than left to be discovered downstream.
-    aliasing::report_observable_aliases(program, usage, diagnostics);
+    aliasing::report_observable_aliases(program, usage, facts, diagnostics);
     // Step 2 of the 0002b design: the decision rule runs, lowering does not
     // change, and every type the plan says should be shared while lowering
     // holds it by value is reported. That list is the work queue for the

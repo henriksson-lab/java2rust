@@ -78,6 +78,10 @@ pub enum CallTargetPlan<'a> {
         rust_path: String,
         receiver_abi: ReceiverAbi,
         mutates_receiver: bool,
+        noop_facade_method_call: bool,
+        receiver_type: String,
+        method_name: String,
+        arg_count: usize,
     },
     SuperBoundary {
         declaring_type: String,
@@ -1735,6 +1739,15 @@ fn retarget_call_target_with_facade_abi_args<'a>(
         rust_path: abi.rust_path.clone(),
         receiver_abi: abi.receiver,
         mutates_receiver: matches!(abi.receiver, ReceiverAbi::MutBorrowedSelf),
+        noop_facade_method_call: crate::stdlib::external_facade_receiver_call_is_noop_method(
+            facts,
+            &abi.key.owner.type_name,
+            &abi.key.member.0,
+            abi.key.arity,
+        ),
+        receiver_type: abi.key.owner.type_name.clone(),
+        method_name: abi.key.member.0.clone(),
+        arg_count: abi.key.arity,
     }
 }
 
@@ -2785,7 +2798,7 @@ fn plan_external_facade_receiver_call<'a>(
     let receiver_name =
         external_receiver_expr_type_key_with_index(receiver, facts, external_index, types, None)?;
     let key = CallableKey::method(
-        receiver_name,
+        receiver_name.clone(),
         name.to_string(),
         Staticness::Unknown,
         arg_count,
@@ -2796,6 +2809,15 @@ fn plan_external_facade_receiver_call<'a>(
         rust_path: abi.rust_path.clone(),
         receiver_abi: abi.receiver,
         mutates_receiver: matches!(abi.receiver, ReceiverAbi::MutBorrowedSelf),
+        noop_facade_method_call: crate::stdlib::external_facade_receiver_call_is_noop_method(
+            facts,
+            &receiver_name,
+            name,
+            arg_count,
+        ),
+        receiver_type: receiver_name,
+        method_name: name.to_string(),
+        arg_count,
     })
 }
 

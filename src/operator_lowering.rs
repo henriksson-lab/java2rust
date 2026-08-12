@@ -566,7 +566,9 @@ fn plan_canonical_equality_comparison(
     }
     match (left.optional_element_type(), right.optional_element_type()) {
         (Some(left_element), Some(right_element)) if left_element == right_element => {
-            if let Some(method_name) = custom_equals_method(&left_element, facts) {
+            if source == EqualityComparisonSource::EqualsCall
+                && let Some(method_name) = custom_equals_method(&left_element, facts)
+            {
                 return EqualityComparisonPlan::BothOptionalCustomEquals {
                     erased_arg_handle_path: custom_equals_erased_arg_handle_path(
                         &left_element,
@@ -926,6 +928,7 @@ pub fn stream_unary_prefix(op: UnaryOp) -> Option<&'static str> {
 #[cfg(test)]
 mod equality_symmetry_tests {
     use super::*;
+    use crate::facts::{FactProvenance, SourceEqualsOverrideFact};
     use crate::java_ir::JavaType;
     use crate::slot_shape::{DispatchShape, MutabilityShape, TypeIdentity, ViewShape};
 
@@ -949,7 +952,7 @@ mod equality_symmetry_tests {
 
     fn optional(inner: JavaType) -> JavaType {
         JavaType::Named {
-            name: "java.util.Optional".to_string(),
+            name: "Optional".to_string(),
             args: vec![inner],
         }
     }
@@ -1036,6 +1039,42 @@ mod equality_symmetry_tests {
 
     #[test]
     fn custom_optional_not_equals_negates_the_some_case() {
+        let mut facts = FactSet::default();
+        facts
+            .source_equals_override_facts
+            .push(SourceEqualsOverrideFact {
+                type_name: "Node".to_string(),
+                provenance: FactProvenance::ParsedSource,
+            });
+        let optional_node = shape(
+            optional(named("Node")),
+            OwnershipShape::Owned,
+            ViewShape::Native,
+        );
+        assert_eq!(
+            plan_equality_comparison_for_source(
+                &optional_node,
+                &optional_node,
+                &facts,
+                EqualityComparisonSource::ReferenceOperator,
+            ),
+            EqualityComparisonPlan::BothOptionalByRef,
+            "Java == must not consult an optional element's custom equals override"
+        );
+        assert_eq!(
+            plan_equality_comparison_for_source(
+                &optional_node,
+                &optional_node,
+                &facts,
+                EqualityComparisonSource::EqualsCall,
+            ),
+            EqualityComparisonPlan::BothOptionalCustomEquals {
+                erased_arg_handle_path: None,
+                method_name: "equals".to_string(),
+            },
+            "optional .equals() still needs the null-safe custom-equals wrapper"
+        );
+
         let rendered = lower_equality_comparison_expr_for_op(
             BinaryOp::Ne,
             EqualityComparisonPlan::BothOptionalCustomEquals {

@@ -75,15 +75,16 @@ pub fn collect_lowering_diagnostic_plans(
             }),
     );
     diagnostics.extend(collect_java_reference_identity_equality_diagnostics(
-        program,
+        program, facts,
     ));
     diagnostics
 }
 
 fn collect_java_reference_identity_equality_diagnostics(
     program: &Program,
+    facts: &FactSet,
 ) -> Vec<LoweringDiagnosticPlan> {
-    let identity = SourceIdentityFacts::from_program(program);
+    let identity = SourceIdentityFacts::from_program(program, facts);
     let mut diagnostics = Vec::new();
     for ty in &program.types {
         collect_type_reference_identity_equality_diagnostics(ty, &identity, &mut diagnostics);
@@ -104,20 +105,26 @@ struct SourceIdentityFacts {
     declared: std::collections::BTreeSet<String>,
     declares_equals: std::collections::BTreeSet<String>,
     extends: std::collections::BTreeMap<String, String>,
+    implemented_reference_identity: std::collections::BTreeSet<String>,
 }
 
 impl SourceIdentityFacts {
-    fn from_program(program: &Program) -> Self {
+    fn from_program(program: &Program, storage_facts: &FactSet) -> Self {
         let mut facts = Self::default();
         for ty in &program.types {
-            facts.collect_type(ty);
+            facts.collect_type(ty, storage_facts);
         }
         facts
     }
 
-    fn collect_type(&mut self, ty: &TypeDecl) {
+    fn collect_type(&mut self, ty: &TypeDecl, storage_facts: &FactSet) {
         let simple = simple_type_name(&ty.name).to_string();
         self.declared.insert(simple.clone());
+        let placement = storage_facts.storage_placement_for(&ty.name);
+        if placement.shared && placement.is_implemented() {
+            self.implemented_reference_identity.insert(ty.name.clone());
+            self.implemented_reference_identity.insert(simple.clone());
+        }
         if let Some(extends) = &ty.extends {
             self.extends
                 .insert(simple.clone(), simple_type_name(extends).to_string());
@@ -127,7 +134,7 @@ impl SourceIdentityFacts {
                 Member::Method(method) if method_overrides_object_equals(method) => {
                     self.declares_equals.insert(simple.clone());
                 }
-                Member::Type(nested) => self.collect_type(nested),
+                Member::Type(nested) => self.collect_type(nested, storage_facts),
                 _ => {}
             }
         }
@@ -154,6 +161,37 @@ impl SourceIdentityFacts {
             }
         }
         false
+    }
+
+    fn java_type_has_implemented_reference_identity(&self, ty: &JavaType) -> bool {
+        match ty {
+            JavaType::Named { name, .. } => self.type_name_has_implemented_reference_identity(name),
+            _ => false,
+        }
+    }
+
+    fn type_name_has_implemented_reference_identity(&self, name: &str) -> bool {
+        self.implemented_reference_identity.contains(name)
+            || self
+                .implemented_reference_identity
+                .contains(simple_type_name(name))
+    }
+
+    fn reference_identity_equality_is_implemented(
+        &self,
+        left: &JavaType,
+        right: &JavaType,
+    ) -> bool {
+        let mut saw_reference = false;
+        for ty in [left, right] {
+            if java_type_has_reference_identity(ty) {
+                saw_reference = true;
+                if !self.java_type_has_implemented_reference_identity(ty) {
+                    return false;
+                }
+            }
+        }
+        saw_reference
     }
 }
 
@@ -518,7 +556,9 @@ fn collect_expr_reference_identity_equality_diagnostics(
     {
         let left_ty = infer_expr_type(left, env);
         let right_ty = infer_expr_type(right, env);
-        if let Some(code) = reference_identity_equality_diagnostic_code(&left_ty, &right_ty) {
+        if let Some(code) =
+            reference_identity_equality_diagnostic_code(&left_ty, &right_ty, identity)
+        {
             diagnostics.push(LoweringDiagnosticPlan {
                 severity: Severity::Warning,
                 code,
@@ -544,6 +584,7 @@ fn collect_expr_reference_identity_equality_diagnostics(
             ..
         } = infer_expr_type(receiver, env)
         && identity.inherits_object_equals(&receiver_type)
+        && !identity.type_name_has_implemented_reference_identity(&receiver_type)
     {
         diagnostics.push(LoweringDiagnosticPlan {
             severity: Severity::Warning,
@@ -713,11 +754,15 @@ fn collect_expr_reference_identity_equality_diagnostics(
 fn reference_identity_equality_diagnostic_code(
     left: &JavaType,
     right: &JavaType,
+    identity: &SourceIdentityFacts,
 ) -> Option<&'static str> {
     if left == &JavaType::String || right == &JavaType::String {
         return Some("java_string_identity");
     }
     if java_type_has_reference_identity(left) || java_type_has_reference_identity(right) {
+        if identity.reference_identity_equality_is_implemented(left, right) {
+            return None;
+        }
         return Some("java_reference_identity_equality");
     }
     None

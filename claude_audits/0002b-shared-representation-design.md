@@ -1,9 +1,8 @@
-# 0002b — Shared object representation: the design, on paper
+# 0002b — Shared object representation design and rollout
 
-Status: **design, not implemented**
+Status: **partially implemented** (`SharedImmutable` landed; `SharedLocal`/`SharedSync` remain open)
 Blocks: [0002b](0002-object-aliasing-has-no-representation.md),
 [0023](0023-inner-class-construction-always-panics.md),
-[0028](done/0028-reference-equality-lowered-as-structural-equality.md),
 and all of [CONCURRENCY-SCOPE](../CONCURRENCY-SCOPE.md)
 
 This exists because three separate documents all stop at the same sentence —
@@ -12,7 +11,9 @@ This exists because three separate documents all stop at the same sentence —
 representation choice on paper before implementing it. Cheap now, expensive
 later.** This is that paper.
 
-Nothing here is committed to code. It is written to be argued with.
+The early sections below are the original design. Later updates record the
+current implementation state: `SharedImmutable` handles and 0028 identity
+lowering are landed; the mutable handle tiers and shared receivers are not.
 
 ## What one decision buys
 
@@ -1226,7 +1227,7 @@ generated form is not.)
 
 `implicit_source_super_constructor_initializes_inherited_fields` does **not**
 call `cargo_check_generated_modules`, which is why an assert-only failure was
-hiding a non-compiling program. That is [0018](0018-the-compile-error-metric-cannot-see-silent-failures.md)'s
+hiding a non-compiling program. That is [0018](done/0018-the-compile-error-metric-cannot-see-silent-failures.md)'s
 blind spot inside the test suite itself.
 
 Not located: it is not `static_storage_initial_value_expr`,
@@ -1901,9 +1902,127 @@ slot. "Fresh" is never guessed; each site has a structural reason:
 - **The return-slot wrap fired on values that were already handles**, giving
   `Arc<Arc<T>>`; restricted to a bare constructor call.
 
+### Codex follow-up 2026-08-12 — constructor freshness guard asks structured calls first
+
+The value-side guard that decides whether a value is fresh enough to wrap for a
+handled slot still rendered the expression and parsed `Owner::new(..)` from the
+result. That kept the guard dependent on value-position text even when lowering
+had a structured `RustExpr::Call`.
+
+`rust_expr_is_bare_constructor_call` now recognises structured call function
+paths directly and keeps the old rendered parser only for raw expressions. This
+does not broaden the fresh-value rule; it just makes the existing bare
+constructor precondition structural when the IR already carries the call shape.
+
+The shared path parser also handles generated turbofish constructor calls and
+spacing before the call parenthesis, so `T::new_1::<U>(...)` is still recognised
+as the same fresh bare constructor as `T::new_1(...)`.
+
+### Codex follow-up 2026-08-12 — shared handle construction preserves call structure
+
+`slot_render::shared_handle_construction_expr` still wrapped fresh defaults and
+fresh local initializers by rendering the inner value and returning one raw
+`Rc::new(...)` or `Arc::new(...)` string.
+
+For the implemented `SharedImmutable` tier, the helper now returns a structured
+`RustExpr::Call` with the original expression as its argument. The raw
+`wrap_construction` fallback remains for future cell placements, where
+`RefCell::new`/`Mutex::new` nesting is not implemented yet.
+
+### Codex follow-up 2026-08-12 — optional element handle construction reuses the structured wrapper
+
+The optional-construction lowering path still had its own
+`placement.wrap_construction(emit_expr(value))` calls for fresh elements meeting
+handled optional slots. Those are the same value-side handle wrap as defaults and
+fresh local initializers, but they flattened `Some(Rc::new(value))` through a raw
+string before the `Some` plan saw it.
+
+Both optional-construction entry points now use the shared structured placement
+helper, so implemented `SharedImmutable` elements keep the nested
+`Some(Rc::new(value))` call shape. The raw fallback remains centralized for the
+unimplemented cell placements.
+
+### Codex follow-up 2026-08-12 — subtype/erasure fresh-constructor wraps use the shared helper
+
+The source-subtype upcast and erased-object slot paths still duplicated the
+fresh-constructor handle wrap with direct
+`placement.wrap_construction(emit_expr(...))` calls. Those branches are the same
+value-side SharedImmutable construction rule as defaults, locals, and optional
+elements.
+
+The fresh-constructor arms now delegate to the shared placement helper too. The
+outer erased-object boxing remains raw because it still composes a cast
+expression, but the handle construction inside it uses the centralized
+implemented-placement path.
+
+### Codex follow-up 2026-08-12 — recovered shared arguments use the shared wrapper
+
+`rewrap_recovered_shared_argument` was the remaining argument-path rewrap named
+above: after lowering recovered a bare value from a shared borrow, the callee's
+owned generic slot still required the handle. That helper still rendered the
+recovered value, checked the rendered wrapper prefix, and returned a raw
+`placement.wrap_construction(...)` string.
+
+It now delegates to the same placement helper as defaults, optional elements,
+and subtype/erasure fresh-constructor wraps. The existing idiom-gaps fixture
+`source_receiver_generic_result_upcasts_to_supertype_assignment_slot` continues
+to pin the emitted `Rc::new(line.clone(...))` shape.
+
+### Codex follow-up 2026-08-12 — borrowed subtype erasure uses the shared wrapper
+
+The borrowed/mutable-borrow erased-object subtype branch still cloned the value,
+rendered it, and passed the string through `placement.wrap_construction(...)`
+before the outer `Box<dyn Any>` erasure. That is the same implemented-placement
+construction rule as the owned fresh-constructor branch.
+
+It now delegates to the centralized placement helper after building the cloned
+payload expression. The outer erasure remains raw because it still composes the
+`Box::new(...) as ...` cast, but the handle construction inside it stays on the
+same structured path as other SharedImmutable value wraps.
+
+### Codex follow-up 2026-08-12 — enum carrier conversions use the shared wrapper
+
+Source-hierarchy enum conversions still had one generated-code duplicate of the
+implemented-placement rule: `impl From<Sub> for SuperEnum` built the enum payload
+with `placement.wrap_construction("value")` when the subtype was stored behind a
+shared handle.
+
+That conversion now renders the centralized placement helper applied to the
+`value` expression. The surrounding `impl From` body is still raw generated Rust,
+but the SharedImmutable construction spelling now has one owner.
+
+### Codex follow-up 2026-08-12 — same-outer constructor storage uses the shared wrapper
+
+The captured-inner constructor-body rewrite had the last non-central value-side
+call to `placement.wrap_construction(...)`: after rewriting a same-outer sibling
+constructor to pass `__outer.clone()`, it rendered the full constructor
+expression and wrapped the string for storage.
+
+It now passes the rewritten expression to the centralized placement helper. The
+helper keeps implemented SharedImmutable handle construction structured and
+retains the raw fallback for future cell placements.
+
 ### What this does *not* do
 
 `SharedImmutable` only. `is_implemented()` still excludes any type whose mutation
 cannot be proved absent, and now also any type whose trait surface is not
 `&self`-forwardable. `SharedLocal`/`SharedSync` -- the `RefCell`/`Mutex` rungs --
 remain off, and with them the reentrancy discipline this file describes.
+
+## Update 2026-08-11 (Codex follow-up) — stale gap diagnostics removed for implemented identity
+
+Two diagnostics were still describing landed `SharedImmutable` cases as if they
+were open gaps.
+
+`storage_strategy_disagreement` now fires only for shared placements that are not
+implemented. An `Rc`/`Arc` placement is no longer "lowered by value"; the
+surface-forwardability warning remains separate and still reports the cases that
+block handle forwarding.
+
+The reference-identity diagnostic pass now receives the same `FactSet` as
+lowering. For source types whose storage placement is shared and implemented,
+`==`, `!=`, and inherited `Object.equals` no longer report the old structural
+equality warning; those are the cases 0028 lowers with `Rc::ptr_eq`/`Arc::ptr_eq`.
+String identity and unimplemented reference-identity cases still warn. The
+regression is `implemented_shared_identity_equality_has_no_gap_diagnostics`,
+using `tests/differential/Identity.java`.

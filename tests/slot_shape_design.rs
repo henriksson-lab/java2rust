@@ -33,6 +33,7 @@ use new_java2rust::call_plan::{
 use new_java2rust::coercion::{
     Coercion, OptionalReceiverProjection, RenderedMutableAliasProjection,
     apply_slot_conversion_plan, borrowed_string_literal_temporary_plan, project_optional_receiver,
+    project_optional_receiver_with_shape, reborrow_optional_mut_projection,
     rendered_expr_is_mutable_alias, rendered_mutable_alias_projection,
 };
 use new_java2rust::constructor_plan::{
@@ -124,11 +125,11 @@ use new_java2rust::method_reference_shape::{
 use new_java2rust::nullability_plan::{TernaryNullRefinementPlan, plan_ternary_null_refinement};
 use new_java2rust::object_model::rust_enum_variant_name_from_parsed_constant;
 use new_java2rust::operator_lowering::{
-    EqualityComparisonPlan, NullComparisonMethod, NumericBinaryPromotionPlan,
-    OptionalStringEqualityOperandView, StringEqualityOperandView, binary_op_to_rust,
-    lower_equality_comparison_expr, lower_equality_comparison_expr_for_op,
+    EqualityComparisonPlan, EqualityComparisonSource, NullComparisonMethod,
+    NumericBinaryPromotionPlan, OptionalStringEqualityOperandView, StringEqualityOperandView,
+    binary_op_to_rust, lower_equality_comparison_expr, lower_equality_comparison_expr_for_op,
     lower_null_comparison_expr, lower_numeric_binary_expr, lower_unary_expr,
-    null_comparison_method, plan_equality_comparison, plan_equality_comparison_with_facts,
+    null_comparison_method, plan_equality_comparison, plan_equality_comparison_for_source,
     plan_numeric_binary_promotion, stream_unary_prefix,
 };
 use new_java2rust::parser::{parse_expr, parse_java_source, parse_type};
@@ -157,7 +158,7 @@ use new_java2rust::rewrite::{
     MethodControlFlowPlan, NullTestKind, TailRecursiveLoopPlan, TailRecursiveNormalizedShape,
     control_flow_rewrite_diagnostics,
 };
-use new_java2rust::rust_ir::{RustExpr, RustItem, RustReceiver, RustStmt, RustType};
+use new_java2rust::rust_ir::{RustExpr, RustExprShape, RustItem, RustReceiver, RustStmt, RustType};
 use new_java2rust::semantic_analysis::analyze_program;
 use new_java2rust::shape_projection::{
     DispatchProjectionPolicy, DispatchRequirementProjectionPolicy,
@@ -264,6 +265,7 @@ use new_java2rust::stdlib::{
     is_owned_string_result_method, java_class_support_item, java_platform_facade_support_item,
     java_string_split_support_item, program_uses_java_platform_facades,
 };
+use new_java2rust::storage_strategy::{Escape, StoragePlan, TypeStorageFacts};
 use new_java2rust::stream::{
     FilterPlan, FlatMapPlan, StreamOp, StreamSourceIteration, build_stream_plan,
     stream_collect_actual,
@@ -513,7 +515,10 @@ external-pack-field hdf5 OpenMode READ_ONLY mapped
             RustExpr::Raw("ignored".to_string()),
             &facts,
         ),
-        RustExpr::Raw("hdf5_facade::OpenMode::CREATE".to_string())
+        RustExpr::Path(vec![
+            "hdf5_facade::OpenMode".to_string(),
+            "CREATE".to_string(),
+        ])
     );
     assert_eq!(
         lower_field_access_with_facts(
@@ -523,7 +528,10 @@ external-pack-field hdf5 OpenMode READ_ONLY mapped
             RustExpr::Raw("ignored".to_string()),
             &facts,
         ),
-        RustExpr::Raw("hdf5_facade::OpenMode::READ_ONLY".to_string())
+        RustExpr::Path(vec![
+            "hdf5_facade::OpenMode".to_string(),
+            "READ_ONLY".to_string(),
+        ])
     );
 }
 
@@ -1757,9 +1765,25 @@ fn slot_render_owns_default_expressions_for_planned_views() {
         ),
         SlotDefaultValuePolicy::EmptySequence
     );
+    let string_default = default_expr_for_slot(&RustSlotShape::conservative(JavaType::String));
+    assert_eq!(emit_expr(&string_default), "String::new()");
     assert_eq!(
-        default_expr_for_slot(&RustSlotShape::conservative(JavaType::String)),
-        RustExpr::Raw("String::new()".to_string())
+        string_default,
+        RustExpr::Call {
+            function: Box::new(RustExpr::path(["String", "new"])),
+            args: Vec::new(),
+        }
+    );
+    let sequence_default = default_expr_for_slot(&RustSlotShape::conservative(list_java_type(
+        JavaType::String,
+    )));
+    assert_eq!(emit_expr(&sequence_default), "Vec::new()");
+    assert_eq!(
+        sequence_default,
+        RustExpr::Call {
+            function: Box::new(RustExpr::path(["Vec", "new"])),
+            args: Vec::new(),
+        }
     );
 
     let mut enum_shape = RustSlotShape::conservative(JavaType::Named {
@@ -1856,7 +1880,10 @@ fn slot_render_owns_default_expressions_for_planned_views() {
     );
     assert_eq!(
         default_expr_for_slot(&optional_boxed_shape),
-        RustExpr::Raw("Default::default()".to_string())
+        RustExpr::Call {
+            function: Box::new(RustExpr::path(["Default", "default"])),
+            args: Vec::new(),
+        }
     );
 
     let mut erased_shape = RustSlotShape::conservative(JavaType::Unknown("Object".to_string()));
@@ -2058,11 +2085,55 @@ fn slot_render_uses_type_capability_facts_for_sequence_views_and_storage() {
     );
     assert_eq!(
         default_expr_for_slot(&storage_shape),
-        RustExpr::Raw("Default::default()".to_string())
+        RustExpr::Call {
+            function: Box::new(RustExpr::path(["Default", "default"])),
+            args: Vec::new(),
+        }
+    );
+    let storage_default = default_expr_for_slot_with_facts(&storage_shape, &facts);
+    assert_eq!(emit_expr(&storage_default), "Vec::new()");
+    assert_eq!(
+        storage_default,
+        RustExpr::Call {
+            function: Box::new(RustExpr::path(["Vec", "new"])),
+            args: Vec::new(),
+        }
+    );
+
+    let shared_node = JavaType::Named {
+        name: "SharedNode".to_string(),
+        args: Vec::new(),
+    };
+    let mut storage_plan = StoragePlan::default();
+    storage_plan.insert(
+        "SharedNode".to_string(),
+        TypeStorageFacts {
+            escape: Escape::Stored,
+            mutated: false,
+            mutation_provably_absent: true,
+            surface_forwardable: true,
+            ..TypeStorageFacts::default()
+        },
+    );
+    let shared_facts = FactSet {
+        storage_strategies: storage_plan,
+        ..FactSet::default()
+    };
+    let shared_default =
+        default_expr_for_slot_with_facts(&RustSlotShape::conservative(shared_node), &shared_facts);
+    assert_eq!(
+        emit_expr(&shared_default),
+        "std::rc::Rc::new(Default::default())"
     );
     assert_eq!(
-        default_expr_for_slot_with_facts(&storage_shape, &facts),
-        RustExpr::Raw("Vec::new()".to_string())
+        shared_default,
+        RustExpr::Call {
+            function: Box::new(RustExpr::path(["std", "rc", "Rc", "new"])),
+            args: vec![RustExpr::Call {
+                function: Box::new(RustExpr::path(["Default", "default"])),
+                args: Vec::new(),
+            }],
+        }
     );
     assert_eq!(
         slot_content_capability_policy(&storage_shape.java_ty, &facts),
@@ -4902,7 +4973,10 @@ fn class_literal_tokens_are_planned_before_lowering() {
     assert_eq!(
         apply_class_literal_token(&JavaType::String, &FactSet::default()),
         RustExpr::Call {
-            function: Box::new(RustExpr::Raw("JavaClass::<String>::literal".to_string())),
+            function: Box::new(RustExpr::Path(vec![
+                "JavaClass::<String>".to_string(),
+                "literal".to_string(),
+            ])),
             args: vec![RustExpr::Literal("\"String\"".to_string())],
         }
     );
@@ -9350,7 +9424,9 @@ fn apply_call_target_uses_shared_call_projection_helpers() {
             vec![RustExpr::Var("value".to_string())],
         ),
         RustExpr::Call {
-            function: Box::new(RustExpr::Raw("Self::make".to_string())),
+            function: Box::new(RustExpr::Path(
+                vec!["Self".to_string(), "make".to_string(),]
+            )),
             args: vec![RustExpr::Var("value".to_string())],
         }
     );
@@ -9364,7 +9440,10 @@ fn apply_call_target_uses_shared_call_projection_helpers() {
             Vec::new(),
         ),
         RustExpr::Call {
-            function: Box::new(RustExpr::Raw("Owner::make".to_string())),
+            function: Box::new(RustExpr::Path(vec![
+                "Owner".to_string(),
+                "make".to_string(),
+            ])),
             args: Vec::new(),
         }
     );
@@ -9577,7 +9656,10 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
     assert_eq!(super_target.receiver_expr(), None);
     assert_eq!(
         apply_call_target(&super_target, None, Vec::new()),
-        RustExpr::Raw("Default::default()".to_string())
+        RustExpr::Call {
+            function: Box::new(RustExpr::path(["Default", "default"])),
+            args: Vec::new(),
+        }
     );
 
     let hdf5_receiver = Expr::Var("hdf5".to_string());
@@ -9777,7 +9859,14 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
             Some(RustExpr::Var("values".to_string())),
             Vec::new(),
         ),
-        RustExpr::Raw("values.len() as i32".to_string())
+        RustExpr::Cast {
+            expr: Box::new(RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Var("values".to_string())),
+                method: "len".to_string(),
+                args: Vec::new(),
+            }),
+            ty: "i32".to_string(),
+        }
     );
     assert!(matches!(
         plan_call_target_with_facts(
@@ -10214,6 +10303,19 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
     assert_eq!(
         apply_call_target(
             &CallTargetPlan::NativeCollectionStatic {
+                method: NativeCollectionStaticMethod::CollectionsUnmodifiableSet,
+            },
+            None,
+            Vec::new(),
+        ),
+        RustExpr::Call {
+            function: Box::new(RustExpr::path(["Default", "default"])),
+            args: Vec::new(),
+        }
+    );
+    assert_eq!(
+        apply_call_target(
+            &CallTargetPlan::NativeCollectionStatic {
                 method: NativeCollectionStaticMethod::CollectionsSingletonMap,
             },
             None,
@@ -10435,7 +10537,7 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
             ],
         ),
         RustExpr::Call {
-            function: Box::new(RustExpr::Raw("std::cmp::max".to_string())),
+            function: Box::new(RustExpr::path(["std", "cmp", "max"])),
             args: vec![
                 RustExpr::Var("left".to_string()),
                 RustExpr::Var("right".to_string())
@@ -10461,7 +10563,7 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
     assert_eq!(
         apply_new_target(&list_new_target, Vec::new()),
         RustExpr::Call {
-            function: Box::new(RustExpr::Raw("Vec::new".to_string())),
+            function: Box::new(RustExpr::path(["Vec", "new"])),
             args: Vec::new(),
         }
     );
@@ -10563,7 +10665,7 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
     assert_eq!(
         apply_new_target(&map_new_target, Vec::new()),
         RustExpr::Call {
-            function: Box::new(RustExpr::Raw("std::collections::HashMap::new".to_string())),
+            function: Box::new(RustExpr::path(["std", "collections", "HashMap", "new"])),
             args: Vec::new(),
         }
     );
@@ -11662,6 +11764,83 @@ fn optional_borrow_receiver_projection_uses_null_check_without_reborrow() {
         )),
         "values.get(key).expect(\"Java null receiver\")"
     );
+    assert_eq!(
+        project_optional_receiver(
+            RustExpr::Var("value".to_string()),
+            OptionalReceiverProjection::Borrowed,
+        ),
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("value".to_string())),
+            method: "expect".to_string(),
+            args: vec![RustExpr::Literal("\"Java null receiver\"".to_string())],
+        }
+    );
+    assert_eq!(
+        project_optional_receiver(
+            RustExpr::Var("value".to_string()),
+            OptionalReceiverProjection::SharedUnchecked,
+        ),
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Var("value".to_string())),
+                method: "as_ref".to_string(),
+                args: Vec::new(),
+            }),
+            method: "unwrap".to_string(),
+            args: Vec::new(),
+        }
+    );
+    assert_eq!(
+        project_optional_receiver(
+            RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Var("values".to_string())),
+                method: "unwrap".to_string(),
+                args: Vec::new(),
+            },
+            OptionalReceiverProjection::Mutable,
+        ),
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Var("values".to_string())),
+                method: "as_mut".to_string(),
+                args: Vec::new(),
+            }),
+            method: "expect".to_string(),
+            args: vec![RustExpr::Literal("\"Java null receiver\"".to_string())],
+        }
+    );
+
+    let mut element_shape = RustSlotShape::conservative(JavaType::Named {
+        name: "Reader".to_string(),
+        args: Vec::new(),
+    });
+    element_shape.ownership = OwnershipShape::SharedBorrow;
+    let projected = project_optional_receiver_with_shape(
+        RustExpr::Var("maybe".to_string()),
+        OptionalReceiverProjection::Shared,
+        &element_shape,
+    );
+    assert_eq!(
+        emit_expr(&projected),
+        "maybe.as_ref().expect(\"Java null receiver\")"
+    );
+    assert_eq!(
+        projected.clone().into_unshaped(),
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Var("maybe".to_string())),
+                method: "as_ref".to_string(),
+                args: Vec::new(),
+            }),
+            method: "expect".to_string(),
+            args: vec![RustExpr::Literal("\"Java null receiver\"".to_string())],
+        }
+    );
+    let produced = projected
+        .recorded_slot_shape()
+        .expect("shape-aware optional receiver projection should record its produced slot");
+    assert_eq!(produced.java_ty, element_shape.java_ty);
+    assert_eq!(produced.ownership, OwnershipShape::SharedBorrow);
 }
 
 #[test]
@@ -11686,6 +11865,17 @@ fn rendered_mutable_alias_projection_names_same_call_alias_shapes() {
         Some(RenderedMutableAliasProjection::OptionalDerefMut)
     );
     assert_eq!(
+        rendered_mutable_alias_projection(
+            "values.map(|item| item.as_mut().expect(\"Java null receiver\"))",
+            "values"
+        ),
+        None
+    );
+    assert_eq!(
+        rendered_mutable_alias_projection("values.map(|item| item.as_deref_mut())", "values"),
+        None
+    );
+    assert_eq!(
         rendered_mutable_alias_projection("values.field.as_mut_slice()", "values"),
         Some(RenderedMutableAliasProjection::NestedMutableSlice)
     );
@@ -11697,6 +11887,100 @@ fn rendered_mutable_alias_projection_names_same_call_alias_shapes() {
         &RustExpr::Raw("values.field.as_deref_mut()".to_string()),
         "values"
     ));
+    assert!(rendered_expr_is_mutable_alias(
+        &RustExpr::Unary {
+            op: "&mut ".to_string(),
+            expr: Box::new(RustExpr::Var("values".to_string())),
+        },
+        "values"
+    ));
+    assert!(rendered_expr_is_mutable_alias(
+        &RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("values".to_string())),
+            method: "as_mut_slice".to_string(),
+            args: Vec::new(),
+        },
+        "values"
+    ));
+    assert!(rendered_expr_is_mutable_alias(
+        &RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Field(
+                Box::new(RustExpr::Var("values".to_string())),
+                "field".to_string(),
+            )),
+            method: "as_deref_mut".to_string(),
+            args: Vec::new(),
+        },
+        "values"
+    ));
+    assert!(rendered_expr_is_mutable_alias(
+        &RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Field(
+                    Box::new(RustExpr::Var("values".to_string())),
+                    "field".to_string(),
+                )),
+                method: "as_mut".to_string(),
+                args: Vec::new(),
+            }),
+            method: "expect".to_string(),
+            args: vec![RustExpr::Literal("\"Java null receiver\"".to_string())],
+        },
+        "values"
+    ));
+    assert!(!rendered_expr_is_mutable_alias(
+        &RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("other".to_string())),
+            method: "as_mut_slice".to_string(),
+            args: Vec::new(),
+        },
+        "values"
+    ));
+}
+
+#[test]
+fn optional_mut_reborrow_records_projected_element_shape() {
+    let array_ty = JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Int)));
+    let mut target = RustSlotShape::conservative(optional_java_type(array_ty.clone()));
+    target.ownership = OwnershipShape::MutableBorrow;
+    target.view = ViewShape::Slice;
+
+    let reborrowed =
+        reborrow_optional_mut_projection(&RustExpr::Raw("values".to_string()), &target)
+            .expect("optional mutable target should reborrow with as_deref_mut");
+
+    assert_eq!(emit_expr(&reborrowed), "values.as_deref_mut()");
+    assert_eq!(
+        reborrowed.recorded_shape(),
+        Some(RustExprShape::OptionalProjected)
+    );
+    let produced = reborrowed
+        .recorded_slot_shape()
+        .expect("optional mut reborrow should record its produced element slot");
+    assert_eq!(produced.java_ty, array_ty);
+    assert_eq!(produced.ownership, OwnershipShape::MutableBorrow);
+    assert_eq!(produced.view, ViewShape::Slice);
+
+    let second_pass = reborrow_optional_mut_projection(&reborrowed, &target)
+        .expect("recorded produced shape should be accepted idempotently");
+    assert_eq!(emit_expr(&second_pass), "values.as_deref_mut()");
+
+    let structured =
+        reborrow_optional_mut_projection(&RustExpr::Var("values".to_string()), &target)
+            .expect("structured optional mutable target should keep method structure");
+    assert_eq!(emit_expr(&structured), "values.as_deref_mut()");
+    assert_eq!(
+        structured.clone().into_unshaped(),
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("values".to_string())),
+            method: "as_deref_mut".to_string(),
+            args: Vec::new(),
+        }
+    );
+    assert_eq!(
+        structured.recorded_shape(),
+        Some(RustExprShape::OptionalProjected)
+    );
 }
 
 #[test]
@@ -14501,7 +14785,7 @@ class CollectionsSortComparatorUse {
         translation.rust.contains("values.sort_by(|a, b|")
             && translation
                 .rust
-                .contains("__java_comparator.compare(a.clone(), b.clone()).cmp(&0)"),
+                .contains("__java_comparator(a.clone(), b.clone()).cmp(&0)"),
         "{}",
         translation.rust
     );
@@ -14515,6 +14799,14 @@ class CollectionsSortComparatorUse {
         !translation.rust.contains("JavaUtilCollections::sort"),
         "{}",
         translation.rust
+    );
+    cargo_check_generated_modules(
+        "collections_sort_comparator_statement_lowers_to_sort_by",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -14554,6 +14846,14 @@ class CollectionsSortLocalUse {
         "{}",
         translation.rust
     );
+    cargo_check_generated_modules(
+        "collections_sort_comparator_marks_local_vec_mutable",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -14592,6 +14892,14 @@ class CollectionsSortInterfaceLocalUse {
         !translation.rust.contains("JavaUtilCollections::sort"),
         "{}",
         translation.rust
+    );
+    cargo_check_generated_modules(
+        "collections_sort_comparator_marks_interface_declared_local_vec_mutable",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -15166,6 +15474,7 @@ fn coercion_plan_owns_clone_recovery_policy() {
     assert!(source.contains("render_clone_recovery_policy"));
     assert!(source.contains("pub fn rendered_expr_has_clone_recovery"));
     assert!(source.contains("pub fn rendered_expr_has_direct_clone_recovery"));
+    assert!(source.contains("pub fn rust_expr_has_direct_clone_recovery"));
     assert!(source.contains("pub fn apply_audited_clone_recovery"));
     assert!(lower_source.contains("enum CloneRecoveryDecision"));
     assert!(lower_source.contains("ApplyRecoveryCoercion"));
@@ -15175,6 +15484,13 @@ fn coercion_plan_owns_clone_recovery_policy() {
     assert!(lower_source.contains("fn audited_clone_recovery_decision"));
     assert!(lower_source.contains("apply_clone_recovery_decision"));
     assert!(lower_source.contains("Coercion::CloneRecovery"));
+    assert!(
+        lower_source.contains("fn clone_recovery_idempotence_matches(\n    lowered: &RustExpr")
+    );
+    assert!(lower_source.contains("crate::coercion::rust_expr_has_clone_recovery(lowered)"));
+    assert!(lower_source.contains("rust_expr_has_direct_clone_recovery(lowered)"));
+    assert!(lower_source.contains("fn optional_clone_recovery_expr(rendered: String) -> RustExpr"));
+    assert!(lower_source.contains("RustExprShape::OwnedRecovery"));
     let unshaped_argument = lower_source
         .split("fn lower_unshaped_argument")
         .nth(1)
@@ -15882,8 +16198,16 @@ fn static_optional_storage_initializers_use_optional_construction_plan() {
 
     assert!(!source.contains("fn construct_optional_value_for_target"));
     assert!(conversion_lowering_source.contains("fn construct_optional_value_for_target"));
-    assert!(!conversion_lowering_source.contains("FactSet"));
-    assert!(!conversion_lowering_source.contains("plan_slot_conversion"));
+    let optional_construction_helper = conversion_lowering_source
+        .split("pub fn construct_optional_value_for_target")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub fn construct_preconverted_optional_value_for_target")
+                .next()
+        })
+        .expect("optional construction helper should be present");
+    assert!(!optional_construction_helper.contains("FactSet"));
+    assert!(!optional_construction_helper.contains("plan_slot_conversion"));
     assert!(
         conversion_lowering_source
             .contains("SlotConversionPlan::OptionalConstruction(construction)")
@@ -16157,19 +16481,17 @@ fn optional_element_borrow_carrier_construction_is_centralized() {
         .and_then(|tail| tail.split("fn adapt_native_collection_receiver").next())
         .expect("optional receiver slot-plan adapter should be present");
     assert!(optional_instance_receiver_adapter.contains("OptionalElementBorrow"));
-    assert!(optional_instance_receiver_adapter.contains("plan_lowered_slot_conversion"));
-    assert!(optional_instance_receiver_adapter.contains("project_optional_receiver"));
-    assert!(optional_instance_receiver_adapter.contains("plan.optional_element_borrow_type"));
+    assert!(optional_instance_receiver_adapter.contains("apply_optional_receiver_slot_projection"));
+    assert!(!optional_instance_receiver_adapter.contains("plan_lowered_slot_conversion"));
+    assert!(!optional_instance_receiver_adapter.contains("project_optional_receiver"));
+    assert!(optional_instance_receiver_adapter.contains("plan.element_ownership"));
     assert!(optional_instance_receiver_adapter.contains("optional_borrowed_receiver_slot_plan"));
     assert!(!optional_instance_receiver_adapter.contains("OptionalReceiverProjection::Borrowed"));
     assert!(
         !optional_instance_receiver_adapter.contains("optional_element_borrow_from_option_shape")
     );
     assert!(!optional_instance_receiver_adapter.contains("Some(if mutable"));
-    assert!(
-        optional_instance_receiver_adapter
-            .contains("receiver_method_autoref_satisfies_optional_slot")
-    );
+    assert!(conversion_source.contains("receiver_method_autoref_satisfies_optional_slot"));
     assert!(!source.contains("fn optional_receiver_method_autoref_satisfies_slot"));
     let native_collection_receiver_helper = source
         .split("fn adapt_native_collection_receiver")
@@ -19538,7 +19860,10 @@ class Holder {
             vec![RustExpr::Var("name".to_string())],
         ),
         vec![RustStmt::Return(Some(RustExpr::Call {
-            function: Box::new(RustExpr::Raw("Self::new_with_name".to_string())),
+            function: Box::new(RustExpr::Path(vec![
+                "Self".to_string(),
+                "new_with_name".to_string(),
+            ])),
             args: vec![RustExpr::Var("name".to_string())],
         }))]
     );
@@ -23645,6 +23970,66 @@ class FallibleImpl implements FallibleIface {
             .reasons
             .contains(&new_java2rust::exception_plan::FallibilityReason::PropagatedFromOverride)
     }));
+}
+
+#[test]
+fn callable_fallibility_override_sets_use_erased_signature_not_arity() {
+    let parsed = parse_java_source(
+        r#"
+class FallibleBase {
+    String f(String value) {
+        return value;
+    }
+}
+
+class FallibleChild extends FallibleBase {
+    String f(String value) {
+        return value;
+    }
+
+    int f(int value) {
+        return value;
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let graph = new_java2rust::usage::build_call_graph(&resolved.program);
+    let mut facts = FactSet::default();
+    facts.method_effect_facts.push(MethodEffectFact {
+        method: FactMethodKey {
+            type_name: "FallibleChild".to_string(),
+            method_name: "f_int".to_string(),
+        },
+        receiver_mutability: ReceiverMutabilityFact::Unknown,
+        return_nullability: NullabilityState::Unknown,
+        thrown: vec![JavaType::Unknown("IllegalStateException".to_string())],
+        provenance: FactProvenance::ParsedSource,
+    });
+
+    let fallibility = plan_program_fallibility(&resolved.program, &graph, &facts);
+    let child_int = new_java2rust::usage::CallableKey::Method {
+        type_name: "FallibleChild".to_string(),
+        method_name: "f_int".to_string(),
+    };
+    let base_declared = new_java2rust::usage::CallableKey::Method {
+        type_name: "FallibleBase".to_string(),
+        method_name: "f".to_string(),
+    };
+    let phantom_base_int = new_java2rust::usage::CallableKey::Method {
+        type_name: "FallibleBase".to_string(),
+        method_name: "f_int".to_string(),
+    };
+
+    assert!(fallibility.returns_result(&child_int));
+    assert!(
+        !fallibility.returns_result(&base_declared),
+        "same-name same-arity overloads with different erased parameter types are not overrides"
+    );
+    assert!(
+        fallibility.callable(&phantom_base_int).is_none(),
+        "override grouping must not invent a parent key from the child overload name"
+    );
 }
 
 #[test]
@@ -30119,7 +30504,7 @@ fn exception_lowering_policy_owns_result_support_ok_and_err_shapes() {
     assert_eq!(
         return_stmt(Some(RustExpr::Literal("1".to_string())), true),
         RustStmt::Return(Some(RustExpr::Call {
-            function: Box::new(RustExpr::Raw("Ok".to_string())),
+            function: Box::new(RustExpr::path(["Ok"])),
             args: vec![RustExpr::Literal("1".to_string())],
         }))
     );
@@ -30129,12 +30514,16 @@ fn exception_lowering_policy_owns_result_support_ok_and_err_shapes() {
             RustExpr::Literal("\"bad\".to_string()".to_string()),
         )),
         RustStmt::Return(Some(RustExpr::Call {
-            function: Box::new(RustExpr::Raw("Err".to_string())),
+            function: Box::new(RustExpr::path(["Err"])),
             args: vec![RustExpr::Call {
-                function: Box::new(RustExpr::Raw("JavaException::new".to_string())),
+                function: Box::new(RustExpr::path(["JavaException", "new"])),
                 args: vec![
                     RustExpr::Literal("\"IllegalArgumentException\"".to_string()),
-                    RustExpr::Raw("\"bad\".to_string().to_string()".to_string()),
+                    RustExpr::MethodCall {
+                        receiver: Box::new(RustExpr::Literal("\"bad\".to_string()".to_string())),
+                        method: "to_string".to_string(),
+                        args: Vec::new(),
+                    },
                 ],
             }],
         }))
@@ -30155,10 +30544,16 @@ fn exception_lowering_policy_owns_result_support_ok_and_err_shapes() {
     assert_eq!(
         fallback_exception_expr(RustExpr::Var("err".to_string())),
         RustExpr::Call {
-            function: Box::new(RustExpr::Raw("JavaException::new".to_string())),
+            function: Box::new(RustExpr::path(["JavaException", "new"])),
             args: vec![
                 RustExpr::Literal("\"JavaException\"".to_string()),
-                RustExpr::Raw("format!(\"{:?}\", err)".to_string()),
+                RustExpr::Call {
+                    function: Box::new(RustExpr::Raw("format!".to_string())),
+                    args: vec![
+                        RustExpr::Literal("\"{:?}\"".to_string()),
+                        RustExpr::Var("err".to_string()),
+                    ],
+                },
             ],
         }
     );
@@ -30172,10 +30567,17 @@ fn exception_lowering_policy_owns_result_support_ok_and_err_shapes() {
     assert_eq!(
         exception_expr_from_new("IllegalStateException", Vec::new(),),
         RustExpr::Call {
-            function: Box::new(RustExpr::Raw("JavaException::new".to_string())),
+            function: Box::new(RustExpr::path(["JavaException", "new"])),
             args: vec![
                 RustExpr::Literal("\"IllegalStateException\"".to_string()),
-                RustExpr::Raw("String::new().to_string()".to_string()),
+                RustExpr::MethodCall {
+                    receiver: Box::new(RustExpr::Call {
+                        function: Box::new(RustExpr::path(["String", "new"])),
+                        args: Vec::new(),
+                    }),
+                    method: "to_string".to_string(),
+                    args: Vec::new(),
+                },
             ],
         }
     );
@@ -30188,7 +30590,7 @@ fn exception_lowering_policy_owns_result_support_ok_and_err_shapes() {
             ],
         ),
         RustExpr::Call {
-            function: Box::new(RustExpr::Raw("JavaException::new".to_string())),
+            function: Box::new(RustExpr::path(["JavaException", "new"])),
             args: vec![
                 RustExpr::Literal("\"IllegalStateException\"".to_string()),
                 RustExpr::Raw("format!(\"{}: {}\", message, ignored).to_string()".to_string()),
@@ -30205,10 +30607,14 @@ fn exception_lowering_policy_owns_result_support_ok_and_err_shapes() {
             true,
         ),
         RustExpr::Call {
-            function: Box::new(RustExpr::Raw("JavaException::with_cause".to_string())),
+            function: Box::new(RustExpr::path(["JavaException", "with_cause"])),
             args: vec![
                 RustExpr::Literal("\"IllegalStateException\"".to_string()),
-                RustExpr::Raw("message.to_string()".to_string()),
+                RustExpr::MethodCall {
+                    receiver: Box::new(RustExpr::Var("message".to_string())),
+                    method: "to_string".to_string(),
+                    args: Vec::new(),
+                },
                 RustExpr::Var("cause".to_string()),
             ],
         }
@@ -30223,7 +30629,7 @@ fn exception_lowering_policy_owns_result_support_ok_and_err_shapes() {
             false,
         ),
         RustExpr::Call {
-            function: Box::new(RustExpr::Raw("JavaException::new".to_string())),
+            function: Box::new(RustExpr::path(["JavaException", "new"])),
             args: vec![
                 RustExpr::Literal("\"MissingArgument\"".to_string()),
                 RustExpr::Raw(
@@ -30239,10 +30645,16 @@ fn exception_lowering_policy_owns_result_support_ok_and_err_shapes() {
             RustExpr::Var("ex".to_string()),
         ),
         RustExpr::Call {
-            function: Box::new(RustExpr::Raw("JavaException::with_cause".to_string())),
+            function: Box::new(RustExpr::path(["JavaException", "with_cause"])),
             args: vec![
                 RustExpr::Literal("\"UserProblem\"".to_string()),
-                RustExpr::Raw("\"copy failed\".to_string().to_string()".to_string()),
+                RustExpr::MethodCall {
+                    receiver: Box::new(RustExpr::Literal(
+                        "\"copy failed\".to_string()".to_string(),
+                    )),
+                    method: "to_string".to_string(),
+                    args: Vec::new(),
+                },
                 RustExpr::Var("ex".to_string()),
             ],
         }
@@ -31957,10 +32369,13 @@ class BorrowedArrowGetterReturn {
     let vector_shape = signatures.required_local_shape(local_plans, "vector");
     assert_eq!(vector_shape.dispatch, DispatchShape::ErasedObject);
     assert_eq!(vector_shape.view, ViewShape::ErasedObjectView);
-    assert!(matches!(
-        vector_shape.optional_element_type(),
-        Some(JavaType::Named { name, .. }) if name == "Object"
-    ));
+    assert!(
+        matches!(
+            vector_shape.optional_element_type(),
+            Some(JavaType::Named { name, .. }) if name == "Object"
+        ),
+        "{vector_shape:?}"
+    );
 
     let translation = translate_source_with_facts(source, &facts);
 
@@ -31983,7 +32398,38 @@ class BorrowedArrowGetterReturn {
         "borrowed_external_facade_return_recovers_owned_value_before_",
         vec![GeneratedCrateModule {
             name: "fixture",
-            rust: translation.rust.clone(),
+            rust: format!(
+                r#"
+pub mod arrow_facade {{
+    #[derive(Clone, Copy)]
+    pub struct VectorSchemaRoot;
+    #[derive(Clone)]
+    pub struct Schema;
+    #[derive(Clone)]
+    pub struct FieldVector;
+
+    static SCHEMA: Schema = Schema;
+    static FIELD_VECTOR: FieldVector = FieldVector;
+
+    impl VectorSchemaRoot {{
+        pub fn close(&self) {{}}
+    }}
+
+    pub fn get_schema(_root: VectorSchemaRoot) -> &'static Schema {{
+        &SCHEMA
+    }}
+
+    pub fn get_vector<T0>(_root: VectorSchemaRoot, _arg0: T0) -> Option<&'static FieldVector> {{
+        Some(&FIELD_VECTOR)
+    }}
+}}
+
+pub use arrow_facade::{{FieldVector, Schema}};
+
+{}
+"#,
+                translation.rust
+            ),
             tests: "",
         }],
     );
@@ -32510,6 +32956,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     }
     assert!(coercion_source.contains("pub fn typed_single_input_callback_projection"));
     assert!(coercion_source.contains("pub fn outer_this_field_projection"));
+    assert!(coercion_source.contains("pub fn outer_this_field_mut_projection"));
     assert!(coercion_source.contains("pub fn self_field_projection"));
     assert!(coercion_source.contains("pub fn field_projection"));
     assert!(coercion_source.contains("pub fn char_sequence_collect_string_projection"));
@@ -32778,6 +33225,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(!lower_source.contains("RustExpr::Raw(format!(\"{owner}::{field}\""));
     assert!(!lower_source.contains("RustExpr::Raw(format!(\"__java_self.{field_name}\""));
     assert!(!lower_source.contains("self.__outer.borrow().{}"));
+    assert!(!lower_source.contains("self.__outer.borrow_mut().{}"));
     assert!(!lower_source.contains(".iter().collect::<String>()"));
     assert!(!lower_source.contains("Self::__set_static_{}"));
     assert!(!lower_source.contains("Self::__static_{}()"));
@@ -33430,14 +33878,14 @@ class TryFinallyUnit {
         try_catch_stmt(
             RustType::I32,
             vec![RustStmt::Return(Some(RustExpr::Call {
-                function: Box::new(RustExpr::Raw("Ok".to_string())),
+                function: Box::new(RustExpr::path(["Ok"])),
                 args: vec![RustExpr::Literal("7".to_string())],
             }))],
             vec![CatchRenderArm {
                 variable_name: "ex".to_string(),
                 class_names: vec!["IllegalArgumentException".to_string()],
                 body: vec![RustStmt::Return(Some(RustExpr::Call {
-                    function: Box::new(RustExpr::Raw("Ok".to_string())),
+                    function: Box::new(RustExpr::path(["Ok"])),
                     args: vec![RustExpr::Literal("1".to_string())],
                 }))],
             }],
@@ -33452,7 +33900,7 @@ class TryFinallyUnit {
         try_catch_stmt(
             RustType::Unit,
             vec![RustStmt::Return(Some(RustExpr::Call {
-                function: Box::new(RustExpr::Raw("Ok".to_string())),
+                function: Box::new(RustExpr::path(["Ok"])),
                 args: vec![RustExpr::Raw("()".to_string())],
             }))],
             Vec::new(),
@@ -33883,6 +34331,29 @@ class ReferenceIdentityDiagnostics {
             .count(),
         2,
         "{codes:?}"
+    );
+}
+
+#[test]
+fn implemented_shared_identity_equality_has_no_gap_diagnostics() {
+    let translation = translate_source(include_str!("differential/Identity.java"));
+
+    for code in [
+        "java_reference_identity_equality",
+        "java_inherited_equals_identity",
+        "storage_strategy_disagreement",
+    ] {
+        assert!(
+            !translation.diagnostics.has_code(code),
+            "implemented shared identity should not report {code}:\n{:?}\n{}",
+            translation.diagnostics,
+            translation.rust
+        );
+    }
+    assert!(
+        translation.rust.contains("std::rc::Rc::ptr_eq"),
+        "identity should be lowered through Rc::ptr_eq:\n{}",
+        translation.rust
     );
 }
 
@@ -36527,7 +36998,10 @@ fn loop_lowering_owns_classic_for_default_condition_label_and_continue_updates()
             label: Some("outer".to_string()),
             body: vec![
                 RustStmt::If {
-                    condition: RustExpr::Raw("!(true)".to_string()),
+                    condition: RustExpr::Unary {
+                        op: "!".to_string(),
+                        expr: Box::new(RustExpr::Literal("true".to_string())),
+                    },
                     then_body: vec![RustStmt::Break(Some("outer".to_string()))],
                     else_body: Vec::new(),
                 },
@@ -36631,7 +37105,15 @@ fn loop_lowering_owns_classic_for_default_condition_label_and_continue_updates()
                     mutable: false,
                     name: "row".to_string(),
                     ty: None,
-                    value: Some(RustExpr::Raw("row.as_ref().unwrap()".to_string())),
+                    value: Some(RustExpr::MethodCall {
+                        receiver: Box::new(RustExpr::MethodCall {
+                            receiver: Box::new(RustExpr::Var("row".to_string())),
+                            method: "as_ref".to_string(),
+                            args: Vec::new(),
+                        }),
+                        method: "unwrap".to_string(),
+                        args: Vec::new(),
+                    }),
                 },
                 RustStmt::Expr(RustExpr::Raw("count += row.size()".to_string())),
             ],
@@ -36722,7 +37204,10 @@ fn expr_render_owns_basic_rust_expression_shells() {
             vec![RustExpr::Var("size".to_string())],
         ),
         RustExpr::Call {
-            function: Box::new(RustExpr::Raw("JavaUtilArrayList::new".to_string())),
+            function: Box::new(RustExpr::Path(vec![
+                "JavaUtilArrayList".to_string(),
+                "new".to_string(),
+            ])),
             args: vec![RustExpr::Var("size".to_string())],
         }
     );
@@ -36772,11 +37257,14 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
     );
     assert_eq!(
         render_method_reference(&plan_method_reference("IllegalArgumentException", "new")),
-        RustExpr::Raw("IllegalArgumentException::new".to_string())
+        RustExpr::Path(vec![
+            "IllegalArgumentException".to_string(),
+            "new".to_string(),
+        ])
     );
     assert_eq!(
         render_method_reference(&plan_method_reference("Score", "add")),
-        RustExpr::Raw("Score::add".to_string())
+        RustExpr::Path(vec!["Score".to_string(), "add".to_string()])
     );
     assert_eq!(
         render_method_reference(&plan_method_reference("Tuple2", "_2")),
@@ -37413,45 +37901,47 @@ fn array_plan_and_lowering_own_java_array_shape_before_orchestrator() {
     );
     assert_eq!(plan_array_expr(&parse_expr("value")), None);
 
-    assert_eq!(
-        render_array_expr(
-            &sized_primitive_plan,
-            vec![RustExpr::Var("len".to_string())],
-        ),
-        RustExpr::Raw("vec![0; len as usize]".to_string())
+    let sized_primitive_array = render_array_expr(
+        &sized_primitive_plan,
+        vec![RustExpr::Var("len".to_string())],
+    );
+    assert_eq!(emit_expr(&sized_primitive_array), "vec![0; len as usize]");
+    assert!(matches!(sized_primitive_array, RustExpr::VecRepeat { .. }));
+    let typed_initializer_array = render_array_expr(
+        &typed_initializer_plan,
+        vec![RustExpr::Raw(
+            "format!(\"{}{}\", prefix, comment)".to_string(),
+        )],
     );
     assert_eq!(
-        render_array_expr(
-            &typed_initializer_plan,
-            vec![RustExpr::Raw(
-                "format!(\"{}{}\", prefix, comment)".to_string()
-            )],
-        ),
-        RustExpr::Raw("vec![format!(\"{}{}\", prefix, comment)]".to_string())
+        emit_expr(&typed_initializer_array),
+        "vec![format!(\"{}{}\", prefix, comment)]"
+    );
+    assert!(matches!(typed_initializer_array, RustExpr::VecLiteral(_)));
+    let array2_creation = render_array_expr(
+        &ArrayExprPlan::Creation {
+            element_type: &JavaType::Primitive(PrimitiveType::Int),
+            dimensions,
+        },
+        vec![
+            RustExpr::Var("rows".to_string()),
+            RustExpr::Var("cols".to_string()),
+        ],
     );
     assert_eq!(
-        render_array_expr(
-            &ArrayExprPlan::Creation {
-                element_type: &JavaType::Primitive(PrimitiveType::Int),
-                dimensions,
-            },
-            vec![
-                RustExpr::Var("rows".to_string()),
-                RustExpr::Var("cols".to_string()),
-            ],
-        ),
-        RustExpr::Raw("ndarray::Array2::from_elem((rows as usize, cols as usize), 0)".to_string())
+        emit_expr(&array2_creation),
+        "ndarray::Array2::from_elem((rows as usize, cols as usize), 0)"
     );
-    assert_eq!(
-        render_array_expr(
-            &initializer_plan,
-            vec![
-                RustExpr::Literal("1".to_string()),
-                RustExpr::Literal("2".to_string()),
-            ],
-        ),
-        RustExpr::Raw("vec![1, 2]".to_string())
+    assert!(matches!(array2_creation, RustExpr::Call { .. }));
+    let initializer_array = render_array_expr(
+        &initializer_plan,
+        vec![
+            RustExpr::Literal("1".to_string()),
+            RustExpr::Literal("2".to_string()),
+        ],
     );
+    assert_eq!(emit_expr(&initializer_array), "vec![1, 2]");
+    assert!(matches!(initializer_array, RustExpr::VecLiteral(_)));
 
     let plan_source = include_str!("../src/array_plan.rs");
     let lowering_source = include_str!("../src/array_lowering.rs");
@@ -37473,7 +37963,6 @@ fn array_plan_and_lowering_own_java_array_shape_before_orchestrator() {
     assert!(!lowering_source.contains("strip_suffix(']')"));
     assert!(lower_source.contains("plan_array_expr"));
     assert!(lower_source.contains("render_array_expr"));
-    assert!(!lower_source.contains("crate::emit::emit_expr"));
     assert!(!lower_source.contains("Java array creation:"));
     assert!(!lower_source.contains("vec![{}]"));
 }
@@ -37681,10 +38170,11 @@ fn operator_lowering_owns_binary_and_unary_rust_spelling() {
             provenance: FactProvenance::ParsedSource,
         });
     assert_eq!(
-        plan_equality_comparison_with_facts(
+        plan_equality_comparison_for_source(
             &optional_value_shape,
             &optional_value_shape,
             &equality_facts,
+            EqualityComparisonSource::EqualsCall,
         ),
         EqualityComparisonPlan::BothOptionalCustomEquals {
             erased_arg_handle_path: None,
@@ -37794,7 +38284,7 @@ fn access_lowering_owns_bare_field_and_member_access_fallbacks() {
     );
     assert_eq!(
         lower_bare_name("LIMIT", &env),
-        RustExpr::Raw("Self::LIMIT".to_string())
+        RustExpr::Path(vec!["Self".to_string(), "LIMIT".to_string()])
     );
 
     let mut type_env = TypeEnv::new();
@@ -37813,7 +38303,14 @@ fn access_lowering_owns_bare_field_and_member_access_fallbacks() {
             &type_env,
             RustExpr::Var("values".to_string()),
         ),
-        RustExpr::Raw("values.len() as i32".to_string())
+        RustExpr::Cast {
+            expr: Box::new(RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Var("values".to_string())),
+                method: "len".to_string(),
+                args: Vec::new(),
+            }),
+            ty: "i32".to_string(),
+        }
     );
     assert_eq!(
         lower_field_access(
@@ -37846,7 +38343,7 @@ fn access_lowering_owns_bare_field_and_member_access_fallbacks() {
             &type_env,
             RustExpr::Var("owner".to_string()),
         ),
-        RustExpr::Raw("Owner::CONSTANT".to_string())
+        RustExpr::Path(vec!["Owner".to_string(), "CONSTANT".to_string()])
     );
 
     let access_lowering_source = include_str!("../src/access_lowering.rs");
@@ -39868,7 +40365,7 @@ public class Numeric {
 /// collapsing both overloads onto `inst`.
 ///
 /// Two answers to one question, which is what
-/// [0009](../claude_audits/0009-overload-identity-collapses-onto-rust-name.md)
+/// [0009](../claude_audits/done/0009-overload-identity-collapses-onto-rust-name.md)
 /// is about. The naming pass was already correct; it was not applied here.
 #[test]
 fn summary_source_overloads_get_one_rust_name_from_every_path() {
@@ -39925,20 +40422,19 @@ public class Caller {
 
 /// Java's `Object.equals` **is** reference identity unless a class overrides it.
 ///
-/// Lowering compares fields either way, so `a.equals(b)` on a class with no
-/// `equals` override answers `true` where Java says `false` — and in the
-/// damaging direction: a `HashMap` or a `contains` built on it merges entries
-/// Java keeps apart. The fix needs object identity and is therefore blocked on
-/// [0002b](../claude_audits/0002b-shared-representation-design.md); until then
-/// the divergence is *reported*, which is the interim measure
-/// [0028](../claude_audits/done/0028-reference-equality-lowered-as-structural-equality.md)
-/// asks for.
+/// Shared immutable source classes now lower inherited equality through handle
+/// identity. This warning still matters for source classes that are not in an
+/// implemented shared tier, where lowering would otherwise compare fields.
 #[test]
 fn inherited_equals_on_a_source_class_is_reported_as_identity() {
     let translation = translate_source(
         r#"
 public class Eq {
-    static final class Key { final int v; Key(int v) { this.v = v; } }
+    static class Key {
+        int v;
+        Key(int v) { this.v = v; }
+        void set(int value) { this.v = value; }
+    }
 
     public static boolean run() {
         Key a = new Key(5);
@@ -40056,7 +40552,7 @@ public class Eq {
 /// **unsuffixed** name — while the call sites, which do resolve the overload,
 /// emitted `pick_int` and `pick_string`. The facade provided neither name, so
 /// the program failed `E0599`. That was the half of
-/// [0009](../claude_audits/0009-overload-identity-collapses-onto-rust-name.md)
+/// [0009](../claude_audits/done/0009-overload-identity-collapses-onto-rust-name.md)
 /// left open after the call-site naming was fixed: a *fourth* place that names
 /// methods, disagreeing with the other three.
 #[test]

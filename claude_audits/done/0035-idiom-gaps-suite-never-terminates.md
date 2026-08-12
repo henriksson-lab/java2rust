@@ -64,7 +64,7 @@ because the suite that covers them could not produce a result. They were found
 only by running it to a fixed truncation point and diffing failure *names*
 against a stashed baseline — which is not something a normal workflow does.
 
-This is [0018](../0018-the-compile-error-metric-cannot-see-silent-failures.md)'s
+This is [0018](0018-the-compile-error-metric-cannot-see-silent-failures.md)'s
 thesis applied to the test infrastructure rather than the translator: a suite
 that never terminates is indistinguishable, to anything that just waits on it,
 from a suite that passes.

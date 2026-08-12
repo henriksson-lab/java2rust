@@ -651,7 +651,7 @@ fn is_broad_ioutils_type_name(name: &str) -> bool {
 ///
 /// These sets used to live inline in `src/lower.rs`, as `matches!` arms in
 /// one-off `-> bool` predicates. That is the "hardcoded library knowledge"
-/// cluster [0008](../claude_audits/0008-inference-machinery-does-not-reach-lowering.md)
+/// cluster [0008](../claude_audits/done/0008-inference-machinery-does-not-reach-lowering.md)
 /// step 4 is about: facts about a *library* compiled into the translator's
 /// lowering rules, where they cannot be inspected, tested, or overridden.
 ///

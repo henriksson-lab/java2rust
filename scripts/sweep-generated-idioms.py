@@ -15,6 +15,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+NOOP_FACADE_METHOD_CALL_SITE_PREFIX = "/* noop Java facade method call: "
+
 
 @dataclass(frozen=True)
 class Signal:
@@ -161,7 +163,7 @@ SIGNALS = [
     ),
     Signal(
         "noop_facade_call_sites",
-        "Call sites of no-op facade constructors",
+        "Call sites of no-op facade members",
         r"",
         "javalibs facade coverage",
         "StringBuilderFacade.java",
@@ -186,6 +188,13 @@ SIGNALS = [
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--generated-root", required=True, type=Path)
+    parser.add_argument(
+        "--extra-rust",
+        action="append",
+        default=[],
+        type=Path,
+        help="additional Rust file to include outside --generated-root",
+    )
     parser.add_argument("--status", type=Path)
     parser.add_argument("--out-md", type=Path)
     parser.add_argument("--out-tsv", type=Path)
@@ -209,6 +218,15 @@ def status_source_map(path: Path | None) -> dict[Path, str]:
 
 def rust_files(root: Path) -> list[Path]:
     return sorted(path for path in root.rglob("*.rs") if path.is_file())
+
+
+def scan_files(generated_root: Path, extra_rust: list[Path]) -> list[Path]:
+    files = rust_files(generated_root)
+    for path in extra_rust:
+        if not path.is_file():
+            raise SystemExit(f"extra Rust file does not exist: {path}")
+        files.append(path)
+    return sorted(dict.fromkeys(path.resolve() for path in files))
 
 
 # Signals whose regex is anchored per line rather than across the whole file.
@@ -299,13 +317,12 @@ def count_noop_facade_call_sites_signal(
 
 def count_noop_facade_call_sites(text: str) -> int:
     constructors = noop_facade_constructors(text)
-    if not constructors:
-        return 0
-    return sum(
+    constructor_calls = sum(
         sum(count_noop_facade_path_calls(line, path) for path in constructors)
         for line in text.splitlines()
         if not line_defines_noop_facade_constructor(line)
     )
+    return constructor_calls + text.count(NOOP_FACADE_METHOD_CALL_SITE_PREFIX)
 
 
 def count_noop_facade_path_calls(line: str, path: str) -> int:
@@ -480,7 +497,7 @@ def main() -> int:
     args = parse_args()
     if not args.generated_root.is_dir():
         raise SystemExit(f"generated root does not exist: {args.generated_root}")
-    files = rust_files(args.generated_root)
+    files = scan_files(args.generated_root, args.extra_rust)
     source_map = status_source_map(args.status)
     rows = [count_signal(signal, files, source_map) for signal in SIGNALS]
     rows.sort(key=lambda row: (int(row["occurrences"]), int(row["files"])), reverse=True)

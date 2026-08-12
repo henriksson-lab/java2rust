@@ -69,14 +69,64 @@ pub fn report_unconstructable_inner_classes(
 
 fn collect_in_type(ty: &TypeDecl, facts: &FactSet, found: &mut Vec<UnconstructableInnerClass>) {
     if let Some(outer_type) = facts.captures.outer_this_type_for_type(&ty.name) {
-        found.push(UnconstructableInnerClass {
-            inner_type: ty.name.clone(),
-            outer_type: outer_type.to_string(),
-        });
+        if !outer_this_constructor_handle_is_implemented(outer_type, facts) {
+            found.push(UnconstructableInnerClass {
+                inner_type: ty.name.clone(),
+                outer_type: outer_type.to_string(),
+            });
+        }
     }
     for member in &ty.members {
         if let Member::Type(nested) = member {
             collect_in_type(nested, facts, found);
         }
+    }
+}
+
+fn outer_this_constructor_handle_is_implemented(outer_type: &str, facts: &FactSet) -> bool {
+    let placement = facts.storage_placement_for(outer_type);
+    placement.shared && placement.interior_mutable && placement.is_implemented()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::outer_this_constructor_handle_is_implemented;
+    use crate::facts::FactSet;
+    use crate::storage_strategy::{Escape, TypeStorageFacts};
+
+    #[test]
+    fn outer_this_construction_needs_an_implemented_mutable_shared_placement() {
+        let mut facts = FactSet::default();
+        assert!(!outer_this_constructor_handle_is_implemented(
+            "Outer", &facts
+        ));
+
+        facts.storage_strategies.insert(
+            "Outer".to_string(),
+            TypeStorageFacts {
+                escape: Escape::Stored,
+                mutated: false,
+                mutation_provably_absent: true,
+                ..TypeStorageFacts::default()
+            },
+        );
+        assert!(
+            !outer_this_constructor_handle_is_implemented("Outer", &facts),
+            "SharedImmutable gives Rc<Outer>, but captured inners need Rc<RefCell<Outer>>"
+        );
+
+        facts.storage_strategies.insert(
+            "Outer".to_string(),
+            TypeStorageFacts {
+                escape: Escape::Stored,
+                mutated: true,
+                mutation_provably_absent: true,
+                ..TypeStorageFacts::default()
+            },
+        );
+        assert!(
+            !outer_this_constructor_handle_is_implemented("Outer", &facts),
+            "SharedLocal is the right shape, but the RefCell tier is not implemented yet"
+        );
     }
 }

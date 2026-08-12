@@ -4,6 +4,7 @@ use crate::java_ir::{JavaType, PrimitiveType, WildcardBound};
 use crate::representation::RepresentationPlan;
 use crate::rust_ir::{RustExpr, RustType};
 use crate::slot_shape::{DispatchShape, OwnershipShape, RustSlotShape, ViewShape};
+use crate::storage_strategy::StoragePlacement;
 use crate::types::optional_element_type;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -490,9 +491,26 @@ pub fn shared_handle_construction_expr(
     if !placement.is_implemented() || !placement.shared {
         return rendered;
     }
+    storage_placement_construction_expr(placement, rendered)
+}
+
+pub fn storage_placement_construction_expr(
+    placement: StoragePlacement,
+    rendered: RustExpr,
+) -> RustExpr {
     let emitted = crate::emit::emit_expr(&rendered);
-    if emitted.starts_with("std::rc::Rc::new(") || emitted.starts_with("std::sync::Arc::new(") {
+    if placement.construction_expr_is_wrapped(&emitted) {
         return rendered;
+    }
+    if let Some(handle) = placement.handle_path()
+        && placement.cell_path().is_none()
+    {
+        let mut segments = handle.split("::").collect::<Vec<_>>();
+        segments.push("new");
+        return RustExpr::Call {
+            function: Box::new(RustExpr::path(segments)),
+            args: vec![rendered],
+        };
     }
     RustExpr::Raw(placement.wrap_construction(emitted))
 }
@@ -613,9 +631,18 @@ pub fn render_slot_default_value_policy(policy: &SlotDefaultValuePolicy) -> Rust
         SlotDefaultValuePolicy::PrimitiveNumericZero => RustExpr::Literal("0".to_string()),
         SlotDefaultValuePolicy::PrimitiveFloatZero => RustExpr::Literal("0f32".to_string()),
         SlotDefaultValuePolicy::PrimitiveDoubleZero => RustExpr::Literal("0f64".to_string()),
-        SlotDefaultValuePolicy::EmptyString => RustExpr::Raw("String::new()".to_string()),
-        SlotDefaultValuePolicy::EmptySequence => RustExpr::Raw("Vec::new()".to_string()),
-        SlotDefaultValuePolicy::DefaultTrait => RustExpr::Raw("Default::default()".to_string()),
+        SlotDefaultValuePolicy::EmptyString => RustExpr::Call {
+            function: Box::new(RustExpr::path(["String", "new"])),
+            args: Vec::new(),
+        },
+        SlotDefaultValuePolicy::EmptySequence => RustExpr::Call {
+            function: Box::new(RustExpr::path(["Vec", "new"])),
+            args: Vec::new(),
+        },
+        SlotDefaultValuePolicy::DefaultTrait => RustExpr::Call {
+            function: Box::new(RustExpr::path(["Default", "default"])),
+            args: Vec::new(),
+        },
     }
 }
 
