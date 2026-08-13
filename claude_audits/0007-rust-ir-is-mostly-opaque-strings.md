@@ -2685,3 +2685,320 @@ The JDK platform helpers now do the same for standard-library callees:
 The integer `Math.max`/`Math.min` projections also no longer hide
 `std::cmp::{max,min}` behind raw callee text. The floating-point Java helper
 calls remain helper-name leaves.
+
+Runtime helper callees in `coercion.rs` now use `RustExpr::Path` as well, even
+for single-segment helpers such as `java_string_hash_code`,
+`java_arrays_equals`, and the floating-point `java_math_*` shims. Emission is
+unchanged, but the call target is no longer an opaque raw string.
+
+`apply_rust_borrowed_facade_return` also stopped rendering `Some(...)` by hand
+for optional borrowed-facade returns. It now uses the existing
+`render_option_some` helper, so the expression records
+`RustExprShape::OptionalConstructed` just like the other optional construction
+paths.
+
+The raw compatibility arm for `Some(&value.as_str())` normalization now keeps
+that same structure. It still accepts the old rendered spelling, but returns a
+tagged `Some(value.as_str())` call instead of a new raw string.
+
+`Some` itself is now path-aware in the optional construction helpers and
+queries. `render_option_some` emits a `RustExpr::Path(["Some"])` callee, while
+the construction/unwrap predicates accept both that shape and the older
+`Var("Some")` compatibility shape.
+
+`String.format` locale-argument detection now asks `RustExpr::Var` and
+`RustExpr::Path` directly before falling back to rendered text for raw legacy
+inputs. A structured `Locale::US` path is recognized without broadening matches
+such as `LocaleSuffix::US`.
+
+Borrowed collection clone recovery now recognizes structured
+`.cloned().collect::<Vec<_>>()` and
+`.cloned().collect::<std::collections::HashSet<_>>()` method chains before the
+rendered suffix fallback. That keeps idempotence for structured producers
+without forcing them through text just to prove the clone already happened.
+
+`call_lowering`'s super-boundary void fallback no longer returns raw `Ok(())` or
+raw `()`. The `Result<(), JavaException>` arm now builds a structured call to
+`Ok` with a zero-item `RustExpr::Tuple`, and the non-result void arm uses the
+same tuple node directly. Emitted Rust is unchanged; the unit value and result
+wrapper are visible to later expression visitors.
+
+The same unit helper now covers the native-call fallback sites in
+`call_lowering`: `System.gc`, malformed `Arrays.equals`/`Arrays.deepEquals` /
+`Arrays.binarySearch` arguments, and missing singleton/nCopies collection
+values. The source-level guard is file-wide: `call_lowering.rs` no longer
+contains raw `Ok(())` or raw `()` expression producers.
+
+Constructor and source-summary boundary returns in `lower.rs` now use the same
+callee shape for non-void `Result` wrapping: `Ok` is a `RustExpr::Path`, not
+`RustExpr::Raw("Ok")`. The 0007 source guard now rejects reintroducing raw `Ok`
+call targets in `lower.rs`.
+
+External facade free/associated calls now keep plain Rust facade paths
+structured too. `apply_external_facade_receiver_call` converts identifier-only
+`crate::Type::method` strings into `RustExpr::Path` before building the call,
+with a raw fallback for generic or otherwise non-plain paths. The HDF5 facade
+receiver test now asserts the structured callee shape.
+
+The `Serializable` marker `instanceof` predicate also stopped rendering the
+whole helper call as raw text. `render_instanceof_check` now builds a structured
+call to `java_is_serializable` with a structured borrowed operand, and the
+`type_coercion` test pins both the emitted spelling and the IR shape.
+
+The Java iterator facade constructor is path-shaped as well:
+`java_iterator_from_collection_projection` now calls `JavaIterator::new` through
+`RustExpr::Path(["JavaIterator", "new"])` instead of a single raw-ish variable
+name containing `::`. Its existing projection test now asserts that callee
+shape.
+
+Subtype-constructor recovery from borrowed values now gets the same treatment.
+`subtype_owned_constructor_from_borrowed_projection` builds `Target::new_1` as a
+structured path when the owner path is identifier-only, with a raw fallback for
+non-plain owner paths. The projection test now asserts the structured callee for
+both structured and raw borrowed operands.
+
+Structured erased-object boxing no longer hides `Box::new` as a single
+`RustExpr::Var("Box::new")`. The structured branch of
+`erased_object_box_projection` now uses `RustExpr::Path(["Box", "new"])`, and
+the existing erased-object facade-return assertions pin that shape.
+
+Boxing into a non-`Any` trait object now follows the same boundary:
+`boxed_dyn_trait_projection` emits a structured `Cast` around a structured
+`Box::new` call whenever the input is structured, and keeps the raw fallback
+only for legacy raw input. The fallback also shares the erased-object path's
+top-level comma guard, so raw tuple payloads are not split across call
+arguments.
+
+Erased-object constructor boxing now keeps its unit and multi-argument payloads
+structured too. `erased_object_constructor_projection` feeds
+`RustExpr::Tuple(Vec::new())` or `RustExpr::Tuple(args)` into the structured
+boxing helper instead of first rendering `()` / `(left, right)` as raw strings.
+
+Nullable enum switch labels in `lower.rs` also stopped manufacturing the whole
+`Some(...)` expression as raw text. Source enum labels now build
+`RustExpr::Path` when the variant path is plain, external enum constants reuse
+the existing associated-path projection, and both are wrapped in a shaped
+`Some` call.
+
+The optional-borrowed string-literal argument fallback in `lower.rs` now does
+the same at the wrapper boundary. The literal payload can remain raw, but
+`lower_optional_argument_for_borrowed_target` now applies the existing borrow
+projection and wraps it in the shaped `Some` helper instead of formatting
+`Some(&{rendered})` as one opaque string.
+
+Erased-object clone recovery now keeps helper calls structured for structured
+inputs. `clone_erased_object_ref_once(value)` and the
+`Coercion::CloneErasedObject` scalar/vector arms build `RustExpr::Call` nodes to
+`java_clone_erased_object_ref` / `java_clone_erased_object_vec_ref` with a
+structured borrow argument. The idempotence check asks for an existing
+one-argument structured helper call before falling back to rendered legacy text,
+so raw fragments keep their old compatibility behavior.
+
+The raw fallback for Rust scalar integral narrowing now parenthesizes compound
+method receivers before adding `.try_into().unwrap()`. Structured inputs were
+already represented as nested `RustExpr::MethodCall` nodes; this closes the
+legacy spelling bug where an opaque `left + right` fallback emitted
+`left + right.try_into().unwrap()` instead of applying the conversion to the
+whole expression.
+
+Optional borrowed-facade returns now keep the outer optional adapter structured
+too. `Option<&Facade>` to `Object`/`Optional<Object>` still uses a raw closure
+leaf for `|value| Box::new(value.to_path_buf()) as Box<dyn Any>`, but the
+surrounding `.map(...)` and, when needed, `.expect("Java null receiver")` are
+`RustExpr::MethodCall` nodes rather than one opaque rendered chain.
+
+Optional receiver projection raw fallbacks also keep their adapter tails
+structured now. A legacy raw receiver such as `values.get(key)` remains a raw
+leaf, but the `.expect(...)`, `.as_ref().unwrap()`, and `.as_mut().unwrap()`
+steps are `RustExpr::MethodCall` nodes. Compound raw receivers are parenthesized
+before the method chain, so `left + right` becomes
+`(left + right).as_ref().unwrap()` rather than binding the unwrap only to the
+right-hand side.
+
+Borrowed sequence `extend` arguments now own their supported iterator recovery
+chains as method-call IR as well. The source collection can still be a raw leaf,
+and the `String` recovery closure remains raw, but `.iter()`, `.map(...)`,
+`.copied()`, and `.cloned()` are no longer emitted as one opaque string for
+supported policies. The unsupported recovery case stays raw because it carries a
+generated audit comment.
+
+Borrowed Vec/Set element recovery now applies the same split when converting a
+borrowed collection back to owned storage. The collection source can remain a
+raw leaf and `|v| v.to_string()` remains a raw closure, but the
+`into_iter().map(...).collect::<...>()` and
+`into_iter().copied().collect::<...>()` tails are method-call IR for supported
+Vec and HashSet recovery policies.
+
+Two more fixed-value native projections are structural now. `Reader.ready()`'s
+stubbed `true` result is a boolean literal node, and `new URI(x)` lowers through
+a `URI::parse` path node instead of an opaque function-name string. Both emit
+the same Rust as before, but they no longer require the call path to be
+recovered from raw text later.
+
+Static storage initialization no longer falls back to raw text for two simple
+known shapes either. A null optional fallback is a `None` path node, and
+non-String static constant references keep the associated-path IR returned by
+`self_associated_path_projection` instead of rendering it and wrapping the text
+back into `RustExpr::Raw`.
+
+Source-enum static API calls are path-shaped now too. The lowering for
+`Kind.values()` and `Kind.valueOf(name)` builds calls to the owner's associated
+`values` / `value_of` path instead of formatting the full call text in
+`lower_source_java_enum_static_call`.
+
+The generic borrowed-element unwrap fallback also reuses the structured
+`expect("Java null receiver")` projection now. Raw receivers still emit the same
+text through that helper, while structured optional-carrier values keep a
+`RustExpr::MethodCall` tail instead of being rendered first and wrapped back as
+raw text.
+
+Optional string-view mapping has the same split now. The common
+`option.as_ref().map(|value| value.as_str())` adapter is centralized in
+`optional_string_view_projection_expr`: structured option receivers produce
+method-call IR for `.as_ref().map(...)`, while legacy raw receivers keep the old
+rendered spelling.
+
+The simpler optional shared-native map arm follows the same rule. Mapping
+`Option<T>` to an optional shared-borrow native element now builds the
+`.as_ref()` tail with `zero_arg_method_projection`, so structured option
+receivers keep a method-call node and raw receivers keep their compatibility
+spelling.
+
+The remaining optional mapped-value arms now share `optional_map_projection_expr`
+for their receiver tails. The closure body is still raw because it is generated
+from a mapped `value` expression, but `.as_ref().map(...)`, `.as_mut().map(...)`,
+and direct `.map(...)` are method-call IR for structured receivers, with the old
+rendered spellings preserved for raw receivers.
+
+Top-level uncaught-exception recovery for `Result` expressions is structured for
+ordinary expression IR now. `unwrap_result_or_panic_uncaught_java_exception`
+still keeps its raw rendered parser for legacy `?` fragments, but a structured
+receiver builds a `RustExpr::MethodCall` for `.unwrap_or_else(...)` instead of
+rendering the full chain and wrapping it back into `RustExpr::Raw`.
+
+The inner-class companion handle argument no longer manufactures clone calls as
+raw text either. Captured-inner `self.__outer.clone()` and current outer receiver
+`__java_self.clone()` both go through field/clone projection IR now. This only
+removes the opaque handle argument expression; ordinary outer-method inner
+construction remains tied to the open shared-receiver work tracked by 0023.
+
+Map-key normalization now keeps a known shared-borrow `String` local structured
+when adding the `.as_str()` view. Raw `&key` compatibility still emits the old
+`key.as_str()` text, but structured `&key` collapses to `key` and then builds the
+`as_str` tail through method-call IR.
+
+`Math.round` lowering no longer turns raw operands into a fully raw helper call.
+`math_round_projection` now always builds a `RustExpr::Call` to
+`java_math_round_f32` / `java_math_round_f64`; a raw argument remains only as the
+operand leaf, including the legacy `left + right as f64` emission for non-float
+sources.
+
+`Math.abs` follows the same raw-leaf rule now. Raw input still gets
+parenthesized to preserve the old `(left + right).wrapping_abs()` spelling, but
+the `.abs()` / `.wrapping_abs()` tail is a `RustExpr::MethodCall` rather than
+part of one opaque string.
+
+The one-argument f64 math-method adapter now uses the same structured path for
+raw and non-raw inputs. `primitive_f64_method_projection` always builds a cast
+receiver plus method-call tail; raw input remains only as the cast operand leaf,
+so the existing `(left + right as f64).ln()` emission is unchanged.
+
+The two-argument f64 method adapters now share that same cast helper. `atan2`
+and `powf` no longer fall back to one raw string when either operand is opaque;
+each side is a structured `as f64` cast and the method call is structured, with
+raw operands retained only as cast leaves.
+
+The central `.expect(...)` projection follows the raw-leaf rule now too.
+`method_expect_projection` no longer renders raw receivers into a larger raw
+string; callers get a `RustExpr::MethodCall` tail and any opaque receiver remains
+only the receiver leaf.
+
+The central zero/normal method-call helper now follows that same rule.
+`method_call_projection` always returns `RustExpr::MethodCall`; it no longer has
+a raw-receiver branch that formats `receiver.method(args)` as one opaque string.
+That moved `.as_deref()`, `.unwrap()`, `.clone()`, and similar helper-mediated
+tails into structured IR while preserving legacy raw receivers as leaves.
+
+The Java length/row-count-to-`i32` adapter uses the same boundary now.
+`method_call_as_i32_projection` always builds `Cast(MethodCall(receiver, ...),
+i32)`, so `len() as i32`, `nrows() as i32`, and `ncols() as i32` expose their
+method tail and cast to later visitors even when the receiver itself is a raw
+legacy leaf.
+
+Logical negation is structured for raw operands now as well.
+`logical_not_projection` always returns `RustExpr::Unary { op: "!", ... }`.
+Rendered legacy predicates such as `left && right` remain grouped raw operand
+leaves, while the `!` operator is visible to later IR visitors and precedence
+handling.
+
+Primitive `compareTo` helper calls are structured for raw operands too.
+`primitive_compare_to_projection` now always builds a `RustExpr::Call` to the
+`java_primitive_compare_to` path; opaque operands remain only call-argument
+leaves instead of forcing the whole helper invocation back into raw text.
+
+Native collection malformed-arity fallback zeros in `call_lowering.rs` are
+literal nodes now. `Arrays.copyOf`, `Arrays.copyOfRange`, and
+`Collections.nCopies` no longer use `RustExpr::Raw("0")` for missing numeric
+arguments.
+
+Static storage initializer references use projection helpers for simple string
+and length adapters now. String references to associated constants build a
+structured `.to_string()` method-call tail, and static string `.length()` /
+`.len()` initializers route through `len_i32_projection` instead of formatting a
+raw `.len() as i32` suffix.
+
+Static string constant concatenation also keeps the call boundary structured
+now. The generated `format!` macro token remains a raw callee leaf, but the
+`format!("{}{}", left, right)` wrapper is a `RustExpr::Call` with literal and
+expression arguments instead of one fully rendered raw expression.
+
+`string_to_char_array_projection` follows the same raw-leaf rule. A raw string
+receiver remains an opaque receiver leaf, but the `.chars().collect::<Vec<char>>()`
+tail is now structured method-call IR instead of a freshly formatted raw chain.
+
+The fallible numeric binary lowering temps also stopped using `RustExpr::Raw`
+for plain identifiers. `__java_left` and `__java_right` are `RustExpr::Var`
+nodes before being passed through the structured numeric operator helpers. The
+surrounding fallible block expression remains raw and is still a future
+composition target.
+
+No-op facade method call-site markers are represented explicitly now. The
+lowering builds a `RustExpr::MarkedBlock` carrying the marker text and lowered
+call expression instead of rendering both into one raw block expression. Emission
+is unchanged, so the existing output-marker counters still see the same marker
+surface while later IR visitors can inspect the wrapped call.
+
+Optional owned-value recovery now keeps its receiver chain structured for raw
+receivers too. `optional_get_owned_value_projection` and
+`optional_or_else_owned_value_projection` share the same
+`.as_ref().map(|value| (*value).clone())` method-call IR; the closure remains a
+raw leaf, but `.expect("Java null receiver")` and `.unwrap_or(...)` are no
+longer part of a fully formatted raw expression.
+
+The defensive malformed-arity fallback for `Buffer.put` no longer emits a raw
+`{ }` block expression. It now reuses the structured unit expression helper; the
+normal modeled one-argument path still discards the argument through the existing
+discard-value projection.
+
+The erased-object subtype-to-supertype slot adapter no longer formats
+`Box::new(value) as target` as one raw expression when the source value is a
+shared handle. `lower_source_subtype_to_supertype_slot` now builds a structured
+`Box::new` call and wraps it in `RustExpr::Cast`; the cast target type remains
+the rendered type string carried by the cast node.
+
+Optional element map projection has one structured receiver path now. Raw
+optional receivers keep their opaque source as the receiver leaf, while the
+`.as_ref()` / `.as_mut()` adapter and `.map(|value| ...)` tail are method-call
+IR. The generated closure body remains a raw leaf because it is assembled from
+the mapped value expression.
+
+Interface `I.super.defaultMethod(...)` lowering no longer renders the trait
+helper call as one raw string. `lower_interface_super_default_call` now builds
+the default helper callee with `owner_associated_path_projection` and passes
+`self` plus lowered arguments through `function_call_projection`.
+
+Optional constructed string-view normalization also stopped rebuilding accepted
+`.as_str()` payloads as raw text. The recognizers for `&value.as_str()` and
+`Some(&value.as_str())` remain exact, but once they accept a legacy raw spelling
+the `value.as_str()` payload is a structured method-call tail over the raw
+receiver leaf.

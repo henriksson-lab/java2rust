@@ -536,6 +536,7 @@ fn rust_expr_reads_var(expr: &RustExpr, var_name: &str) -> bool {
         RustExpr::StructLit { fields, .. } => fields
             .iter()
             .any(|(_, field_expr)| rust_expr_reads_var(field_expr, var_name)),
+        RustExpr::MarkedBlock { expr, .. } => rust_expr_reads_var(expr, var_name),
         RustExpr::Raw(text) => raw_rust_expr_mentions_identifier(text, var_name),
         RustExpr::Path(_) | RustExpr::Literal(_) => false,
     }

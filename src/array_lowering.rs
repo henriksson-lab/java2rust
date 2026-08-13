@@ -68,31 +68,22 @@ pub fn render_array_expr_with_object_default(
 }
 
 pub fn array2_from_elem_projection(rows: RustExpr, cols: RustExpr, default: &str) -> RustExpr {
-    if !matches!(rows.unshaped(), RustExpr::Raw(_)) && !matches!(cols.unshaped(), RustExpr::Raw(_))
-    {
-        return RustExpr::Call {
-            function: Box::new(RustExpr::path(["ndarray", "Array2", "from_elem"])),
-            args: vec![
-                RustExpr::Tuple(vec![
-                    RustExpr::Cast {
-                        expr: Box::new(rows),
-                        ty: "usize".to_string(),
-                    },
-                    RustExpr::Cast {
-                        expr: Box::new(cols),
-                        ty: "usize".to_string(),
-                    },
-                ]),
-                RustExpr::Raw(default.to_string()),
-            ],
-        };
+    RustExpr::Call {
+        function: Box::new(RustExpr::path(["ndarray", "Array2", "from_elem"])),
+        args: vec![
+            RustExpr::Tuple(vec![
+                RustExpr::Cast {
+                    expr: Box::new(rows),
+                    ty: "usize".to_string(),
+                },
+                RustExpr::Cast {
+                    expr: Box::new(cols),
+                    ty: "usize".to_string(),
+                },
+            ]),
+            RustExpr::Raw(default.to_string()),
+        ],
     }
-    RustExpr::Raw(format!(
-        "ndarray::Array2::from_elem(({} as usize, {} as usize), {})",
-        emit_expr(&rows),
-        emit_expr(&cols),
-        default,
-    ))
 }
 
 /// `new T[rows][cols]` for a non-primitive `T`: rows of `Vec<T>`.
@@ -166,56 +157,97 @@ pub fn borrowed_array2_temporary_for_slot(
 }
 
 pub fn array2_from_rows_projection(rows: RustExpr, ownership: OwnershipShape) -> Option<RustExpr> {
-    let raw_rows = matches!(rows.unshaped(), RustExpr::Raw(_));
-    if !raw_rows {
-        let call = RustExpr::Call {
-            function: Box::new(RustExpr::path(["ndarray", "Array2", "from_rows"])),
-            args: vec![rows],
-        };
-        return match ownership {
-            OwnershipShape::SharedBorrow => Some(RustExpr::Unary {
-                op: "&".to_string(),
-                expr: Box::new(call),
-            }),
-            OwnershipShape::Owned => Some(call),
-            OwnershipShape::MutableBorrow | OwnershipShape::CopyValue => None,
-        };
-    }
-
-    let rows = emit_expr(&rows);
+    let call = RustExpr::Call {
+        function: Box::new(RustExpr::path(["ndarray", "Array2", "from_rows"])),
+        args: vec![rows],
+    };
     match ownership {
-        OwnershipShape::SharedBorrow => Some(RustExpr::Raw(format!(
-            "&ndarray::Array2::from_rows({rows})"
-        ))),
-        OwnershipShape::Owned => Some(RustExpr::Raw(format!("ndarray::Array2::from_rows({rows})"))),
+        OwnershipShape::SharedBorrow => Some(RustExpr::Unary {
+            op: "&".to_string(),
+            expr: Box::new(call),
+        }),
+        OwnershipShape::Owned => Some(call),
         OwnershipShape::MutableBorrow | OwnershipShape::CopyValue => None,
     }
 }
 
 pub fn array2_index_projection(array: RustExpr, row: RustExpr, col: RustExpr) -> RustExpr {
-    if !matches!(array.unshaped(), RustExpr::Raw(_)) {
-        return RustExpr::Index(
-            Box::new(array),
-            Box::new(RustExpr::Raw(format!(
-                "[{}, {}]",
-                emit_expr(&row),
-                emit_expr(&col)
-            ))),
-        );
+    RustExpr::Index(
+        Box::new(parenthesize_raw_postfix_receiver(array)),
+        Box::new(RustExpr::ArrayLiteral(vec![row, col])),
+    )
+}
+
+fn parenthesize_raw_postfix_receiver(expr: RustExpr) -> RustExpr {
+    let RustExpr::Raw(raw) = expr else {
+        return expr;
+    };
+    let trimmed = raw.trim();
+    if raw_needs_postfix_receiver_parentheses(trimmed) {
+        RustExpr::Raw(format!("({trimmed})"))
+    } else {
+        RustExpr::Raw(raw)
     }
-    RustExpr::Raw(format!(
-        "{}[[{}, {}]]",
-        emit_expr(&array),
-        emit_expr(&row),
-        emit_expr(&col)
-    ))
+}
+
+fn raw_needs_postfix_receiver_parentheses(raw: &str) -> bool {
+    if raw.starts_with('(') && raw.ends_with(')') {
+        return false;
+    }
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+    let mut chars = raw.char_indices().peekable();
+    while let Some((idx, ch)) = chars.next() {
+        match ch {
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            '{' => brace_depth += 1,
+            '}' => brace_depth = brace_depth.saturating_sub(1),
+            '"' | '\'' => {
+                let quote = ch;
+                let mut escaped = false;
+                for (_, inner) in chars.by_ref() {
+                    if escaped {
+                        escaped = false;
+                    } else if inner == '\\' {
+                        escaped = true;
+                    } else if inner == quote {
+                        break;
+                    }
+                }
+            }
+            '+' | '-' | '*' | '/' | '%' | '^' | '&' | '|' | '=' | '<' | '>'
+                if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 =>
+            {
+                return true;
+            }
+            '!' if paren_depth == 0
+                && bracket_depth == 0
+                && brace_depth == 0
+                && (idx == 0 || raw[idx + 1..].starts_with('=')) =>
+            {
+                return true;
+            }
+            'a' if paren_depth == 0
+                && bracket_depth == 0
+                && brace_depth == 0
+                && raw[idx..].starts_with("as")
+                && raw[..idx].ends_with(char::is_whitespace)
+                && raw[idx + 2..].starts_with(char::is_whitespace) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 pub fn array2_row_mut_assign_stmt(array: RustExpr, index: RustExpr, value: RustExpr) -> RustStmt {
-    if !matches!(array.unshaped(), RustExpr::Raw(_))
-        && !matches!(index.unshaped(), RustExpr::Raw(_))
-        && !matches!(value.unshaped(), RustExpr::Raw(_))
-    {
+    if !matches!(array.unshaped(), RustExpr::Raw(_)) {
         return RustStmt::Expr(RustExpr::MethodCall {
             receiver: Box::new(RustExpr::MethodCall {
                 receiver: Box::new(array),
@@ -362,13 +394,18 @@ mod tests {
             "ndarray::Array2::from_elem((rows as usize, cols as usize), 0)"
         );
         assert!(matches!(structured_from_elem, RustExpr::Call { .. }));
+        let structured_from_elem_with_raw_dimension = array2_from_elem_projection(
+            RustExpr::Raw("rows".to_string()),
+            RustExpr::Var("cols".to_string()),
+            "0",
+        );
+        assert_eq!(
+            emit_expr(&structured_from_elem_with_raw_dimension),
+            "ndarray::Array2::from_elem((rows as usize, cols as usize), 0)"
+        );
         assert!(matches!(
-            array2_from_elem_projection(
-                RustExpr::Raw("rows".to_string()),
-                RustExpr::Var("cols".to_string()),
-                "0",
-            ),
-            RustExpr::Raw(_)
+            structured_from_elem_with_raw_dimension,
+            RustExpr::Call { .. }
         ));
         let structured_vec_repeat =
             array_from_elem_projection(RustExpr::Var("len".to_string()), "0");
@@ -388,26 +425,32 @@ mod tests {
             RustExpr::VecRepeat { .. }
         ));
 
+        let raw_rows_borrow = array2_from_rows_projection(
+            RustExpr::Raw("Self::COEF".to_string()),
+            OwnershipShape::SharedBorrow,
+        )
+        .unwrap();
         assert_eq!(
-            emit_expr(
-                &array2_from_rows_projection(
-                    RustExpr::Raw("Self::COEF".to_string()),
-                    OwnershipShape::SharedBorrow,
-                )
-                .unwrap()
-            ),
+            emit_expr(&raw_rows_borrow),
             "&ndarray::Array2::from_rows(Self::COEF)"
         );
+        assert!(matches!(
+            &raw_rows_borrow,
+            RustExpr::Unary {
+                op,
+                expr,
+            } if op == "&" && matches!(expr.as_ref(), RustExpr::Call { .. })
+        ));
+        let raw_rows_owned = array2_from_rows_projection(
+            RustExpr::Raw("Self::COEF".to_string()),
+            OwnershipShape::Owned,
+        )
+        .unwrap();
         assert_eq!(
-            emit_expr(
-                &array2_from_rows_projection(
-                    RustExpr::Raw("Self::COEF".to_string()),
-                    OwnershipShape::Owned,
-                )
-                .unwrap()
-            ),
+            emit_expr(&raw_rows_owned),
             "ndarray::Array2::from_rows(Self::COEF)"
         );
+        assert!(matches!(raw_rows_owned, RustExpr::Call { .. }));
         let structured_borrow = array2_from_rows_projection(
             RustExpr::Var("rows".to_string()),
             OwnershipShape::SharedBorrow,
@@ -444,32 +487,66 @@ mod tests {
             )),
             "values[[row as usize, col as usize]]"
         );
+        let index_expr = array2_index_projection(
+            RustExpr::Var("values".to_string()),
+            RustExpr::Raw("row as usize".to_string()),
+            RustExpr::Raw("col as usize".to_string()),
+        );
         assert!(matches!(
-            array2_index_projection(
-                RustExpr::Var("values".to_string()),
-                RustExpr::Raw("row as usize".to_string()),
-                RustExpr::Raw("col as usize".to_string()),
-            ),
-            RustExpr::Index(_, _)
+            index_expr,
+            RustExpr::Index(_, ref index) if matches!(index.as_ref(), RustExpr::ArrayLiteral(_))
         ));
-        assert!(matches!(
-            array2_index_projection(
-                RustExpr::Raw("values".to_string()),
-                RustExpr::Raw("row as usize".to_string()),
-                RustExpr::Raw("col as usize".to_string()),
-            ),
-            RustExpr::Raw(_)
-        ));
+        let raw_receiver_index = array2_index_projection(
+            RustExpr::Raw("values".to_string()),
+            RustExpr::Raw("row as usize".to_string()),
+            RustExpr::Raw("col as usize".to_string()),
+        );
         assert_eq!(
-            array2_row_mut_assign_stmt(
-                RustExpr::Var("values".to_string()),
-                RustExpr::Raw("row as usize".to_string()),
-                RustExpr::Var("replacement".to_string()),
-            ),
-            RustStmt::Raw(
-                "values.row_mut(row as usize).assign(&ndarray::ArrayView1::from(replacement));"
-                    .to_string()
-            )
+            emit_expr(&raw_receiver_index),
+            "values[[row as usize, col as usize]]"
+        );
+        assert!(matches!(raw_receiver_index, RustExpr::Index(_, _)));
+        let compound_raw_receiver_index = array2_index_projection(
+            RustExpr::Raw("left + right".to_string()),
+            RustExpr::Raw("row as usize".to_string()),
+            RustExpr::Raw("col as usize".to_string()),
+        );
+        assert_eq!(
+            emit_expr(&compound_raw_receiver_index),
+            "(left + right)[[row as usize, col as usize]]"
+        );
+        assert!(matches!(compound_raw_receiver_index, RustExpr::Index(_, _)));
+        let structured_row_assign_with_raw_index = array2_row_mut_assign_stmt(
+            RustExpr::Var("values".to_string()),
+            RustExpr::Raw("row as usize".to_string()),
+            RustExpr::Var("replacement".to_string()),
+        );
+        let RustStmt::Expr(structured_row_assign_with_raw_index_expr) =
+            structured_row_assign_with_raw_index
+        else {
+            panic!("expected structured row assignment expression for raw index");
+        };
+        assert_eq!(
+            emit_expr(&structured_row_assign_with_raw_index_expr),
+            "values.row_mut(row as usize).assign(&ndarray::ArrayView1::from(replacement))"
+        );
+        assert!(matches!(
+            structured_row_assign_with_raw_index_expr,
+            RustExpr::MethodCall { .. }
+        ));
+        let structured_row_assign_with_raw_value = array2_row_mut_assign_stmt(
+            RustExpr::Var("values".to_string()),
+            RustExpr::Raw("0 as usize".to_string()),
+            RustExpr::Raw("&vec![2, 3, 6, 4]".to_string()),
+        );
+        let RustStmt::Expr(structured_row_assign_with_raw_value_expr) =
+            structured_row_assign_with_raw_value
+        else {
+            panic!("expected structured row assignment expression for raw value");
+        };
+        assert_eq!(
+            emit_expr(&structured_row_assign_with_raw_value_expr),
+            "values.row_mut(0 as usize).assign(&ndarray::ArrayView1::from(&vec![2, 3, 6, 4]))"
         );
         let structured_row_assign = array2_row_mut_assign_stmt(
             RustExpr::Var("values".to_string()),

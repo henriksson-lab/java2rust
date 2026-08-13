@@ -632,7 +632,7 @@ fn noop_facade_constructor_call_sites_are_counted_per_call() {
 #[test]
 fn noop_facade_method_call_sites_are_marked_at_lowering_time() {
     let receiver = Expr::Var("o".to_string());
-    let rust = new_java2rust::emit::emit_expr(&apply_call_target(
+    let lowered = apply_call_target(
         &CallTargetPlan::ExternalFacadeReceiver {
             receiver: &receiver,
             rust_path: "put".to_string(),
@@ -648,7 +648,26 @@ fn noop_facade_method_call_sites_are_marked_at_lowering_time() {
             RustExpr::Literal("\"x\"".to_string()),
             RustExpr::Literal("1".to_string()),
         ],
-    ));
+    );
+    let marker =
+        output_markers::noop_facade_method_call_site_marker("org.json.JSONObject", "put", 2);
+    assert_eq!(
+        lowered,
+        RustExpr::MarkedBlock {
+            marker: marker.clone(),
+            expr: Box::new(RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Var("o".to_string())),
+                method: "put".to_string(),
+                args: vec![
+                    RustExpr::Literal("\"x\"".to_string()),
+                    RustExpr::Literal("1".to_string()),
+                ],
+            }),
+        }
+    );
+
+    let rust = new_java2rust::emit::emit_expr(&lowered);
+    assert_eq!(rust, format!("{{ {marker} o.put(\"x\", 1) }}"));
 
     assert!(
         rust.contains(&output_markers::noop_facade_method_call_site_marker_prefix()),

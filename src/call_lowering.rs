@@ -175,11 +175,10 @@ fn mark_noop_facade_method_call_site(
     method_name: &str,
     arg_count: usize,
 ) -> RustExpr {
-    RustExpr::Raw(format!(
-        "{{ {} {} }}",
-        noop_facade_method_call_site_marker(receiver_type, method_name, arg_count),
-        crate::emit::emit_expr(&expr)
-    ))
+    RustExpr::MarkedBlock {
+        marker: noop_facade_method_call_site_marker(receiver_type, method_name, arg_count),
+        expr: Box::new(expr),
+    }
 }
 
 fn apply_external_facade_receiver_call(
@@ -193,10 +192,10 @@ fn apply_external_facade_receiver_call(
             let mut all_args = Vec::with_capacity(args.len() + 1);
             all_args.push(receiver);
             all_args.extend(args);
-            function_call_projection(RustExpr::Raw(rust_path.to_string()), all_args)
+            function_call_projection(external_facade_rust_path_expr(rust_path), all_args)
         }
         ReceiverAbi::AssociatedFunction => {
-            function_call_projection(RustExpr::Raw(rust_path.to_string()), args)
+            function_call_projection(external_facade_rust_path_expr(rust_path), args)
         }
         ReceiverAbi::BorrowedSelf | ReceiverAbi::MutBorrowedSelf | ReceiverAbi::OwnedSelf => {
             facade_receiver_method_call_projection(receiver, rust_path, args)
@@ -204,10 +203,30 @@ fn apply_external_facade_receiver_call(
     }
 }
 
+fn external_facade_rust_path_expr(rust_path: &str) -> RustExpr {
+    if rust_path
+        .split("::")
+        .all(|segment| rust_path_segment_is_plain_ident(segment))
+    {
+        RustExpr::path(rust_path.split("::"))
+    } else {
+        RustExpr::Raw(rust_path.to_string())
+    }
+}
+
+fn rust_path_segment_is_plain_ident(segment: &str) -> bool {
+    let mut chars = segment.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
 fn apply_super_boundary_call(return_type: &JavaType, propagates_result: bool) -> RustExpr {
     match (return_type, propagates_result) {
-        (JavaType::Void, true) => RustExpr::Raw("Ok(())".to_string()),
-        (JavaType::Void, false) => RustExpr::Raw("()".to_string()),
+        (JavaType::Void, true) => ok_unit_expr(),
+        (JavaType::Void, false) => unit_expr(),
         (JavaType::Primitive(PrimitiveType::Boolean), _) => RustExpr::Literal("false".to_string()),
         (JavaType::Primitive(PrimitiveType::Char), _) => RustExpr::Literal("'\\0'".to_string()),
         (JavaType::Primitive(PrimitiveType::Byte), _)
@@ -218,6 +237,17 @@ fn apply_super_boundary_call(return_type: &JavaType, propagates_result: bool) ->
         (JavaType::Primitive(PrimitiveType::Double), _) => RustExpr::Literal("0.0f64".to_string()),
         _ => default_trait_expr(),
     }
+}
+
+fn ok_unit_expr() -> RustExpr {
+    RustExpr::Call {
+        function: Box::new(RustExpr::path(["Ok"])),
+        args: vec![unit_expr()],
+    }
+}
+
+fn unit_expr() -> RustExpr {
+    RustExpr::Tuple(Vec::new())
 }
 
 fn default_trait_expr() -> RustExpr {
@@ -270,10 +300,10 @@ fn apply_native_java_instance_method(
             receiver_method_call_projection(receiver, "get", args)
         }
         NativeJavaInstanceMethod::FileExists => file_exists_projection(receiver),
-        NativeJavaInstanceMethod::ReaderReady => RustExpr::Raw("true".to_string()),
+        NativeJavaInstanceMethod::ReaderReady => RustExpr::Literal("true".to_string()),
         NativeJavaInstanceMethod::BufferPut => {
             let Some(arg) = args.into_iter().next() else {
-                return RustExpr::Raw("{ }".to_string());
+                return unit_expr();
             };
             discard_value_projection(arg)
         }
@@ -615,7 +645,7 @@ fn apply_native_java_static_method(
             };
             primitive_is_nan_projection(arg)
         }
-        NativeJavaStaticMethod::SystemGc => RustExpr::Raw("()".to_string()),
+        NativeJavaStaticMethod::SystemGc => unit_expr(),
         NativeJavaStaticMethod::SystemExit => {
             let Some(status) = args.into_iter().next() else {
                 return compile_error_call("System.exit requires one argument");
@@ -690,10 +720,7 @@ fn apply_native_collection_static_method(
     match method {
         NativeCollectionStaticMethod::ArraysAsList => arrays_as_list_projection(args),
         NativeCollectionStaticMethod::ArraysEquals => {
-            let left = args
-                .first()
-                .cloned()
-                .unwrap_or_else(|| RustExpr::Raw("()".to_string()));
+            let left = args.first().cloned().unwrap_or_else(unit_expr);
             match args.as_slice() {
                 [_, right] => arrays_equals_projection(left, right.clone()),
                 [_, left_from, left_to, right, right_from, right_to] => {
@@ -706,18 +733,12 @@ fn apply_native_collection_static_method(
                         right_to.clone(),
                     )
                 }
-                _ => arrays_equals_projection(left, RustExpr::Raw("()".to_string())),
+                _ => arrays_equals_projection(left, unit_expr()),
             }
         }
         NativeCollectionStaticMethod::ArraysDeepEquals => {
-            let left = args
-                .first()
-                .cloned()
-                .unwrap_or_else(|| RustExpr::Raw("()".to_string()));
-            let right = args
-                .get(1)
-                .cloned()
-                .unwrap_or_else(|| RustExpr::Raw("()".to_string()));
+            let left = args.first().cloned().unwrap_or_else(unit_expr);
+            let right = args.get(1).cloned().unwrap_or_else(unit_expr);
             arrays_deep_equals_projection(left, right)
         }
         NativeCollectionStaticMethod::ArraysBinarySearch => {
@@ -733,7 +754,7 @@ fn apply_native_collection_static_method(
                     to.clone(),
                     key.clone(),
                 ),
-                _ => arrays_binary_search_projection(source, RustExpr::Raw("()".to_string())),
+                _ => arrays_binary_search_projection(source, unit_expr()),
             }
         }
         NativeCollectionStaticMethod::ArraysCompare => {
@@ -794,7 +815,7 @@ fn apply_native_collection_static_method(
             let len = args
                 .get(1)
                 .cloned()
-                .unwrap_or_else(|| RustExpr::Raw("0".to_string()));
+                .unwrap_or_else(|| RustExpr::Literal("0".to_string()));
             arrays_copy_of_projection(source, len)
         }
         NativeCollectionStaticMethod::ArraysCopyOfRange => {
@@ -805,11 +826,11 @@ fn apply_native_collection_static_method(
             let from = args
                 .get(1)
                 .cloned()
-                .unwrap_or_else(|| RustExpr::Raw("0".to_string()));
+                .unwrap_or_else(|| RustExpr::Literal("0".to_string()));
             let to = args
                 .get(2)
                 .cloned()
-                .unwrap_or_else(|| RustExpr::Raw("0".to_string()));
+                .unwrap_or_else(|| RustExpr::Literal("0".to_string()));
             arrays_copy_of_range_projection(source, from, to)
         }
         NativeCollectionStaticMethod::ArraysToString => args
@@ -836,39 +857,24 @@ fn apply_native_collection_static_method(
             .map(collections_unmodifiable_projection)
             .unwrap_or_else(default_trait_expr),
         NativeCollectionStaticMethod::CollectionsSingleton => {
-            let value = args
-                .first()
-                .cloned()
-                .unwrap_or_else(|| RustExpr::Raw("()".to_string()));
+            let value = args.first().cloned().unwrap_or_else(unit_expr);
             collections_singleton_projection(value)
         }
         NativeCollectionStaticMethod::CollectionsSingletonList => {
-            let value = args
-                .first()
-                .cloned()
-                .unwrap_or_else(|| RustExpr::Raw("()".to_string()));
+            let value = args.first().cloned().unwrap_or_else(unit_expr);
             collections_singleton_list_projection(value)
         }
         NativeCollectionStaticMethod::CollectionsSingletonMap => {
-            let key = args
-                .first()
-                .cloned()
-                .unwrap_or_else(|| RustExpr::Raw("()".to_string()));
-            let value = args
-                .get(1)
-                .cloned()
-                .unwrap_or_else(|| RustExpr::Raw("()".to_string()));
+            let key = args.first().cloned().unwrap_or_else(unit_expr);
+            let value = args.get(1).cloned().unwrap_or_else(unit_expr);
             collections_singleton_map_projection(key, value)
         }
         NativeCollectionStaticMethod::CollectionsNCopies => {
             let count = args
                 .first()
                 .cloned()
-                .unwrap_or_else(|| RustExpr::Raw("0".to_string()));
-            let value = args
-                .get(1)
-                .cloned()
-                .unwrap_or_else(|| RustExpr::Raw("()".to_string()));
+                .unwrap_or_else(|| RustExpr::Literal("0".to_string()));
+            let value = args.get(1).cloned().unwrap_or_else(unit_expr);
             collections_n_copies_projection(count, value)
         }
     }

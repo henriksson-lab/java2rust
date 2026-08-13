@@ -9487,6 +9487,14 @@ fn apply_call_target_uses_shared_call_projection_helpers() {
         .expect("apply_call_target should be bounded");
     assert!(apply_call_target_source.contains("function_call_projection"));
     assert!(apply_call_target_source.contains("receiver_method_call_projection_exact"));
+    assert!(call_lowering_source.contains("fn ok_unit_expr() -> RustExpr"));
+    assert!(call_lowering_source.contains("function: Box::new(RustExpr::path([\"Ok\"]))"));
+    assert!(call_lowering_source.contains("RustExpr::Tuple(Vec::new())"));
+    assert!(!call_lowering_source.contains("RustExpr::Raw(\"Ok(())\""));
+    assert!(!call_lowering_source.contains("RustExpr::Raw(\"()\""));
+    assert!(!call_lowering_source.contains("RustExpr::Raw(\"{ }\""));
+    assert!(call_lowering_source.contains("RustExpr::MarkedBlock"));
+    assert!(!call_lowering_source.contains("RustExpr::Raw(format!(\n        \"{{ {} {} }}\""));
 }
 
 #[test]
@@ -11635,7 +11643,7 @@ fn facade_abi_fact_selects_receiver_call_shape_before_crate_mapping() {
             ],
         ),
         RustExpr::Call {
-            function: Box::new(RustExpr::Raw("hdf5_facade::write_array".to_string())),
+            function: Box::new(RustExpr::path(["hdf5_facade", "write_array"])),
             args: vec![
                 RustExpr::Var("hdf5".to_string()),
                 RustExpr::Literal("\"/metrics\"".to_string()),
@@ -11763,6 +11771,39 @@ fn optional_borrow_receiver_projection_uses_null_check_without_reborrow() {
             OptionalReceiverProjection::Borrowed,
         )),
         "values.get(key).expect(\"Java null receiver\")"
+    );
+    assert_eq!(
+        project_optional_receiver(
+            RustExpr::Raw("values.get(key)".to_string()),
+            OptionalReceiverProjection::Borrowed,
+        ),
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Raw("values.get(key)".to_string())),
+            method: "expect".to_string(),
+            args: vec![RustExpr::Literal("\"Java null receiver\"".to_string())],
+        }
+    );
+    assert_eq!(
+        project_optional_receiver(
+            RustExpr::Raw("left + right".to_string()),
+            OptionalReceiverProjection::SharedUnchecked,
+        ),
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Raw("(left + right)".to_string())),
+                method: "as_ref".to_string(),
+                args: Vec::new(),
+            }),
+            method: "unwrap".to_string(),
+            args: Vec::new(),
+        }
+    );
+    assert_eq!(
+        emit_expr(&project_optional_receiver(
+            RustExpr::Raw("left + right".to_string()),
+            OptionalReceiverProjection::SharedUnchecked,
+        )),
+        "(left + right).as_ref().unwrap()"
     );
     assert_eq!(
         project_optional_receiver(
@@ -15878,7 +15919,10 @@ class Holder {
             || translation.rust.contains("helper.consume(&self.value);")
             || translation
                 .rust
-                .contains("helper.consume(self.value.clone()"),
+                .contains("helper.consume(self.value.clone()")
+            || translation
+                .rust
+                .contains("helper.consume(java_clone_erased_object_ref(&self.value));"),
         "{}",
         translation.rust
     );
@@ -16246,6 +16290,73 @@ fn static_optional_storage_initializers_use_optional_construction_plan() {
         !static_initializer.contains("format!(\"Some({})\""),
         "{static_initializer}"
     );
+    assert!(
+        static_initializer.contains("RustExpr::path([\"None\"])"),
+        "{static_initializer}"
+    );
+    assert!(
+        !static_initializer.contains("RustExpr::Raw(\"None\".to_string())"),
+        "{static_initializer}"
+    );
+    assert!(
+        static_initializer
+            .contains("self_associated_path_projection(&static_const_reference_name_for_type"),
+        "{static_initializer}"
+    );
+    assert!(
+        !static_initializer.contains("RustExpr::Raw(reference)"),
+        "{static_initializer}"
+    );
+    assert!(
+        !static_initializer.contains("RustExpr::Raw(format!(\"{reference}.to_string()\")"),
+        "{static_initializer}"
+    );
+    assert!(
+        !static_initializer.contains("RustExpr::Raw(format!(\n                \"{}.len() as i32\""),
+        "{static_initializer}"
+    );
+    assert!(
+        !static_initializer
+            .contains("RustExpr::Raw(format!(\n                \"format!(\\\"{{}}{{}}\\\""),
+        "{static_initializer}"
+    );
+    assert!(
+        static_initializer.contains("receiver_method_call_projection_exact"),
+        "{static_initializer}"
+    );
+    assert!(
+        static_initializer.contains("len_i32_projection(receiver)"),
+        "{static_initializer}"
+    );
+    assert!(
+        static_initializer.contains("RustExpr::Raw(\"format!\".to_string())"),
+        "{static_initializer}"
+    );
+    let switch_label_expr = source
+        .split("fn lower_switch_case_label_expr")
+        .nth(1)
+        .and_then(|tail| tail.split("fn option_some_projection").next())
+        .expect("switch label expression helper should be present");
+    assert!(
+        !switch_label_expr.contains("format!(\"Some({variant})\""),
+        "{switch_label_expr}"
+    );
+    assert!(
+        !switch_label_expr.contains("format!(\"Some({owner}::{field})\""),
+        "{switch_label_expr}"
+    );
+    let optional_borrowed_arg = source
+        .split("fn lower_optional_argument_for_borrowed_target")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn lower_optional_owned_argument_for_owned_target")
+                .next()
+        })
+        .expect("optional borrowed argument helper should be present");
+    assert!(
+        !optional_borrowed_arg.contains("format!(\"Some(&{rendered})\""),
+        "{optional_borrowed_arg}"
+    );
 }
 
 #[test]
@@ -16402,6 +16513,15 @@ fn optional_element_borrow_carrier_construction_is_centralized() {
         .expect("optional receiver field access helper should be present");
     assert!(
         optional_receiver_field_helper.contains("adapt_optional_instance_receiver_with_slot_plan")
+    );
+    assert!(
+        !optional_receiver_field_helper
+            .contains("emit::emit_expr(&adapt_optional_instance_receiver_with_slot_plan"),
+        "optional receiver field access should keep the adapted receiver structured"
+    );
+    assert!(
+        !optional_receiver_field_helper.contains("RustExpr::Raw(unwrapped_receiver.clone())"),
+        "optional receiver field length projections should consume structured receivers"
     );
     assert!(!optional_receiver_field_helper.contains("project_optional_receiver"));
     let reused_optional_wrap_helper = source
@@ -30562,7 +30682,16 @@ fn exception_lowering_policy_owns_result_support_ok_and_err_shapes() {
             RustExpr::Var("ce".to_string()),
             &["RuntimeException".to_string()],
         ),
-        RustExpr::Raw("ce.cause_or_self_if_instance(&[\"RuntimeException\"])".to_string())
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("ce".to_string())),
+            method: "cause_or_self_if_instance".to_string(),
+            args: vec![RustExpr::Unary {
+                op: "&".to_string(),
+                expr: Box::new(RustExpr::ArrayLiteral(vec![RustExpr::Literal(
+                    "\"RuntimeException\"".to_string(),
+                )])),
+            }],
+        }
     );
     assert_eq!(
         exception_expr_from_new("IllegalStateException", Vec::new(),),
@@ -30593,7 +30722,13 @@ fn exception_lowering_policy_owns_result_support_ok_and_err_shapes() {
             function: Box::new(RustExpr::path(["JavaException", "new"])),
             args: vec![
                 RustExpr::Literal("\"IllegalStateException\"".to_string()),
-                RustExpr::Raw("format!(\"{}: {}\", message, ignored).to_string()".to_string()),
+                RustExpr::MethodCall {
+                    receiver: Box::new(RustExpr::Raw(
+                        "format!(\"{}: {}\", message, ignored)".to_string(),
+                    )),
+                    method: "to_string".to_string(),
+                    args: Vec::new(),
+                },
             ],
         }
     );
@@ -30632,9 +30767,13 @@ fn exception_lowering_policy_owns_result_support_ok_and_err_shapes() {
             function: Box::new(RustExpr::path(["JavaException", "new"])),
             args: vec![
                 RustExpr::Literal("\"MissingArgument\"".to_string()),
-                RustExpr::Raw(
-                    "format!(\"{}: {}\", argument_name, message).to_string()".to_string()
-                ),
+                RustExpr::MethodCall {
+                    receiver: Box::new(RustExpr::Raw(
+                        "format!(\"{}: {}\", argument_name, message)".to_string(),
+                    )),
+                    method: "to_string".to_string(),
+                    args: Vec::new(),
+                },
             ],
         }
     );
@@ -32701,11 +32840,17 @@ fn optional_facade_abi_fact_owns_borrowed_return_recovery_policy() {
             if policy.recovery == RustBorrowedFacadeReturnRecovery::ToPathBuf
     ));
     assert_eq!(
-        apply_slot_conversion_plan(RustExpr::Raw("reader.get_file()".to_string()), &plan.conversion),
-        RustExpr::Raw(
-            "reader.get_file().map(|value| Box::new(value.to_path_buf()) as Box<dyn std::any::Any>)"
-                .to_string()
-        )
+        apply_slot_conversion_plan(
+            RustExpr::Raw("reader.get_file()".to_string()),
+            &plan.conversion
+        ),
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Raw("reader.get_file()".to_string())),
+            method: "map".to_string(),
+            args: vec![RustExpr::Raw(
+                "|value| Box::new(value.to_path_buf()) as Box<dyn std::any::Any>".to_string()
+            )],
+        }
     );
 }
 
@@ -32795,6 +32940,18 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(coercion_source.contains("FormatValue"));
     assert!(coercion_source.contains("OptionalBorrowedValue"));
     assert!(
+        !coercion_source.contains("RustExpr::Raw(format!(\"{helper}({})\""),
+        "JavaDisplayPlan::ConcatFloatValue should compose helper calls structurally"
+    );
+    assert!(
+        !coercion_source.contains("JavaDisplayPlan::FormatValue => RustExpr::Raw(format!("),
+        "JavaDisplayPlan::FormatValue should compose to_string structurally"
+    );
+    assert!(
+        !coercion_source.contains("\"java_erased_object_to_string(&{})\""),
+        "JavaDisplayPlan::ErasedObject should compose helper calls structurally"
+    );
+    assert!(
         coercion_source
             .contains(".as_ref().map(|value| value.to_string()).unwrap_or_else(|| \\\"null\\\"")
     );
@@ -32840,6 +32997,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(coercion_source.contains("pub fn string_join_varargs_projection"));
     assert!(coercion_source.contains("pub fn render_string_equality_operand_projection"));
     assert!(coercion_source.contains("pub fn optional_string_view_projection"));
+    assert!(coercion_source.contains("fn optional_string_view_projection_expr"));
     assert!(coercion_source.contains("pub fn string_helper_receiver_projection"));
     assert!(coercion_source.contains("pub fn string_hash_code_projection"));
     assert!(coercion_source.contains("pub fn string_replace_first_projection"));
@@ -32854,7 +33012,23 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(coercion_source.contains("pub fn string_get_bytes_projection"));
     assert!(coercion_source.contains("pub fn string_to_char_array_projection"));
     assert!(coercion_source.contains("pub fn string_char_at_projection"));
+    assert!(
+        !coercion_source
+            .contains("\"{}.as_bytes().iter().map(|byte| *byte as i8).collect::<Vec<i8>>()\""),
+        "string_get_bytes_projection should compose the byte pipeline structurally"
+    );
+    assert!(
+        !coercion_source
+            .contains("\"{}.chars().nth({}).expect(\\\"Java string index out of bounds\\\")\""),
+        "string_char_at_projection should compose the char lookup structurally"
+    );
     assert!(coercion_source.contains("pub fn string_index_of_projection"));
+    assert!(
+        !coercion_source.contains(
+            "\"{}.iter().position(|item| item == {}).map(|index| index as i32).unwrap_or(-1)\""
+        ),
+        "sequence_index_of_projection should compose the iterator lookup structurally"
+    );
     assert!(coercion_source.contains("pub fn string_substring_projection"));
     assert!(coercion_source.contains("pub fn primitive_number_value_projection"));
     assert!(coercion_source.contains("pub fn primitive_hash_code_projection"));
@@ -32864,6 +33038,10 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(coercion_source.contains("pub fn array2_rows_i32_projection"));
     assert!(coercion_source.contains("pub fn array2_cols_i32_projection"));
     assert!(coercion_source.contains("pub fn file_exists_projection"));
+    assert!(
+        !coercion_source.contains("\"std::path::Path::new({}.get_path().as_str()).exists()\""),
+        "file_exists_projection should compose Path::new(...).exists() structurally"
+    );
     assert!(coercion_source.contains("pub fn system_exit_projection"));
     assert!(coercion_source.contains("pub fn thread_sleep_millis_projection"));
     assert!(coercion_source.contains("pub fn math_max_projection"));
@@ -32882,6 +33060,11 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(coercion_source.contains("pub fn tuple_field_projection"));
     assert!(coercion_source.contains("pub fn primitive_is_nan_projection"));
     assert!(coercion_source.contains("pub fn render_string_format_arg_value"));
+    assert!(
+        !coercion_source
+            .contains("RustExpr::Raw(format!(\"{}.to_string()\", emit::emit_expr(&arg)))"),
+        "string_format_arg_value_projection should compose display conversion structurally"
+    );
     assert!(coercion_source.contains("pub fn string_format_projection"));
     assert!(coercion_source.contains("pub fn borrowed_sequence_extend_arg"));
     assert!(coercion_source.contains("pub enum LiteralSlotPlan"));
@@ -32910,6 +33093,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(coercion_source.contains("pub fn owner_associated_path_projection"));
     assert!(coercion_source.contains("pub fn java_class_static_path_projection"));
     assert!(coercion_source.contains("pub fn java_class_literal_path_projection"));
+    assert!(coercion_source.contains("pub fn java_class_for_name_path_projection"));
     assert!(coercion_source.contains("pub fn external_crate_path_projection"));
     assert!(coercion_source.contains("pub fn external_crate_associated_path_projection"));
     assert!(coercion_source.contains("pub fn static_storage_accessor_projection"));
@@ -32954,6 +33138,13 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
             "native instance method {method} should render through receiver_method_call_projection"
         );
     }
+    assert!(native_instance_method_projection.contains(
+        "NativeJavaInstanceMethod::ReaderReady => RustExpr::Literal(\"true\".to_string())"
+    ));
+    assert!(
+        !native_instance_method_projection
+            .contains("NativeJavaInstanceMethod::ReaderReady => RustExpr::Raw(\"true\"")
+    );
     assert!(coercion_source.contains("pub fn typed_single_input_callback_projection"));
     assert!(coercion_source.contains("pub fn outer_this_field_projection"));
     assert!(coercion_source.contains("pub fn outer_this_field_mut_projection"));
@@ -33124,6 +33315,10 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(coercion_source.contains("pub fn apply_clone_projection"));
     assert!(coercion_source.contains("pub fn rewrite_downcast_expect_message"));
     assert!(coercion_source.contains("pub fn deref_borrowed_projection"));
+    assert!(
+        !coercion_source.contains("RustExpr::Raw(format!(\"*{}\", emit::emit_expr(&expr)))"),
+        "deref_borrowed_projection should compose unary deref structurally"
+    );
     assert!(coercion_source.contains("pub fn unwrap_result_or_panic_uncaught_java_exception"));
     assert!(coercion_source.contains("pub fn normalize_reused_clone_for_borrowed_argument"));
     assert!(coercion_source.contains("fn render_optional_element_projection"));
@@ -33144,11 +33339,39 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(coercion_source.contains("pub fn erased_object_borrowed_downcast_ref_projection"));
     assert!(coercion_source.contains("pub fn snapshot_rendered_shared_borrow_argument"));
     assert!(array_source.contains("pub fn array2_from_rows_projection"));
+    assert!(
+        !array_source.contains("\"ndarray::Array2::from_rows({rows})\""),
+        "array2_from_rows_projection should compose ndarray construction structurally"
+    );
+    assert!(
+        !array_source.contains("\"&ndarray::Array2::from_rows({rows})\""),
+        "array2_from_rows_projection should compose borrowed ndarray construction structurally"
+    );
     assert!(array_source.contains("pub fn array2_from_elem_projection"));
+    assert!(
+        !array_source.contains("\"ndarray::Array2::from_elem(({} as usize, {} as usize), {})\""),
+        "array2_from_elem_projection should compose ndarray construction structurally"
+    );
     assert!(array_source.contains("pub fn array_from_elem_projection"));
     assert!(array_source.contains("pub fn java_array_creation_fallback_projection"));
     assert!(array_source.contains("pub fn array2_index_projection"));
+    assert!(
+        !array_source.contains("\"{}[[{}, {}]]\""),
+        "array2_index_projection should compose indexing structurally"
+    );
+    assert!(
+        !array_source.contains("RustExpr::Raw(format!(\n            \"[{}, {}]\""),
+        "array2_index_projection should compose multidimensional index as ArrayLiteral"
+    );
     assert!(array_source.contains("pub fn array2_row_mut_assign_stmt"));
+    assert!(
+        !array_source.contains("&& !matches!(index.unshaped(), RustExpr::Raw(_))"),
+        "array2_row_mut_assign_stmt should allow raw index leaves in structured calls"
+    );
+    assert!(
+        !array_source.contains("&& !matches!(value.unshaped(), RustExpr::Raw(_))"),
+        "array2_row_mut_assign_stmt should allow raw value leaves in structured calls"
+    );
     assert!(array_source.contains("pub fn ragged_array_outer_creation_projection"));
     assert!(coercion_source.contains("validate same-call alias snapshot"));
     assert!(lower_source.contains("MoveUseContext"));
@@ -33186,12 +33409,67 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(!lower_source.contains("\"Box<dyn std::any::Any>\""));
     assert!(lower_source.contains("typed_none_projection("));
     assert!(!lower_source.contains("{}.expect(\"Java null receiver\")"));
+    assert!(
+        !coercion_source
+            .contains("RustExpr::Raw(format!(\"{rendered}.expect(\\\"Java null receiver\\\")\")")
+    );
+    assert!(
+        !coercion_source
+            .contains("RustExpr::Raw(format!(\"{}.expect({message:?})\", emit::emit_expr(&expr)))")
+    );
+    assert!(coercion_source.contains(
+        "fn method_call_projection(receiver: RustExpr, method: &str, args: Vec<RustExpr>) -> RustExpr"
+    ));
+    assert!(!coercion_source.contains("RustExpr::Raw(format!(\n            \"{}.{}({})\""));
+    assert!(!coercion_source.contains("RustExpr::Raw(format!(\"{}.{}() as i32\""));
+    assert!(
+        !coercion_source
+            .contains("RustExpr::Raw(format!(\"{rendered}.as_ref().map(|value| value.as_str())\")")
+    );
+    assert!(!coercion_source.contains("RustExpr::Raw(format!(\"{inner}.as_str()\""));
+    assert!(
+        !coercion_source.contains("optional_projected_expr(format!(\"{rendered_expr}.as_ref()\")")
+    );
+    assert!(coercion_source.contains("fn optional_map_projection_expr"));
+    assert!(
+        !coercion_source
+            .contains("format!(\"{rendered_expr}.as_ref().map(|value| {rendered_mapped})\")")
+    );
+    assert!(
+        !coercion_source
+            .contains("format!(\"{rendered_expr}.as_mut().map(|value| {rendered_mapped})\")")
+    );
+    assert!(
+        !coercion_source.contains("format!(\"{rendered_expr}.map(|value| {rendered_mapped})\")")
+    );
+    assert!(
+        !coercion_source
+            .contains("RustExpr::Raw(format!(\"{receiver}.map(|value| {rendered_mapped})\")")
+    );
+    assert!(!coercion_source.contains(
+        "RustExpr::Raw(format!(\"{rendered_expr}.as_ref().map(|value| value.as_str())\")"
+    ));
+    assert!(coercion_source.contains("panic_recovery_closure"));
+    assert!(
+        coercion_source
+            .contains("method_call_projection(\n            expr,\n            \"unwrap_or_else\"")
+    );
+    assert!(
+        coercion_source.contains("let expr_was_raw = matches!(expr.unshaped(), RustExpr::Raw(_));")
+    );
+    assert!(
+        coercion_source
+            .contains("return string_view_expr(zero_arg_method_projection(expr, \"as_str\"));")
+    );
     assert!(lower_source.contains("unwrap_java_null_receiver_projection("));
     assert!(!lower_source.contains("{macro_name}!()"));
     assert!(!lower_source.contains("{macro_name}!(\\\"{{}}\\\", {})"));
     assert!(lower_source.contains("print_macro_projection("));
+    assert!(!coercion_source.contains("RustExpr::Raw(format!(\"!({})\""));
     assert!(!lower_source.contains("!({})"));
     assert!(lower_source.contains("logical_not_projection("));
+    assert!(!lower_source.contains("RustExpr::Raw(\"__java_left\".to_string())"));
+    assert!(!lower_source.contains("RustExpr::Raw(\"__java_right\".to_string())"));
     assert!(!lower_source.contains("__java_old_value = {target}"));
     assert!(lower_source.contains("java_update_expression_projection("));
     assert!(!lower_source.contains("!({object_type_predicate})"));
@@ -33218,11 +33496,31 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(call_source.contains("java_class_literal_path_projection("));
     assert!(call_source.contains("external_crate_path_projection("));
     assert!(call_source.contains("external_crate_associated_path_projection("));
+    assert!(call_source.contains("fn external_facade_rust_path_expr"));
+    assert!(
+        call_source.contains("function_call_projection(external_facade_rust_path_expr(rust_path)")
+    );
+    assert!(!call_source.contains("function_call_projection(RustExpr::Raw(rust_path.to_string())"));
     assert!(!call_source.contains("fn propagate_result_expr"));
     assert!(!call_source.contains("format!(\"{}?\""));
+    assert!(lower_source.contains("RustExpr::path([\"URI\", \"parse\"])"));
+    assert!(!lower_source.contains("RustExpr::Raw(\"URI::parse\".to_string())"));
     assert!(!lower_source.contains("RustExpr::Raw(format!(\"Self::{}\""));
     assert!(!lower_source.contains("RustExpr::Raw(format!(\"{rust_name}::new"));
     assert!(!lower_source.contains("RustExpr::Raw(format!(\"{owner}::{field}\""));
+    assert!(!lower_source.contains(
+        "RustExpr::Raw(format!(\n                    \"JavaClass::<{rust_type}>::for_name"
+    ));
+    assert!(!lower_source.contains("RustExpr::Raw(format!(\"Box::new({boxed}) as {target_ty}\""));
+    assert!(
+        !lower_source
+            .contains("RustExpr::Raw(format!(\n        \"{trait_name}::{helper_name}({})\"")
+    );
+    assert!(!lower_source.contains("RustExpr::Raw(format!(\"{rust_owner}::values()\""));
+    assert!(
+        !lower_source
+            .contains("RustExpr::Raw(format!(\n                \"{rust_owner}::value_of({})\"")
+    );
     assert!(!lower_source.contains("RustExpr::Raw(format!(\"__java_self.{field_name}\""));
     assert!(!lower_source.contains("self.__outer.borrow().{}"));
     assert!(!lower_source.contains("self.__outer.borrow_mut().{}"));
@@ -33241,6 +33539,8 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(lower_source.contains("owner_associated_path_projection("));
     assert!(item_assembly_source.contains("self_associated_path_projection("));
     assert!(!lower_source.contains("format!(\"{}.as_ref().unwrap()\""));
+    assert!(!lower_source.contains("RustExpr::Raw(\"self.__outer.clone()\""));
+    assert!(!lower_source.contains("RustExpr::Raw(format!(\"{name}.clone()\")"));
     assert!(!lower_source.contains("format!(\"&{name}\")"));
     assert!(!lower_source.contains("self.clone()/* TODO(translation): validate added clone */"));
     assert!(!lower_source.contains(".clone()/* TODO(translation): validate added clone */\","));
@@ -33296,6 +33596,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(!lower_source.contains("format!(\"{rendered_receiver}.len() as i32\")"));
     assert!(!lower_source.contains("format!(\"{}.len() as i32\""));
     assert!(!lower_source.contains("format!(\"{unwrapped_receiver}.len() as i32\")"));
+    assert!(!lower_source.contains("RustExpr::Raw(\"Ok\".to_string())"));
     assert!(!lower_source.contains(".nrows() as i32"));
     assert!(!access_source.contains(".nrows() as i32"));
     assert!(lower_source.contains("array2_rows_i32_projection"));
@@ -33402,6 +33703,10 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(!call_source.contains("format!(\"{}.as_str()\""));
     assert!(!call_source.contains("as_bytes().iter().map(|byte| *byte as i8)"));
     assert!(!call_source.contains("chars().collect::<Vec<char>>()"));
+    assert!(
+        !coercion_source
+            .contains("RustExpr::Raw(format!(\n        \"{}.chars().collect::<Vec<char>>()\"")
+    );
     assert!(!call_source.contains("chars().nth({}).expect"));
     assert!(!call_source.contains("Java string index out of bounds"));
     assert!(!call_source.contains("java_string_index_of_from"));
@@ -33418,16 +33723,68 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(!call_source.contains("java_string_compare_to_ignore_case"));
     assert!(!call_source.contains("java_string_equals_ignore_case"));
     assert!(!call_source.contains("PrimitiveType::Double => RustExpr::Raw(format!(\"{} as f64\""));
+    assert!(
+        !coercion_source.contains("RustExpr::Raw(format!(\"{} as {rust_ty}\""),
+        "primitive_number_value_projection should compose casts structurally"
+    );
+    assert!(coercion_source.contains("pub fn java_char_from_u32_mask_projection"));
+    assert!(coercion_source.contains("pub fn java_char_to_numeric_projection"));
+    assert!(
+        !coercion_source.contains(
+            "RustExpr::Raw(format!(\n            \"char::from_u32((({}) as u32) & 0xffff)"
+        ),
+        "Rust scalar char casts should use java_char_from_u32_mask_projection"
+    );
+    assert!(
+        !coercion_source.contains("RustExpr::Raw(format!(\n                    \"char::from_u32(({rendered} as u32) & 0xffff)"),
+        "primitive widening to char should use java_char_from_u32_mask_projection"
+    );
+    assert!(
+        !coercion_source.contains("\"({rendered} as u32) as {}\""),
+        "primitive widening from char should use java_char_to_numeric_projection"
+    );
+    assert!(
+        !lower_source.contains("char::from_u32((({rendered}) as u32) & 0xffff)"),
+        "compound char narrowing should use java_char_from_u32_mask_projection"
+    );
+    assert!(
+        !lower_source.contains("char::from_u32((({}) as u32) & 0xffff)"),
+        "explicit char casts should use java_char_from_u32_mask_projection"
+    );
     assert!(!call_source.contains("if {rendered} {{ 1231 }} else {{ 1237 }}"));
     assert!(!call_source.contains("java_primitive_compare_to({}, {})"));
+    assert!(
+        !coercion_source
+            .contains("RustExpr::Raw(format!(\n        \"java_primitive_compare_to({}, {})\"")
+    );
     assert!(!call_source.contains("format!(\"({} as f64).ln()\""));
     assert!(!call_source.contains("format!(\"({} as f64).exp()\""));
+    assert!(!coercion_source.contains("RustExpr::Raw(format!(\"java_math_round_f32"));
+    assert!(!coercion_source.contains("RustExpr::Raw(format!(\"java_math_round_f64"));
+    assert!(!coercion_source.contains("RustExpr::Raw(format!(\"({rendered}).abs()\""));
+    assert!(!coercion_source.contains("RustExpr::Raw(format!(\"({rendered}).wrapping_abs()\""));
+    assert!(!coercion_source.contains("RustExpr::Raw(format!(\"({} as f64).{method}()\""));
+    assert!(
+        !coercion_source
+            .contains("RustExpr::Raw(format!(\n        \"({} as f64).{method}({} as f64)\"")
+    );
+    assert!(
+        !coercion_source
+            .contains("RustExpr::Raw(format!(\n        \"({} as f64).powf({} as f64)\"")
+    );
+    assert!(coercion_source.contains("fn f64_cast_projection(expr: RustExpr) -> RustExpr"));
     assert!(!call_source.contains("format!(\"{}.len() as i32\""));
     assert!(!call_source.contains("keys().cloned().collect::<Vec<_>>()"));
     assert!(!call_source.contains("iter().cloned().collect::<Vec<_>>()"));
     assert!(!call_source.contains("JavaIterator::new({}.iter().cloned())"));
     assert!(!call_source.contains("format!(\"({receiver_for_len}).len() as i32\""));
     assert!(!call_source.contains("as_ref().map(|value| (*value).clone())"));
+    assert!(!coercion_source.contains(
+        "RustExpr::Raw(format!(\n            \"{}.as_ref().map(|value| (*value).clone()).expect"
+    ));
+    assert!(!coercion_source.contains(
+        "RustExpr::Raw(format!(\n            \"{}.as_ref().map(|value| (*value).clone()).unwrap_or"
+    ));
     assert!(!call_source.contains("format!(\"{}.is_nan()\""));
     assert!(!call_source.contains("std::process::exit({} as i32)"));
     assert!(!call_source.contains("std::process::exit({})"));
@@ -33450,6 +33807,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(!native_collection_static_source.contains("vec![{}]"));
     assert!(!native_collection_static_source.contains("vec![{value}]"));
     assert!(!native_collection_static_source.contains("vec![{value}; {count} as usize]"));
+    assert!(!native_collection_static_source.contains("RustExpr::Raw(\"0\".to_string())"));
     assert!(call_source.contains("arrays_as_list_projection(args)"));
     assert!(call_source.contains("arrays_equals_projection(left, right.clone())"));
     assert!(call_source.contains("arrays_equals_range_projection"));
@@ -33501,6 +33859,18 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(!collection_remove_if_source.contains("!({})"));
     assert!(collection_remove_if_source.contains("collection_remove_if_projection"));
     assert!(coercion_source.contains("pub fn collection_remove_if_projection"));
+    let collection_remove_if_projection_source = coercion_source
+        .split("pub fn collection_remove_if_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn collection_sort_projection").next())
+        .expect("collection removeIf projection should remain discoverable");
+    assert!(
+        !collection_remove_if_projection_source.contains("{}.retain(|{}| !({}))"),
+        "collection_remove_if_projection should compose retain structurally"
+    );
+    assert!(
+        collection_remove_if_projection_source.contains("receiver_method_call_projection_exact")
+    );
     let lower_varargs_source = lower_source
         .split("fn lower_varargs_call_args_from_params")
         .nth(1)
@@ -34099,6 +34469,15 @@ class SpecificProblem extends BaseProblem {}
     assert!(exception_plan_source.contains("pub fn catch_match_class_names"));
     assert!(exception_lowering_source.contains("pub struct CatchRenderArm"));
     assert!(exception_lowering_source.contains("pub fn try_catch_stmt"));
+    assert!(
+        !exception_lowering_source.contains(
+            "RustExpr::Raw(format!(\"{}.to_string()\", crate::emit::emit_expr(&message)))"
+        )
+    );
+    assert!(
+        !exception_lowering_source.contains("\"{}.cause_or_self_if_instance(&[{}])\""),
+        "exception cause filtering should compose receiver and class slice structurally"
+    );
     assert!(lower_source.contains("let fallibility = plan_program_fallibility"));
     assert!(
         lower_source

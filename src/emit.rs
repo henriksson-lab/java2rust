@@ -301,6 +301,9 @@ fn emit_expr_prec(
                 .join(", ");
             format!("{} {{ {fields} }}", rust_struct_literal_path(name))
         }
+        RustExpr::MarkedBlock { marker, expr } => {
+            format!("{{ {marker} {} }}", emit_expr(expr))
+        }
         RustExpr::Raw(raw) => normalize_raw_expr_for_context(raw, parent_prec),
     };
 
@@ -515,6 +518,7 @@ fn expr_precedence(expr: &RustExpr) -> u8 {
         | RustExpr::VecLiteral(_)
         | RustExpr::VecRepeat { .. }
         | RustExpr::StructLit { .. }
+        | RustExpr::MarkedBlock { .. }
         | RustExpr::Raw(_) => 12,
         RustExpr::If { .. } => 1,
     }

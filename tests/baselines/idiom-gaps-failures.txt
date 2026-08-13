@@ -4,7 +4,7 @@
 # and the suite never returned, so no baseline could exist and regressions in
 # it were undetectable (claude_audits/done/0035).
 #
-# 689 tests: 544 passed, 145 failed, 0 hung.
+# 689 tests: 545 passed, 144 failed, 0 hung.
 #
 # Diff failure *names* against this file after any change. A name here is a
 # known defect; a name that is new is a regression.
@@ -138,7 +138,6 @@ static_external_call_to_generic_set_slot_uses_external_return_shape
 static_external_nullable_constructor_field_initializer_does_not_double_wrap
 static_owned_path_argument_does_not_borrow_owned_temporary
 static_owner_name_does_not_collapse_to_same_named_instance_field
-string_concat_preserves_parenthesized_numeric_addition
 string_pattern_chained_receiver_keeps_borrowed_pattern_argument
 string_pattern_methods_borrow_owned_string_arguments
 string_pattern_methods_use_signature_borrowed_argument_slots

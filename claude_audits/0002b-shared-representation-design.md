@@ -21,7 +21,7 @@ lowering are landed; the mutable handle tiers and shared receivers are not.
 |---|---|---|
 | 0002 | `Node b = a` copies; writes through `a` are invisible through `b` | `Rc::clone` — one object, two handles |
 | 0028 | `a == b` is structural equality, violating the stated project decision | `Rc::ptr_eq` — *exactly* Java's reference identity |
-| 0023 | every non-static inner class panics on construction | `__outer` stops being a one-off; it becomes the general case |
+| 0023 | ordinary outer-method inner construction still calls the panic fallback until a shared outer receiver can be passed to the existing companions | `__outer` stops being a one-off; it becomes the general receiver case |
 | 0006 | clone/borrow recovery is the largest rule cluster in `lower.rs` | for shared types the answer is always `Rc::clone`, and the cluster does not apply |
 | concurrency | `synchronized` erased; nothing to lock | `Arc<Mutex<T>>` gives `synchronized (o)` an object to lock |
 

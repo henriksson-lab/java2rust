@@ -51,7 +51,8 @@ use crate::coercion::{
     explicit_java_facade_cast_placeholder_projection, field_projection,
     force_shared_borrow_projection, function_call_projection,
     if_err_panic_uncaught_java_exception_stmt, instanceof_pattern_downcast_ref_projection,
-    into_projection, iterator_next_expect_projection, java_integral_literal_char,
+    into_projection, iterator_next_expect_projection, java_char_from_u32_mask_projection,
+    java_class_for_name_path_projection, java_integral_literal_char,
     java_primitive_update_expression_projection, java_primitive_updated_value_projection,
     java_update_expression_projection, java_value_hash_code_projection, len_i32_projection,
     literal_slot_plan, logical_not_projection, map_get_expect_projection,
@@ -244,6 +245,7 @@ struct LowerCtx<'a> {
     current_method_decl: Option<&'a MethodDecl>,
     current_constructor: Option<&'a str>,
     current_receiver: Option<ReceiverPlan>,
+    current_self_handle: Option<&'a str>,
     current_local_shapes: &'a [LocalPlan],
     current_return_shape: Option<&'a SolvedSlotShape>,
     exceptions: &'a ProgramExceptionPlan,
@@ -391,6 +393,7 @@ pub fn lower_program_with_semantic_plans_and_support_context(
         current_method_decl: None,
         current_constructor: None,
         current_receiver: None,
+        current_self_handle: None,
         current_local_shapes: &[],
         current_return_shape: None,
         exceptions: &exceptions,
@@ -1137,7 +1140,9 @@ fn lower_type(
                 ty,
                 ctx,
             ),
-            Member::Method(method) => functions.push(lower_method(program, ty, method, ctx)),
+            Member::Method(method) => {
+                push_method_with_outer_handle_companion(&mut functions, program, ty, method, ctx)
+            }
             _ => {}
         }
     }
@@ -1717,17 +1722,16 @@ fn static_storage_initial_value_expr(
     let value = match initializer {
         Expr::Literal(Literal::Null) if shape.optional_element_type().is_some() => {
             return typed_none_for_slot(&Slot::Return(shape.clone()))
-                .unwrap_or_else(|| RustExpr::Raw("None".to_string()));
+                .unwrap_or_else(|| RustExpr::path(["None"]));
         }
         Expr::Literal(literal) => literal_expr(literal),
         Expr::Var(name) => {
-            let reference = emit::emit_expr(&self_associated_path_projection(
-                &static_const_reference_name_for_type(ty, name),
-            ));
+            let reference =
+                self_associated_path_projection(&static_const_reference_name_for_type(ty, name));
             if matches!(shape.java_ty, JavaType::String) {
-                RustExpr::Raw(format!("{reference}.to_string()"))
+                receiver_method_call_projection_exact(reference, "to_string", Vec::new())
             } else {
-                RustExpr::Raw(reference)
+                reference
             }
         }
         Expr::New { ty, args, body, .. } if args.is_empty() && body.is_none() => {
@@ -1919,10 +1923,7 @@ fn static_primitive_storage_initial_value_expr(
             ..
         } if args.is_empty() && matches!(name.as_str(), "length" | "len") => {
             let receiver = static_string_storage_initial_value_expr(ty, receiver, ctx)?;
-            Some(RustExpr::Raw(format!(
-                "{}.len() as i32",
-                emit::emit_expr(&receiver)
-            )))
+            Some(len_i32_projection(receiver))
         }
         Expr::Unary {
             op: UnaryOp::Neg,
@@ -2036,11 +2037,10 @@ fn static_string_storage_initial_value_expr(
         } => {
             let left = static_string_storage_initial_value_expr(ty, left, ctx)?;
             let right = static_string_storage_initial_value_expr(ty, right, ctx)?;
-            Some(RustExpr::Raw(format!(
-                "format!(\"{{}}{{}}\", {}, {})",
-                emit::emit_expr(&left),
-                emit::emit_expr(&right)
-            )))
+            Some(function_call_projection(
+                RustExpr::Raw("format!".to_string()),
+                vec![RustExpr::Literal("\"{}{}\"".to_string()), left, right],
+            ))
         }
         _ => None,
     }
@@ -2071,10 +2071,11 @@ fn static_string_storage_reference_expr(
         } else {
             self_associated_path_projection(member)
         };
-        return Some(RustExpr::Raw(format!(
-            "{}.to_string()",
-            emit::emit_expr(&path)
-        )));
+        return Some(receiver_method_call_projection_exact(
+            path,
+            "to_string",
+            Vec::new(),
+        ));
     }
     Some(match owner {
         Some(owner) => qualified_static_storage_accessor_projection(&owner, member),
@@ -2951,6 +2952,9 @@ fn wrap_same_outer_inner_constructor_calls_expr(
         RustExpr::Shaped { expr, .. } => {
             wrap_same_outer_inner_constructor_calls_expr(expr, outer_type, ctx)
         }
+        RustExpr::MarkedBlock { expr, .. } => {
+            wrap_same_outer_inner_constructor_calls_expr(expr, outer_type, ctx)
+        }
         RustExpr::Literal(_) | RustExpr::Var(_) | RustExpr::Path(_) | RustExpr::Raw(_) => false,
     }
 }
@@ -3130,6 +3134,9 @@ fn replace_same_outer_inner_constructor_calls_expr(
                 })
         }
         RustExpr::Shaped { expr, .. } => {
+            replace_same_outer_inner_constructor_calls_expr(expr, outer_type, ty, ctx)
+        }
+        RustExpr::MarkedBlock { expr, .. } => {
             replace_same_outer_inner_constructor_calls_expr(expr, outer_type, ty, ctx)
         }
         RustExpr::Raw(raw) => {
@@ -3456,6 +3463,7 @@ fn replace_outer_this_panic_field_expr(expr: &mut RustExpr) -> bool {
                 | args.iter_mut().any(replace_outer_this_panic_field_expr)
         }
         RustExpr::Shaped { expr, .. } => replace_outer_this_panic_field_expr(expr),
+        RustExpr::MarkedBlock { expr, .. } => replace_outer_this_panic_field_expr(expr),
         RustExpr::Literal(_) | RustExpr::Var(_) | RustExpr::Path(_) | RustExpr::Raw(_) => false,
     }
 }
@@ -4082,7 +4090,7 @@ fn constructor_field_plans_with_trailing_body_ordered(
     ));
     let returned = RustExpr::Var("__java_self".to_string());
     body.push(RustStmt::Return(Some(if returns_result {
-        function_call_projection(RustExpr::Raw("Ok".to_string()), vec![returned])
+        function_call_projection(RustExpr::path(["Ok"]), vec![returned])
     } else {
         returned
     })));
@@ -5678,7 +5686,7 @@ fn delegated_constructor_with_trailing_body(
     ));
     let returned = RustExpr::Var("__java_self".to_string());
     body.push(RustStmt::Return(Some(if returns_result {
-        function_call_projection(RustExpr::Raw("Ok".to_string()), vec![returned])
+        function_call_projection(RustExpr::path(["Ok"]), vec![returned])
     } else {
         returned
     })));
@@ -5714,7 +5722,7 @@ fn super_no_arg_constructor_with_trailing_body(
     ));
     let returned = RustExpr::Var("__java_self".to_string());
     body.push(RustStmt::Return(Some(if returns_result {
-        function_call_projection(RustExpr::Raw("Ok".to_string()), vec![returned])
+        function_call_projection(RustExpr::path(["Ok"]), vec![returned])
     } else {
         returned
     })));
@@ -6076,6 +6084,55 @@ fn lower_method(
     ctx: LowerCtx,
 ) -> RustFunction {
     lower_method_with_exception_owner(program, ty, method, ty, ctx)
+}
+
+fn push_method_with_outer_handle_companion(
+    functions: &mut Vec<RustFunction>,
+    program: &Program,
+    ty: &TypeDecl,
+    method: &MethodDecl,
+    ctx: LowerCtx,
+) {
+    let function = lower_method(program, ty, method, ctx);
+    let Some(companion) = outer_this_handle_method_companion(program, ty, method, &function, ctx)
+    else {
+        functions.push(function);
+        return;
+    };
+    functions.push(function);
+    functions.push(companion);
+}
+
+fn outer_this_handle_method_companion(
+    program: &Program,
+    ty: &TypeDecl,
+    method: &MethodDecl,
+    function: &RustFunction,
+    ctx: LowerCtx,
+) -> Option<RustFunction> {
+    if method.modifiers.contains(&Modifier::Static) {
+        return None;
+    }
+    let companion_ctx = LowerCtx {
+        current_self_handle: Some("__java_self"),
+        ..ctx
+    };
+    let mut companion = lower_method(program, ty, method, companion_ctx);
+    if companion.body == function.body {
+        return None;
+    }
+    companion.name = format!("{}_with_outer", companion.name);
+    companion.params.insert(
+        0,
+        RustParam {
+            name: "__java_self".to_string(),
+            ty: RustType::Raw(format!(
+                "std::rc::Rc<std::cell::RefCell<{}>>",
+                crate::slot_render::rust_name_for_java_named_type(&ty.name)
+            )),
+        },
+    );
+    Some(companion)
 }
 
 fn lower_method_with_exception_owner(
@@ -7665,8 +7722,8 @@ fn lower_numeric_binary_expr_with_fallible_operands(
     };
     let left_value = apply_coercions(left_value, &plan.left);
     let right_value = apply_coercions(right_value, &plan.right);
-    let left_temp = RustExpr::Raw("__java_left".to_string());
-    let right_temp = RustExpr::Raw("__java_right".to_string());
+    let left_temp = RustExpr::Var("__java_left".to_string());
+    let right_temp = RustExpr::Var("__java_right".to_string());
     let promoted_plan = crate::operator_lowering::NumericBinaryPromotionPlan {
         promoted: plan.promoted,
         left: Vec::new(),
@@ -8460,6 +8517,9 @@ fn hoist_borrowed_string_temporaries_in_expr(
             for (_, value) in fields {
                 hoist_borrowed_string_temporaries_in_expr(local_name, value, out, counter);
             }
+        }
+        RustExpr::MarkedBlock { expr, .. } => {
+            hoist_borrowed_string_temporaries_in_expr(local_name, expr, out, counter);
         }
         RustExpr::Literal(_) | RustExpr::Var(_) | RustExpr::Path(_) | RustExpr::Raw(_) => {}
     }
@@ -9706,14 +9766,14 @@ fn lower_switch_case_label_expr(
             .representations
             .java_enum_variant_for_label(name, label_name)
         {
-            return RustExpr::Raw(format!("Some({variant})"));
+            return option_some_projection(rust_expr_from_plain_path_or_raw(&variant));
         }
         if external_enum_constant_label_matches(ctx.facts, name, label_name) {
             let owner = crate::slot_render::rust_name_for_java_named_type(
                 &crate::stdlib::canonical_external_receiver_type_key(name),
             );
             let field = crate::parser::to_snake_case(label_name);
-            return RustExpr::Raw(format!("Some({owner}::{field})"));
+            return option_some_projection(owner_associated_path_projection(&owner, &field));
         }
     }
     if let (JavaType::Named { name, .. }, Expr::Var(label_name)) = (selector_ty, expr) {
@@ -9732,6 +9792,33 @@ fn lower_switch_case_label_expr(
         }
     }
     lower_expr(expr, env, ctx)
+}
+
+fn option_some_projection(expr: RustExpr) -> RustExpr {
+    RustExpr::shaped(
+        RustExprShape::OptionalConstructed,
+        RustExpr::Call {
+            function: Box::new(RustExpr::path(["Some"])),
+            args: vec![expr],
+        },
+    )
+}
+
+fn rust_expr_from_plain_path_or_raw(path: &str) -> RustExpr {
+    if path.split("::").all(rust_path_segment_is_plain_ident) {
+        RustExpr::path(path.split("::"))
+    } else {
+        RustExpr::Raw(path.to_string())
+    }
+}
+
+fn rust_path_segment_is_plain_ident(segment: &str) -> bool {
+    let mut chars = segment.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn external_enum_constant_label_matches(facts: &FactSet, owner: &str, label: &str) -> bool {
@@ -12771,9 +12858,10 @@ fn lower_expr_with_refinements(
             if receiver.is_none() && is_java_get_class_name(name) && args.is_empty() {
                 let current_type = ctx.current_type.unwrap_or("java.lang.Object");
                 let rust_type = crate::slot_render::rust_name_for_java_named_type(current_type);
-                return RustExpr::Raw(format!(
-                    "JavaClass::<{rust_type}>::for_name({current_type:?})"
-                ));
+                return function_call_projection(
+                    java_class_for_name_path_projection(&rust_type),
+                    vec![RustExpr::Literal(format!("{current_type:?}"))],
+                );
             }
             if let Some(expr) =
                 lower_interface_super_default_call(receiver.as_deref(), name, args, env, ctx)
@@ -13176,7 +13264,7 @@ fn lower_expr_with_refinements(
                 && args.len() == 1
             {
                 let lowered = function_call_projection(
-                    RustExpr::Raw("URI::parse".to_string()),
+                    RustExpr::path(["URI", "parse"]),
                     lower_args_with_plan(
                         args,
                         env,
@@ -13216,9 +13304,11 @@ fn lower_expr_with_refinements(
             };
             let mut rust_args =
                 lower_constructor_args_with_plan(args, env, constructor_arg_plan, ctx);
-            if sibling_inner_constructor_can_reuse_outer_handle(&target, resolved.as_ref(), ctx) {
+            if let Some(outer_arg) =
+                inner_constructor_outer_this_handle_arg(&target, resolved.as_ref(), ctx)
+            {
                 target.rust_name = format!("{}_with_outer", target.rust_name);
-                rust_args.insert(0, RustExpr::Raw("self.__outer.clone()".to_string()));
+                rust_args.insert(0, outer_arg);
             }
             let mut lowered = apply_new_target_with_facts_and_representations(
                 &target,
@@ -13344,22 +13434,50 @@ fn lower_java_string_constructor_expr(
     Some(char_sequence_collect_string_projection(chars))
 }
 
-fn sibling_inner_constructor_can_reuse_outer_handle(
+fn inner_constructor_outer_this_handle_arg(
     target: &NewTargetPlan,
     resolved: Option<&ResolvedConstructor>,
     ctx: LowerCtx,
-) -> bool {
+) -> Option<RustExpr> {
+    match inner_constructor_outer_this_handle_source(
+        target,
+        resolved,
+        ctx.current_type,
+        ctx.current_receiver,
+        ctx.facts,
+    ) {
+        OuterThisHandleSource::CapturedInnerSelfOuterClone => Some(apply_clone_projection(
+            field_projection(RustExpr::Var("self".to_string()), "__outer"),
+        )),
+        OuterThisHandleSource::CurrentOuterReceiverNeedsSharedHandle => ctx
+            .current_self_handle
+            .map(|name| apply_clone_projection(RustExpr::Var(name.to_string()))),
+        OuterThisHandleSource::Unavailable => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OuterThisHandleSource {
+    CapturedInnerSelfOuterClone,
+    CurrentOuterReceiverNeedsSharedHandle,
+    Unavailable,
+}
+
+fn inner_constructor_outer_this_handle_source(
+    target: &NewTargetPlan,
+    resolved: Option<&ResolvedConstructor>,
+    current_type: Option<&str>,
+    current_receiver: Option<ReceiverPlan>,
+    facts: &FactSet,
+) -> OuterThisHandleSource {
     if target.external_crate.is_some() || target.native_collection.is_some() {
-        return false;
+        return OuterThisHandleSource::Unavailable;
     }
-    if ctx.current_receiver.is_none() {
-        return false;
+    if current_receiver.is_none() {
+        return OuterThisHandleSource::Unavailable;
     }
-    let Some(current_type) = ctx.current_type else {
-        return false;
-    };
-    let Some(current_outer) = ctx.facts.captures.outer_this_type_for_type(current_type) else {
-        return false;
+    let Some(current_type) = current_type else {
+        return OuterThisHandleSource::Unavailable;
     };
     let Some(constructed_type) = resolved
         .map(|resolved| resolved.declaring_type.clone())
@@ -13368,22 +13486,34 @@ fn sibling_inner_constructor_can_reuse_outer_handle(
                 if name.contains('.') {
                     name.to_string()
                 } else {
-                    format!("{current_outer}.{name}")
+                    facts
+                        .captures
+                        .outer_this_type_for_type(current_type)
+                        .map(|current_outer| format!("{current_outer}.{name}"))
+                        .unwrap_or_else(|| name.to_string())
                 }
             })
         })
     else {
-        return false;
+        return OuterThisHandleSource::Unavailable;
     };
-    let Some(constructed_outer) = ctx
-        .facts
-        .captures
-        .outer_this_type_for_type(&constructed_type)
-    else {
-        return false;
+    let Some(constructed_outer) = facts.captures.outer_this_type_for_type(&constructed_type) else {
+        return OuterThisHandleSource::Unavailable;
     };
-    crate::stdlib::canonical_external_receiver_type_key(current_outer)
-        == crate::stdlib::canonical_external_receiver_type_key(constructed_outer)
+    if let Some(current_outer) = facts.captures.outer_this_type_for_type(current_type)
+        && canonical_java_type_names_match(current_outer, constructed_outer)
+    {
+        return OuterThisHandleSource::CapturedInnerSelfOuterClone;
+    }
+    if canonical_java_type_names_match(current_type, constructed_outer) {
+        return OuterThisHandleSource::CurrentOuterReceiverNeedsSharedHandle;
+    }
+    OuterThisHandleSource::Unavailable
+}
+
+fn canonical_java_type_names_match(left: &str, right: &str) -> bool {
+    crate::stdlib::canonical_external_receiver_type_key(left)
+        == crate::stdlib::canonical_external_receiver_type_key(right)
 }
 
 fn lower_boxed_primitive_string_constructor_expr(
@@ -14961,7 +15091,10 @@ fn lower_source_java_enum_type_api_call(
             };
             Some(java_value_hash_code_projection(hash_receiver))
         }
-        ("values", []) => Some(RustExpr::Raw(format!("{rust_owner}::values()"))),
+        ("values", []) => Some(function_call_projection(
+            owner_associated_path_projection(&rust_owner, "values"),
+            Vec::new(),
+        )),
         ("valueOf" | "value_of", [arg]) => {
             let arg = lower_expr_for_slot_with_refinements(
                 arg,
@@ -14970,10 +15103,10 @@ fn lower_source_java_enum_type_api_call(
                 ctx,
                 refinements,
             );
-            Some(RustExpr::Raw(format!(
-                "{rust_owner}::value_of({})",
-                emit::emit_expr(&arg)
-            )))
+            Some(function_call_projection(
+                owner_associated_path_projection(&rust_owner, "value_of"),
+                vec![arg],
+            ))
         }
         _ => None,
     }
@@ -15361,11 +15494,8 @@ fn compound_assignment_arithmetic_op(op: BinaryOp) -> bool {
 }
 
 fn primitive_narrowing_projection(expr: RustExpr, primitive: PrimitiveType) -> RustExpr {
-    let rendered = emit::emit_expr(&expr);
     if primitive == PrimitiveType::Char {
-        return RustExpr::Raw(format!(
-            "char::from_u32((({rendered}) as u32) & 0xffff).unwrap_or('\\0')"
-        ));
+        return java_char_from_u32_mask_projection(expr);
     }
     RustExpr::Cast {
         expr: Box::new(expr),
@@ -16168,10 +16298,7 @@ fn lower_explicit_primitive_numeric_cast_operand(
     }
     let lowered = lower_expr_with_refinements(inner, env, ctx, refinements);
     if *target == PrimitiveType::Char {
-        return Some(RustExpr::Raw(format!(
-            "char::from_u32((({}) as u32) & 0xffff).unwrap_or('\\0')",
-            emit::emit_expr(&lowered)
-        )));
+        return Some(java_char_from_u32_mask_projection(lowered));
     }
     Some(RustExpr::Cast {
         expr: Box::new(lowered),
@@ -20393,7 +20520,9 @@ fn lower_optional_argument_for_borrowed_target(
     }
     let lowered = lower_expr_with_refinements(arg, env, ctx, &ExprRefinements::default());
     match lowered {
-        RustExpr::Raw(rendered) => Some(RustExpr::Raw(format!("Some(&{rendered})"))),
+        RustExpr::Raw(rendered) => Some(option_some_projection(force_shared_borrow_projection(
+            RustExpr::Raw(rendered),
+        ))),
         _ => None,
     }
 }
@@ -23134,9 +23263,11 @@ fn lower_source_constructor_expr_for_concrete_slot(
         ctx.facts,
     );
     let mut rust_args = lower_constructor_args_with_plan(args, env, constructor_arg_plan, ctx);
-    if sibling_inner_constructor_can_reuse_outer_handle(&target, resolved.as_ref(), ctx) {
+    if let Some(outer_arg) =
+        inner_constructor_outer_this_handle_arg(&target, resolved.as_ref(), ctx)
+    {
         target.rust_name = format!("{}_with_outer", target.rust_name);
-        rust_args.insert(0, RustExpr::Raw("self.__outer.clone()".to_string()));
+        rust_args.insert(0, outer_arg);
     }
     let owner_type = crate::slot_render::rust_name_for_java_named_type(type_name);
     let lowered = function_call_projection(
@@ -23223,17 +23354,23 @@ fn lower_source_subtype_to_supertype_slot(
         && slot_java_type_is_shared_handle(&actual.java_ty, ctx.facts)
     {
         let boxed = if rust_expr_is_bare_constructor_call(lowered_expr) {
-            crate::emit::emit_expr(&crate::slot_render::storage_placement_construction_expr(
+            crate::slot_render::storage_placement_construction_expr(
                 ctx.facts.storage_placement_for(actual_name),
                 lowered_expr.clone(),
-            ))
+            )
         } else {
-            crate::emit::emit_expr(lowered_expr)
+            lowered_expr.clone()
         };
         let target_ty = crate::emit::emit_type(&crate::slot_render::rust_type_for_slot_with_facts(
             &target, ctx.facts,
         ));
-        return Some(RustExpr::Raw(format!("Box::new({boxed}) as {target_ty}")));
+        return Some(RustExpr::Cast {
+            expr: Box::new(function_call_projection(
+                RustExpr::path(["Box", "new"]),
+                vec![boxed],
+            )),
+            ty: target_ty,
+        });
     }
     if type_param_source_subtype_conversion_available(actual_name, target_name, env, ctx) {
         return Some(into_projection(lowered_expr.clone()));
@@ -23497,33 +23634,34 @@ fn lower_optional_receiver_field_access_for_slot(
             ctx.facts,
         )
     {
-        let unwrapped_receiver = emit::emit_expr(&adapt_optional_instance_receiver_with_slot_plan(
+        let unwrapped_receiver = adapt_optional_instance_receiver_with_slot_plan(
             receiver,
             lowered_receiver.clone(),
             env,
             ctx,
             false,
             false,
-        ));
+        );
         let lowered = match plan.op {
             crate::member_access_plan::MemberAccessOp::LenAsI32 => {
-                len_i32_projection(RustExpr::Raw(unwrapped_receiver.clone()))
+                len_i32_projection(unwrapped_receiver.clone())
             }
             crate::member_access_plan::MemberAccessOp::Array2RowsAsI32
                 if two_dimensional_array_expr_uses_nested_slice(receiver, env, ctx) =>
             {
-                len_i32_projection(RustExpr::Raw(unwrapped_receiver.clone()))
+                len_i32_projection(unwrapped_receiver.clone())
             }
             crate::member_access_plan::MemberAccessOp::Array2RowsAsI32 => {
-                array2_rows_i32_projection(RustExpr::Raw(unwrapped_receiver.clone()))
+                array2_rows_i32_projection(unwrapped_receiver.clone())
             }
             crate::member_access_plan::MemberAccessOp::Array2ColsAsI32 => {
-                len_i32_projection(RustExpr::Raw(unwrapped_receiver.clone()))
+                len_i32_projection(unwrapped_receiver.clone())
             }
-            _ => RustExpr::Raw(format!(
-                "{unwrapped_receiver}.{}",
-                crate::parser::to_snake_case(accessor_member_name(field))
-            )),
+            _ => receiver_method_call_projection_exact(
+                unwrapped_receiver,
+                &crate::parser::to_snake_case(accessor_member_name(field)),
+                Vec::new(),
+            ),
         };
         return Some(apply_expr_to_slot_via_plan(
             lowered,
@@ -23689,14 +23827,14 @@ fn lower_interface_super_default_call(
     let trait_name = interface_trait_rust_name(interface_name, ctx)
         .unwrap_or_else(|| crate::slot_render::rust_name_for_java_named_type(interface_name));
     let lowered_args = lower_interface_super_call_args(interface_name, &rust_name, args, env, ctx);
-    let mut rendered_args = Vec::with_capacity(lowered_args.len() + 1);
-    rendered_args.push("self".to_string());
-    rendered_args.extend(lowered_args.iter().map(crate::emit::emit_expr));
+    let mut call_args = Vec::with_capacity(lowered_args.len() + 1);
+    call_args.push(RustExpr::Var("self".to_string()));
+    call_args.extend(lowered_args);
     let helper_name = interface_default_helper_name(&rust_name);
-    Some(RustExpr::Raw(format!(
-        "{trait_name}::{helper_name}({})",
-        rendered_args.join(", ")
-    )))
+    Some(function_call_projection(
+        owner_associated_path_projection(&trait_name, &helper_name),
+        call_args,
+    ))
 }
 
 fn interface_trait_rust_name(interface_name: &str, ctx: LowerCtx) -> Option<String> {
@@ -27671,10 +27809,7 @@ fn lower_source_summary_super_boundary_call(
     }
     let gap = source_summary_method_unimplemented_expr(declaring_type, java_name);
     if *propagates_result {
-        Some(function_call_projection(
-            RustExpr::Raw("Ok".to_string()),
-            vec![gap],
-        ))
+        Some(function_call_projection(RustExpr::path(["Ok"]), vec![gap]))
     } else {
         Some(gap)
     }
@@ -30421,6 +30556,7 @@ class NumericBox {
     #[test]
     fn same_outer_inner_constructor_raw_rewrite_ignores_literals_and_keeps_real_calls() {
         assert_bare_constructor_detection_uses_structured_call_paths_before_raw_text();
+        assert_outer_this_handle_source_distinguishes_captured_inner_from_outer_receiver_gap();
 
         let rewritten = rewrite_same_outer_inner_constructor_calls_text_with_resolver(
             r##"let text = "OuterB::new()";
@@ -30451,6 +30587,99 @@ let c = OtherB::new();
 let d = OuterB::new_with_outer(__outer.clone());
 let e = OuterB::new_with_outer::<T>(__outer.clone());
 "##
+        );
+    }
+
+    fn inner_constructor_target(name: &str) -> NewTargetPlan {
+        NewTargetPlan {
+            owner_shape: RustSlotShape::conservative(JavaType::Named {
+                name: name.to_string(),
+                args: Vec::new(),
+            }),
+            rust_name: "new".to_string(),
+            external_crate: None,
+            native_collection: None,
+        }
+    }
+
+    fn resolved_inner_constructor(name: &str) -> ResolvedConstructor {
+        ResolvedConstructor {
+            declaring_type: name.to_string(),
+            rust_name: "new".to_string(),
+            constructed_type: JavaType::Named {
+                name: name.to_string(),
+                args: Vec::new(),
+            },
+            params: Vec::new(),
+            arg_coercions: Vec::new(),
+        }
+    }
+
+    fn facts_with_outer_this(inner: &str, outer: &str) -> FactSet {
+        let mut facts = FactSet::default();
+        facts.captures.owners.push(crate::facts::CaptureOwner {
+            id: crate::facts::NodeId(0),
+            kind: crate::facts::CaptureOwnerKind::InnerClass,
+            name: Some(inner.to_string()),
+            target_type: Some(JavaType::Named {
+                name: inner.to_string(),
+                args: Vec::new(),
+            }),
+            origin: crate::facts::CaptureOrigin::Type {
+                type_name: inner.to_string(),
+            },
+            captures: vec![crate::facts::Capture {
+                name: "__outer".to_string(),
+                source: crate::facts::CaptureSource::OuterThis,
+                ty: JavaType::Named {
+                    name: outer.to_string(),
+                    args: Vec::new(),
+                },
+                effectively_final: false,
+                mutable_after_capture: true,
+            }],
+        });
+        facts
+    }
+
+    fn assert_outer_this_handle_source_distinguishes_captured_inner_from_outer_receiver_gap() {
+        let mut facts = facts_with_outer_this("Outer.A", "Outer");
+        facts
+            .captures
+            .owners
+            .extend(facts_with_outer_this("Outer.B", "Outer").captures.owners);
+
+        assert_eq!(
+            inner_constructor_outer_this_handle_source(
+                &inner_constructor_target("Outer.B"),
+                Some(&resolved_inner_constructor("Outer.B")),
+                Some("Outer.A"),
+                Some(ReceiverPlan::Shared),
+                &facts,
+            ),
+            OuterThisHandleSource::CapturedInnerSelfOuterClone
+        );
+
+        assert_eq!(
+            inner_constructor_outer_this_handle_source(
+                &inner_constructor_target("Outer.B"),
+                Some(&resolved_inner_constructor("Outer.B")),
+                Some("Outer"),
+                Some(ReceiverPlan::Shared),
+                &facts,
+            ),
+            OuterThisHandleSource::CurrentOuterReceiverNeedsSharedHandle
+        );
+
+        assert_eq!(
+            inner_constructor_outer_this_handle_source(
+                &inner_constructor_target("Outer.B"),
+                Some(&resolved_inner_constructor("Outer.B")),
+                Some("Unrelated"),
+                Some(ReceiverPlan::Shared),
+                &facts,
+            ),
+            OuterThisHandleSource::Unavailable
         );
     }
 

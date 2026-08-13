@@ -163,6 +163,10 @@ pub enum RustExpr {
         name: String,
         fields: Vec<(String, RustExpr)>,
     },
+    MarkedBlock {
+        marker: String,
+        expr: Box<RustExpr>,
+    },
     Raw(String),
     /// An expression that remembers what the adapter which produced it made it
     /// into. Transparent everywhere else: it emits as its inner expression and

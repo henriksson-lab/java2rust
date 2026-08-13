@@ -1,13 +1,15 @@
-# 0023 — Constructing a non-static inner class always panics at runtime
+# 0023 — Non-static inner-class construction still lacks shared outer receivers
 
-Status: **open** (diagnosed; runtime panic still emitted)
-Severity: high — any Java program using a non-static inner class dies on first use
+Status: **open** (diagnosed; runtime panic fallback still emitted when no outer handle is available)
+Severity: high — ordinary `new Inner()` from an outer instance method still lowers to a runtime fallback
 Kind: blocked by unimplemented `SharedLocal`/shared receiver construction ([0002](0002-object-aliasing-has-no-representation.md))
 
 ## Symptom
 
-Non-static inner classes compile, but their constructor is a `panic!`. Every
-`new Inner()` aborts at runtime.
+Non-static inner classes compile, and paths that already possess an outer handle
+now have non-panicking `_with_outer` companions. The remaining ordinary outer
+method path still has no shared receiver handle, so its original lowering calls
+the fallback constructor and aborts at runtime.
 
 ```java
 public class InnerCapture {
@@ -67,8 +69,8 @@ The *access* side is done and correct: the `__outer` field exists with the right
 would give Java's by-reference capture semantics — `base` mutated after
 construction would be visible, returning 21.
 
-Only the *construction* side is missing, and it is missing for a structural
-reason.
+Only the *construction* side for call sites without an existing outer handle is
+missing, and it is missing for a structural reason.
 
 ## Root cause: this is 0002 with the consequence made visible
 
@@ -86,22 +88,21 @@ noted in 0002 as "a one-off, not a representation the planner can choose". This
 issue is what that one-off costs: the field type can be written, but no
 representation can produce a value for it.
 
-So 0002 is not only an aliasing-correctness issue. It **blocks a language
-feature outright**. That materially raises its priority: `SUGGESTIONS.md`
+So 0002 is not only an aliasing-correctness issue. It **blocks completion of a
+language feature**. That materially raises its priority: `SUGGESTIONS.md`
 places 0002b last partly because `E0382` is rare in the corpora, but inner
-classes are common in Java and this failure is invisible to compile-error counts
-(it compiles; it panics).
+classes are common in Java and the remaining failure is invisible to
+compile-error counts (it compiles; it panics).
 
 ## Fix direction
 
-Requires the shared representation from 0002b. Once a type can be planned as
-`Rc<RefCell<T>>`:
+The remaining work requires the shared receiver side of 0002b. Once a type can
+be planned and called as `Rc<RefCell<T>>`:
 
 1. Mark any class that is the outer type of a non-static inner class as
    requiring a shared representation.
-2. Give the inner class a constructor taking the outer handle
-   (`InnerCaptureAdder::new(outer: Rc<RefCell<InnerCapture>>)`), and lower
-   `new Adder()` inside an instance method to pass the enclosing handle.
+2. Route instance-method calls through the existing `_with_outer` method and
+   constructor companions, passing the enclosing handle.
 3. `outer.new Inner()` (qualified creation from outside) uses the same path.
 
 A narrower interim option, if 0002b is far off: restrict the shared
@@ -278,6 +279,61 @@ return SiblingInnerConstructionB::new_with_outer(self.__outer.clone());
 Ordinary `Outer::make() { return new Inner(); }` remains blocked for the same
 reason as before: an outer method receiver is still `&self`/`&mut self`, not a
 shared handle.
+
+### Codex follow-up 2026-08-12 — the remaining outer-method case is classified
+
+The call-site decision is no longer a bare boolean. `Expr::New` still rewrites
+only the renderable captured-inner case, but the helper now names the three
+outcomes:
+
+- `CapturedInnerSelfOuterClone`: available today as `self.__outer.clone()`;
+- `CurrentOuterReceiverNeedsSharedHandle`: the ordinary
+  `Outer::make() { return new Inner(); }` blocker;
+- `Unavailable`: unrelated constructors or missing capture facts.
+
+The existing raw-rewrite unit coverage now also pins that classification. This
+does not implement shared outer method receivers; it makes the remaining
+implementation point explicit instead of folding it into a generic false result.
+
+### Codex follow-up 2026-08-12 — ordinary outer methods get a narrow companion body
+
+The classified outer-method case now has a generated target. Non-static methods
+are lowered once normally and once with `current_self_handle = "__java_self"`;
+if that changes the body, the second function is emitted as `method_with_outer`
+with an explicit `Rc<RefCell<Outer>>` parameter.
+
+For:
+
+```java
+Inner make() {
+    return new Inner();
+}
+```
+
+the original method still preserves the old lowering and remains a diagnostic
+surface:
+
+```rust
+pub fn make(&self) -> InnerConstructionCompanionInner {
+    return InnerConstructionCompanionInner::new();
+}
+```
+
+but the companion is non-panicking when a caller already has the outer handle:
+
+```rust
+pub fn make_with_outer(
+    &self,
+    __java_self: std::rc::Rc<std::cell::RefCell<InnerConstructionCompanion>>,
+) -> InnerConstructionCompanionInner {
+    return InnerConstructionCompanionInner::new_with_outer(__java_self.clone());
+}
+```
+
+`non_static_inner_class_constructor_has_outer_handle_companion` compile-checks
+the generated crate. The remaining 0023 work is now call-site routing into this
+companion once shared receivers exist; the ordinary-method body itself no longer
+lacks a non-panicking lowering.
 
 ### Codex follow-up 2026-08-11 — captured constructor field initializers reuse the handle
 

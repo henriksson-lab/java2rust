@@ -91,7 +91,7 @@ handling the idioms we currently fail, grounded in corpus error counts.
 | [0017](done/0017-generic-bounds-dropped-and-method-type-params-undeclared.md) | Generic bounds dropped; method type params never declared; ~36% of biojava | probe + corpus | large |
 | [0019](done/0019-unhandled-expressions-emit-raw-java-source.md) | Unhandled expressions emitted as **raw Java source**; hits `switch` expressions | rustc | small |
 | [0020](done/0020-text-block-content-not-processed.md) | Text block keeps incidental indentation → wrong string | runtime | small |
-| [0023](0023-inner-class-construction-always-panics.md) | **Every non-static inner class panics on construction**; compiles clean | runtime | blocked on 0002b |
+| [0023](0023-inner-class-construction-always-panics.md) | Non-static inner-class construction has non-panicking companions when an outer handle exists, but ordinary outer methods still call the panic fallback until shared receivers land | runtime | blocked on SharedLocal/shared receivers |
 | [0024](done/0024-numeric-limit-constants-stubbed-to-zero.md) | **`Integer.MAX_VALUE` is `0`** — breaks every min/max idiom; live in corpus | runtime + corpus | **tiny** |
 | [0025](done/0025-interface-default-methods-are-discarded.md) | `default` method bodies dropped → runtime panic | runtime | small — Rust supports it natively |
 | [0026](done/0026-assignment-evaluation-order-differs-from-java.md) | Rust evaluates assignment RHS before the target; Java is the reverse | runtime | small |

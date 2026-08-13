@@ -599,14 +599,11 @@ pub fn new_exception_expr_with_cause(
 }
 
 fn exception_message_expr(message: RustExpr) -> RustExpr {
-    if !matches!(message.unshaped(), RustExpr::Raw(_)) {
-        return RustExpr::MethodCall {
-            receiver: Box::new(message),
-            method: "to_string".to_string(),
-            args: Vec::new(),
-        };
+    RustExpr::MethodCall {
+        receiver: Box::new(parenthesize_raw_method_receiver(message)),
+        method: "to_string".to_string(),
+        args: Vec::new(),
     }
-    RustExpr::Raw(format!("{}.to_string()", crate::emit::emit_expr(&message)))
 }
 
 pub fn fallback_exception_expr(value: RustExpr) -> RustExpr {
@@ -638,14 +635,84 @@ pub fn exception_cause_or_self_if_instance_expr(
 ) -> RustExpr {
     let class_names = class_names
         .iter()
-        .map(|name| format!("{name:?}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    RustExpr::Raw(format!(
-        "{}.cause_or_self_if_instance(&[{}])",
-        crate::emit::emit_expr(&wrapper),
-        class_names
-    ))
+        .map(|name| RustExpr::Literal(format!("{name:?}")))
+        .collect();
+    RustExpr::MethodCall {
+        receiver: Box::new(parenthesize_raw_method_receiver(wrapper)),
+        method: "cause_or_self_if_instance".to_string(),
+        args: vec![RustExpr::Unary {
+            op: "&".to_string(),
+            expr: Box::new(RustExpr::ArrayLiteral(class_names)),
+        }],
+    }
+}
+
+fn parenthesize_raw_method_receiver(expr: RustExpr) -> RustExpr {
+    let RustExpr::Raw(raw) = expr else {
+        return expr;
+    };
+    let trimmed = raw.trim();
+    if raw_needs_method_receiver_parentheses(trimmed) {
+        RustExpr::Raw(format!("({trimmed})"))
+    } else {
+        RustExpr::Raw(raw)
+    }
+}
+
+fn raw_needs_method_receiver_parentheses(raw: &str) -> bool {
+    if raw.starts_with('(') && raw.ends_with(')') {
+        return false;
+    }
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+    let mut chars = raw.char_indices().peekable();
+    while let Some((idx, ch)) = chars.next() {
+        match ch {
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            '{' => brace_depth += 1,
+            '}' => brace_depth = brace_depth.saturating_sub(1),
+            '"' | '\'' => {
+                let quote = ch;
+                let mut escaped = false;
+                for (_, inner) in chars.by_ref() {
+                    if escaped {
+                        escaped = false;
+                    } else if inner == '\\' {
+                        escaped = true;
+                    } else if inner == quote {
+                        break;
+                    }
+                }
+            }
+            '+' | '-' | '*' | '/' | '%' | '^' | '&' | '|' | '=' | '<' | '>'
+                if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 =>
+            {
+                return true;
+            }
+            '!' if paren_depth == 0
+                && bracket_depth == 0
+                && brace_depth == 0
+                && (idx == 0 || raw[idx + 1..].starts_with('=')) =>
+            {
+                return true;
+            }
+            'a' if paren_depth == 0
+                && bracket_depth == 0
+                && brace_depth == 0
+                && raw[idx..].starts_with("as")
+                && raw[..idx].ends_with(char::is_whitespace)
+                && raw[idx + 2..].starts_with(char::is_whitespace) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 pub fn exception_expr_from_new(class_name: &str, args: Vec<RustExpr>) -> RustExpr {
@@ -742,6 +809,17 @@ mod tests {
 
     #[test]
     fn fallback_exception_message_keeps_structured_value() {
+        let message = exception_message_expr(RustExpr::Raw("value + 1".to_string()));
+        assert_eq!(crate::emit::emit_expr(&message), "(value + 1).to_string()");
+        assert_eq!(
+            message,
+            RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Raw("(value + 1)".to_string())),
+                method: "to_string".to_string(),
+                args: Vec::new(),
+            }
+        );
+
         let structured = fallback_exception_message_expr(RustExpr::Var("value".to_string()));
         assert_eq!(
             crate::emit::emit_expr(&structured),
@@ -760,5 +838,28 @@ mod tests {
 
         let raw = fallback_exception_message_expr(RustExpr::Raw("value + 1".to_string()));
         assert_eq!(crate::emit::emit_expr(&raw), "format!(\"{:?}\", value + 1)");
+
+        let cause_or_self = exception_cause_or_self_if_instance_expr(
+            RustExpr::Raw("left + right".to_string()),
+            &["PrimaryProblem".to_string(), "SecondaryProblem".to_string()],
+        );
+        assert_eq!(
+            crate::emit::emit_expr(&cause_or_self),
+            "(left + right).cause_or_self_if_instance(&[\"PrimaryProblem\", \"SecondaryProblem\"])"
+        );
+        assert_eq!(
+            cause_or_self,
+            RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Raw("(left + right)".to_string())),
+                method: "cause_or_self_if_instance".to_string(),
+                args: vec![RustExpr::Unary {
+                    op: "&".to_string(),
+                    expr: Box::new(RustExpr::ArrayLiteral(vec![
+                        RustExpr::Literal("\"PrimaryProblem\"".to_string()),
+                        RustExpr::Literal("\"SecondaryProblem\"".to_string()),
+                    ])),
+                }],
+            }
+        );
     }
 }

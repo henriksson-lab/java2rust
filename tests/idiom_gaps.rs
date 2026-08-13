@@ -1413,9 +1413,9 @@ class JavaNumericCharCasts {
     assert!(
         translation
             .rust
-            .contains("char::from_u32(((value) as u32) & 0xffff).unwrap_or('\\0')")
+            .contains("char::from_u32(value as u32 & 0xffff).unwrap_or('\\0')")
             && translation.rust.contains(
-                "((char::from_u32(((value - offset) as u32) & 0xffff).unwrap_or('\\0')) as u32) as f64"
+                "((char::from_u32((((value).wrapping_sub(offset)) as u32) & 0xffff).unwrap_or('\\0')) as u32) as f64"
             )
             && !translation.rust.contains("as char")
             && !translation.rust.contains("unwrap_or('\\0') as f64"),
@@ -1528,7 +1528,9 @@ class StringConcatNestedArithmetic {
     );
 
     assert!(
-        translation.rust.contains("format!(\"x{}\", (a + b))")
+        translation
+            .rust
+            .contains("format!(\"x{}\", ((a).wrapping_add(b)).to_string())")
             && translation
                 .rust
                 .contains("format!(\"x{}{}\", (a).to_string(), (b).to_string())")
@@ -16591,7 +16593,13 @@ class InnerConstructionCompanion {
             && translation.rust.contains("__outer: __outer.clone()")
             && translation
                 .rust
-                .contains("return InnerConstructionCompanionInner::new();"),
+                .contains("return InnerConstructionCompanionInner::new();")
+            && translation.rust.contains(
+                "pub fn make_with_outer(&self, __java_self: std::rc::Rc<std::cell::RefCell<InnerConstructionCompanion>>) -> InnerConstructionCompanionInner"
+            )
+            && translation.rust.contains(
+                "return InnerConstructionCompanionInner::new_with_outer(__java_self.clone());"
+            ),
         "{}",
         translation.rust
     );
