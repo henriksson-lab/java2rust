@@ -1,57 +1,23 @@
-use crate::coercion::{LoweredExpr, OptionalReceiverProjection, apply_slot_conversion_plan};
+use crate::coercion::{
+    LoweredExpr, OptionalReceiverProjection, apply_slot_conversion_plan,
+    java_char_from_u32_mask_projection, java_char_to_numeric_projection,
+};
 use crate::conversion_plan::{
     CastConversionPlan, InstanceOfPlan, JavaCastSemanticsPolicy, LoweredSlotExprConversionPlan,
     LoweredType, OptionalSlotConstructionPlan, ReusedOptionalUnwrapPlan,
     ReusedOptionalUnwrapProjection, Slot, SlotConversionPlan, SlotExprConversionPlan,
-    plan_lowered_slot_conversion, receiver_method_autoref_satisfies_optional_slot,
 };
-use crate::facts::FactSet;
 use crate::java_ir::PrimitiveType;
 use crate::rust_ir::RustExpr;
-use crate::slot_shape::{OwnershipShape, RustSlotShape};
+use crate::slot_shape::RustSlotShape;
 
 pub fn apply_cast_conversion(expr: RustExpr, plan: &CastConversionPlan) -> RustExpr {
     if let JavaCastSemanticsPolicy::PrimitiveNumericCast { from, to, .. } = plan.semantics {
         if to == PrimitiveType::Char {
-            if matches!(expr.unshaped(), RustExpr::Raw(_)) {
-                return RustExpr::Raw(format!(
-                    "char::from_u32((({}) as u32) & 0xffff).unwrap_or('\\0')",
-                    crate::emit::emit_expr(&expr)
-                ));
-            }
-            return RustExpr::MethodCall {
-                receiver: Box::new(RustExpr::Call {
-                    function: Box::new(RustExpr::path(["char", "from_u32"])),
-                    args: vec![RustExpr::Binary {
-                        op: "&".to_string(),
-                        left: Box::new(RustExpr::Cast {
-                            expr: Box::new(expr),
-                            ty: "u32".to_string(),
-                        }),
-                        right: Box::new(RustExpr::Literal("0xffff".to_string())),
-                    }],
-                }),
-                method: "unwrap_or".to_string(),
-                args: vec![RustExpr::Literal("'\\0'".to_string())],
-            };
+            return java_char_from_u32_mask_projection(expr);
         }
         if from == PrimitiveType::Char {
-            if matches!(expr.unshaped(), RustExpr::Raw(_)) {
-                return RustExpr::Raw(format!(
-                    "(({}) as u32) as {}",
-                    crate::emit::emit_expr(&expr),
-                    crate::coercion::rust_primitive_type_name_policy(to).rust_name
-                ));
-            }
-            return RustExpr::Cast {
-                expr: Box::new(RustExpr::Cast {
-                    expr: Box::new(expr),
-                    ty: "u32".to_string(),
-                }),
-                ty: crate::coercion::rust_primitive_type_name_policy(to)
-                    .rust_name
-                    .to_string(),
-            };
+            return java_char_to_numeric_projection(expr, to);
         }
         return RustExpr::Cast {
             expr: Box::new(expr),
@@ -80,38 +46,23 @@ pub fn apply_lowered_slot_expr_conversion(
 
 pub fn apply_optional_receiver_slot_projection(
     lowered: RustExpr,
-    option_shape: RustSlotShape,
-    receiver_slot: Slot,
     projection: OptionalReceiverProjection,
-    element_ownership: OwnershipShape,
-    facts: &FactSet,
+    element_shape: Option<&RustSlotShape>,
+    conversion_plan: Option<&LoweredSlotExprConversionPlan>,
 ) -> RustExpr {
-    let target_shape = match &receiver_slot {
-        Slot::Assignment(shape) | Slot::Return(shape) | Slot::Argument(shape) => shape,
-        _ => return crate::coercion::project_optional_receiver(lowered, projection),
+    let projected = if let Some(element_shape) = element_shape {
+        crate::coercion::project_optional_receiver_with_shape(lowered, projection, element_shape)
+    } else {
+        crate::coercion::project_optional_receiver(lowered, projection)
     };
-    let Some(actual) = LoweredType::optional_element_borrow_from_option_shape(
-        option_shape,
-        target_shape.java_ty.clone(),
-        Some(element_ownership),
-        facts,
-    ) else {
-        return crate::coercion::project_optional_receiver(lowered, projection);
+    let Some(conversion_plan) = conversion_plan else {
+        return projected;
     };
-    let LoweredType::OptionalElementBorrow { element_shape, .. } = actual else {
-        return crate::coercion::project_optional_receiver(lowered, projection);
-    };
-    let projected =
-        crate::coercion::project_optional_receiver_with_shape(lowered, projection, &element_shape);
     let projected = LoweredExpr {
         expr: projected,
-        actual: LoweredType::Slot(element_shape),
+        actual: conversion_plan.actual.clone(),
     };
-    let conversion_plan = plan_lowered_slot_conversion(&projected.actual, receiver_slot, facts);
-    if receiver_method_autoref_satisfies_optional_slot(&conversion_plan) {
-        return projected.expr;
-    }
-    apply_lowered_slot_expr_conversion(projected, &conversion_plan)
+    apply_lowered_slot_expr_conversion(projected, conversion_plan)
 }
 
 pub fn apply_reused_optional_unwrap(

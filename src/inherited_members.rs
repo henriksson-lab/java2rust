@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::facts::{ExternalApiEffectFact, ExternalFieldKind, FactSet, NullabilityState};
 use crate::java_ir::{FieldDecl, JavaType, Member, MethodDecl, Modifier, Program, TypeDecl};
@@ -278,8 +278,7 @@ pub fn external_inherited_instance_methods_for_type(
     let mut api_facts = facts.external_api_effect_facts.clone();
     api_facts
         .extend(crate::external_packs::builtin_external_library_packs().external_api_effect_facts);
-    let mut methods = Vec::new();
-    let mut seen = HashSet::new();
+    let mut methods = HashMap::<(String, usize), ExternalInheritedInstanceMethod>::new();
     for super_name in super_names {
         for fact in &api_facts {
             let Some(receiver_type) = fact.receiver_type.as_deref() else {
@@ -292,19 +291,37 @@ pub fn external_inherited_instance_methods_for_type(
                 continue;
             };
             let rust_name = crate::parser::to_snake_case(&fact.method_name);
-            if !seen.insert((rust_name.clone(), arg_count)) {
-                continue;
-            }
-            methods.push(ExternalInheritedInstanceMethod {
+            let method = ExternalInheritedInstanceMethod {
                 declaring_type: receiver_type.to_string(),
                 method_name: fact.method_name.clone(),
-                rust_name,
+                rust_name: rust_name.clone(),
                 arg_count,
                 fact: fact.clone(),
-            });
+            };
+            methods
+                .entry((rust_name, arg_count))
+                .and_modify(|existing| {
+                    if external_inherited_method_fact_should_replace(&existing.fact, fact) {
+                        *existing = method.clone();
+                    }
+                })
+                .or_insert(method);
         }
     }
+    let mut methods = methods.into_values().collect::<Vec<_>>();
+    methods.sort_by(|left, right| {
+        left.rust_name
+            .cmp(&right.rust_name)
+            .then(left.arg_count.cmp(&right.arg_count))
+    });
     methods
+}
+
+fn external_inherited_method_fact_should_replace(
+    existing: &ExternalApiEffectFact,
+    candidate: &ExternalApiEffectFact,
+) -> bool {
+    existing.return_type.is_none() && candidate.return_type.is_some()
 }
 
 fn external_super_names_for_type(ty: &TypeDecl, facts: &FactSet) -> Vec<String> {
@@ -567,6 +584,29 @@ mod tests {
         assert_eq!(inherited[0].method.name, "f");
         assert_eq!(inherited[0].method.params.len(), 2);
         assert_eq!(inherited[0].rust_name, "f_int_int");
+    }
+
+    #[test]
+    fn external_inherited_instance_methods_prefer_typed_builtin_facts() {
+        let ty = class("GenomicsLikeTool", Some("GATKTool"), Vec::new());
+
+        let inherited = external_inherited_instance_methods_for_type(&ty, &FactSet::default());
+        let method = inherited
+            .iter()
+            .find(|method| method.rust_name == "get_default_tool_v_c_f_header_lines")
+            .expect("GATKTool builtin method should be inherited");
+
+        assert_eq!(method.arg_count, 0);
+        assert_eq!(
+            method.fact.return_type,
+            Some(JavaType::Named {
+                name: "Set".to_string(),
+                args: vec![JavaType::Named {
+                    name: "VCFHeaderLine".to_string(),
+                    args: Vec::new(),
+                }],
+            })
+        );
     }
 }
 

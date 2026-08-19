@@ -7,7 +7,7 @@ differential	1	0
 effective_facts	6	0
 external_packs	165	2
 fixtures	21	20
-idiom_gaps	545	144
+idiom_gaps	552	138
 idiom_sweep_script	48	0
 object_model	28	0
 output_markers	23	0
@@ -16,5 +16,5 @@ parser_tree_sitter	43	1
 resolve_calls	280	10
 semantic_facts	166	4
 slot_shape_design	527	73
-type_coercion	125	0
---lib	263	0
+type_coercion	126	0
+--lib	269	0

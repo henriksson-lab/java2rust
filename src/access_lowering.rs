@@ -38,29 +38,7 @@ pub fn lower_bare_name(name: &str, env: &ShapeEnv) -> RustExpr {
 }
 
 pub fn render_bare_name(name: &str, env: &ShapeEnv) -> String {
-    if env.local_type(name).is_none()
-        && env.is_instance_field(name)
-        && !bare_name_looks_like_static_owner(name)
-    {
-        emit::emit_expr(&self_field_projection(name))
-    } else if env.local_type(name).is_none()
-        && let Some(static_name) = env.static_storage_field_access_name(name)
-    {
-        emit::emit_expr(&static_storage_accessor_for(static_name, env))
-    } else if env.local_type(name).is_none()
-        && let Some(static_name) = env.static_field_access_name(name)
-    {
-        if let Some(owner) = env.static_field_access_owner(name) {
-            emit::emit_expr(&owner_associated_path_projection(
-                &crate::slot_render::rust_name_for_java_named_type(owner),
-                static_name,
-            ))
-        } else {
-            emit::emit_expr(&self_associated_path_projection(static_name))
-        }
-    } else {
-        crate::parser::to_snake_case(name)
-    }
+    emit::emit_expr(&lower_bare_name(name, env))
 }
 
 /// A static-storage read, qualified with the declaring type when that is not

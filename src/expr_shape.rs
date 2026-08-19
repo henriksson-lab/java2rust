@@ -4,7 +4,8 @@ use std::rc::Rc;
 
 use crate::binding_id::{BindingId, BindingKind};
 use crate::facts::FactSet;
-use crate::java_ir::{Expr, JavaType, Member, MethodDecl, Modifier, Stmt, TypeDecl};
+use crate::java_ir::{CallKind, Expr, JavaType, Member, MethodDecl, Modifier, Stmt, TypeDecl};
+use crate::java_signature::{JavaCallableKey, JavaCallableKind, JavaCallableStaticness};
 use crate::representation::RepresentationPlan;
 use crate::shape_projection::{
     borrowed_string_content_shape, indexed_assignment_shape_with_facts,
@@ -652,8 +653,13 @@ pub fn infer_expr_shape_with_context(
                 })
                 .or_else(|| {
                     ctx.signatures.and_then(|signatures| {
-                        signatures
-                            .method_return_shape_by_rust_name(&call.declaring_type, &call.rust_name)
+                        resolved_call_return_shape_by_java_key(call, name, args.len(), signatures)
+                            .or_else(|| {
+                                signatures.method_return_shape_by_rust_name(
+                                    &call.declaring_type,
+                                    &call.rust_name,
+                                )
+                            })
                     })
                 })
                 .unwrap_or_else(|| {
@@ -692,6 +698,31 @@ pub fn infer_expr_shape_with_context(
         Expr::Cast { ty, .. } => value_shape_or_conservative(ctx, ty.clone()),
         _ => value_shape_or_conservative(ctx, infer_expr_type(expr, env.type_env())),
     }
+}
+
+fn resolved_call_return_shape_by_java_key(
+    call: &crate::java_ir::ResolvedCall,
+    source_name: &str,
+    arg_count: usize,
+    signatures: &SignaturePlan,
+) -> Option<RustSlotShape> {
+    if call.arg_target_types.len() != arg_count {
+        return None;
+    }
+    signatures.method_return_shape_by_java_key(&JavaCallableKey {
+        owner: call.declaring_type.clone(),
+        java_name: source_name.to_string(),
+        erased_param_types: call
+            .arg_target_types
+            .iter()
+            .map(|ty| crate::java_signature::erased_type_name(ty, false))
+            .collect(),
+        kind: JavaCallableKind::Method,
+        staticness: match call.kind {
+            CallKind::Static => JavaCallableStaticness::Static,
+            CallKind::Instance => JavaCallableStaticness::Instance,
+        },
+    })
 }
 
 fn native_java_call_expr_shape(

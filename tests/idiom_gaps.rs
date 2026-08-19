@@ -874,7 +874,7 @@ class JdkNumericAndFormatFacades {
             && translation.rust.contains("(value as f64).to_radians()")
             && translation.rust.contains("java_math_round_f64(value)")
             && translation.rust.contains("java_math_round_f32(value)")
-            && translation.rust.contains("(value).wrapping_abs()")
+            && translation.rust.contains("value.wrapping_abs()")
             && translation.rust.contains("std::cmp::max(left, right)")
             && translation.rust.contains("java_math_max_f64(left, right)")
             && translation.rust.contains("java_math_min_f64(left, right)")
@@ -895,8 +895,8 @@ class JdkNumericAndFormatFacades {
                 .contains("java_math_floor_mod_i64(left as i64, right as i64)")
             && translation
                 .rust
-                .contains("(java_math_floor_mod_i64(left as i64, right as i64)) as i32")
-            && translation.rust.contains("pub fn collect() {\n    }")
+                .contains("java_math_floor_mod_i64(left as i64, right as i64) as i32")
+            && translation.rust.contains("pub fn collect() {\n        ();")
             && translation.rust.contains("value.to_string()")
             && !translation.rust.contains("Math::log")
             && !translation.rust.contains("Math::exp")
@@ -937,7 +937,7 @@ mod generated_tests {
 
     #[test]
     fn numeric_facades_typecheck_and_run() {
-        assert!((JdkNumericAndFormatFacades::log2(8.0) - 3.0).abs() < 1e-9);
+        assert!((JdkNumericAndFormatFacades::log2(8.0).unwrap() - 3.0).abs() < 1e-9);
         assert!((JdkNumericAndFormatFacades::exponent(1.0) - std::f64::consts::E).abs() < 1e-9);
         assert_eq!(JdkNumericAndFormatFacades::root(9.0), 3.0);
         assert_eq!(JdkNumericAndFormatFacades::square(4.0), 16.0);
@@ -1953,7 +1953,7 @@ class JavaStringBytesAndIndex {
     assert!(
         translation
             .rust
-            .contains("value.as_bytes().iter().map(|byte| *byte as i8).collect::<Vec<i8>>()")
+            .contains("value.as_bytes().iter().map(|byte| (*byte) as i8).collect::<Vec<i8>>()")
             && translation
                 .rust
                 .contains("java_string_index_of(&value, \"&\")")
@@ -2296,7 +2296,7 @@ class StringEqualitySlots {
                 == 3
             && translation
                 .rust
-                .contains("value == \"Chrom\".to_string().as_str()")
+                .contains("value.as_str() == \"Chrom\".to_string().as_str()")
             && translation
                 .rust
                 .contains("sorted[0 as usize].as_str() == unsorted[0 as usize].as_str()")
@@ -2318,9 +2318,10 @@ class StringEqualitySlots {
 #[test]
 fn compares_string_slots() {
     let values = vec!["Chrom".to_string(), "Other".to_string()];
-    assert!(StringEqualitySlots::first_is(&values, "Chrom"));
-    assert!(StringEqualitySlots::first_equals(&values, "Chrom"));
-    assert!(StringEqualitySlots::literal_is("Chrom"));
+    let expected = "Chrom".to_string();
+    assert!(StringEqualitySlots::first_is(&values, &expected));
+    assert!(StringEqualitySlots::first_equals(&values, &expected));
+    assert!(StringEqualitySlots::literal_is(&expected));
     assert!(StringEqualitySlots::sorted_same(&values, &values));
 }
 "#,
@@ -3229,6 +3230,47 @@ class InstanceofPatternVariableAndChain {
 
     cargo_check_generated_modules(
         "instanceof_pattern_variable_and_chain",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn instanceof_pattern_ternary_lowers_to_match_in_value_and_return_slots() {
+    let translation = translate_source(
+        r#"
+class InstanceofPatternTernary {
+    int local(Object o) {
+        int n = (o instanceof String s) ? s.length() : -1;
+        return n;
+    }
+
+    int direct(Object o) {
+        return (o instanceof String s) ? s.length() : 0;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("match o.downcast_ref::<String>() { Some(s) => s.len() as i32, None => -1 }")
+            && translation.rust.contains(
+                "match o.downcast_ref::<String>() { Some(s) => s.len() as i32, None => 0 }"
+            )
+            && !translation
+                .rust
+                .contains("\"match {} { Some({}) => {}, None => {} }\""),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "instanceof_pattern_ternary",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
@@ -5330,16 +5372,16 @@ class JavaUnsignedRightShift {
     assert!(
         translation
             .rust
-            .contains("return ((value as u32).wrapping_shr((8) as u32)) as i32;")
+            .contains("return (value as u32).wrapping_shr((8) as u32) as i32;")
             && translation
                 .rust
                 .contains("return (value).wrapping_shr((8) as u32);")
             && translation
                 .rust
-                .contains("return ((value as u64).wrapping_shr((8) as u32)) as i64;")
+                .contains("return (value as u64).wrapping_shr((8) as u32) as i64;")
             && translation
                 .rust
-                .contains("value = ((value as u32).wrapping_shr((8) as u32)) as i32;")
+                .contains("value = (value as u32).wrapping_shr((8) as u32) as i32;")
             && !translation.rust.contains("value = 8;"),
         "{}",
         translation.rust
@@ -5430,10 +5472,10 @@ mod generated_tests {
     fn integer_binary_ops_match_java_wrapping_edges() {
         let fixture = JavaIntegerBinarySemantics {};
         assert_eq!(fixture.multiply_add(2_000_000_000, 2), 1_705_032_704);
-        assert_eq!(fixture.min_div(i32::MIN), i32::MIN);
-        assert_eq!(fixture.min_long_div(i64::MIN), i64::MIN);
-        assert_eq!(fixture.min_rem(i32::MIN), 0);
-        assert_eq!(fixture.min_long_rem(i64::MIN), 0);
+        assert_eq!(fixture.min_div(i32::MIN), Ok(i32::MIN));
+        assert_eq!(fixture.min_long_div(i64::MIN), Ok(i64::MIN));
+        assert_eq!(fixture.min_rem(i32::MIN), Ok(0));
+        assert_eq!(fixture.min_long_rem(i64::MIN), Ok(0));
         assert_eq!(fixture.shift_int(1, 33), 2);
         assert_eq!(fixture.shift_long(1, 65), 2);
         assert_eq!(fixture.unsigned_shift_int(-1, 33), 2_147_483_647);
@@ -5683,10 +5725,9 @@ class JavaIntegerCallArgumentExceptionSemantics {
     );
 
     assert!(
-        translation.rust.contains("pub fn plain_call_arg")
-            && translation
-                .rust
-                .contains("unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))")
+        translation.rust.contains(
+            "pub fn plain_call_arg(&self, value: i32, divisor: i32) -> Result<i32, JavaException>"
+        ) && translation.rust.contains("}?.wrapping_abs())")
             && translation.rust.contains("pub fn catch_call_arg")
             && translation
                 .rust
@@ -6773,7 +6814,7 @@ class LocalizedException {
     assert!(
         translation
             .rust
-            .contains("&LocalizedFormats::ILLEGAL_STATE as &dyn Localizable")
+            .contains("(&LocalizedFormats::ILLEGAL_STATE) as &dyn Localizable")
             && translation.rust.contains("Vec::new()")
             && !translation.rust.contains("ILLEGAL_STATE.as_ref()")
             && !translation.rust.contains("Java null receiver"),
@@ -8847,9 +8888,9 @@ class CompoundAssignmentArgument {
     assert!(
         translation.rust.contains("let mut a = a;")
             && translation.rust.contains("let mut b = b;")
-            && translation
-                .rust
-                .contains("self.take({ a = a + 1; a }, { b = b - 1; b })")
+            && translation.rust.contains(
+                "self.take({ a = (a).wrapping_add(1); a }, { b = (b).wrapping_sub(1); b })"
+            )
             && !translation.rust.contains("self.take(a += 1, b -= 1)"),
         "{}",
         translation.rust
@@ -8905,7 +8946,7 @@ class CompoundAssignmentNarrowing {
                 .rust
                 .contains("s = (s as i32).wrapping_mul(100000) as i16;")
             && translation.rust.contains(
-                "c = char::from_u32(((((c as u32) as i32).wrapping_add(1)) as u32) & 0xffff).unwrap_or('\\0');"
+                "c = char::from_u32(((c as u32) as i32).wrapping_add(1) as u32 & 0xffff).unwrap_or('\\0');"
             )
             && translation
                 .rust
@@ -9311,9 +9352,9 @@ class PrefixUpdateArgument {
     assert!(
         translation.rust.contains("let mut a = a;")
             && translation.rust.contains("let mut b = b;")
-            && translation
-                .rust
-                .contains("self.take({ a += 1; a }, { b -= 1; b })")
+            && translation.rust.contains(
+                "self.take({ a = (a).wrapping_add(1); a }, { b = (b).wrapping_sub(1); b })"
+            )
             && !translation.rust.contains("self.take(a += 1, b -= 1)"),
         "{}",
         translation.rust
@@ -20996,12 +21037,18 @@ class CurrentGetClassVsErasedObjectGetClass {
 "#,
     );
 
+    let same_class_body = translation
+        .rust
+        .split("pub fn same_class")
+        .nth(1)
+        .and_then(|tail| tail.split("\n    }\n\n}").next())
+        .expect("same_class body should be emitted");
     assert!(
-        translation.rust.contains(
+        same_class_body.contains(
             "obj.as_ref().is_some_and(|value| value.is::<CurrentGetClassVsErasedObjectGetClass>())"
-        ) && translation.rust.contains("if !(obj.as_ref().is_some_and")
-            && !translation.rust.contains("get_class()")
-            && !translation.rust.contains(".get_class()"),
+        ) && same_class_body.contains("if !obj.as_ref().is_some_and")
+            && !same_class_body.contains("get_class()")
+            && !same_class_body.contains(".get_class()"),
         "{}",
         translation.rust
     );
@@ -21267,6 +21314,8 @@ class ClassLiteralGetClassLoaderFacade {
                 "{receiver}.get_resource_as_stream(path).expect(\"Java null receiver\")"
             )) || translation.rust.contains(&format!(
                 "{receiver}.get_resource_as_stream(path.to_string()).expect(\"Java null receiver\")"
+            )) || translation.rust.contains(&format!(
+                "{receiver}.get_resource_as_stream(path.clone()).expect(\"Java null receiver\")"
             ))))
             && ([class_loader, borrowed_class_loader.as_str()]
                 .iter()
@@ -21275,7 +21324,10 @@ class ClassLiteralGetClassLoaderFacade {
                     .contains(&format!("{receiver}.get_resource(path)"))
                     || translation
                         .rust
-                        .contains(&format!("{receiver}.get_resource(path.to_string())"))))
+                        .contains(&format!("{receiver}.get_resource(path.to_string())"))
+                    || translation
+                        .rust
+                        .contains(&format!("{receiver}.get_resource(path.clone())"))))
             && translation
                 .rust
                 .contains("pub fn get_class_loader(&self) -> ClassLoader")
@@ -25168,10 +25220,12 @@ fn documents_tail_recursive_accumulator_gap() {
 
     assert!(
         translation.rust.contains("loop {")
-            && translation.rust.contains("let __java_tail_arg_0 = n - 1;")
             && translation
                 .rust
-                .contains("let __java_tail_arg_1 = acc * (n as i64);")
+                .contains("let __java_tail_arg_0 = (n).wrapping_sub(1);")
+            && translation
+                .rust
+                .contains("let __java_tail_arg_1 = (acc).wrapping_mul(n as i64);")
             && !translation
                 .diagnostics
                 .has_code("control_flow_rewrite_pending"),
@@ -25818,7 +25872,7 @@ class CommonsMathLocalizedFormatPatternUse {
     assert!(
         translation
             .rust
-            .contains("&LocalizedFormats::OVERFLOW_IN_ADDITION as &dyn Localizable"),
+            .contains("(&LocalizedFormats::OVERFLOW_IN_ADDITION) as &dyn Localizable"),
         "{}",
         translation.rust
     );
@@ -25873,7 +25927,7 @@ class CommonsMathLocalizablePatternDisplay {
     assert!(
         translation
             .rust
-            .contains("&LocalizedFormats::OVERFLOW as &dyn Localizable"),
+            .contains("(&LocalizedFormats::OVERFLOW) as &dyn Localizable"),
         "{}",
         translation.rust
     );
@@ -27827,7 +27881,7 @@ class SwitchExpressionDiagnostic {
     assert!(
         translation.rust.contains("let mapped: i32 = match value {")
             && translation.rust.contains("1 => 10,")
-            && translation.rust.contains("_ => 0,")
+            && translation.rust.contains("_ => 0")
             && !translation.rust.contains("compile_error!")
             && !translation.rust.contains("switch (value)"),
         "{}",
@@ -27862,7 +27916,7 @@ class YieldSwitchExpressionDiagnostic {
     assert!(
         translation.rust.contains("let mapped: i32 = match value {")
             && translation.rust.contains("1 => 10,")
-            && translation.rust.contains("_ => 0,")
+            && translation.rust.contains("_ => 0")
             && !translation.rust.contains("compile_error!")
             && !translation.rust.contains("switch (value)"),
         "{}",

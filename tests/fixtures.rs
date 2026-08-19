@@ -823,7 +823,7 @@ fn stream_block_lambda_generated_rust_preserves_behavior() {
     );
     assert!(
         translation.rust.contains(
-            "values.iter().map(|value: &String| { let trimmed = value.trim(); trimmed.to_lowercase() }).collect::<Vec<_>>()"
+            "values.iter().map(|value| { let trimmed = value.trim(); trimmed.to_lowercase() }).collect::<Vec<_>>()"
         ) && !translation.rust.contains("unsupported Java expression: lambda")
             && !translation.rust.contains(".cloned().collect::<Vec<_>>()"),
         "{}",
@@ -1038,9 +1038,9 @@ fn stream_string_method_references_use_call_target_plan() {
     assert!(
         translation
             .rust
-            .contains("values.iter().map(|value: &String| value.len() as i32).collect::<Vec<_>>()")
+            .contains("values.iter().map(|value| value.len() as i32).collect::<Vec<_>>()")
             && translation.rust.contains(
-                "values.iter().map(|value: &String| value.trim()).collect::<Vec<_>>().into_iter().map(|v| v.to_string()).collect::<Vec<_>>()"
+                "values.iter().map(|value| value.trim()).collect::<Vec<_>>().into_iter().map(|v| v.to_string()).collect::<Vec<_>>()"
             )
             && translation
                 .rust

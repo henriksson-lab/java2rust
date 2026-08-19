@@ -10,6 +10,7 @@ use crate::java_ir::{
     BinaryOp, ConstructorDecl, Expr, FieldDecl, JavaType, Literal, Member, MethodDecl, Modifier,
     PrimitiveType, Program, Stmt, TypeDecl, TypeKind,
 };
+use crate::representation::RepresentationPlan;
 use crate::rust_ir::{
     RustAssociatedConst, RustExpr, RustField, RustFunction, RustImpl, RustItem, RustParam,
     RustReceiver, RustStmt, RustStruct, RustType,
@@ -18,6 +19,7 @@ use crate::signature::{ReceiverPlan, SignaturePlan};
 use crate::slot_render::{
     default_expr_for_slot, default_expr_for_slot_with_facts, rust_name_for_java_named_type,
     rust_type_for_java_type_with_facts, rust_type_for_slot_with_facts,
+    rust_type_for_slot_with_facts_and_representations,
 };
 use crate::slot_shape::{OwnershipShape, RustSlotShape};
 use crate::types::{
@@ -44,11 +46,34 @@ pub fn struct_item_for_type_with_facts_and_support_context(
     facts: &FactSet,
     support_program: &Program,
 ) -> RustItem {
-    let fields = struct_fields_for_type(ty, signatures, facts, support_program);
+    let fields = struct_fields_for_type(ty, signatures, facts, None, support_program);
     RustItem::Struct(RustStruct {
         name: rust_decl_name_for_source_type(ty),
         derives: struct_derives_for_type(ty, &fields, signatures, facts, support_program),
         fields,
+        is_unit: false,
+    })
+}
+
+pub fn struct_item_for_type_with_facts_representations_and_support_context(
+    ty: &TypeDecl,
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    representations: &RepresentationPlan,
+    support_program: &Program,
+) -> RustItem {
+    let fields = struct_fields_for_type(
+        ty,
+        signatures,
+        facts,
+        Some(representations),
+        support_program,
+    );
+    RustItem::Struct(RustStruct {
+        name: rust_decl_name_for_source_type(ty),
+        derives: struct_derives_for_type(ty, &fields, signatures, facts, support_program),
+        fields,
+        is_unit: false,
     })
 }
 
@@ -430,7 +455,7 @@ pub fn with_type_param_marker_field_values(
     {
         fields.push((
             "__marker".to_string(),
-            RustExpr::Raw("std::marker::PhantomData".to_string()),
+            RustExpr::path(["std", "marker", "PhantomData"]),
         ));
     }
     fields
@@ -491,7 +516,7 @@ fn reorder_struct_literal_moves_after_reads(
 fn rust_expr_direct_move_var(expr: &RustExpr) -> Option<String> {
     match expr {
         RustExpr::Var(name) => Some(name.clone()),
-        RustExpr::Raw(text) if valid_rust_identifier(text) => Some(text.clone()),
+        RustExpr::Raw(text) if valid_raw_move_identifier(text) => Some(text.clone()),
         _ => None,
     }
 }
@@ -499,6 +524,7 @@ fn rust_expr_direct_move_var(expr: &RustExpr) -> Option<String> {
 fn rust_expr_reads_var(expr: &RustExpr, var_name: &str) -> bool {
     match expr {
         RustExpr::Shaped { expr, .. } => rust_expr_reads_var(expr, var_name),
+        RustExpr::Grouped(expr) => rust_expr_reads_var(expr, var_name),
         RustExpr::Var(name) => name == var_name,
         RustExpr::Field(receiver, _) => rust_expr_reads_var(receiver, var_name),
         RustExpr::Index(target, index) => {
@@ -506,8 +532,12 @@ fn rust_expr_reads_var(expr: &RustExpr, var_name: &str) -> bool {
         }
         RustExpr::Unary { expr, .. } => rust_expr_reads_var(expr, var_name),
         RustExpr::Cast { expr, .. } => rust_expr_reads_var(expr, var_name),
+        RustExpr::Try(expr) => rust_expr_reads_var(expr, var_name),
         RustExpr::Binary { left, right, .. } => {
             rust_expr_reads_var(left, var_name) || rust_expr_reads_var(right, var_name)
+        }
+        RustExpr::Range { start, end, .. } => {
+            rust_expr_reads_var(start, var_name) || rust_expr_reads_var(end, var_name)
         }
         RustExpr::If {
             condition,
@@ -525,20 +555,136 @@ fn rust_expr_reads_var(expr: &RustExpr, var_name: &str) -> bool {
         RustExpr::VecRepeat { value, len } => {
             rust_expr_reads_var(value, var_name) || rust_expr_reads_var(len, var_name)
         }
+        RustExpr::UnsupportedJavaArrayCreation { dimensions, .. } => dimensions
+            .iter()
+            .any(|dimension| rust_expr_reads_var(dimension, var_name)),
         RustExpr::Call { function, args } => {
             rust_expr_reads_var(function, var_name)
                 || args.iter().any(|arg| rust_expr_reads_var(arg, var_name))
         }
-        RustExpr::MethodCall { receiver, args, .. } => {
-            rust_expr_reads_var(receiver, var_name)
+        RustExpr::MacroCall { args, .. } => {
+            args.iter().any(|arg| rust_expr_reads_var(arg, var_name))
+        }
+        RustExpr::MethodCall {
+            receiver,
+            method,
+            args,
+        } => {
+            method == var_name
+                || rust_expr_reads_var(receiver, var_name)
                 || args.iter().any(|arg| rust_expr_reads_var(arg, var_name))
         }
         RustExpr::StructLit { fields, .. } => fields
             .iter()
             .any(|(_, field_expr)| rust_expr_reads_var(field_expr, var_name)),
         RustExpr::MarkedBlock { expr, .. } => rust_expr_reads_var(expr, var_name),
+        RustExpr::PostfixComment { expr, .. } => rust_expr_reads_var(expr, var_name),
+        RustExpr::Closure { params, body, .. } => {
+            if params.iter().any(|param| param.pattern == var_name) {
+                return false;
+            }
+            match body {
+                crate::rust_ir::RustClosureBody::Expr(expr) => rust_expr_reads_var(expr, var_name),
+            }
+        }
+        RustExpr::Match { expr, arms } => {
+            rust_expr_reads_var(expr, var_name)
+                || arms.iter().any(|arm| {
+                    !arm.pattern
+                        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+                        .any(|token| token == var_name)
+                        && rust_expr_reads_var(&arm.body, var_name)
+                })
+        }
+        RustExpr::Block { stmts, tail } => {
+            stmts.iter().any(|stmt| rust_stmt_reads_var(stmt, var_name))
+                || tail
+                    .as_ref()
+                    .is_some_and(|tail| rust_expr_reads_var(tail, var_name))
+        }
         RustExpr::Raw(text) => raw_rust_expr_mentions_identifier(text, var_name),
-        RustExpr::Path(_) | RustExpr::Literal(_) => false,
+        RustExpr::Path(_)
+        | RustExpr::GenericPath { .. }
+        | RustExpr::TypeAssociatedPath { .. }
+        | RustExpr::Literal(_)
+        | RustExpr::Pattern(_) => false,
+    }
+}
+
+fn rust_stmt_reads_var(stmt: &RustStmt, var_name: &str) -> bool {
+    match stmt {
+        RustStmt::Let { name, value, .. } => {
+            value
+                .as_ref()
+                .is_some_and(|value| rust_expr_reads_var(value, var_name))
+                && name != var_name
+        }
+        RustStmt::Assign { target, value } | RustStmt::AssignOp { target, value, .. } => {
+            rust_expr_reads_var(target, var_name) || rust_expr_reads_var(value, var_name)
+        }
+        RustStmt::Expr(expr) | RustStmt::Return(Some(expr)) => rust_expr_reads_var(expr, var_name),
+        RustStmt::If {
+            condition,
+            then_body,
+            else_body,
+        } => {
+            rust_expr_reads_var(condition, var_name)
+                || then_body
+                    .iter()
+                    .any(|stmt| rust_stmt_reads_var(stmt, var_name))
+                || else_body
+                    .iter()
+                    .any(|stmt| rust_stmt_reads_var(stmt, var_name))
+        }
+        RustStmt::IfLet {
+            pattern,
+            expr,
+            then_body,
+            else_body,
+        } => {
+            rust_expr_reads_var(expr, var_name)
+                || (pattern
+                    .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+                    .all(|token| token != var_name)
+                    && (then_body
+                        .iter()
+                        .any(|stmt| rust_stmt_reads_var(stmt, var_name))
+                        || else_body
+                            .iter()
+                            .any(|stmt| rust_stmt_reads_var(stmt, var_name))))
+        }
+        RustStmt::While { condition, body } => {
+            rust_expr_reads_var(condition, var_name)
+                || body.iter().any(|stmt| rust_stmt_reads_var(stmt, var_name))
+        }
+        RustStmt::WhileLet {
+            pattern,
+            expr,
+            body,
+            ..
+        } => {
+            rust_expr_reads_var(expr, var_name)
+                || (pattern
+                    .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+                    .all(|token| token != var_name)
+                    && body.iter().any(|stmt| rust_stmt_reads_var(stmt, var_name)))
+        }
+        RustStmt::For {
+            pattern,
+            iterable,
+            body,
+            ..
+        } => {
+            rust_expr_reads_var(iterable, var_name)
+                || (pattern
+                    .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+                    .all(|token| token != var_name)
+                    && body.iter().any(|stmt| rust_stmt_reads_var(stmt, var_name)))
+        }
+        RustStmt::Loop { body, .. } => body.iter().any(|stmt| rust_stmt_reads_var(stmt, var_name)),
+        RustStmt::BreakValue { value, .. } => rust_expr_reads_var(value, var_name),
+        RustStmt::Raw(text) => raw_rust_expr_mentions_identifier(text, var_name),
+        RustStmt::Return(None) | RustStmt::Break(_) | RustStmt::Continue(_) => false,
     }
 }
 
@@ -548,6 +694,44 @@ fn valid_rust_identifier(text: &str) -> bool {
         .next()
         .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn valid_raw_move_identifier(text: &str) -> bool {
+    valid_rust_identifier(text) && !matches!(text, "self" | "super" | "crate" | "Self")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn structured_method_calls_count_method_name_reads() {
+        let call = RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("self".to_string())),
+            method: "get_default_tool_v_c_f_header_lines".to_string(),
+            args: Vec::new(),
+        };
+
+        assert!(rust_expr_reads_var(
+            &call,
+            "get_default_tool_v_c_f_header_lines"
+        ));
+        assert!(!rust_expr_reads_var(&call, "unrelated_method"));
+    }
+
+    #[test]
+    fn raw_pseudo_identifiers_are_not_direct_move_vars() {
+        assert_eq!(
+            rust_expr_direct_move_var(&RustExpr::Raw("value".to_string())),
+            Some("value".to_string())
+        );
+        for pseudo in ["self", "super", "crate", "Self"] {
+            assert_eq!(
+                rust_expr_direct_move_var(&RustExpr::Raw(pseudo.to_string())),
+                None
+            );
+        }
+    }
 }
 
 fn raw_rust_expr_mentions_identifier(text: &str, ident: &str) -> bool {
@@ -760,14 +944,14 @@ fn rust_crate_mapped_external_rust_type(java_ty: &JavaType, facts: &FactSet) -> 
     {
         let args = args
             .iter()
-            .map(|arg| crate::emit::emit_type(&rust_type_for_java_type_with_facts(arg, facts)))
-            .collect::<Vec<_>>()
-            .join(", ");
-        return Some(RustType::Raw(format!(
-            "{crate_name}::{rust_type_name}<{args}>"
-        )));
+            .map(|arg| rust_type_for_java_type_with_facts(arg, facts))
+            .collect();
+        return Some(crate::slot_render::rust_generic_type(
+            format!("{crate_name}::{rust_type_name}"),
+            args,
+        ));
     }
-    Some(RustType::Raw(format!("{crate_name}::{rust_type_name}")))
+    Some(RustType::Named(format!("{crate_name}::{rust_type_name}")))
 }
 
 fn rust_crate_mapped_external_java_type(java_ty: &JavaType, facts: &FactSet) -> bool {
@@ -783,16 +967,14 @@ fn struct_fields_for_type(
     ty: &TypeDecl,
     signatures: &SignaturePlan,
     facts: &FactSet,
+    representations: Option<&RepresentationPlan>,
     support_program: &Program,
 ) -> Vec<RustField> {
     let mut fields = Vec::new();
     if let Some(outer_type) = facts.captures.outer_this_type_for_type(&ty.name) {
         fields.push(RustField {
             name: "__outer".to_string(),
-            ty: RustType::Raw(format!(
-                "std::rc::Rc<std::cell::RefCell<{}>>",
-                rust_name_for_java_named_type(outer_type)
-            )),
+            ty: rc_refcell_type(RustType::Named(rust_name_for_java_named_type(outer_type))),
             is_pub: false,
             is_pub_crate: false,
         });
@@ -806,6 +988,7 @@ fn struct_fields_for_type(
                 &field.name,
                 &signatures.required_field_shape(&ty.name, &field.name),
                 facts,
+                representations,
             ),
             is_pub: source_field_is_public(field),
             is_pub_crate: !source_field_is_public(field) && upcast_visible_fields,
@@ -817,9 +1000,10 @@ fn struct_fields_for_type(
             .into_iter()
             .map(|inherited| RustField {
                 name: inherited.field.name.clone(),
-                ty: rust_type_for_slot_with_facts(
+                ty: rust_type_for_slot_maybe_with_representations(
                     &signatures.required_field_shape(&ty.name, &inherited.field.name),
                     facts,
+                    representations,
                 ),
                 is_pub: false,
                 is_pub_crate: upcast_visible_fields,
@@ -830,9 +1014,10 @@ fn struct_fields_for_type(
             .into_iter()
             .map(|inherited| RustField {
                 name: inherited.rust_name.clone(),
-                ty: rust_type_for_slot_with_facts(
+                ty: rust_type_for_slot_maybe_with_representations(
                     &signatures.required_field_shape(&ty.name, &inherited.rust_name),
                     facts,
+                    representations,
                 ),
                 is_pub: false,
                 is_pub_crate: upcast_visible_fields,
@@ -845,7 +1030,7 @@ fn struct_fields_for_type(
     {
         fields.push(RustField {
             name: "__marker".to_string(),
-            ty: RustType::Raw(type_param_marker_type(&ty.type_params)),
+            ty: type_param_marker_type(&ty.type_params),
             is_pub: false,
             is_pub_crate: false,
         });
@@ -857,13 +1042,24 @@ fn source_type_needs_type_param_marker_field(ty: &TypeDecl) -> bool {
     !ty.type_params.is_empty() && matches!(ty.kind, TypeKind::Class | TypeKind::Record)
 }
 
-fn type_param_marker_type(type_params: &[String]) -> String {
+fn type_param_marker_type(type_params: &[String]) -> RustType {
     let return_type = if type_params.len() == 1 {
-        type_params[0].clone()
+        RustType::Named(type_params[0].clone())
     } else {
-        format!("({})", type_params.join(", "))
+        RustType::Tuple(
+            type_params
+                .iter()
+                .map(|type_param| RustType::Named(type_param.clone()))
+                .collect(),
+        )
     };
-    format!("std::marker::PhantomData<fn() -> {return_type}>")
+    crate::slot_render::rust_generic_type(
+        "std::marker::PhantomData",
+        vec![RustType::FnPointer {
+            params: Vec::new(),
+            return_type: Box::new(return_type),
+        }],
+    )
 }
 
 fn rust_type_for_instance_field(
@@ -871,14 +1067,27 @@ fn rust_type_for_instance_field(
     field_name: &str,
     shape: &RustSlotShape,
     facts: &FactSet,
+    representations: Option<&RepresentationPlan>,
 ) -> RustType {
-    let rust_ty = rust_type_for_slot_with_facts(shape, facts);
+    let rust_ty = rust_type_for_slot_maybe_with_representations(shape, facts, representations);
     if instance_field_is_self_referential(owner, field_name, shape)
         && !field_type_is_shared_handle(shape, facts)
     {
         return box_recursive_field_type(rust_ty);
     }
     rust_ty
+}
+
+fn rust_type_for_slot_maybe_with_representations(
+    shape: &RustSlotShape,
+    facts: &FactSet,
+    representations: Option<&RepresentationPlan>,
+) -> RustType {
+    representations
+        .map(|representations| {
+            rust_type_for_slot_with_facts_and_representations(shape, facts, representations)
+        })
+        .unwrap_or_else(|| rust_type_for_slot_with_facts(shape, facts))
 }
 
 /// A handle is already an indirection, so boxing one gives `Option<Box<Rc<T>>>`.
@@ -932,12 +1141,21 @@ fn java_type_names_same_after_optional(left: &JavaType, right: &JavaType) -> boo
 
 fn box_recursive_field_type(rust_ty: RustType) -> RustType {
     match rust_ty {
-        RustType::Option(inner) => RustType::Option(Box::new(RustType::Raw(format!(
-            "Box<{}>",
-            crate::emit::emit_type(&inner)
-        )))),
-        other => RustType::Raw(format!("Box<{}>", crate::emit::emit_type(&other))),
+        RustType::Option(inner) => RustType::Option(Box::new(
+            crate::slot_render::rust_generic_type("Box", vec![*inner]),
+        )),
+        other => crate::slot_render::rust_generic_type("Box", vec![other]),
     }
+}
+
+fn rc_refcell_type(inner: RustType) -> RustType {
+    crate::slot_render::rust_generic_type(
+        "std::rc::Rc",
+        vec![crate::slot_render::rust_generic_type(
+            "std::cell::RefCell",
+            vec![inner],
+        )],
+    )
 }
 
 fn source_field_is_public(field: &FieldDecl) -> bool {
@@ -1092,6 +1310,34 @@ fn rust_type_supports_struct_derive_clone(
                 visiting,
             )
         }
+        RustType::Generic { base, .. }
+            if base == "std::rc::Rc"
+                || base == "std::marker::PhantomData"
+                || base == "PhantomData" =>
+        {
+            true
+        }
+        RustType::Tuple(items) => items.iter().all(|item| {
+            rust_type_supports_struct_derive_clone(
+                item,
+                type_params,
+                signatures,
+                facts,
+                support_program,
+                visiting,
+            )
+        }),
+        RustType::FnPointer { .. } => true,
+        RustType::Generic { args, .. } => args.iter().all(|arg| {
+            rust_type_supports_struct_derive_clone(
+                arg,
+                type_params,
+                signatures,
+                facts,
+                support_program,
+                visiting,
+            )
+        }),
         RustType::Named(name) if type_params.contains(name) => true,
         RustType::Named(name) => rust_named_type_supports_struct_derive_clone(
             name,
@@ -1114,7 +1360,11 @@ fn rust_type_supports_struct_derive_clone(
         {
             true
         }
-        RustType::Slice(_) | RustType::Ref { .. } | RustType::Raw(_) => false,
+        RustType::DynTrait(_)
+        | RustType::ImplTrait(_)
+        | RustType::Slice(_)
+        | RustType::Ref { .. }
+        | RustType::Raw(_) => false,
     }
 }
 
@@ -1306,7 +1556,23 @@ pub fn rust_type_supports_struct_derive_default(
             support_program,
             visiting,
         ),
-        RustType::Slice(_) | RustType::Ref { .. } | RustType::Raw(_) => false,
+        RustType::Tuple(items) => items.iter().all(|item| {
+            rust_type_supports_struct_derive_default(
+                item,
+                type_params,
+                signatures,
+                facts,
+                support_program,
+                visiting,
+            )
+        }),
+        RustType::FnPointer { .. } => true,
+        RustType::Generic { .. }
+        | RustType::DynTrait(_)
+        | RustType::ImplTrait(_)
+        | RustType::Slice(_)
+        | RustType::Ref { .. }
+        | RustType::Raw(_) => false,
     }
 }
 
@@ -1338,7 +1604,7 @@ pub fn rust_named_type_supports_struct_derive_default(
         return true;
     }
     let nested_type_params: HashSet<String> = ty.type_params.iter().cloned().collect();
-    let fields = struct_fields_for_type(ty, signatures, facts, support_program);
+    let fields = struct_fields_for_type(ty, signatures, facts, None, support_program);
     // A generic type has no single zero value, so it is excluded rather than
     // guessed at.
     let supports_default = ty.type_params.is_empty()
@@ -1379,7 +1645,7 @@ fn rust_named_type_supports_struct_derive_clone(
     if !visiting.insert(ty.name.clone()) {
         return true;
     }
-    let fields = struct_fields_for_type(ty, signatures, facts, support_program);
+    let fields = struct_fields_for_type(ty, signatures, facts, None, support_program);
     let supports_clone = fields.iter().all(|field| {
         rust_type_supports_struct_derive_clone(
             &field.ty,
@@ -1429,7 +1695,14 @@ fn rust_type_supports_struct_derive_partial_eq(ty: &RustType) -> bool {
         RustType::Vec(inner) | RustType::Array2(inner) | RustType::Option(inner) => {
             rust_type_supports_struct_derive_partial_eq(inner)
         }
-        RustType::Named(_) => false,
+        RustType::Tuple(items) => items
+            .iter()
+            .all(rust_type_supports_struct_derive_partial_eq),
+        RustType::FnPointer { .. } => true,
+        RustType::Generic { .. }
+        | RustType::DynTrait(_)
+        | RustType::ImplTrait(_)
+        | RustType::Named(_) => false,
         RustType::Slice(_) | RustType::Ref { .. } | RustType::Raw(_) => false,
     }
 }
@@ -1447,8 +1720,13 @@ fn rust_type_supports_struct_derive_eq_hash(ty: &RustType) -> bool {
         RustType::Vec(inner) | RustType::Array2(inner) | RustType::Option(inner) => {
             rust_type_supports_struct_derive_eq_hash(inner)
         }
+        RustType::Tuple(items) => items.iter().all(rust_type_supports_struct_derive_eq_hash),
+        RustType::FnPointer { .. } => true,
         RustType::F32
         | RustType::F64
+        | RustType::Generic { .. }
+        | RustType::DynTrait(_)
+        | RustType::ImplTrait(_)
         | RustType::Named(_)
         | RustType::Slice(_)
         | RustType::Ref { .. }
@@ -1633,7 +1911,14 @@ fn static_final_default_const_type_and_value(field: &FieldDecl) -> Option<(RustT
         return None;
     }
     let rust_ty = const_rust_type_for_java_type(&field.ty)?;
-    Some((rust_ty, RustExpr::Raw("&[]".to_string())))
+    Some((rust_ty, borrowed_empty_array_literal_expr()))
+}
+
+fn borrowed_empty_array_literal_expr() -> RustExpr {
+    RustExpr::Unary {
+        op: "&".to_string(),
+        expr: Box::new(RustExpr::ArrayLiteral(Vec::new())),
+    }
 }
 
 fn const_type_and_value(
@@ -1650,12 +1935,17 @@ fn const_rust_type_for_java_type(ty: &JavaType) -> Option<RustType> {
     match ty {
         JavaType::Array(element) => {
             let element_ty = const_rust_type_for_java_type(element)?;
-            Some(RustType::Raw(format!(
-                "&'static [{}]",
-                crate::emit::emit_type(&element_ty)
-            )))
+            Some(RustType::Ref {
+                mutable: false,
+                lifetime: Some("'static".to_string()),
+                inner: Box::new(RustType::Slice(Box::new(element_ty))),
+            })
         }
-        JavaType::String => Some(RustType::Raw("&'static str".to_string())),
+        JavaType::String => Some(RustType::Ref {
+            mutable: false,
+            lifetime: Some("'static".to_string()),
+            inner: Box::new(RustType::Raw("str".to_string())),
+        }),
         JavaType::Primitive(PrimitiveType::Boolean) => Some(RustType::Bool),
         JavaType::Primitive(PrimitiveType::Byte) => Some(RustType::I8),
         JavaType::Primitive(PrimitiveType::Short) => Some(RustType::I16),
@@ -1798,14 +2088,10 @@ fn const_array_expr_value(
         .iter()
         .map(|element| const_expr_value(element, const_infos, Some(element_ty)))
         .collect::<Option<Vec<_>>>()?;
-    Some(RustExpr::Raw(format!(
-        "&[{}]",
-        values
-            .iter()
-            .map(crate::emit::emit_expr)
-            .collect::<Vec<_>>()
-            .join(", ")
-    )))
+    Some(RustExpr::Unary {
+        op: "&".to_string(),
+        expr: Box::new(RustExpr::ArrayLiteral(values)),
+    })
 }
 
 fn expected_array_element_type(expected_ty: Option<&JavaType>) -> Option<&JavaType> {
@@ -3021,13 +3307,13 @@ fn maybe_add_lifetime_to_refs(ty: RustType, lifetime: bool) -> RustType {
 
 fn add_lifetime_to_refs(ty: RustType) -> RustType {
     match ty {
-        RustType::Ref { mutable, inner } => {
+        RustType::Ref { mutable, inner, .. } => {
             let inner = add_lifetime_to_refs(*inner);
-            RustType::Raw(format!(
-                "&'a {}{}",
-                if mutable { "mut " } else { "" },
-                crate::emit::emit_type(&inner)
-            ))
+            RustType::Ref {
+                mutable,
+                lifetime: Some("'a".to_string()),
+                inner: Box::new(inner),
+            }
         }
         RustType::Option(inner) => RustType::Option(Box::new(add_lifetime_to_refs(*inner))),
         RustType::Vec(inner) => RustType::Vec(Box::new(add_lifetime_to_refs(*inner))),
@@ -3044,6 +3330,12 @@ fn rust_type_contains_ref(ty: &RustType) -> bool {
         | RustType::Vec(inner)
         | RustType::Array2(inner)
         | RustType::Slice(inner) => rust_type_contains_ref(inner),
+        RustType::Generic { args, .. } => args.iter().any(rust_type_contains_ref),
+        RustType::Tuple(items) => items.iter().any(rust_type_contains_ref),
+        RustType::FnPointer {
+            params,
+            return_type,
+        } => params.iter().any(rust_type_contains_ref) || rust_type_contains_ref(return_type),
         RustType::Unit
         | RustType::Bool
         | RustType::I8
@@ -3054,6 +3346,8 @@ fn rust_type_contains_ref(ty: &RustType) -> bool {
         | RustType::F64
         | RustType::Char
         | RustType::String
+        | RustType::DynTrait(_)
+        | RustType::ImplTrait(_)
         | RustType::Named(_)
         | RustType::Raw(_) => false,
     }

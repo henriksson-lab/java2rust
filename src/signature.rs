@@ -5489,6 +5489,11 @@ impl SignaturePlan {
             .and_then(|signature| signature.return_shape.clone())
     }
 
+    pub fn method_return_shape_by_java_key(&self, key: &JavaCallableKey) -> Option<RustSlotShape> {
+        self.method_signature_by_java_key(key)
+            .and_then(|signature| signature.return_shape.clone())
+    }
+
     pub fn field_shape(&self, type_name: &str, field_name: &str) -> Option<&RustSlotShape> {
         self.fields.get(&FieldKey {
             type_name: type_name.to_string(),
@@ -7956,6 +7961,10 @@ pub fn field_shape_constraints_with_usage(
         &mut constraints,
         &external_call_return_field_constraints(ty, field, usage, facts),
     );
+    push_unique_signature_constraints(
+        &mut constraints,
+        &native_collection_receiver_field_constraints(ty, field),
+    );
     if let Some(kind) = field_boundary_policy(ty, field, usage).kind {
         push_unique_signature_constraints(
             &mut constraints,
@@ -8012,6 +8021,295 @@ fn delegated_null_constructor_field_constraints(
         }
     }
     Vec::new()
+}
+
+fn native_collection_receiver_field_constraints(
+    ty: &TypeDecl,
+    field: &FieldDecl,
+) -> Vec<SignatureConstraint> {
+    if crate::stdlib::java_collection_kind_for_type(&field.ty).is_none()
+        || !field_is_native_collection_receiver(ty, &field.name)
+    {
+        return Vec::new();
+    }
+    vec![
+        SignatureConstraint::RequiredDispatch(DispatchShape::Concrete),
+        SignatureConstraint::RequiredView(ViewShape::Native),
+        SignatureConstraint::RequiredOwnership(OwnershipShape::Owned),
+    ]
+}
+
+fn field_is_native_collection_receiver(ty: &TypeDecl, field_name: &str) -> bool {
+    ty.members.iter().any(|member| match member {
+        crate::java_ir::Member::Method(method) => method
+            .body
+            .as_ref()
+            .is_some_and(|body| block_uses_field_as_native_collection_receiver(body, field_name)),
+        crate::java_ir::Member::Constructor(ctor) => ctor
+            .body
+            .as_ref()
+            .is_some_and(|body| block_uses_field_as_native_collection_receiver(body, field_name)),
+        crate::java_ir::Member::Type(nested) => {
+            field_is_native_collection_receiver(nested, field_name)
+        }
+        crate::java_ir::Member::Field(field) => field
+            .initializer
+            .as_ref()
+            .is_some_and(|expr| expr_uses_field_as_native_collection_receiver(expr, field_name)),
+        crate::java_ir::Member::Unsupported { .. } => false,
+    })
+}
+
+fn block_uses_field_as_native_collection_receiver(block: &Block, field_name: &str) -> bool {
+    block
+        .statements
+        .iter()
+        .any(|stmt| stmt_uses_field_as_native_collection_receiver(stmt, field_name))
+}
+
+fn stmt_uses_field_as_native_collection_receiver(stmt: &Stmt, field_name: &str) -> bool {
+    match stmt {
+        Stmt::VarDecl { initializer, .. } | Stmt::Return(initializer) => initializer
+            .as_ref()
+            .is_some_and(|expr| expr_uses_field_as_native_collection_receiver(expr, field_name)),
+        Stmt::Expr(expr) | Stmt::Throw(expr) => {
+            expr_uses_field_as_native_collection_receiver(expr, field_name)
+        }
+        Stmt::Assign { target, value } => {
+            expr_uses_field_as_native_collection_receiver(target, field_name)
+                || expr_uses_field_as_native_collection_receiver(value, field_name)
+        }
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            expr_uses_field_as_native_collection_receiver(condition, field_name)
+                || block_uses_field_as_native_collection_receiver(then_block, field_name)
+                || else_block.as_ref().is_some_and(|block| {
+                    block_uses_field_as_native_collection_receiver(block, field_name)
+                })
+        }
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
+            expr_uses_field_as_native_collection_receiver(condition, field_name)
+                || block_uses_field_as_native_collection_receiver(body, field_name)
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            init.iter()
+                .any(|stmt| stmt_uses_field_as_native_collection_receiver(stmt, field_name))
+                || condition.as_ref().is_some_and(|condition| {
+                    expr_uses_field_as_native_collection_receiver(condition, field_name)
+                })
+                || update
+                    .iter()
+                    .any(|expr| expr_uses_field_as_native_collection_receiver(expr, field_name))
+                || block_uses_field_as_native_collection_receiver(body, field_name)
+        }
+        Stmt::EnhancedFor { iterable, body, .. } => {
+            expr_uses_field_as_native_collection_receiver(iterable, field_name)
+                || block_uses_field_as_native_collection_receiver(body, field_name)
+        }
+        Stmt::Switch { selector, cases } => {
+            expr_uses_field_as_native_collection_receiver(selector, field_name)
+                || cases.iter().any(|case| {
+                    case.statements
+                        .iter()
+                        .any(|stmt| stmt_uses_field_as_native_collection_receiver(stmt, field_name))
+                })
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            resources
+                .iter()
+                .any(|stmt| stmt_uses_field_as_native_collection_receiver(stmt, field_name))
+                || block_uses_field_as_native_collection_receiver(body, field_name)
+                || catches.iter().any(|catch| {
+                    block_uses_field_as_native_collection_receiver(&catch.body, field_name)
+                })
+                || finally_block.as_ref().is_some_and(|block| {
+                    block_uses_field_as_native_collection_receiver(block, field_name)
+                })
+        }
+        Stmt::ConstructorInvocation { args, .. } => args
+            .iter()
+            .any(|expr| expr_uses_field_as_native_collection_receiver(expr, field_name)),
+        Stmt::LocalType(nested) => field_is_native_collection_receiver(nested, field_name),
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            block_uses_field_as_native_collection_receiver(block, field_name)
+        }
+        Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => false,
+    }
+}
+
+fn expr_uses_field_as_native_collection_receiver(expr: &Expr, field_name: &str) -> bool {
+    match expr {
+        Expr::Call {
+            receiver: Some(receiver),
+            name,
+            args,
+            ..
+        } => {
+            (native_collection_receiver_method_name(name)
+                && expr_is_this_field(receiver, field_name))
+                || expr_uses_field_as_native_collection_receiver(receiver, field_name)
+                || args
+                    .iter()
+                    .any(|arg| expr_uses_field_as_native_collection_receiver(arg, field_name))
+        }
+        Expr::Call { args, .. }
+        | Expr::New {
+            args, body: None, ..
+        } => args
+            .iter()
+            .any(|arg| expr_uses_field_as_native_collection_receiver(arg, field_name)),
+        Expr::New {
+            args,
+            body: Some(body),
+            ..
+        } => {
+            args.iter()
+                .any(|arg| expr_uses_field_as_native_collection_receiver(arg, field_name))
+                || body.iter().any(|member| match member {
+                    crate::java_ir::Member::Field(field) => {
+                        field.initializer.as_ref().is_some_and(|expr| {
+                            expr_uses_field_as_native_collection_receiver(expr, field_name)
+                        })
+                    }
+                    crate::java_ir::Member::Method(method) => {
+                        method.body.as_ref().is_some_and(|body| {
+                            block_uses_field_as_native_collection_receiver(body, field_name)
+                        })
+                    }
+                    crate::java_ir::Member::Constructor(ctor) => {
+                        ctor.body.as_ref().is_some_and(|body| {
+                            block_uses_field_as_native_collection_receiver(body, field_name)
+                        })
+                    }
+                    crate::java_ir::Member::Type(nested) => {
+                        field_is_native_collection_receiver(nested, field_name)
+                    }
+                    crate::java_ir::Member::Unsupported { .. } => false,
+                })
+        }
+        Expr::FieldAccess(receiver, _) => {
+            expr_uses_field_as_native_collection_receiver(receiver, field_name)
+        }
+        Expr::ArrayAccess(array, index) => {
+            expr_uses_field_as_native_collection_receiver(array, field_name)
+                || expr_uses_field_as_native_collection_receiver(index, field_name)
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            dimensions
+                .iter()
+                .any(|expr| expr_uses_field_as_native_collection_receiver(expr, field_name))
+                || initializer
+                    .iter()
+                    .flatten()
+                    .any(|expr| expr_uses_field_as_native_collection_receiver(expr, field_name))
+        }
+        Expr::ArrayInitializer(values) => values
+            .iter()
+            .any(|expr| expr_uses_field_as_native_collection_receiver(expr, field_name)),
+        Expr::Binary { left, right, .. } => {
+            expr_uses_field_as_native_collection_receiver(left, field_name)
+                || expr_uses_field_as_native_collection_receiver(right, field_name)
+        }
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::InstanceOf { expr, .. } => {
+            expr_uses_field_as_native_collection_receiver(expr, field_name)
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            expr_uses_field_as_native_collection_receiver(condition, field_name)
+                || expr_uses_field_as_native_collection_receiver(then_expr, field_name)
+                || expr_uses_field_as_native_collection_receiver(else_expr, field_name)
+        }
+        Expr::Switch { selector, cases } => {
+            expr_uses_field_as_native_collection_receiver(selector, field_name)
+                || cases.iter().any(|case| {
+                    case.labels.iter().any(|label| {
+                        matches!(
+                            label,
+                            SwitchLabel::Expr(expr)
+                                if expr_uses_field_as_native_collection_receiver(expr, field_name)
+                        )
+                    }) || expr_uses_field_as_native_collection_receiver(&case.value, field_name)
+                })
+        }
+        Expr::Lambda { body, .. } => match body {
+            LambdaBody::Expr(expr) => {
+                expr_uses_field_as_native_collection_receiver(expr, field_name)
+            }
+            LambdaBody::Block(block) => {
+                block_uses_field_as_native_collection_receiver(block, field_name)
+            }
+        },
+        Expr::MethodReference { .. }
+        | Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::ClassLiteral(_)
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => false,
+    }
+}
+
+fn expr_is_this_field(expr: &Expr, field_name: &str) -> bool {
+    match expr {
+        Expr::Var(name) => name == field_name,
+        Expr::FieldAccess(receiver, field) => {
+            field == field_name && matches!(receiver.as_ref(), Expr::This)
+        }
+        _ => false,
+    }
+}
+
+fn native_collection_receiver_method_name(name: &str) -> bool {
+    matches!(
+        name,
+        "add"
+            | "addAll"
+            | "add_all"
+            | "clear"
+            | "contains"
+            | "containsKey"
+            | "contains_key"
+            | "extend"
+            | "get"
+            | "insert"
+            | "put"
+            | "putAll"
+            | "put_all"
+            | "remove"
+            | "removeAll"
+            | "remove_all"
+            | "removeIf"
+            | "remove_if"
+            | "retain"
+            | "size"
+    )
 }
 
 fn constructor_decl_for_resolved_name<'a>(
@@ -13677,8 +13975,41 @@ fn constrained_return_shape(
     type_param_scope: TypeParamScope<'_>,
 ) -> Option<RustSlotShape> {
     let return_type = method_return_type_for_signature(method).unwrap_or(&method.return_type);
+    let public_api_return = signature_member_api_boundary_policy(&method.modifiers).public_api;
     if java_type_is_string_like_signature_type(return_type)
         && !constraints_require_nullable_storage(constraints)
+        && !public_api_return
+        && constraints.contains(&SignatureConstraint::RequiredOwnership(
+            OwnershipShape::SharedBorrow,
+        ))
+    {
+        let constraints = constraints
+            .iter()
+            .filter(|constraint| {
+                !matches!(
+                    constraint,
+                    SignatureConstraint::RequiredStorageNullability(
+                        NullabilityState::MaybeNull | NullabilityState::DefinitelyNull
+                    )
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut shape = apply_signature_constraints(
+            RustSlotShape::conservative(JavaType::String),
+            &constraints,
+        );
+        apply_required_dispatch(&mut shape, DispatchShape::Concrete);
+        apply_required_view(&mut shape, ViewShape::Str);
+        apply_required_ownership(&mut shape, OwnershipShape::SharedBorrow);
+        return Some(shape);
+    }
+    if java_type_is_string_like_signature_type(return_type)
+        && !constraints_require_nullable_storage(constraints)
+        && (public_api_return
+            || (!constraints.contains(&SignatureConstraint::RequiredOwnership(
+                OwnershipShape::SharedBorrow,
+            )) && !constraints.contains(&SignatureConstraint::RequiredView(ViewShape::Str))))
     {
         let constraints = constraints
             .iter()

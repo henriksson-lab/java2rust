@@ -8,7 +8,7 @@ pub enum MethodReferencePlan {
         method: String,
     },
     BoundReceiver {
-        receiver: String,
+        receiver: BoundMethodReferenceReceiver,
         method: String,
     },
     UnboundAccessor {
@@ -18,6 +18,12 @@ pub enum MethodReferencePlan {
         method: String,
         arity: Option<usize>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoundMethodReferenceReceiver {
+    Local(String),
+    InstanceField(String),
 }
 
 pub fn plan_method_reference(target: &str, method: &str) -> MethodReferencePlan {

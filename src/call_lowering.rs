@@ -16,8 +16,8 @@ use crate::coercion::{
     collections_singleton_map_projection, collections_singleton_projection,
     collections_unmodifiable_projection, discard_value_projection,
     erased_object_constructor_projection, external_crate_associated_path_projection,
-    external_crate_path_projection, facade_receiver_method_call_projection, file_exists_projection,
-    function_call_projection, java_class_literal_path_projection,
+    external_crate_path_projection, external_facade_rust_path_projection, facade_method_name,
+    file_exists_projection, function_call_projection, java_class_literal_path_projection,
     java_class_static_path_projection, java_iterator_from_collection_projection,
     java_list_hash_code_projection, java_map_hash_code_projection, java_set_hash_code_projection,
     java_value_hash_code_projection, len_i32_projection, math_abs_projection,
@@ -32,8 +32,8 @@ use crate::coercion::{
     primitive_f64_binary_method_projection, primitive_f64_method_projection,
     primitive_hash_code_projection, primitive_is_nan_projection, primitive_number_value_projection,
     primitive_parse_projection, receiver_method_call_projection,
-    receiver_method_call_projection_exact, self_associated_path_projection,
-    sequence_index_of_projection, string_char_at_projection,
+    receiver_method_call_projection_exact, rust_type_associated_path_projection,
+    self_associated_path_projection, sequence_index_of_projection, string_char_at_projection,
     string_compare_to_ignore_case_projection, string_compare_to_projection,
     string_equals_ignore_case_projection, string_format_projection,
     string_from_byte_range_projection, string_from_bytes_projection, string_get_bytes_projection,
@@ -51,7 +51,7 @@ use crate::representation::RepresentationPlan;
 use crate::rust_ir::RustExpr;
 use crate::shape_projection::shape_is_erased_object_boundary;
 use crate::slot_render::{rust_name_for_java_named_type, rust_type_for_slot_with_facts};
-use crate::stream_lowering::{StreamLambdaValue, emit_stream_lambda_body};
+use crate::stream_lowering::{StreamLambdaValue, emit_stream_lambda_body_expr};
 
 pub fn apply_call_target(
     target: &CallTargetPlan<'_>,
@@ -192,35 +192,15 @@ fn apply_external_facade_receiver_call(
             let mut all_args = Vec::with_capacity(args.len() + 1);
             all_args.push(receiver);
             all_args.extend(args);
-            function_call_projection(external_facade_rust_path_expr(rust_path), all_args)
+            function_call_projection(external_facade_rust_path_projection(rust_path), all_args)
         }
         ReceiverAbi::AssociatedFunction => {
-            function_call_projection(external_facade_rust_path_expr(rust_path), args)
+            function_call_projection(external_facade_rust_path_projection(rust_path), args)
         }
         ReceiverAbi::BorrowedSelf | ReceiverAbi::MutBorrowedSelf | ReceiverAbi::OwnedSelf => {
-            facade_receiver_method_call_projection(receiver, rust_path, args)
+            receiver_method_call_projection(receiver, &facade_method_name(rust_path), args)
         }
     }
-}
-
-fn external_facade_rust_path_expr(rust_path: &str) -> RustExpr {
-    if rust_path
-        .split("::")
-        .all(|segment| rust_path_segment_is_plain_ident(segment))
-    {
-        RustExpr::path(rust_path.split("::"))
-    } else {
-        RustExpr::Raw(rust_path.to_string())
-    }
-}
-
-fn rust_path_segment_is_plain_ident(segment: &str) -> bool {
-    let mut chars = segment.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first == '_' || first.is_ascii_alphabetic())
-        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn apply_super_boundary_call(return_type: &JavaType, propagates_result: bool) -> RustExpr {
@@ -363,11 +343,7 @@ fn apply_native_java_instance_method(
             let Some(other) = args.into_iter().next() else {
                 return compile_error_call("Java equals requires one argument");
             };
-            RustExpr::Binary {
-                op: "==".to_string(),
-                left: Box::new(receiver),
-                right: Box::new(other),
-            }
+            objects_equals_projection(receiver, other)
         }
     }
 }
@@ -888,8 +864,8 @@ pub fn apply_collection_remove_if(receiver: RustExpr, predicate: &Expr) -> Optio
     let LambdaBody::Expr(body) = body else {
         return None;
     };
-    let predicate = emit_stream_lambda_body(body, param, StreamLambdaValue::BorrowedItem)?;
-    Some(collection_remove_if_projection(receiver, param, &predicate))
+    let predicate = emit_stream_lambda_body_expr(body, param, StreamLambdaValue::BorrowedItem)?;
+    Some(collection_remove_if_projection(receiver, param, predicate))
 }
 
 fn apply_native_collection_method(
@@ -960,7 +936,7 @@ pub fn apply_native_collection_extend(receiver: RustExpr, arg: RustExpr) -> Rust
 pub fn apply_class_literal_token(ty: &JavaType, facts: &FactSet) -> RustExpr {
     let plan = crate::stdlib::class_literal_token_plan(ty, facts);
     function_call_projection(
-        java_class_literal_path_projection(&plan.rust_type),
+        java_class_literal_path_projection(plan.rust_type),
         vec![RustExpr::Literal(format!("{:?}", plan.java_name))],
     )
 }
@@ -1011,7 +987,6 @@ fn apply_new_target_with_optional_representations(
             args,
         );
     }
-    let owner_type = constructor_owner_path_type(&target.owner_shape);
     if target.rust_name == "new"
         && args.len() == 1
         && boxed_primitive_constructor_owner(&target.owner_shape.java_ty)
@@ -1030,27 +1005,52 @@ fn apply_new_target_with_optional_representations(
     {
         return erased_object_constructor_projection(args);
     }
-    if owner_type == "String" && target.rust_name == "new" && matches!(args.len(), 1 | 2) {
+    if constructor_owner_is_string(&target.owner_shape.java_ty)
+        && target.rust_name == "new"
+        && matches!(args.len(), 1 | 2)
+    {
         return string_from_bytes_constructor_expr(args);
     }
-    if owner_type == "String" && target.rust_name == "new" && matches!(args.len(), 3 | 4) {
+    if constructor_owner_is_string(&target.owner_shape.java_ty)
+        && target.rust_name == "new"
+        && matches!(args.len(), 3 | 4)
+    {
         return string_from_byte_range_constructor_expr(args);
     }
     function_call_projection(
-        owner_associated_path_projection(&owner_type, &target.rust_name),
+        constructor_owner_associated_path_expr(&target.owner_shape, &target.rust_name, facts),
         args,
     )
 }
 
-fn constructor_owner_path_type(owner_shape: &crate::slot_shape::RustSlotShape) -> String {
+fn constructor_owner_associated_path_expr(
+    owner_shape: &crate::slot_shape::RustSlotShape,
+    member: &str,
+    facts: &FactSet,
+) -> RustExpr {
     match &owner_shape.java_ty {
-        JavaType::Named { name, .. } | JavaType::Unknown(name) => rust_name_for_java_named_type(
-            &crate::stdlib::canonical_external_receiver_type_key(name),
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => RustExpr::path([
+            rust_name_for_java_named_type(&crate::stdlib::canonical_external_receiver_type_key(
+                name,
+            )),
+            member.to_string(),
+        ]),
+        _ => rust_type_associated_path_projection(
+            rust_type_for_slot_with_facts(owner_shape, facts),
+            member,
         ),
-        _ => crate::emit::emit_type(&rust_type_for_slot_with_facts(
-            owner_shape,
-            &FactSet::default(),
-        )),
+    }
+}
+
+fn constructor_owner_is_string(java_ty: &JavaType) -> bool {
+    match java_ty {
+        JavaType::String => true,
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+            crate::stdlib::canonical_external_receiver_type_key(name) == "String"
+        }
+        JavaType::Primitive(_) | JavaType::Void | JavaType::Array(_) | JavaType::Wildcard(_) => {
+            false
+        }
     }
 }
 

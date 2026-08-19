@@ -1,6 +1,5 @@
 use crate::array_plan::ArrayExprPlan;
-use crate::coercion::{BorrowProjectionUse, ensure_borrow_projection, rendered_vec_macro_body};
-use crate::emit::emit_expr;
+use crate::coercion::{BorrowProjectionUse, ensure_borrow_projection, raw_receiver_projection};
 use crate::java_ir::{JavaType, PrimitiveType};
 use crate::rust_ir::{RustExpr, RustStmt};
 use crate::slot_shape::{OwnershipShape, RustSlotShape};
@@ -26,7 +25,7 @@ pub fn render_array_expr_with_object_default(
     match plan {
         ArrayExprPlan::Creation { element_type, .. } => {
             let default = default_array_element_expr(element_type)
-                .or(element_has_default.then_some(OBJECT_ELEMENT_DEFAULT));
+                .or_else(|| element_has_default.then(object_element_default_expr));
             if children.len() == 2
                 && let Some(default) = default
             {
@@ -67,21 +66,21 @@ pub fn render_array_expr_with_object_default(
     }
 }
 
-pub fn array2_from_elem_projection(rows: RustExpr, cols: RustExpr, default: &str) -> RustExpr {
+pub fn array2_from_elem_projection(rows: RustExpr, cols: RustExpr, default: RustExpr) -> RustExpr {
     RustExpr::Call {
         function: Box::new(RustExpr::path(["ndarray", "Array2", "from_elem"])),
         args: vec![
             RustExpr::Tuple(vec![
                 RustExpr::Cast {
-                    expr: Box::new(rows),
+                    expr: Box::new(parenthesize_raw_array_dimension_cast_operand(rows)),
                     ty: "usize".to_string(),
                 },
                 RustExpr::Cast {
-                    expr: Box::new(cols),
+                    expr: Box::new(parenthesize_raw_array_dimension_cast_operand(cols)),
                     ty: "usize".to_string(),
                 },
             ]),
-            RustExpr::Raw(default.to_string()),
+            default,
         ],
     }
 }
@@ -93,20 +92,20 @@ pub fn array2_from_elem_projection(rows: RustExpr, cols: RustExpr, default: &str
 pub fn nested_array2_from_elem_projection(
     rows: RustExpr,
     cols: RustExpr,
-    default: &str,
+    default: RustExpr,
 ) -> RustExpr {
     RustExpr::VecRepeat {
         value: Box::new(RustExpr::VecRepeat {
-            value: Box::new(RustExpr::Raw(default.to_string())),
+            value: Box::new(default),
             len: Box::new(array_dimension_len_projection(cols)),
         }),
         len: Box::new(array_dimension_len_projection(rows)),
     }
 }
 
-pub fn array_from_elem_projection(len: RustExpr, default: &str) -> RustExpr {
+pub fn array_from_elem_projection(len: RustExpr, default: RustExpr) -> RustExpr {
     RustExpr::VecRepeat {
-        value: Box::new(RustExpr::Raw(default.to_string())),
+        value: Box::new(default),
         len: Box::new(array_dimension_len_projection(len)),
     }
 }
@@ -115,21 +114,15 @@ pub fn java_array_creation_fallback_projection(
     element_type: &JavaType,
     dimensions: &[RustExpr],
 ) -> RustExpr {
-    let dims = dimensions
-        .iter()
-        .map(emit_expr)
-        .collect::<Vec<_>>()
-        .join("][");
     // The marker text is what `count_invalid_patterns` looks for. It used to
     // read "Java array creation", which that detector does not match, so an
     // allocation that silently comes out with length 0 — every index into it
     // panics — counted as a clean translation. Both sides now read one
     // constant, so the text cannot drift again.
-    RustExpr::Raw(format!(
-        "/* {}: {:?}[{dims}] */ Vec::new()",
-        crate::output_markers::UNSUPPORTED_JAVA_ARRAY_CREATION,
-        element_type
-    ))
+    RustExpr::UnsupportedJavaArrayCreation {
+        element_type: format!("{element_type:?}"),
+        dimensions: dimensions.to_vec(),
+    }
 }
 
 pub fn borrowed_array2_temporary_for_slot(
@@ -179,15 +172,7 @@ pub fn array2_index_projection(array: RustExpr, row: RustExpr, col: RustExpr) ->
 }
 
 fn parenthesize_raw_postfix_receiver(expr: RustExpr) -> RustExpr {
-    let RustExpr::Raw(raw) = expr else {
-        return expr;
-    };
-    let trimmed = raw.trim();
-    if raw_needs_postfix_receiver_parentheses(trimmed) {
-        RustExpr::Raw(format!("({trimmed})"))
-    } else {
-        RustExpr::Raw(raw)
-    }
+    raw_receiver_projection(expr, raw_needs_postfix_receiver_parentheses)
 }
 
 fn raw_needs_postfix_receiver_parentheses(raw: &str) -> bool {
@@ -247,29 +232,21 @@ fn raw_needs_postfix_receiver_parentheses(raw: &str) -> bool {
 }
 
 pub fn array2_row_mut_assign_stmt(array: RustExpr, index: RustExpr, value: RustExpr) -> RustStmt {
-    if !matches!(array.unshaped(), RustExpr::Raw(_)) {
-        return RustStmt::Expr(RustExpr::MethodCall {
-            receiver: Box::new(RustExpr::MethodCall {
-                receiver: Box::new(array),
-                method: "row_mut".to_string(),
-                args: vec![index],
+    RustStmt::Expr(RustExpr::MethodCall {
+        receiver: Box::new(RustExpr::MethodCall {
+            receiver: Box::new(parenthesize_raw_postfix_receiver(array)),
+            method: "row_mut".to_string(),
+            args: vec![index],
+        }),
+        method: "assign".to_string(),
+        args: vec![RustExpr::Unary {
+            op: "&".to_string(),
+            expr: Box::new(RustExpr::Call {
+                function: Box::new(RustExpr::path(["ndarray", "ArrayView1", "from"])),
+                args: vec![value],
             }),
-            method: "assign".to_string(),
-            args: vec![RustExpr::Unary {
-                op: "&".to_string(),
-                expr: Box::new(RustExpr::Call {
-                    function: Box::new(RustExpr::path(["ndarray", "ArrayView1", "from"])),
-                    args: vec![value],
-                }),
-            }],
-        });
-    }
-    RustStmt::Raw(format!(
-        "{}.row_mut({}).assign(&ndarray::ArrayView1::from({}));",
-        emit_expr(&array),
-        emit_expr(&index),
-        emit_expr(&value)
-    ))
+        }],
+    })
 }
 
 pub fn ragged_array_outer_creation_projection(len: RustExpr) -> RustExpr {
@@ -284,82 +261,65 @@ pub fn ragged_array_outer_creation_projection(len: RustExpr) -> RustExpr {
 
 fn array_dimension_len_projection(expr: RustExpr) -> RustExpr {
     RustExpr::Cast {
-        expr: Box::new(expr),
+        expr: Box::new(parenthesize_raw_array_dimension_cast_operand(expr)),
         ty: "usize".to_string(),
     }
 }
 
+fn parenthesize_raw_array_dimension_cast_operand(expr: RustExpr) -> RustExpr {
+    raw_receiver_projection(expr, raw_needs_postfix_receiver_parentheses)
+}
+
 fn render_array_initializer(children: Vec<RustExpr>) -> RustExpr {
-    let children = children
-        .into_iter()
-        .filter(|child| !is_comment_only_expr(child))
-        .collect::<Vec<_>>();
     RustExpr::VecLiteral(children)
 }
 
 fn render_array2_initializer(children: &[RustExpr]) -> Option<RustExpr> {
-    let children = children
-        .iter()
-        .filter(|child| !is_comment_only_expr(child))
-        .collect::<Vec<_>>();
-    if children.is_empty() {
-        return None;
-    }
     let rows = children
         .iter()
-        .map(|child| rendered_vec_macro_body(&emit_expr(child)))
+        .map(array2_initializer_row_items)
         .collect::<Option<Vec<_>>>()?;
-    let width = split_top_level_commas(rows.first()?).len();
-    if width == 0
-        || rows
-            .iter()
-            .any(|row| split_top_level_commas(row).len() != width)
-    {
+    if rows.is_empty() {
         return None;
     }
-    let rows = rows
-        .iter()
-        .map(|row| format!("[{}]", row.trim()))
-        .collect::<Vec<_>>()
-        .join(", ");
-    Some(RustExpr::Raw(format!("ndarray::arr2(&[{rows}])")))
-}
-
-fn is_comment_only_expr(expr: &RustExpr) -> bool {
-    emit_expr(expr).trim_start().starts_with("//")
-}
-
-fn split_top_level_commas(input: &str) -> Vec<&str> {
-    let mut parts = Vec::new();
-    let mut depth = 0usize;
-    let mut start = 0usize;
-    for (index, ch) in input.char_indices() {
-        match ch {
-            '(' | '[' | '{' | '<' => depth += 1,
-            ')' | ']' | '}' | '>' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
-                parts.push(input[start..index].trim());
-                start = index + ch.len_utf8();
-            }
-            _ => {}
-        }
+    let width = rows.first()?.len();
+    if width == 0 || rows.iter().any(|row| row.len() != width) {
+        return None;
     }
-    parts.push(input[start..].trim());
-    parts.into_iter().filter(|part| !part.is_empty()).collect()
+    Some(RustExpr::Call {
+        function: Box::new(RustExpr::path(["ndarray", "arr2"])),
+        args: vec![RustExpr::Unary {
+            op: "&".to_string(),
+            expr: Box::new(RustExpr::ArrayLiteral(
+                rows.into_iter().map(RustExpr::ArrayLiteral).collect(),
+            )),
+        }],
+    })
 }
 
-pub fn default_array_element_expr(element_type: &JavaType) -> Option<&'static str> {
+fn array2_initializer_row_items(row: &RustExpr) -> Option<Vec<RustExpr>> {
+    match row {
+        RustExpr::VecLiteral(items) | RustExpr::ArrayLiteral(items) => Some(items.clone()),
+        RustExpr::Shaped { expr, .. } => array2_initializer_row_items(expr),
+        _ => None,
+    }
+}
+
+pub fn default_array_element_expr(element_type: &JavaType) -> Option<RustExpr> {
     match element_type {
-        JavaType::Primitive(PrimitiveType::Boolean) => Some("false"),
+        JavaType::Primitive(PrimitiveType::Boolean) => Some(RustExpr::Literal("false".to_string())),
         JavaType::Primitive(PrimitiveType::Byte)
         | JavaType::Primitive(PrimitiveType::Short)
         | JavaType::Primitive(PrimitiveType::Int)
-        | JavaType::Primitive(PrimitiveType::Long) => Some("0"),
+        | JavaType::Primitive(PrimitiveType::Long) => Some(RustExpr::Literal("0".to_string())),
         JavaType::Primitive(PrimitiveType::Float) | JavaType::Primitive(PrimitiveType::Double) => {
-            Some("0.0")
+            Some(RustExpr::Literal("0.0".to_string()))
         }
-        JavaType::Primitive(PrimitiveType::Char) => Some("'\\0'"),
-        JavaType::String => Some("String::new()"),
+        JavaType::Primitive(PrimitiveType::Char) => Some(RustExpr::Literal("'\\0'".to_string())),
+        JavaType::String => Some(RustExpr::Call {
+            function: Box::new(RustExpr::path(["String", "new"])),
+            args: Vec::new(),
+        }),
         _ => None,
     }
 }
@@ -376,18 +336,24 @@ pub fn default_array_element_expr(element_type: &JavaType) -> Option<&'static st
 /// throws `NullPointerException`. Option 1 (`Vec<Option<T>>`) is the faithful
 /// end state and is a slot-shape change; this is strictly better than an
 /// allocation of the wrong length.
-const OBJECT_ELEMENT_DEFAULT: &str = "Default::default()";
+fn object_element_default_expr() -> RustExpr {
+    RustExpr::Call {
+        function: Box::new(RustExpr::path(["Default", "default"])),
+        args: Vec::new(),
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::emit::emit_expr;
 
     #[test]
     fn array2_from_rows_projection_owns_static_matrix_handoff_spelling() {
         let structured_from_elem = array2_from_elem_projection(
             RustExpr::Var("rows".to_string()),
             RustExpr::Var("cols".to_string()),
-            "0",
+            RustExpr::Literal("0".to_string()),
         );
         assert_eq!(
             emit_expr(&structured_from_elem),
@@ -397,7 +363,7 @@ mod tests {
         let structured_from_elem_with_raw_dimension = array2_from_elem_projection(
             RustExpr::Raw("rows".to_string()),
             RustExpr::Var("cols".to_string()),
-            "0",
+            RustExpr::Literal("0".to_string()),
         );
         assert_eq!(
             emit_expr(&structured_from_elem_with_raw_dimension),
@@ -407,23 +373,132 @@ mod tests {
             structured_from_elem_with_raw_dimension,
             RustExpr::Call { .. }
         ));
-        let structured_vec_repeat =
-            array_from_elem_projection(RustExpr::Var("len".to_string()), "0");
+        let structured_from_elem_with_raw_binary_dimension = array2_from_elem_projection(
+            RustExpr::Raw("rows + extra".to_string()),
+            RustExpr::Raw("cols + extra".to_string()),
+            RustExpr::Literal("0".to_string()),
+        );
+        assert_eq!(
+            emit_expr(&structured_from_elem_with_raw_binary_dimension),
+            "ndarray::Array2::from_elem(((rows + extra) as usize, (cols + extra) as usize), 0)"
+        );
+        let structured_vec_repeat = array_from_elem_projection(
+            RustExpr::Var("len".to_string()),
+            RustExpr::Literal("0".to_string()),
+        );
         assert_eq!(emit_expr(&structured_vec_repeat), "vec![0; len as usize]");
-        assert!(matches!(structured_vec_repeat, RustExpr::VecRepeat { .. }));
+        assert!(matches!(
+            structured_vec_repeat,
+            RustExpr::VecRepeat { value, .. } if matches!(*value, RustExpr::Literal(_))
+        ));
+        let structured_vec_repeat_with_raw_binary_dimension = array_from_elem_projection(
+            RustExpr::Raw("len + extra".to_string()),
+            RustExpr::Literal("0".to_string()),
+        );
+        assert_eq!(
+            emit_expr(&structured_vec_repeat_with_raw_binary_dimension),
+            "vec![0; (len + extra) as usize]"
+        );
+        let fallback = java_array_creation_fallback_projection(
+            &JavaType::Unknown("Node".to_string()),
+            &[
+                RustExpr::Var("len".to_string()),
+                RustExpr::Binary {
+                    op: "+".to_string(),
+                    left: Box::new(RustExpr::Var("left".to_string())),
+                    right: Box::new(RustExpr::Var("right".to_string())),
+                },
+            ],
+        );
+        let rendered_fallback = emit_expr(&fallback);
+        assert!(rendered_fallback.contains(crate::output_markers::UNSUPPORTED_JAVA_ARRAY_CREATION));
+        assert!(rendered_fallback.contains("Vec::new()"));
+        assert!(matches!(
+            fallback,
+            RustExpr::UnsupportedJavaArrayCreation { dimensions, .. }
+                if matches!(
+                    dimensions.as_slice(),
+                    [RustExpr::Var(name), RustExpr::Binary { op, .. }]
+                        if name == "len" && op == "+"
+                )
+        ));
         let structured_nested_repeat = nested_array2_from_elem_projection(
             RustExpr::Var("rows".to_string()),
             RustExpr::Var("cols".to_string()),
-            "String::new()",
+            RustExpr::Call {
+                function: Box::new(RustExpr::path(["String", "new"])),
+                args: Vec::new(),
+            },
         );
         assert_eq!(
             emit_expr(&structured_nested_repeat),
             "vec![vec![String::new(); cols as usize]; rows as usize]"
         );
-        assert!(matches!(
-            structured_nested_repeat,
-            RustExpr::VecRepeat { .. }
-        ));
+        assert_eq!(
+            emit_expr(&nested_array2_from_elem_projection(
+                RustExpr::Raw("rows + extra".to_string()),
+                RustExpr::Raw("cols + extra".to_string()),
+                RustExpr::Call {
+                    function: Box::new(RustExpr::path(["String", "new"])),
+                    args: Vec::new(),
+                },
+            )),
+            "vec![vec![String::new(); (cols + extra) as usize]; (rows + extra) as usize]"
+        );
+        let RustExpr::VecRepeat { value, .. } = structured_nested_repeat else {
+            panic!("nested array default should be an outer VecRepeat");
+        };
+        let RustExpr::VecRepeat { value, .. } = *value else {
+            panic!("nested array default should be an inner VecRepeat");
+        };
+        assert!(matches!(*value, RustExpr::Call { .. }));
+
+        let array2_initializer = render_array2_initializer(&[
+            RustExpr::VecLiteral(vec![
+                RustExpr::Literal("1f64".to_string()),
+                RustExpr::Binary {
+                    op: "+".to_string(),
+                    left: Box::new(RustExpr::Literal("1f64".to_string())),
+                    right: Box::new(RustExpr::Literal("1f64".to_string())),
+                },
+            ]),
+            RustExpr::ArrayLiteral(vec![
+                RustExpr::Call {
+                    function: Box::new(RustExpr::Var("third".to_string())),
+                    args: Vec::new(),
+                },
+                RustExpr::Literal("4f64".to_string()),
+            ]),
+        ])
+        .expect("rectangular structural rows should lower to ndarray::arr2");
+        assert_eq!(
+            emit_expr(&array2_initializer),
+            "ndarray::arr2(&[[1f64, 1f64 + 1f64], [third(), 4f64]])"
+        );
+        assert!(matches!(array2_initializer, RustExpr::Call { .. }));
+        assert!(
+            render_array2_initializer(&[
+                RustExpr::VecLiteral(vec![RustExpr::Literal("1".to_string())]),
+                RustExpr::VecLiteral(vec![
+                    RustExpr::Literal("2".to_string()),
+                    RustExpr::Literal("3".to_string()),
+                ]),
+            ])
+            .is_none(),
+            "ragged structural rows should not lower to ndarray::arr2"
+        );
+        assert!(
+            render_array2_initializer(&[
+                RustExpr::Raw("// skipped".to_string()),
+                RustExpr::VecLiteral(vec![RustExpr::Literal("1".to_string())]),
+            ])
+            .is_none(),
+            "comment-only raw expressions should not be treated as nonsemantic array rows"
+        );
+        assert!(
+            render_array2_initializer(&[RustExpr::Raw("vec![1, 2]".to_string())]).is_none(),
+            "raw vec spelling should not be parsed back into ndarray::arr2"
+        );
 
         let raw_rows_borrow = array2_from_rows_projection(
             RustExpr::Raw("Self::COEF".to_string()),
@@ -515,7 +590,32 @@ mod tests {
             emit_expr(&compound_raw_receiver_index),
             "(left + right)[[row as usize, col as usize]]"
         );
-        assert!(matches!(compound_raw_receiver_index, RustExpr::Index(_, _)));
+        assert!(matches!(
+            compound_raw_receiver_index,
+            RustExpr::Index(receiver, _)
+                if matches!(receiver.as_ref(), RustExpr::Grouped(grouped)
+                    if matches!(grouped.as_ref(), RustExpr::Raw(raw) if raw == "left + right"))
+        ));
+        let raw_cast_receiver_index = array2_index_projection(
+            RustExpr::Raw("values as ndarray::Array2<i32>".to_string()),
+            RustExpr::Var("row".to_string()),
+            RustExpr::Var("col".to_string()),
+        );
+        assert_eq!(
+            emit_expr(&raw_cast_receiver_index),
+            "(values as ndarray::Array2<i32>)[[row, col]]"
+        );
+        assert!(matches!(
+            raw_cast_receiver_index,
+            RustExpr::Index(receiver, _)
+                if matches!(receiver.as_ref(), RustExpr::Grouped(grouped)
+                    if matches!(
+                        grouped.as_ref(),
+                        RustExpr::Cast { expr, ty }
+                            if ty == "ndarray::Array2<i32>"
+                                && matches!(expr.as_ref(), RustExpr::Var(name) if name == "values")
+                    ))
+        ));
         let structured_row_assign_with_raw_index = array2_row_mut_assign_stmt(
             RustExpr::Var("values".to_string()),
             RustExpr::Raw("row as usize".to_string()),
@@ -563,6 +663,27 @@ mod tests {
         assert!(matches!(
             structured_row_assign_expr,
             RustExpr::MethodCall { .. }
+        ));
+        let structured_row_assign_with_raw_receiver = array2_row_mut_assign_stmt(
+            RustExpr::Raw("left + right".to_string()),
+            RustExpr::Var("row".to_string()),
+            RustExpr::Var("replacement".to_string()),
+        );
+        let RustStmt::Expr(structured_row_assign_with_raw_receiver_expr) =
+            structured_row_assign_with_raw_receiver
+        else {
+            panic!("expected structured row assignment expression for raw receiver");
+        };
+        assert_eq!(
+            emit_expr(&structured_row_assign_with_raw_receiver_expr),
+            "(left + right).row_mut(row).assign(&ndarray::ArrayView1::from(replacement))"
+        );
+        assert!(matches!(
+            structured_row_assign_with_raw_receiver_expr,
+            RustExpr::MethodCall { receiver, .. }
+                if matches!(receiver.as_ref(), RustExpr::MethodCall { receiver, .. }
+                    if matches!(receiver.as_ref(), RustExpr::Grouped(grouped)
+                        if matches!(grouped.as_ref(), RustExpr::Raw(raw) if raw == "left + right")))
         ));
         assert_eq!(
             emit_expr(&ragged_array_outer_creation_projection(RustExpr::Raw(

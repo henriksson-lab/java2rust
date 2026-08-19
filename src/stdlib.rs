@@ -12,7 +12,8 @@ use crate::java_ir::{
     BinaryOp, Block, Expr, FieldDecl, JavaType, Literal, Member, MethodDecl, Modifier,
     PrimitiveType, Program, Stmt, SwitchLabel, TypeDecl, TypeKind, WildcardBound,
 };
-use crate::representation::{ObjectRepresentation, RepresentationPlan};
+use crate::representation::{ObjectRepresentation, RepresentationPlan, RepresentationProvenance};
+use crate::rust_ir::RustType;
 use crate::shape_projection::{
     apply_borrowed_sequence_content_projection, apply_borrowed_string_content_projection,
 };
@@ -4798,17 +4799,17 @@ fn is_known_java_platform_output_stream_receiver(receiver: &str) -> bool {
     )
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ClassLiteralTokenPlan {
     pub java_name: String,
-    pub rust_type: String,
+    pub rust_type: RustType,
 }
 
 pub fn class_literal_token_plan(ty: &JavaType, facts: &FactSet) -> ClassLiteralTokenPlan {
     let shape = RustSlotShape::conservative(ty.clone());
     ClassLiteralTokenPlan {
         java_name: class_literal_java_name(ty),
-        rust_type: crate::emit::emit_type(&rust_type_for_slot_with_facts(&shape, facts)),
+        rust_type: rust_type_for_slot_with_facts(&shape, facts),
     }
 }
 
@@ -7125,7 +7126,12 @@ pub fn external_api_facade_support_items_with_local_type_program(
         source_summary_type_program,
         &source_summary_types,
     );
-    support.add_emitted_external_super_method_surfaces(facts, program, &used_calls);
+    support.add_emitted_external_super_method_surfaces(
+        facts,
+        representations,
+        program,
+        &used_calls,
+    );
     support.add_inherited_support_field_types(program, local_type_program, &emitted_local_types);
     support.add_external_inherited_field_types(program, facts);
     support.add_external_inherited_static_final_surfaces(program, facts);
@@ -7173,7 +7179,12 @@ pub fn external_api_facade_support_items_with_local_type_program(
         source_summary_type_program,
         &source_summary_types,
     );
-    support.add_emitted_external_super_method_surfaces(facts, program, &used_calls);
+    support.add_emitted_external_super_method_surfaces(
+        facts,
+        representations,
+        program,
+        &used_calls,
+    );
     support.add_imported_static_owner_calls(
         facts,
         &imported_static_owner_calls,
@@ -8415,12 +8426,17 @@ impl ExternalApiFacadeSupport {
     fn add_emitted_external_super_method_surfaces(
         &mut self,
         facts: &FactSet,
+        representations: &RepresentationPlan,
         program: &Program,
         used_calls: &BTreeMap<String, BTreeSet<usize>>,
     ) {
         for ty in &program.types {
             self.add_emitted_external_super_method_surfaces_for_type(
-                facts, ty, program, used_calls,
+                facts,
+                representations,
+                ty,
+                program,
+                used_calls,
             );
         }
     }
@@ -8428,6 +8444,7 @@ impl ExternalApiFacadeSupport {
     fn add_emitted_external_super_method_surfaces_for_type(
         &mut self,
         facts: &FactSet,
+        representations: &RepresentationPlan,
         ty: &TypeDecl,
         program: &Program,
         used_calls: &BTreeMap<String, BTreeSet<usize>>,
@@ -8468,7 +8485,7 @@ impl ExternalApiFacadeSupport {
                     continue;
                 }
                 let (return_rust, unmodelled_return) =
-                    self.external_inherited_method_return(facts, &inherited);
+                    self.external_inherited_method_return(facts, representations, &inherited);
                 let method_body = if unmodelled_return {
                     external_facade_unmodelled_method_with_facts(
                         facts,
@@ -8529,7 +8546,7 @@ impl ExternalApiFacadeSupport {
                     continue;
                 }
                 let (return_rust, unmodelled_return) =
-                    self.external_inherited_method_return(facts, &inherited);
+                    self.external_inherited_method_return(facts, representations, &inherited);
                 let method_body = if unmodelled_return {
                     external_facade_unmodelled_method_with_facts(
                         facts,
@@ -8566,7 +8583,11 @@ impl ExternalApiFacadeSupport {
         for member in &ty.members {
             if let Member::Type(nested) = member {
                 self.add_emitted_external_super_method_surfaces_for_type(
-                    facts, nested, program, used_calls,
+                    facts,
+                    representations,
+                    nested,
+                    program,
+                    used_calls,
                 );
             }
         }
@@ -8575,13 +8596,15 @@ impl ExternalApiFacadeSupport {
     fn external_inherited_method_return(
         &mut self,
         facts: &FactSet,
+        representations: &RepresentationPlan,
         inherited: &crate::inherited_members::ExternalInheritedInstanceMethod,
     ) -> (String, bool) {
         if let Some(return_type) = &inherited.fact.return_type {
             self.add_java_type(return_type);
             return (
-                external_facade_method_return_type_with_facts(
+                external_facade_method_return_type_with_facts_and_representations(
                     facts,
+                    representations,
                     Some(&inherited.declaring_type),
                     &inherited.method_name,
                     Some(inherited.arg_count),
@@ -13971,7 +13994,9 @@ fn external_facade_return_type_with_representations(
     if let Some(rust_type) = external_opaque_final_facade_return_type(java_type, facts) {
         return rust_type;
     }
-    if let Some(dispatch_type) = representation_dispatch_return_type(java_type, representations) {
+    if let Some(dispatch_type) =
+        external_facade_representation_dispatch_return_type(java_type, representations)
+    {
         return dispatch_type;
     }
     if let Some(rust_type) = external_typed_erased_facade_return_type(java_type, facts) {
@@ -13995,9 +14020,8 @@ fn external_facade_return_type_with_representations(
                 })
                 .unwrap_or_else(|| "Box<dyn std::any::Any>".to_string());
             if element_ty.is_some_and(|arg| {
-                representation_dispatch_return_type(arg, representations).is_some()
-            }) || crate::slot_render::java_set_uses_hash_free_carrier(java_type, facts)
-            {
+                external_facade_representation_dispatch_return_type(arg, representations).is_some()
+            }) {
                 format!("Vec<{element}>")
             } else {
                 format!("std::collections::HashSet<{element}>")
@@ -14067,6 +14091,31 @@ fn representation_dispatch_return_type(
         DispatchShape::BoxedDynTrait { trait_name } => Some(format!("Box<dyn {trait_name}>")),
         DispatchShape::DynTrait { trait_name } => Some(format!("dyn {trait_name}")),
         DispatchShape::Concrete => None,
+    }
+}
+
+fn external_facade_representation_dispatch_return_type(
+    java_type: &JavaType,
+    representations: &RepresentationPlan,
+) -> Option<String> {
+    let dispatch = representation_dispatch_return_type(java_type, representations)?;
+    let type_name = match java_type {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => name,
+        _ => return Some(dispatch),
+    };
+    let Some(representation) = representations.type_representation(type_name) else {
+        return Some(dispatch);
+    };
+    if dispatch == "Box<dyn std::any::Any>"
+        && matches!(
+            representation.provenance,
+            RepresentationProvenance::BuiltinExternalModel
+                | RepresentationProvenance::ConservativeFallback
+        )
+    {
+        None
+    } else {
+        Some(dispatch)
     }
 }
 
@@ -16038,9 +16087,18 @@ pub fn external_static_string_constant_support_items_with_context_programs_and_d
     // A name emitted as a type alias must not also get a placeholder struct.
     support_type_names.retain(|name| !emitted_alias_names.contains(name));
     for type_name in support_type_names {
-        support_items.push(crate::rust_ir::RustItem::Raw(format!(
-            "#[derive(Clone, Debug, Default)]\npub struct {type_name};"
-        )));
+        support_items.push(crate::rust_ir::RustItem::Struct(
+            crate::rust_ir::RustStruct {
+                name: type_name,
+                derives: vec![
+                    "Clone".to_string(),
+                    "Debug".to_string(),
+                    "Default".to_string(),
+                ],
+                fields: Vec::new(),
+                is_unit: true,
+            },
+        ));
     }
     support_items
 }

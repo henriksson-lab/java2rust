@@ -24,6 +24,10 @@ fn emit_struct(strukt: &RustStruct) -> String {
     if !strukt.derives.is_empty() {
         out.push_str(&format!("#[derive({})]\n", strukt.derives.join(", ")));
     }
+    if strukt.is_unit && strukt.fields.is_empty() {
+        out.push_str(&format!("pub struct {};\n", rust_ident(&strukt.name)));
+        return out;
+    }
     out.push_str(&format!("pub struct {} {{\n", rust_ident(&strukt.name)));
     for field in &strukt.fields {
         let vis = if field.is_pub {
@@ -133,6 +137,9 @@ fn emit_stmt(stmt: &RustStmt, indent: usize) -> String {
         RustStmt::Assign { target, value } => {
             format!("{pad}{} = {};\n", emit_expr(target), emit_expr(value))
         }
+        RustStmt::AssignOp { target, op, value } => {
+            format!("{pad}{} {op} {};\n", emit_expr(target), emit_expr(value))
+        }
         RustStmt::Expr(expr) if is_unit_expr(expr) => String::new(),
         RustStmt::Expr(expr) => format!("{pad}{};\n", emit_expr(expr)),
         RustStmt::Return(Some(expr)) if is_unit_expr(expr) => format!("{pad}return;\n"),
@@ -154,8 +161,55 @@ fn emit_stmt(stmt: &RustStmt, indent: usize) -> String {
             out.push('\n');
             out
         }
+        RustStmt::IfLet {
+            pattern,
+            expr,
+            then_body,
+            else_body,
+        } => {
+            let mut out = format!("{pad}if let {pattern} = {} {{\n", emit_expr(expr));
+            out.push_str(&emit_statements(then_body, indent + 1));
+            out.push_str(&format!("{pad}}}"));
+            if !else_body.is_empty() {
+                out.push_str(" else {\n");
+                out.push_str(&emit_statements(else_body, indent + 1));
+                out.push_str(&format!("{pad}}}"));
+            }
+            out.push('\n');
+            out
+        }
         RustStmt::While { condition, body } => {
             let mut out = format!("{pad}while {} {{\n", emit_expr(condition));
+            out.push_str(&emit_statements(body, indent + 1));
+            out.push_str(&format!("{pad}}}\n"));
+            out
+        }
+        RustStmt::WhileLet {
+            label,
+            pattern,
+            expr,
+            body,
+        } => {
+            let label = label
+                .as_ref()
+                .map(|l| format!("'{l}: "))
+                .unwrap_or_default();
+            let mut out = format!("{pad}{label}while let {pattern} = {} {{\n", emit_expr(expr));
+            out.push_str(&emit_statements(body, indent + 1));
+            out.push_str(&format!("{pad}}}\n"));
+            out
+        }
+        RustStmt::For {
+            label,
+            pattern,
+            iterable,
+            body,
+        } => {
+            let label = label
+                .as_ref()
+                .map(|l| format!("'{l}: "))
+                .unwrap_or_default();
+            let mut out = format!("{pad}{label}for {pattern} in {} {{\n", emit_expr(iterable));
             out.push_str(&emit_statements(body, indent + 1));
             out.push_str(&format!("{pad}}}\n"));
             out
@@ -173,6 +227,10 @@ fn emit_stmt(stmt: &RustStmt, indent: usize) -> String {
         RustStmt::Break(label) => {
             let label = label.as_ref().map(|l| format!(" '{l}")).unwrap_or_default();
             format!("{pad}break{label};\n")
+        }
+        RustStmt::BreakValue { label, value } => {
+            let label = label.as_ref().map(|l| format!(" '{l}")).unwrap_or_default();
+            format!("{pad}break{label} {};\n", emit_expr(value))
         }
         RustStmt::Continue(label) => {
             let label = label.as_ref().map(|l| format!(" '{l}")).unwrap_or_default();
@@ -214,6 +272,21 @@ fn emit_expr_prec(
             .map(|segment| rust_ident(segment))
             .collect::<Vec<_>>()
             .join("::"),
+        RustExpr::GenericPath { base, args, member } => {
+            let base = base
+                .iter()
+                .map(|segment| rust_ident(segment))
+                .collect::<Vec<_>>()
+                .join("::");
+            let args = args.iter().map(emit_type).collect::<Vec<_>>().join(", ");
+            match member {
+                Some(member) => format!("{base}::<{args}>::{}", rust_ident(member)),
+                None => format!("{base}::<{args}>"),
+            }
+        }
+        RustExpr::TypeAssociatedPath { ty, member } => {
+            format!("<{}>::{}", emit_type(ty), rust_ident(member))
+        }
         RustExpr::Field(receiver, field) => {
             format!(
                 "{}.{}",
@@ -233,6 +306,14 @@ fn emit_expr_prec(
             emit_expr_prec(left, binary_precedence(op), Some(op), ExprChildSide::Left),
             emit_expr_prec(right, binary_precedence(op), Some(op), ExprChildSide::Right)
         ),
+        RustExpr::Range {
+            start,
+            end,
+            inclusive,
+        } => {
+            let op = if *inclusive { "..=" } else { ".." };
+            format!("{}{}{}", emit_expr(start), op, emit_expr(end))
+        }
         RustExpr::Unary { op, expr } => {
             format!(
                 "{op}{}",
@@ -249,6 +330,10 @@ fn emit_expr_prec(
             let rendered = pin_integer_literal_before_cast(rendered, ty);
             format!("{rendered} as {ty}")
         }
+        RustExpr::Try(expr) => {
+            format!("{}?", emit_expr_prec(expr, 11, None, ExprChildSide::None))
+        }
+        RustExpr::Grouped(expr) => format!("({})", emit_expr(expr)),
         RustExpr::If {
             condition,
             then_expr,
@@ -283,6 +368,11 @@ fn emit_expr_prec(
             emit_expr_prec(function, 11, None, ExprChildSide::None),
             args.iter().map(emit_expr).collect::<Vec<_>>().join(", ")
         ),
+        RustExpr::MacroCall { macro_name, args } => format!(
+            "{}!({})",
+            rust_ident(macro_name),
+            args.iter().map(emit_expr).collect::<Vec<_>>().join(", ")
+        ),
         RustExpr::MethodCall {
             receiver,
             method,
@@ -293,6 +383,15 @@ fn emit_expr_prec(
             rust_ident(method),
             args.iter().map(emit_expr).collect::<Vec<_>>().join(", ")
         ),
+        RustExpr::Closure {
+            is_move,
+            params,
+            return_type,
+            body,
+        } => emit_closure_expr(*is_move, params, return_type.as_ref(), body),
+        RustExpr::Pattern(pattern) => emit_pattern(pattern),
+        RustExpr::Match { expr, arms } => emit_match_expr(expr, arms),
+        RustExpr::Block { stmts, tail } => emit_block_expr(stmts, tail.as_deref()),
         RustExpr::StructLit { name, fields } => {
             let fields = fields
                 .iter()
@@ -300,6 +399,26 @@ fn emit_expr_prec(
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("{} {{ {fields} }}", rust_struct_literal_path(name))
+        }
+        RustExpr::PostfixComment { expr, comment } => {
+            format!(
+                "{}{comment}",
+                emit_expr_prec(expr, 0, None, ExprChildSide::None)
+            )
+        }
+        RustExpr::UnsupportedJavaArrayCreation {
+            element_type,
+            dimensions,
+        } => {
+            let dims = dimensions
+                .iter()
+                .map(emit_expr)
+                .collect::<Vec<_>>()
+                .join("][");
+            format!(
+                "Vec::new() /* {}: {element_type}[{dims}] */",
+                crate::output_markers::UNSUPPORTED_JAVA_ARRAY_CREATION
+            )
         }
         RustExpr::MarkedBlock { marker, expr } => {
             format!("{{ {marker} {} }}", emit_expr(expr))
@@ -311,6 +430,208 @@ fn emit_expr_prec(
         format!("({rendered})")
     } else {
         rendered
+    }
+}
+
+fn emit_closure_expr(
+    is_move: bool,
+    params: &[crate::rust_ir::RustClosureParam],
+    return_type: Option<&RustType>,
+    body: &crate::rust_ir::RustClosureBody,
+) -> String {
+    let move_prefix = if is_move { "move " } else { "" };
+    let params = params
+        .iter()
+        .map(|param| match &param.ty {
+            Some(ty) => format!("{}: {ty}", param.pattern),
+            None => param.pattern.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    match return_type {
+        Some(return_type) => format!(
+            "{move_prefix}|{params}| -> {} {}",
+            emit_type(return_type),
+            emit_typed_closure_body(body)
+        ),
+        None => {
+            let body = match body {
+                crate::rust_ir::RustClosureBody::Expr(expr) => emit_expr(expr),
+            };
+            format!("{move_prefix}|{params}| {body}")
+        }
+    }
+}
+
+fn emit_typed_closure_body(body: &crate::rust_ir::RustClosureBody) -> String {
+    match body {
+        crate::rust_ir::RustClosureBody::Expr(expr) => match expr.as_ref() {
+            RustExpr::Block { stmts, tail } => emit_block_expr(stmts, tail.as_deref()),
+            _ => format!("{{ {} }}", emit_expr(expr)),
+        },
+    }
+}
+
+fn emit_pattern(pattern: &RustPattern) -> String {
+    match pattern {
+        RustPattern::TupleVariantWildcard {
+            enum_name,
+            variant_name,
+        } => {
+            format!("{enum_name}::{variant_name}(_)")
+        }
+    }
+}
+
+fn emit_match_expr(expr: &RustExpr, arms: &[crate::rust_ir::RustMatchArm]) -> String {
+    let arms = arms
+        .iter()
+        .map(|arm| format!("{} => {}", arm.pattern, emit_expr(&arm.body)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("match {} {{ {arms} }}", emit_expr(expr))
+}
+
+fn emit_block_expr(stmts: &[RustStmt], tail: Option<&RustExpr>) -> String {
+    let mut parts = stmts
+        .iter()
+        .map(emit_stmt_as_block_part)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if let Some(tail) = tail {
+        parts.push(emit_expr(tail));
+    }
+    if parts.is_empty() {
+        "{ }".to_string()
+    } else {
+        format!("{{ {} }}", parts.join(" "))
+    }
+}
+
+fn emit_stmt_as_block_part(stmt: &RustStmt) -> String {
+    match stmt {
+        RustStmt::Let {
+            mutable,
+            name,
+            ty,
+            value,
+        } => {
+            let mutability = if *mutable { "mut " } else { "" };
+            let ty = ty
+                .as_ref()
+                .map(|ty| format!(": {}", emit_type(ty)))
+                .unwrap_or_default();
+            let value = value
+                .as_ref()
+                .map(|expr| format!(" = {}", emit_expr(expr)))
+                .unwrap_or_default();
+            format!("let {mutability}{}{ty}{value};", rust_ident(name))
+        }
+        RustStmt::Assign { target, value } => {
+            format!("{} = {};", emit_expr(target), emit_expr(value))
+        }
+        RustStmt::AssignOp { target, op, value } => {
+            format!("{} {op} {};", emit_expr(target), emit_expr(value))
+        }
+        RustStmt::Expr(expr) if is_unit_expr(expr) => String::new(),
+        RustStmt::Expr(expr) => format!("{};", emit_expr(expr)),
+        RustStmt::Return(Some(expr)) if is_unit_expr(expr) => "return;".to_string(),
+        RustStmt::Return(Some(expr)) => format!("return {};", emit_expr(expr)),
+        RustStmt::Return(None) => "return;".to_string(),
+        RustStmt::BreakValue { label, value } => {
+            let label = label.as_ref().map(|l| format!(" '{l}")).unwrap_or_default();
+            format!("break{label} {};", emit_expr(value))
+        }
+        RustStmt::If {
+            condition,
+            then_body,
+            else_body,
+        } => {
+            let then_body = then_body
+                .iter()
+                .map(emit_stmt_as_block_part)
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let mut rendered = format!("if {} {{ {then_body} }}", emit_expr(condition));
+            if !else_body.is_empty() {
+                let else_body = else_body
+                    .iter()
+                    .map(emit_stmt_as_block_part)
+                    .filter(|part| !part.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                rendered.push_str(&format!(" else {{ {else_body} }}"));
+            }
+            rendered
+        }
+        RustStmt::IfLet {
+            pattern,
+            expr,
+            then_body,
+            else_body,
+        } => {
+            let then_body = then_body
+                .iter()
+                .map(emit_stmt_as_block_part)
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let mut rendered = format!("if let {pattern} = {} {{ {then_body} }}", emit_expr(expr));
+            if !else_body.is_empty() {
+                let else_body = else_body
+                    .iter()
+                    .map(emit_stmt_as_block_part)
+                    .filter(|part| !part.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                rendered.push_str(&format!(" else {{ {else_body} }}"));
+            }
+            rendered
+        }
+        RustStmt::WhileLet {
+            label,
+            pattern,
+            expr,
+            body,
+        } => {
+            let label = label
+                .as_ref()
+                .map(|l| format!("'{l}: "))
+                .unwrap_or_default();
+            let body = body
+                .iter()
+                .map(emit_stmt_as_block_part)
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!(
+                "{label}while let {pattern} = {} {{ {body} }}",
+                emit_expr(expr)
+            )
+        }
+        RustStmt::For {
+            label,
+            pattern,
+            iterable,
+            body,
+        } => {
+            let label = label
+                .as_ref()
+                .map(|l| format!("'{l}: "))
+                .unwrap_or_default();
+            let body = body
+                .iter()
+                .map(emit_stmt_as_block_part)
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!(
+                "{label}for {pattern} in {} {{ {body} }}",
+                emit_expr(iterable)
+            )
+        }
+        other => emit_stmt(other, 0).trim().to_string(),
     }
 }
 
@@ -494,6 +815,8 @@ fn strip_one_balanced_outer_parentheses(raw: &str) -> Option<&str> {
 fn is_unit_expr(expr: &RustExpr) -> bool {
     match expr {
         RustExpr::Shaped { expr, .. } => is_unit_expr(expr),
+        RustExpr::PostfixComment { expr, .. } => is_unit_expr(expr),
+        RustExpr::UnsupportedJavaArrayCreation { .. } => false,
         RustExpr::Raw(raw) => strip_redundant_outer_parentheses(raw) == "()",
         _ => false,
     }
@@ -502,25 +825,36 @@ fn is_unit_expr(expr: &RustExpr) -> bool {
 fn expr_precedence(expr: &RustExpr) -> u8 {
     match expr {
         RustExpr::Shaped { expr, .. } => expr_precedence(expr),
+        RustExpr::PostfixComment { expr, .. } => expr_precedence(expr),
+        RustExpr::UnsupportedJavaArrayCreation { .. } => 12,
         RustExpr::Binary { op, .. } => binary_precedence(op),
+        RustExpr::Range { .. } => 2,
         RustExpr::Cast { .. } => 6,
+        RustExpr::Try(_) => 11,
+        RustExpr::Grouped(_) => 12,
         RustExpr::Unary { .. } => 10,
         RustExpr::Field(_, _)
         | RustExpr::Index(_, _)
         | RustExpr::Call { .. }
+        | RustExpr::MacroCall { .. }
         | RustExpr::MethodCall { .. } => 11,
         RustExpr::Raw(raw) if raw_contains_top_level_cast(raw) => 6,
         RustExpr::Literal(_)
         | RustExpr::Var(_)
         | RustExpr::Path(_)
+        | RustExpr::GenericPath { .. }
+        | RustExpr::TypeAssociatedPath { .. }
+        | RustExpr::Pattern(_)
         | RustExpr::Tuple(_)
         | RustExpr::ArrayLiteral(_)
         | RustExpr::VecLiteral(_)
         | RustExpr::VecRepeat { .. }
+        | RustExpr::Closure { .. }
+        | RustExpr::Block { .. }
         | RustExpr::StructLit { .. }
         | RustExpr::MarkedBlock { .. }
         | RustExpr::Raw(_) => 12,
-        RustExpr::If { .. } => 1,
+        RustExpr::If { .. } | RustExpr::Match { .. } => 1,
     }
 }
 
@@ -634,6 +968,30 @@ mod tests {
     }
 
     #[test]
+    fn grouped_expressions_emit_explicit_parentheses() {
+        let expr = RustExpr::Grouped(Box::new(binary("+", var("a"), var("b"))));
+
+        assert_eq!(emit_expr(&expr), "(a + b)");
+        assert_eq!(emit_expr(&binary("*", expr, var("c"))), "(a + b) * c");
+        assert_eq!(
+            emit_expr(&RustExpr::Range {
+                start: Box::new(var("start")),
+                end: Box::new(var("end")),
+                inclusive: false,
+            }),
+            "start..end"
+        );
+        assert_eq!(
+            emit_expr(&RustExpr::Range {
+                start: Box::new(var("start")),
+                end: Box::new(var("end")),
+                inclusive: true,
+            }),
+            "start..=end"
+        );
+    }
+
+    #[test]
     fn numeric_binary_chains_preserve_left_grouping() {
         let add = binary("+", binary("+", var("a"), var("b")), var("c"));
         let mul = binary("*", binary("*", var("a"), var("b")), var("c"));
@@ -668,6 +1026,19 @@ mod tests {
         };
 
         assert_eq!(emit_expr(&expr), "!done");
+    }
+
+    #[test]
+    fn try_expressions_parenthesize_only_when_needed() {
+        assert_eq!(emit_expr(&RustExpr::Try(Box::new(var("call")))), "call?");
+        assert_eq!(
+            emit_expr(&RustExpr::Try(Box::new(RustExpr::Binary {
+                op: "+".to_string(),
+                left: Box::new(var("left")),
+                right: Box::new(var("right")),
+            }))),
+            "(left + right)?"
+        );
     }
 
     #[test]
@@ -720,6 +1091,205 @@ mod tests {
                 }),
             }),
             "vec![0; len as usize]"
+        );
+    }
+
+    #[test]
+    fn closure_expressions_emit_move_and_typed_params() {
+        assert_eq!(
+            emit_expr(&RustExpr::Closure {
+                is_move: false,
+                return_type: None,
+                params: vec![crate::rust_ir::RustClosureParam {
+                    pattern: "value".to_string(),
+                    ty: None,
+                }],
+                body: crate::rust_ir::RustClosureBody::Expr(Box::new(RustExpr::MethodCall {
+                    receiver: Box::new(RustExpr::Var("value".to_string())),
+                    method: "as_str".to_string(),
+                    args: Vec::new(),
+                })),
+            }),
+            "|value| value.as_str()"
+        );
+        assert_eq!(
+            emit_expr(&RustExpr::Closure {
+                is_move: true,
+                return_type: None,
+                params: vec![crate::rust_ir::RustClosureParam {
+                    pattern: "(k, v)".to_string(),
+                    ty: Some("(String, i32)".to_string()),
+                }],
+                body: crate::rust_ir::RustClosureBody::Expr(Box::new(RustExpr::Tuple(vec![
+                    RustExpr::Var("k".to_string()),
+                    RustExpr::Var("v".to_string()),
+                ]))),
+            }),
+            "move |(k, v): (String, i32)| (k, v)"
+        );
+        assert_eq!(
+            emit_expr(&RustExpr::Closure {
+                is_move: false,
+                return_type: Some(RustType::Generic {
+                    base: "Result".to_string(),
+                    args: vec![RustType::Unit, RustType::Named("JavaException".to_string())],
+                }),
+                params: Vec::new(),
+                body: crate::rust_ir::RustClosureBody::Expr(Box::new(RustExpr::Block {
+                    stmts: vec![RustStmt::Return(Some(RustExpr::Call {
+                        function: Box::new(RustExpr::path(["Ok"])),
+                        args: vec![RustExpr::Tuple(Vec::new())],
+                    }))],
+                    tail: None,
+                })),
+            }),
+            "|| -> Result<(), JavaException> { return Ok(()); }"
+        );
+    }
+
+    #[test]
+    fn match_expressions_emit_structured_scrutinee_and_arms() {
+        assert_eq!(
+            emit_expr(&RustExpr::Match {
+                expr: Box::new(RustExpr::Tuple(vec![var("left"), var("right")])),
+                arms: vec![
+                    crate::rust_ir::RustMatchArm {
+                        pattern: "(Some(left), Some(right))".to_string(),
+                        body: RustExpr::MethodCall {
+                            receiver: Box::new(var("left")),
+                            method: "equals".to_string(),
+                            args: vec![var("right")],
+                        },
+                    },
+                    crate::rust_ir::RustMatchArm {
+                        pattern: "_".to_string(),
+                        body: RustExpr::Literal("false".to_string()),
+                    },
+                ],
+            }),
+            "match (left, right) { (Some(left), Some(right)) => left.equals(right), _ => false }"
+        );
+    }
+
+    #[test]
+    fn while_let_statements_emit_label_pattern_and_body() {
+        assert_eq!(
+            emit_stmt(
+                &RustStmt::WhileLet {
+                    label: Some("scan".to_string()),
+                    pattern: "Some(item)".to_string(),
+                    expr: RustExpr::MethodCall {
+                        receiver: Box::new(var("cursor")),
+                        method: "next".to_string(),
+                        args: Vec::new(),
+                    },
+                    body: vec![RustStmt::Expr(RustExpr::MethodCall {
+                        receiver: Box::new(var("items")),
+                        method: "push".to_string(),
+                        args: vec![var("item")],
+                    })],
+                },
+                1,
+            ),
+            "    'scan: while let Some(item) = cursor.next() {\n        items.push(item);\n    }\n"
+        );
+    }
+
+    #[test]
+    fn for_statements_emit_label_pattern_iterable_and_body() {
+        assert_eq!(
+            emit_stmt(
+                &RustStmt::For {
+                    label: Some("items".to_string()),
+                    pattern: "mut item".to_string(),
+                    iterable: RustExpr::MethodCall {
+                        receiver: Box::new(var("values")),
+                        method: "iter".to_string(),
+                        args: Vec::new(),
+                    },
+                    body: vec![RustStmt::Expr(RustExpr::MethodCall {
+                        receiver: Box::new(var("item")),
+                        method: "touch".to_string(),
+                        args: Vec::new(),
+                    })],
+                },
+                1,
+            ),
+            "    'items: for mut item in values.iter() {\n        item.touch();\n    }\n"
+        );
+    }
+
+    #[test]
+    fn block_expressions_emit_statements_and_tail() {
+        assert_eq!(
+            emit_expr(&RustExpr::Block {
+                stmts: vec![
+                    RustStmt::Let {
+                        mutable: true,
+                        name: "items".to_string(),
+                        ty: None,
+                        value: Some(var("seed")),
+                    },
+                    RustStmt::Expr(RustExpr::MethodCall {
+                        receiver: Box::new(var("items")),
+                        method: "extend".to_string(),
+                        args: vec![var("tail")],
+                    }),
+                ],
+                tail: Some(Box::new(var("items"))),
+            }),
+            "{ let mut items = seed; items.extend(tail); items }"
+        );
+        assert_eq!(
+            emit_expr(&RustExpr::Block {
+                stmts: vec![RustStmt::Let {
+                    mutable: false,
+                    name: "_".to_string(),
+                    ty: None,
+                    value: Some(var("value")),
+                }],
+                tail: None,
+            }),
+            "{ let _ = value; }"
+        );
+    }
+
+    #[test]
+    fn ref_types_emit_optional_lifetimes() {
+        assert_eq!(
+            emit_type(&RustType::Ref {
+                mutable: false,
+                lifetime: Some("'static".to_string()),
+                inner: Box::new(RustType::Slice(Box::new(RustType::I32))),
+            }),
+            "&'static [i32]"
+        );
+        assert_eq!(
+            emit_type(&RustType::Ref {
+                mutable: true,
+                lifetime: Some("'a".to_string()),
+                inner: Box::new(RustType::String),
+            }),
+            "&'a mut String"
+        );
+    }
+
+    #[test]
+    fn dyn_and_impl_trait_types_emit_without_raw_type_strings() {
+        assert_eq!(
+            emit_type(&RustType::DynTrait("std::any::Any".to_string())),
+            "dyn std::any::Any"
+        );
+        assert_eq!(
+            emit_type(&RustType::ImplTrait("dep_facade::Locatable".to_string())),
+            "impl dep_facade::Locatable"
+        );
+        assert_eq!(
+            emit_type(&RustType::Generic {
+                base: "Box".to_string(),
+                args: vec![RustType::DynTrait("Animal".to_string())],
+            }),
+            "Box<dyn Animal>"
         );
     }
 
@@ -850,14 +1420,34 @@ pub fn emit_type(ty: &RustType) -> String {
         RustType::Array2(inner) => format!("ndarray::Array2<{}>", emit_type(inner)),
         RustType::Slice(inner) => format!("[{}]", emit_type(inner)),
         RustType::Option(inner) => format!("Option<{}>", emit_type(inner)),
-        RustType::Named(name) => name.clone(),
-        RustType::Ref { mutable, inner } => {
-            if *mutable {
-                format!("&mut {}", emit_type(inner))
-            } else {
-                format!("&{}", emit_type(inner))
-            }
+        RustType::Generic { base, args } => format!(
+            "{base}<{}>",
+            args.iter().map(emit_type).collect::<Vec<_>>().join(", ")
+        ),
+        RustType::Tuple(items) => {
+            let items = items.iter().map(emit_type).collect::<Vec<_>>().join(", ");
+            format!("({items})")
         }
+        RustType::FnPointer {
+            params,
+            return_type,
+        } => {
+            let params = params.iter().map(emit_type).collect::<Vec<_>>().join(", ");
+            format!("fn({params}) -> {}", emit_type(return_type))
+        }
+        RustType::DynTrait(trait_name) => format!("dyn {trait_name}"),
+        RustType::ImplTrait(trait_name) => format!("impl {trait_name}"),
+        RustType::Named(name) => name.clone(),
+        RustType::Ref {
+            mutable,
+            lifetime,
+            inner,
+        } => match (lifetime.as_deref(), mutable) {
+            (Some(lifetime), true) => format!("&{lifetime} mut {}", emit_type(inner)),
+            (Some(lifetime), false) => format!("&{lifetime} {}", emit_type(inner)),
+            (None, true) => format!("&mut {}", emit_type(inner)),
+            (None, false) => format!("&{}", emit_type(inner)),
+        },
         RustType::Raw(raw) => raw.clone(),
     }
 }

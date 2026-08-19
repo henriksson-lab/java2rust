@@ -1,10 +1,13 @@
 use crate::coercion::{
-    Coercion, apply_coercions, optional_string_view_projection,
-    render_string_equality_operand_projection,
+    Coercion, apply_coercions, java_update_expression_projection, logical_not_projection,
+    optional_string_view_projection, raw_receiver_projection, shared_borrow_expr,
+    string_equality_operand_projection,
 };
 use crate::facts::FactSet;
 use crate::java_ir::{BinaryOp, JavaType, PrimitiveType, UnaryOp};
-use crate::rust_ir::RustExpr;
+use crate::rust_ir::{
+    RustClosureBody, RustClosureParam, RustExpr, RustMatchArm, RustStmt, RustType,
+};
 use crate::shape_projection::shape_is_borrowed_string_content;
 use crate::slot_shape::{OwnershipShape, RustSlotShape};
 
@@ -90,6 +93,19 @@ pub struct NumericBinaryPromotionPlan {
     pub promoted: PrimitiveType,
     pub left: Vec<Coercion>,
     pub right: Vec<Coercion>,
+}
+
+pub fn rust_type_for_java_primitive(primitive: PrimitiveType) -> RustType {
+    match primitive {
+        PrimitiveType::Boolean => RustType::Bool,
+        PrimitiveType::Byte => RustType::I8,
+        PrimitiveType::Short => RustType::I16,
+        PrimitiveType::Char => RustType::Char,
+        PrimitiveType::Int => RustType::I32,
+        PrimitiveType::Long => RustType::I64,
+        PrimitiveType::Float => RustType::F32,
+        PrimitiveType::Double => RustType::F64,
+    }
 }
 
 pub fn binary_op_to_rust(op: BinaryOp) -> &'static str {
@@ -204,18 +220,67 @@ pub fn lower_checked_java_integer_div_rem_expr(
         BinaryOp::Rem => "wrapping_rem",
         _ => unreachable!("checked above"),
     };
-    let left = integer_wrapping_receiver_text(
-        crate::emit::emit_expr(&apply_coercions(left, &plan.left)),
-        plan.promoted,
-    );
-    let right = crate::emit::emit_expr(&apply_coercions(right, &plan.right));
-    let temp_ty = match plan.promoted {
-        PrimitiveType::Long => "i64",
-        _ => "i32",
-    };
-    Some(RustExpr::Raw(format!(
-        "{{ let __java_left: {temp_ty} = {left}; let __java_right: {temp_ty} = {right}; if __java_right == 0 {{ Err(JavaException::new(\"ArithmeticException\", \"/ by zero\".to_string())) }} else {{ Ok((__java_left).{method}(__java_right)) }} }}"
-    )))
+    let left = integer_wrapping_receiver_expr(apply_coercions(left, &plan.left), plan.promoted);
+    let right = apply_coercions(right, &plan.right);
+    let temp_ty = rust_type_for_java_primitive(plan.promoted);
+    Some(checked_java_integer_div_rem_block_leaf(
+        temp_ty, left, right, method,
+    ))
+}
+
+fn checked_java_integer_div_rem_block_leaf(
+    temp_ty: RustType,
+    left: RustExpr,
+    right: RustExpr,
+    method: &str,
+) -> RustExpr {
+    RustExpr::Block {
+        stmts: vec![
+            RustStmt::Let {
+                mutable: false,
+                name: "__java_left".to_string(),
+                ty: Some(temp_ty.clone()),
+                value: Some(left),
+            },
+            RustStmt::Let {
+                mutable: false,
+                name: "__java_right".to_string(),
+                ty: Some(temp_ty),
+                value: Some(right),
+            },
+        ],
+        tail: Some(Box::new(RustExpr::If {
+            condition: Box::new(RustExpr::Binary {
+                op: "==".to_string(),
+                left: Box::new(RustExpr::Var("__java_right".to_string())),
+                right: Box::new(RustExpr::Literal("0".to_string())),
+            }),
+            then_expr: Box::new(RustExpr::Call {
+                function: Box::new(RustExpr::path(["Err"])),
+                args: vec![RustExpr::Call {
+                    function: Box::new(RustExpr::path(["JavaException", "new"])),
+                    args: vec![
+                        RustExpr::Literal("\"ArithmeticException\"".to_string()),
+                        RustExpr::MethodCall {
+                            receiver: Box::new(RustExpr::Literal("\"/ by zero\"".to_string())),
+                            method: "to_string".to_string(),
+                            args: Vec::new(),
+                        },
+                    ],
+                }],
+            }),
+            else_expr: Box::new(RustExpr::Call {
+                function: Box::new(RustExpr::path(["Ok"])),
+                args: vec![RustExpr::MethodCall {
+                    receiver: Box::new(RustExpr::Grouped(Box::new(RustExpr::Var(
+                        "__java_left".to_string(),
+                    )))),
+                    method: method.to_string(),
+                    args: vec![RustExpr::Var("__java_right".to_string())],
+                }],
+            }),
+        })),
+    }
 }
 
 fn lower_java_integer_binary_expr(
@@ -235,17 +300,53 @@ fn lower_java_integer_binary_expr(
         BinaryOp::Shr => "wrapping_shr",
         _ => return None,
     };
-    let left = integer_wrapping_receiver_text(
-        crate::emit::emit_expr(&apply_coercions(left.clone(), &plan.left)),
-        plan.promoted,
-    );
-    let right = crate::emit::emit_expr(&apply_coercions(right.clone(), &plan.right));
+    let left =
+        integer_wrapping_receiver_expr(apply_coercions(left.clone(), &plan.left), plan.promoted);
+    let right = apply_coercions(right.clone(), &plan.right);
     if matches!(op, BinaryOp::Shl | BinaryOp::Shr) {
-        return Some(RustExpr::Raw(format!(
-            "({left}).{method}(({right}) as u32)"
-        )));
+        return Some(integer_wrapping_method_projection(
+            left,
+            method,
+            RustExpr::Cast {
+                expr: Box::new(integer_wrapping_grouped_expr(right)),
+                ty: "u32".to_string(),
+            },
+        ));
     }
-    Some(RustExpr::Raw(format!("({left}).{method}({right})")))
+    Some(integer_wrapping_method_projection(left, method, right))
+}
+
+fn integer_wrapping_method_projection(left: RustExpr, method: &str, right: RustExpr) -> RustExpr {
+    RustExpr::MethodCall {
+        receiver: Box::new(integer_wrapping_grouped_expr(left)),
+        method: method.to_string(),
+        args: vec![right],
+    }
+}
+
+fn integer_wrapping_receiver_expr(expr: RustExpr, primitive: PrimitiveType) -> RustExpr {
+    match expr {
+        RustExpr::Literal(rendered) if integer_wrapping_receiver_is_literal(&rendered) => {
+            RustExpr::Literal(integer_wrapping_receiver_literal(rendered, primitive))
+        }
+        RustExpr::Unary { op, expr } if op == "-" => match *expr {
+            RustExpr::Literal(rendered) if integer_wrapping_receiver_is_literal(&rendered) => {
+                RustExpr::Literal(integer_wrapping_receiver_literal(
+                    format!("-{rendered}"),
+                    primitive,
+                ))
+            }
+            other => RustExpr::Unary {
+                op,
+                expr: Box::new(other),
+            },
+        },
+        other => other,
+    }
+}
+
+fn integer_wrapping_grouped_expr(expr: RustExpr) -> RustExpr {
+    RustExpr::Grouped(Box::new(expr))
 }
 
 /// Pin an integer literal receiver to a concrete type.
@@ -253,11 +354,12 @@ fn lower_java_integer_binary_expr(
 /// `(-1).wrapping_shr(..)` does not compile: the literal stays `{integer}` and
 /// the method is ambiguous. A leading `-` has to be accepted, not just digits,
 /// or every negative literal keeps that ambiguity.
-fn integer_wrapping_receiver_text(rendered: String, primitive: PrimitiveType) -> String {
+fn integer_wrapping_receiver_is_literal(rendered: &str) -> bool {
     let digits = rendered.strip_prefix('-').unwrap_or(&rendered);
-    if digits.is_empty() || !digits.chars().all(|ch| ch.is_ascii_digit()) {
-        return rendered;
-    }
+    !digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn integer_wrapping_receiver_literal(rendered: String, primitive: PrimitiveType) -> String {
     match primitive {
         PrimitiveType::Long => format!("{rendered}i64"),
         PrimitiveType::Int => format!("{rendered}i32"),
@@ -277,22 +379,25 @@ pub fn lower_unsigned_right_shift_expr(
     // Pin the operand's type before the cast. `(-1) as u32` infers the literal
     // as `u32` and then negates it; `(-1i32) as u32` is the reinterpretation
     // Java's `>>>` actually means.
-    let left = integer_wrapping_receiver_text(
-        crate::emit::emit_expr(&apply_coercions(left, &plan.left)),
+    let left = parenthesize_raw_operand_for_prefix_or_call_arg(integer_wrapping_receiver_expr(
+        apply_coercions(left, &plan.left),
         plan.promoted,
-    );
-    // `as` binds tighter than unary minus, so `-x as u32` is `-(x as u32)`. Only
-    // a negated operand needs the grouping; adding it unconditionally would just
-    // make every ordinary shift noisier.
-    let left = if left.starts_with('-') {
-        format!("({left})")
-    } else {
-        left
-    };
-    let right = crate::emit::emit_expr(&apply_coercions(right, &plan.right));
-    RustExpr::Raw(format!(
-        "(({left} as {unsigned_ty}).wrapping_shr(({right}) as u32)) as {signed_ty}"
-    ))
+    ));
+    let right = apply_coercions(right, &plan.right);
+    RustExpr::Cast {
+        expr: Box::new(RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Cast {
+                expr: Box::new(left),
+                ty: unsigned_ty.to_string(),
+            }),
+            method: "wrapping_shr".to_string(),
+            args: vec![RustExpr::Cast {
+                expr: Box::new(integer_wrapping_grouped_expr(right)),
+                ty: "u32".to_string(),
+            }],
+        }),
+        ty: signed_ty.to_string(),
+    }
 }
 
 fn promoted_numeric_primitive(
@@ -665,36 +770,193 @@ fn shared_handle_identity_path(
     placement.handle_path().map(str::to_string)
 }
 
-/// Renders an operand as `&Rc<T>`, which is what `ptr_eq` takes.
-fn borrowed_handle_operand(expr: &RustExpr, already_borrowed: bool) -> String {
-    let rendered = crate::emit::emit_expr(expr);
-    if already_borrowed {
-        rendered
-    } else {
-        format!("&{rendered}")
+fn shared_handle_ptr_eq_projection(handle_path: &str, left: RustExpr, right: RustExpr) -> RustExpr {
+    shared_handle_call(handle_path, "ptr_eq", vec![left, right])
+}
+
+fn shared_handle_call(handle_path: &str, method: &str, args: Vec<RustExpr>) -> RustExpr {
+    RustExpr::Call {
+        function: Box::new(shared_handle_method_path(handle_path, method)),
+        args,
     }
 }
 
-fn erased_custom_equals_arg(expr: &RustExpr, borrowed: bool, handle_path: Option<&str>) -> String {
-    let rendered = crate::emit::emit_expr(expr);
-    if let Some(handle_path) = handle_path {
-        if borrowed {
-            return format!("Box::new({handle_path}::new((*({rendered})).clone()))");
+fn shared_handle_method_path(handle_path: &str, method: &str) -> RustExpr {
+    let mut path = handle_path
+        .split("::")
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    path.push(method.to_string());
+    RustExpr::Path(path)
+}
+
+fn optional_shared_handle_ptr_eq_projection(
+    option: RustExpr,
+    handle_path: &str,
+    other: RustExpr,
+) -> RustExpr {
+    RustExpr::MethodCall {
+        receiver: Box::new(option_as_ref(option)),
+        method: "is_some_and".to_string(),
+        args: vec![shared_handle_ptr_eq_closure_leaf(handle_path, other)],
+    }
+}
+
+fn shared_handle_ptr_eq_closure_leaf(handle_path: &str, other: RustExpr) -> RustExpr {
+    RustExpr::Closure {
+        is_move: false,
+        return_type: None,
+        params: vec![RustClosureParam {
+            pattern: "value".to_string(),
+            ty: None,
+        }],
+        body: RustClosureBody::Expr(Box::new(shared_handle_call(
+            handle_path,
+            "ptr_eq",
+            vec![RustExpr::Var("value".to_string()), other],
+        ))),
+    }
+}
+
+fn both_optional_shared_handle_identity_match_leaf(
+    handle_path: &str,
+    left: RustExpr,
+    right: RustExpr,
+) -> RustExpr {
+    RustExpr::Match {
+        expr: Box::new(RustExpr::Tuple(vec![
+            option_as_ref(left),
+            option_as_ref(right),
+        ])),
+        arms: vec![
+            RustMatchArm {
+                pattern: "(Some(left), Some(right))".to_string(),
+                body: shared_handle_call(
+                    handle_path,
+                    "ptr_eq",
+                    vec![
+                        RustExpr::Var("left".to_string()),
+                        RustExpr::Var("right".to_string()),
+                    ],
+                ),
+            },
+            RustMatchArm {
+                pattern: "(None, None)".to_string(),
+                body: RustExpr::Literal("true".to_string()),
+            },
+            RustMatchArm {
+                pattern: "_".to_string(),
+                body: RustExpr::Literal("false".to_string()),
+            },
+        ],
+    }
+}
+
+fn both_optional_custom_equals_match_leaf(
+    op: &str,
+    method_name: &str,
+    erased_arg_handle_path: Option<&str>,
+    left: RustExpr,
+    right: RustExpr,
+) -> RustExpr {
+    let true_expr = matches!(op, "==");
+    let false_expr = !true_expr;
+    let some_expr = RustExpr::MethodCall {
+        receiver: Box::new(RustExpr::Var("left".to_string())),
+        method: method_name.to_string(),
+        args: vec![erased_optional_custom_equals_arg_expr(
+            erased_arg_handle_path,
+        )],
+    };
+    let some_expr = if true_expr {
+        some_expr
+    } else {
+        RustExpr::Unary {
+            op: "!".to_string(),
+            expr: Box::new(some_expr),
         }
-        return format!("Box::new(({rendered}).clone())");
-    }
-    if borrowed {
-        format!("Box::new((*({rendered})).clone())")
-    } else {
-        format!("Box::new(({rendered}).clone())")
+    };
+    RustExpr::Match {
+        expr: Box::new(RustExpr::Tuple(vec![left, right])),
+        arms: vec![
+            RustMatchArm {
+                pattern: "(Some(left), Some(right))".to_string(),
+                body: some_expr,
+            },
+            RustMatchArm {
+                pattern: "(None, None)".to_string(),
+                body: RustExpr::Literal(true_expr.to_string()),
+            },
+            RustMatchArm {
+                pattern: "_".to_string(),
+                body: RustExpr::Literal(false_expr.to_string()),
+            },
+        ],
     }
 }
 
-fn erased_optional_custom_equals_arg(handle_path: Option<&str>) -> String {
-    if let Some(handle_path) = handle_path {
-        format!("Box::new({handle_path}::new((*right).clone()))")
+fn erased_optional_custom_equals_arg_expr(handle_path: Option<&str>) -> RustExpr {
+    let cloned = RustExpr::MethodCall {
+        receiver: Box::new(RustExpr::Grouped(Box::new(RustExpr::Unary {
+            op: "*".to_string(),
+            expr: Box::new(RustExpr::Var("right".to_string())),
+        }))),
+        method: "clone".to_string(),
+        args: Vec::new(),
+    };
+    let boxed_value = handle_path
+        .map(|handle_path| shared_handle_call(handle_path, "new", vec![cloned.clone()]))
+        .unwrap_or(cloned);
+    RustExpr::Call {
+        function: Box::new(RustExpr::path(["Box", "new"])),
+        args: vec![boxed_value],
+    }
+}
+
+fn borrowed_handle_operand_expr(expr: RustExpr, already_borrowed: bool) -> RustExpr {
+    if already_borrowed {
+        expr
     } else {
-        "Box::new((*right).clone())".to_string()
+        borrow_for_equality_expr(expr)
+    }
+}
+
+fn maybe_negate_equality(op: &str, expr: RustExpr) -> RustExpr {
+    if op == "!=" {
+        logical_not_projection(expr)
+    } else {
+        expr
+    }
+}
+
+fn erased_custom_equals_arg_expr(
+    expr: RustExpr,
+    borrowed: bool,
+    handle_path: Option<&str>,
+) -> RustExpr {
+    let clone_receiver = if borrowed {
+        RustExpr::Unary {
+            op: "*".to_string(),
+            expr: Box::new(RustExpr::Grouped(Box::new(expr))),
+        }
+    } else {
+        RustExpr::Grouped(Box::new(expr))
+    };
+    let cloned = RustExpr::MethodCall {
+        receiver: Box::new(clone_receiver),
+        method: "clone".to_string(),
+        args: Vec::new(),
+    };
+    let boxed_value = if borrowed {
+        handle_path
+            .map(|handle_path| shared_handle_call(handle_path, "new", vec![cloned.clone()]))
+            .unwrap_or(cloned)
+    } else {
+        cloned
+    };
+    RustExpr::Call {
+        function: Box::new(RustExpr::path(["Box", "new"])),
+        args: vec![boxed_value],
     }
 }
 
@@ -739,149 +1001,132 @@ pub fn lower_equality_comparison_expr_for_op(
         _ => "==",
     };
     match plan {
-        EqualityComparisonPlan::Direct => RustExpr::Raw(format!(
-            "({} {op} {})",
-            crate::emit::emit_expr(&left),
-            crate::emit::emit_expr(&right)
-        )),
+        EqualityComparisonPlan::Direct => RustExpr::Binary {
+            op: op.to_string(),
+            left: Box::new(left),
+            right: Box::new(right),
+        },
         EqualityComparisonPlan::StringView {
             left_view,
             right_view,
-        } => RustExpr::Raw(format!(
-            "({} {op} {})",
-            string_equality_operand_expr(left, left_view),
-            string_equality_operand_expr(right, right_view),
-        )),
+        } => RustExpr::Binary {
+            op: op.to_string(),
+            left: Box::new(string_equality_operand_expr(left, left_view)),
+            right: Box::new(string_equality_operand_expr(right, right_view)),
+        },
         EqualityComparisonPlan::BothOptionalByRef => RustExpr::Binary {
             op: op.to_string(),
             left: Box::new(option_as_ref(left)),
             right: Box::new(option_as_ref(right)),
         },
-        EqualityComparisonPlan::LeftOptionalByRef => RustExpr::Raw(format!(
-            "{} {op} Some(&{})",
-            crate::emit::emit_expr(&option_as_ref(left)),
-            crate::emit::emit_expr(&right)
-        )),
-        EqualityComparisonPlan::RightOptionalByRef => RustExpr::Raw(format!(
-            "Some(&{}) {op} {}",
-            crate::emit::emit_expr(&left),
-            crate::emit::emit_expr(&option_as_ref(right))
-        )),
-        EqualityComparisonPlan::LeftOptionalStringView { left_view } => RustExpr::Raw(format!(
-            "{} {op} Some({})",
-            crate::emit::emit_expr(&option_as_string_view(left, left_view)),
-            crate::emit::emit_expr(&right)
-        )),
-        EqualityComparisonPlan::RightOptionalStringView { right_view } => RustExpr::Raw(format!(
-            "Some({}) {op} {}",
-            crate::emit::emit_expr(&left),
-            crate::emit::emit_expr(&option_as_string_view(right, right_view))
-        )),
+        EqualityComparisonPlan::LeftOptionalByRef => RustExpr::Binary {
+            op: op.to_string(),
+            left: Box::new(option_as_ref(left)),
+            right: Box::new(some_expr(borrow_for_some_expr(right))),
+        },
+        EqualityComparisonPlan::RightOptionalByRef => RustExpr::Binary {
+            op: op.to_string(),
+            left: Box::new(some_expr(borrow_for_some_expr(left))),
+            right: Box::new(option_as_ref(right)),
+        },
+        EqualityComparisonPlan::LeftOptionalStringView { left_view } => RustExpr::Binary {
+            op: op.to_string(),
+            left: Box::new(option_as_string_view(left, left_view)),
+            right: Box::new(some_expr(parenthesize_raw_operand_for_prefix_or_call_arg(
+                right,
+            ))),
+        },
+        EqualityComparisonPlan::RightOptionalStringView { right_view } => RustExpr::Binary {
+            op: op.to_string(),
+            left: Box::new(some_expr(parenthesize_raw_operand_for_prefix_or_call_arg(
+                left,
+            ))),
+            right: Box::new(option_as_string_view(right, right_view)),
+        },
         EqualityComparisonPlan::SharedHandleIdentity {
             handle_path,
             left_borrowed,
             right_borrowed,
-        } => {
-            let call = format!(
-                "{handle_path}::ptr_eq({}, {})",
-                borrowed_handle_operand(&left, left_borrowed),
-                borrowed_handle_operand(&right, right_borrowed)
-            );
-            RustExpr::Raw(if op == "!=" { format!("!{call}") } else { call })
-        }
+        } => maybe_negate_equality(
+            op,
+            shared_handle_ptr_eq_projection(
+                &handle_path,
+                borrowed_handle_operand_expr(left, left_borrowed),
+                borrowed_handle_operand_expr(right, right_borrowed),
+            ),
+        ),
         EqualityComparisonPlan::LeftOptionalSharedHandleIdentity {
             handle_path,
             right_borrowed,
-        } => {
-            let other = borrowed_handle_operand(&right, right_borrowed);
-            let call = format!(
-                "{}.as_ref().is_some_and(|value| {handle_path}::ptr_eq(value, {other}))",
-                crate::emit::emit_expr(&left)
-            );
-            RustExpr::Raw(if op == "!=" {
-                format!("!({call})")
-            } else {
-                call
-            })
-        }
+        } => maybe_negate_equality(
+            op,
+            optional_shared_handle_ptr_eq_projection(
+                left,
+                &handle_path,
+                borrowed_handle_operand_expr(right, right_borrowed),
+            ),
+        ),
         EqualityComparisonPlan::RightOptionalSharedHandleIdentity {
             handle_path,
             left_borrowed,
-        } => {
-            let other = borrowed_handle_operand(&left, left_borrowed);
-            let call = format!(
-                "{}.as_ref().is_some_and(|value| {handle_path}::ptr_eq(value, {other}))",
-                crate::emit::emit_expr(&right)
-            );
-            RustExpr::Raw(if op == "!=" {
-                format!("!({call})")
-            } else {
-                call
-            })
-        }
+        } => maybe_negate_equality(
+            op,
+            optional_shared_handle_ptr_eq_projection(
+                right,
+                &handle_path,
+                borrowed_handle_operand_expr(left, left_borrowed),
+            ),
+        ),
         EqualityComparisonPlan::BothOptionalSharedHandleIdentity { handle_path } => {
             // `null == null` is `true` in Java, and a null never equals a live
             // reference -- so this is not `Option::eq`, which would compare the
             // pointees structurally.
-            let call = format!(
-                "match ({}.as_ref(), {}.as_ref()) {{ (Some(left), Some(right)) => {handle_path}::ptr_eq(left, right), (None, None) => true, _ => false }}",
-                crate::emit::emit_expr(&left),
-                crate::emit::emit_expr(&right)
-            );
-            RustExpr::Raw(if op == "!=" {
-                format!("!({call})")
-            } else {
-                call
-            })
+            maybe_negate_equality(
+                op,
+                both_optional_shared_handle_identity_match_leaf(&handle_path, left, right),
+            )
         }
         EqualityComparisonPlan::CustomEquals {
             method_name,
             right_borrowed,
             erased_arg_handle_path,
-        } => {
-            let call = format!(
-                "{}.{method_name}({})",
-                crate::emit::emit_expr(&left),
-                erased_custom_equals_arg(&right, right_borrowed, erased_arg_handle_path.as_deref())
-            );
-            RustExpr::Raw(if op == "!=" { format!("!{call}") } else { call })
-        }
-        EqualityComparisonPlan::LeftSharedBorrowRightOwned => RustExpr::Raw(format!(
-            "({} {op} &{})",
-            crate::emit::emit_expr(&left),
-            crate::emit::emit_expr(&right)
-        )),
-        EqualityComparisonPlan::LeftOwnedRightSharedBorrow => RustExpr::Raw(format!(
-            "(&{} {op} {})",
-            crate::emit::emit_expr(&left),
-            crate::emit::emit_expr(&right)
-        )),
+        } => maybe_negate_equality(
+            op,
+            RustExpr::MethodCall {
+                receiver: Box::new(left),
+                method: method_name,
+                args: vec![erased_custom_equals_arg_expr(
+                    right,
+                    right_borrowed,
+                    erased_arg_handle_path.as_deref(),
+                )],
+            },
+        ),
+        EqualityComparisonPlan::LeftSharedBorrowRightOwned => RustExpr::Binary {
+            op: op.to_string(),
+            left: Box::new(left),
+            right: Box::new(borrow_for_equality_expr(right)),
+        },
+        EqualityComparisonPlan::LeftOwnedRightSharedBorrow => RustExpr::Binary {
+            op: op.to_string(),
+            left: Box::new(borrow_for_equality_expr(left)),
+            right: Box::new(right),
+        },
         EqualityComparisonPlan::BothOptionalCustomEquals {
             method_name,
             erased_arg_handle_path,
-        } => {
-            let true_expr = matches!(op, "==");
-            let false_expr = !true_expr;
-            let right_arg = erased_optional_custom_equals_arg(erased_arg_handle_path.as_deref());
-            let some_expr = if true_expr {
-                format!("left.{method_name}({right_arg})")
-            } else {
-                format!("!left.{method_name}({right_arg})")
-            };
-            RustExpr::Raw(format!(
-                "match ({}, {}) {{ (Some(left), Some(right)) => {some_expr}, (None, None) => {true_expr}, _ => {false_expr} }}",
-                crate::emit::emit_expr(&left),
-                crate::emit::emit_expr(&right),
-            ))
-        }
+        } => both_optional_custom_equals_match_leaf(
+            op,
+            &method_name,
+            erased_arg_handle_path.as_deref(),
+            left,
+            right,
+        ),
     }
 }
 
-fn string_equality_operand_expr(expr: RustExpr, view: StringEqualityOperandView) -> String {
-    render_string_equality_operand_projection(
-        expr,
-        matches!(view, StringEqualityOperandView::BorrowedStr),
-    )
+fn string_equality_operand_expr(expr: RustExpr, view: StringEqualityOperandView) -> RustExpr {
+    string_equality_operand_projection(expr, matches!(view, StringEqualityOperandView::BorrowedStr))
 }
 
 fn option_as_ref(expr: RustExpr) -> RustExpr {
@@ -890,6 +1135,56 @@ fn option_as_ref(expr: RustExpr) -> RustExpr {
         method: "as_ref".to_string(),
         args: Vec::new(),
     }
+}
+
+fn some_expr(expr: RustExpr) -> RustExpr {
+    RustExpr::Call {
+        function: Box::new(RustExpr::path(["Some"])),
+        args: vec![expr],
+    }
+}
+
+fn borrow_for_some_expr(expr: RustExpr) -> RustExpr {
+    borrow_for_equality_expr(expr)
+}
+
+fn borrow_for_equality_expr(expr: RustExpr) -> RustExpr {
+    shared_borrow_expr(expr)
+}
+
+fn parenthesize_raw_operand_for_prefix_or_call_arg(expr: RustExpr) -> RustExpr {
+    if structured_operand_needs_parentheses_for_prefix_or_call_arg(&expr) {
+        return RustExpr::Grouped(Box::new(expr));
+    }
+    raw_receiver_projection(expr, |trimmed| {
+        !trimmed.starts_with('(') && raw_borrow_operand_needs_parentheses(trimmed)
+    })
+}
+
+fn structured_operand_needs_parentheses_for_prefix_or_call_arg(expr: &RustExpr) -> bool {
+    matches!(
+        expr.unshaped(),
+        RustExpr::Binary { .. }
+            | RustExpr::Range { .. }
+            | RustExpr::Cast { .. }
+            | RustExpr::If { .. }
+            | RustExpr::Match { .. }
+            | RustExpr::Block { .. }
+    )
+}
+
+fn raw_borrow_operand_needs_parentheses(raw: &str) -> bool {
+    raw.contains(char::is_whitespace)
+        || raw.contains('+')
+        || raw.contains('-')
+        || raw.contains('*')
+        || raw.contains('/')
+        || raw.contains('%')
+        || raw.contains('&')
+        || raw.contains('|')
+        || raw.contains('=')
+        || raw.contains('<')
+        || raw.contains('>')
 }
 
 fn option_as_string_view(expr: RustExpr, view: OptionalStringEqualityOperandView) -> RustExpr {
@@ -901,8 +1196,8 @@ fn option_as_string_view(expr: RustExpr, view: OptionalStringEqualityOperandView
 
 pub fn lower_unary_expr(op: UnaryOp, operand: RustExpr) -> RustExpr {
     match op {
-        UnaryOp::PostInc => RustExpr::Raw(format!("{} += 1", crate::emit::emit_expr(&operand))),
-        UnaryOp::PostDec => RustExpr::Raw(format!("{} -= 1", crate::emit::emit_expr(&operand))),
+        UnaryOp::PostInc => java_update_expression_projection(operand, "+=", false),
+        UnaryOp::PostDec => java_update_expression_projection(operand, "-=", false),
         UnaryOp::Not => RustExpr::Unary {
             op: "!".to_string(),
             expr: Box::new(operand),
@@ -912,7 +1207,8 @@ pub fn lower_unary_expr(op: UnaryOp, operand: RustExpr) -> RustExpr {
             expr: Box::new(operand),
         },
         UnaryOp::Pos => operand,
-        UnaryOp::PreInc | UnaryOp::PreDec => RustExpr::Raw(crate::emit::emit_expr(&operand)),
+        UnaryOp::PreInc => java_update_expression_projection(operand, "+=", true),
+        UnaryOp::PreDec => java_update_expression_projection(operand, "-=", true),
     }
 }
 
@@ -1090,6 +1386,43 @@ mod equality_symmetry_tests {
             "match (left_value, right_value) { (Some(left), Some(right)) => !left.equals(Box::new((*right).clone())), (None, None) => false, _ => true }"
         );
     }
+
+    #[test]
+    fn optional_string_equality_groups_structured_compound_operands_before_raw_fallback() {
+        let structured = lower_equality_comparison_expr(
+            EqualityComparisonPlan::RightOptionalStringView {
+                right_view: OptionalStringEqualityOperandView::NativeString,
+            },
+            RustExpr::Binary {
+                op: "+".to_string(),
+                left: Box::new(RustExpr::Var("left".to_string())),
+                right: Box::new(RustExpr::Var("right".to_string())),
+            },
+            RustExpr::Var("maybe".to_string()),
+        );
+        let optional_string_view = ["maybe", ".as_ref().map(|value| ", "value.as_str())"].concat();
+        let expected = format!("Some((left + right)) == {optional_string_view}");
+        assert_eq!(crate::emit::emit_expr(&structured), expected);
+        let RustExpr::Binary { left, .. } = structured else {
+            panic!("optional string equality should lower to a binary expression");
+        };
+        let RustExpr::Call { args, .. } = left.as_ref() else {
+            panic!("left side should be Some(grouped structured value)");
+        };
+        assert!(matches!(
+            args.as_slice(),
+            [RustExpr::Grouped(grouped)] if matches!(grouped.as_ref(), RustExpr::Binary { .. })
+        ));
+
+        let raw = lower_equality_comparison_expr(
+            EqualityComparisonPlan::RightOptionalStringView {
+                right_view: OptionalStringEqualityOperandView::NativeString,
+            },
+            RustExpr::Raw("left + right".to_string()),
+            RustExpr::Var("maybe".to_string()),
+        );
+        assert_eq!(crate::emit::emit_expr(&raw), expected);
+    }
 }
 
 #[cfg(test)]
@@ -1177,7 +1510,32 @@ mod shared_handle_identity_tests {
         let facts = shared_node_facts();
         let owned = node(OwnershipShape::Owned, false);
         let plan = plan_equality_comparison_with_facts(&owned, &owned, &facts);
-        assert_eq!(render(plan, BinaryOp::Eq), "std::rc::Rc::ptr_eq(&a, &b)");
+        let lowered = lower_equality_comparison_expr_for_op(
+            BinaryOp::Eq,
+            plan,
+            RustExpr::Var("a".to_string()),
+            RustExpr::Var("b".to_string()),
+        );
+        assert_eq!(
+            crate::emit::emit_expr(&lowered),
+            "std::rc::Rc::ptr_eq(&a, &b)"
+        );
+        assert_eq!(
+            lowered,
+            RustExpr::Call {
+                function: Box::new(RustExpr::path(["std", "rc", "Rc", "ptr_eq"])),
+                args: vec![
+                    RustExpr::Unary {
+                        op: "&".to_string(),
+                        expr: Box::new(RustExpr::Var("a".to_string())),
+                    },
+                    RustExpr::Unary {
+                        op: "&".to_string(),
+                        expr: Box::new(RustExpr::Var("b".to_string())),
+                    },
+                ],
+            }
+        );
     }
 
     #[test]
@@ -1214,10 +1572,55 @@ mod shared_handle_identity_tests {
                 erased_arg_handle_path: Some("std::rc::Rc".to_string()),
             }
         );
+        let lowered_eq = lower_equality_comparison_expr_for_op(
+            BinaryOp::Eq,
+            plan.clone(),
+            RustExpr::Var("a".to_string()),
+            RustExpr::Var("b".to_string()),
+        );
         assert_eq!(
-            render(plan, BinaryOp::Eq),
+            crate::emit::emit_expr(&lowered_eq),
             "a.equals(Box::new((b).clone()))"
         );
+        assert!(matches!(
+            lowered_eq,
+            RustExpr::MethodCall {
+                ref method,
+                ref args,
+                ..
+            }
+                if method == "equals" && matches!(args.as_slice(), [RustExpr::Call { .. }])
+        ));
+        let RustExpr::MethodCall { args, .. } = lowered_eq else {
+            panic!("custom equals should lower as a method call");
+        };
+        let [
+            RustExpr::Call {
+                args: boxed_args, ..
+            },
+        ] = args.as_slice()
+        else {
+            panic!("custom equals erased argument should be boxed structurally");
+        };
+        assert!(matches!(
+            boxed_args.as_slice(),
+            [RustExpr::MethodCall { receiver, method, args }]
+                if method == "clone"
+                    && args.is_empty()
+                    && matches!(receiver.as_ref(), RustExpr::Grouped(_))
+        ));
+
+        let lowered_ne = lower_equality_comparison_expr_for_op(
+            BinaryOp::Ne,
+            plan,
+            RustExpr::Var("a".to_string()),
+            RustExpr::Var("b".to_string()),
+        );
+        assert_eq!(
+            crate::emit::emit_expr(&lowered_ne),
+            "!a.equals(Box::new((b).clone()))"
+        );
+        assert!(matches!(lowered_ne, RustExpr::Unary { op, .. } if op == "!"));
     }
 
     #[test]
@@ -1248,8 +1651,12 @@ mod shared_handle_identity_tests {
         let optional = node(OwnershipShape::Owned, true);
         let plan = plan_equality_comparison_with_facts(&optional, &optional, &facts);
         assert_eq!(
-            render(plan, BinaryOp::Eq),
+            render(plan.clone(), BinaryOp::Eq),
             "match (a.as_ref(), b.as_ref()) { (Some(left), Some(right)) => std::rc::Rc::ptr_eq(left, right), (None, None) => true, _ => false }"
+        );
+        assert_eq!(
+            render(plan, BinaryOp::Ne),
+            "!(match (a.as_ref(), b.as_ref()) { (Some(left), Some(right)) => std::rc::Rc::ptr_eq(left, right), (None, None) => true, _ => false })"
         );
     }
 
@@ -1261,9 +1668,44 @@ mod shared_handle_identity_tests {
             &node(OwnershipShape::Owned, false),
             &facts,
         );
+        let lowered = lower_equality_comparison_expr_for_op(
+            BinaryOp::Eq,
+            plan,
+            RustExpr::Var("a".to_string()),
+            RustExpr::Var("b".to_string()),
+        );
         assert_eq!(
-            render(plan, BinaryOp::Eq),
+            crate::emit::emit_expr(&lowered),
             "a.as_ref().is_some_and(|value| std::rc::Rc::ptr_eq(value, &b))"
+        );
+        assert_eq!(
+            lowered,
+            RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::MethodCall {
+                    receiver: Box::new(RustExpr::Var("a".to_string())),
+                    method: "as_ref".to_string(),
+                    args: Vec::new(),
+                }),
+                method: "is_some_and".to_string(),
+                args: vec![RustExpr::Closure {
+                    is_move: false,
+                    return_type: None,
+                    params: vec![RustClosureParam {
+                        pattern: "value".to_string(),
+                        ty: None,
+                    }],
+                    body: RustClosureBody::Expr(Box::new(RustExpr::Call {
+                        function: Box::new(RustExpr::path(["std", "rc", "Rc", "ptr_eq"])),
+                        args: vec![
+                            RustExpr::Var("value".to_string()),
+                            RustExpr::Unary {
+                                op: "&".to_string(),
+                                expr: Box::new(RustExpr::Var("b".to_string())),
+                            },
+                        ],
+                    })),
+                }],
+            }
         );
     }
 
@@ -1274,6 +1716,49 @@ mod shared_handle_identity_tests {
         let owned = node(OwnershipShape::Owned, false);
         let plan = plan_equality_comparison_with_facts(&owned, &owned, &FactSet::default());
         assert_eq!(plan, EqualityComparisonPlan::Direct);
+        assert_eq!(
+            lower_equality_comparison_expr(
+                plan,
+                RustExpr::Var("left".to_string()),
+                RustExpr::Var("right".to_string()),
+            ),
+            RustExpr::Binary {
+                op: "==".to_string(),
+                left: Box::new(RustExpr::Var("left".to_string())),
+                right: Box::new(RustExpr::Var("right".to_string())),
+            }
+        );
+    }
+
+    #[test]
+    fn unary_update_fallback_uses_structured_update_projection() {
+        let post_inc = lower_unary_expr(UnaryOp::PostInc, RustExpr::Var("i".to_string()));
+        assert_eq!(
+            crate::emit::emit_expr(&post_inc),
+            "{ let __java_old_value = i; i += 1; __java_old_value }"
+        );
+        assert!(matches!(
+            post_inc,
+            RustExpr::Block {
+                stmts,
+                tail: Some(tail),
+            } if matches!(stmts.as_slice(), [
+                RustStmt::Let { name, .. },
+                RustStmt::AssignOp { op, .. },
+            ] if name == "__java_old_value" && op == "+=")
+                && matches!(*tail, RustExpr::Var(ref name) if name == "__java_old_value")
+        ));
+
+        let pre_dec = lower_unary_expr(UnaryOp::PreDec, RustExpr::Var("i".to_string()));
+        assert_eq!(crate::emit::emit_expr(&pre_dec), "{ i -= 1; i }");
+        assert!(matches!(
+            pre_dec,
+            RustExpr::Block {
+                stmts,
+                tail: Some(tail),
+            } if matches!(stmts.as_slice(), [RustStmt::AssignOp { op, .. }] if op == "-=")
+                && matches!(*tail, RustExpr::Var(ref name) if name == "i")
+        ));
     }
 
     /// The involution still holds with the identity arms in play: swapping the

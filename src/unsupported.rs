@@ -2,11 +2,14 @@ use crate::java_ir::{Expr, Member, Stmt};
 use crate::rust_ir::{RustExpr, RustStmt};
 
 pub fn compile_error_stmt(message: &str) -> RustStmt {
-    RustStmt::Raw(format!("compile_error!({message:?});"))
+    RustStmt::Expr(compile_error_expr(message))
 }
 
 pub fn compile_error_expr(message: &str) -> RustExpr {
-    RustExpr::Raw(format!("compile_error!({message:?})"))
+    RustExpr::MacroCall {
+        macro_name: "compile_error".to_string(),
+        args: vec![RustExpr::Literal(format!("{message:?}"))],
+    }
 }
 
 /// A `compile_error!` at item position, for a refusal that has no expression or
@@ -36,10 +39,15 @@ pub fn compile_error_diverging_text(message: &str) -> String {
 }
 
 pub fn compile_error_expr_consuming(expr: &RustExpr, message: &str) -> RustExpr {
-    RustExpr::Raw(format!(
-        "{{ let _ = {}; compile_error!({message:?}) }}",
-        crate::emit::emit_expr(expr),
-    ))
+    RustExpr::Block {
+        stmts: vec![RustStmt::Let {
+            mutable: false,
+            name: "_".to_string(),
+            ty: None,
+            value: Some(expr.clone()),
+        }],
+        tail: Some(Box::new(compile_error_expr(message))),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,7 +107,10 @@ pub fn unsupported_constructor_body(kind: UnsupportedConstructorLowering) -> Vec
     let policy = unsupported_constructor_message_policy(kind);
     vec![
         policy.compile_error_stmt(),
-        RustStmt::Return(Some(RustExpr::Raw(format!("panic!({:?})", policy.message)))),
+        RustStmt::Return(Some(RustExpr::MacroCall {
+            macro_name: "panic".to_string(),
+            args: vec![RustExpr::Literal(format!("{:?}", policy.message))],
+        })),
     ]
 }
 

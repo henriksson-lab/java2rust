@@ -18,11 +18,7 @@ pub fn this_expr() -> RustExpr {
 }
 
 pub fn super_expr() -> RustExpr {
-    RustExpr::Raw("super".to_string())
-}
-
-pub fn raw_expr(raw: &str) -> RustExpr {
-    RustExpr::Raw(raw.to_string())
+    crate::unsupported::compile_error_expr("unsupported standalone Java super expression")
 }
 
 pub fn literal_expr(lit: &Literal) -> RustExpr {

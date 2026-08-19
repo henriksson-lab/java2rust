@@ -6,7 +6,7 @@ mod common;
 use common::{GeneratedCrateModule, cargo_check_generated_modules};
 
 use new_java2rust::access_lowering::{
-    lower_bare_name, lower_field_access, lower_field_access_with_facts,
+    lower_bare_name, lower_field_access, lower_field_access_with_facts, render_bare_name,
 };
 use new_java2rust::array_lowering::render_array_expr;
 use new_java2rust::array_plan::{ArrayExprPlan, plan_array_expr};
@@ -56,7 +56,8 @@ use new_java2rust::exception_lowering::{
     CatchRenderArm, exception_cause_or_self_if_instance_expr, exception_expr_from_new,
     exception_expr_from_new_with_cause_hint, exception_result_type, external_exception_conversions,
     fallback_exception_expr, java_exception_support_item, java_exception_support_item_with_facts,
-    new_exception_expr, new_exception_expr_with_cause, return_stmt, throw_stmt, try_catch_stmt,
+    new_exception_expr, new_exception_expr_with_cause, return_stmt, throw_stmt,
+    try_catch_finally_scope_stmt, try_catch_stmt, try_catch_value_fallthrough_stmt,
     try_finally_scope_stmt, try_with_resources_scope_stmt,
 };
 use new_java2rust::exception_plan::{
@@ -66,8 +67,8 @@ use new_java2rust::exception_plan::{
     try_resource_names,
 };
 use new_java2rust::expr_render::{
-    binary_expr, indexed_expr, literal_expr, named_constructor_expr, raw_expr, super_expr,
-    ternary_expr, this_expr,
+    binary_expr, indexed_expr, literal_expr, named_constructor_expr, super_expr, ternary_expr,
+    this_expr,
 };
 use new_java2rust::expr_shape::{
     ExprShapeContext, ShapeEnv, infer_assignment_target_shape,
@@ -158,7 +159,10 @@ use new_java2rust::rewrite::{
     MethodControlFlowPlan, NullTestKind, TailRecursiveLoopPlan, TailRecursiveNormalizedShape,
     control_flow_rewrite_diagnostics,
 };
-use new_java2rust::rust_ir::{RustExpr, RustExprShape, RustItem, RustReceiver, RustStmt, RustType};
+use new_java2rust::rust_ir::{
+    RustClosureBody, RustClosureParam, RustExpr, RustExprShape, RustItem, RustMatchArm,
+    RustReceiver, RustStmt, RustType,
+};
 use new_java2rust::semantic_analysis::analyze_program;
 use new_java2rust::shape_projection::{
     DispatchProjectionPolicy, DispatchRequirementProjectionPolicy,
@@ -257,8 +261,9 @@ use new_java2rust::slot_shape::{
     DispatchShape, MutabilityShape, OwnershipShape, RustSlotShape, TypeCapabilities, ViewShape,
 };
 use new_java2rust::statement_render::{
-    assignment_stmt, break_stmt, continue_stmt, expr_stmt, if_stmt, local_let_stmt,
-    local_let_stmt_with_facts, raw_stmt, render_block_stmt, render_enhanced_for, while_stmt,
+    assignment_stmt, break_stmt, continue_stmt, expr_stmt, if_let_stmt, if_stmt, local_let_stmt,
+    local_let_stmt_with_facts, raw_stmt, render_block_stmt, render_enhanced_for,
+    render_enhanced_for_iterator, while_let_stmt, while_stmt,
 };
 use new_java2rust::stdlib::{
     class_literal_token_plan, is_borrowed_string_view_method, is_content_read_method,
@@ -271,7 +276,7 @@ use new_java2rust::stream::{
     stream_collect_actual,
 };
 use new_java2rust::stream_lowering::{
-    StreamLambdaValue, StreamRenderContext, emit_stream_lambda_body,
+    StreamLambdaValue, StreamRenderContext, emit_stream_lambda_body, emit_stream_lambda_body_expr,
     emit_stream_lambda_body_with_context, render_stream_plan, render_stream_plan_with_context,
 };
 use new_java2rust::stream_shape::{
@@ -282,8 +287,7 @@ use new_java2rust::stream_shape::{
     stream_source_capability_policy_with_effective_facts,
 };
 use new_java2rust::switch_lowering::{
-    SwitchMatchRenderCase, SwitchRenderCase, render_simple_return_match_switch, render_switch,
-    switch_case_condition,
+    SwitchRenderCase, lower_switch_block_stmts, switch_case_condition,
 };
 use new_java2rust::switch_plan::{
     SWITCH_LABEL, SWITCH_MATCHED, SWITCH_VALUE, SwitchCaseLabelPlan, plan_simple_return_switch,
@@ -311,6 +315,13 @@ use new_java2rust::{
     translate_source_with_context_summary_sources, translate_source_with_facts,
 };
 
+fn boxed_dyn_type(trait_name: &str) -> RustType {
+    RustType::Generic {
+        base: "Box".to_string(),
+        args: vec![RustType::DynTrait(trait_name.to_string())],
+    }
+}
+
 #[test]
 fn slot_shape_keeps_string_ownership_and_view_as_separate_axes() {
     let mut shape = RustSlotShape::conservative(JavaType::String);
@@ -324,6 +335,7 @@ fn slot_shape_keeps_string_ownership_and_view_as_separate_axes() {
         rust_type_for_slot(&shape),
         RustType::Ref {
             mutable: false,
+            lifetime: None,
             inner: Box::new(RustType::Raw("str".to_string()))
         }
     );
@@ -343,6 +355,7 @@ fn slot_shape_projects_arrays_and_primitives_without_type_specific_ownership_var
         rust_type_for_slot(&array_shape),
         RustType::Ref {
             mutable: false,
+            lifetime: None,
             inner: Box::new(RustType::Slice(Box::new(RustType::String)))
         }
     );
@@ -368,15 +381,20 @@ fn rust_crate_mapped_external_slots_render_facade_type_identity() {
         provenance: FactProvenance::ExternalLibraryPack,
     });
 
+    let sqlite_connection_ty = rust_type_for_slot_with_facts(
+        &RustSlotShape::conservative(JavaType::Named {
+            name: "java.sql.Connection".to_string(),
+            args: Vec::new(),
+        }),
+        &facts,
+    );
     assert_eq!(
-        rust_type_for_slot_with_facts(
-            &RustSlotShape::conservative(JavaType::Named {
-                name: "java.sql.Connection".to_string(),
-                args: Vec::new(),
-            }),
-            &facts
-        ),
-        RustType::Raw("sqlite_facade::Connection".to_string())
+        sqlite_connection_ty,
+        RustType::Named("sqlite_facade::Connection".to_string())
+    );
+    assert_eq!(
+        emit::emit_type(&sqlite_connection_ty),
+        "sqlite_facade::Connection"
     );
     assert_eq!(
         rust_type_for_slot_with_facts(
@@ -386,7 +404,25 @@ fn rust_crate_mapped_external_slots_render_facade_type_identity() {
             }),
             &facts
         ),
-        RustType::Raw("hdf5_facade::HDF5File".to_string())
+        RustType::Named("hdf5_facade::HDF5File".to_string())
+    );
+    let sqlite_result_ty = rust_type_for_slot_with_facts(
+        &RustSlotShape::conservative(JavaType::Named {
+            name: "java.sql.Connection".to_string(),
+            args: vec![JavaType::String],
+        }),
+        &facts,
+    );
+    assert_eq!(
+        sqlite_result_ty,
+        RustType::Generic {
+            base: "sqlite_facade::Connection".to_string(),
+            args: vec![RustType::String],
+        }
+    );
+    assert_eq!(
+        emit::emit_type(&sqlite_result_ty),
+        "sqlite_facade::Connection<String>"
     );
 }
 
@@ -1221,9 +1257,7 @@ fn slot_render_owns_conservative_java_to_rust_type_projection() {
             },
             &FactSet::default(),
         ),
-        RustType::Vec(Box::new(RustType::Raw(
-            "Box<dyn std::any::Any>".to_string()
-        )))
+        RustType::Vec(Box::new(boxed_dyn_type("std::any::Any")))
     );
     assert_eq!(
         rust_type_for_java_type_with_facts(
@@ -1233,7 +1267,10 @@ fn slot_render_owns_conservative_java_to_rust_type_projection() {
             },
             &FactSet::default(),
         ),
-        RustType::Raw("std::collections::HashMap<String, Box<dyn std::any::Any>>".to_string())
+        RustType::Generic {
+            base: "std::collections::HashMap".to_string(),
+            args: vec![RustType::String, boxed_dyn_type("std::any::Any"),],
+        }
     );
     assert_eq!(
         native_java_rust_type_policy(
@@ -1247,6 +1284,24 @@ fn slot_render_owns_conservative_java_to_rust_type_projection() {
             container: NativeSequenceContainer::HashSet,
             element_ty: JavaType::String,
         }
+    );
+    let hash_set_type = rust_type_for_java_type_with_facts(
+        &JavaType::Named {
+            name: "Set".to_string(),
+            args: vec![JavaType::String],
+        },
+        &FactSet::default(),
+    );
+    assert_eq!(
+        hash_set_type,
+        RustType::Generic {
+            base: "std::collections::HashSet".to_string(),
+            args: vec![RustType::String],
+        }
+    );
+    assert_eq!(
+        emit::emit_type(&hash_set_type),
+        "std::collections::HashSet<String>"
     );
     let facts = FactSet::default();
     let effective_facts = EffectiveFacts::new(&facts);
@@ -1315,7 +1370,7 @@ fn slot_render_owns_conservative_java_to_rust_type_projection() {
             &FactSet::default(),
         ),
         NativeJavaRustTypePolicy::Direct {
-            ty: RustType::Raw("Box<dyn std::any::Any>".to_string()),
+            ty: boxed_dyn_type("std::any::Any"),
         }
     );
     assert_eq!(
@@ -1382,14 +1437,15 @@ fn slot_render_owns_conservative_java_to_rust_type_projection() {
     assert_eq!(
         slot_rust_type_policy(&dyn_trait_shape, &FactSet::default()),
         SlotRustTypePolicy::SharedBorrow {
-            ty: RustType::Raw("dyn Animal".to_string()),
+            ty: RustType::DynTrait("Animal".to_string()),
         }
     );
     assert_eq!(
         rust_type_for_slot(&dyn_trait_shape),
         RustType::Ref {
             mutable: false,
-            inner: Box::new(RustType::Raw("dyn Animal".to_string()))
+            lifetime: None,
+            inner: Box::new(RustType::DynTrait("Animal".to_string()))
         }
     );
 
@@ -1409,12 +1465,12 @@ fn slot_render_owns_conservative_java_to_rust_type_projection() {
     assert_eq!(
         slot_rust_type_policy(&boxed_trait_shape, &FactSet::default()),
         SlotRustTypePolicy::OwnedOrCopy {
-            ty: RustType::Raw("Box<dyn Animal>".to_string()),
+            ty: boxed_dyn_type("Animal"),
         }
     );
     assert_eq!(
         rust_type_for_slot(&boxed_trait_shape),
-        RustType::Raw("Box<dyn Animal>".to_string())
+        boxed_dyn_type("Animal")
     );
 
     let mut mutable_string_shape = RustSlotShape::conservative(JavaType::String);
@@ -1533,7 +1589,7 @@ fn slot_render_projects_erased_object_facts_inside_native_generic_containers() {
     assert_eq!(
         native_java_rust_type_policy(&erased_handle, &facts),
         NativeJavaRustTypePolicy::Direct {
-            ty: RustType::Raw("Box<dyn std::any::Any>".to_string()),
+            ty: boxed_dyn_type("std::any::Any"),
         }
     );
     assert_eq!(
@@ -1548,17 +1604,24 @@ fn slot_render_projects_erased_object_facts_inside_native_generic_containers() {
     );
     assert_eq!(
         rust_type_for_java_type_with_facts(&map_ty, &facts),
-        RustType::Raw("std::collections::HashMap<String, Box<dyn std::any::Any>>".to_string())
+        RustType::Generic {
+            base: "std::collections::HashMap".to_string(),
+            args: vec![RustType::String, boxed_dyn_type("std::any::Any"),],
+        }
     );
     assert_eq!(
         rust_type_for_java_type_with_facts(&final_payload_map_ty, &facts),
-        RustType::Raw("std::collections::HashMap<String, ExternalOwnerPayload>".to_string())
+        RustType::Generic {
+            base: "std::collections::HashMap".to_string(),
+            args: vec![
+                RustType::String,
+                RustType::Named("ExternalOwnerPayload".to_string()),
+            ],
+        }
     );
     assert_eq!(
         rust_type_for_java_type_with_facts(&list_ty, &facts),
-        RustType::Vec(Box::new(RustType::Raw(
-            "Box<dyn std::any::Any>".to_string()
-        )))
+        RustType::Vec(Box::new(boxed_dyn_type("std::any::Any")))
     );
     assert_eq!(
         rust_type_for_java_type_with_facts(&final_payload_list_ty, &facts),
@@ -1568,9 +1631,7 @@ fn slot_render_projects_erased_object_facts_inside_native_generic_containers() {
     );
     assert_eq!(
         rust_type_for_java_type_with_facts(&optional_ty, &facts),
-        RustType::Option(Box::new(RustType::Raw(
-            "Box<dyn std::any::Any>".to_string()
-        )))
+        RustType::Option(Box::new(boxed_dyn_type("std::any::Any")))
     );
     assert_eq!(
         rust_type_for_java_type_with_facts(&facade_list_ty, &facts),
@@ -1710,7 +1771,17 @@ fn slot_render_owns_default_expressions_for_planned_views() {
     );
     assert_eq!(
         default_expr_for_slot(&slice_view),
-        RustExpr::Raw("&[]".to_string())
+        RustExpr::Unary {
+            op: "&".to_string(),
+            expr: Box::new(RustExpr::ArrayLiteral(Vec::new())),
+        }
+    );
+    let slot_render_source = include_str!("../src/slot_render.rs");
+    assert!(
+        !slot_render_source.contains(
+            "SlotDefaultValuePolicy::EmptySliceView => RustExpr::Raw(\"&[]\".to_string())"
+        ),
+        "empty slice defaults should compose borrowed array literals structurally"
     );
 
     assert_eq!(
@@ -1809,16 +1880,14 @@ fn slot_render_owns_default_expressions_for_planned_views() {
     );
     assert_eq!(
         enum_no_default.compile_error_expr(),
-        RustExpr::Raw(
-            "compile_error!(\"no default value is available for closed enum slot AnimalValue\")"
-                .to_string()
+        new_java2rust::unsupported::compile_error_expr(
+            "no default value is available for closed enum slot AnimalValue"
         )
     );
     assert_eq!(
         default_expr_for_slot(&enum_shape),
-        RustExpr::Raw(
-            "compile_error!(\"no default value is available for closed enum slot AnimalValue\")"
-                .to_string()
+        new_java2rust::unsupported::compile_error_expr(
+            "no default value is available for closed enum slot AnimalValue"
         )
     );
 
@@ -1837,9 +1906,8 @@ fn slot_render_owns_default_expressions_for_planned_views() {
     );
     assert_eq!(
         default_expr_for_slot(&dyn_shape),
-        RustExpr::Raw(
-            "compile_error!(\"no default value is available for dyn trait slot Animal\")"
-                .to_string()
+        new_java2rust::unsupported::compile_error_expr(
+            "no default value is available for dyn trait slot Animal"
         )
     );
 
@@ -1858,9 +1926,8 @@ fn slot_render_owns_default_expressions_for_planned_views() {
     );
     assert_eq!(
         default_expr_for_slot(&boxed_shape),
-        RustExpr::Raw(
-            "compile_error!(\"no default value is available for boxed dyn trait slot Animal\")"
-                .to_string()
+        new_java2rust::unsupported::compile_error_expr(
+            "no default value is available for boxed dyn trait slot Animal"
         )
     );
 
@@ -1894,8 +1961,8 @@ fn slot_render_owns_default_expressions_for_planned_views() {
     );
     assert_eq!(
         default_expr_for_slot(&erased_shape),
-        RustExpr::Raw(
-            "compile_error!(\"no default value is available for erased object slot\")".to_string()
+        new_java2rust::unsupported::compile_error_expr(
+            "no default value is available for erased object slot"
         )
     );
 
@@ -1998,6 +2065,7 @@ fn slot_render_uses_type_capability_facts_for_string_views() {
         rust_type_for_slot(&shape),
         RustType::Ref {
             mutable: false,
+            lifetime: None,
             inner: Box::new(RustType::Named("ExternalLabel".to_string())),
         }
     );
@@ -2005,6 +2073,7 @@ fn slot_render_uses_type_capability_facts_for_string_views() {
         rust_type_for_slot_with_facts(&shape, &facts),
         RustType::Ref {
             mutable: false,
+            lifetime: None,
             inner: Box::new(RustType::Raw("str".to_string())),
         }
     );
@@ -2061,6 +2130,7 @@ fn slot_render_uses_type_capability_facts_for_sequence_views_and_storage() {
         rust_type_for_slot(&slice_shape),
         RustType::Ref {
             mutable: false,
+            lifetime: None,
             inner: Box::new(RustType::Named("ExternalIds".to_string())),
         }
     );
@@ -2068,6 +2138,7 @@ fn slot_render_uses_type_capability_facts_for_sequence_views_and_storage() {
         rust_type_for_slot_with_facts(&slice_shape, &facts),
         RustType::Ref {
             mutable: false,
+            lifetime: None,
             inner: Box::new(RustType::Slice(Box::new(RustType::Named(
                 "ExternalId".to_string()
             )))),
@@ -2254,7 +2325,8 @@ class Dog implements Animal {
         rust_type_for_slot(&param_shape),
         RustType::Ref {
             mutable: false,
-            inner: Box::new(RustType::Raw("dyn Animal".to_string()))
+            lifetime: None,
+            inner: Box::new(RustType::DynTrait("Animal".to_string()))
         }
     );
 
@@ -2274,10 +2346,7 @@ class Dog implements Animal {
     );
     assert_eq!(return_shape.ownership, OwnershipShape::Owned);
     assert_eq!(return_shape.view, ViewShape::DynTraitView);
-    assert_eq!(
-        rust_type_for_slot(&return_shape),
-        RustType::Raw("Box<dyn Animal>".to_string())
-    );
+    assert_eq!(rust_type_for_slot(&return_shape), boxed_dyn_type("Animal"));
 }
 
 #[test]
@@ -2382,10 +2451,7 @@ class Dog implements Animal {}
     );
     assert_eq!(storage_shape.ownership, OwnershipShape::Owned);
     assert_eq!(storage_shape.view, ViewShape::DynTraitView);
-    assert_eq!(
-        rust_type_for_slot(&storage_shape),
-        RustType::Raw("Box<dyn Animal>".to_string())
-    );
+    assert_eq!(rust_type_for_slot(&storage_shape), boxed_dyn_type("Animal"));
 }
 
 #[test]
@@ -3507,14 +3573,12 @@ fn callable_analysis_shell_reaches_lowering_context() {
     assert!(lower_source.contains(
         ".callable_analysis\n        .external_method_returns_result(receiver_type, name, arg_count)"
     ));
-    assert!(lower_source.contains(".source_method_returns_result(ty, method)"));
+    assert!(lower_source.contains(".callable_returns_result(&crate::usage::CallableKey::Method"));
     assert!(lower_source.contains(
         "fn plan_call_exception_propagation_with_lower_context(\n    receiver: Option<&Expr>,"
     ));
     assert!(
-        lower_source.contains(
-            "if source_method_call_returns_result_with_exception_plan(\n        receiver,"
-        )
+        lower_source.contains("source_method_call_returns_result_with_exception_plan(receiver,")
     );
     let binding_use_count_helper = lower_source
         .split("fn current_callable_binding_use_count_for_id")
@@ -4783,9 +4847,12 @@ fn unsupported_lowering_policy_owns_compile_error_placeholders() {
     );
     assert_eq!(
         statement_policy.compile_error_stmt(),
-        RustStmt::Raw(
-            "compile_error!(\"unsupported Java statement: local type declaration\");".to_string()
-        )
+        RustStmt::Expr(RustExpr::MacroCall {
+            macro_name: "compile_error".to_string(),
+            args: vec![RustExpr::Literal(
+                "\"unsupported Java statement: local type declaration\"".to_string()
+            )],
+        })
     );
     assert_eq!(
         unsupported_constructor_message_policy(
@@ -4797,16 +4864,24 @@ fn unsupported_lowering_policy_owns_compile_error_placeholders() {
         }
     );
     assert_eq!(
-        unsupported_constructor_body(UnsupportedConstructorLowering::SuperRequiresInheritanceLowering),
+        unsupported_constructor_body(
+            UnsupportedConstructorLowering::SuperRequiresInheritanceLowering
+        ),
         vec![
-            RustStmt::Raw(
-                "compile_error!(\"unsupported Java constructor: super(...) requires inheritance lowering\");"
-                    .to_string()
-            ),
-            RustStmt::Return(Some(RustExpr::Raw(
-                "panic!(\"unsupported Java constructor: super(...) requires inheritance lowering\")"
-                    .to_string()
-            ))),
+            RustStmt::Expr(RustExpr::MacroCall {
+                macro_name: "compile_error".to_string(),
+                args: vec![RustExpr::Literal(
+                    "\"unsupported Java constructor: super(...) requires inheritance lowering\""
+                        .to_string()
+                )],
+            }),
+            RustStmt::Return(Some(RustExpr::MacroCall {
+                macro_name: "panic".to_string(),
+                args: vec![RustExpr::Literal(
+                    "\"unsupported Java constructor: super(...) requires inheritance lowering\""
+                        .to_string()
+                )],
+            })),
         ]
     );
     assert_eq!(
@@ -4826,23 +4901,25 @@ fn unsupported_lowering_policy_owns_compile_error_placeholders() {
     );
     assert_eq!(
         unsupported_statement_stmt(UnsupportedStatementLowering::LocalTypeDeclaration),
-        RustStmt::Raw(
-            "compile_error!(\"unsupported Java statement: local type declaration\");".to_string()
-        )
+        RustStmt::Expr(RustExpr::MacroCall {
+            macro_name: "compile_error".to_string(),
+            args: vec![RustExpr::Literal(
+                "\"unsupported Java statement: local type declaration\"".to_string()
+            )],
+        })
     );
     assert_eq!(
         unsupported_expression_expr(UnsupportedExpressionLowering::MethodReference),
-        RustExpr::Raw(
-            "compile_error!(\"unsupported Java expression: method reference\")".to_string()
+        new_java2rust::unsupported::compile_error_expr(
+            "unsupported Java expression: method reference"
         )
     );
     assert_eq!(
         unsupported_expression_expr(UnsupportedExpressionLowering::ParserUnsupported(
             "unsupported expression node: weird_\"quoted\"_\\_node".to_string()
         )),
-        RustExpr::Raw(
-            "compile_error!(\"unsupported Java expression: unsupported expression node: weird_\\\"quoted\\\"_\\\\_node\")"
-                .to_string()
+        new_java2rust::unsupported::compile_error_expr(
+            "unsupported Java expression: unsupported expression node: weird_\"quoted\"_\\_node"
         )
     );
     assert_eq!(
@@ -4958,6 +5035,35 @@ fn unsupported_compile_error_literals_are_centralized() {
             "direct compile_error! producer should route through src/unsupported.rs: {rendered_path}"
         );
     }
+    let unsupported_source = fs::read_to_string("src/unsupported.rs").unwrap();
+    let compile_error_expr = unsupported_source
+        .split("pub fn compile_error_expr")
+        .nth(1)
+        .unwrap()
+        .split("/// A `compile_error!` at item position")
+        .next()
+        .unwrap();
+    assert!(
+        compile_error_expr.contains("RustExpr::MacroCall"),
+        "expression-position compile_error! should use structured macro-call IR"
+    );
+    assert!(
+        !compile_error_expr.contains("RustExpr::Raw(format!(\"compile_error!"),
+        "expression-position compile_error! should not be a raw formatted expression"
+    );
+    assert!(
+        !unsupported_source.contains("RustStmt::Raw(format!(\"compile_error!"),
+        "statement-position compile_error! should use structured macro-call IR"
+    );
+    assert!(
+        !unsupported_source
+            .contains("RustExpr::Raw(format!(\n        \"{{ let _ = {}; compile_error!"),
+        "compile_error expressions that consume a value should use structured block IR"
+    );
+    assert!(
+        !unsupported_source.contains("RustExpr::Raw(format!(\"panic!"),
+        "unsupported constructor diverging placeholders should use structured panic macro IR"
+    );
 }
 
 #[test]
@@ -4967,16 +5073,17 @@ fn class_literal_tokens_are_planned_before_lowering() {
         plan,
         new_java2rust::stdlib::ClassLiteralTokenPlan {
             java_name: "String".to_string(),
-            rust_type: "String".to_string(),
+            rust_type: RustType::String,
         }
     );
     assert_eq!(
         apply_class_literal_token(&JavaType::String, &FactSet::default()),
         RustExpr::Call {
-            function: Box::new(RustExpr::Path(vec![
-                "JavaClass::<String>".to_string(),
-                "literal".to_string(),
-            ])),
+            function: Box::new(RustExpr::GenericPath {
+                base: vec!["JavaClass".to_string()],
+                args: vec![RustType::String],
+                member: Some("literal".to_string()),
+            }),
             args: vec![RustExpr::Literal("\"String\"".to_string())],
         }
     );
@@ -4989,7 +5096,10 @@ fn class_literal_tokens_are_planned_before_lowering() {
             name: "Class".to_string(),
             args: vec![JavaType::String],
         })),
-        RustType::Raw("JavaClass<String>".to_string())
+        RustType::Generic {
+            base: "JavaClass".to_string(),
+            args: vec![RustType::String],
+        }
     );
 }
 
@@ -9493,6 +9603,11 @@ fn apply_call_target_uses_shared_call_projection_helpers() {
     assert!(!call_lowering_source.contains("RustExpr::Raw(\"Ok(())\""));
     assert!(!call_lowering_source.contains("RustExpr::Raw(\"()\""));
     assert!(!call_lowering_source.contains("RustExpr::Raw(\"{ }\""));
+    assert!(!call_lowering_source.contains("RustStmt::Raw("));
+    assert!(
+        !call_lowering_source.contains("emit::emit_expr"),
+        "call lowering should not render RustExprs back to text while composing calls"
+    );
     assert!(call_lowering_source.contains("RustExpr::MarkedBlock"));
     assert!(!call_lowering_source.contains("RustExpr::Raw(format!(\n        \"{{ {} {} }}\""));
 }
@@ -10614,7 +10729,13 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
             &list_capacity_target,
             vec![RustExpr::Raw("names.as_ref().unwrap().len()".to_string())]
         ),
-        RustExpr::Raw("Vec::with_capacity(names.as_ref().unwrap().len() as usize)".to_string())
+        RustExpr::Call {
+            function: Box::new(RustExpr::path(["Vec", "with_capacity"])),
+            args: vec![RustExpr::Cast {
+                expr: Box::new(RustExpr::Raw("names.as_ref().unwrap().len()".to_string())),
+                ty: "usize".to_string(),
+            }],
+        }
     );
 
     let mut external_constructor_facts = FactSet::default();
@@ -11607,7 +11728,7 @@ fn facade_abi_fact_selects_receiver_call_shape_before_crate_mapping() {
     let mut abi_facts = new_java2rust::external_packs::hdf5_pack_facts();
     abi_facts.facade_abi_facts.push(FacadeAbiFact {
         key: CallableKey::method("HDF5File", "writeDoubleArray", Staticness::Unknown, 2),
-        rust_path: "hdf5_facade::write_array".to_string(),
+        rust_path: "hdf5_facade::write_array::<f64>".to_string(),
         receiver: ReceiverAbi::FreeFunction,
         args: vec![FacadeSlot::Borrowed, FacadeSlot::Borrowed],
         return_slot: FacadeSlot::Owned,
@@ -11631,7 +11752,7 @@ fn facade_abi_fact_selects_receiver_call_shape_before_crate_mapping() {
             ref rust_path,
             receiver_abi: ReceiverAbi::FreeFunction,
             ..
-        } if rust_path == "hdf5_facade::write_array"
+        } if rust_path == "hdf5_facade::write_array::<f64>"
     ));
     assert_eq!(
         apply_call_target(
@@ -11643,7 +11764,7 @@ fn facade_abi_fact_selects_receiver_call_shape_before_crate_mapping() {
             ],
         ),
         RustExpr::Call {
-            function: Box::new(RustExpr::path(["hdf5_facade", "write_array"])),
+            function: Box::new(RustExpr::path(["hdf5_facade", "write_array::<f64>"])),
             args: vec![
                 RustExpr::Var("hdf5".to_string()),
                 RustExpr::Literal("\"/metrics\"".to_string()),
@@ -11790,7 +11911,9 @@ fn optional_borrow_receiver_projection_uses_null_check_without_reborrow() {
         ),
         RustExpr::MethodCall {
             receiver: Box::new(RustExpr::MethodCall {
-                receiver: Box::new(RustExpr::Raw("(left + right)".to_string())),
+                receiver: Box::new(RustExpr::Grouped(Box::new(RustExpr::Raw(
+                    "left + right".to_string(),
+                )))),
                 method: "as_ref".to_string(),
                 args: Vec::new(),
             }),
@@ -12005,6 +12128,20 @@ fn optional_mut_reborrow_records_projected_element_shape() {
     let second_pass = reborrow_optional_mut_projection(&reborrowed, &target)
         .expect("recorded produced shape should be accepted idempotently");
     assert_eq!(emit_expr(&second_pass), "values.as_deref_mut()");
+
+    let untagged_already_reborrowed = reborrow_optional_mut_projection(
+        &RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("values".to_string())),
+            method: "as_deref_mut".to_string(),
+            args: Vec::new(),
+        },
+        &target,
+    )
+    .expect("structured as_deref_mut should be accepted idempotently");
+    assert_eq!(
+        emit_expr(&untagged_already_reborrowed),
+        "values.as_deref_mut()"
+    );
 
     let structured =
         reborrow_optional_mut_projection(&RustExpr::Var("values".to_string()), &target)
@@ -12871,6 +13008,22 @@ class ExternalConstantConstructorCaller {
         "{}",
         translation.rust
     );
+    let stdlib_source = include_str!("../src/stdlib.rs");
+    let support_items_source = stdlib_source
+        .split("pub fn external_static_string_constant_support_items_with_context_programs_and_declared_owners")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn collect_static_constant_field_support_types")
+                .next()
+        })
+        .expect("external static string support item helper should remain discoverable");
+    assert!(
+        support_items_source.contains("RustItem::Struct")
+            && support_items_source.contains("RustStruct")
+            && support_items_source.contains("is_unit: true")
+            && !support_items_source.contains("RustItem::Raw(format!"),
+        "external static string placeholder structs should use structured unit struct items"
+    );
 
     cargo_check_generated_modules(
         "external_constant_facade_shells_are_defaultable_for_construc",
@@ -13113,9 +13266,9 @@ class GenomicsLikeTool extends GATKTool {
         translation.rust
     );
     assert!(
-        translation
-            .rust
-            .contains("self.cloud_prefetch_buffer + self.cloud_index_prefetch_buffer"),
+        translation.rust.contains(
+            "(self.cloud_prefetch_buffer).wrapping_add(self.cloud_index_prefetch_buffer)"
+        ),
         "{}",
         translation.rust
     );
@@ -14183,10 +14336,31 @@ fn java_string_join_static_call_renders_collection_join() {
                 RustExpr::Raw("format!(\"{}-classes\", name)".to_string()),
             ],
         ),
-        RustExpr::Raw(
-            "vec![\"bin\".to_string(), (root).to_string(), (format!(\"{}-classes\", name)).to_string()].join(\"|\")"
-                .to_string()
-        )
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::VecLiteral(vec![
+                RustExpr::MethodCall {
+                    receiver: Box::new(RustExpr::Literal("\"bin\"".to_string())),
+                    method: "to_string".to_string(),
+                    args: Vec::new(),
+                },
+                RustExpr::MethodCall {
+                    receiver: Box::new(RustExpr::Grouped(Box::new(RustExpr::Var(
+                        "root".to_string(),
+                    )))),
+                    method: "to_string".to_string(),
+                    args: Vec::new(),
+                },
+                RustExpr::MethodCall {
+                    receiver: Box::new(RustExpr::Grouped(Box::new(RustExpr::Raw(
+                        "format!(\"{}-classes\", name)".to_string(),
+                    )))),
+                    method: "to_string".to_string(),
+                    args: Vec::new(),
+                },
+            ])),
+            method: "join".to_string(),
+            args: vec![RustExpr::Literal("\"|\"".to_string())],
+        }
     );
 }
 
@@ -15161,7 +15335,7 @@ class Use {
         "{rust}"
     );
     assert!(
-        rust.contains("pub fn is_dog(&self, animal: &AnimalValue) -> bool"),
+        rust.contains("pub fn is_dog(&self, animal: AnimalValue) -> bool"),
         "{rust}"
     );
     assert!(
@@ -15377,7 +15551,7 @@ fn coercion_plan_owns_invalid_cast_runtime_policy() {
     assert!(source.contains("DowncastBoxedDynTrait"));
     assert!(source.contains("DowncastErasedObject"));
     assert!(source.contains("apply_boxed_dyn_trait_downcast"));
-    assert!(source.contains("render_invalid_cast_policy"));
+    assert!(source.contains("invalid_cast_policy_expr"));
     assert!(conversion_source.contains("semantics: JavaCastSemanticsPolicy"));
     assert!(conversion_source.contains("PrimitiveNumericCast"));
     assert!(conversion_source.contains("CheckedReferenceDowncast"));
@@ -15516,6 +15690,10 @@ fn coercion_plan_owns_clone_recovery_policy() {
     assert!(source.contains("pub fn rendered_expr_has_clone_recovery"));
     assert!(source.contains("pub fn rendered_expr_has_direct_clone_recovery"));
     assert!(source.contains("pub fn rust_expr_has_direct_clone_recovery"));
+    assert!(
+        !source.contains("rendered_expr_has_direct_clone_recovery(&emit::emit_expr(expr))"),
+        "direct clone-recovery detection should inspect structured projections and raw leaves without re-rendering the full expression"
+    );
     assert!(source.contains("pub fn apply_audited_clone_recovery"));
     assert!(lower_source.contains("enum CloneRecoveryDecision"));
     assert!(lower_source.contains("ApplyRecoveryCoercion"));
@@ -15530,8 +15708,49 @@ fn coercion_plan_owns_clone_recovery_policy() {
     );
     assert!(lower_source.contains("crate::coercion::rust_expr_has_clone_recovery(lowered)"));
     assert!(lower_source.contains("rust_expr_has_direct_clone_recovery(lowered)"));
-    assert!(lower_source.contains("fn optional_clone_recovery_expr(rendered: String) -> RustExpr"));
     assert!(lower_source.contains("RustExprShape::OwnedRecovery"));
+    assert!(lower_source.contains("fn direct_optional_clone_recovery_unwrap_expr"));
+    let direct_optional_clone_recovery_source = lower_source
+        .split("fn direct_optional_clone_recovery_unwrap_expr")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn rust_expr_has_optional_unwrap_or_java_null_expect")
+                .next()
+        })
+        .expect("direct optional clone recovery helper should remain discoverable");
+    assert!(
+        direct_optional_clone_recovery_source.contains("method != \"unwrap\"")
+            && direct_optional_clone_recovery_source
+                .contains("optional_clone_recovery_owned_element_projection")
+            && direct_optional_clone_recovery_source.contains("direct_optional_clone_receiver")
+            && !direct_optional_clone_recovery_source.contains("emit::emit_expr")
+            && !direct_optional_clone_recovery_source
+                .contains("replace_optional_clone_recovery_unwrap"),
+        "direct optional clone recovery should inspect method-call structure before rendered fallback"
+    );
+    let apply_clone_recovery_decision_source = lower_source
+        .split("fn apply_clone_recovery_decision")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn direct_optional_clone_recovery_unwrap_expr")
+                .next()
+        })
+        .expect("clone recovery decision application should remain discoverable");
+    assert!(
+        apply_clone_recovery_decision_source.contains("direct_optional_clone_recovery_unwrap_expr")
+            && !apply_clone_recovery_decision_source.contains("emit::emit_expr(&lowered)")
+            && !apply_clone_recovery_decision_source
+                .contains("replace_optional_clone_recovery_unwrap"),
+        "clone recovery decision application should stay on structured optional unwrap recovery"
+    );
+    assert!(
+        !lower_source.contains("fn optional_clone_recovery_expr(rendered: String) -> RustExpr")
+    );
+    assert!(
+        lower_source.contains("fn rust_expr_has_optional_unwrap_or_java_null_expect")
+            && !lower_source.contains("rendered_expr_has_optional_unwrap_or_java_null_expect"),
+        "lowering should guard optional unwraps structurally instead of rendering lowered expressions"
+    );
     let unshaped_argument = lower_source
         .split("fn lower_unshaped_argument")
         .nth(1)
@@ -15565,17 +15784,118 @@ fn coercion_owns_borrowed_string_literal_temporary_projection() {
     let borrowed = borrowed_string_literal_temporary_plan("&\"actual\".to_string()", "_tmp")
         .expect("borrowed string literal temporary should be planned");
     assert_eq!(borrowed.replacement_expr, "&_tmp");
+    assert!(matches!(
+        borrowed.replacement,
+        new_java2rust::rust_ir::RustExpr::Unary { ref op, ref expr }
+            if op == "&"
+                && matches!(
+                    expr.as_ref(),
+                    new_java2rust::rust_ir::RustExpr::Var(name)
+                        if name == "_tmp"
+                )
+    ));
     assert_eq!(borrowed.initializer_expr, "\"actual\".to_string()");
+    assert!(matches!(
+        borrowed.initializer,
+        new_java2rust::rust_ir::RustExpr::MethodCall { receiver, method, args }
+            if method == "to_string"
+                && args.is_empty()
+                && matches!(
+                    receiver.as_ref(),
+                    new_java2rust::rust_ir::RustExpr::Literal(literal)
+                        if literal == "\"actual\""
+                )
+    ));
 
     let optional = borrowed_string_literal_temporary_plan("Some(&\"actual\".to_string())", "_tmp")
         .expect("optional borrowed string literal temporary should be planned");
     assert_eq!(optional.replacement_expr, "Some(&_tmp)");
+    assert!(matches!(
+        optional.replacement,
+        new_java2rust::rust_ir::RustExpr::Call { ref function, ref args }
+            if matches!(
+                function.as_ref(),
+                new_java2rust::rust_ir::RustExpr::Var(name)
+                    if name == "Some"
+            )
+                && matches!(
+                    args.as_slice(),
+                    [new_java2rust::rust_ir::RustExpr::Unary { op, expr }]
+                        if op == "&"
+                            && matches!(
+                                expr.as_ref(),
+                                new_java2rust::rust_ir::RustExpr::Var(name)
+                                    if name == "_tmp"
+                            )
+                )
+    ));
     assert_eq!(optional.initializer_expr, "\"actual\".to_string()");
+    assert!(matches!(
+        optional.initializer,
+        new_java2rust::rust_ir::RustExpr::MethodCall { receiver, method, args }
+            if method == "to_string"
+                && args.is_empty()
+                && matches!(
+                    receiver.as_ref(),
+                    new_java2rust::rust_ir::RustExpr::Literal(literal)
+                        if literal == "\"actual\""
+                )
+    ));
 
     let lower_source = fs::read_to_string("src/lower.rs").expect("lower source should be readable");
     assert!(!lower_source.contains("fn string_literal_to_string_expr"));
     assert!(!lower_source.contains("strip_prefix(\"Some(&\")"));
     assert!(!lower_source.contains("raw.starts_with('\"') && raw.ends_with(\".to_string()\")"));
+    let hoist_source = lower_source
+        .split("fn hoist_borrowed_string_temporaries_in_expr")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn hoist_borrowed_string_temporaries_in_stmt")
+                .next()
+        })
+        .expect("borrowed string temporary hoist should remain discoverable");
+    assert!(
+        !hoist_source.contains("value: Some(RustExpr::Raw(value))"),
+        "borrowed string literal temporary hoists should use the structured initializer from the plan"
+    );
+    assert!(
+        hoist_source.contains("*expr = replacement.expr")
+            && !hoist_source.contains("*raw = replacement.expr"),
+        "borrowed string literal temporary hoists should replace raw leaves with structured replacement expressions"
+    );
+    let borrowed_owned_string_literal_temporary_source = lower_source
+        .split("fn borrowed_owned_string_literal_temporary")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn borrowed_structured_optional_erased_string_literal_temporary")
+                .next()
+        })
+        .expect("borrowed string literal temporary helper should remain discoverable");
+    assert!(
+        borrowed_owned_string_literal_temporary_source.contains("expr: plan.replacement")
+            && !borrowed_owned_string_literal_temporary_source
+                .contains("rendered_projection_or_raw_leaf(&plan.replacement_expr)"),
+        "borrowed string literal temporary helper should use the structured replacement from the plan"
+    );
+    let borrowed_structured_optional_erased_source = lower_source
+        .split("fn borrowed_structured_optional_erased_string_literal_temporary")
+        .nth(1)
+        .and_then(|tail| tail.split("fn erased_any_box_type_name").next())
+        .expect("structured optional erased string literal helper should remain discoverable");
+    assert!(
+        borrowed_structured_optional_erased_source
+            .contains("optional_erased_boxed_string_literal_initializer(&args[0])")
+            && borrowed_structured_optional_erased_source
+                .contains("fn structured_string_literal_to_string_initializer")
+            && !borrowed_structured_optional_erased_source
+                .contains("RustExpr::Literal(rendered) | RustExpr::Raw(rendered)")
+            && !borrowed_structured_optional_erased_source.contains("RustExpr::Raw(rendered) =>")
+            && !borrowed_structured_optional_erased_source.contains("emit::emit_expr(&args[0])")
+            && !borrowed_structured_optional_erased_source.contains("Some(Box::new({}) as {})")
+            && !borrowed_structured_optional_erased_source
+                .contains("borrowed_string_literal_temporary_plan(&raw"),
+        "structured optional erased string literal hoists should inspect the boxed expression instead of rendering it"
+    );
 }
 
 #[test]
@@ -16329,7 +16649,12 @@ fn static_optional_storage_initializers_use_optional_construction_plan() {
         "{static_initializer}"
     );
     assert!(
-        static_initializer.contains("RustExpr::Raw(\"format!\".to_string())"),
+        !static_initializer.contains("RustExpr::Raw(\"format!\".to_string())"),
+        "{static_initializer}"
+    );
+    assert!(
+        static_initializer.contains("macro_call_projection(")
+            && static_initializer.contains("\"format\","),
         "{static_initializer}"
     );
     let switch_label_expr = source
@@ -16345,6 +16670,27 @@ fn static_optional_storage_initializers_use_optional_construction_plan() {
         !switch_label_expr.contains("format!(\"Some({owner}::{field})\""),
         "{switch_label_expr}"
     );
+    let switch_match_pattern = source
+        .split("fn switch_match_pattern")
+        .nth(1)
+        .and_then(|tail| tail.split("fn switch_label_condition").next())
+        .expect("switch match pattern helper should be present");
+    assert!(
+        switch_match_pattern.contains("lower_switch_case_label_expr("),
+        "{switch_match_pattern}"
+    );
+    assert!(
+        !switch_match_pattern.contains("format!(\"Some({variant})\""),
+        "{switch_match_pattern}"
+    );
+    assert!(
+        !switch_match_pattern.contains("format!(\"Some({owner}::{field})\""),
+        "{switch_match_pattern}"
+    );
+    assert!(
+        !switch_match_pattern.contains("format!(\"{owner}::{field}\")"),
+        "{switch_match_pattern}"
+    );
     let optional_borrowed_arg = source
         .split("fn lower_optional_argument_for_borrowed_target")
         .nth(1)
@@ -16356,6 +16702,16 @@ fn static_optional_storage_initializers_use_optional_construction_plan() {
     assert!(
         !optional_borrowed_arg.contains("format!(\"Some(&{rendered})\""),
         "{optional_borrowed_arg}"
+    );
+    assert!(
+        !optional_borrowed_arg.contains("RustExpr::Raw(rendered)"),
+        "optional borrowed literal arguments should not render before force_shared_borrow_projection"
+    );
+    assert!(
+        optional_borrowed_arg
+            .contains("Some(option_some_projection(force_shared_borrow_projection(")
+            && optional_borrowed_arg.contains("lowered,"),
+        "optional borrowed literal arguments should compose Some(&literal) structurally"
     );
 }
 
@@ -16539,7 +16895,7 @@ fn optional_element_borrow_carrier_construction_is_centralized() {
         .nth(1)
         .and_then(|tail| tail.split("fn map_type_args_from_expr_shape").next())
         .expect("map entry set helper should be present");
-    assert!(map_entry_set_helper.contains("adapt_optional_instance_receiver_with_slot_plan"));
+    assert!(map_entry_set_helper.contains("sequence_iteration_source_projection"));
     assert!(!map_entry_set_helper.contains("project_optional_receiver"));
     let enhanced_for_iterable_helper = source
         .split("fn lower_enhanced_for_iterable_expr")
@@ -18156,7 +18512,10 @@ class Dog implements Animal {}
     );
     assert_eq!(
         apply_cast_conversion(RustExpr::Var("dog".to_string()), &cast_plan),
-        RustExpr::Raw("AnimalValue::Dog(dog)".to_string())
+        RustExpr::Call {
+            function: Box::new(RustExpr::path(["AnimalValue", "Dog"])),
+            args: vec![RustExpr::Var("dog".to_string())],
+        }
     );
     let mut borrowed_env = ShapeEnv::new();
     let mut borrowed_dog_shape = value_shape_for_java_type(
@@ -18280,10 +18639,21 @@ class Dog implements Animal {}
             variant_name: "Dog".to_string(),
         }
     );
+    let instanceof_expr = apply_instanceof(RustExpr::Var("animal".to_string()), &instanceof_plan);
     assert_eq!(
-        apply_instanceof(RustExpr::Var("animal".to_string()), &instanceof_plan),
-        RustExpr::Raw("matches!(animal, AnimalValue::Dog(_))".to_string())
+        emit::emit_expr(&instanceof_expr),
+        "matches!(animal, AnimalValue::Dog(_))"
     );
+    assert!(matches!(
+        instanceof_expr,
+        RustExpr::MacroCall { macro_name, args }
+            if macro_name == "matches"
+                && matches!(
+                    args.as_slice(),
+                    [RustExpr::Var(name), RustExpr::Raw(pattern)]
+                        if name == "animal" && pattern == "AnimalValue::Dog(_)"
+                )
+    ));
 
     let interface_instanceof_plan = plan_instanceof(&parse_expr("dog"), &animal_ty, &env, fact_ctx);
     assert_eq!(interface_instanceof_plan.check, InstanceOfCheck::AlwaysTrue);
@@ -20128,6 +20498,7 @@ class ExternalLabel {}
         default_shell.params[0].ty,
         RustType::Ref {
             mutable: false,
+            lifetime: None,
             inner: Box::new(RustType::Named("ExternalLabel".to_string())),
         }
     );
@@ -20135,6 +20506,7 @@ class ExternalLabel {}
         fact_shell.params[0].ty,
         RustType::Ref {
             mutable: false,
+            lifetime: None,
             inner: Box::new(RustType::Raw("str".to_string())),
         }
     );
@@ -20603,9 +20975,9 @@ fn erased_object_runtime_contract_is_documented_and_shared() {
     }
     assert!(conversion_source.contains("pub struct ErasedObjectRuntimeContract"));
     assert!(conversion_source.contains("pub fn erased_object_runtime_contract"));
-    assert!(coercion_source.contains("Box::new({}) as Box<dyn std::any::Any>"));
+    assert!(coercion_source.contains("pub fn erased_object_box_projection"));
     assert!(coercion_source.contains("downcast::<{target_type}>()"));
-    assert!(coercion_source.contains(".is::<{target_type}>()"));
+    assert!(coercion_source.contains("format!(\"is::<{target_type}>\")"));
     assert!(slot_render_source.contains("Box<dyn std::any::Any>"));
 }
 
@@ -20930,6 +21302,7 @@ class StringUse {
         rust_type_for_slot(&param.shape),
         RustType::Ref {
             mutable: false,
+            lifetime: None,
             inner: Box::new(RustType::Raw("str".to_string()))
         }
     );
@@ -27549,13 +27922,27 @@ fn call_plan_does_not_render_rust_expressions() {
 #[test]
 fn call_lowering_renders_constructor_owner_types_with_facts() {
     let source = include_str!("../src/call_lowering.rs");
+    let coercion_source = include_str!("../src/coercion.rs");
     let lower_source = include_str!("../src/lower.rs");
 
     assert!(source.contains("pub fn apply_new_target_with_facts"));
     assert!(source.contains("pub fn apply_new_target_with_facts_and_representations"));
-    assert!(source.contains("constructor_owner_path_type(&target.owner_shape)"));
+    assert!(source.contains("constructor_owner_associated_path_expr("));
+    assert!(source.contains("rust_type_associated_path_projection("));
+    assert!(!source.contains("fn constructor_owner_type_associated_path_expr"));
+    assert!(!source.contains("emit_type"));
+    assert!(coercion_source.contains("pub fn rust_type_associated_path_projection"));
+    assert!(coercion_source.contains("RustExpr::GenericPath"));
+    assert!(!source.contains("RustExpr::Path(vec![crate::emit::emit_type(&other)"));
+    assert!(!source.contains("emit_type(&other), member.to_string()"));
+    assert!(source.contains("fn constructor_owner_is_string"));
     assert!(source.contains("canonical_external_receiver_type_key(name)"));
+    assert!(!source.contains("let owner_type = constructor_owner_path_type"));
+    assert!(!source.contains("owner_type == \"String\""));
+    assert!(!source.contains("constructor_owner_path_type(&target.owner_shape)"));
+    assert!(!source.contains("rust_type_for_slot_with_facts(owner_shape, &FactSet::default())"));
     assert!(!source.contains("emit_type(&rust_type_for_slot_with_facts(&target.owner_shape"));
+    assert!(!source.contains("emit_type(&rust_type_for_slot_with_facts("));
     assert!(!source.contains("rust_type_for_slot(&target.owner_shape)"));
     assert!(lower_source.contains("apply_new_target_with_facts_and_representations("));
     assert!(lower_source.contains("ctx.representations"));
@@ -29878,7 +30265,10 @@ class StringReturnFlow {
         translation.rust.contains("pub fn id(value: &str) -> &str")
             || translation
                 .rust
-                .contains("pub fn id<'a>(value: &'a str) -> &'a str"),
+                .contains("pub fn id<'a>(value: &'a str) -> &'a str")
+            || translation
+                .rust
+                .contains("pub fn id<'a>(value: &'a String) -> &'a str"),
         "{}",
         translation.rust
     );
@@ -29888,7 +30278,10 @@ class StringReturnFlow {
             .contains("return Self::id(value.as_str()).to_string();")
             || translation
                 .rust
-                .contains("return Self::id(value).to_string();"),
+                .contains("return Self::id(value).to_string();")
+            || translation
+                .rust
+                .contains("return Self::id(&value).to_string();"),
         "{}",
         translation.rust
     );
@@ -29979,7 +30372,10 @@ class StringReturnFlow {
         translation.rust.contains("pub fn id(value: &str) -> &str")
             || translation
                 .rust
-                .contains("pub fn id<'a>(value: &'a str) -> &'a str"),
+                .contains("pub fn id<'a>(value: &'a str) -> &'a str")
+            || translation
+                .rust
+                .contains("pub fn id<'a>(value: &'a String) -> &'a str"),
         "{}",
         translation.rust
     );
@@ -29989,7 +30385,10 @@ class StringReturnFlow {
             .contains("pub fn wrapper(value: &str) -> &str")
             || translation
                 .rust
-                .contains("pub fn wrapper<'a>(value: &'a str) -> &'a str"),
+                .contains("pub fn wrapper<'a>(value: &'a str) -> &'a str")
+            || translation
+                .rust
+                .contains("pub fn wrapper<'a>(value: &'a String) -> &'a str"),
         "{}",
         translation.rust
     );
@@ -30612,7 +31011,14 @@ fn exception_lowering_policy_owns_result_support_ok_and_err_shapes() {
     );
     assert_eq!(
         exception_result_type(RustType::I32),
-        RustType::Raw("Result<i32, JavaException>".to_string())
+        RustType::Generic {
+            base: "Result".to_string(),
+            args: vec![RustType::I32, RustType::Named("JavaException".to_string())],
+        }
+    );
+    assert_eq!(
+        emit::emit_type(&exception_result_type(RustType::I32)),
+        "Result<i32, JavaException>"
     );
     assert!(matches!(
         java_exception_support_item(),
@@ -30656,10 +31062,40 @@ fn exception_lowering_policy_owns_result_support_ok_and_err_shapes() {
             ),
             false,
         ),
-        RustStmt::Raw(
-            "panic!(\"uncaught Java exception: {:?}\", JavaException::new(\"IllegalArgumentException\", \"bad\".to_string().to_string()));"
-                .to_string(),
-        )
+        RustStmt::Expr(RustExpr::MacroCall {
+            macro_name: "panic".to_string(),
+            args: vec![
+                RustExpr::Literal("\"uncaught Java exception: {:?}\"".to_string()),
+                RustExpr::Call {
+                    function: Box::new(RustExpr::path(["JavaException", "new"])),
+                    args: vec![
+                        RustExpr::Literal("\"IllegalArgumentException\"".to_string()),
+                        RustExpr::MethodCall {
+                            receiver: Box::new(RustExpr::Literal(
+                                "\"bad\".to_string()".to_string()
+                            )),
+                            method: "to_string".to_string(),
+                            args: Vec::new(),
+                        },
+                    ],
+                },
+            ],
+        })
+    );
+    assert_eq!(
+        new_java2rust::emit::emit_statements(
+            &[
+                new_java2rust::exception_lowering::throw_stmt_with_result_policy(
+                    new_exception_expr(
+                        "IllegalArgumentException",
+                        RustExpr::Literal("\"bad\".to_string()".to_string()),
+                    ),
+                    false,
+                )
+            ],
+            0,
+        ),
+        "panic!(\"uncaught Java exception: {:?}\", JavaException::new(\"IllegalArgumentException\", \"bad\".to_string().to_string()));\n"
     );
     assert_eq!(
         fallback_exception_expr(RustExpr::Var("err".to_string())),
@@ -30667,8 +31103,8 @@ fn exception_lowering_policy_owns_result_support_ok_and_err_shapes() {
             function: Box::new(RustExpr::path(["JavaException", "new"])),
             args: vec![
                 RustExpr::Literal("\"JavaException\"".to_string()),
-                RustExpr::Call {
-                    function: Box::new(RustExpr::Raw("format!".to_string())),
+                RustExpr::MacroCall {
+                    macro_name: "format".to_string(),
                     args: vec![
                         RustExpr::Literal("\"{:?}\"".to_string()),
                         RustExpr::Var("err".to_string()),
@@ -30723,9 +31159,14 @@ fn exception_lowering_policy_owns_result_support_ok_and_err_shapes() {
             args: vec![
                 RustExpr::Literal("\"IllegalStateException\"".to_string()),
                 RustExpr::MethodCall {
-                    receiver: Box::new(RustExpr::Raw(
-                        "format!(\"{}: {}\", message, ignored)".to_string(),
-                    )),
+                    receiver: Box::new(RustExpr::MacroCall {
+                        macro_name: "format".to_string(),
+                        args: vec![
+                            RustExpr::Literal("\"{}: {}\"".to_string()),
+                            RustExpr::Var("message".to_string()),
+                            RustExpr::Var("ignored".to_string()),
+                        ],
+                    }),
                     method: "to_string".to_string(),
                     args: Vec::new(),
                 },
@@ -30768,9 +31209,14 @@ fn exception_lowering_policy_owns_result_support_ok_and_err_shapes() {
             args: vec![
                 RustExpr::Literal("\"MissingArgument\"".to_string()),
                 RustExpr::MethodCall {
-                    receiver: Box::new(RustExpr::Raw(
-                        "format!(\"{}: {}\", argument_name, message)".to_string(),
-                    )),
+                    receiver: Box::new(RustExpr::MacroCall {
+                        macro_name: "format".to_string(),
+                        args: vec![
+                            RustExpr::Literal("\"{}: {}\"".to_string()),
+                            RustExpr::Var("argument_name".to_string()),
+                            RustExpr::Var("message".to_string()),
+                        ],
+                    }),
                     method: "to_string".to_string(),
                     args: Vec::new(),
                 },
@@ -32839,19 +33285,24 @@ fn optional_facade_abi_fact_owns_borrowed_return_recovery_policy() {
         SlotConversionPlan::OptionalRustBorrowedFacadeReturn(ref policy)
             if policy.recovery == RustBorrowedFacadeReturnRecovery::ToPathBuf
     ));
-    assert_eq!(
+    assert!(matches!(
         apply_slot_conversion_plan(
             RustExpr::Raw("reader.get_file()".to_string()),
             &plan.conversion
         ),
         RustExpr::MethodCall {
-            receiver: Box::new(RustExpr::Raw("reader.get_file()".to_string())),
-            method: "map".to_string(),
-            args: vec![RustExpr::Raw(
-                "|value| Box::new(value.to_path_buf()) as Box<dyn std::any::Any>".to_string()
-            )],
-        }
-    );
+            receiver,
+            method,
+            args,
+        } if matches!(receiver.as_ref(), RustExpr::Raw(raw) if raw == "reader.get_file()")
+            && method == "map"
+            && matches!(args.as_slice(), [RustExpr::Closure { body, .. }]
+                if matches!(
+                    body,
+                    new_java2rust::rust_ir::RustClosureBody::Expr(expr)
+                        if matches!(expr.as_ref(), RustExpr::Cast { ty, .. } if ty == "Box<dyn std::any::Any>")
+                ))
+    ));
 }
 
 #[test]
@@ -32874,6 +33325,175 @@ fn exception_lowering_does_not_infer_java_exception_class_names() {
     assert!(!source.contains("exception_class_name"));
     assert!(!source.contains("JavaType::Named"));
     assert!(!source.contains("JavaType::Unknown"));
+    let throw_policy_source = source
+        .split("pub fn throw_stmt_with_result_policy")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn try_catch_stmt").next())
+        .expect("throw result policy lowering should remain discoverable");
+    assert!(throw_policy_source.contains("RustExpr::MacroCall"));
+    assert!(
+        !throw_policy_source.contains("RustStmt::Raw(format!")
+            && !throw_policy_source.contains("emit_expr(&exception)"),
+        "non-result throw lowering should keep the exception expression structured"
+    );
+    let exception_method_receiver_source = source
+        .split("fn parenthesize_raw_method_receiver")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn raw_needs_method_receiver_parentheses")
+                .next()
+        })
+        .expect("exception method receiver helper should remain discoverable");
+    assert!(
+        exception_method_receiver_source
+            .contains("raw_receiver_projection(expr, raw_needs_method_receiver_parentheses)")
+            && !exception_method_receiver_source.contains("RustExpr::Raw(format!(\"({trimmed})\""),
+        "exception method receivers should delegate Raw recovery to the central coercion helper"
+    );
+    assert!(source.contains("fn java_exception_new_projection"));
+    assert!(source.contains("fn java_exception_with_cause_projection"));
+    assert!(source.contains("function_call_projection("));
+    assert!(source.contains("receiver_method_call_projection_exact("));
+    assert!(source.contains("macro_call_projection(\"format\""));
+    let exception_message_expr_source = source
+        .split("fn exception_message_expr")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn fallback_exception_expr").next())
+        .expect("exception message projection helper should remain discoverable");
+    assert!(!source.contains("RustExpr::Raw(format!(\"JavaException::new"));
+    assert!(!source.contains("RustExpr::Raw(format!(\"JavaException::with_cause"));
+    assert!(!source.contains("RustExpr::Raw(format!(\"format!("));
+    assert!(!exception_message_expr_source.contains("crate::emit::emit_expr(&message)"));
+    assert!(source.contains("fn uncaught_java_exception_panic_stmt(exception: RustExpr)"));
+    let plain_return_catch_source = source
+        .split("fn plain_return_catch_body")
+        .nth(1)
+        .and_then(|tail| tail.split("fn rust_expr_is_path_name").next())
+        .expect("plain return catch body lowering should remain discoverable");
+    assert!(
+        plain_return_catch_source.contains("uncaught_java_exception_panic_stmt(exception)")
+            && !plain_return_catch_source.contains("RustStmt::Raw(format!")
+            && !plain_return_catch_source.contains("emit_expr(&exception)"),
+        "plain catch return Err rewrites should keep the exception expression structured"
+    );
+    assert!(
+        source.contains("fn rust_expr_is_path_name")
+            && !source.contains("rust_expr_is_path_or_raw_name")
+            && !source.contains("RustExpr::Raw(name) => segments.len() == 1"),
+        "try/catch Ok/Err rewrites should rely on structured path functions"
+    );
+    let try_catch_source = source
+        .split("pub fn try_catch_stmt")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn try_catch_value_fallthrough_stmt").next())
+        .expect("try/catch lowering should remain discoverable");
+    assert!(
+        try_catch_source.contains("RustExpr::Match")
+            && try_catch_source.contains("RustMatchArm")
+            && try_catch_source.contains("result_scope_call_expr(")
+            && !try_catch_source.contains("RustStmt::Raw(out)"),
+        "try/catch lowering should build a structured match expression"
+    );
+    let value_fallthrough_source = source
+        .split("pub fn try_catch_value_fallthrough_stmt")
+        .nth(1)
+        .and_then(|tail| tail.split("fn wrap_ok_returns_in_some").next())
+        .expect("value fallthrough try/catch lowering should remain discoverable");
+    assert!(source.contains("fn ok_none_expr() -> RustExpr"));
+    assert!(
+        value_fallthrough_source.contains("ok_none_expr()")
+            && value_fallthrough_source.contains("RustExpr::Match")
+            && value_fallthrough_source.contains("RustMatchArm")
+            && value_fallthrough_source.contains("result_scope_call_expr(")
+            && !value_fallthrough_source.contains("RustExpr::Raw(\n        \"Ok(None)\""),
+        "try/catch value fallthrough should compose its match structurally"
+    );
+    assert!(
+        !value_fallthrough_source.contains("RustStmt::Raw(out)"),
+        "try/catch value fallthrough should not render the whole match as a raw statement"
+    );
+    assert!(source.contains("fn return_result_var_stmt(result_name: &str) -> RustStmt"));
+    assert!(source.contains("fn return_result_or_panic_stmt(result_name: &str) -> RustStmt"));
+    assert!(source.contains("fn panic_if_result_err_stmt(result_name: &str) -> RustStmt"));
+    assert!(source.contains("fn propagate_result_stmt(result_name: &str) -> RustStmt"));
+    let propagate_result_stmt_source = source
+        .split("fn propagate_result_stmt(result_name: &str) -> RustStmt")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn try_with_resources_scope_stmt").next())
+        .expect("exception result propagation helper should remain discoverable");
+    assert!(
+        propagate_result_stmt_source.contains("RustExpr::Try")
+            && propagate_result_stmt_source.contains("RustExpr::Var(")
+            && propagate_result_stmt_source.contains("result_name.to_string()")
+            && !propagate_result_stmt_source.contains("RustExpr::Raw(format!"),
+        "exception result propagation should model postfix ? structurally"
+    );
+    assert!(
+        source.contains("fn unit_expr() -> RustExpr")
+            && source.contains("RustExpr::Tuple(Vec::new())")
+            && !source.contains("RustExpr::Raw(\"()\""),
+        "unit exception results should use tuple IR rather than a raw unit literal"
+    );
+    let try_with_resources_scope_source = source
+        .split("pub fn try_with_resources_scope_stmt")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn try_finally_scope_stmt").next())
+        .expect("try-with-resources scope lowering should remain discoverable");
+    let try_finally_scope_source = source
+        .split("pub fn try_finally_scope_stmt")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn try_catch_finally_scope_stmt").next())
+        .expect("try/finally scope lowering should remain discoverable");
+    let try_catch_finally_scope_source = source
+        .split("pub fn try_catch_finally_scope_stmt")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn new_exception_expr").next())
+        .expect("try/catch/finally scope lowering should remain discoverable");
+    assert!(
+        source.contains("fn result_scope_call_let_stmt")
+            && source.contains("return_type: Some(result_type)")
+            && source.contains("RustExpr::Closure")
+            && source.contains("RustExpr::Call")
+            && !source.contains("RustStmt::Raw(format!(\n        \"let __java_twr_result")
+            && !source.contains("RustStmt::Raw(format!(\n        \"let __java_try_result"),
+        "exception result scope calls should compose typed closure-call IR instead of rendered let statements"
+    );
+    for scope_source in [
+        try_with_resources_scope_source,
+        try_finally_scope_source,
+        try_catch_finally_scope_source,
+    ] {
+        assert!(
+            scope_source.contains("return_result_var_stmt(")
+                && scope_source.contains("return_result_or_panic_stmt(")
+                && scope_source.contains("panic_if_result_err_stmt(")
+                && scope_source.contains("propagate_result_stmt(")
+                && !scope_source.contains("RustStmt::Raw(\"return __java_")
+                && !scope_source.contains("RustStmt::Raw(\"__java_")
+                && !scope_source.contains("unwrap_or_else(|ex| panic!")
+                && !scope_source.contains("if let Err(ex) = __java_")
+                && !scope_source.contains("__java_try_result?;"),
+            "TWR/finally result trailing statements should use structured return/if-let helpers"
+        );
+    }
+    for scope_source in [
+        try_with_resources_scope_source,
+        try_finally_scope_source,
+        try_catch_finally_scope_source,
+    ] {
+        assert!(
+            scope_source.contains("RustStmt::Expr(RustExpr::Block")
+                && !scope_source.contains("RustStmt::Raw(format!(\n        \"{\\n{}\\n}\""),
+            "TWR/finally outer scope wrappers should preserve their body as structured block IR"
+        );
+    }
+    assert!(
+        try_catch_finally_scope_source.contains("RustExpr::Match")
+            && try_catch_finally_scope_source.contains("RustMatchArm")
+            && try_catch_finally_scope_source.contains("result_scope_call_expr(")
+            && !try_catch_finally_scope_source.contains("RustStmt::Raw(out)"),
+        "try/catch/finally lowering should build the catch result match structurally"
+    );
 }
 
 #[test]
@@ -32923,15 +33543,301 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     let call_plan_source = include_str!("../src/call_plan.rs");
     let conversion_source = include_str!("../src/conversion_plan.rs");
     let stream_source = include_str!("../src/stream_lowering.rs");
+    let switch_source = include_str!("../src/switch_lowering.rs");
     let access_source = include_str!("../src/access_lowering.rs");
     let array_source = include_str!("../src/array_lowering.rs");
+    let exception_source = include_str!("../src/exception_lowering.rs");
     let item_assembly_source = include_str!("../src/item_assembly.rs");
     let operator_source = include_str!("../src/operator_lowering.rs");
+    let rust_ir_source = include_str!("../src/rust_ir.rs");
+    let slot_render_source = include_str!("../src/slot_render.rs");
     let types_source = include_str!("../src/types.rs");
     let stdlib_source = include_str!("../src/stdlib.rs");
     let main_source = include_str!("../src/main.rs");
     let external_packs_source = include_str!("../src/external_packs.rs");
     let java_naming_source = include_str!("../src/java_naming.rs");
+    let string_concat_render_source = include_str!("../src/string_concat_render.rs");
+    assert!(
+        rust_ir_source.contains("Generic {\n        base: String,\n        args: Vec<RustType>,")
+    );
+    assert!(
+        rust_ir_source
+            .contains("GenericPath {\n        base: Vec<String>,\n        args: Vec<RustType>,")
+    );
+    assert!(
+        rust_ir_source.contains("Ref {\n        mutable: bool,\n        lifetime: Option<String>,")
+    );
+    assert!(rust_ir_source.contains("DynTrait(String)"));
+    assert!(rust_ir_source.contains("ImplTrait(String)"));
+    assert!(
+        string_concat_render_source.contains("macro_call_projection(\"format\"")
+            && string_concat_render_source.contains("java_display_operand_projection")
+            && !string_concat_render_source.contains("RustExpr::Raw(")
+            && !string_concat_render_source.contains("render_java_display_operand"),
+        "string concat rendering should compose the format macro structurally"
+    );
+    assert!(
+        !exception_source.contains("RustType::Raw(format!(\n        \"Result<"),
+        "exception Result<T, JavaException> types should use structured generic type IR"
+    );
+    assert!(
+        !slot_render_source
+            .contains("RustType::Raw(format!(\n                    \"std::collections::HashSet<"),
+        "HashSet<T> type rendering should use structured generic type IR"
+    );
+    assert!(
+        !slot_render_source.contains("RustType::Raw(format!(\"JavaClass<{token_ty}>\"))"),
+        "JavaClass<T> type rendering should use structured generic type IR"
+    );
+    assert!(
+        !slot_render_source.contains("RustType::Raw(\"Box<dyn std::any::Any>\".to_string())"),
+        "erased object type rendering should use structured Box<DynTrait> type IR"
+    );
+    assert!(
+        !slot_render_source.contains("RustType::Raw(format!(\n                \"Box<dyn {}>\"")
+            && !slot_render_source.contains("RustType::Raw(format!(\"Box<dyn {trait_name}>\""),
+        "boxed dyn trait type rendering should use structured Box<DynTrait> type IR"
+    );
+    assert!(
+        !slot_render_source.contains("RustType::Raw(format!(\n                \"dyn {}\"")
+            && !slot_render_source.contains("RustType::Raw(format!(\"dyn {trait_name}\""),
+        "dyn trait type rendering should use structured DynTrait type IR"
+    );
+    assert!(
+        !slot_render_source.contains("RustType::Raw(format!(\"impl {trait_path}\"))"),
+        "impl trait type rendering should use structured ImplTrait type IR"
+    );
+    assert!(
+        !slot_render_source.contains("RustType::Raw(format!(\n                    \"JavaIterator<"),
+        "JavaIterator<T> type rendering should use structured generic type IR"
+    );
+    assert!(
+        !slot_render_source
+            .contains("RustType::Raw(format!(\n                    \"std::collections::HashMap<"),
+        "HashMap<K, V> type rendering should use structured generic type IR"
+    );
+    assert!(
+        !slot_render_source
+            .contains("RustType::Raw(\"std::collections::HashMap<String, String>\".to_string())"),
+        "Properties should use structured HashMap<String, String> type IR"
+    );
+    assert!(
+        !slot_render_source.contains("ty: RustType::Raw(format!(\n                \"{}<{}>\""),
+        "generic named Java types should use structured generic type IR"
+    );
+    assert!(
+        !slot_render_source.contains("Some(RustType::Raw(format!(\"{crate_name}::{type_name}\")))"),
+        "slot-rendered external crate mapped plain paths should be structured named types"
+    );
+    assert!(
+        !slot_render_source
+            .contains("Some(RustType::Raw(format!(\n            \"{crate_name}::{type_name}<"),
+        "slot-rendered external crate mapped generic paths should use structured generic type IR"
+    );
+    assert!(
+        !lower_source
+            .contains("RustType::Raw(format!(\n                \"std::rc::Rc<std::cell::RefCell<"),
+        "outer-this companion handle types should use structured generic type IR"
+    );
+    assert!(
+        !item_assembly_source
+            .contains("RustType::Raw(format!(\n            \"{crate_name}::{rust_type_name}<"),
+        "external crate mapped generic types should use structured generic type IR"
+    );
+    assert!(
+        !item_assembly_source
+            .contains("RustType::Raw(format!(\"{crate_name}::{rust_type_name}\"))"),
+        "external crate mapped plain paths should be structured named types"
+    );
+    assert!(
+        !item_assembly_source
+            .contains("RustType::Raw(format!(\n                \"std::rc::Rc<std::cell::RefCell<"),
+        "outer-this struct field handle types should use structured generic type IR"
+    );
+    assert!(
+        !slot_render_source
+            .contains("RustType::Raw(placement.wrap(crate::emit::emit_type(&rendered)))"),
+        "shared storage slot and generic-argument wrappers should compose structured generic type IR"
+    );
+    assert!(
+        !item_assembly_source.contains("RustType::Raw(type_param_marker_type")
+            && item_assembly_source
+                .contains("rust_generic_type(\n        \"std::marker::PhantomData\""),
+        "type-param marker fields should structure PhantomData instead of raw-wrapping the whole type"
+    );
+    assert!(
+        !item_assembly_source.contains("RustExpr::Raw(format!(\n        \"&[{}]\""),
+        "const array values should use structured borrow of ArrayLiteral"
+    );
+    assert!(
+        !item_assembly_source.contains("RustType::Raw(format!(\n                \"&'static [{}]\""),
+        "const array types should use lifetime-bearing Ref and Slice type IR"
+    );
+    assert!(
+        !item_assembly_source.contains("RustType::Raw(\"&'static str\".to_string())"),
+        "const string types should use lifetime-bearing Ref type IR"
+    );
+    assert!(
+        !item_assembly_source.contains("RustType::Raw(format!(\n                \"&'a {}{}\""),
+        "borrowed functional interface wrappers should add lifetimes through Ref type IR"
+    );
+    assert!(
+        !item_assembly_source.contains("RustExpr::Raw(\"&[]\".to_string())"),
+        "default static-final const arrays should use structured borrow of an empty ArrayLiteral"
+    );
+    let coercion_production_source = coercion_source
+        .split("#[cfg(test)]")
+        .next()
+        .expect("coercion production source should be present");
+    let coercion_production_lines = coercion_production_source.lines().collect::<Vec<_>>();
+    let coercion_raw_constructor_sites = coercion_production_lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let line = line.trim();
+            let next = coercion_production_lines
+                .get(index + 1)
+                .map(|line| line.trim())
+                .unwrap_or_default();
+            let standalone_raw_constructor = line.starts_with("RustExpr::Raw(")
+                && !line.contains("=>")
+                && !line.contains(" if ")
+                && !next.starts_with("if ");
+            (standalone_raw_constructor
+                || line.contains("|| RustExpr::Raw(")
+                || line.contains("return RustExpr::Raw("))
+            .then_some(line)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        coercion_raw_constructor_sites,
+        vec![".unwrap_or_else(|| RustExpr::Raw(rendered.to_string()))"],
+        "coercion production Raw constructors should stay confined to named leaf/recovery/fallback boundaries"
+    );
+    let no_op_stream_source = stream_source
+        .split("fn render_no_op_stream_plan_structured")
+        .nth(1)
+        .and_then(|tail| tail.split("fn no_op_stream_terminal_method").next())
+        .expect("no-op stream structured renderer should remain discoverable");
+    assert!(no_op_stream_source.contains("sequence_iteration_source_projection"));
+    assert!(no_op_stream_source.contains("RustExpr::MethodCall"));
+    assert!(no_op_stream_source.contains("stream_terminal_actual_after_rendered_ops"));
+    assert!(
+        !no_op_stream_source.contains("emit::emit_expr"),
+        "no-op stream terminal lowering should keep the iterator receiver structured"
+    );
+    assert!(stream_source.contains("fn no_op_stream_terminal_method"));
+    let raw_expr_constructor_sites = |source: &str| {
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source should be present");
+        let production_lines = production_source.lines().collect::<Vec<_>>();
+        production_lines
+            .iter()
+            .enumerate()
+            .filter_map(|(index, line)| {
+                let line = line.trim();
+                let next = production_lines
+                    .get(index + 1)
+                    .map(|line| line.trim())
+                    .unwrap_or_default();
+                let standalone_raw_constructor = line.starts_with("RustExpr::Raw(")
+                    && !line.contains("=>")
+                    && !line.contains(" if ")
+                    && !next.starts_with("if ");
+                (standalone_raw_constructor
+                    || line.contains("|| RustExpr::Raw(")
+                    || line.contains("return RustExpr::Raw("))
+                .then_some(line.to_string())
+            })
+            .collect::<Vec<_>>()
+    };
+    for (path, source) in [
+        ("src/lower.rs", lower_source),
+        ("src/call_lowering.rs", call_source),
+        ("src/operator_lowering.rs", operator_source),
+        ("src/stream_lowering.rs", stream_source),
+        ("src/switch_lowering.rs", switch_source),
+        ("src/item_assembly.rs", item_assembly_source),
+        (
+            "src/exception_lowering.rs",
+            include_str!("../src/exception_lowering.rs"),
+        ),
+    ] {
+        assert_eq!(
+            raw_expr_constructor_sites(source),
+            Vec::<String>::new(),
+            "{path} should not mint production RustExpr::Raw constructors outside named leaf/recovery helpers"
+        );
+    }
+    for (path, source) in [
+        ("src/array_lowering.rs", array_source),
+        ("src/exception_lowering.rs", exception_source),
+    ] {
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source should be present");
+        assert!(
+            !production_source.contains("let RustExpr::Raw(raw)"),
+            "{path} should delegate Raw receiver recovery to coercion helpers"
+        );
+    }
+    let lower_raw_boundary_sites = lower_source
+        .split("#[cfg(test)]")
+        .next()
+        .expect("lower production source should be present")
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            (trimmed.contains("super_expr()")
+                || trimmed.contains("rendered_projection_or_raw_leaf("))
+            .then_some(trimmed.to_string())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lower_raw_boundary_sites,
+        vec![
+            "let mut recovered = rendered_projection_or_raw_leaf(raw);",
+            "*expr = rendered_projection_or_raw_leaf(&rewritten);",
+            "let recovered = rendered_projection_or_raw_leaf(raw.trim());",
+            "rendered_projection_or_raw_leaf(replacement)",
+            "let recovered = rendered_projection_or_raw_leaf(raw);",
+            "let target = rendered_projection_or_raw_leaf(target);",
+            "rendered_projection_or_raw_leaf(path)",
+            "let recovered = rendered_projection_or_raw_leaf(rendered);",
+            "Expr::Super => super_expr(),",
+            "Expr::Raw(raw) => rendered_projection_or_raw_leaf(raw),",
+        ],
+        "lower.rs raw-boundary helper calls should stay confined to named leaf/recovery sites"
+    );
+    let inherited_super_adapter_source = lower_source
+        .split("fn adapt_inherited_super_field_value_for_child_shape")
+        .nth(1)
+        .and_then(|tail| tail.split("fn rust_expr_is_none_or_default_value").next())
+        .expect("inherited super field adapter should remain discoverable");
+    assert!(
+        inherited_super_adapter_source.contains("rust_expr_is_none_or_default_value(&value)")
+            && !inherited_super_adapter_source.contains("emit::emit_expr(&value)"),
+        "inherited super field adapter should inspect optional defaults structurally"
+    );
+    let none_or_default_source = lower_source
+        .split("fn rust_expr_is_none_or_default_value")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn rust_path_segments_are_none_or_default_value")
+                .next()
+        })
+        .expect("None/default predicate should remain discoverable");
+    assert!(
+        none_or_default_source
+            .contains("RustExpr::Raw(raw) => raw_expr_is_none_or_default_value(raw)")
+            && none_or_default_source
+                .contains("fn raw_expr_is_none_or_default_value(raw: &str) -> bool")
+            && none_or_default_source.contains("rust_expr_is_none_or_default_value(&recovered)"),
+        "None/default raw compatibility should recover structured expressions before text comparison"
+    );
 
     assert!(coercion_source.contains("pub fn ensure_borrow_projection"));
     assert!(coercion_source.contains("pub fn rendered_expr_has_clone_recovery"));
@@ -32944,45 +33850,475 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         "JavaDisplayPlan::ConcatFloatValue should compose helper calls structurally"
     );
     assert!(
+        !coercion_source.contains("JavaDisplayPlan::ConcatValue => {\n            RustExpr::Raw(format!(\"({}).to_string()\""),
+        "JavaDisplayPlan::ConcatValue should compose to_string structurally"
+    );
+    assert!(
+        coercion_source.contains(
+            "JavaDisplayPlan::ConcatValue => {\n            zero_arg_method_projection(RustExpr::Grouped(Box::new(expr)), \"to_string\")\n        }"
+        ),
+        "JavaDisplayPlan::ConcatValue should group the receiver structurally before to_string"
+    );
+    let locale_format_arg_source = coercion_source
+        .split("fn is_java_locale_format_arg")
+        .nth(1)
+        .and_then(|tail| tail.split("fn java_format_to_rust_format").next())
+        .expect("locale format arg helper should remain discoverable");
+    assert!(
+        locale_format_arg_source.contains("RustExpr::Raw(raw)")
+            && !locale_format_arg_source.contains("emit::emit_expr(arg)"),
+        "String.format locale detection should inspect structured IR first and reserve text matching for raw leaves"
+    );
+    assert!(
+        lower_source.contains("RustExpr::Range"),
+        "IntStream.range lowering should preserve range structure instead of raw formatting"
+    );
+    assert!(
+        !lower_source.contains("return Some(RustExpr::Raw(range));"),
+        "IntStream.range lowering should not return a pre-rendered raw range"
+    );
+    assert!(
+        !lower_source.contains("format!(\"({start}.."),
+        "IntStream.range lowering should not format range syntax manually"
+    );
+    let lower_switch_expr_source = lower_source
+        .split_once("fn lower_switch_expr(")
+        .and_then(|(_, tail)| {
+            tail.split_once("fn switch_expr_case_labels")
+                .map(|(body, _)| body)
+        })
+        .expect("lower_switch_expr source");
+    assert!(lower_switch_expr_source.contains("RustExpr::Match"));
+    assert!(lower_switch_expr_source.contains("RustMatchArm"));
+    assert!(
+        !lower_switch_expr_source.contains("RustExpr::Raw(out)"),
+        "switch expressions should keep the match selector and arm values structured"
+    );
+    assert!(
+        !lower_switch_expr_source.contains("emit::emit_expr(&selector)"),
+        "switch expressions should not render the match selector while lowering"
+    );
+    let lower_switch_assignment_source = lower_source
+        .split_once("fn lower_switch_assignment(")
+        .and_then(|(_, tail)| {
+            tail.split_once("fn lower_switch_assignment_value")
+                .map(|(body, _)| body)
+        })
+        .expect("lower_switch_assignment source");
+    assert!(lower_switch_assignment_source.contains(") -> Option<RustStmt>"));
+    assert!(lower_switch_assignment_source.contains("RustStmt::Assign"));
+    assert!(lower_switch_assignment_source.contains("RustExpr::Match"));
+    assert!(lower_switch_assignment_source.contains("RustMatchArm"));
+    assert!(
+        !lower_switch_assignment_source.contains("String::new()")
+            && !lower_switch_assignment_source.contains("emit::emit_expr(&selector)")
+            && !lower_switch_assignment_source.contains("emit::emit_expr(&target)"),
+        "switch assignment lowering should not render the assignment match while lowering"
+    );
+    let switch_case_condition_source = switch_source
+        .split_once("pub fn switch_case_condition(")
+        .and_then(|(_, tail)| {
+            tail.split_once("pub fn lower_switch_block_stmts(")
+                .map(|(body, _)| body)
+        })
+        .expect("switch case condition source");
+    assert!(switch_case_condition_source.contains(") -> RustExpr"));
+    assert!(switch_case_condition_source.contains("switch_unmatched_expr"));
+    assert!(switch_case_condition_source.contains("switch_value_equals_label_expr"));
+    assert!(!switch_case_condition_source.contains("format!("));
+    assert!(!switch_case_condition_source.contains("emit_expr"));
+    assert!(!switch_source.contains("pub fn render_switch("));
+    assert!(!switch_source.contains("pub fn render_simple_return_match_switch("));
+    let switch_stmt_source = lower_source
+        .split_once("lower_switch_assignment(selector, cases, env, ctx)")
+        .and_then(|(_, tail)| {
+            tail.split_once("plan_simple_return_switch")
+                .map(|(body, _)| body)
+        })
+        .expect("switch statement lowering source");
+    assert!(
+        switch_stmt_source.contains("out.push(stmt)")
+            && !switch_stmt_source.contains("raw_stmt(raw)"),
+        "switch assignment lowering should return a structured statement"
+    );
+    let simple_return_switch_stmt_source = lower_source
+        .split_once("plan_simple_return_switch(selector, cases)")
+        .and_then(|(_, tail)| {
+            tail.split_once("let plan = plan_switch")
+                .map(|(body, _)| body)
+        })
+        .expect("simple-return switch statement lowering source");
+    assert!(
+        simple_return_switch_stmt_source.contains("out.push(lower_simple_return_switch")
+            && !simple_return_switch_stmt_source.contains("raw_stmt(lower_simple_return_switch"),
+        "simple-return switch lowering should return a structured statement"
+    );
+    let fallback_switch_stmt_source = lower_source
+        .split_once("let plan = plan_switch(selector, cases);")
+        .and_then(|(_, tail)| tail.split_once("Stmt::Try").map(|(body, _)| body))
+        .expect("fallback switch statement lowering source");
+    assert!(
+        fallback_switch_stmt_source.contains("out.extend(lower_switch")
+            && !fallback_switch_stmt_source.contains("raw_stmt(lower_switch"),
+        "fallback switch lowering should extend structured statements instead of wrapping rendered text"
+    );
+    let lower_switch_source = lower_source
+        .split_once("fn lower_switch(")
+        .and_then(|(_, tail)| {
+            tail.split_once("struct SwitchAssignmentPlan")
+                .map(|(body, _)| body)
+        })
+        .expect("lower_switch source");
+    assert!(lower_switch_source.contains(") -> Vec<RustStmt>"));
+    assert!(lower_switch_source.contains("lower_switch_block_stmts"));
+    assert!(!lower_switch_source.contains("render_switch("));
+    let switch_block_builder_source = switch_source
+        .split_once("pub fn lower_switch_block_stmts(")
+        .and_then(|(_, tail)| {
+            tail.split_once("pub fn switch_match_pattern_expr")
+                .map(|(body, _)| body)
+        })
+        .expect("structured fallback switch builder source");
+    assert!(switch_block_builder_source.contains("RustStmt::Loop"));
+    assert!(switch_block_builder_source.contains("RustStmt::If"));
+    assert!(switch_block_builder_source.contains("RustStmt::BreakValue"));
+    assert!(
+        !switch_block_builder_source.contains("format!(")
+            && !switch_block_builder_source.contains("emit_statements"),
+        "structured fallback switch builder should not render the switch body"
+    );
+    let lower_simple_return_switch_source = lower_source
+        .split_once("fn lower_simple_return_switch(")
+        .and_then(|(_, tail)| {
+            tail.split_once("fn lower_switch_match_selector")
+                .map(|(body, _)| body)
+        })
+        .expect("lower_simple_return_switch source");
+    assert!(lower_simple_return_switch_source.contains(") -> RustStmt"));
+    assert!(lower_simple_return_switch_source.contains("RustStmt::Expr"));
+    assert!(lower_simple_return_switch_source.contains("RustExpr::Match"));
+    assert!(lower_simple_return_switch_source.contains("RustMatchArm"));
+    assert!(lower_simple_return_switch_source.contains("RustExpr::Block"));
+    assert!(
+        !lower_simple_return_switch_source.contains("render_simple_return_match_switch"),
+        "simple-return switch lowering should not render the match while lowering"
+    );
+    let temporary_call_source = lower_source
+        .split_once("fn wrap_call_expr_with_argument_temporaries")
+        .and_then(|(_, tail)| {
+            tail.split_once("fn snapshot_same_call_shared_read_before_mut_borrow")
+                .map(|(body, _)| body)
+        })
+        .expect("wrap_call_expr_with_argument_temporaries source");
+    assert!(temporary_call_source.contains("RustExpr::Block"));
+    assert!(temporary_call_source.contains("RustStmt::Let"));
+    assert!(
+        !temporary_call_source.contains("String::from(\"{ \")"),
+        "call temporaries should compose as block IR instead of a rendered block"
+    );
+    assert!(
+        !temporary_call_source.contains("emit::emit_expr(&call)"),
+        "call temporaries should keep the wrapped call as the block tail"
+    );
+    let instanceof_pattern_while_source = lower_source
+        .split_once("fn lower_instanceof_pattern_while_stmt")
+        .and_then(|(_, tail)| {
+            tail.split_once("fn lower_instanceof_pattern_ternary_for_slot")
+                .map(|(body, _)| body)
+        })
+        .expect("lower_instanceof_pattern_while_stmt source");
+    assert!(rust_ir_source.contains("WhileLet"));
+    assert!(instanceof_pattern_while_source.contains("while_let_stmt"));
+    assert!(
+        !instanceof_pattern_while_source.contains("RustStmt::Raw(format!("),
+        "instanceof-pattern while lowering should compose while-let statements structurally"
+    );
+    assert!(
+        !instanceof_pattern_while_source.contains("emit::emit_statements(&lowered_body"),
+        "instanceof-pattern while lowering should keep its body as structured statements"
+    );
+    let statement_render_source = include_str!("../src/statement_render.rs");
+    let enhanced_for_source = statement_render_source
+        .split_once("pub fn render_enhanced_for(")
+        .and_then(|(_, tail)| {
+            tail.split_once("pub fn render_enhanced_for_iterator(")
+                .map(|(body, _)| body)
+        })
+        .expect("render_enhanced_for source");
+    let enhanced_for_iterator_source = statement_render_source
+        .split_once("pub fn render_enhanced_for_iterator(")
+        .and_then(|(_, tail)| {
+            tail.split_once("pub fn render_block_stmt(")
+                .map(|(body, _)| body)
+        })
+        .expect("render_enhanced_for_iterator source");
+    let render_block_stmt_source = statement_render_source
+        .split_once("pub fn render_block_stmt(")
+        .map(|(_, body)| body)
+        .expect("render_block_stmt source");
+    assert!(rust_ir_source.contains("For {"));
+    assert!(enhanced_for_source.contains("RustStmt::For"));
+    assert!(enhanced_for_iterator_source.contains("RustStmt::For"));
+    assert!(
+        !enhanced_for_source.contains("RustStmt::Raw(format!(")
+            && !enhanced_for_iterator_source.contains("RustStmt::Raw(format!("),
+        "enhanced-for helpers should compose for-loop statements structurally"
+    );
+    assert!(
+        !enhanced_for_source.contains("emit_statements(body")
+            && !enhanced_for_iterator_source.contains("emit_statements(body"),
+        "enhanced-for helpers should keep loop bodies as structured statements"
+    );
+    assert!(render_block_stmt_source.contains("RustExpr::Block"));
+    assert!(
+        !render_block_stmt_source.contains("RustStmt::Raw(format!(\"{\\n{}\\n}}\"")
+            && !render_block_stmt_source.contains("emit_statements(body"),
+        "block statement helper should compose block IR instead of rendering its body"
+    );
+    assert!(
         !coercion_source.contains("JavaDisplayPlan::FormatValue => RustExpr::Raw(format!("),
         "JavaDisplayPlan::FormatValue should compose to_string structurally"
+    );
+    let java_display_format_source = coercion_source
+        .split("JavaDisplayPlan::FormatValue =>")
+        .nth(1)
+        .and_then(|tail| tail.split("JavaDisplayPlan::ErasedObject =>").next())
+        .expect("JavaDisplayPlan::FormatValue arm should remain discoverable");
+    assert!(
+        java_display_format_source.contains("java_display_operand_projection(expr)")
+            && !java_display_format_source.contains("RustExpr::Raw(render_java_display_operand"),
+        "JavaDisplayPlan::FormatValue should recover structured display operands before rendering fallback"
+    );
+    assert!(!coercion_source.contains("fn strip_arithmetic_display_conversion"));
+    assert!(
+        !coercion_source.contains(
+            "fn arithmetic_display_conversion_receiver(expr: &RustExpr) -> Option<String>"
+        )
+    );
+    assert!(
+        coercion_source.contains("emit::emit_expr(&java_display_operand_projection(expr.clone()))"),
+        "Java display rendering should delegate conversion stripping to the structured projection"
+    );
+    assert!(coercion_source.contains("fn java_display_operand_projection"));
+    let java_display_operand_projection_source = coercion_source
+        .split("fn java_display_operand_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("/// Textual fallback").next())
+        .expect("Java display operand projection helper should remain discoverable");
+    assert!(
+        java_display_operand_projection_source
+            .contains("arithmetic_display_conversion_receiver_expr")
+            && java_display_operand_projection_source.contains("expr")
+            && !java_display_operand_projection_source.contains("render_java_display_operand"),
+        "Java display operand projection should preserve structured arithmetic and return unchanged non-conversions"
+    );
+    let arithmetic_display_receiver_expr_source = coercion_source
+        .split("fn arithmetic_display_receiver_expr")
+        .nth(1)
+        .and_then(|tail| tail.split("fn rust_expr_is_arithmetic_expr").next())
+        .expect("arithmetic display receiver expression helper should remain discoverable");
+    assert!(
+        arithmetic_display_receiver_expr_source.contains("RustExpr::Raw(rendered)")
+            && !arithmetic_display_receiver_expr_source.contains("emit::emit_expr"),
+        "arithmetic display expression recovery should use structured arithmetic and raw-leaf fallback"
     );
     assert!(
         !coercion_source.contains("\"java_erased_object_to_string(&{})\""),
         "JavaDisplayPlan::ErasedObject should compose helper calls structurally"
     );
     assert!(
-        coercion_source
-            .contains(".as_ref().map(|value| value.to_string()).unwrap_or_else(|| \\\"null\\\"")
+        !coercion_source.contains("{}.as_deref().unwrap_or(\\\"null\\\")"),
+        "JavaDisplayPlan::OptionalString should compose as_deref/unwrap_or structurally"
+    );
+    assert!(coercion_source.contains("fn optional_display_chain_projection"));
+    assert!(
+        !coercion_source
+            .contains("{}.as_ref().map(|value| value.to_string()).unwrap_or_else(|| \\\"null\\\""),
+        "JavaDisplayPlan::OptionalValue should compose as_ref/map/unwrap_or_else structurally"
+    );
+    assert!(
+        !coercion_source
+            .contains("{}.map(|value| value.to_string()).unwrap_or_else(|| \\\"null\\\""),
+        "JavaDisplayPlan::OptionalBorrowedValue should compose map/unwrap_or_else structurally"
     );
     assert!(coercion_source.contains("pub fn normalize_optional_constructed_string_view_expr"));
+    let optional_string_view_normalization_source = coercion_source
+        .split("pub fn normalize_optional_constructed_string_view_expr")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn normalize_optional_constructed_string_view_element")
+                .next()
+        })
+        .expect("optional string-view normalization helper should remain discoverable");
+    assert!(
+        optional_string_view_normalization_source.contains("rendered_projection_or_raw_leaf")
+            && !optional_string_view_normalization_source
+                .contains("RustExpr::Raw(inner.to_string())")
+            && !optional_string_view_normalization_source.contains("emit::emit_expr(&expr)"),
+        "optional string-view normalization should recover structured inner receivers before raw fallback"
+    );
+    let optional_constructed_element_normalization_source = coercion_source
+        .split("fn normalize_optional_constructed_element_expr")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub fn normalize_optional_constructed_string_view_expr")
+                .next()
+        })
+        .expect("optional constructed element normalization helper should remain discoverable");
+    assert!(
+        !optional_constructed_element_normalization_source.contains("emit::emit_expr(&expr)"),
+        "optional constructed element normalization should reserve rendered fallback for raw leaves"
+    );
     assert!(coercion_source.contains("fn render_option_some"));
     assert!(coercion_source.contains("fn render_raw_option_some"));
+    assert!(
+        coercion_source.contains("fn render_raw_option_some(expr: RustExpr) -> RustExpr {\n    render_option_some(expr)\n}"),
+        "raw option wrapping should share the structured Some projection path"
+    );
     assert!(coercion_source.contains("pub fn unwrap_rendered_some_expr"));
     assert!(coercion_source.contains("pub fn unwrap_some_expr"));
+    let unwrap_rendered_some_source = coercion_source
+        .split("fn unwrap_rendered_some_raw_expr")
+        .nth(1)
+        .and_then(|tail| tail.split("fn rendered_complete_some_call_inner").next())
+        .expect("rendered Some unwrap helper should remain discoverable");
+    assert!(
+        unwrap_rendered_some_source.contains("rendered_projection_or_raw_leaf")
+            && !unwrap_rendered_some_source.contains("RustExpr::Raw(inner.to_string())"),
+        "rendered Some unwrapping should recover structured inner expressions before raw fallback"
+    );
     assert!(coercion_source.contains("fn unwrap_rendered_some_raw_expr"));
     assert!(coercion_source.contains("pub fn rust_expr_is_constructed_optional_value"));
+    let constructed_optional_source = coercion_source
+        .split("pub fn rust_expr_is_constructed_optional_value")
+        .nth(1)
+        .and_then(|tail| tail.split("fn rust_expr_is_get_projection").next())
+        .expect("constructed optional predicate should remain discoverable");
+    assert!(
+        constructed_optional_source
+            .contains("RustExpr::Raw(raw) => raw_expr_is_constructed_optional_value(raw)")
+            && coercion_source
+                .contains("fn raw_expr_is_constructed_optional_value(rendered: &str) -> bool")
+            && coercion_source.contains("rust_expr_is_constructed_optional_value(&recovered)")
+            && coercion_source.contains("rendered_expr_is_constructed_optional_value(rendered)"),
+        "constructed optional raw compatibility should recover structured expressions before text scanning"
+    );
     assert!(!lower_source.contains("fn lowered_expr_is_constructed_optional_value"));
     assert!(!lower_source.contains("fn lowered_raw_expr_is_constructed_optional_value"));
     assert!(!coercion_source.contains("pub enum OptionalArgumentProjection"));
+    assert!(
+        !coercion_source
+            .contains("RustExpr::Raw(format!(\"{enum_name}::{variant_name}({rendered})\""),
+        "closed-enum upcasts should compose enum constructor calls structurally"
+    );
+    assert!(
+        !coercion_source
+            .contains("RustExpr::Raw(format!(\"{enum_name}::{root_variant}({rendered}.into())\""),
+        "closed-enum type-parameter upcasts should compose .into() structurally"
+    );
     assert!(!coercion_source.contains("pub fn apply_optional_argument_projection"));
     assert!(coercion_source.contains("pub enum OptionalReceiverProjection"));
     assert!(coercion_source.contains("Borrowed"));
     assert!(coercion_source.contains("pub fn project_optional_receiver"));
+    let optional_receiver_source = coercion_source
+        .split("pub fn project_optional_receiver")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub fn project_optional_receiver_with_shape")
+                .next()
+        })
+        .expect("optional receiver projection helper should remain discoverable");
+    assert!(
+        optional_receiver_source
+            .contains("parenthesize_raw_method_receiver(strip_terminal_unwrap_projection(expr))")
+            && !optional_receiver_source.contains("let rendered = emit::emit_expr(&expr)")
+            && !optional_receiver_source.contains("let RustExpr::Raw(rendered)")
+            && !optional_receiver_source.contains("parenthesize_borrow_operand(receiver)")
+            && !optional_receiver_source
+                .contains("RustExpr::Raw(parenthesize_borrow_operand(receiver))"),
+        "optional receiver projection should normalize raw and structured receivers through one projection path"
+    );
     assert!(coercion_source.contains("UnwrapOptionMutBorrowed"));
     assert!(coercion_source.contains("SharedUnchecked"));
     assert!(coercion_source.contains("MutableUnchecked"));
     assert!(coercion_source.contains("pub enum OptionalSequenceReceiverProjection"));
     assert!(coercion_source.contains("pub fn project_optional_sequence_receiver"));
     assert!(coercion_source.contains("pub enum SequenceIterationProjection"));
-    assert!(coercion_source.contains("pub fn render_sequence_iteration_source"));
+    assert!(!coercion_source.contains("pub fn render_sequence_iteration_source"));
+    assert!(coercion_source.contains("pub fn sequence_iteration_source_projection"));
     assert!(coercion_source.contains("pub fn render_optional_non_null_filter_map"));
     assert!(coercion_source.contains("pub fn render_borrowed_collection_flat_map"));
     assert!(coercion_source.contains("pub enum StreamLambdaParamProjection"));
     assert!(coercion_source.contains("pub fn render_stream_lambda_param_projection"));
     assert!(coercion_source.contains("pub fn parenthesize_borrowed_method_receiver"));
+    let borrowed_method_receiver_source = coercion_source
+        .split("pub fn parenthesize_borrowed_method_receiver")
+        .nth(1)
+        .and_then(|tail| tail.split("fn raw_contains_top_level_as_cast").next())
+        .expect("borrowed receiver parenthesizing helper should remain discoverable");
+    assert!(
+        !borrowed_method_receiver_source.contains("emit::emit_expr(&RustExpr::Unary { op, expr })"),
+        "borrowed method receiver grouping should not render structured borrows into Raw"
+    );
+    assert!(
+        !borrowed_method_receiver_source.contains("RustExpr::Raw(format!(\"({rendered})\"))"),
+        "borrowed method receiver grouping should use RustExpr::Grouped for raw leaves"
+    );
     assert!(coercion_source.contains("pub fn force_shared_borrow_projection"));
     assert!(coercion_source.contains("pub fn borrow_as_dyn_trait"));
+    assert!(coercion_source.contains("fn shared_borrow_expr"));
+    assert!(coercion_source.contains("fn mutable_borrow_expr"));
+    assert!(coercion_source.contains("fn borrow_operand_expr"));
+    assert!(coercion_source.contains("fn parenthesized_borrow_operand_leaf"));
+    let borrow_operand_expr_source = coercion_source
+        .split("fn borrow_operand_expr")
+        .nth(1)
+        .and_then(|tail| tail.split("fn parenthesized_borrow_operand_leaf").next())
+        .expect("borrow operand normalization helper should remain discoverable");
+    assert!(
+        borrow_operand_expr_source
+            .contains("RustExpr::Raw(raw) => parenthesized_borrow_operand_leaf(&raw)")
+            && !coercion_source
+                .contains("RustExpr::Raw(raw) => RustExpr::Unary {\n            op: \"&\"")
+            && !coercion_source
+                .contains("RustExpr::Raw(raw) => RustExpr::Unary {\n            op: \"&mut \""),
+        "borrow projections should centralize raw operand normalization before composing the borrow operator"
+    );
+    let parenthesized_borrow_operand_leaf_source = coercion_source
+        .split("fn parenthesized_borrow_operand_leaf")
+        .nth(1)
+        .and_then(|tail| tail.split("fn parenthesize_borrow_operand").next())
+        .expect("parenthesized borrow operand helper should remain discoverable");
+    assert!(
+        parenthesized_borrow_operand_leaf_source.contains("rendered_projection_or_raw_leaf")
+            && !parenthesized_borrow_operand_leaf_source
+                .contains("RustExpr::Raw(parenthesize_borrow_operand(rendered))"),
+        "borrow operand leaf recovery should parse simple rendered leaves before raw fallback"
+    );
+    assert!(
+        !coercion_source.contains("RustExpr::Raw(format!(\"&{}\", emit::emit_expr(&expr)))"),
+        "shared borrow projection should keep the borrow operator structured"
+    );
+    assert!(
+        !coercion_source.contains("RustExpr::Raw(format!(\"&{}\", parenthesize_borrow_operand"),
+        "central borrow projection should keep the borrow operator structured"
+    );
+    assert!(
+        !coercion_source.contains("RustExpr::Raw(format!(\"&{} as &dyn {trait_name}\""),
+        "borrow_as_dyn_trait should compose borrow plus dyn cast structurally"
+    );
+    assert!(
+        !coercion_source.contains("{}.as_ref() as &dyn {trait_name}"),
+        "borrow_boxed_as_dyn_trait should compose as_ref plus dyn cast structurally"
+    );
+    assert!(
+        !coercion_source.contains("RustExpr::Raw(format!(\"{} as &dyn {trait_name}\""),
+        "borrowed element dyn adapters should compose the dyn cast structurally"
+    );
+    assert!(
+        !coercion_source.contains("BorrowProjectionUse::MutableSliceView => {\n            RustExpr::Raw(format!(\"&mut {}\""),
+        "non-raw mutable borrow projection should compose the borrow operator structurally"
+    );
     assert!(coercion_source.contains("pub fn unwrap_optional_shared_value"));
     assert!(coercion_source.contains("pub fn optional_get_owned_value_projection"));
     assert!(coercion_source.contains("pub fn optional_or_else_owned_value_projection"));
@@ -32991,14 +34327,128 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(coercion_source.contains("pub fn constructor_self_field_projection"));
     assert!(coercion_source.contains("pub fn render_parse_receiver"));
     assert!(coercion_source.contains("pub fn primitive_parse_projection"));
+    assert!(coercion_source.contains("fn parse_receiver_projection"));
+    assert!(coercion_source.contains("fn primitive_parse_raw_receiver_projection"));
+    assert!(coercion_source.contains("fn dotted_zero_arg_or_field_projection"));
+    assert!(coercion_source.contains("fn borrowed_item_projection_or_raw_leaf"));
+    assert!(coercion_source.contains("fn primitive_parse_chain_projection"));
+    let borrowed_item_string_view_source = coercion_source
+        .split("fn borrowed_item_string_view_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("fn java_type_param_variant_name").next())
+        .expect("borrowed item string-view helper should remain discoverable");
+    assert!(
+        borrowed_item_string_view_source.contains("borrowed_item_projection_or_raw_leaf")
+            && borrowed_item_string_view_source.contains("zero_arg_method_projection")
+            && borrowed_item_string_view_source
+                .contains("rendered_projection_or_raw_leaf(borrowed_item)")
+            && !borrowed_item_string_view_source
+                .contains("unwrap_or_else(|| RustExpr::Raw(borrowed_item.trim().to_string()))")
+            && !borrowed_item_string_view_source
+                .contains("RustExpr::Raw(borrowed_item.to_string())"),
+        "borrowed item string-view projection should compose as_str structurally around the shared raw leaf fallback"
+    );
+    let primitive_parse_source = coercion_source
+        .split("pub fn primitive_parse_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("fn parse_receiver_projection").next())
+        .expect("primitive parse projection should remain discoverable");
+    assert!(
+        primitive_parse_source.contains("parse_receiver_projection(arg)")
+            && !primitive_parse_source.contains("matches!(arg.unshaped(), RustExpr::Raw(_))"),
+        "primitive_parse_projection should normalize raw receivers through a structured helper"
+    );
+    assert!(
+        !primitive_parse_source.contains("render_parse_receiver_rendered")
+            && !primitive_parse_source.contains("RustExpr::Raw(render_parse_receiver"),
+        "primitive_parse_projection should not construct raw expressions just to normalize rendered receivers"
+    );
+    assert!(
+        !coercion_source.contains("fn render_parse_receiver_rendered"),
+        "parse receiver normalization should not route through rendered text rewriting"
+    );
+    let parse_receiver_projection_source = coercion_source
+        .split("fn parse_receiver_projection")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn primitive_parse_raw_receiver_projection")
+                .next()
+        })
+        .expect("parse receiver projection should remain discoverable");
+    assert!(
+        parse_receiver_projection_source
+            .contains("primitive_parse_raw_receiver_projection(stripped)")
+            && !parse_receiver_projection_source.contains("render_parse_receiver_rendered"),
+        "raw parse receiver fallback should strip only the raw leaf before structured recovery"
+    );
+    let render_parse_receiver_source = coercion_source
+        .split("pub fn render_parse_receiver")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn primitive_parse_projection").next())
+        .expect("parse receiver render bridge should remain discoverable");
+    assert!(
+        render_parse_receiver_source.contains("emit::emit_expr(&parse_receiver_projection(expr))")
+            && !render_parse_receiver_source.contains("render_parse_receiver_rendered"),
+        "render_parse_receiver should stay a render bridge over parse_receiver_projection"
+    );
+    assert!(
+        !coercion_source.contains("{}.parse::<{rust_ty}>().unwrap()"),
+        "primitive_parse_projection should compose parse/unwrap as method calls"
+    );
     assert!(coercion_source.contains("pub fn render_string_join_vararg_value"));
     assert!(coercion_source.contains("pub fn render_string_view_argument"));
     assert!(coercion_source.contains("pub fn string_join_delimiter_projection"));
     assert!(coercion_source.contains("pub fn string_join_varargs_projection"));
+    assert!(coercion_source.contains("fn string_join_vararg_value_projection(value: RustExpr)"));
+    let string_join_vararg_source = coercion_source
+        .split("fn string_join_vararg_value_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn string_join_delimiter_projection").next())
+        .expect("string join vararg helper should remain discoverable");
+    assert!(
+        string_join_vararg_source.contains("rust_expr_is_already_to_string_call(&value)")
+            && string_join_vararg_source.contains("RustExpr::MethodCall")
+            && string_join_vararg_source.contains("RustExpr::Raw(raw)")
+            && !string_join_vararg_source.contains("emit::emit_expr(value)"),
+        "String.join vararg idempotence should inspect structured to_string calls first and reserve suffix matching for raw leaves"
+    );
+    assert!(
+        coercion_source.contains(".map(string_join_vararg_value_projection)"),
+        "string_join_varargs_projection should adapt varargs as RustExpr values"
+    );
+    assert!(
+        !coercion_source.contains(".map(render_string_join_vararg_value)"),
+        "string_join_varargs_projection should not render varargs before building the VecLiteral"
+    );
+    assert!(
+        !coercion_source.contains("vec![{values}].join"),
+        "string_join_varargs_projection should compose vec/join structurally"
+    );
     assert!(coercion_source.contains("pub fn render_string_equality_operand_projection"));
+    assert!(coercion_source.contains("pub fn string_equality_operand_projection"));
     assert!(coercion_source.contains("pub fn optional_string_view_projection"));
     assert!(coercion_source.contains("fn optional_string_view_projection_expr"));
     assert!(coercion_source.contains("pub fn string_helper_receiver_projection"));
+    assert!(
+        !coercion_source.contains("RustExpr::Raw(format!(\"{rendered}.as_str()\"))"),
+        "string helper receivers should compose as_str structurally"
+    );
+    assert!(
+        !coercion_source.contains("RustExpr::Raw(format!(\"&{rendered}\"))"),
+        "string helper receivers should compose raw borrows through the borrow projection helper"
+    );
+    let string_helper_receiver_source = coercion_source
+        .split("pub fn string_helper_receiver_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("fn expr_is_as_ref_unwrap_projection").next())
+        .expect("string helper receiver projection should remain discoverable");
+    assert!(
+        string_helper_receiver_source.contains("expr_is_as_ref_unwrap_projection")
+            && string_helper_receiver_source.contains("if let RustExpr::Raw(raw)")
+            && !string_helper_receiver_source.contains("emit::emit_expr(&receiver)")
+            && !string_helper_receiver_source.contains("rendered.ends_with"),
+        "string helper receiver projection should inspect rendered suffixes only for raw fallback leaves"
+    );
     assert!(coercion_source.contains("pub fn string_hash_code_projection"));
     assert!(coercion_source.contains("pub fn string_replace_first_projection"));
     assert!(coercion_source.contains("pub fn string_replace_all_projection"));
@@ -33017,12 +34467,63 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
             .contains("\"{}.as_bytes().iter().map(|byte| *byte as i8).collect::<Vec<i8>>()\""),
         "string_get_bytes_projection should compose the byte pipeline structurally"
     );
+    let string_get_bytes_source = coercion_source
+        .split("pub fn string_get_bytes_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn string_to_char_array_projection").next())
+        .expect("string getBytes projection should remain discoverable");
+    assert!(
+        string_get_bytes_source.contains("single_param_closure_expr")
+            && string_get_bytes_source.contains("RustExpr::Cast")
+            && !string_get_bytes_source.contains("RustExpr::Raw(\"|byte| *byte as i8\""),
+        "string getBytes byte-map closure should compose structurally"
+    );
+    assert!(
+        !coercion_source.contains(
+            "{expr}.map(|bytes| bytes.into_iter().map(|byte| byte as i8).collect::<Vec<_>>())"
+        ),
+        "optional unsigned byte-array returns should compose the outer map structurally"
+    );
+    assert!(
+        !coercion_source.contains("{expr}.into_iter().map(|byte| byte as i8).collect::<Vec<_>>()"),
+        "unsigned byte-array returns should compose into_iter/map/collect structurally"
+    );
     assert!(
         !coercion_source
             .contains("\"{}.chars().nth({}).expect(\\\"Java string index out of bounds\\\")\""),
         "string_char_at_projection should compose the char lookup structurally"
     );
+    assert!(
+        !coercion_source.contains("let index = RustExpr::Raw(render_index_to_usize_projection("),
+        "string_char_at_projection should compose the index cast structurally"
+    );
+    assert!(coercion_source.contains("fn string_char_at_index_to_usize_projection"));
+    let string_char_at_index_source = coercion_source
+        .split("fn string_char_at_index_to_usize_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn string_index_of_projection").next())
+        .expect("string charAt index projection helper should remain discoverable");
+    assert!(
+        string_char_at_index_source.contains("decimal_integer_literal_projection(index)")
+            && string_char_at_index_source.contains("RustExpr::Cast")
+            && !string_char_at_index_source
+                .contains("RustExpr::Raw(render_index_to_usize_projection"),
+        "string charAt index projection should recover integer literal leafs before casting"
+    );
     assert!(coercion_source.contains("pub fn string_index_of_projection"));
+    let string_search_needle_source = coercion_source
+        .split("fn string_search_needle_projection")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn string_literal_from_rust_char_literal")
+                .next()
+        })
+        .expect("string search needle projection should remain discoverable");
+    assert!(
+        string_search_needle_source.contains("string_literal_from_rust_char_literal_expr(&needle)")
+            && !string_search_needle_source.contains("emit::emit_expr(&needle)"),
+        "string search needle projection should classify structured char literals before raw fallback"
+    );
     assert!(
         !coercion_source.contains(
             "\"{}.iter().position(|item| item == {}).map(|index| index as i32).unwrap_or(-1)\""
@@ -33032,9 +34533,49 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(coercion_source.contains("pub fn string_substring_projection"));
     assert!(coercion_source.contains("pub fn primitive_number_value_projection"));
     assert!(coercion_source.contains("pub fn primitive_hash_code_projection"));
+    assert!(coercion_source.contains("fn primitive_hash_i32_cast_projection"));
+    assert!(coercion_source.contains("fn primitive_hash_float_bits_projection"));
+    assert!(coercion_source.contains("fn primitive_hash_folded_bits_projection"));
+    let primitive_hash_source = coercion_source
+        .split("pub fn primitive_hash_code_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("fn primitive_hash_i32_cast_projection").next())
+        .expect("primitive hash projection should remain discoverable");
+    assert!(
+        !primitive_hash_source.contains("receiver.unshaped()")
+            && !primitive_hash_source.contains("RustExpr::Raw(_)"),
+        "primitive hash lowering should use one structured projection path for raw and non-raw receivers"
+    );
+    assert!(
+        !coercion_source.contains("RustExpr::Raw(format!(\"{rendered} as i32\")"),
+        "primitive int-like hash codes should compose casts structurally"
+    );
+    assert!(
+        !coercion_source.contains("RustExpr::Raw(format!(\"({rendered}).to_bits() as i32\")"),
+        "primitive float hash codes should compose to_bits plus cast structurally"
+    );
+    assert!(
+        !coercion_source.contains("(({rendered} as i64) ^ (({rendered} as i64) >> 32)) as i32"),
+        "primitive long hash codes should compose folded bits structurally"
+    );
+    assert!(
+        !coercion_source
+            .contains("(({rendered}).to_bits() ^ (({rendered}).to_bits() >> 32)) as i32"),
+        "primitive double hash codes should compose folded bits structurally"
+    );
     assert!(coercion_source.contains("pub fn primitive_compare_to_projection"));
     assert!(coercion_source.contains("pub fn primitive_f64_method_projection"));
     assert!(coercion_source.contains("pub fn len_i32_projection"));
+    let render_len_i32_source = coercion_source
+        .split("pub fn render_len_i32_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn array2_rows_i32_projection").next())
+        .expect("render_len_i32_projection should remain discoverable");
+    assert!(
+        render_len_i32_source.contains("rendered_projection_or_raw_leaf(rendered)")
+            && !render_len_i32_source.contains("RustExpr::Raw(rendered.to_string())"),
+        "rendered len projection should recover structured receiver leaves before raw fallback"
+    );
     assert!(coercion_source.contains("pub fn array2_rows_i32_projection"));
     assert!(coercion_source.contains("pub fn array2_cols_i32_projection"));
     assert!(coercion_source.contains("pub fn file_exists_projection"));
@@ -33055,8 +34596,31 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(coercion_source.contains("pub fn to_owned_sequence_projection"));
     assert!(coercion_source.contains("pub fn java_iterator_from_collection_projection"));
     assert!(coercion_source.contains("pub fn sequence_iter_cloned_projection"));
+    assert!(coercion_source.contains("pub fn erased_object_sequence_iter_cloned_projection"));
+    let erased_object_sequence_iter_source = coercion_source
+        .split("pub fn erased_object_sequence_iter_cloned_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn sequence_iter_copied_projection").next())
+        .expect("erased object sequence iterator projection should remain discoverable");
+    assert!(
+        !erased_object_sequence_iter_source
+            .contains("{}.iter().map(|value| java_clone_erased_object_ref(value))"),
+        "erased object sequence iterator projection should compose iter/map structurally"
+    );
+    assert!(
+        erased_object_sequence_iter_source.contains("single_param_closure_expr")
+            && erased_object_sequence_iter_source.contains("java_clone_erased_object_ref")
+            && !erased_object_sequence_iter_source.contains(
+                "RustExpr::Raw(\n            \"|value| java_clone_erased_object_ref(value)\""
+            ),
+        "erased object sequence iterator map callback should use closure IR"
+    );
     assert!(coercion_source.contains("pub fn sequence_iter_copied_projection"));
     assert!(coercion_source.contains("pub fn iterator_next_expect_projection"));
+    assert!(
+        !coercion_source.contains("{}.expect(\\\"Java iterator exhausted\\\")"),
+        "iterator_next_expect_projection should compose expect as a MethodCall"
+    );
     assert!(coercion_source.contains("pub fn tuple_field_projection"));
     assert!(coercion_source.contains("pub fn primitive_is_nan_projection"));
     assert!(coercion_source.contains("pub fn render_string_format_arg_value"));
@@ -33067,18 +34631,114 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     );
     assert!(coercion_source.contains("pub fn string_format_projection"));
     assert!(coercion_source.contains("pub fn borrowed_sequence_extend_arg"));
+    let borrow_projection_satisfied_source = coercion_source
+        .split("fn borrow_projection_already_satisfied")
+        .nth(1)
+        .and_then(|tail| tail.split("fn borrow_expr").next())
+        .expect("borrow projection idempotence helper should remain discoverable");
+    assert!(
+        borrow_projection_satisfied_source.contains("rust_expr_is_raw_borrow_leaf(expr)")
+            && borrow_projection_satisfied_source.contains("rust_expr_is_simple_local_path(expr)")
+            && !borrow_projection_satisfied_source.contains("emit::emit_expr(expr)"),
+        "borrow projection idempotence should use structured evidence and raw-leaf fallback without rendering the full expression"
+    );
+    let already_borrowed_map_key_source = coercion_source
+        .split("fn rendered_expr_is_already_borrowed_map_key")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn map_key_shape_is_borrowed_string_view")
+                .next()
+        })
+        .expect("map-key borrowed idempotence helpers should remain discoverable");
+    assert!(
+        already_borrowed_map_key_source.contains("fn rust_expr_is_map_key_string_helper")
+            && already_borrowed_map_key_source.contains("java_string_substring")
+            && already_borrowed_map_key_source
+                .contains("rendered_projection_or_raw_leaf(rendered)")
+            && !already_borrowed_map_key_source.contains("starts_with(\"java_string_\")"),
+        "map-key borrowed idempotence should recognize specific structured helper calls, not every raw java_string_* spelling"
+    );
     assert!(coercion_source.contains("pub enum LiteralSlotPlan"));
     assert!(coercion_source.contains("pub fn literal_slot_plan"));
     assert!(coercion_source.contains("pub fn apply_literal_slot_plan"));
+    assert!(
+        coercion_source.contains("storage_placement_construction_expr(*placement, expr)")
+            && !coercion_source.contains("placement.wrap_construction(emit::emit_expr(&expr))"),
+        "handle adaptation should delegate construction wrapping to structured slot rendering"
+    );
     assert!(coercion_source.contains("pub fn java_integral_literal_char"));
     assert!(coercion_source.contains("pub enum BorrowedStringViewProjection"));
     assert!(coercion_source.contains("pub fn borrowed_string_view_projection"));
     assert!(coercion_source.contains("pub fn apply_borrowed_string_view_projection"));
     assert!(coercion_source.contains("pub fn anonymous_dyn_trait_projection"));
+    assert!(
+        !coercion_source.contains("RustExpr::Raw(format!(\"<dyn {trait_name}>::anonymous()\"))"),
+        "anonymous dyn trait constructors should compose a structured zero-arg call"
+    );
+    assert!(
+        coercion_source.contains("fn anonymous_dyn_trait_constructor_trait")
+            && !coercion_source
+                .contains("emit::emit_expr(&anonymous_dyn_trait_projection(trait_name))"),
+        "anonymous dyn trait constructors should be recognized structurally before raw compatibility"
+    );
+    assert!(
+        coercion_source.contains("fn rendered_anonymous_dyn_trait_constructor_trait")
+            && coercion_source.contains("anonymous_dyn_trait_projection(trait_name)")
+            && !coercion_source.contains("} else if rendered_expr_is_anonymous_dyn_trait_constructor(&rendered) {\n                RustExpr::Raw(rendered)"),
+        "anonymous dyn trait constructor compatibility should extract the trait and recover a structured projection"
+    );
     assert!(coercion_source.contains("pub fn unwrap_java_null_receiver_projection"));
     assert!(coercion_source.contains("pub fn typed_none_projection"));
+    let typed_none_projection_source = coercion_source
+        .split("pub fn typed_none_projection")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub fn optional_get_owned_value_projection")
+                .next()
+        })
+        .expect("typed None projection should remain discoverable");
+    assert!(
+        typed_none_projection_source.contains("RustExpr::generic_path")
+            && typed_none_projection_source.contains("[\"None\"]")
+            && typed_none_projection_source.contains("RustType::Raw(rust_ty.to_string())")
+            && !typed_none_projection_source.contains("RustExpr::Path")
+            && !typed_none_projection_source.contains("format!(\"None::<{rust_ty}>\")"),
+        "typed None projection should use GenericPath rather than encoding turbofish text in a Path segment"
+    );
     assert!(coercion_source.contains("pub fn boxed_dyn_trait_projection"));
-    assert!(include_str!("../src/slot_render.rs").contains("pub fn erased_object_rust_type"));
+    assert!(coercion_source.contains("fn raw_tuple_leaf_expr"));
+    assert!(
+        !coercion_source.contains("RustExpr::Raw(raw[start..idx].trim().to_string())")
+            && !coercion_source.contains("RustExpr::Raw(raw[start..].trim().to_string())"),
+        "raw tuple splitting should recover simple tuple leaves as structured expressions"
+    );
+    let slot_render_source = include_str!("../src/slot_render.rs");
+    assert!(slot_render_source.contains("pub fn erased_object_rust_type"));
+    assert!(
+        slot_render_source.contains("fn storage_wrapper_new_call_expr")
+            && slot_render_source.contains("fn storage_placement_construction_expr_is_wrapped")
+            && slot_render_source
+                .contains("fn raw_storage_placement_construction_leaf_is_wrapped")
+            && slot_render_source.contains(
+                "RustExpr::Raw(rendered) => {\n            raw_storage_placement_construction_leaf_is_wrapped(placement, rendered)\n        }"
+            )
+            && !slot_render_source.contains("let emitted = crate::emit::emit_expr(&rendered);")
+            && !slot_render_source.contains("RustExpr::Raw(placement.wrap_construction"),
+        "storage placement construction should compose handle/cell new calls structurally"
+    );
+    let supertype_conversion_source = lower_source
+        .split("fn source_supertype_conversion_impl_for_pair")
+        .nth(1)
+        .and_then(|tail| tail.split("fn inherited_super_getter_impls").next())
+        .expect("supertype conversion impl helper should remain discoverable");
+    assert!(
+        supertype_conversion_source.contains("storage_placement_construction_expr(")
+            && supertype_conversion_source.contains("RustExpr::Var(\"value\".to_string())")
+            && !supertype_conversion_source.contains(
+                "crate::emit::emit_expr(&crate::slot_render::storage_placement_construction_expr"
+            ),
+        "closed-enum supertype conversion payloads should stay structured until the raw impl boundary"
+    );
     assert!(coercion_source.contains("pub fn unsupported_deserialization_cast_handoff_projection"));
     assert!(coercion_source.contains("pub fn abstract_method_stub_projection"));
     assert!(coercion_source.contains("pub fn abstract_interface_method_stub_projection"));
@@ -33086,6 +34746,40 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(coercion_source.contains("pub fn unsupported_constructor_call_handoff_projection"));
     assert!(coercion_source.contains("pub fn print_macro_projection"));
     assert!(coercion_source.contains("pub fn logical_not_projection"));
+    assert!(
+        coercion_source.contains("fn grouped_raw_leaf")
+            && coercion_source.contains("fn raw_leaf_or_grouped")
+            && coercion_source.contains("RustExpr::Raw(raw) => grouped_raw_leaf(raw)")
+            && coercion_source
+                .contains("RustExpr::Grouped(Box::new(rendered_projection_or_raw_leaf(&raw)))")
+            && !coercion_source.contains("RustExpr::Raw(format!(\"({raw})\"))"),
+        "raw leaf grouping should be centralized and recover simple structured projections before raw fallback"
+    );
+    let raw_leaf_or_grouped_source = coercion_source
+        .split("fn raw_leaf_or_grouped")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn string_index_of_projection").next())
+        .expect("raw leaf grouping helper should remain discoverable");
+    assert!(
+        raw_leaf_or_grouped_source.contains("let RustExpr::Raw(raw) = &expr")
+            && raw_leaf_or_grouped_source.contains("expr\n    }")
+            && !raw_leaf_or_grouped_source.contains("} else {\n        RustExpr::Raw(raw)\n    }"),
+        "raw leaf grouping helper should return unchanged leaves without rebuilding Raw"
+    );
+    let clone_method_receiver_source = coercion_source
+        .split("fn clone_method_receiver")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn into_projection").next())
+        .expect("clone method receiver helper should remain discoverable");
+    assert!(
+        clone_method_receiver_source.contains("let RustExpr::Raw(raw) = &expr")
+            && clone_method_receiver_source.contains("RustExpr::Literal(raw.clone())")
+            && !clone_method_receiver_source
+                .contains("} else {\n            RustExpr::Raw(raw)\n        }")
+            && !clone_method_receiver_source
+                .contains("} else {\n        RustExpr::Raw(raw)\n    }"),
+        "clone receiver helper should return unchanged raw leaves unless converting literals or grouping"
+    );
     assert!(coercion_source.contains("pub fn java_update_expression_projection"));
     assert!(coercion_source.contains("pub fn into_projection"));
     assert!(coercion_source.contains("pub fn propagate_result_projection"));
@@ -33094,17 +34788,65 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(coercion_source.contains("pub fn java_class_static_path_projection"));
     assert!(coercion_source.contains("pub fn java_class_literal_path_projection"));
     assert!(coercion_source.contains("pub fn java_class_for_name_path_projection"));
+    assert!(coercion_source.contains("fn java_class_path_projection"));
+    assert!(coercion_source.contains("pub fn rust_type_associated_path_projection"));
+    let rust_type_associated_path_source = coercion_source
+        .split("pub fn rust_type_associated_path_projection")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub fn java_class_static_path_projection")
+                .next()
+        })
+        .expect("Rust type associated path projection helper should remain discoverable");
+    assert!(
+        rust_type_associated_path_source.contains("RustExpr::generic_path")
+            && rust_type_associated_path_source.contains("RustExpr::GenericPath")
+            && rust_type_associated_path_source.contains("RustExpr::TypeAssociatedPath")
+            && rust_type_associated_path_source
+                .contains("qualified_rust_type_associated_path_projection(other, member)")
+            && !rust_type_associated_path_source.contains("RustExpr::Raw(format!(\"<{}>::{}\"")
+            && !rust_type_associated_path_source.contains("Path(vec![crate::emit::emit_type"),
+        "Rust type associated path projection should keep path-like owners structured and use a qualified fallback for non-path types"
+    );
+    assert!(
+        coercion_source
+            .contains("RustExpr::generic_path([\"JavaClass\"], vec![rust_type], Some(member))")
+            && !coercion_source.contains("format!(\"JavaClass::<{rust_type}>\")"),
+        "JavaClass runtime helper paths should use GenericPath rather than encoding turbofish text in Path segments"
+    );
     assert!(coercion_source.contains("pub fn external_crate_path_projection"));
     assert!(coercion_source.contains("pub fn external_crate_associated_path_projection"));
     assert!(coercion_source.contains("pub fn static_storage_accessor_projection"));
     assert!(coercion_source.contains("pub fn static_storage_setter_path_projection"));
     assert!(coercion_source.contains("pub fn qualified_static_storage_accessor_projection"));
     assert!(coercion_source.contains("pub fn qualified_static_storage_setter_path_projection"));
+    assert!(coercion_source.contains("pub fn static_storage_assignment_value_projection"));
     assert!(coercion_source.contains("pub fn static_storage_getter_body_projection"));
     assert!(coercion_source.contains("pub fn static_storage_setter_body_projection"));
     assert!(coercion_source.contains("pub fn associated_const_projection"));
     assert!(coercion_source.contains("pub fn unbound_method_reference_projection"));
     assert!(coercion_source.contains("pub fn current_receiver_method_reference_projection"));
+    assert!(coercion_source.contains("fn unbound_method_reference_closure_leaf"));
+    assert!(coercion_source.contains(
+        "fn current_receiver_method_reference_closure_leaf(method: &str, args: &[String])"
+    ));
+    assert!(
+        !coercion_source.contains(
+            "pub fn unbound_method_reference_projection(method: &str) -> RustExpr {\n    RustExpr::Raw(format!(\"|value| value.{method}()\"))"
+        ),
+        "unbound method-reference closure Raw should live behind a named leaf helper"
+    );
+    let current_receiver_method_reference_projection = coercion_source
+        .split("pub fn current_receiver_method_reference_projection")
+        .nth(1)
+        .unwrap()
+        .split("fn current_receiver_method_reference_closure_leaf")
+        .next()
+        .unwrap();
+    assert!(
+        !current_receiver_method_reference_projection.contains("RustExpr::Raw(format!"),
+        "current-receiver method-reference closure Raw should live behind a named leaf helper"
+    );
     assert!(coercion_source.contains("pub fn unbound_method_call_projection"));
     assert!(coercion_source.contains("pub fn function_call_projection"));
     assert!(coercion_source.contains("pub fn receiver_method_call_projection_exact"));
@@ -33148,9 +34890,25 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(coercion_source.contains("pub fn typed_single_input_callback_projection"));
     assert!(coercion_source.contains("pub fn outer_this_field_projection"));
     assert!(coercion_source.contains("pub fn outer_this_field_mut_projection"));
+    assert!(
+        !coercion_source.contains("self.__outer.borrow().{}"),
+        "outer-this field reads should compose the borrow and field projection structurally"
+    );
+    assert!(
+        !coercion_source.contains("self.__outer.borrow_mut().{}"),
+        "outer-this field writes should compose the mutable borrow and field projection structurally"
+    );
     assert!(coercion_source.contains("pub fn self_field_projection"));
     assert!(coercion_source.contains("pub fn field_projection"));
+    assert!(
+        !coercion_source.contains("\"__java_self.{}\""),
+        "constructor self field projection should compose as RustExpr::Field"
+    );
     assert!(coercion_source.contains("pub fn char_sequence_collect_string_projection"));
+    assert!(
+        !coercion_source.contains("{}.iter().collect::<String>()"),
+        "char_sequence_collect_string_projection should compose iter/collect structurally"
+    );
     assert!(coercion_source.contains("pub fn rendered_vec_macro_body"));
     assert!(types_source.contains("pub fn raw_rust_generic_args"));
     assert!(types_source.contains("pub fn raw_rust_type_is_result"));
@@ -33304,16 +35062,191 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(!raw_clone_support.contains("starts_with(\"Box<dyn \""));
     assert!(coercion_source.contains("pub fn collapse_redundant_shared_borrow_projection"));
     assert!(coercion_source.contains("pub fn normalize_map_key_borrow_projection"));
+    assert!(
+        !coercion_source.contains("RustExpr::Raw(format!(\"{name}.as_str()\"))"),
+        "map-key borrowed string locals should compose as_str structurally"
+    );
+    let normalize_map_key_source = coercion_source
+        .split("pub fn normalize_map_key_borrow_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("fn rust_expr_is_local_name").next())
+        .expect("map-key normalization helper should remain discoverable");
+    assert!(
+        normalize_map_key_source.contains("rendered_projection_or_raw_leaf(&rendered)")
+            && normalize_map_key_source.contains("collapse_redundant_shared_borrow_projection"),
+        "map-key normalization should recover structured raw leafs before local-name checks"
+    );
+    let collapse_shared_borrow_source = coercion_source
+        .split("pub fn collapse_redundant_shared_borrow_projection")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub fn normalize_map_key_borrow_projection")
+                .next()
+        })
+        .expect("shared-borrow collapse helper should remain discoverable");
+    assert!(
+        collapse_shared_borrow_source.contains("RustExpr::Unary { op, expr }")
+            && !collapse_shared_borrow_source.contains("RustExpr::Raw(rendered)")
+            && !collapse_shared_borrow_source.contains("format!(\"&{base}\")"),
+        "shared-borrow collapse should operate on structured borrow expressions; raw spellings are recovered at the map-key boundary"
+    );
+    let local_name_source = coercion_source
+        .split("fn rust_expr_is_local_name")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn render_index_to_usize_projection").next())
+        .expect("local-name identity helper should remain discoverable");
+    assert!(
+        local_name_source.contains("RustExpr::Var(var) => var == name")
+            && !local_name_source.contains("RustExpr::Raw(raw) => raw == name"),
+        "local-name identity should be structural, not a raw rendered-string comparison"
+    );
     assert!(coercion_source.contains("pub enum IndexToUsizeProjection"));
     assert!(coercion_source.contains("pub fn render_index_to_usize_projection"));
+    assert!(coercion_source.contains("pub fn index_to_usize_projection"));
+    assert!(coercion_source.contains("pub fn indexed_access_projection"));
+    assert!(coercion_source.contains("fn index_to_usize_cast_projection"));
+    let rendered_index_projection_source = coercion_source
+        .split("pub fn render_index_to_usize_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn indexed_access_projection").next())
+        .expect("index render/projection helpers should remain discoverable");
+    assert!(
+        rendered_index_projection_source.contains("rendered_projection_or_raw_leaf(rendered)")
+            && rendered_index_projection_source
+                .contains("decimal_integer_literal_projection(index)")
+            && rendered_index_projection_source
+                .contains("recover_raw_index_to_usize_operand(index)")
+            && rendered_index_projection_source.contains("fn recover_raw_index_to_usize_operand")
+            && rendered_index_projection_source
+                .contains("fn rendered_expr_is_decimal_integer_literal")
+            && rendered_index_projection_source
+                .contains("let recovered = rendered_projection_or_raw_leaf(rendered);")
+            && rendered_index_projection_source
+                .contains("rust_expr_is_simple_usize_cast_operand(&recovered)")
+            && rendered_index_projection_source.contains("RustExpr::Cast")
+            && rendered_index_projection_source.contains("rust_expr_is_simple_usize_cast_operand")
+            && !rendered_index_projection_source
+                .contains("RustExpr::Literal(rendered) | RustExpr::Raw(rendered)")
+            && !rendered_index_projection_source
+                .contains("rendered_expr_is_usize_cast(&emit::emit_expr(expr))")
+            && !rendered_index_projection_source.contains("emit::emit_expr(&index)")
+            && !rendered_index_projection_source.contains("format!(\"{rendered} as usize\")")
+            && !rendered_index_projection_source.contains("format!(\"({rendered}) as usize\")")
+            && !rendered_index_projection_source.contains("format!(\n        \"{array}[{}]\""),
+        "index render helpers should build structured cast/index projections before rendering"
+    );
+    assert!(
+        !coercion_source
+            .contains("Coercion::IndexToUsize if matches!(expr.unshaped(), RustExpr::Raw(_))"),
+        "IndexToUsize should compose casts structurally for raw operands"
+    );
+    assert!(
+        !coercion_source
+            .contains("render_cast_operand_with_structural_parentheses(&expr)\n            ))"),
+        "IndexToUsize should not render the cast operand into a top-level Raw expression"
+    );
+    let render_bridge_source = coercion_source
+        .split("pub fn render_function_call_projection")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub enum AssociatedFunctionMethodReferenceProjection")
+                .next()
+        })
+        .expect("render bridge helpers should remain discoverable");
+    assert!(
+        render_bridge_source.contains("rendered_projection_or_raw_leaf")
+            && render_bridge_source.contains("rendered_args_to_projection_leaves")
+            && !render_bridge_source.contains("rendered_args_to_raw_leaves")
+            && !render_bridge_source.contains("RustExpr::Raw(receiver)")
+            && !render_bridge_source.contains("args.into_iter().map(RustExpr::Raw).collect()")
+            && !render_bridge_source.contains("RustExpr::Raw(receiver.to_string())")
+            && !render_bridge_source.contains("RustExpr::Raw(body.to_string())"),
+        "render bridge helpers should recover structured leaves before raw fallback"
+    );
     assert!(coercion_source.contains("pub fn render_indexed_access_projection"));
     assert!(coercion_source.contains("pub enum RenderedMutableAliasProjection"));
     assert!(coercion_source.contains("pub fn rendered_mutable_alias_projection"));
     assert!(coercion_source.contains("pub fn rendered_expr_is_mutable_alias"));
+    let mutable_alias_source = coercion_source
+        .split("pub fn rendered_expr_is_mutable_alias")
+        .nth(1)
+        .and_then(|tail| tail.split("fn rust_expr_mutable_alias_projection").next())
+        .expect("mutable alias helper should remain discoverable");
+    assert!(
+        mutable_alias_source.contains("rust_expr_mutable_alias_projection(arg, base)")
+            && mutable_alias_source.contains("RustExpr::Raw(rendered) = arg.unshaped()")
+            && !mutable_alias_source.contains("emit::emit_expr(arg)"),
+        "mutable alias detection should use structured IR first and raw fallback only for raw leaves"
+    );
     assert!(coercion_source.contains("pub fn reborrow_optional_mut_projection"));
+    let reborrow_optional_mut_source = coercion_source
+        .split("pub fn reborrow_optional_mut_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn clone_erased_object_ref_once").next())
+        .expect("optional mutable reborrow helper should remain discoverable");
+    assert!(
+        reborrow_optional_mut_source.contains("expr_is_optional_mut_reborrow(expr)")
+            && !reborrow_optional_mut_source.contains("emit::emit_expr(expr)"),
+        "optional mutable reborrow idempotence should use structured method-call evidence before raw fallback"
+    );
     assert!(coercion_source.contains("pub fn clone_erased_object_ref_once"));
+    let clone_erased_object_source = coercion_source
+        .split("fn clone_erased_object_helper_once")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn rust_expr_is_erased_object_clone_helper_call")
+                .next()
+        })
+        .expect("erased-object clone helper should remain discoverable");
+    assert!(
+        clone_erased_object_source
+            .contains("let borrow_operand = rendered.strip_prefix('&').unwrap_or(&rendered);")
+            && clone_erased_object_source
+                .contains("parenthesized_borrow_operand_leaf(borrow_operand)")
+            && clone_erased_object_source.contains("borrowed_erased_object_clone_arg(expr)")
+            && !clone_erased_object_source.contains("borrowed_raw_safe_expr(RustExpr::Raw(")
+            && !clone_erased_object_source
+                .contains("borrowed_raw_safe_expr(rendered_projection_or_raw_leaf")
+            && !clone_erased_object_source.contains("emit::emit_expr(&expr)"),
+        "erased-object clone helper should normalize raw operands before sharing structured clone-call construction"
+    );
     assert!(coercion_source.contains("pub fn apply_clone_projection"));
     assert!(coercion_source.contains("pub fn rewrite_downcast_expect_message"));
+    let rewrite_downcast_expect_source = coercion_source
+        .split("pub fn rewrite_downcast_expect_message")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub fn rewrite_optional_erased_borrowed_string_view_call_args")
+                .next()
+        })
+        .expect("downcast expect rewrite helper should remain discoverable");
+    assert!(
+        rewrite_downcast_expect_source.contains("rendered_projection_or_raw_leaf")
+            && !rewrite_downcast_expect_source.contains(".map(RustExpr::Raw)"),
+        "downcast expect rewrites should recover structured rendered expressions before raw fallback"
+    );
+    let optional_erased_string_rewrite_source = coercion_source
+        .split("pub fn rewrite_optional_erased_borrowed_string_view_call_args")
+        .nth(1)
+        .and_then(|tail| tail.split("fn raw_replace_all_outside_literals").next())
+        .expect("optional erased string rewrite helper should remain discoverable");
+    let optional_erased_string_public_rewrite_source = optional_erased_string_rewrite_source
+        .split("fn rewrite_optional_erased_borrowed_string_view_call_args_projection")
+        .next()
+        .expect("optional erased string public rewrite helper should remain discoverable");
+    assert!(
+        optional_erased_string_rewrite_source
+            .contains("rendered_projection_or_raw_leaf(&rendered)")
+            && optional_erased_string_rewrite_source
+                .contains("fn rewrite_optional_erased_borrowed_string_view_call_args_projection")
+            && optional_erased_string_public_rewrite_source
+                .contains("rewrite_optional_erased_borrowed_string_view_call_args_projection")
+            && optional_erased_string_public_rewrite_source
+                .contains("let RustExpr::Raw(rendered) = lowered.unshaped()")
+            && !optional_erased_string_public_rewrite_source
+                .contains("let mut rendered = emit::emit_expr(&lowered)"),
+        "optional erased string rewrites should try structured projection first and reserve rendered replacement for raw leaves"
+    );
     assert!(coercion_source.contains("pub fn deref_borrowed_projection"));
     assert!(
         !coercion_source.contains("RustExpr::Raw(format!(\"*{}\", emit::emit_expr(&expr)))"),
@@ -33337,6 +35270,38 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     );
     assert!(coercion_source.contains("pub fn explicit_java_facade_cast_placeholder_projection"));
     assert!(coercion_source.contains("pub fn erased_object_borrowed_downcast_ref_projection"));
+    assert!(
+        !coercion_source.contains("{}.as_any().is::<{target_type}>()"),
+        "dyn-trait instanceof predicates should compose as method-call chains"
+    );
+    assert!(
+        !coercion_source.contains("{}.as_ref().as_any().is::<{target_type}>()"),
+        "boxed-dyn instanceof predicates should compose as method-call chains"
+    );
+    assert!(
+        !coercion_source.contains("{}.as_ref().is_some_and(|value| value.is::<{target_type}>())"),
+        "optional erased-object instanceof predicates should compose Option method calls structurally"
+    );
+    let render_instanceof_source = coercion_source
+        .split("pub fn render_instanceof_check")
+        .nth(1)
+        .and_then(|tail| tail.split("fn closed_enum_variant_pattern_leaf").next())
+        .expect("instanceof predicate renderer should remain discoverable");
+    assert!(rust_ir_source.contains("RustPattern"));
+    assert!(coercion_source.contains("fn closed_enum_variant_pattern_leaf"));
+    assert!(
+        render_instanceof_source.contains("closed_enum_variant_pattern_leaf")
+            && !render_instanceof_source
+                .contains("RustExpr::Raw(format!(\"{enum_name}::{variant_name}(_)\"))"),
+        "closed-enum instanceof predicates should keep the pattern as structured pattern IR"
+    );
+    assert!(coercion_source.contains("fn optional_erased_object_is_instance_closure_leaf"));
+    assert!(
+        !coercion_source.contains(
+            "vec![RustExpr::Raw(format!(\n                \"|value| value.is::<{target_type}>()\""
+        ),
+        "optional erased-object instanceof should keep closure Raw behind a named leaf helper"
+    );
     assert!(coercion_source.contains("pub fn snapshot_rendered_shared_borrow_argument"));
     assert!(array_source.contains("pub fn array2_from_rows_projection"));
     assert!(
@@ -33347,13 +35312,44 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         !array_source.contains("\"&ndarray::Array2::from_rows({rows})\""),
         "array2_from_rows_projection should compose borrowed ndarray construction structurally"
     );
+    assert!(
+        !array_source.contains("RustExpr::Raw(format!(\"ndarray::arr2"),
+        "array2 initializer lowering should compose ndarray::arr2 structurally"
+    );
+    assert!(
+        !array_source.contains("fn is_comment_only_expr")
+            && !array_source.contains("emit_expr(expr).trim_start().starts_with(\"//\")"),
+        "array initializer lowering should not render expressions to filter comment-only Raw pseudo-values"
+    );
     assert!(array_source.contains("pub fn array2_from_elem_projection"));
     assert!(
         !array_source.contains("\"ndarray::Array2::from_elem(({} as usize, {} as usize), {})\""),
         "array2_from_elem_projection should compose ndarray construction structurally"
     );
     assert!(array_source.contains("pub fn array_from_elem_projection"));
+    assert!(
+        array_source.contains(
+            "pub fn default_array_element_expr(element_type: &JavaType) -> Option<RustExpr>"
+        ) && !array_source.contains("RustExpr::Raw(default.to_string())"),
+        "array default elements should be structured expressions instead of Raw text"
+    );
     assert!(array_source.contains("pub fn java_array_creation_fallback_projection"));
+    let java_array_creation_fallback_source = array_source
+        .split("pub fn java_array_creation_fallback_projection")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub fn borrowed_array2_temporary_for_slot")
+                .next()
+        })
+        .expect("array creation fallback should remain discoverable");
+    assert!(
+        java_array_creation_fallback_source.contains("RustExpr::UnsupportedJavaArrayCreation")
+            && java_array_creation_fallback_source.contains("dimensions: dimensions.to_vec()")
+            && !java_array_creation_fallback_source.contains("emit_expr")
+            && !java_array_creation_fallback_source.contains(".join(\"][\")")
+            && !java_array_creation_fallback_source.contains("RustExpr::Raw(format!"),
+        "unsupported array creation fallback should keep dimensions structured until emit"
+    );
     assert!(array_source.contains("pub fn array2_index_projection"));
     assert!(
         !array_source.contains("\"{}[[{}, {}]]\""),
@@ -33363,7 +35359,15 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         !array_source.contains("RustExpr::Raw(format!(\n            \"[{}, {}]\""),
         "array2_index_projection should compose multidimensional index as ArrayLiteral"
     );
+    assert!(
+        !array_source.contains("RustExpr::Raw(format!(\"({trimmed})\"))"),
+        "array raw postfix receivers should use RustExpr::Grouped instead of rendered parentheses"
+    );
     assert!(array_source.contains("pub fn array2_row_mut_assign_stmt"));
+    assert!(
+        !array_source.contains("RustStmt::Raw(format!(\n        \"{}.row_mut({}).assign("),
+        "array2_row_mut_assign_stmt should compose row_mut/assign structurally even for raw receivers"
+    );
     assert!(
         !array_source.contains("&& !matches!(index.unshaped(), RustExpr::Raw(_))"),
         "array2_row_mut_assign_stmt should allow raw index leaves in structured calls"
@@ -33374,6 +35378,24 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     );
     assert!(array_source.contains("pub fn ragged_array_outer_creation_projection"));
     assert!(coercion_source.contains("validate same-call alias snapshot"));
+    let snapshot_source = coercion_source
+        .split("pub fn snapshot_rendered_shared_borrow_argument")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn apply_audited_clone_recovery").next())
+        .expect("same-call alias snapshot helper should remain discoverable");
+    assert!(
+        snapshot_source.contains("fn snapshot_shared_borrow_argument_projection")
+            && snapshot_source.contains("fn snapshot_rendered_shared_borrow_argument_fallback")
+            && snapshot_source.contains("fn snapshot_clone_expr")
+            && snapshot_source.contains("RustExpr::PostfixComment")
+            && snapshot_source.contains("zero_arg_method_projection")
+            && snapshot_source.contains("let RustExpr::Raw(rendered) = lowered.unshaped()")
+            && snapshot_source.contains("fn snapshot_rendered_shared_borrow_argument_fallback")
+            && snapshot_source.contains("rendered: &str")
+            && !snapshot_source.contains("emit::emit_expr(&lowered)")
+            && !snapshot_source.contains("return RustExpr::Raw(to);"),
+        "same-call alias snapshots should match structured expressions first and reserve rendered matching for raw leaves"
+    );
     assert!(lower_source.contains("MoveUseContext"));
     assert!(lower_source.contains("Coercion::CloneRecovery"));
     assert!(lower_source.contains("enum SameCallArgumentAliasPlan"));
@@ -33391,7 +35413,180 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(!access_source.contains("as_ref().expect(\"Java null receiver\")"));
     assert!(!lower_source.contains("strip_suffix(\".unwrap()\")"));
     assert!(!lower_source.contains("rendered.contains(\"__java_self\")"));
-    assert!(!lower_source.contains("strip_suffix(\".clone()\")"));
+    assert!(lower_source.contains("struct SelfReceiverReplacement"));
+    assert!(lower_source.contains("fn self_replacement_expr_from_text"));
+    let replace_self_receiver_source = lower_source
+        .split("fn replace_self_receiver_with_policy")
+        .nth(1)
+        .and_then(|tail| tail.split("struct SelfReceiverReplacement").next())
+        .expect("self receiver replacement helper should remain discoverable");
+    assert!(
+        replace_self_receiver_source
+            .contains("recover_rewritten_raw_expr_or_simple_plus_projection(&text)")
+            && replace_self_receiver_source.contains("replacement.expr.clone()")
+            && replace_self_receiver_source.contains("replacement.field_expr.clone()")
+            && replace_self_receiver_source.contains("replace_self_receiver_with_policy(")
+            && replace_self_receiver_source.contains("replace_self_field_prefixes_in_raw"),
+        "self receiver replacement should use prebuilt structured replacement expressions before raw text fallback"
+    );
+    let replace_self_receiver_stmt_source = lower_source
+        .split("fn replace_self_receiver_in_stmt")
+        .nth(1)
+        .and_then(|tail| tail.split("fn raw_assignment_stmt_projection").next())
+        .expect("self receiver statement replacement helper should remain discoverable");
+    assert!(
+        replace_self_receiver_stmt_source.contains("raw_assignment_stmt_projection")
+            && replace_self_receiver_stmt_source.contains("recover_rewritten_raw_expr_stmt")
+            && replace_self_receiver_stmt_source.contains("replace_self_field_prefixes_in_raw"),
+        "self receiver raw statement fallback should recover structured assignments and expression statements before text scanning"
+    );
+    assert!(lower_source.contains("fn split_top_level_assignment"));
+    assert!(lower_source.contains("fn recover_rewritten_raw_expr_or_simple_plus_projection"));
+    assert!(!lower_source.contains("fn rendered_call_parts"));
+    assert!(!lower_source.contains("fn split_raw_top_level_commas"));
+    assert!(!lower_source.contains("fn recover_raw_constructor_arg_expr_projection"));
+    assert!(!lower_source.contains("fn raw_constructor_arg_leaf"));
+    assert!(lower_source.contains("fn recover_rewritten_raw_expr_stmt"));
+    let raw_assignment_stmt_source = lower_source
+        .split("fn raw_assignment_stmt_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("fn split_top_level_assignment").next())
+        .expect("raw assignment projection helper should remain discoverable");
+    assert!(
+        raw_assignment_stmt_source
+            .contains("recover_rewritten_raw_expr_or_simple_plus_projection(value)")
+            && raw_assignment_stmt_source.contains("rendered_projection_or_raw_leaf(target)"),
+        "raw assignment projection should recover structured RHS expressions while leaving targets on the leaf/path projection"
+    );
+    let simple_plus_recovery_source = lower_source
+        .split("fn recover_rewritten_raw_expr_or_simple_plus_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("fn split_top_level_assignment").next())
+        .expect("simple plus recovery helper should remain discoverable");
+    assert!(
+        simple_plus_recovery_source.contains("rendered_plus_expr_projection_or_raw_leaf(rendered)")
+            && !lower_source.contains("fn raw_top_level_plus_expr_projection")
+            && !lower_source.contains("fn split_top_level_plus_terms"),
+        "lower raw repair should delegate plus-expression recovery to the shared projection helper"
+    );
+    let rendered_plus_projection_source = coercion_source
+        .split("pub(crate) fn rendered_plus_expr_projection_or_raw_leaf")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn rendered_top_level_plus_expr_projection")
+                .next()
+        })
+        .expect("rendered plus projection helper should remain discoverable");
+    assert!(
+        rendered_plus_projection_source.contains("rendered_projection_or_raw_leaf(rendered)")
+            && rendered_plus_projection_source
+                .contains("rendered_top_level_plus_expr_projection(rendered)"),
+        "composition-aware rendered recovery should first preserve leaf projection behavior"
+    );
+    let rendered_top_level_plus_source = coercion_source
+        .split("fn rendered_top_level_plus_expr_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("fn split_rendered_top_level_plus_terms").next())
+        .expect("top-level plus projection helper should remain discoverable");
+    assert!(
+        rendered_top_level_plus_source.contains("split_rendered_top_level_plus_terms(rendered)")
+            && rendered_top_level_plus_source.contains("for term in terms")
+            && !lower_source.contains("fn split_top_level_plus(text: &str)"),
+        "top-level plus projection should handle multi-term expressions structurally in coercion"
+    );
+    let raw_constructor_call_source = lower_source
+        .split("fn raw_constructor_call_expr_projection")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn constructor_call_function_is_plain_new")
+                .next()
+        })
+        .expect("raw constructor call projection helper should remain discoverable");
+    assert!(
+        raw_constructor_call_source.contains("rendered_projection_or_raw_leaf(raw.trim())")
+            && raw_constructor_call_source.contains("RustExpr::Call { function, .. }")
+            && raw_constructor_call_source
+                .contains("constructor_call_function_is_plain_new(function)")
+            && !raw_constructor_call_source.contains("function_call_projection")
+            && !raw_constructor_call_source.contains("RustExpr::Call {\n        function:"),
+        "raw constructor call recovery should reuse centralized rendered-call recovery and only gate constructor eligibility locally"
+    );
+    let bare_constructor_function_source = lower_source
+        .split("fn rust_expr_is_bare_constructor_call")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn rust_path_is_bare_constructor_function")
+                .next()
+        })
+        .expect("bare constructor call helper should remain discoverable");
+    assert!(
+        bare_constructor_function_source.contains("rendered_projection_or_raw_leaf(rendered)")
+            && bare_constructor_function_source
+                .contains("rust_expr_is_bare_constructor_call(&recovered)")
+            && bare_constructor_function_source
+                .contains("rendered_expr_is_bare_constructor_call(rendered)"),
+        "raw constructor-call detection should recover structured expressions before falling back to raw text"
+    );
+    let bare_constructor_function_source = lower_source
+        .split("fn rust_path_is_bare_constructor_function")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn rust_path_segments_are_bare_constructor_function")
+                .next()
+        })
+        .expect("bare constructor function helper should remain discoverable");
+    assert!(
+        bare_constructor_function_source.contains("RustExpr::Path(segments)")
+            && bare_constructor_function_source.contains(
+                "RustExpr::Raw(path) => rust_path_text_is_bare_constructor_function(path)"
+            )
+            && !bare_constructor_function_source
+                .contains("RustExpr::Var(path) | RustExpr::Raw(path)"),
+        "bare constructor detection should use structured Path evidence first and reserve text parsing for raw leaves"
+    );
+    let self_replacement_source = lower_source
+        .split("impl SelfReceiverReplacement")
+        .nth(1)
+        .and_then(|tail| tail.split("fn replace_self_field_prefixes_in_raw").next())
+        .expect("self replacement helper should remain discoverable");
+    assert!(
+        self_replacement_source.contains("expr: self_replacement_expr_from_text(rendered)")
+            && self_replacement_source
+                .contains("field_expr: self_replacement_expr_from_text(&field_rendered)")
+            && self_replacement_source.contains("field_rendered")
+            && !replace_self_receiver_source.contains("self_replacement_expr_from_text"),
+        "self receiver replacement should parse compatibility replacement text once before recursive rewriting"
+    );
+    let self_replacement_parser_source = lower_source
+        .split("fn self_replacement_expr_from_text")
+        .nth(1)
+        .and_then(|tail| tail.split("fn lower_delegating_constructor").next())
+        .expect("self replacement compatibility parser should remain discoverable");
+    assert!(
+        self_replacement_parser_source.contains("rendered_projection_or_raw_leaf(replacement)")
+            && !lower_source.contains("fn dotted_identifier_expr")
+            && !self_replacement_parser_source.contains("RustExpr::Raw("),
+        "self replacement compatibility parser should use the centralized rendered leaf recovery helper"
+    );
+    assert!(
+        !lower_source.contains("RustExpr::Raw(\"__java_self.clone().unwrap()\""),
+        "self receiver clone+unwrap replacements should compose nested method calls structurally"
+    );
+    assert!(
+        lower_source.contains("rewrite_same_outer_inner_constructor_calls_text")
+            && lower_source.contains("fn raw_constructor_call_expr_projection")
+            && lower_source.contains("replace_same_outer_inner_constructor_calls_expr(")
+            && lower_source.contains("let mut recovered = rendered_projection_or_raw_leaf(raw);")
+            && lower_source.contains("&mut recovered")
+            && lower_source.contains("fn same_outer_inner_constructor_companion_path_expr")
+            && lower_source.contains("self_associated_path_projection(&companion_constructor)")
+            && lower_source.contains("*expr = rendered_projection_or_raw_leaf(&rewritten)")
+            && !lower_source.contains("rust_expr_from_plain_path_or_raw(&path)")
+            && !lower_source.contains("format!(\"Self::{constructor}_with_outer\")")
+            && !lower_source.contains("format!(\"{owner}::{constructor}_with_outer\")")
+            && !lower_source.contains("*raw = rewritten"),
+        "same-outer constructor raw rewrites should recover structured expressions before raw fallback"
+    );
     assert!(!lower_source.contains("rendered.contains(\".clone()\")"));
     assert!(!lower_source.contains("fn self_field_replacement"));
     assert!(!lower_source.contains("fn parenthesize_borrowed_method_receiver"));
@@ -33414,6 +35609,24 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
             .contains("RustExpr::Raw(format!(\"{rendered}.expect(\\\"Java null receiver\\\")\")")
     );
     assert!(
+        !coercion_source.contains("fn optional_borrowed_element_projection_expr("),
+        "optional borrowed-element unwraps should keep the unwrapped value as RustExpr"
+    );
+    assert!(
+        !coercion_source.contains("format!(\"{rendered}.expect(\\\"Java null receiver\\\")\")"),
+        "optional borrowed-element same-ownership unwraps should compose expect structurally"
+    );
+    assert!(
+        !coercion_source
+            .contains("format!(\"{rendered}.as_ref().expect(\\\"Java null receiver\\\")\")"),
+        "optional borrowed-element shared unwraps should compose as_ref/expect structurally"
+    );
+    assert!(
+        !coercion_source
+            .contains("format!(\"{rendered}.as_mut().expect(\\\"Java null receiver\\\")\")"),
+        "optional borrowed-element mutable unwraps should compose as_mut/expect structurally"
+    );
+    assert!(
         !coercion_source
             .contains("RustExpr::Raw(format!(\"{}.expect({message:?})\", emit::emit_expr(&expr)))")
     );
@@ -33426,11 +35639,46 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         !coercion_source
             .contains("RustExpr::Raw(format!(\"{rendered}.as_ref().map(|value| value.as_str())\")")
     );
+    assert!(
+        !coercion_source.contains("\"{}.as_ref().map(|value| value.as_str())\""),
+        "optional_string_view_projection_expr should compose as_ref/map structurally"
+    );
     assert!(!coercion_source.contains("RustExpr::Raw(format!(\"{inner}.as_str()\""));
     assert!(
         !coercion_source.contains("optional_projected_expr(format!(\"{rendered_expr}.as_ref()\")")
     );
     assert!(coercion_source.contains("fn optional_map_projection_expr"));
+    assert!(
+        coercion_source.contains("fn single_value_closure_projection(body: RustExpr) -> RustExpr"),
+        "optional map projection should keep the mapped body structured until the closure leaf"
+    );
+    assert!(coercion_source.contains("fn single_param_closure_expr"));
+    let single_value_closure_source = coercion_source
+        .split("fn single_value_closure_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("fn single_param_closure_expr").next())
+        .expect("single-value closure projection should remain discoverable");
+    assert!(
+        !single_value_closure_source.contains("RustExpr::Raw(format!"),
+        "single-value map closures should use closure IR rather than raw formatted closure text"
+    );
+    let single_param_closure_source = coercion_source
+        .split("fn single_param_closure_expr")
+        .nth(1)
+        .and_then(|tail| tail.split("#[derive").next())
+        .expect("single-param closure helper should remain discoverable");
+    assert!(
+        single_param_closure_source.contains("RustExpr::Closure"),
+        "single-param closure helper should build closure IR"
+    );
+    assert!(
+        !coercion_source.contains("let rendered_mapped = emit::emit_expr(&mapped_value);"),
+        "optional element projection should not render the mapped body before choosing the map receiver"
+    );
+    assert!(
+        !coercion_source.contains("RustExpr::Raw(format!(\"({trimmed})\"))"),
+        "coercion raw operand grouping should use RustExpr::Grouped"
+    );
     assert!(
         !coercion_source
             .contains("format!(\"{rendered_expr}.as_ref().map(|value| {rendered_mapped})\")")
@@ -33449,13 +35697,67 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(!coercion_source.contains(
         "RustExpr::Raw(format!(\"{rendered_expr}.as_ref().map(|value| value.as_str())\")"
     ));
-    assert!(coercion_source.contains("panic_recovery_closure"));
+    let unwrap_result_source = coercion_source
+        .split_once("pub fn unwrap_result_or_panic_uncaught_java_exception")
+        .and_then(|(_, tail)| tail.split_once("pub fn if_err_panic_uncaught_java_exception_stmt"))
+        .map(|(body, _)| body)
+        .expect("unwrap_result_or_panic_uncaught_java_exception source");
+    assert!(unwrap_result_source.contains("panic_uncaught_java_exception_closure_expr"));
+    assert!(coercion_source.contains("fn panic_recovered_result_expr_or_raw_leaf"));
+    assert!(
+        unwrap_result_source.contains("panic_recovered_result_expr_or_raw_leaf")
+            && !unwrap_result_source.contains("let rendered = emit::emit_expr(&expr)")
+            && !unwrap_result_source.contains("return RustExpr::Raw(")
+            && !unwrap_result_source.contains("RustExpr::Raw(format!"),
+        "raw result panic recovery should use structured calls for simple trailing try operators and isolate textual surgery behind a named raw fallback helper"
+    );
+    let nested_result_recovery_source = coercion_source
+        .split_once("fn recover_nested_result_try_operator")
+        .and_then(|(_, tail)| {
+            tail.split_once("pub fn if_err_projection")
+                .or(Some((tail, "")))
+        })
+        .map(|(body, _)| body)
+        .expect("recover_nested_result_try_operator source");
+    assert!(
+        nested_result_recovery_source.contains("rendered_projection_or_raw_leaf(without_try)")
+            && nested_result_recovery_source.contains("panic_recovered_result_expr_or_raw_leaf"),
+        "simple trailing try recovery should recover a structured receiver before raw fallback"
+    );
+    assert!(coercion_source.contains("fn panic_uncaught_java_exception_closure_expr"));
+    assert!(coercion_source.contains("RustExpr::MacroCall"));
+    assert!(
+        !unwrap_result_source.contains("panic_recovery_closure"),
+        "non-raw result recovery should build its panic closure structurally"
+    );
+    assert!(
+        !unwrap_result_source.contains("vec![RustExpr::Raw(panic_recovery_closure"),
+        "non-raw result recovery should not pass a rendered closure leaf"
+    );
     assert!(
         coercion_source
             .contains("method_call_projection(\n            expr,\n            \"unwrap_or_else\"")
     );
+    let if_err_panic_source = coercion_source
+        .split_once("pub fn if_err_panic_uncaught_java_exception_stmt")
+        .and_then(|(_, tail)| {
+            tail.split_once("fn panic_uncaught_java_exception_expr")
+                .map(|(body, _)| body)
+        })
+        .expect("if_err_panic_uncaught_java_exception_stmt source");
+    assert!(if_err_panic_source.contains("RustStmt::IfLet"));
+    assert!(coercion_source.contains("fn panic_uncaught_java_exception_expr"));
     assert!(
-        coercion_source.contains("let expr_was_raw = matches!(expr.unshaped(), RustExpr::Raw(_));")
+        !if_err_panic_source.contains("RustStmt::Raw(format!("),
+        "panic-on-error statements should compose as IfLet IR"
+    );
+    assert!(
+        !if_err_panic_source.contains("emit::emit_expr(&expr)"),
+        "panic-on-error statements should keep the checked expression structured"
+    );
+    assert!(
+        !coercion_source
+            .contains("let expr_was_raw = matches!(expr.unshaped(), RustExpr::Raw(_));")
     );
     assert!(
         coercion_source
@@ -33465,13 +35767,141 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(!lower_source.contains("{macro_name}!()"));
     assert!(!lower_source.contains("{macro_name}!(\\\"{{}}\\\", {})"));
     assert!(lower_source.contains("print_macro_projection("));
+    let call_statement_lowering_source = lower_source
+        .split("fn lower_planned_call_expr_stmt")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn native_collections_sort_comparator_is_callback_param")
+                .next()
+        })
+        .expect("call statement lowering should remain discoverable");
+    assert!(
+        call_statement_lowering_source
+            .contains("CallStatementPlan::NativeJavaExceptionPrintStackTrace")
+            && call_statement_lowering_source.contains("RustExpr::PostfixComment")
+            && call_statement_lowering_source.contains("RustExpr::Tuple(Vec::new())")
+            && !call_statement_lowering_source
+                .contains("\"{ /* Java printStackTrace omitted by translation runtime */ }\""),
+        "printStackTrace no-op lowering should compose unit plus explanatory comment structurally"
+    );
+    let throwing_call_stmt_source = lower_source
+        .split("fn lower_throwing_call_expr_stmt")
+        .nth(1)
+        .and_then(|tail| tail.split("fn statement_expr_is_super_call").next())
+        .expect("throwing call statement lowering should remain discoverable");
+    assert!(
+        throwing_call_stmt_source.contains("source_super_call_boundary_result_expr()")
+            && throwing_call_stmt_source.contains("RustExpr::Try")
+            && throwing_call_stmt_source.contains("RustExpr::Call")
+            && throwing_call_stmt_source.contains("RustExpr::Path")
+            && throwing_call_stmt_source.contains("Ok::<(), JavaException>")
+            && throwing_call_stmt_source.contains("RustExpr::Tuple(Vec::new())")
+            && !throwing_call_stmt_source.contains("RustExpr::Raw")
+            && !throwing_call_stmt_source.contains("Ok::<(), JavaException>(())?"),
+        "source super-call boundary should model the typed Ok call and postfix ? structurally"
+    );
     assert!(!coercion_source.contains("RustExpr::Raw(format!(\"!({})\""));
     assert!(!lower_source.contains("!({})"));
     assert!(lower_source.contains("logical_not_projection("));
     assert!(!lower_source.contains("RustExpr::Raw(\"__java_left\".to_string())"));
     assert!(!lower_source.contains("RustExpr::Raw(\"__java_right\".to_string())"));
+    let fallible_numeric_binary_source = lower_source
+        .split("fn lower_numeric_binary_expr_with_fallible_operands")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn lower_logical_binary_expr_with_fallible_operands")
+                .next()
+        })
+        .expect("fallible numeric binary helper should remain discoverable");
+    assert!(
+        fallible_numeric_binary_source.contains("RustExpr::Block")
+            && fallible_numeric_binary_source.contains("RustStmt::Let")
+            && fallible_numeric_binary_source.contains("rust_type_for_java_primitive")
+            && !fallible_numeric_binary_source.contains("RustExpr::Raw(format!")
+            && !fallible_numeric_binary_source.contains("RustType::Raw"),
+        "fallible numeric binary helper should compose temp/result blocks structurally"
+    );
+    let fallible_logical_binary_source = lower_source
+        .split("fn lower_logical_binary_expr_with_fallible_operands")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn lower_nullable_assignment_condition_value")
+                .next()
+        })
+        .expect("fallible logical binary helper should remain discoverable");
+    assert!(
+        fallible_logical_binary_source.contains("RustExpr::Block")
+            && fallible_logical_binary_source.contains("RustExpr::If")
+            && fallible_logical_binary_source.contains("RustStmt::Let")
+            && !fallible_logical_binary_source.contains("RustExpr::Raw(format!"),
+        "fallible logical binary helper should compose short-circuit result blocks structurally"
+    );
+    let fallible_ternary_source = lower_source
+        .split("fn lower_fallible_ternary_expr_for_slot")
+        .nth(1)
+        .and_then(|tail| tail.split("fn ok_expr").next())
+        .expect("fallible ternary helper should remain discoverable");
+    assert!(
+        fallible_ternary_source.contains("RustExpr::If")
+            && fallible_ternary_source.contains("ok_expr(then_value)")
+            && fallible_ternary_source.contains("ok_expr(else_value)")
+            && !fallible_ternary_source.contains("RustExpr::Raw(format!"),
+        "fallible ternary helper should compose condition/result arms structurally"
+    );
+    let callback_lambda_source = lower_source
+        .split("fn lower_callback_lambda_expr_with_shapes")
+        .nth(1)
+        .and_then(|tail| tail.split("fn lower_sequence_callback_call_expr").next())
+        .expect("callback lambda helper should remain discoverable");
+    assert!(
+        callback_lambda_source.contains("LambdaBody::Expr(expr) => RustExpr::Closure")
+            && callback_lambda_source.contains("LambdaBody::Block(block) =>")
+            && callback_lambda_source.contains("RustExpr::Block")
+            && callback_lambda_source.contains("RustClosureParam")
+            && callback_lambda_source.contains("RustClosureBody::Expr")
+            && !callback_lambda_source.contains("LambdaBody::Expr(expr) => RustExpr::Raw(format!")
+            && !callback_lambda_source.contains("RustExpr::Raw(format!"),
+        "callback lambdas should compose closure/block structure directly"
+    );
     assert!(!lower_source.contains("__java_old_value = {target}"));
+    assert!(
+        !lower_source.contains("RustExpr::Raw(\"__java_old_value\".to_string())"),
+        "post static-storage updates should pass old-value temporaries as RustExpr::Var operands"
+    );
     assert!(lower_source.contains("java_update_expression_projection("));
+    assert!(rust_ir_source.contains("AssignOp"));
+    let java_update_projection_source = coercion_source
+        .split("pub fn java_update_expression_projection")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub fn java_primitive_updated_value_projection")
+                .next()
+        })
+        .expect("Java update expression projection should remain discoverable");
+    assert!(
+        java_update_projection_source.contains("RustExpr::Block")
+            && java_update_projection_source.contains("RustStmt::AssignOp")
+            && !java_update_projection_source.contains("RustExpr::Raw(format!"),
+        "Java update expression blocks should compose structurally"
+    );
+    assert!(coercion_source.contains("fn parenthesized_update_method_receiver"));
+    assert!(
+        !coercion_source.contains("RustExpr::Raw(format!(\"({})\", emit::emit_expr(&target)))"),
+        "primitive update method receivers should use RustExpr::Grouped instead of rendered parentheses"
+    );
+    assert!(coercion_source.contains(
+        "PrimitiveType::Byte | PrimitiveType::Short | PrimitiveType::Int | PrimitiveType::Long =>"
+    ));
+    assert!(
+        coercion_source.contains("Some(receiver_method_call_projection_exact(\n                parenthesized_update_method_receiver(target),"),
+        "primitive updated values should compose wrapping method calls structurally for int-like primitives"
+    );
+    assert!(
+        coercion_source.contains("fn char_update_wrapping_value_projection")
+            && coercion_source.contains("java_char_from_u32_mask_projection(\n            char_update_wrapping_value_projection(target, method),")
+            && !coercion_source.contains("fn java_primitive_update_value_projection"),
+        "char updated values should compose wrapping casts structurally instead of rendering raw update strings"
+    );
     assert!(!lower_source.contains("!({object_type_predicate})"));
     assert!(!lower_source.contains("!({identity_expr})"));
     assert!(!lower_source.contains("format!(\"{}.into()\""));
@@ -33496,14 +35926,119 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(call_source.contains("java_class_literal_path_projection("));
     assert!(call_source.contains("external_crate_path_projection("));
     assert!(call_source.contains("external_crate_associated_path_projection("));
-    assert!(call_source.contains("fn external_facade_rust_path_expr"));
+    assert!(coercion_source.contains("pub fn external_facade_rust_path_projection"));
+    assert!(coercion_source.contains("pub fn facade_method_name"));
+    assert!(call_source.contains("facade_method_name(rust_path)"));
+    assert!(call_source.contains(
+        "receiver_method_call_projection(receiver, &facade_method_name(rust_path), args)"
+    ));
     assert!(
-        call_source.contains("function_call_projection(external_facade_rust_path_expr(rust_path)")
+        !call_source.contains("facade_receiver_method_call_projection(receiver, rust_path, args)")
+    );
+    assert!(coercion_source.contains("fn split_external_facade_rust_path"));
+    assert!(!call_source.contains("RustExpr::Raw("));
+    assert!(
+        call_source
+            .contains("function_call_projection(external_facade_rust_path_projection(rust_path)")
     );
     assert!(!call_source.contains("function_call_projection(RustExpr::Raw(rust_path.to_string())"));
+    assert!(
+        !call_source.contains("RustExpr::Raw(rust_path.to_string())\n    }"),
+        "external facade paths with generic arguments should become RustExpr::Path when possible"
+    );
     assert!(!call_source.contains("fn propagate_result_expr"));
     assert!(!call_source.contains("format!(\"{}?\""));
+    let propagate_result_projection_source = coercion_source
+        .split("pub fn propagate_result_projection")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("/// Whether `?` has already been applied")
+                .next()
+        })
+        .expect("result propagation projection should remain discoverable");
+    assert!(
+        propagate_result_projection_source.contains("RustExpr::Try(Box::new(expr))")
+            && !propagate_result_projection_source.contains("RustExpr::Raw(format!"),
+        "result propagation should preserve the operand and model postfix ? structurally"
+    );
     assert!(lower_source.contains("RustExpr::path([\"URI\", \"parse\"])"));
+    assert!(lower_source.contains("fn rust_expr_from_plain_path_or_raw"));
+    assert!(lower_source.contains("fn rust_path_segment_is_balanced_turbofish"));
+    let plain_path_parser_source = lower_source
+        .split("fn rust_expr_from_plain_path_or_raw")
+        .nth(1)
+        .and_then(|tail| tail.split("fn external_enum_constant_label_matches").next())
+        .expect("plain Rust path parser should remain discoverable");
+    assert!(
+        plain_path_parser_source.contains("rust_turbofish_args_are_type_like")
+            && plain_path_parser_source.contains("angle_depth")
+            && plain_path_parser_source.contains("ch.is_ascii_alphanumeric()")
+            && plain_path_parser_source.contains("rendered_projection_or_raw_leaf(path)")
+            && !plain_path_parser_source.contains("RustExpr::Raw(path.to_string())"),
+        "plain Rust path parsing should keep balanced type-like turbofish arguments structured"
+    );
+    let rendered_projection_source = coercion_source
+        .split("pub(crate) fn rendered_projection_or_raw_leaf")
+        .nth(1)
+        .and_then(|tail| tail.split("fn rendered_function_call_projection").next())
+        .expect("rendered projection fallback should remain discoverable");
+    assert!(
+        rendered_projection_source.contains("rendered_literal_leaf_projection")
+            && rendered_projection_source.contains("rendered_expr_is_decimal_integer_literal")
+            && rendered_projection_source.contains("rendered_expr_is_complete_string_literal")
+            && rendered_projection_source.contains("rendered_expr_is_complete_char_literal")
+            && rendered_projection_source.contains("rendered_cast_leaf_projection")
+            && rendered_projection_source.contains("rendered_top_level_as_cast_parts")
+            && rendered_projection_source
+                .contains("raw_contains_top_level_binary_operator(operand)")
+            && rendered_projection_source.contains("simple_rust_cast_type(ty)")
+            && rendered_projection_source.contains("grouped_rendered_leaf_projection"),
+        "rendered projection fallback should recover atomic literal/cast/grouped leaves before raw fallback"
+    );
+    assert!(
+        coercion_source.contains("fn rust_method_token")
+            && coercion_source.contains("rust_method_generic_args_are_balanced")
+            && coercion_source.contains("&& rust_method_token(method)"),
+        "rendered method-call recovery should accept balanced turbofish method tokens structurally"
+    );
+    let rendered_function_call_source = coercion_source
+        .split("fn rendered_function_call_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("fn rendered_call_args_projection").next())
+        .expect("rendered function-call projection should remain discoverable");
+    assert!(
+        rendered_function_call_source.contains("simple_macro_call_name(function)")
+            && rendered_function_call_source.contains("macro_call_projection(")
+            && coercion_source.contains("fn simple_macro_call_name")
+            && coercion_source.contains("rust_plain_identifier(macro_name)"),
+        "rendered function-call recovery should recover only simple macro-call leaves structurally"
+    );
+    assert!(
+        !coercion_source.contains("RustExpr::Raw(\"factory().collect::<Vec<_>>()\".to_string())"),
+        "rendered turbofish method calls should not remain raw compatibility leaves"
+    );
+    assert!(
+        !lower_source.contains("return RustExpr::Raw(variant);"),
+        "enum switch labels should preserve structured paths when variants are plain Rust paths"
+    );
+    assert!(
+        !lower_source.contains("return Some((owner, RustExpr::Raw(variant)));"),
+        "enum static field access should preserve structured paths when variants are plain Rust paths"
+    );
+    assert!(
+        !lower_source.contains(".map(|variant| (owner, RustExpr::Raw(variant)))"),
+        "candidate enum static field access should preserve structured paths when variants are plain Rust paths"
+    );
+    let enum_static_field_slot_source = lower_source
+        .split("fn lower_java_enum_static_field_access_for_slot")
+        .nth(1)
+        .and_then(|tail| tail.split("fn rust_expr_is_bare_constructor_call").next())
+        .expect("enum static field slot adapter should remain discoverable");
+    assert!(
+        enum_static_field_slot_source.contains("rust_expr_is_associated_path_for_owner")
+            && !enum_static_field_slot_source.contains("emit::emit_expr(&lowered)"),
+        "enum static field slot adapter should inspect variant paths structurally"
+    );
     assert!(!lower_source.contains("RustExpr::Raw(\"URI::parse\".to_string())"));
     assert!(!lower_source.contains("RustExpr::Raw(format!(\"Self::{}\""));
     assert!(!lower_source.contains("RustExpr::Raw(format!(\"{rust_name}::new"));
@@ -33512,6 +36047,10 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         "RustExpr::Raw(format!(\n                    \"JavaClass::<{rust_type}>::for_name"
     ));
     assert!(!lower_source.contains("RustExpr::Raw(format!(\"Box::new({boxed}) as {target_ty}\""));
+    assert!(
+        !lower_source.contains("\"Box::new({}) as {target_ty}\""),
+        "source subtype erased-object upcasts should compose Box::new plus cast structurally"
+    );
     assert!(
         !lower_source
             .contains("RustExpr::Raw(format!(\n        \"{trait_name}::{helper_name}({})\"")
@@ -33522,13 +36061,161 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
             .contains("RustExpr::Raw(format!(\n                \"{rust_owner}::value_of({})\"")
     );
     assert!(!lower_source.contains("RustExpr::Raw(format!(\"__java_self.{field_name}\""));
+    assert!(
+        !lower_source.contains("RustExpr::Raw(\"__java_self.context\".to_string())"),
+        "inherited-context receiver calls should compose __java_self.context as a field projection"
+    );
+    assert!(
+        !lower_source.contains("value: Box::new(RustExpr::Raw(default.to_string()))"),
+        "static array default VecRepeat values should use structured literal/call leaves"
+    );
+    assert!(
+        !lower_source.contains("expr: Box::new(RustExpr::Raw(length))"),
+        "static array default VecRepeat lengths should use structured literal/path leaves"
+    );
+    assert!(
+        !lower_source.contains("rendered.into_iter().map(RustExpr::Raw).collect()"),
+        "static array literal elements should stay as structured RustExpr values"
+    );
+    assert!(
+        !lower_source.contains("receiver: Box::new(RustExpr::Raw(rendered))"),
+        "static string array literal elements should call to_string on structured literal receivers"
+    );
+    assert!(
+        !lower_source.contains(".map(RustExpr::Raw)"),
+        "rewritten plain constructor companion paths should recover structured Path expressions"
+    );
+    assert!(
+        coercion_source.contains("fn dotted_zero_arg_or_field_projection")
+            && coercion_source.contains(".strip_suffix(\".clone()\")"),
+        "plain clone self replacements should recover through centralized structured MethodCall recovery"
+    );
     assert!(!lower_source.contains("self.__outer.borrow().{}"));
     assert!(!lower_source.contains("self.__outer.borrow_mut().{}"));
     assert!(!lower_source.contains(".iter().collect::<String>()"));
+    assert!(lower_source.contains("fn class_init_call_stmt() -> RustStmt"));
+    assert!(lower_source.contains("RustExpr::path([\"Self\", CLASS_INIT_NAME])"));
+    assert!(lower_source.contains("fn class_init_guard_fast_return_stmt(guard: &str) -> RustStmt"));
+    assert!(
+        !lower_source.contains("RustStmt::Raw(format!(\"{CLASS_INIT_NAME}();\""),
+        "class-init trigger calls should be structured statement calls"
+    );
+    assert!(
+        !lower_source.contains("\"if {guard}.swap(true, std::sync::atomic::Ordering::SeqCst)"),
+        "class-init reentry guard should compose as If/MethodCall IR"
+    );
+    assert!(
+        !lower_source.contains("emit::emit_expr(&setter)"),
+        "class-init static setter calls should be structured function calls"
+    );
     assert!(!lower_source.contains("Self::__set_static_{}"));
     assert!(!lower_source.contains("Self::__static_{}()"));
     assert!(!lower_source.contains("{}::__set_static_{}"));
     assert!(!lower_source.contains("{}::__static_{}()"));
+    assert!(lower_source.contains("static_storage_assignment_value_projection("));
+    let static_storage_update_source = lower_source
+        .split("fn lower_static_storage_primitive_update_expr")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn java_string_identity_audit_projection")
+                .next()
+        })
+        .expect("static storage primitive update helper should remain discoverable");
+    assert!(
+        static_storage_update_source.contains("RustExpr::Block")
+            && static_storage_update_source.contains("RustExpr::Call")
+            && static_storage_update_source.contains("RustStmt::Let")
+            && !static_storage_update_source.contains("RustExpr::Raw(format!"),
+        "static-storage primitive update expressions should compose block/call structure directly"
+    );
+    let string_identity_audit_source = lower_source
+        .split("fn java_string_identity_audit_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("fn lower_local_update_value_expr").next())
+        .expect("string identity audit helper should remain discoverable");
+    assert!(
+        string_identity_audit_source.contains("RustExpr::PostfixComment")
+            && !string_identity_audit_source.contains("RustExpr::Raw(format!")
+            && !string_identity_audit_source.contains("emit::emit_expr(&expr)"),
+        "string identity audit comments should keep the compared expression structured"
+    );
+    assert!(
+        !lower_source.contains("\"{{ {}({}); {} }}\""),
+        "static-storage assignment value expressions should route block construction through a projection helper"
+    );
+    let static_storage_assignment_value_projection_source = coercion_source
+        .split("pub fn static_storage_assignment_value_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("fn associated_path_projection").next())
+        .expect("static storage assignment value projection should remain discoverable");
+    assert!(
+        static_storage_assignment_value_projection_source.contains("RustExpr::Block")
+            && !static_storage_assignment_value_projection_source.contains("RustExpr::Raw(format!"),
+        "static-storage assignment value expressions should compose block structure directly"
+    );
+    let static_storage_getter_body_projection_source = coercion_source
+        .split("pub fn static_storage_getter_body_projection")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub fn static_storage_element_write_projection")
+                .next()
+        })
+        .expect("static storage getter body projection should remain discoverable");
+    assert!(
+        static_storage_getter_body_projection_source.contains("method_call_projection")
+            && static_storage_getter_body_projection_source.contains("zero_arg_closure_expr")
+            && !static_storage_getter_body_projection_source.contains("RustExpr::Raw(format!"),
+        "static-storage getter body should compose lock/clone/default calls structurally"
+    );
+    let static_storage_element_assignment_source = lower_source
+        .split("fn lower_static_storage_element_assignment_stmt")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn static_storage_element_target_owner_field")
+                .next()
+        })
+        .expect("static-storage element assignment lowering should remain discoverable");
+    assert!(
+        static_storage_element_assignment_source.contains("RustExpr::Block")
+            && static_storage_element_assignment_source.contains("RustStmt::Let")
+            && static_storage_element_assignment_source
+                .contains("static_storage_element_write_projection")
+            && !static_storage_element_assignment_source.contains("RustStmt::Raw(format!"),
+        "static-storage element assignment should compose temp bindings and the write structurally"
+    );
+    let static_storage_element_write_projection_source = coercion_source
+        .split("pub fn static_storage_element_write_projection")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub fn static_storage_setter_body_projection")
+                .next()
+        })
+        .expect("static-storage element write projection should remain discoverable");
+    assert!(
+        static_storage_element_write_projection_source.contains("RustStmt::Assign")
+            && static_storage_element_write_projection_source.contains("RustExpr::Index")
+            && static_storage_element_write_projection_source.contains("get_or_insert_with")
+            && !static_storage_element_write_projection_source.contains("format!("),
+        "static-storage element write projection should build the indexed assignment structurally"
+    );
+    let static_storage_setter_body_projection_source = coercion_source
+        .split("pub fn static_storage_setter_body_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn associated_const_projection").next())
+        .expect("static-storage setter body projection should remain discoverable");
+    assert!(
+        static_storage_setter_body_projection_source.contains("RustStmt::Assign")
+            && static_storage_setter_body_projection_source.contains("RustExpr::Unary")
+            && static_storage_setter_body_projection_source.contains("function_call_projection")
+            && static_storage_setter_body_projection_source
+                .contains("static_storage_guard_projection")
+            && !static_storage_setter_body_projection_source.contains("format!("),
+        "static-storage setter body should compose the assignment structurally"
+    );
+    assert!(
+        !lower_source.contains("RustStmt::Raw(static_storage_setter_body_projection"),
+        "static-storage setter lowering should use the structured setter statement directly"
+    );
     assert!(!lower_source.contains(".with(|cell| cell.borrow().clone().unwrap_or_else"));
     assert!(!lower_source.contains(".with(|cell| *cell.borrow_mut() = Some(value));"));
     assert!(!item_assembly_source.contains("RustExpr::Raw(format!(\"Self::{rust_name}\""));
@@ -33540,6 +36227,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(item_assembly_source.contains("self_associated_path_projection("));
     assert!(!lower_source.contains("format!(\"{}.as_ref().unwrap()\""));
     assert!(!lower_source.contains("RustExpr::Raw(\"self.__outer.clone()\""));
+    assert!(!lower_source.contains("RustExpr::Raw(\"__outer.clone()\""));
     assert!(!lower_source.contains("RustExpr::Raw(format!(\"{name}.clone()\")"));
     assert!(!lower_source.contains("format!(\"&{name}\")"));
     assert!(!lower_source.contains("self.clone()/* TODO(translation): validate added clone */"));
@@ -33547,8 +36235,446 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(!lower_source.contains("Box::new({cloned_self}) as Box<dyn"));
     assert!(lower_source.contains("boxed_dyn_trait_projection("));
     assert!(lower_source.contains("erased_object_box_projection(apply_audited_clone_recovery("));
+    let apply_one_source = coercion_source
+        .split("fn apply_one")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub fn apply_borrowed_element_target_view")
+                .next()
+        })
+        .expect("apply_one should remain discoverable");
+    assert!(apply_one_source.contains("boxed_dyn_trait_projection(expr, trait_name)"));
+    assert!(apply_one_source.contains("erased_object_box_projection(expr)"));
+    assert!(coercion_source.contains("fn boxed_cast_projection"));
+    let boxed_cast_source = coercion_source
+        .split("fn preserve_raw_tuple_operand")
+        .nth(1)
+        .and_then(|tail| tail.split("fn split_raw_top_level_commas").next())
+        .expect("boxed cast tuple-preservation helper should remain discoverable");
+    assert!(
+        boxed_cast_source.contains("rendered_projection_or_raw_leaf(&raw)")
+            && !boxed_cast_source.contains("} else {\n        RustExpr::Raw(raw)\n    }"),
+        "boxed cast fallback should recover structured leaves before raw fallback"
+    );
+    assert!(
+        !apply_one_source.contains("Box::new({}) as Box<dyn"),
+        "apply_one should delegate boxed coercion expression composition to projection helpers"
+    );
+    assert!(
+        !apply_one_source.contains("RustExpr::Raw(format!(\"{rendered}.as_str()\""),
+        "apply_one raw string view receivers should compose the method call structurally"
+    );
+    assert!(
+        apply_one_source.contains(
+            "string_view_expr(zero_arg_method_projection(\n                    parenthesize_raw_method_receiver(expr)"
+        ) && apply_one_source.contains(
+            "slice_view_expr(zero_arg_method_projection(\n                    parenthesize_raw_method_receiver(expr)"
+        ) && apply_one_source.contains(
+            "Coercion::AsMutSlice => mutable_slice_view_expr(zero_arg_method_projection("
+        ) && !apply_one_source.contains("} else if matches!(expr.unshaped(), RustExpr::Raw(_))"),
+        "apply_one string and slice view coercions should share the same structured method-call projection after special cases"
+    );
+    let as_str_source = apply_one_source
+        .split("Coercion::AsStr")
+        .nth(1)
+        .and_then(|tail| tail.split("Coercion::ToOwnedString").next())
+        .expect("string view arm should remain discoverable");
+    assert!(
+        as_str_source.contains("deref_string_view_projection(&expr)")
+            && !as_str_source.contains("emit::emit_expr(&expr)")
+            && coercion_source.contains("fn deref_string_view_projection")
+            && coercion_source.contains("fn raw_deref_string_view_projection"),
+        "string view deref recovery should use structured unary evidence before raw-leaf compatibility"
+    );
+    assert!(
+        apply_one_source.contains(
+            "zero_arg_method_projection(parenthesize_raw_method_receiver(expr), \"clone_box\")"
+        ) && !apply_one_source.contains("RustExpr::Raw(format!(\"{rendered}.clone_box()\""),
+        "clone_box recovery should compose the method call structurally"
+    );
+    let clone_box_source = apply_one_source
+        .split("Coercion::CloneBoxDynTrait")
+        .nth(1)
+        .and_then(|tail| tail.split("Coercion::EraseObject").next())
+        .expect("clone-box dyn-trait arm should remain discoverable");
+    assert!(
+        clone_box_source.contains("anonymous_dyn_trait_constructor_trait(&expr)")
+            && !clone_box_source.contains("emit::emit_expr(&expr)")
+            && !clone_box_source.contains("emit::emit_expr(&anonymous_dyn_trait_projection")
+            && coercion_source.contains("fn anonymous_dyn_trait_constructor_trait"),
+        "clone-box anonymous-dyn idempotence should use structured constructor evidence before raw-leaf compatibility"
+    );
+    let erased_object_downcast_source = coercion_source
+        .split("fn apply_erased_object_downcast")
+        .nth(1)
+        .and_then(|tail| tail.split("/// Mangles a Java type name").next())
+        .expect("erased-object downcast projection should remain discoverable");
+    assert!(
+        erased_object_downcast_source.contains("RustExpr::Grouped")
+            && erased_object_downcast_source.contains("RustExpr::Unary")
+            && erased_object_downcast_source.contains("method_expect_projection")
+            && erased_object_downcast_source.contains("downcast::<{target_type}>")
+            && !erased_object_downcast_source.contains("RustExpr::Raw(format!"),
+        "owned erased-object downcasts should compose downcast/expect/deref structurally"
+    );
+    assert!(
+        !apply_one_source.contains("RustExpr::Raw(format!(\"{borrowed_item}.as_str()\""),
+        "apply_one borrowed string view receivers should compose the method call structurally"
+    );
+    assert!(
+        coercion_source.contains("RustExpr::PostfixComment")
+            && coercion_source.contains("fn clone_recovery_postfix_marker_expr")
+            && !coercion_source.contains("{}.cloned(){}")
+            && !coercion_source.contains("{}.clone(){}")
+            && !coercion_source.contains("{rendered}.as_ref().cloned(){}"),
+        "clone recovery markers should wrap structured clone projections instead of formatting method-call strings"
+    );
+    let apply_clone_recovery_source = coercion_source
+        .split("fn apply_clone_recovery")
+        .nth(1)
+        .and_then(|tail| tail.split("fn render_clone_recovery_expr").next())
+        .expect("clone recovery helper should remain discoverable");
+    assert!(
+        apply_clone_recovery_source.contains("clone_recovery_postfix_marker_expr")
+            && apply_clone_recovery_source.contains("zero_arg_method_projection")
+            && apply_clone_recovery_source.contains("clone_recovery_method_receiver")
+            && !apply_clone_recovery_source.contains("let rendered = emit::emit_expr(&expr)")
+            && !apply_clone_recovery_source.contains("RustExpr::Raw(render_clone_recovery_expr"),
+        "clone recovery should compose clone markers structurally and keep raw inputs as receiver leaves"
+    );
+    let borrowed_option_slice_clone_source = coercion_source
+        .split("fn apply_borrowed_option_slice_clone_adapter")
+        .nth(1)
+        .and_then(|tail| tail.split("fn apply_borrowed_vec_clone_adapter").next())
+        .expect("borrowed optional slice clone adapter should remain discoverable");
+    assert!(
+        borrowed_option_slice_clone_source.contains("single_param_closure_expr")
+            && borrowed_option_slice_clone_source.contains("to_vec")
+            && borrowed_option_slice_clone_source.contains("clone_recovery_postfix_marker_expr")
+            && !borrowed_option_slice_clone_source.contains("RustExpr::Raw(format!"),
+        "borrowed optional slice clone adapter should compose map/to_vec structurally"
+    );
+    let borrowed_collect_clone_source = coercion_source
+        .split("fn borrowed_collect_clone_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("fn rust_expr_is_cloned_collect_call").next())
+        .expect("borrowed collect clone projection should remain discoverable");
+    let borrowed_vec_clone_adapter_source = coercion_source
+        .split("fn apply_borrowed_vec_clone_adapter")
+        .nth(1)
+        .and_then(|tail| tail.split("fn apply_borrowed_set_clone_adapter").next())
+        .expect("borrowed Vec clone adapter should remain discoverable");
+    let borrowed_set_clone_adapter_source = coercion_source
+        .split("fn apply_borrowed_set_clone_adapter")
+        .nth(1)
+        .and_then(|tail| tail.split("fn rendered_projection_or_raw_leaf").next())
+        .expect("borrowed Set clone adapter should remain discoverable");
+    assert!(
+        borrowed_collect_clone_source.contains("clone_recovery_postfix_marker_expr")
+            && borrowed_collect_clone_source.contains("zero_arg_method_projection")
+            && coercion_source.contains("fn rendered_projection_or_raw_leaf")
+            && coercion_source.contains("fn rendered_function_call_projection")
+            && coercion_source.contains("fn rendered_path_leaf_projection")
+            && coercion_source.contains("fn borrowed_rendered_leaf_projection")
+            && coercion_source.contains("fn raw_borrowed_collect_clone_compat_projection")
+            && !borrowed_collect_clone_source.contains("RustExpr::Raw(format!")
+            && !borrowed_vec_clone_adapter_source.contains("emit::emit_expr(&expr)")
+            && !borrowed_set_clone_adapter_source.contains("emit::emit_expr(&expr)")
+            && !borrowed_vec_clone_adapter_source.contains("RustExpr::Raw(iterator.to_string())")
+            && !borrowed_set_clone_adapter_source.contains("RustExpr::Raw(iterator.to_string())"),
+        "borrowed Vec/Set clone adapters should compose cloned/collect structurally"
+    );
+    let to_owned_sequence_projection_source = coercion_source
+        .split("pub fn to_owned_sequence_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("fn apply_clone_recovery").next())
+        .expect("to-owned sequence projection should remain discoverable");
+    assert!(
+        to_owned_sequence_projection_source.contains("clone_recovery_postfix_marker_expr")
+            && to_owned_sequence_projection_source.contains("zero_arg_method_projection")
+            && to_owned_sequence_projection_source
+                .contains("fn rust_owned_sequence_receiver_needs_parentheses")
+            && !to_owned_sequence_projection_source
+                .contains("let rendered = emit::emit_expr(&expr)")
+            && !to_owned_sequence_projection_source.contains("RustExpr::Raw(format!"),
+        "to-owned sequence projection should compose audited to_vec recovery structurally"
+    );
+    assert!(
+        !apply_one_source.contains("RustExpr::Raw(format!(\"{rendered}.as_slice()\""),
+        "apply_one raw slice view receivers should compose the method call structurally"
+    );
+    let as_slice_source = apply_one_source
+        .split("Coercion::AsSlice")
+        .nth(1)
+        .and_then(|tail| tail.split("Coercion::AsMutSlice").next())
+        .expect("slice view arm should remain discoverable");
+    assert!(
+        as_slice_source.contains("expr_is_associated_path_without_call(&expr)")
+            && as_slice_source.contains("associated_path_view_projection(expr)")
+            && !as_slice_source.contains("emit::emit_expr(&expr)")
+            && coercion_source.contains("fn expr_is_associated_path_without_call")
+            && coercion_source.contains("fn associated_path_view_projection"),
+        "slice view associated-path compatibility should use structured Path evidence before raw-leaf compatibility"
+    );
+    assert!(
+        !apply_one_source.contains("RustExpr::Raw(format!(\"{rendered}.to_string()\""),
+        "apply_one string ownership recovery should compose to_string structurally"
+    );
+    let to_owned_string_source = apply_one_source
+        .split("Coercion::ToOwnedString")
+        .nth(1)
+        .and_then(|tail| tail.split("Coercion::AsSlice").next())
+        .expect("owned-string recovery arm should remain discoverable");
+    let expr_is_string_view_source = coercion_source
+        .split("pub fn expr_is_string_view")
+        .nth(1)
+        .and_then(|tail| tail.split("fn rust_expr_is_string_view_projection").next())
+        .expect("string view predicate should remain discoverable");
+    let expr_is_owned_string_recovery_source = coercion_source
+        .split("fn expr_is_owned_string_recovery")
+        .nth(1)
+        .and_then(|tail| tail.split("fn rust_expr_is_zero_arg_method_call").next())
+        .expect("owned-string recovery predicate should remain discoverable");
+    assert!(
+        to_owned_string_source.contains("expr_is_owned_string_recovery(&expr)")
+            && !to_owned_string_source.contains("emit::emit_expr(&expr)")
+            && coercion_source.contains("fn rust_expr_is_zero_arg_method_call")
+            && coercion_source.contains("fn rendered_expr_is_already_owned_string_recovery"),
+        "owned-string recovery idempotence should use structural/shape evidence before raw-leaf compatibility"
+    );
+    assert!(
+        expr_is_string_view_source
+            .contains("RustExpr::Raw(rendered) if raw_expr_is_string_view(rendered)")
+            && expr_is_owned_string_recovery_source
+                .contains("RustExpr::Raw(rendered) if raw_expr_is_owned_string_recovery(rendered)")
+            && coercion_source.contains("fn raw_expr_is_string_view(rendered: &str) -> bool")
+            && coercion_source
+                .contains("fn raw_expr_is_owned_string_recovery(rendered: &str) -> bool")
+            && coercion_source
+                .matches("rendered_projection_or_raw_leaf(rendered)")
+                .count()
+                >= 2,
+        "raw string view/recovery compatibility should recover structured expressions before text suffix checks"
+    );
+    assert!(
+        !apply_one_source.contains("{}.as_mut_slice()"),
+        "apply_one raw mutable-slice view receivers should compose the method call structurally"
+    );
+    assert!(coercion_source.contains("fn borrow_concrete_facade_block_expr"));
+    assert!(
+        coercion_source.contains("borrow_concrete_facade_block_expr(expr, &target_type)")
+            && coercion_source.contains("borrow_concrete_facade_block_expr(expr, target_type)")
+            && !coercion_source.contains("\"{{ let _java_value = {}; &{} }}\"")
+            && !coercion_source.contains("\"{{ let _java_value = {}; &{target_type} }}\""),
+        "concrete facade borrow coercions should compose the let/borrow block structurally"
+    );
+    assert!(
+        !coercion_source.contains("RustExpr::Raw(format!(\"&mut {}\""),
+        "mutable borrow projections should compose the borrow operator structurally"
+    );
+    assert!(
+        !coercion_source.contains("RustExpr::Raw(format!(\"Box::new({value}) as Box<dyn"),
+        "boxed coercion projection helpers should compose Box::new plus cast structurally"
+    );
+    let optional_borrowed_facade_return_source = coercion_source
+        .split("fn apply_optional_rust_borrowed_facade_return")
+        .nth(1)
+        .and_then(|tail| tail.split("fn boxed_erased_any_value_closure_expr").next())
+        .expect("optional borrowed facade return helper should remain discoverable");
+    let boxed_erased_any_value_closure_source = coercion_source
+        .split("fn boxed_erased_any_value_closure_expr")
+        .nth(1)
+        .and_then(|tail| tail.split("fn apply_rust_scalar_slot_cast").next())
+        .expect("boxed erased-any value closure helper should remain discoverable");
+    assert!(
+        optional_borrowed_facade_return_source.contains("boxed_erased_any_value_closure_expr")
+            && boxed_erased_any_value_closure_source.contains("single_param_closure_expr")
+            && boxed_erased_any_value_closure_source.contains("erased_object_box_projection")
+            && !optional_borrowed_facade_return_source.contains("RustExpr::Raw(format!")
+            && !boxed_erased_any_value_closure_source.contains("RustExpr::Raw(format!"),
+        "optional borrowed facade return callbacks should compose closure/box/cast structure"
+    );
+    assert!(
+        !coercion_source.contains("RustExpr::Raw(format!(\"{rendered}.try_into().unwrap()\""),
+        "scalar narrowing should compose try_into plus unwrap structurally"
+    );
+    let pattern_downcast_source = coercion_source
+        .split("pub fn instanceof_pattern_downcast_ref_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("impl InstanceOfCheck").next())
+        .expect("instanceof pattern downcast projection should remain discoverable");
+    assert!(
+        pattern_downcast_source.contains("closed_enum_pattern_downcast_ref_projection")
+            && pattern_downcast_source.contains("RustExpr::Match")
+            && !pattern_downcast_source.contains("RustExpr::Raw(format!"),
+        "instanceof pattern downcasts should compose closed-enum matches and closures structurally"
+    );
+    let closed_enum_downcast_source = coercion_source
+        .split("fn closed_enum_downcast_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("fn dyn_trait_downcast_ref_projection").next())
+        .expect("closed-enum downcast projection should remain discoverable");
+    assert!(
+        closed_enum_downcast_source.contains("RustExpr::Match")
+            && closed_enum_downcast_source.contains("invalid_cast_policy_expr")
+            && !closed_enum_downcast_source.contains("RustExpr::Raw(format!"),
+        "closed-enum downcast coercions should compose match expressions structurally"
+    );
+    assert!(
+        !coercion_source
+            .contains("\"match {} {{ {enum_name}::{variant_name}(value) => value, _ => {} }}\""),
+        "closed-enum downcast coercions should not render the whole match before lowering"
+    );
+    assert!(
+        !pattern_downcast_source.contains("{rendered}.as_any().downcast_ref::<{target_type}>()"),
+        "dyn trait pattern downcasts should compose the method chain structurally"
+    );
+    assert!(
+        !pattern_downcast_source
+            .contains("{rendered}.as_ref().as_any().downcast_ref::<{target_type}>()"),
+        "boxed dyn trait pattern downcasts should compose the method chain structurally"
+    );
+    assert!(
+        !pattern_downcast_source.contains("{rendered}.downcast_ref::<{target_type}>()"),
+        "erased-object pattern downcasts should compose downcast_ref structurally"
+    );
+    assert!(
+        !pattern_downcast_source.contains(
+            "{rendered}.as_ref().and_then(|value| value.downcast_ref::<{target_type}>())"
+        ),
+        "optional erased-object pattern downcasts should compose as_ref/and_then structurally"
+    );
+    let dyn_cast_helper_source = coercion_source
+        .split("fn apply_dyn_trait_downcast")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub fn erased_object_borrowed_downcast_ref_projection")
+                .next()
+        })
+        .expect("dyn trait invalid-cast helpers should remain discoverable");
+    assert!(
+        !dyn_cast_helper_source.contains("{rendered}.as_any().downcast_ref::<{target_type}>(){}"),
+        "dyn trait invalid-cast downcasts should compose the method chain and expect structurally"
+    );
+    assert!(
+        !dyn_cast_helper_source
+            .contains("{rendered}.as_ref().as_any().downcast_ref::<{target_type}>(){}"),
+        "boxed dyn trait invalid-cast downcasts should compose the method chain and expect structurally"
+    );
+    let erased_borrowed_downcast_source = coercion_source
+        .split("pub fn erased_object_borrowed_downcast_ref_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("fn shared_handle_inner_type").next())
+        .expect("erased-object borrowed downcast projection should remain discoverable");
+    assert!(
+        !erased_borrowed_downcast_source.contains("{rendered}.downcast_ref::<{target_type}>(){}"),
+        "borrowed erased-object downcasts should compose downcast_ref plus expect structurally"
+    );
+    assert!(
+        !erased_borrowed_downcast_source.contains(
+            "{rendered}.as_ref().and_then(|value| value.downcast_ref::<{target_type}>()){}"
+        ),
+        "optional borrowed erased-object downcasts should compose as_ref/and_then/expect structurally"
+    );
+    assert!(
+        erased_borrowed_downcast_source.contains("fn erased_object_downcast_ref_call")
+            && erased_borrowed_downcast_source.contains("fn value_as_ref_closure_expr")
+            && !erased_borrowed_downcast_source.contains("RustExpr::Raw(closure)")
+            && !erased_borrowed_downcast_source.contains("RustExpr::Raw(\"|value| value.as_ref()"),
+        "shared-handle erased-object borrowed downcasts should keep downcast and map callbacks structured"
+    );
+    let optional_erased_string_view_source = coercion_source
+        .split("fn optional_erased_string_downcast_ref_view_projection")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn required_borrowed_element_already_matches_target")
+                .next()
+        })
+        .expect("optional erased string downcast view helper should remain discoverable");
+    assert!(
+        optional_erased_string_view_source.contains("Option<RustExpr>")
+            && optional_erased_string_view_source.contains("erased_object_downcast_ref_call")
+            && optional_erased_string_view_source.contains("single_param_closure_expr")
+            && !optional_erased_string_view_source.contains("let rendered = emit::emit_expr(expr)")
+            && !coercion_source.contains("RustExpr::Raw(borrowed_erased_view)"),
+        "optional erased string downcast views should compose as_ref/and_then/expect/as_str structurally"
+    );
+    let optional_erased_string_consuming_view_source = coercion_source
+        .split("fn optional_erased_string_consuming_view_projection")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn required_borrowed_element_already_matches_target")
+                .next()
+        })
+        .expect("optional erased string consuming-view helper should remain discoverable");
+    assert!(
+        optional_erased_string_rewrite_source
+            .contains("optional_erased_string_consuming_view_projection(&rendered)")
+            && optional_erased_string_consuming_view_source.contains("strip_suffix(\".as_str()\")")
+            && optional_erased_string_consuming_view_source
+                .contains("optional_erased_string_downcast_ref_view_projection(rendered)")
+            && !optional_erased_string_consuming_view_source.contains("RustExpr::Raw")
+            && !optional_erased_string_consuming_view_source.contains("format!"),
+        "raw optional erased string consuming views should recover through the structured downcast-view projection before rendered replacement"
+    );
     assert!(!lower_source.contains("unsupported Java deserialization cast to {java_name}"));
     assert!(lower_source.contains("unsupported_deserialization_cast_handoff_projection("));
+    let unsupported_deserialization_cast_source = coercion_source
+        .split("pub fn unsupported_deserialization_cast_handoff_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn abstract_method_stub_projection").next())
+        .expect("unsupported deserialization cast handoff helper should remain discoverable");
+    assert!(
+        unsupported_deserialization_cast_source.contains("RustExpr::Block")
+            && unsupported_deserialization_cast_source.contains("panic_message_projection")
+            && !unsupported_deserialization_cast_source.contains("RustExpr::Raw(format!"),
+        "unsupported deserialization cast handoff should compose let/panic block structurally"
+    );
+    assert!(coercion_source.contains("fn panic_message_projection(message: String) -> RustExpr"));
+    let abstract_method_stub_source = coercion_source
+        .split("pub fn abstract_method_stub_projection")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub fn abstract_interface_method_stub_projection")
+                .next()
+        })
+        .expect("abstract method stub helper should remain discoverable");
+    let abstract_interface_stub_source = coercion_source
+        .split("pub fn abstract_interface_method_stub_projection")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub fn unsupported_outer_capture_constructor_projection")
+                .next()
+        })
+        .expect("abstract interface stub helper should remain discoverable");
+    let unsupported_outer_capture_constructor_source = coercion_source
+        .split("pub fn unsupported_outer_capture_constructor_projection")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub fn unsupported_constructor_call_handoff_projection")
+                .next()
+        })
+        .expect("unsupported outer capture constructor helper should remain discoverable");
+    assert!(
+        abstract_method_stub_source.contains("panic_message_projection")
+            && abstract_interface_stub_source.contains("panic_message_projection")
+            && unsupported_outer_capture_constructor_source.contains("panic_message_projection")
+            && !abstract_method_stub_source.contains("RustExpr::Raw(format!")
+            && !abstract_interface_stub_source.contains("RustExpr::Raw(format!")
+            && !unsupported_outer_capture_constructor_source.contains("RustExpr::Raw(format!"),
+        "abstract/unsupported panic helpers should compose panic macros structurally"
+    );
+    let unsupported_constructor_call_handoff_source = coercion_source
+        .split("pub fn unsupported_constructor_call_handoff_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("fn raw_contains_top_level_comma").next())
+        .expect("unsupported constructor call handoff helper should remain discoverable");
+    assert!(
+        unsupported_constructor_call_handoff_source.contains("RustExpr::PostfixComment")
+            && unsupported_constructor_call_handoff_source.contains("panic_message_projection")
+            && !unsupported_constructor_call_handoff_source.contains("RustExpr::Raw(format!"),
+        "unsupported constructor handoff should compose panic plus TODO comment structurally"
+    );
     assert!(!lower_source.contains("abstract method {}.{} has no implementation"));
     assert!(!lower_source.contains("abstract interface method {}.{} has no implementation"));
     assert!(!lower_source.contains(
@@ -33566,17 +36692,81 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(!lower_source.contains("as_deref_mut()\") {\n        return None;"));
     assert!(!lower_source.contains("java_clone_erased_object_ref("));
     assert!(!lower_source.contains(".downcast::<\") && rendered.contains"));
+    assert!(!lower_source.contains("{}.downcast_ref::<{rust_type}>()"));
     assert!(!lower_source.contains("downcast_ref::<{rust_type}>().expect(\"invalid Java cast\")"));
+    let early_return_pattern_refinement_source = lower_source
+        .split("fn pattern_binding_refinement_stmt")
+        .nth(1)
+        .and_then(|tail| tail.split("fn pattern_binding_rust_type_name").next())
+        .expect("pattern binding refinement lowering should remain discoverable");
+    assert!(
+        !early_return_pattern_refinement_source.contains("RustStmt::Raw(format!"),
+        "early-return instanceof pattern bindings should compose let/expect structurally"
+    );
+    assert!(early_return_pattern_refinement_source.contains("RustStmt::Let"));
+    assert!(
+        early_return_pattern_refinement_source.contains("receiver_method_call_projection_exact")
+    );
     assert!(lower_source.contains("erased_object_borrowed_downcast_ref_projection("));
     assert!(!lower_source.contains("{target_ty}::new_1({}.clone())"));
     assert!(lower_source.contains("subtype_owned_constructor_from_borrowed_projection("));
+    let subtype_owned_constructor_source = coercion_source
+        .split("pub fn subtype_owned_constructor_from_borrowed_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("fn rust_path_segment_is_plain_ident").next())
+        .expect("subtype constructor projection should remain discoverable");
+    assert!(
+        subtype_owned_constructor_source.contains("fn associated_rust_path_expr")
+            && subtype_owned_constructor_source.contains("split_external_facade_rust_path")
+            && subtype_owned_constructor_source.contains("rendered_projection_or_raw_leaf")
+            && !subtype_owned_constructor_source
+                .contains("RustExpr::Raw(format!(\"{owner}::{member}\"))"),
+        "subtype constructor associated paths should use the shared structured path splitter before raw fallback"
+    );
     assert!(
         !lower_source
             .contains("Default::default()/* TODO(translation): Java exception self-as-supertype facade boundary */")
     );
     assert!(lower_source.contains("exception_self_as_supertype_facade_boundary_projection()"));
+    let exception_self_facade_boundary_source = coercion_source
+        .split("pub fn exception_self_as_supertype_facade_boundary_projection")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub fn explicit_java_facade_cast_placeholder_projection")
+                .next()
+        })
+        .expect("exception self-as-supertype facade boundary helper should remain discoverable");
+    assert!(
+        exception_self_facade_boundary_source.contains("RustExpr::PostfixComment")
+            && exception_self_facade_boundary_source.contains("RustExpr::Call")
+            && exception_self_facade_boundary_source
+                .contains("RustExpr::path([\"Default\", \"default\"])")
+            && !exception_self_facade_boundary_source.contains("RustExpr::Raw"),
+        "exception self-as-supertype facade boundary should compose Default::default plus TODO structurally"
+    );
     assert!(!lower_source.contains("/* TODO(translation): validate explicit Java facade cast */"));
     assert!(lower_source.contains("explicit_java_facade_cast_placeholder_projection("));
+    let explicit_facade_cast_source = coercion_source
+        .split("pub fn explicit_java_facade_cast_placeholder_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("fn rust_type_default_call_expr").next())
+        .expect("explicit facade cast placeholder helper should remain discoverable");
+    let rust_type_default_call_source = coercion_source
+        .split("fn rust_type_default_call_expr")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn render_audited_clone_recovery").next())
+        .expect("Rust type default call helper should remain discoverable");
+    assert!(
+        explicit_facade_cast_source.contains("RustExpr::PostfixComment")
+            && explicit_facade_cast_source.contains("RustExpr::Block")
+            && explicit_facade_cast_source.contains("rust_type_default_call_expr")
+            && rust_type_default_call_source.contains("RustExpr::Call")
+            && rust_type_default_call_source.contains("external_facade_rust_path_projection")
+            && !rust_type_default_call_source.contains("RustExpr::Path(vec![format!")
+            && !rust_type_default_call_source.contains("RustExpr::Raw(format!")
+            && !explicit_facade_cast_source.contains("RustExpr::Raw(format!"),
+        "explicit facade cast placeholder should compose let/default/TODO structure"
+    );
     assert!(!lower_source.contains("format!(\"{name}.as_str()\")"));
     assert!(!lower_source.contains("format!(\"{name}.as_mut_slice()\")"));
     assert!(!lower_source.contains("format!(\"{name}.as_slice()\")"));
@@ -33602,15 +36792,389 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(lower_source.contains("array2_rows_i32_projection"));
     assert!(access_source.contains("array2_rows_i32_projection"));
     assert!(access_source.contains("array2_cols_i32_projection"));
+    assert!(
+        !operator_source.contains("EqualityComparisonPlan::Direct => RustExpr::Raw(format!("),
+        "direct equality should compose as RustExpr::Binary"
+    );
+    assert!(
+        !operator_source.contains("{} {op} Some(&{})"),
+        "left optional equality should compose Some(&value) structurally"
+    );
+    assert!(
+        !operator_source.contains("Some(&{}) {op} {}"),
+        "right optional equality should compose Some(&value) structurally"
+    );
+    assert!(
+        !operator_source.contains("{} {op} Some({})"),
+        "left optional string equality should compose Some(value) structurally"
+    );
+    assert!(
+        !operator_source.contains("Some({}) {op} {}"),
+        "right optional string equality should compose Some(value) structurally"
+    );
+    assert!(
+        !operator_source.contains("{handle_path}::ptr_eq({}, {})"),
+        "shared-handle direct identity should compose ptr_eq structurally"
+    );
+    assert!(operator_source.contains("fn checked_java_integer_div_rem_block_leaf"));
+    let checked_java_integer_div_rem_caller_source = operator_source
+        .split("pub fn lower_checked_java_integer_div_rem_expr")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn checked_java_integer_div_rem_block_leaf")
+                .next()
+        })
+        .expect("checked Java integer div/rem lowering should remain discoverable");
+    assert!(
+        !checked_java_integer_div_rem_caller_source.contains("RustExpr::Raw(format!"),
+        "checked Java integer div/rem caller should delegate fallible block construction"
+    );
+    let checked_java_integer_div_rem_leaf_source = operator_source
+        .split("fn checked_java_integer_div_rem_block_leaf")
+        .nth(1)
+        .and_then(|tail| tail.split("fn lower_java_integer_binary_expr").next())
+        .expect("checked Java integer div/rem leaf should remain discoverable");
+    assert!(
+        checked_java_integer_div_rem_leaf_source.contains("RustExpr::Block")
+            && checked_java_integer_div_rem_leaf_source.contains("RustExpr::If")
+            && !checked_java_integer_div_rem_leaf_source.contains("RustExpr::Raw(format!")
+            && !checked_java_integer_div_rem_leaf_source.contains("RustType::Raw"),
+        "checked Java integer div/rem should compose the catchable exception block structurally"
+    );
+    assert!(operator_source.contains("fn shared_handle_ptr_eq_closure_leaf"));
+    assert!(
+        !operator_source.contains("args: vec![RustExpr::Raw(format!(\n            \"|value|"),
+        "optional shared-handle identity should keep closure Raw behind a named leaf helper"
+    );
+    assert!(
+        !operator_source
+            .contains("{}.as_ref().is_some_and(|value| {handle_path}::ptr_eq(value, {other}))"),
+        "optional shared-handle identity should compose the Option method chain structurally"
+    );
+    assert!(operator_source.contains("fn shared_handle_method_path"));
+    assert!(operator_source.contains("fn shared_handle_call"));
+    assert!(operator_source.contains("shared_handle_call(handle_path, \"ptr_eq\""));
+    assert!(operator_source.contains("shared_handle_call(handle_path, \"new\""));
+    assert!(!operator_source.contains("path.push(\"ptr_eq\".to_string())"));
+    assert!(!operator_source.contains("path.push(\"new\".to_string())"));
+    assert!(
+        operator_source.contains(
+            "fn shared_handle_ptr_eq_closure_leaf(handle_path: &str, other: RustExpr) -> RustExpr"
+        ) && operator_source.contains("RustExpr::Closure")
+            && !operator_source.contains("let other = crate::emit::emit_expr(&other);"),
+        "optional shared-handle identity should keep the compared operand structured inside the closure"
+    );
+    assert!(operator_source.contains("fn both_optional_shared_handle_identity_match_leaf"));
+    let both_optional_shared_handle_identity_match_leaf = operator_source
+        .split("fn both_optional_shared_handle_identity_match_leaf")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn both_optional_custom_equals_match_leaf")
+                .next()
+        })
+        .expect("both-optional shared-handle identity match helper should remain discoverable");
+    assert!(
+        both_optional_shared_handle_identity_match_leaf.contains("RustExpr::Match")
+            && !both_optional_shared_handle_identity_match_leaf.contains("RustExpr::Raw(format!"),
+        "both-optional shared-handle identity should compose match structurally"
+    );
+    assert!(operator_source.contains("fn both_optional_custom_equals_match_leaf"));
+    let both_optional_custom_equals_match_leaf = operator_source
+        .split("fn both_optional_custom_equals_match_leaf")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn erased_optional_custom_equals_arg_expr")
+                .next()
+        })
+        .expect("both-optional custom-equals match helper should remain discoverable");
+    assert!(
+        both_optional_custom_equals_match_leaf.contains("RustExpr::Match")
+            && !both_optional_custom_equals_match_leaf.contains("RustExpr::Raw(format!"),
+        "both-optional custom-equals matching should compose match structurally"
+    );
+    assert!(
+        !operator_source.contains("fn borrowed_handle_operand("),
+        "optional shared-handle identity should not use a string-returning borrow helper"
+    );
+    let lower_unary_expr_source = operator_source
+        .split("pub fn lower_unary_expr")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn stream_unary_prefix").next())
+        .expect("unary lowering should remain discoverable");
+    assert!(
+        lower_unary_expr_source.contains("java_update_expression_projection")
+            && !operator_source.contains("fn postfix_update_statement_leaf")
+            && !lower_unary_expr_source.contains("RustExpr::Raw(format!"),
+        "unary update fallback should reuse the structured Java update projection"
+    );
+    assert!(
+        !operator_source.contains("({} {op} &{})"),
+        "left shared-borrow equality should compose borrowed operand structurally"
+    );
+    assert!(
+        !operator_source.contains("(&{} {op} {})"),
+        "right shared-borrow equality should compose borrowed operand structurally"
+    );
+    assert!(
+        !operator_source.contains("{}.{method_name}({})"),
+        "custom equals calls should compose the method call structurally"
+    );
+    assert!(
+        !operator_source.contains("RustExpr::Raw(format!(\"*({rendered})\"))"),
+        "borrowed custom-equals erased arguments should compose deref receivers structurally"
+    );
+    assert!(
+        !operator_source.contains("RustExpr::Raw(format!(\"({rendered})\"))"),
+        "custom-equals erased arguments should use RustExpr::Grouped for clone receivers"
+    );
+    assert!(
+        !operator_source.contains("RustExpr::Raw(if op == \"!=\" { format!(\"!{call}\") }"),
+        "custom equals negation should compose through logical_not_projection"
+    );
+    assert!(
+        !operator_source.contains("\"({} {op} {})\""),
+        "string equality should compose as RustExpr::Binary"
+    );
+    assert!(operator_source.contains("fn integer_wrapping_method_projection"));
+    let integer_wrapping_receiver_source = operator_source
+        .split("fn integer_wrapping_receiver_expr")
+        .nth(1)
+        .and_then(|tail| tail.split("fn integer_wrapping_grouped_expr").next())
+        .expect("integer wrapping receiver helper should remain discoverable");
+    assert!(
+        integer_wrapping_receiver_source.contains("RustExpr::Literal(rendered)")
+            && !integer_wrapping_receiver_source.contains("RustExpr::Raw(rendered)")
+            && !integer_wrapping_receiver_source.contains("emit::emit_expr"),
+        "integer wrapping receiver suffixing should use literal structure, not rendered Raw text"
+    );
+    assert!(
+        !operator_source.contains("RustExpr::Raw(integer_wrapping_receiver_text("),
+        "integer wrapping receivers should preserve structured operands and only suffix literal leaves"
+    );
+    assert!(
+        !operator_source.contains("fn integer_wrapping_receiver_text("),
+        "integer wrapping literal suffixing should not require rendering arbitrary receivers"
+    );
+    assert!(
+        !operator_source.contains(
+            "UnaryOp::PreInc | UnaryOp::PreDec => RustExpr::Raw(crate::emit::emit_expr(&operand))"
+        ),
+        "prefix increment/decrement expression fallback should preserve the structured operand"
+    );
+    assert!(
+        !operator_source.contains("({left}).{method}({right})"),
+        "integer wrapping arithmetic should compose wrapping calls structurally"
+    );
+    assert!(
+        !operator_source.contains("RustExpr::Raw(format!(\"({right})\""),
+        "integer wrapping shift distances should not format the grouped cast operand inline"
+    );
+    assert!(
+        operator_source.contains("fn parenthesize_raw_operand_for_prefix_or_call_arg"),
+        "raw operand grouping for prefix/call-arg contexts should be centralized"
+    );
+    assert!(
+        operator_source.contains("fn structured_operand_needs_parentheses_for_prefix_or_call_arg")
+            && operator_source.contains("RustExpr::Binary { .. }")
+            && operator_source.contains("RustExpr::Cast { .. }")
+            && operator_source.contains("RustExpr::Match { .. }")
+            && operator_source.contains("raw_receiver_projection(expr, |trimmed|"),
+        "prefix/call-arg operand grouping should handle structured compound expressions before falling back to raw text"
+    );
+    let borrow_for_equality_source = operator_source
+        .split("fn borrow_for_equality_expr")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn parenthesize_raw_operand_for_prefix_or_call_arg")
+                .next()
+        })
+        .expect("equality borrow helper should remain discoverable");
+    assert!(
+        borrow_for_equality_source.contains("shared_borrow_expr(expr)")
+            && !borrow_for_equality_source.contains("RustExpr::Unary"),
+        "equality borrowing should reuse the shared borrow projection instead of rebuilding raw grouping locally"
+    );
+    assert!(
+        !operator_source.contains("fn unsigned_shift_cast_operand(")
+            && !operator_source.contains("fn parenthesize_raw_some_operand(")
+            && !operator_source.contains("fn parenthesize_raw_borrow_operand("),
+        "operator raw operand grouping should not be duplicated across context-specific helpers"
+    );
+    assert!(
+        !operator_source.contains("receiver: Box::new(RustExpr::Raw(format!(\"({left})\""),
+        "integer wrapping receivers should be grouped through a helper leaf"
+    );
+    assert!(
+        operator_source.contains("fn integer_wrapping_grouped_expr(expr: RustExpr) -> RustExpr"),
+        "integer wrapping should route explicit grouping through a structured node"
+    );
+    assert!(
+        operator_source.contains(
+            "fn integer_wrapping_grouped_expr(expr: RustExpr) -> RustExpr {\n    RustExpr::Grouped(Box::new(expr))\n}"
+        ),
+        "integer wrapping grouping should not render structured expressions into Raw"
+    );
+    assert!(
+        operator_source.contains("raw_receiver_projection(expr, |trimmed|")
+            && !operator_source.contains("let RustExpr::Raw(raw) = expr else"),
+        "operator raw operand grouping should delegate Raw recovery to the central coercion helper"
+    );
+    assert!(
+        !operator_source.contains("RustExpr::Raw(format!(\"({trimmed})\"))"),
+        "operator raw operand grouping should use RustExpr::Grouped"
+    );
+    assert!(
+        !operator_source.contains("({left}).{method}(({right}) as u32)"),
+        "integer wrapping shifts should compose shift-distance casts structurally"
+    );
+    assert!(
+        !operator_source.contains(
+            "\"(({left} as {unsigned_ty}).wrapping_shr(({right}) as u32)) as {signed_ty}\""
+        ),
+        "unsigned right shift should compose the cast/method/cast chain structurally"
+    );
     assert!(!operator_source.contains("{rendered}.as_str()"));
     assert!(!operator_source.contains(".as_ref().map(|value| value.as_str())"));
     assert!(lower_source.contains("to_owned_sequence_projection"));
     assert!(!lower_source.contains("format!(\"{rendered}.to_vec()\")"));
+    assert!(
+        !lower_source
+            .contains("to_owned_sequence_projection(\n            RustExpr::Raw(rendered),"),
+        "static final array slot lowering should not render before to_owned_sequence_projection"
+    );
+    assert!(lower_source.contains("fn static_storage_array_constant_element_expr"));
+    assert!(
+        !lower_source.contains("_ => RustExpr::Raw(rendered),"),
+        "static storage array primitive constants should use Literal leaves, not Raw rendered values"
+    );
     assert!(!lower_source.contains(".row({}).to_vec()"));
     assert!(!lower_source.contains("Array2::from_rows({rendered})"));
     assert!(lower_source.contains("array2_from_rows_projection(lowered, target.ownership)"));
     assert!(!lower_source.contains("{}[[{}, {}]]"));
     assert!(lower_source.contains("array2_index_projection("));
+    assert!(
+        !lower_source.contains("RustExpr::Raw(\"__java_assignment_index\".to_string())")
+            && !lower_source.contains("RustExpr::Raw(\"__java_assignment_receiver\".to_string())")
+            && !lower_source.contains("RustExpr::Raw(\"__java_assignment_row\".to_string())")
+            && !lower_source.contains("RustExpr::Raw(\"__java_assignment_col\".to_string())")
+            && !lower_source.contains("RustExpr::Raw(\"__java_assignment_old\".to_string())"),
+        "ordered assignment temporaries should be RustExpr::Var leaves, not Raw identifiers"
+    );
+    let ordered_assignment_source = lower_source
+        .split("fn lower_array_assignment_value_expr")
+        .nth(1)
+        .and_then(|tail| tail.split("fn compound_assignment_parts").next())
+        .expect("ordered array assignment helper family should remain discoverable");
+    assert!(
+        ordered_assignment_source.contains("RustExpr::Block")
+            && ordered_assignment_source.contains("RustStmt::Let")
+            && ordered_assignment_source.contains("RustStmt::Assign")
+            && ordered_assignment_source.contains("ordered_assignment_block_stmt")
+            && !ordered_assignment_source.contains("RustExpr::Raw(format!")
+            && !ordered_assignment_source.contains("RustStmt::Raw(format!"),
+        "ordered array assignment expression/statement blocks should compose structurally"
+    );
+    let local_assignment_value_source = lower_source
+        .split("fn lower_local_assignment_value_expr")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn lower_assignment_null_comparison_expr")
+                .next()
+        })
+        .expect("local assignment value lowering should remain discoverable");
+    assert!(
+        local_assignment_value_source.contains("local_assignment_value_block")
+            && local_assignment_value_source.contains("RustExpr::Block")
+            && local_assignment_value_source.contains("RustStmt::Assign")
+            && !local_assignment_value_source.contains("RustExpr::Raw(format!"),
+        "local assignment value expressions should compose assignment blocks structurally"
+    );
+    let assignment_null_comparison_source = lower_source
+        .split("fn lower_assignment_null_comparison_expr")
+        .nth(1)
+        .and_then(|tail| tail.split("fn lower_assignment_value_for_slot").next())
+        .expect("assignment-null comparison lowering should remain discoverable");
+    assert!(
+        assignment_null_comparison_source.contains("local_assignment_predicate_block")
+            && assignment_null_comparison_source.contains("RustExpr::Block")
+            && assignment_null_comparison_source.contains("RustExpr::MethodCall")
+            && !assignment_null_comparison_source.contains("RustExpr::Raw(format!"),
+        "assignment-null comparisons should compose assignment predicate blocks structurally"
+    );
+    assert!(lower_source.contains("fn instanceof_pattern_guard_method_projection"));
+    assert!(lower_source.contains("fn instanceof_pattern_ternary_match_projection"));
+    assert!(lower_source.contains("fn instanceof_pattern_some_binding_pattern"));
+    assert_eq!(
+        lower_source
+            .matches("format!(\"Some({})\", crate::parser::to_snake_case")
+            .count(),
+        1,
+        "the instanceof Some(binding) pattern spelling should live only in its named leaf helper"
+    );
+    let instanceof_pattern_ternary_match_source = lower_source
+        .split("fn instanceof_pattern_ternary_match_projection")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn instanceof_pattern_guard_method_projection")
+                .next()
+        })
+        .expect("instanceof pattern ternary match helper should remain discoverable");
+    assert!(
+        instanceof_pattern_ternary_match_source.contains("RustExpr::Match")
+            && !instanceof_pattern_ternary_match_source.contains("RustExpr::Raw(format!"),
+        "instanceof pattern ternaries should compose match structurally"
+    );
+    assert!(
+        !lower_source.contains("\"match {} {{ Some({}) => {}, None => {} }}\""),
+        "instanceof pattern ternary paths should not render match expressions before lowering"
+    );
+    let instanceof_pattern_if_source = lower_source
+        .split("fn lower_instanceof_pattern_if_stmt")
+        .nth(1)
+        .and_then(|tail| tail.split("fn lower_instanceof_pattern_value_expr").next())
+        .expect("instanceof pattern if lowering should remain discoverable");
+    assert!(
+        instanceof_pattern_if_source.contains("if_let_stmt(")
+            && !instanceof_pattern_if_source.contains("RustStmt::Raw(format!")
+            && !instanceof_pattern_if_source.contains("\"if let Some({}) = {}"),
+        "instanceof pattern if statements should compose if-let structurally"
+    );
+    let instanceof_pattern_guard_method_source = lower_source
+        .split("fn instanceof_pattern_guard_method_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("fn instanceof_pattern_option_projection").next())
+        .expect("instanceof pattern guard helper should remain discoverable");
+    assert!(
+        instanceof_pattern_guard_method_source.contains("RustExpr::Closure")
+            && !instanceof_pattern_guard_method_source.contains("RustExpr::Raw(format!"),
+        "instanceof pattern guard helper should pass a structured closure"
+    );
+    assert!(
+        !lower_source.contains("{}.is_some_and(|{}| {})"),
+        "instanceof pattern && guards should compose the Option method call structurally"
+    );
+    assert!(
+        !lower_source.contains("{object}.as_ref().is_some_and(|value| value.is::<{rust_type}>())"),
+        "erased-object getClass comparisons should compose as_ref/is_some_and structurally"
+    );
+    assert!(
+        !lower_source.contains("{object}.is::<{rust_type}>()"),
+        "erased-object exact-type checks should compose is::<T> structurally"
+    );
+    assert!(
+        !lower_source.contains("{object}.as_ref().and_then(|value| value.downcast_ref::<{rust_type}>()).is_some_and(|other| std::ptr::eq(self, other))"),
+        "optional erased-object self identity checks should compose the method chain structurally"
+    );
+    assert!(
+        !lower_source.contains(
+            "{object}.downcast_ref::<{rust_type}>().is_some_and(|other| std::ptr::eq(self, other))"
+        ),
+        "erased-object self identity checks should compose downcast_ref/is_some_and structurally"
+    );
+    assert!(
+        !lower_source.contains("{}.is_none_or(|{}| {})"),
+        "instanceof pattern || guards should compose the Option method call structurally"
+    );
     assert!(
         !lower_source.contains(".row_mut({index}).assign(&ndarray::ArrayView1::from({value}));")
     );
@@ -33626,10 +37190,40 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(lower_source.contains("map_get_expect_projection("));
     assert!(lower_source.contains("map_get_mut_expect_projection("));
     assert!(lower_source.contains("optional_copied_expect_projection("));
+    assert!(lower_source.contains("fn stream_byte_array_temp_call_block_projection("));
+    assert!(lower_source.contains("fn stream_byte_array_temp_call_args("));
+    let stream_byte_array_block_source = lower_source
+        .split("fn stream_byte_array_temp_call_block_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("fn java_type_is_byte_array_like").next())
+        .expect("stream byte-array temp call block helper should remain discoverable");
+    assert!(
+        stream_byte_array_block_source.contains("RustExpr::Block")
+            && stream_byte_array_block_source.contains("RustStmt::Let")
+            && !stream_byte_array_block_source.contains("RustExpr::Raw(format!"),
+        "stream byte-array temp call helper should compose let/call blocks structurally"
+    );
+    assert!(
+        !lower_source.contains("__java_write_bytes.len() as i32"),
+        "stream byte-array write overloads should compose len casts structurally"
+    );
+    assert!(
+        !lower_source.contains("__java_read_bytes.len() as i32"),
+        "stream byte-array read overloads should compose len casts structurally"
+    );
+    assert!(
+        !lower_source.contains("{receiver_text}.write_byte_array_int_int("),
+        "stream byte-array write overloads should compose receiver method calls structurally"
+    );
+    assert!(
+        !lower_source.contains("{receiver_text}.{read_method}("),
+        "stream byte-array read overloads should compose receiver method calls structurally"
+    );
     assert!(!lower_source.contains("format!(\"{}.sort()\""));
     assert!(!lower_source.contains(".sort_by(|a, b| __java_comparator.compare"));
     assert!(lower_source.contains("collection_sort_projection(lower_expr("));
     assert!(lower_source.contains("collection_sort_by_comparator_projection("));
+    assert!(lower_source.contains("collection_sort_by_callback_projection("));
     assert!(!lower_source.contains("format!(\"{}.fill({})\""));
     assert!(lower_source.contains("array_fill_projection("));
     assert!(!lower_source.contains("format!(\"{}.iter()\""));
@@ -33637,10 +37231,66 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(!lower_source.contains("format!(\"{}.iter().copied()\""));
     assert!(lower_source.contains("sequence_iter_cloned_projection("));
     assert!(lower_source.contains("sequence_iter_copied_projection("));
+    assert!(coercion_source.contains("fn sequence_index_position_predicate_leaf"));
+    assert!(coercion_source.contains("fn sequence_index_i32_map_leaf"));
+    let sequence_index_of_projection_source = coercion_source
+        .split("pub fn sequence_index_of_projection")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn sequence_index_position_predicate_leaf")
+                .next()
+        })
+        .expect("sequence indexOf projection should remain discoverable");
+    assert!(
+        !sequence_index_of_projection_source.contains("RustExpr::Raw(format!"),
+        "sequence_index_of_projection should keep position/map closure text behind named leaf helpers"
+    );
+    let sequence_index_position_source = coercion_source
+        .split("fn sequence_index_position_predicate_leaf")
+        .nth(1)
+        .and_then(|tail| tail.split("fn sequence_index_i32_map_leaf").next())
+        .expect("sequence position closure leaf should remain discoverable");
+    assert!(
+        !sequence_index_position_source.contains("RustExpr::Raw(format!"),
+        "sequence index position predicate should use closure IR rather than formatted Raw"
+    );
     assert!(!lower_source.contains(".next().expect(\"Java iterator exhausted\")"));
     assert!(lower_source.contains("iterator_next_expect_projection(iter_expr)"));
     assert!(lower_source.contains("tuple_field_projection(next_expr, field_index)"));
-    assert!(lower_source.contains("render_sequence_iteration_source"));
+    assert!(!coercion_source.contains("pub fn render_sequence_iteration_source"));
+    assert!(coercion_source.contains("pub fn sequence_iteration_source_projection"));
+    assert!(lower_source.contains("sequence_iteration_source_projection"));
+    assert!(
+        !lower_source.contains("RustExpr::Raw(render_sequence_iteration_source"),
+        "map-entry iteration lowering should keep receiver iteration structured"
+    );
+    assert!(
+        !lower_source.contains("RustExpr::Raw(helper.to_string())"),
+        "boxed primitive helper calls should use structured plain-path projection when possible"
+    );
+    assert!(
+        !lower_source.contains("{}.into_iter().map(|(k, v)| (k, {}))"),
+        "map putAll value adaptation should compose into_iter/map structurally"
+    );
+    assert!(lower_source.contains("fn map_entry_value_adapter_closure(value_expr: RustExpr)"));
+    let map_entry_value_adapter_source = lower_source
+        .split("fn map_entry_value_adapter_closure")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn java_type_is_erased_object_like_for_lowering")
+                .next()
+        })
+        .expect("map entry value adapter closure helper should remain discoverable");
+    assert!(
+        map_entry_value_adapter_source.contains("RustExpr::Closure")
+            && map_entry_value_adapter_source.contains("RustExpr::Tuple")
+            && !map_entry_value_adapter_source.contains("RustExpr::Raw(format!"),
+        "map putAll value adapter closure should compose closure and tuple structurally"
+    );
+    assert!(
+        !lower_source.contains("emit::emit_expr(&value_expr)"),
+        "map putAll value adaptation should keep the value expression structured until the closure leaf"
+    );
     assert!(!lower_source.contains("fn adapt_optional_instance_receiver_with_access"));
     assert!(!lower_source.contains("fn adapt_optional_instance_receiver_with_projection"));
     assert!(lower_source.contains("fn adapt_optional_instance_receiver_with_slot_plan"));
@@ -33671,6 +37321,19 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
             .contains(".as_ref().map(|value| value.to_string()).unwrap_or_else(|| \\\"null\\\"")
     );
     assert!(!lower_source.contains(".map(|value| value.to_string()).unwrap_or_else(|| \"null\""));
+    assert!(coercion_source.contains("fn param_to_string_closure_expr"));
+    assert!(coercion_source.contains("fn null_string_closure_expr"));
+    let optional_display_chain_projection_source = coercion_source
+        .split("fn optional_display_chain_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn render_java_display_operand").next())
+        .expect("optional display chain projection should remain discoverable");
+    assert!(
+        optional_display_chain_projection_source.contains("param_to_string_closure_expr")
+            && optional_display_chain_projection_source.contains("null_string_closure_expr")
+            && !optional_display_chain_projection_source.contains("RustExpr::Raw("),
+        "optional Java display chains should compose map and fallback closures structurally"
+    );
 
     assert!(lower_source.matches("rendered.ends_with").count() <= 13);
     assert!(lower_source.matches("rendered.starts_with").count() == 0);
@@ -33763,6 +37426,43 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(!coercion_source.contains("RustExpr::Raw(format!(\"java_math_round_f64"));
     assert!(!coercion_source.contains("RustExpr::Raw(format!(\"({rendered}).abs()\""));
     assert!(!coercion_source.contains("RustExpr::Raw(format!(\"({rendered}).wrapping_abs()\""));
+    assert!(
+        !coercion_source.contains("RustExpr::Raw(format!(\"({rendered})\"))"),
+        "math raw method receivers should use RustExpr::Grouped instead of rendered parentheses"
+    );
+    assert!(
+        !coercion_source.contains("RustExpr::Raw(format!(\n        \"{helper}({}{suffix}"),
+        "math floor helper calls should compose helper invocation and casts structurally"
+    );
+    assert!(
+        !coercion_source
+            .contains("RustExpr::Raw(format!(\"({}) as i32\", emit::emit_expr(&call)))"),
+        "math floor-mod narrowing should compose the final cast structurally"
+    );
+    let unsigned_byte_array_return_source = coercion_source
+        .split("fn apply_rust_unsigned_byte_array_return")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn unsigned_byte_array_conversion_pipeline")
+                .next()
+        })
+        .expect("unsigned byte array return adapter should remain discoverable");
+    assert!(
+        unsigned_byte_array_return_source.contains("single_param_closure_expr")
+            && !unsigned_byte_array_return_source.contains("RustExpr::Raw("),
+        "unsigned byte array optional return mapping should compose its closure structurally"
+    );
+    let unsigned_byte_array_pipeline_source = coercion_source
+        .split("fn unsigned_byte_array_conversion_pipeline")
+        .nth(1)
+        .and_then(|tail| tail.split("fn apply_rust_borrowed_facade_return").next())
+        .expect("unsigned byte array conversion pipeline should remain discoverable");
+    assert!(
+        unsigned_byte_array_pipeline_source.contains("RustExpr::Cast")
+            && unsigned_byte_array_pipeline_source.contains("typed_collect_projection")
+            && !unsigned_byte_array_pipeline_source.contains("RustExpr::Raw("),
+        "unsigned byte array conversion pipeline should compose map/cast/collect structurally"
+    );
     assert!(!coercion_source.contains("RustExpr::Raw(format!(\"({} as f64).{method}()\""));
     assert!(
         !coercion_source
@@ -33773,9 +37473,43 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
             .contains("RustExpr::Raw(format!(\n        \"({} as f64).powf({} as f64)\"")
     );
     assert!(coercion_source.contains("fn f64_cast_projection(expr: RustExpr) -> RustExpr"));
+    let f64_cast_projection_source = coercion_source
+        .split("fn f64_cast_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn math_round_projection").next())
+        .expect("f64 cast projection should remain discoverable");
+    assert!(
+        f64_cast_projection_source.contains("parenthesize_raw_primitive_number_cast_operand")
+            && !f64_cast_projection_source.contains("expr: Box::new(expr)"),
+        "f64 casts should group ambiguous raw operands before composing cast projections"
+    );
     assert!(!call_source.contains("format!(\"{}.len() as i32\""));
     assert!(!call_source.contains("keys().cloned().collect::<Vec<_>>()"));
     assert!(!call_source.contains("iter().cloned().collect::<Vec<_>>()"));
+    assert!(
+        !coercion_source.contains(
+            "RustExpr::Raw(format!(\"&({rendered}).iter().cloned().collect::<Vec<_>>()\""
+        ),
+        "set-to-borrowed-slice temporary adapters should compose borrow/iter/cloned/collect structurally"
+    );
+    assert!(
+        !coercion_source.contains(
+            "iter().map(|value| java_clone_erased_object_ref(value)).collect::<Vec<_>>()"
+        ),
+        "erased-object collection snapshots should compose iter/map/collect structurally"
+    );
+    let erased_object_vec_clone_projection_source = coercion_source
+        .split("fn erased_object_vec_clone_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("fn typed_collect_projection").next())
+        .expect("erased-object Vec clone projection should remain discoverable");
+    assert!(
+        erased_object_vec_clone_projection_source.contains("single_param_closure_expr")
+            && erased_object_vec_clone_projection_source.contains("function_call_projection")
+            && erased_object_vec_clone_projection_source.contains("java_clone_erased_object_ref")
+            && !erased_object_vec_clone_projection_source.contains("RustExpr::Raw("),
+        "erased-object Vec clone projection should keep the map callback structured"
+    );
     assert!(!call_source.contains("JavaIterator::new({}.iter().cloned())"));
     assert!(!call_source.contains("format!(\"({receiver_for_len}).len() as i32\""));
     assert!(!call_source.contains("as_ref().map(|value| (*value).clone())"));
@@ -33793,6 +37527,16 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(!call_source.contains("std::cmp::max"));
     assert!(!call_source.contains("std::cmp::min"));
     assert!(call_source.contains("objects_equals_projection(left, right)"));
+    let native_java_instance_equals_source = call_source
+        .split("NativeJavaInstanceMethod::Equals =>")
+        .nth(1)
+        .and_then(|tail| tail.split("fn apply_primitive_number_value").next())
+        .expect("native Java instance equals lowering should remain discoverable");
+    assert!(
+        native_java_instance_equals_source.contains("objects_equals_projection(receiver, other)")
+            && !native_java_instance_equals_source.contains("RustExpr::Binary"),
+        "native Java instance equals lowering should reuse the shared equality projection"
+    );
     assert!(call_source.contains("objects_non_null_projection(arg)"));
     assert!(call_source.contains("objects_is_null_projection(arg)"));
     let native_collection_static_source = call_source
@@ -33811,12 +37555,74 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(call_source.contains("arrays_as_list_projection(args)"));
     assert!(call_source.contains("arrays_equals_projection(left, right.clone())"));
     assert!(call_source.contains("arrays_equals_range_projection"));
+    let arrays_equals_range_source = coercion_source
+        .split("pub fn arrays_equals_range_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn arrays_binary_search_projection").next())
+        .expect("Arrays.equals range projection should remain discoverable");
+    assert!(
+        arrays_equals_range_source.contains("arrays_dual_range_runtime_call_projection")
+            && !arrays_equals_range_source.contains("RustExpr::Raw(format!"),
+        "Arrays.equals range should delegate to the structured dual-range projection"
+    );
     assert!(native_collection_static_source.contains("arrays_binary_search_projection"));
     assert!(call_source.contains("arrays_binary_search_range_projection"));
+    let arrays_binary_search_source = coercion_source
+        .split("pub fn arrays_binary_search_projection")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub fn arrays_binary_search_range_projection")
+                .next()
+        })
+        .expect("Arrays.binarySearch projection should remain discoverable");
+    assert!(
+        arrays_binary_search_source.contains("RustExpr::Block")
+            && arrays_binary_search_source.contains("arrays_binary_search_match_expr")
+            && arrays_binary_search_source.contains("RustExpr::Match")
+            && !arrays_binary_search_source.contains("RustExpr::Raw(format!"),
+        "Arrays.binarySearch should compose its block and match structurally"
+    );
+    let arrays_binary_search_range_source = coercion_source
+        .split("pub fn arrays_binary_search_range_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn arrays_compare_projection").next())
+        .expect("Arrays.binarySearch range projection should remain discoverable");
+    assert!(
+        arrays_binary_search_range_source.contains("RustExpr::Block")
+            && arrays_binary_search_range_source.contains("RustStmt::If")
+            && arrays_binary_search_range_source.contains("arrays_binary_search_match_expr")
+            && !arrays_binary_search_range_source.contains("RustExpr::Raw(format!"),
+        "Arrays.binarySearch range should compose guards, slice, and match structurally"
+    );
     assert!(call_source.contains("arrays_compare_projection(left, right.clone())"));
     assert!(call_source.contains("arrays_compare_range_projection"));
     assert!(call_source.contains("arrays_mismatch_projection(left, right.clone())"));
     assert!(call_source.contains("arrays_mismatch_range_projection"));
+    let arrays_dual_range_runtime_call_source = coercion_source
+        .split("fn arrays_dual_range_runtime_call_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn arrays_copy_of_projection").next())
+        .expect("dual-range array helper should remain discoverable");
+    assert!(
+        arrays_dual_range_runtime_call_source.contains("RustExpr::Block")
+            && arrays_dual_range_runtime_call_source.contains("RustStmt::If")
+            && arrays_dual_range_runtime_call_source.contains("RustExpr::Range")
+            && !arrays_dual_range_runtime_call_source.contains("RustExpr::Raw(format!"),
+        "Arrays.equals/compare/mismatch range should compose guards, slices, and calls structurally"
+    );
+    assert!(call_source.contains("arrays_copy_of_projection(source, len)"));
+    assert!(call_source.contains("arrays_copy_of_range_projection(source, from, to)"));
+    let arrays_copy_source = coercion_source
+        .split("pub fn arrays_copy_of_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn arrays_to_string_projection").next())
+        .expect("Arrays.copyOf projection should remain discoverable");
+    assert!(
+        arrays_copy_source.contains("RustExpr::Block")
+            && arrays_copy_source.contains("arrays_resize_out_stmt")
+            && !arrays_copy_source.contains("RustExpr::Raw(format!"),
+        "Arrays.copyOf/copyOfRange should compose copy blocks structurally"
+    );
     assert!(call_source.contains("arrays_deep_equals_projection"));
     assert!(call_source.contains("arrays_deep_hash_code_projection"));
     assert!(call_source.contains("arrays_deep_to_string_projection"));
@@ -33825,6 +37631,17 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(!call_source.contains("{{ let _ = {}; }}"));
     assert!(call_source.contains("discard_value_projection(arg)"));
     assert!(coercion_source.contains("pub fn discard_value_projection"));
+    assert!(coercion_source.contains("fn discard_value_block_leaf"));
+    let discard_value_block_leaf_source = coercion_source
+        .split("fn discard_value_block_leaf")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn varargs_packed_vec_projection").next())
+        .expect("discard value projection should remain discoverable");
+    assert!(
+        discard_value_block_leaf_source.contains("RustExpr::Block")
+            && !discard_value_block_leaf_source.contains("RustExpr::Raw(format!"),
+        "discard_value_projection should compose its statement block structurally"
+    );
     assert!(!call_source.contains("fn erased_object_new_expr"));
     assert!(call_source.contains("erased_object_constructor_projection(args)"));
     assert!(!call_source.contains("owner_type == \"Box<dyn std::any::Any>\""));
@@ -33858,11 +37675,13 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(!collection_remove_if_source.contains(".retain(|{}|"));
     assert!(!collection_remove_if_source.contains("!({})"));
     assert!(collection_remove_if_source.contains("collection_remove_if_projection"));
+    assert!(collection_remove_if_source.contains("emit_stream_lambda_body_expr"));
+    assert!(!collection_remove_if_source.contains("emit_stream_lambda_body(body"));
     assert!(coercion_source.contains("pub fn collection_remove_if_projection"));
     let collection_remove_if_projection_source = coercion_source
         .split("pub fn collection_remove_if_projection")
         .nth(1)
-        .and_then(|tail| tail.split("pub fn collection_sort_projection").next())
+        .and_then(|tail| tail.split("fn collection_remove_if_predicate_leaf").next())
         .expect("collection removeIf projection should remain discoverable");
     assert!(
         !collection_remove_if_projection_source.contains("{}.retain(|{}| !({}))"),
@@ -33871,6 +37690,130 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(
         collection_remove_if_projection_source.contains("receiver_method_call_projection_exact")
     );
+    assert!(coercion_source.contains("fn collection_remove_if_predicate_leaf"));
+    assert!(
+        collection_remove_if_projection_source.contains("predicate: RustExpr")
+            && !collection_remove_if_projection_source.contains("predicate: &str")
+            && !collection_remove_if_projection_source.contains("RustExpr::Raw(format!"),
+        "collection_remove_if_projection should compose predicate expressions structurally"
+    );
+    let collection_remove_all_source = lower_source
+        .split("fn lower_native_collection_remove_all_expr_stmt")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn lower_native_collection_extend_expr_stmt")
+                .next()
+        })
+        .expect("collection removeAll lowering should remain discoverable");
+    assert!(
+        !collection_remove_all_source.contains("raw_stmt(format!"),
+        "collection removeAll lowering should compose the temp binding and retain call structurally"
+    );
+    assert!(collection_remove_all_source.contains("RustExpr::Block"));
+    assert!(collection_remove_all_source.contains("RustStmt::Let"));
+    assert!(collection_remove_all_source.contains("RustExpr::Closure"));
+    let collection_extend_source = lower_source
+        .split("fn lower_native_collection_extend_expr_stmt")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn native_collection_extend_receiver_type")
+                .next()
+        })
+        .expect("collection addAll lowering should remain discoverable");
+    assert!(
+        !collection_extend_source.contains("raw_stmt(format!"),
+        "collection addAll self-read lowering should compose the temp binding and extend call structurally"
+    );
+    assert!(collection_extend_source.contains("RustExpr::Block"));
+    assert!(collection_extend_source.contains("RustStmt::Let"));
+    assert!(collection_extend_source.contains("apply_native_collection_extend"));
+    assert!(coercion_source.contains("fn collection_sort_range_block_leaf"));
+    assert!(coercion_source.contains("fn collection_sort_by_comparator_block_leaf"));
+    assert!(coercion_source.contains("fn collection_sort_by_callback_block_leaf"));
+    assert!(coercion_source.contains("fn array_fill_range_block_leaf"));
+    for (public_helper, leaf_helper, message) in [
+        (
+            "pub fn collection_sort_range_projection",
+            "fn collection_sort_range_block_leaf",
+            "collection_sort_range_projection should compose its checked slice-sort block structurally",
+        ),
+        (
+            "pub fn collection_sort_by_comparator_projection",
+            "fn collection_sort_by_comparator_block_leaf",
+            "collection_sort_by_comparator_projection should compose its comparator block structurally",
+        ),
+        (
+            "pub fn collection_sort_by_callback_projection",
+            "fn collection_sort_by_callback_block_leaf",
+            "collection_sort_by_callback_projection should compose its callback block structurally",
+        ),
+        (
+            "pub fn array_fill_range_projection",
+            "fn array_fill_range_block_leaf",
+            "array_fill_range_projection should compose its checked slice-fill block structurally",
+        ),
+    ] {
+        let public_source = coercion_source
+            .split(public_helper)
+            .nth(1)
+            .and_then(|tail| tail.split(leaf_helper).next())
+            .expect("collection/array range projection should remain discoverable");
+        assert!(
+            !public_source.contains("RustExpr::Raw(format!"),
+            "{message}"
+        );
+        if leaf_helper == "fn collection_sort_range_block_leaf"
+            || leaf_helper == "fn array_fill_range_block_leaf"
+        {
+            let leaf_source = coercion_source
+                .split(leaf_helper)
+                .nth(1)
+                .expect("collection/array range leaf should remain discoverable");
+            let leaf_source = leaf_source
+                .split("pub fn ")
+                .next()
+                .expect("collection/array range leaf body should remain bounded");
+            let checked_array_range_block_source = coercion_source
+                .split("fn checked_array_range_block_expr")
+                .nth(1)
+                .and_then(|tail| tail.split("fn checked_array_range_slice_expr").next())
+                .expect("checked array range block builder should remain discoverable");
+            assert!(
+                leaf_source.contains("checked_array_range_block_expr")
+                    && checked_array_range_block_source.contains("RustExpr::Block")
+                    && !leaf_source.contains("RustExpr::Raw(format!")
+                    && !checked_array_range_block_source.contains("RustExpr::Raw(format!")
+                    && !checked_array_range_block_source
+                        .contains("__java_arrays_to as usize > __java_arrays_target.len()"),
+                "{message}"
+            );
+        }
+        if leaf_helper == "fn collection_sort_by_comparator_block_leaf"
+            || leaf_helper == "fn collection_sort_by_callback_block_leaf"
+        {
+            let leaf_source = coercion_source
+                .split(leaf_helper)
+                .nth(1)
+                .expect("collection sort-by leaf should remain discoverable");
+            let leaf_source = leaf_source
+                .split("pub fn ")
+                .next()
+                .expect("collection sort-by leaf body should remain bounded");
+            let comparator_sort_block_source = coercion_source
+                .split("fn comparator_sort_block_expr")
+                .nth(1)
+                .and_then(|tail| tail.split("fn clone_var_expr").next())
+                .expect("comparator sort block builder should remain discoverable");
+            assert!(
+                leaf_source.contains("comparator_sort_block_expr")
+                    && comparator_sort_block_source.contains("RustExpr::Block")
+                    && comparator_sort_block_source.contains("closure_expr(")
+                    && !leaf_source.contains("RustExpr::Raw(format!")
+                    && !comparator_sort_block_source.contains("RustExpr::Raw(format!"),
+                "{message}"
+            );
+        }
+    }
     let lower_varargs_source = lower_source
         .split("fn lower_varargs_call_args_from_params")
         .nth(1)
@@ -33883,6 +37826,50 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(lower_varargs_source.contains("varargs_spread_extend_projection(packed_vec, tail)"));
     assert!(coercion_source.contains("pub fn varargs_packed_vec_projection"));
     assert!(coercion_source.contains("pub fn varargs_spread_extend_projection"));
+    assert!(coercion_source.contains("fn varargs_spread_extend_block_leaf"));
+    let varargs_spread_extend_block_leaf = coercion_source
+        .split("fn varargs_spread_extend_block_leaf")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn collection_remove_if_projection").next())
+        .expect("varargs spread extension leaf should remain discoverable");
+    assert!(
+        varargs_spread_extend_block_leaf.contains("RustExpr::Block")
+            && !varargs_spread_extend_block_leaf.contains("RustExpr::Raw(format!"),
+        "varargs spread extension should compose its block structurally"
+    );
+    let borrowed_sequence_extend_arg_source = coercion_source
+        .split("pub fn borrowed_sequence_extend_arg")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub fn project_optional_sequence_receiver")
+                .next()
+        })
+        .expect("borrowed sequence extend arg projection should remain discoverable");
+    assert!(
+        borrowed_sequence_extend_arg_source.contains("param_to_string_closure_expr(\"v\")")
+            && borrowed_sequence_extend_arg_source.contains("RustExpr::PostfixComment")
+            && borrowed_sequence_extend_arg_source.contains("borrow_operand_expr(arg)")
+            && borrowed_sequence_extend_arg_source
+                .contains("zero_arg_method_projection(iter, \"cloned\")")
+            && !borrowed_sequence_extend_arg_source.contains("RustExpr::Raw(\"|v|")
+            && !borrowed_sequence_extend_arg_source.contains("RustExpr::Raw(format!"),
+        "borrowed sequence extend recovery should keep callbacks and unsupported cloned markers structured"
+    );
+    let borrowed_collection_string_view_to_owned_projection_source = coercion_source
+        .split("fn borrowed_collection_string_view_to_owned_projection")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn borrowed_collection_copy_to_owned_projection")
+                .next()
+        })
+        .expect("borrowed collection string recovery projection should remain discoverable");
+    assert!(
+        borrowed_collection_string_view_to_owned_projection_source
+            .contains("param_to_string_closure_expr(\"v\")")
+            && !borrowed_collection_string_view_to_owned_projection_source
+                .contains("RustExpr::Raw(\"|v|"),
+        "borrowed collection string recovery should keep the map callback structured"
+    );
     assert!(!call_source.contains("unsupported borrowed element recovery for extend"));
     assert!(!call_source.contains("iter().map(|v| v.to_string())"));
     assert!(!call_source.contains("format!(\"&{}\""));
@@ -33891,6 +37878,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(stream_source.matches("rendered.starts_with").count() <= 1);
     assert!(stream_source.matches("rendered.contains").count() <= 1);
     assert!(stream_source.contains("len_i32_projection"));
+    assert!(!stream_source.contains("len_i32_projection(RustExpr::Raw"));
     assert!(!stream_source.contains("fn render_stream_lambda_index_arg"));
     assert!(!stream_source.contains("rendered_expr_is_already_string_view"));
     assert!(!stream_source.contains("format!(\"{}.as_str()\""));
@@ -33904,15 +37892,410 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(!stream_source.contains(".filter_map(|item| item.as_ref())"));
     assert!(!stream_source.contains(".filter_map(|item| item)"));
     assert!(!stream_source.contains(".flat_map(|{param_name}| {param_name}.iter())"));
-    assert!(stream_source.contains("render_sequence_iteration_source"));
+    assert!(
+        !stream_source.contains("render_sequence_iteration_source"),
+        "stream lowering should use sequence_iteration_source_projection instead of the string renderer"
+    );
     assert!(stream_source.contains("render_optional_non_null_filter_map"));
+    assert!(coercion_source.contains("pub fn optional_non_null_filter_map_projection"));
     assert!(stream_source.contains("render_borrowed_collection_flat_map"));
-    assert!(stream_source.contains("render_stream_lambda_param_projection"));
+    assert!(coercion_source.contains("pub fn borrowed_collection_flat_map_projection"));
+    assert!(stream_source.contains("render_stream_collect_to_map_terminal"));
+    assert!(coercion_source.contains("pub fn stream_collect_to_map_projection"));
+    assert!(stream_source.contains("render_stream_join_terminal"));
+    assert!(coercion_source.contains("pub fn stream_join_terminal_projection"));
+    assert!(stream_source.contains("render_stream_match_terminal"));
+    assert!(coercion_source.contains("pub fn stream_match_terminal_projection"));
+    assert!(stream_source.contains("render_stream_reduce_terminal"));
+    assert!(coercion_source.contains("pub fn stream_reduce_terminal_projection"));
+    assert!(stream_source.contains("render_stream_filter_op"));
+    assert!(coercion_source.contains("pub fn stream_filter_op_projection"));
+    assert!(stream_source.contains("render_stream_map_op"));
+    assert!(coercion_source.contains("pub fn stream_map_op_projection"));
+    assert!(stream_source.contains("render_stream_flat_map_op"));
+    assert!(coercion_source.contains("pub fn stream_flat_map_op_projection"));
+    assert!(coercion_source.contains("pub fn stream_prefixed_flat_map_op_projection"));
+    assert!(coercion_source.contains("pub fn render_stream_prefixed_flat_map_op"));
+    assert!(
+        !stream_source.contains("render_stream_prefixed_flat_map_op"),
+        "stream lowering should build flatMap block lambdas structurally before rendering"
+    );
+    assert!(
+        !stream_source.contains("fn emit_stream_lambda_prefix(")
+            && !stream_source.contains("fn emit_stream_lambda_prefix_and_locals")
+            && !stream_source.contains("fn emit_stream_lambda_stmt("),
+        "stream lambda prefix lowering should use the structured RustStmt helper"
+    );
+    let prefixed_stream_block_source = coercion_source
+        .split("fn prefixed_stream_block_stmts")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub fn render_stream_lambda_param_projection")
+                .next()
+        })
+        .expect("prefixed stream block statement helper should remain discoverable");
+    assert!(prefixed_stream_block_source.contains("prefixed_stream_block_let_stmt"));
+    assert!(prefixed_stream_block_source.contains("RustStmt::Let"));
+    assert!(prefixed_stream_block_source.contains("prefixed_stream_block_expr_stmt"));
+    assert!(
+        !prefixed_stream_block_source.contains("vec![RustStmt::Raw(prefix.to_string())]"),
+        "simple stream prefix statements should not be stored as one opaque raw block"
+    );
+    assert!(
+        !prefixed_stream_block_source.contains("RustStmt::Raw(format!(\"{stmt};\"))"),
+        "non-let stream prefix statements should keep the semicolon as statement structure"
+    );
+    assert!(
+        !stream_source.contains(".map(|{}| ({}, {})).collect::<std::collections::HashMap<_, _>>()"),
+        "Collectors.toMap terminal lowering should delegate the fixed map/collect shape to a projection helper"
+    );
+    assert!(
+        !stream_source
+            .contains(".map(|item| {item_display}).collect::<Vec<_>>().join({delimiter})"),
+        "Collectors.joining terminal lowering should delegate the fixed map/collect/join shape to a projection helper"
+    );
+    assert!(
+        !stream_source.contains(".any(|{}| {})") && !stream_source.contains(".all(|{}| {})"),
+        "stream match terminals should delegate fixed any/all closure shape to a projection helper"
+    );
+    let stream_terminal_source = stream_source
+        .split("fn render_stream_terminal")
+        .nth(1)
+        .and_then(|tail| tail.split("fn render_stream_join_item_display").next())
+        .expect("stream terminal lowering should remain discoverable");
+    assert!(
+        stream_terminal_source.contains("emit_stream_lambda_closure_body_expr")
+            && !stream_terminal_source
+                .contains("rendered_projection_or_raw_leaf(&emit_stream_lambda_closure_body"),
+        "stream any/all terminals should pass structured predicate bodies to the match projection"
+    );
+    let stream_lambda_closure_body_expr_source = stream_source
+        .split("fn emit_stream_lambda_closure_body_expr")
+        .nth(1)
+        .and_then(|tail| tail.split("fn emit_stream_method_reference_body").next())
+        .expect("structured stream closure body helper should remain discoverable");
+    assert!(
+        stream_lambda_closure_body_expr_source.contains(") -> Option<RustExpr>")
+            && stream_lambda_closure_body_expr_source
+                .contains("emit_stream_lambda_body_with_locals_prec")
+            && stream_lambda_closure_body_expr_source
+                .contains("emit_stream_lambda_prefix_stmts_and_locals")
+            && stream_lambda_closure_body_expr_source.contains("RustExpr::Block")
+            && !stream_lambda_closure_body_expr_source.contains("RustStmt::Raw"),
+        "structured stream closure body helper should preserve ordinary lambda return expressions as RustExpr"
+    );
+    let stream_lambda_prefix_stmts_and_locals_source = stream_source
+        .split("fn emit_stream_lambda_prefix_stmts_and_locals")
+        .nth(1)
+        .and_then(|tail| tail.split("fn emit_stream_lambda_stmt").next())
+        .expect("structured stream prefix helper should remain discoverable");
+    assert!(
+        stream_lambda_prefix_stmts_and_locals_source.contains("emit_stream_lambda_stmt_structured")
+            && !stream_lambda_prefix_stmts_and_locals_source.contains("RustStmt::Raw"),
+        "structured stream prefix helper should keep supported prefix statements as RustStmt values"
+    );
+    assert!(
+        !stream_source.contains(".fold({identity}, |{left}, {right}| {body})"),
+        "stream reduce terminal lowering should delegate fixed fold closure shape to a projection helper"
+    );
+    assert!(
+        !stream_source.contains(".filter({closure_prefix}|{}| {})")
+            && !stream_source.contains(".map(|{param}| {})"),
+        "stream map/filter ops should delegate fixed closure shape to projection helpers"
+    );
+    let stream_ops_source = stream_source
+        .split("fn render_stream_ops_with_options")
+        .nth(1)
+        .and_then(|tail| tail.split("fn render_context_lambda_output_shape").next())
+        .expect("stream ops lowering should remain discoverable");
+    assert!(
+        stream_ops_source.contains("emit_stream_lambda_closure_body_expr")
+            && !stream_ops_source
+                .contains("rendered_projection_or_raw_leaf(&emit_stream_lambda_closure_body"),
+        "stream map/filter ops should pass structured closure bodies to projection helpers"
+    );
+    assert!(
+        stream_ops_source.contains("render_stream_sub_pipeline_expr")
+            && !stream_ops_source.contains("render_stream_sub_pipeline(pipeline")
+            && !stream_ops_source.contains("rendered_projection_or_raw_leaf(&nested)"),
+        "stream flatMap chain ops should keep nested stream pipelines as RustExpr until final emission"
+    );
+    assert!(
+        stream_ops_source.contains("emit_stream_lambda_receiver_expr")
+            && !stream_ops_source.contains("rendered_projection_or_raw_leaf(&source)"),
+        "stream flatMap ops should pass structured lambda receiver expressions to sequence iteration projection"
+    );
+    assert!(
+        !stream_source.contains(".flat_map(|{}| {iter_source})")
+            && !stream_source.contains(".flat_map(|{}| {nested})"),
+        "stream no-prefix flatMap ops should delegate fixed closure shape to projection helpers"
+    );
+    assert!(
+        !stream_source.contains(".flat_map(|{}| {{ {prefix}{iter_source} }})")
+            && !stream_source.contains(".flat_map(|{}| {{ {prefix}{nested} }})"),
+        "stream prefixed flatMap ops should delegate fixed block-closure shape to a projection helper"
+    );
+    assert!(stream_source.contains("arrays_stream_range_projection"));
+    assert!(coercion_source.contains("pub fn arrays_stream_range_projection"));
+    let stream_source_range_source = stream_source
+        .split("fn stream_source_range_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("fn sequence_iteration_projection").next())
+        .expect("stream range source lowering should remain discoverable");
+    let arrays_stream_range_projection_source = coercion_source
+        .split("pub fn arrays_stream_range_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("fn checked_array_range_block_expr").next())
+        .expect("arrays stream range projection should remain discoverable");
+    assert!(
+        stream_source_range_source.contains("arrays_stream_range_projection")
+            && arrays_stream_range_projection_source.contains("RustExpr::Block")
+            && arrays_stream_range_projection_source.contains("checked_array_range_slice_expr")
+            && !stream_source_range_source.contains("format!(")
+            && !stream_source_range_source.contains("__java_arrays_source = &{source}")
+            && !arrays_stream_range_projection_source.contains("RustExpr::Raw(format!"),
+        "Arrays.stream range source lowering should delegate checked slice block construction to a projection helper"
+    );
+    assert!(stream_source.contains("fn render_stream_lambda_value_expr"));
+    assert!(stream_source.contains("fn render_stream_lambda_receiver_expr"));
+    assert!(stream_source.contains("fn stream_lambda_param_expr"));
     assert!(stream_source.contains("owner_associated_path_projection"));
+    assert!(stream_source.contains("function_call_projection"));
     assert!(stream_source.contains("receiver_method_call_projection"));
+    assert!(stream_source.contains("current_receiver_method_call_projection"));
+    assert!(stream_source.contains("field_projection"));
+    assert!(stream_source.contains("struct StreamLambdaRenderedExpr"));
+    assert!(stream_source.contains(") -> Option<StreamLambdaRenderedExpr>"));
+    assert!(stream_source.contains("fn render_stream_binary_expr"));
+    assert!(stream_source.contains("fn render_stream_unary_expr"));
+    let stream_binary_expr_source = stream_source
+        .split("fn render_stream_binary_expr")
+        .nth(1)
+        .and_then(|tail| tail.split("fn render_stream_unary_expr").next())
+        .expect("stream binary expression helper should remain discoverable");
+    assert!(
+        stream_binary_expr_source.contains(") -> RustExpr")
+            && stream_binary_expr_source.contains("RustExpr::Binary")
+            && !stream_binary_expr_source.contains("emit_expr")
+            && !stream_binary_expr_source.contains("rendered_projection_or_raw_leaf"),
+        "stream binary lambda lowering should carry structured child expressions"
+    );
+    let stream_unary_expr_source = stream_source
+        .split("fn render_stream_unary_expr")
+        .nth(1)
+        .and_then(|tail| tail.split("fn stream_binary_precedence").next())
+        .expect("stream unary expression helper should remain discoverable");
+    assert!(
+        stream_unary_expr_source.contains(") -> RustExpr")
+            && stream_unary_expr_source.contains("RustExpr::Unary")
+            && !stream_unary_expr_source.contains("emit_expr")
+            && !stream_unary_expr_source.contains("rendered_projection_or_raw_leaf"),
+        "stream unary lambda lowering should carry structured child expressions"
+    );
+    assert!(
+        !stream_source.contains("args.into_iter().map(RustExpr::Raw).collect()")
+            && !stream_source.contains("rendered_args.into_iter().map(RustExpr::Raw).collect()")
+            && !stream_source.contains("RustExpr::Raw(receiver)")
+            && !stream_source.contains("format!(\"{}({})\", method, rendered_args.join(\", \"))"),
+        "stream lambda call rendering should delegate rendered argument leaves to projection render helpers"
+    );
+    let stream_lambda_receiver_call_source = stream_source
+        .split("receiver: Some(receiver),")
+        .nth(1)
+        .and_then(|tail| tail.split("receiver: None,").next())
+        .expect("stream lambda receiver-call branch should remain discoverable");
+    assert!(
+        stream_lambda_receiver_call_source
+            .contains("emit_stream_lambda_call_args_for_receiver_exprs")
+            && stream_lambda_receiver_call_source
+                .contains("emit_stream_lambda_receiver_with_locals_expr")
+            && stream_lambda_receiver_call_source.contains("function_call_projection")
+            && stream_lambda_receiver_call_source.contains("receiver_method_call_projection")
+            && !stream_lambda_receiver_call_source
+                .contains("emit_stream_lambda_call_args_for_receiver(")
+            && !stream_lambda_receiver_call_source
+                .contains("emit_stream_lambda_receiver_with_locals(")
+            && !stream_lambda_receiver_call_source.contains("render_function_call_projection")
+            && !stream_lambda_receiver_call_source
+                .contains("render_current_receiver_method_call_projection")
+            && !stream_lambda_receiver_call_source
+                .contains("render_receiver_method_call_projection"),
+        "stream lambda receiver-call lowering should keep receiver and args structured until the lambda expression wrapper"
+    );
+    let stream_lambda_receiverless_call_source = stream_source
+        .split("receiver: None,")
+        .nth(1)
+        .and_then(|tail| tail.split("Expr::New {").next())
+        .expect("stream lambda receiverless call branch should remain discoverable");
+    assert!(
+        stream_lambda_receiverless_call_source
+            .contains("emit_stream_lambda_call_args_for_resolved_exprs")
+            && stream_lambda_receiverless_call_source
+                .contains("current_receiver_method_call_projection")
+            && stream_lambda_receiverless_call_source.contains("function_call_projection")
+            && !stream_lambda_receiverless_call_source
+                .contains("emit_stream_lambda_call_args_for_resolved(")
+            && !stream_lambda_receiverless_call_source.contains("render_function_call_projection")
+            && !stream_lambda_receiverless_call_source
+                .contains("render_current_receiver_method_call_projection")
+            && !stream_lambda_receiverless_call_source.contains("stream_lambda_rendered_expr"),
+        "stream lambda receiverless calls should compose through structured call projections"
+    );
+    assert!(
+        !stream_source.contains("format!(\n                    \"{}.{}\""),
+        "stream lambda field access fallback should use the shared field projection"
+    );
+    let stream_lambda_field_access_source = stream_source
+        .split("Expr::FieldAccess(receiver, field) =>")
+        .nth(1)
+        .and_then(|tail| tail.split("Expr::ArrayAccess(array, index)").next())
+        .expect("stream lambda field access branch should remain discoverable");
+    let stream_lambda_length_field_source = stream_lambda_field_access_source
+        .split("if field == \"length\"")
+        .nth(1)
+        .and_then(|tail| tail.split("if is_static_constant_member(field)").next())
+        .expect("stream lambda length field branch should remain discoverable");
+    assert!(
+        stream_lambda_length_field_source.contains("len_i32_projection(receiver)")
+            && stream_lambda_length_field_source
+                .contains("emit_stream_lambda_receiver_with_locals_expr")
+            && !stream_lambda_length_field_source.contains("render_len_i32_projection")
+            && !stream_lambda_length_field_source
+                .contains("let receiver = emit_stream_lambda_receiver_with_locals("),
+        "stream lambda length field lowering should pass structured receivers to len_i32_projection"
+    );
+    let stream_lambda_field_fallback_source = stream_lambda_field_access_source
+        .split("stream_lambda_expr(\n                field_projection")
+        .nth(1)
+        .expect("stream lambda field fallback should remain discoverable");
+    assert!(
+        !stream_lambda_field_fallback_source.contains("render_field_projection")
+            && !stream_lambda_field_fallback_source
+                .contains("let receiver = emit_stream_lambda_receiver_with_locals("),
+        "stream lambda field access fallback should pass structured receivers to the shared field projection"
+    );
+    let stream_lambda_array_access_source = stream_source
+        .split("Expr::ArrayAccess(array, index) =>")
+        .nth(1)
+        .and_then(|tail| tail.split("Expr::Call {").next())
+        .expect("stream lambda array access branch should remain discoverable");
+    assert!(
+        stream_lambda_array_access_source.contains("indexed_access_projection")
+            && stream_lambda_array_access_source
+                .contains("emit_stream_lambda_receiver_with_locals_expr")
+            && stream_lambda_array_access_source
+                .contains("emit_stream_lambda_body_with_locals_prec")
+            && !stream_lambda_array_access_source.contains("render_indexed_access_projection")
+            && !stream_lambda_array_access_source.contains("emit_stream_lambda_body_with_locals("),
+        "stream lambda array access should pass structured array/index expressions to the shared projection"
+    );
+    let stream_lambda_receiver_with_locals_expr_source = stream_source
+        .split("fn emit_stream_lambda_receiver_with_locals_expr")
+        .nth(1)
+        .and_then(|tail| tail.split("fn render_stream_lambda_string_value").next())
+        .expect("structured stream lambda receiver helper should remain discoverable");
+    assert!(
+        stream_lambda_receiver_with_locals_expr_source.contains("RustExpr::Var(param.to_string())")
+            && !stream_lambda_receiver_with_locals_expr_source
+                .contains("rendered_projection_or_raw_leaf(match value"),
+        "stream lambda receiver lowering should keep direct lambda parameters as RustExpr::Var"
+    );
+    assert!(
+        !stream_source.contains("format!(\n                    \"{} {} {}\"")
+            && !stream_source.contains("format!(\n                    \"{op}{}\""),
+        "stream lambda operator rendering should use RustExpr::Binary/Unary helpers"
+    );
+    let stream_join_item_display_source = stream_source
+        .split("fn render_stream_join_item_display")
+        .nth(1)
+        .and_then(|tail| tail.split("fn render_stream_join_delimiter").next())
+        .expect("stream join item display helper should remain discoverable");
+    assert!(
+        stream_join_item_display_source.contains("RustExpr::MethodCall")
+            && stream_join_item_display_source.contains("RustExpr::Closure")
+            && stream_join_item_display_source.contains("RustExpr::Var(\"item\".to_string())")
+            && stream_join_item_display_source.contains("method: \"to_string\".to_string()")
+            && !stream_join_item_display_source
+                .contains("item.as_ref().map(|value| value.to_string()).unwrap_or_else(||")
+            && !stream_join_item_display_source
+                .contains("render_receiver_method_call_projection(\"item\""),
+        "stream joining item display should compose optional display through RustExpr"
+    );
+    let stream_join_delimiter_source = stream_source
+        .split("fn render_stream_join_delimiter")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn emit_stream_collect_to_map_lambda_body_expr")
+                .next()
+        })
+        .expect("stream join delimiter helper should remain discoverable");
+    assert!(
+        stream_join_delimiter_source.contains(") -> Option<RustExpr>")
+            && stream_join_delimiter_source.contains("RustExpr::Literal")
+            && stream_join_delimiter_source.contains("apply_lowered_slot_expr_conversion")
+            && !stream_join_delimiter_source.contains("Option<String>")
+            && !stream_join_delimiter_source
+                .contains("rendered_projection_or_raw_leaf(&delimiter)")
+            && !stream_join_delimiter_source.contains("Some(format!(\"{value:?}\""),
+        "stream joining delimiter should stay structured through slot conversion"
+    );
+    let collect_to_map_lambda_body_source = stream_source
+        .split("fn emit_stream_collect_to_map_lambda_body_expr")
+        .nth(1)
+        .and_then(|tail| tail.split("fn emit_stream_lambda_closure_body_expr").next())
+        .expect("Collectors.toMap lambda body helper should remain discoverable");
+    assert!(
+        stream_source.contains("fn stream_identity_value_projection")
+            && collect_to_map_lambda_body_source.contains("stream_identity_value_projection")
+            && !collect_to_map_lambda_body_source.contains("stream_identity_value_expr")
+            && !collect_to_map_lambda_body_source.contains("rendered_projection_or_raw_leaf"),
+        "Collectors.toMap identity lambda bodies should stay structured instead of rendering and reparsing"
+    );
     assert!(stream_source.contains("fn render_stream_static_member_path"));
     assert!(stream_source.contains("fn render_stream_lambda_clone_projection"));
-    assert!(stream_source.contains("apply_clone_projection(RustExpr::Raw"));
+    let stream_lambda_clone_projection_source = stream_source
+        .split("fn render_stream_lambda_clone_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("fn stream_compile_error_expr").next())
+        .expect("stream lambda clone projection helper should remain discoverable");
+    assert!(
+        stream_lambda_clone_projection_source.contains("render_clone_projection")
+            && !stream_lambda_clone_projection_source.contains("RustExpr::Raw")
+            && !stream_lambda_clone_projection_source.contains("apply_clone_projection"),
+        "stream lambda clone rendering should delegate to the clone render helper instead of constructing Raw"
+    );
+    let stream_lambda_owned_arg_recovery_expr_source = stream_source
+        .split("fn recover_stream_lambda_owned_arg_move_expr")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn recover_stream_lambda_borrowed_string_param_move")
+                .next()
+        })
+        .expect("structured stream lambda owned-arg recovery helper should remain discoverable");
+    assert!(
+        stream_lambda_owned_arg_recovery_expr_source.contains("apply_clone_projection")
+            && !stream_lambda_owned_arg_recovery_expr_source.contains("render_clone_projection"),
+        "structured stream lambda owned-arg recovery should clone through RustExpr projection"
+    );
+    let stream_lambda_borrowed_string_recovery_expr_source = stream_source
+        .split("fn recover_stream_lambda_borrowed_string_param_move_expr")
+        .nth(1)
+        .and_then(|tail| tail.split("fn parenthesize_stream_expr_if_needed").next())
+        .expect(
+            "structured stream lambda borrowed string recovery helper should remain discoverable",
+        );
+    assert!(
+        stream_source.contains("fn stream_lambda_borrowed_item_expr")
+            && !stream_source.contains("fn rendered_stream_lambda_borrowed_item_expr")
+            && stream_lambda_borrowed_string_recovery_expr_source
+                .contains("stream_lambda_borrowed_item_expr(&lowered.expr, param)")
+            && stream_lambda_borrowed_string_recovery_expr_source.contains(
+                "stream_lambda_expr(apply_clone_projection(RustExpr::Var(param.to_string())), 11)"
+            )
+            && !stream_lambda_borrowed_string_recovery_expr_source
+                .contains("let rendered = lowered.rendered()"),
+        "structured stream lambda borrowed-string recovery should compare RustExpr values before cloning"
+    );
 }
 
 #[test]
@@ -34244,103 +38627,173 @@ class TryFinallyUnit {
         plan_try_stmt(resources, body, catches, finally_block.as_ref()),
         TryStmtPlan::FinallyOnly { .. }
     ));
-    assert_eq!(
-        try_catch_stmt(
-            RustType::I32,
-            vec![RustStmt::Return(Some(RustExpr::Call {
+    let try_catch_return_stmt = try_catch_stmt(
+        RustType::I32,
+        vec![RustStmt::Return(Some(RustExpr::Call {
+            function: Box::new(RustExpr::path(["Ok"])),
+            args: vec![RustExpr::Literal("7".to_string())],
+        }))],
+        vec![CatchRenderArm {
+            variable_name: "ex".to_string(),
+            class_names: vec!["IllegalArgumentException".to_string()],
+            body: vec![RustStmt::Return(Some(RustExpr::Call {
                 function: Box::new(RustExpr::path(["Ok"])),
-                args: vec![RustExpr::Literal("7".to_string())],
+                args: vec![RustExpr::Literal("1".to_string())],
             }))],
-            vec![CatchRenderArm {
-                variable_name: "ex".to_string(),
-                class_names: vec!["IllegalArgumentException".to_string()],
-                body: vec![RustStmt::Return(Some(RustExpr::Call {
-                    function: Box::new(RustExpr::path(["Ok"])),
-                    args: vec![RustExpr::Literal("1".to_string())],
-                }))],
-            }],
-            true,
-            false,
-        ),
-        RustStmt::Raw(
-            "match (|| -> Result<i32, JavaException> {\n    return Ok(7);\n})() {\n    Ok(value) => return Ok(value),\n    Err(ex) if ex.is_instance(&[\"IllegalArgumentException\"]) => {\n        return Ok(1);\n    }\n    Err(ex) => return Err(ex),\n}".to_string()
-        )
+        }],
+        true,
+        false,
     );
+    assert!(matches!(
+        try_catch_return_stmt,
+        RustStmt::Expr(RustExpr::Match { .. })
+    ));
     assert_eq!(
-        try_catch_stmt(
-            RustType::Unit,
-            vec![RustStmt::Return(Some(RustExpr::Call {
+        new_java2rust::emit::emit_statements(&[try_catch_return_stmt], 0),
+        "match (|| -> Result<i32, JavaException> { return Ok(7); })() { Ok(value) => { return Ok(value); }, Err(ex) if ex.is_instance(&[\"IllegalArgumentException\"]) => { return Ok(1); }, Err(ex) => { return Err(ex); } };\n"
+    );
+    let try_catch_fallthrough_stmt = try_catch_stmt(
+        RustType::Unit,
+        vec![RustStmt::Return(Some(RustExpr::Call {
+            function: Box::new(RustExpr::path(["Ok"])),
+            args: vec![RustExpr::Raw("()".to_string())],
+        }))],
+        Vec::new(),
+        false,
+        true,
+    );
+    assert!(matches!(
+        try_catch_fallthrough_stmt,
+        RustStmt::Expr(RustExpr::Match { .. })
+    ));
+    assert_eq!(
+        new_java2rust::emit::emit_statements(&[try_catch_fallthrough_stmt], 0),
+        "match (|| -> Result<(), JavaException> { return Ok(()); })() { Ok(()) => { }, Err(ex) => { panic!(\"uncaught Java exception: {:?}\", ex); } };\n"
+    );
+    let value_fallthrough_stmt = try_catch_value_fallthrough_stmt(
+        RustType::I32,
+        vec![RustStmt::Return(Some(RustExpr::Call {
+            function: Box::new(RustExpr::path(["Ok"])),
+            args: vec![RustExpr::Literal("7".to_string())],
+        }))],
+        vec![CatchRenderArm {
+            variable_name: "ex".to_string(),
+            class_names: vec!["IOException".to_string()],
+            body: vec![RustStmt::Return(Some(RustExpr::Call {
                 function: Box::new(RustExpr::path(["Ok"])),
-                args: vec![RustExpr::Raw("()".to_string())],
+                args: vec![RustExpr::Literal("1".to_string())],
             }))],
-            Vec::new(),
-            false,
-            true,
-        ),
-        RustStmt::Raw(
-            "match (|| -> Result<(), JavaException> {\n    return Ok(());\n})() {\n    Ok(()) => {}\n    Err(ex) => panic!(\"uncaught Java exception: {:?}\", ex),\n}".to_string()
-        )
+        }],
+        true,
+        false,
     );
+    assert!(matches!(
+        value_fallthrough_stmt,
+        RustStmt::Expr(RustExpr::Match { .. })
+    ));
     assert_eq!(
-        try_with_resources_scope_stmt(
-            RustType::Unit,
-            vec![RustStmt::Raw("let input = open_input();".to_string())],
-            vec![RustStmt::Raw("copy_chunk(&mut input)?;".to_string())],
-            vec![RustStmt::Raw("input.close()?;".to_string())],
-            false,
-            true,
-        ),
-        RustStmt::Raw(
-            "{\n    let input = open_input();\n    let __java_twr_result = (|| -> Result<(), JavaException> {\n        copy_chunk(&mut input)?;\n        return Ok(());\n    })();\n    input.close()?;\n    __java_twr_result?;\n\n}".to_string()
-        )
+        new_java2rust::emit::emit_statements(&[value_fallthrough_stmt], 0),
+        "match (|| -> Result<Option<i32>, JavaException> { return Ok(Some(7)); return Ok(None); })() { Ok(Some(value)) => { return Ok(value); }, Ok(None) => { }, Err(ex) if ex.is_instance(&[\"IOException\"]) => { return Ok(1); }, Err(ex) => { return Err(ex); } };\n"
     );
-    assert_eq!(
-        try_with_resources_scope_stmt(
-            RustType::String,
-            vec![RustStmt::Raw("let reader = open_reader();".to_string())],
-            vec![return_stmt(
-                Some(RustExpr::Raw("reader.read_line()".to_string())),
-                true,
-            )],
-            vec![RustStmt::Raw("reader.close()?;".to_string())],
-            true,
-            true,
-        ),
-        RustStmt::Raw(
-            "{\n    let reader = open_reader();\n    let __java_twr_result = (|| -> Result<String, JavaException> {\n        return Ok(reader.read_line());\n    })();\n    reader.close()?;\n    return __java_twr_result;\n\n}".to_string()
-        )
+    let twr_unit_stmt = try_with_resources_scope_stmt(
+        RustType::Unit,
+        vec![RustStmt::Raw("let input = open_input();".to_string())],
+        vec![RustStmt::Raw("copy_chunk(&mut input)?;".to_string())],
+        vec![RustStmt::Raw("input.close()?;".to_string())],
+        false,
+        true,
     );
+    assert!(matches!(
+        twr_unit_stmt,
+        RustStmt::Expr(RustExpr::Block { .. })
+    ));
     assert_eq!(
-        try_with_resources_scope_stmt(
-            RustType::Unit,
-            Vec::new(),
-            vec![RustStmt::Raw("copy_chunk()?;".to_string())],
-            vec![RustStmt::Raw(
-                "if let Err(ex) = input.close() { panic!(\"uncaught Java exception: {:?}\", ex); }"
-                    .to_string(),
-            )],
-            false,
-            false,
-        ),
-        RustStmt::Raw(
-            "{\n    let __java_twr_result = (|| -> Result<(), JavaException> {\n        copy_chunk()?;\n        return Ok(());\n    })();\n    if let Err(ex) = input.close() { panic!(\"uncaught Java exception: {:?}\", ex); }\n    if let Err(ex) = __java_twr_result { panic!(\"uncaught Java exception: {:?}\", ex); }\n\n}".to_string()
-        )
+        new_java2rust::emit::emit_statements(&[twr_unit_stmt], 0),
+        "{ let input = open_input(); let __java_twr_result = (|| -> Result<(), JavaException> { copy_chunk(&mut input)?; return Ok(()); })(); input.close()?; __java_twr_result?; };\n"
     );
-    assert_eq!(
-        try_finally_scope_stmt(
-            RustType::Unit,
-            vec![RustStmt::Raw("resource.read()?;".to_string())],
-            vec![RustStmt::Raw("resource.close();".to_string())],
-            false,
+    let twr_value_stmt = try_with_resources_scope_stmt(
+        RustType::String,
+        vec![RustStmt::Raw("let reader = open_reader();".to_string())],
+        vec![return_stmt(
+            Some(RustExpr::Raw("reader.read_line()".to_string())),
             true,
-        ),
-        RustStmt::Raw(
-            "{\n    let __java_try_result = (|| -> Result<(), JavaException> {\n        resource.read()?;\n        return Ok(());\n    })();\n    resource.close();\n    __java_try_result?;\n\n}".to_string()
-        )
+        )],
+        vec![RustStmt::Raw("reader.close()?;".to_string())],
+        true,
+        true,
+    );
+    assert!(matches!(
+        twr_value_stmt,
+        RustStmt::Expr(RustExpr::Block { .. })
+    ));
+    assert_eq!(
+        new_java2rust::emit::emit_statements(&[twr_value_stmt], 0),
+        "{ let reader = open_reader(); let __java_twr_result = (|| -> Result<String, JavaException> { return Ok(reader.read_line()); })(); reader.close()?; return __java_twr_result; };\n"
+    );
+    let twr_panic_stmt = try_with_resources_scope_stmt(
+        RustType::Unit,
+        Vec::new(),
+        vec![RustStmt::Raw("copy_chunk()?;".to_string())],
+        vec![RustStmt::Raw(
+            "if let Err(ex) = input.close() { panic!(\"uncaught Java exception: {:?}\", ex); }"
+                .to_string(),
+        )],
+        false,
+        false,
+    );
+    assert!(matches!(
+        twr_panic_stmt,
+        RustStmt::Expr(RustExpr::Block { .. })
+    ));
+    assert_eq!(
+        new_java2rust::emit::emit_statements(&[twr_panic_stmt], 0),
+        "{ let __java_twr_result = (|| -> Result<(), JavaException> { copy_chunk()?; return Ok(()); })(); if let Err(ex) = input.close() { panic!(\"uncaught Java exception: {:?}\", ex); } if let Err(ex) = __java_twr_result { panic!(\"uncaught Java exception: {:?}\", ex); } };\n"
+    );
+    let try_finally_stmt = try_finally_scope_stmt(
+        RustType::Unit,
+        vec![RustStmt::Raw("resource.read()?;".to_string())],
+        vec![RustStmt::Raw("resource.close();".to_string())],
+        false,
+        true,
+    );
+    assert!(matches!(
+        try_finally_stmt,
+        RustStmt::Expr(RustExpr::Block { .. })
+    ));
+    assert_eq!(
+        new_java2rust::emit::emit_statements(&[try_finally_stmt], 0),
+        "{ let __java_try_result = (|| -> Result<(), JavaException> { resource.read()?; return Ok(()); })(); resource.close(); __java_try_result?; };\n"
+    );
+    let try_catch_finally_stmt = try_catch_finally_scope_stmt(
+        RustType::I32,
+        vec![RustStmt::Return(Some(RustExpr::Call {
+            function: Box::new(RustExpr::path(["Ok"])),
+            args: vec![RustExpr::Literal("7".to_string())],
+        }))],
+        vec![CatchRenderArm {
+            variable_name: "ex".to_string(),
+            class_names: vec!["IllegalArgumentException".to_string()],
+            body: vec![RustStmt::Return(Some(RustExpr::Call {
+                function: Box::new(RustExpr::path(["Ok"])),
+                args: vec![RustExpr::Literal("1".to_string())],
+            }))],
+        }],
+        vec![RustStmt::Raw("cleanup();".to_string())],
+        true,
+        true,
+        false,
+    );
+    assert!(matches!(
+        try_catch_finally_stmt,
+        RustStmt::Expr(RustExpr::Block { .. })
+    ));
+    assert_eq!(
+        new_java2rust::emit::emit_statements(&[try_catch_finally_stmt], 0),
+        "{ let __java_try_result = match (|| -> Result<i32, JavaException> { return Ok(7); })() { Ok(value) => Ok(value), Err(ex) if ex.is_instance(&[\"IllegalArgumentException\"]) => (|| -> Result<i32, JavaException> { return Ok(1); })(), Err(ex) => Err(ex) }; cleanup(); return __java_try_result; };\n"
     );
     let twr_close_source = r#"
-class TryResourceModeledClose {
-    String read() throws IOException {
+	class TryResourceModeledClose {
+	    String read() throws IOException {
         try (FeatureReader reader = openReader()) {
             return "ok";
         } catch (IOException ex) {
@@ -34478,6 +38931,21 @@ class SpecificProblem extends BaseProblem {}
         !exception_lowering_source.contains("\"{}.cause_or_self_if_instance(&[{}])\""),
         "exception cause filtering should compose receiver and class slice structurally"
     );
+    let exception_method_receiver_source = exception_lowering_source
+        .split("fn parenthesize_raw_method_receiver")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn raw_needs_method_receiver_parentheses")
+                .next()
+        })
+        .expect("exception method receiver helper should remain discoverable");
+    assert!(
+        exception_method_receiver_source
+            .contains("raw_receiver_projection(expr, raw_needs_method_receiver_parentheses)")
+            && !exception_method_receiver_source
+                .contains("else {\n        RustExpr::Raw(raw)\n    }"),
+        "exception method receiver fallback should recover structured leaves before raw fallback"
+    );
     assert!(lower_source.contains("let fallibility = plan_program_fallibility"));
     assert!(
         lower_source
@@ -34563,6 +39031,7 @@ fn control_flow_normalization_plans_are_owned_before_lowering() {
     let semantic_source = include_str!("../src/semantic_analysis.rs");
     let rewrite_source = include_str!("../src/rewrite.rs");
     let lower_source = include_str!("../src/lower.rs");
+    let control_flow_lowering_source = include_str!("../src/control_flow_lowering.rs");
 
     assert!(rewrite_source.contains("pub struct MethodControlFlowPlan"));
     assert!(rewrite_source.contains("AssignmentInConditionPlan"));
@@ -34576,6 +39045,14 @@ fn control_flow_normalization_plans_are_owned_before_lowering() {
     assert!(!lower_source.contains("TailRecursiveLoopPlan"));
     assert!(!lower_source.contains("LoopWithParameterReassignment"));
     assert!(!lower_source.contains("recursion_tco_fallback"));
+    assert!(control_flow_lowering_source.contains("RustStmt::Loop"));
+    assert!(control_flow_lowering_source.contains("RustStmt::If"));
+    assert!(control_flow_lowering_source.contains("RustStmt::Assign"));
+    assert!(control_flow_lowering_source.contains("RustStmt::Continue"));
+    assert!(!control_flow_lowering_source.contains("raw_stmt"));
+    assert!(!control_flow_lowering_source.contains("emit_expr"));
+    assert!(!control_flow_lowering_source.contains("format!(\"let mut"));
+    assert!(!control_flow_lowering_source.contains("format!(\"    if"));
 }
 
 #[test]
@@ -34843,6 +39320,10 @@ fn stream_shape_uses_shared_call_plan_for_lambda_call_results() {
 #[test]
 fn shape_projection_owns_borrowed_string_content_shape() {
     let coercion_source = include_str!("../src/coercion.rs");
+    let coercion_production_source = coercion_source
+        .split("#[cfg(test)]")
+        .next()
+        .expect("coercion production source should be available before tests");
     let stream_shape_source = include_str!("../src/stream_shape.rs");
     let slot_policy_source = include_str!("../src/slot_policy.rs");
     let shape_projection_source = include_str!("../src/shape_projection.rs");
@@ -34864,7 +39345,7 @@ fn shape_projection_owns_borrowed_string_content_shape() {
     assert!(!stream_shape_source.contains("JavaType::String"));
     assert!(!slot_policy_source.contains("ViewShape::Str"));
     assert!(!slot_policy_source.contains("OwnershipShape::SharedBorrow"));
-    assert!(!coercion_source.contains("element_shape.ownership = OwnershipShape"));
+    assert!(!coercion_production_source.contains("element_shape.ownership = OwnershipShape"));
 }
 
 #[test]
@@ -36837,6 +41318,16 @@ fn stream_lambda_emission_owns_java_string_method_mappings() {
         .unwrap(),
         "value.is_empty()"
     );
+    assert!(matches!(
+        emit_stream_lambda_body_expr(
+            &parse_expr("value.isEmpty()"),
+            "value",
+            StreamLambdaValue::BorrowedItem
+        )
+        .unwrap()
+        .unshaped(),
+        RustExpr::MethodCall { method, .. } if method == "is_empty"
+    ));
     assert_eq!(
         emit_stream_lambda_body(
             &parse_expr("value.toLowerCase()"),
@@ -36845,6 +41336,37 @@ fn stream_lambda_emission_owns_java_string_method_mappings() {
         )
         .unwrap(),
         "value.to_lowercase()"
+    );
+}
+
+#[test]
+fn stream_lambda_emission_uses_structured_operator_rendering() {
+    assert_eq!(
+        emit_stream_lambda_body(
+            &parse_expr("value - (other - third)"),
+            "value",
+            StreamLambdaValue::OwnedItem
+        )
+        .unwrap(),
+        "value - (other - third)"
+    );
+    assert_eq!(
+        emit_stream_lambda_body(
+            &parse_expr("-(value + other)"),
+            "value",
+            StreamLambdaValue::OwnedItem
+        )
+        .unwrap(),
+        "-(value + other)"
+    );
+    assert_eq!(
+        emit_stream_lambda_body(
+            &parse_expr("value < other && other < third"),
+            "value",
+            StreamLambdaValue::OwnedItem
+        )
+        .unwrap(),
+        "value < other && other < third"
     );
 }
 
@@ -36891,7 +41413,7 @@ fn stream_lambda_emission_uses_shape_env_for_bare_fields_and_static_fields() {
             ctx,
         )
         .unwrap(),
-        "OrgGenomicsdbGenomicsDBUtils::get_array_column_bounds(self.workspace, *partition)"
+        "GenomicsDBUtils::get_array_column_bounds(self.workspace, *partition)"
     );
     assert_eq!(
         emit_stream_lambda_body_with_context(
@@ -37130,33 +41652,51 @@ class Use {
         Stmt::Break(Some(SWITCH_LABEL.to_string()))
     );
     assert_eq!(
+        emit::emit_expr(&switch_case_condition(
+            &plan,
+            &plan_switch_case(&cases[0]),
+            vec![RustExpr::Literal("1".to_string())],
+        )),
+        "!__java_switch_matched && (__java_switch_value == 1)"
+    );
+    assert!(matches!(
         switch_case_condition(
             &plan,
             &plan_switch_case(&cases[0]),
             vec![RustExpr::Literal("1".to_string())],
         ),
-        "!__java_switch_matched && (__java_switch_value == 1)"
-    );
+        RustExpr::Binary { op, .. } if op == "&&"
+    ));
     assert_eq!(
-        switch_case_condition(&plan, &plan_switch_case(&cases[1]), Vec::new()),
+        emit::emit_expr(&switch_case_condition(
+            &plan,
+            &plan_switch_case(&cases[1]),
+            Vec::new()
+        )),
         "!__java_switch_matched"
     );
 
-    let rendered = render_switch(
-        &plan,
-        RustExpr::Var("value".to_string()),
-        vec![SwitchRenderCase {
-            label_condition: "!__java_switch_matched".to_string(),
-            statements: vec![RustStmt::Break(Some(SWITCH_LABEL.to_string()))],
-        }],
-        false,
+    let rendered = emit::emit_statements(
+        &lower_switch_block_stmts(
+            &plan,
+            RustExpr::Var("value".to_string()),
+            vec![SwitchRenderCase {
+                label_condition: RustExpr::Unary {
+                    op: "!".to_string(),
+                    expr: Box::new(RustExpr::Var(SWITCH_MATCHED.to_string())),
+                },
+                statements: vec![RustStmt::Break(Some(SWITCH_LABEL.to_string()))],
+            }],
+            false,
+        ),
+        0,
     );
     assert!(rendered.contains("let __java_switch_value = value;"));
     assert!(rendered.contains("let mut __java_switch_matched = false;"));
     assert!(rendered.contains("'java_switch: loop"));
     assert!(rendered.contains("if !__java_switch_matched"));
     assert!(rendered.contains("break 'java_switch ();"));
-    assert!(rendered.ends_with("};"));
+    assert!(rendered.contains("};"));
 
     let simple = parse_java_source(
         r#"
@@ -37196,26 +41736,38 @@ class Use {
     assert_eq!(simple_plan.cases.len(), 4);
     assert!(plan_simple_return_switch_case(&simple_cases[1]).is_none());
     assert!(plan_simple_return_switch_case(&simple_cases[2]).is_some());
-    let match_rendered = render_simple_return_match_switch(
-        RustExpr::Var("value".to_string()),
-        vec![
-            SwitchMatchRenderCase {
-                patterns: vec!["1".to_string()],
-                statements: vec![RustStmt::Return(Some(RustExpr::Literal(
-                    "\"one\".to_string()".to_string(),
-                )))],
+    let match_rendered = emit::emit_expr(&RustExpr::Match {
+        expr: Box::new(RustExpr::Var("value".to_string())),
+        arms: vec![
+            RustMatchArm {
+                pattern: "1".to_string(),
+                body: RustExpr::Block {
+                    stmts: vec![RustStmt::Return(Some(RustExpr::Literal(
+                        "\"one\".to_string()".to_string(),
+                    )))],
+                    tail: None,
+                },
             },
-            SwitchMatchRenderCase {
-                patterns: vec!["2".to_string(), "3".to_string()],
-                statements: vec![RustStmt::Return(Some(RustExpr::Literal(
-                    "\"small\".to_string()".to_string(),
-                )))],
+            RustMatchArm {
+                pattern: "2 | 3".to_string(),
+                body: RustExpr::Block {
+                    stmts: vec![RustStmt::Return(Some(RustExpr::Literal(
+                        "\"small\".to_string()".to_string(),
+                    )))],
+                    tail: None,
+                },
+            },
+            RustMatchArm {
+                pattern: "_".to_string(),
+                body: RustExpr::Block {
+                    stmts: vec![RustStmt::Return(Some(RustExpr::Literal(
+                        "\"other\".to_string()".to_string(),
+                    )))],
+                    tail: None,
+                },
             },
         ],
-        Some(vec![RustStmt::Return(Some(RustExpr::Literal(
-            "\"other\".to_string()".to_string(),
-        )))]),
-    );
+    });
     assert!(match_rendered.contains("match value {"));
     assert!(match_rendered.contains("2 | 3 =>"));
     assert!(!match_rendered.contains("__java_switch_matched"));
@@ -37322,9 +41874,37 @@ fn statement_render_owns_raw_block_and_enhanced_for_wrappers() {
         }
     );
     assert_eq!(
+        if_let_stmt(
+            "Some(item)",
+            RustExpr::Var("maybe_item".to_string()),
+            body.clone(),
+            Vec::new()
+        ),
+        RustStmt::IfLet {
+            pattern: "Some(item)".to_string(),
+            expr: RustExpr::Var("maybe_item".to_string()),
+            then_body: body.clone(),
+            else_body: Vec::new(),
+        }
+    );
+    assert_eq!(
         while_stmt(RustExpr::Var("ready".to_string()), body.clone()),
         RustStmt::While {
             condition: RustExpr::Var("ready".to_string()),
+            body: body.clone(),
+        }
+    );
+    assert_eq!(
+        while_let_stmt(
+            Some("scan".to_string()),
+            "Some(item)",
+            RustExpr::Var("cursor".to_string()),
+            body.clone()
+        ),
+        RustStmt::WhileLet {
+            label: Some("scan".to_string()),
+            pattern: "Some(item)".to_string(),
+            expr: RustExpr::Var("cursor".to_string()),
             body: body.clone(),
         }
     );
@@ -37339,11 +41919,37 @@ fn statement_render_owns_raw_block_and_enhanced_for_wrappers() {
     );
     assert_eq!(
         render_enhanced_for("item", &RustExpr::Var("items".to_string()), &body, None),
-        RustStmt::Raw("for item in items.iter() {\n    touch(item);\n\n}".to_string())
+        RustStmt::For {
+            label: None,
+            pattern: "item".to_string(),
+            iterable: RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Var("items".to_string())),
+                method: "iter".to_string(),
+                args: Vec::new(),
+            },
+            body: body.clone(),
+        }
+    );
+    assert_eq!(
+        render_enhanced_for_iterator(
+            "item",
+            &RustExpr::Var("items_iter".to_string()),
+            &body,
+            Some("outer")
+        ),
+        RustStmt::For {
+            label: Some("outer".to_string()),
+            pattern: "item".to_string(),
+            iterable: RustExpr::Var("items_iter".to_string()),
+            body: body.clone(),
+        }
     );
     assert_eq!(
         render_block_stmt(&body),
-        RustStmt::Raw("{\n    touch(item);\n\n}".to_string())
+        RustStmt::Expr(RustExpr::Block {
+            stmts: body.clone(),
+            tail: None,
+        })
     );
 }
 
@@ -37570,8 +42176,12 @@ class OptionalSequenceLoop {
 #[test]
 fn expr_render_owns_basic_rust_expression_shells() {
     assert_eq!(this_expr(), RustExpr::Var("self".to_string()));
-    assert_eq!(super_expr(), RustExpr::Raw("super".to_string()));
-    assert_eq!(raw_expr("value"), RustExpr::Raw("value".to_string()));
+    assert_eq!(
+        super_expr(),
+        new_java2rust::unsupported::compile_error_expr(
+            "unsupported standalone Java super expression"
+        )
+    );
     assert_eq!(
         literal_expr(&Literal::String("value".to_string())),
         RustExpr::Literal("\"value\".to_string()".to_string())
@@ -37628,6 +42238,53 @@ fn expr_render_owns_basic_rust_expression_shells() {
 
 #[test]
 fn method_reference_plan_owns_generic_function_adapter_shapes() {
+    fn single_param_closure(pattern: &str, body: RustExpr) -> RustExpr {
+        RustExpr::Closure {
+            is_move: false,
+            return_type: None,
+            params: vec![RustClosureParam {
+                pattern: pattern.to_string(),
+                ty: None,
+            }],
+            body: RustClosureBody::Expr(Box::new(body)),
+        }
+    }
+
+    fn typed_single_param_closure(pattern: &str, ty: &str, body: RustExpr) -> RustExpr {
+        RustExpr::Closure {
+            is_move: false,
+            return_type: None,
+            params: vec![RustClosureParam {
+                pattern: pattern.to_string(),
+                ty: Some(ty.to_string()),
+            }],
+            body: RustClosureBody::Expr(Box::new(body)),
+        }
+    }
+
+    fn value_zero_arg_method(method: &str) -> RustExpr {
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("value".to_string())),
+            method: method.to_string(),
+            args: Vec::new(),
+        }
+    }
+
+    fn closure_with_params(params: &[&str], body: RustExpr) -> RustExpr {
+        RustExpr::Closure {
+            is_move: false,
+            return_type: None,
+            params: params
+                .iter()
+                .map(|param| RustClosureParam {
+                    pattern: (*param).to_string(),
+                    ty: None,
+                })
+                .collect(),
+            body: RustClosureBody::Expr(Box::new(body)),
+        }
+    }
+
     assert_eq!(
         plan_method_reference("IllegalArgumentException", "new"),
         MethodReferencePlan::Constructor {
@@ -37647,15 +42304,36 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
     );
     assert_eq!(
         render_method_reference(&plan_method_reference("Tuple2", "_2")),
-        RustExpr::Raw("|value| value._2()".to_string())
+        single_param_closure(
+            "value",
+            RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Var("value".to_string())),
+                method: "_2".to_string(),
+                args: Vec::new(),
+            },
+        )
     );
     assert_eq!(
         render_method_reference(&plan_method_reference("NameHolder", "getName")),
-        RustExpr::Raw("|value| value.get_name()".to_string())
+        single_param_closure(
+            "value",
+            RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Var("value".to_string())),
+                method: "get_name".to_string(),
+                args: Vec::new(),
+            },
+        )
     );
     assert_eq!(
         render_method_reference(&plan_method_reference("this", "emit")),
-        RustExpr::Raw("|value| self.emit(value)".to_string())
+        single_param_closure(
+            "value",
+            RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Var("self".to_string())),
+                method: "emit".to_string(),
+                args: vec![RustExpr::Var("value".to_string())],
+            },
+        )
     );
     assert_eq!(
         new_java2rust::method_reference_lowering::render_single_input_method_reference_body(
@@ -37686,7 +42364,11 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
             &plan_method_reference("NameHolder", "getName"),
             "&String",
         ),
-        RustExpr::Raw("|value: &String| value.get_name()".to_string())
+        typed_single_param_closure(
+            "value",
+            "&String",
+            value_zero_arg_method("get_name"),
+        )
     );
     assert_eq!(
         infer_single_input_method_reference_output_shape(
@@ -37736,7 +42418,18 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
             method: "emit".to_string(),
             arity: Some(3),
         }),
-        RustExpr::Raw("|arg0, arg1, arg2| self.emit(arg0, arg1, arg2)".to_string())
+        closure_with_params(
+            &["arg0", "arg1", "arg2"],
+            RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Var("self".to_string())),
+                method: "emit".to_string(),
+                args: vec![
+                    RustExpr::Var("arg0".to_string()),
+                    RustExpr::Var("arg1".to_string()),
+                    RustExpr::Var("arg2".to_string()),
+                ],
+            },
+        )
     );
     let stdlib_facts = new_java2rust::stdlib::rust_stdlib_signature_facts();
     assert_eq!(
@@ -37746,7 +42439,7 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
             &RustSlotShape::conservative(optional_java_type(JavaType::String)),
             &stdlib_facts,
         ),
-        RustExpr::Raw("|value: Option<&String>| value.is_some()".to_string())
+        typed_single_param_closure("value", "Option<&String>", value_zero_arg_method("is_some"),)
     );
     let mut custom_method_ref_facts = FactSet::default();
     custom_method_ref_facts
@@ -37774,7 +42467,7 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
             &RustSlotShape::for_storage(JavaType::String),
             &custom_method_ref_facts,
         ),
-        RustExpr::Raw("|value: &String| value.display_name()".to_string())
+        typed_single_param_closure("value", "&String", value_zero_arg_method("display_name"),)
     );
     assert_eq!(
         render_typed_single_input_method_reference_callback_with_facts(
@@ -37783,7 +42476,7 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
             &RustSlotShape::for_storage(JavaType::String),
             &stdlib_facts,
         ),
-        RustExpr::Raw("|value: &String| value.to_string()".to_string())
+        typed_single_param_closure("value", "&String", value_zero_arg_method("to_string"),)
     );
     let mut external_method_ref_facts = FactSet::default();
     external_method_ref_facts
@@ -37839,7 +42532,7 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
             &facade_value_shape,
             &external_method_ref_facts,
         ),
-        RustExpr::Raw("|value: &FacadeValue| value.label_text()".to_string())
+        typed_single_param_closure("value", "&FacadeValue", value_zero_arg_method("label_text"),)
     );
     let mut external_getter_method_ref_facts = FactSet::default();
     external_getter_method_ref_facts
@@ -37888,7 +42581,7 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
             &RustSlotShape::for_storage(JavaType::String),
             &stdlib_facts,
         ),
-        RustExpr::Raw("|value: &String| true".to_string())
+        typed_single_param_closure("value", "&String", RustExpr::Literal("true".to_string()))
     );
 
     let lower_source = include_str!("../src/lower.rs");
@@ -37902,11 +42595,72 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
     assert!(lower_source.contains("plan_method_reference"));
     assert!(lower_source.contains("render_method_reference"));
     assert!(plan_source.contains("pub enum MethodReferencePlan"));
+    assert!(plan_source.contains("pub enum BoundMethodReferenceReceiver"));
     assert!(!plan_source.contains("RustExpr"));
     assert!(lowering_source.contains("pub fn render_method_reference"));
+    assert!(lowering_source.contains("fn always_true_method_reference_closure_leaf"));
+    assert!(lowering_source.contains("fn bound_receiver_method_reference_closure_leaf"));
+    let lower_bound_method_reference_source = lower_source
+        .split("fn plan_method_reference_with_shape_env")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn method_reference_target_is_bound_receiver")
+                .next()
+        })
+        .expect("bound method-reference planning should remain discoverable");
+    assert!(
+        lower_bound_method_reference_source.contains("method_reference_bound_receiver")
+            && !lower_bound_method_reference_source.contains("emit::emit_expr(&lower_bare_name"),
+        "bound method-reference planning should preserve receiver intent without rendering lower_bare_name"
+    );
+    let render_method_reference_source = lowering_source
+        .split("pub fn render_method_reference")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn always_true_method_reference_closure_leaf")
+                .next()
+        })
+        .expect("method reference renderer should remain discoverable");
+    assert!(
+        !render_method_reference_source.contains("RustExpr::Raw(\"|_value| true\".to_string())"),
+        "Objects::nonNull method-reference closure Raw should live behind a named leaf helper"
+    );
+    assert!(
+        !render_method_reference_source
+            .contains("RustExpr::Raw(format!(\"|value| {receiver}.{method}(value)\"))"),
+        "bound-receiver method-reference closure Raw should live behind a named leaf helper"
+    );
     assert!(lowering_source.contains("pub fn render_single_input_method_reference_body"));
+    assert!(lowering_source.contains("pub fn single_input_method_reference_body_projection"));
     assert!(
         lowering_source.contains("pub fn render_single_input_method_reference_body_with_facts")
+    );
+    let single_input_method_reference_body_source = lowering_source
+        .split_once("pub fn render_single_input_method_reference_body")
+        .and_then(|(_, tail)| {
+            tail.split_once("fn method_reference_operand_expr")
+                .map(|(body, _)| body)
+        })
+        .expect("single-input method-reference body source");
+    assert!(
+        lowering_source.contains("fn method_reference_operand_expr")
+            && lowering_source.contains("rendered_projection_or_raw_leaf(rendered)")
+            && !lowering_source.contains("fn method_reference_operand_is_identifier"),
+        "method-reference operands should reuse the shared rendered projection parser before raw fallback"
+    );
+    assert!(
+        !single_input_method_reference_body_source.contains("RustExpr::Raw(receiver.to_string())"),
+        "method-reference body lowering should keep identifier receivers structured"
+    );
+    assert!(
+        !single_input_method_reference_body_source
+            .contains("RustExpr::Raw(value_expr.to_string())"),
+        "method-reference body lowering should keep identifier values structured"
+    );
+    assert!(
+        single_input_method_reference_body_source
+            .contains("emit::emit_expr(&single_input_method_reference_body_projection("),
+        "single-input method-reference string rendering should be a compatibility wrapper around the structured projection"
     );
     assert!(lowering_source.contains("pub fn render_typed_single_input_method_reference_callback"));
     assert!(
@@ -37915,7 +42669,7 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
     );
     assert!(lowering_source.contains("enum AssociatedFunctionMethodReferenceBodyPlan"));
     assert!(lowering_source.contains("fn associated_function_method_reference_body_plan"));
-    assert!(lowering_source.contains("fn render_associated_function_method_reference_body"));
+    assert!(lowering_source.contains("fn associated_function_method_reference_body_projection"));
     assert!(lowering_source.contains("associated_function_method_reference_body_projection"));
     assert!(
         !lowering_source.contains(
@@ -37925,7 +42679,34 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
     );
     assert!(coercion_source.contains("pub enum AssociatedFunctionMethodReferenceProjection"));
     assert!(coercion_source.contains("associated_function_method_reference_body_projection"));
-    assert!(lowering_source.contains("fn render_facade_abi_method_reference_body"));
+    assert!(coercion_source.contains("associated_function_method_reference_body_expr"));
+    let associated_function_method_reference_source = coercion_source
+        .split("pub fn associated_function_method_reference_body_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn outer_this_field_projection").next())
+        .expect(
+            "associated function method-reference projection helper should remain discoverable",
+        );
+    assert!(
+        associated_function_method_reference_source.contains("emit::emit_expr")
+            && associated_function_method_reference_source
+                .contains("rendered_projection_or_raw_leaf(value_expr)")
+            && associated_function_method_reference_source.contains("RustExpr::Literal(\"true\"")
+            && !associated_function_method_reference_source.contains("value_expr.to_string()")
+            && !associated_function_method_reference_source
+                .contains("AlwaysTrue => \"true\".to_string()"),
+        "associated function method-reference bodies should build structured expressions before rendering"
+    );
+    assert!(
+        !lowering_source.contains("fn render_facade_abi_method_reference_body"),
+        "facade method-reference string rendering should stay a compatibility wrapper over the structured projection helper"
+    );
+    assert!(
+        lowering_source.contains(
+            "facade_abi_method_reference_body_projection(owner, method, receiver, input_shape, facts)"
+        ) && lowering_source.contains("return emit::emit_expr(&body);"),
+        "method-reference rendering with facts should render the structured facade ABI projection directly"
+    );
     assert!(lowering_source.contains("method_reference_receiver_owner_key"));
     assert!(lowering_source.contains("facade_receiver_method_call_projection"));
     assert!(lowering_source.contains("facade_abi_for_key"));
@@ -37945,6 +42726,39 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
     assert!(stream_lowering_source.contains("current_receiver_method_call_projection"));
     assert!(stream_lowering_source.contains("self_associated_path_projection"));
     assert!(stream_lowering_source.contains("fn plan_stream_lambda_call_target"));
+    assert!(stream_lowering_source.contains("fn stream_call_target_projection"));
+    assert!(!stream_lowering_source.contains("fn render_stream_call_target_projection"));
+    assert!(
+        stream_lowering_source.contains("fn stream_rendered_pipeline_expr")
+            && stream_lowering_source.contains("stream_rendered_pipeline_expr(&out)")
+            && !stream_lowering_source.contains("expr: RustExpr::Raw(out)"),
+        "stream plan rendering should recover structured leaves through a named boundary helper"
+    );
+    let stream_call_target_projection_source = stream_lowering_source
+        .split("fn stream_call_target_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("#[derive(Debug, Clone)]").next())
+        .expect("stream call-target projection helper should remain discoverable");
+    assert!(
+        stream_call_target_projection_source.contains("apply_call_target(target, receiver, args)")
+            && !stream_call_target_projection_source.contains("rendered_projection_or_raw_leaf"),
+        "stream call-target lowering should apply structured operands without rendered recovery"
+    );
+    let stream_source_iter = stream_lowering_source
+        .split("fn render_stream_source_iter")
+        .nth(1)
+        .and_then(|tail| tail.split("fn stream_source_range_projection").next())
+        .expect("stream source iterator helper should remain discoverable");
+    assert!(
+        stream_source_iter.contains("source: RustExpr")
+            && stream_source_iter.contains("stream_source_range_projection(source,")
+            && stream_source_iter.contains("sequence_iteration_source_projection(")
+            && !stream_source_iter.contains("rendered_projection_or_raw_leaf"),
+        "legacy stream source iteration should keep source structured until the final rendered pipeline boundary"
+    );
+    assert!(
+        !stream_lowering_source.contains("let source = crate::emit::emit_expr(&lowered_source);")
+    );
     assert_eq!(
         stream_lowering_source
             .matches("plan_call_target_with_external_index_and_arity")
@@ -37959,7 +42773,17 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
     );
     assert!(!stream_lowering_source.contains("\"self.{}({rendered_args})\""));
     assert!(!stream_lowering_source.contains("\"Self::{}({rendered_args})\""));
-    assert!(lowering_source.contains("typed_single_input_callback_projection"));
+    assert!(coercion_source.contains("pub fn typed_single_input_callback_expr"));
+    assert!(lowering_source.contains("typed_single_input_callback_expr"));
+    assert!(!lowering_source.contains("typed_single_input_callback_projection(param_type, &body)"));
+    assert!(
+        !lowering_source
+            .contains("render_single_input_method_reference_body(plan, \"value\", \"value\")")
+    );
+    assert!(
+        !lowering_source
+            .contains("let body = render_single_input_method_reference_body_with_facts")
+    );
     assert!(!lowering_source.contains("format!(\"{type_name}::new"));
     assert!(!lowering_source.contains("format!(\"{owner}::{method}"));
     assert!(shape_source.contains("pub fn infer_single_input_method_reference_output_shape"));
@@ -37973,25 +42797,56 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
     assert!(!shape_source.contains("fn is_java_accessor_method_reference_fallback"));
     assert!(stream_source.contains("infer_single_input_method_reference_output_shape"));
     assert!(!stream_source.contains("fn infer_stream_method_reference_output_shape"));
-    assert!(stream_lowering_source.contains("render_single_input_method_reference_body"));
+    assert!(!stream_lowering_source.contains("render_single_input_method_reference_body("));
     assert!(
-        stream_lowering_source.contains("render_single_input_method_reference_body_with_facts")
+        !stream_lowering_source.contains("render_single_input_method_reference_body_with_facts")
+    );
+    assert!(
+        stream_lowering_source.contains("fn emit_stream_method_reference_body_expr")
+            && stream_lowering_source.contains("single_input_method_reference_body_projection(")
+            && stream_lowering_source
+                .contains("single_input_method_reference_body_projection_with_facts("),
+        "stream method-reference expression lowering should use structured body projections"
+    );
+    assert!(
+        !stream_lowering_source.contains(
+            "emit_stream_lambda_closure_body(lambda, value, ctx, param_shape)\n            .map(|rendered| rendered_projection_or_raw_leaf(&rendered))"
+        ),
+        "stream method-reference expression lowering should not render and immediately reparse"
     );
     assert!(stream_lowering_source.contains("fn render_stream_lambda_value_expr"));
     assert!(stream_lowering_source.contains("fn render_stream_lambda_receiver_expr"));
-    assert!(stream_lowering_source.contains("fn rendered_stream_lambda_borrowed_item_expr"));
+    assert!(stream_lowering_source.contains("fn stream_lambda_borrowed_item_expr"));
+    assert!(!stream_lowering_source.contains("fn rendered_stream_lambda_borrowed_item_expr"));
+    assert!(stream_lowering_source.contains("fn stream_lambda_value_expr"));
+    assert!(stream_lowering_source.contains("fn stream_lambda_receiver_expr"));
+    assert!(stream_lowering_source.contains("fn stream_lambda_param_expr"));
     assert!(stream_lowering_source.contains("fn stream_lambda_param_projection"));
-    assert!(stream_lowering_source.contains("render_stream_lambda_param_projection"));
+    assert!(
+        !stream_lowering_source.contains("rendered_projection_or_raw_leaf(&render_stream_lambda")
+    );
+    let shared_native = stream_lowering_source
+        .split("fn emit_stream_lambda_shared_native_call")
+        .nth(1)
+        .and_then(|tail| tail.split("fn stream_call_target_projection").next())
+        .expect("stream lambda native-call adapter should remain discoverable");
+    assert!(
+        shared_native.contains(") -> Option<StreamLambdaRenderedExpr>")
+            && shared_native.contains("Some(stream_lambda_expr(expr, precedence))")
+            && !shared_native.contains("crate::emit::emit_expr(&expr)"),
+        "stream lambda native-call adapter should preserve structured call-target projections"
+    );
     assert!(lower_source.contains("render_typed_single_input_method_reference_callback"));
     assert!(!lower_source.contains("value.is_some()"));
     assert!(!lower_source.contains("format!(\"|value: {param_type}| {owner}::{method}(value)"));
     assert!(!lower_source.contains("format!(\"|value: {param_type}| value.{method}()"));
+    assert!(!lower_source.contains("format!(\"|value: {param_ty}| value.{method}()"));
     assert!(!lower_source.contains("format!(\"|value: {param_type}| {type_name}::new(value)"));
     assert!(!stream_lowering_source.contains("format!(\"**{param}\")"));
     assert!(!stream_lowering_source.contains("format!(\"*{param}\")"));
     assert!(!stream_lowering_source.contains("format!(\"(**{param})\")"));
     assert!(!stream_lowering_source.contains("format!(\"(*{param})\")"));
-    assert!(stream_lowering_source.contains("render_indexed_access_projection"));
+    assert!(stream_lowering_source.contains("indexed_access_projection"));
     assert!(!stream_lowering_source.contains("\"{}[{} as usize]\""));
     assert!(
         stream_lowering_source.contains("method_reference_receiver_type_for_call_plan_with_facts")
@@ -38324,16 +43179,25 @@ fn array_plan_and_lowering_own_java_array_shape_before_orchestrator() {
 
     let plan_source = include_str!("../src/array_plan.rs");
     let lowering_source = include_str!("../src/array_lowering.rs");
+    let lowering_production_source = lowering_source
+        .split("#[cfg(test)]")
+        .next()
+        .expect("array lowering production source should be present");
+    let emit_source = include_str!("../src/emit.rs");
     let lower_source = include_str!("../src/lower.rs");
     assert!(!plan_source.contains("rust_ir"));
     assert!(!plan_source.contains("RustExpr"));
     assert!(!plan_source.contains("emit_expr"));
-    assert!(lowering_source.contains("emit_expr"));
-    assert!(lowering_source.contains("Java array creation"));
+    assert!(!lowering_production_source.contains("emit_expr"));
+    assert!(lowering_source.contains("UnsupportedJavaArrayCreation"));
+    assert!(emit_source.contains("UnsupportedJavaArrayCreation"));
+    assert!(emit_source.contains("UNSUPPORTED_JAVA_ARRAY_CREATION"));
     assert!(lowering_source.contains("ensure_borrow_projection("));
     assert!(lowering_source.contains("BorrowProjectionUse::Argument"));
     assert!(lowering_source.contains("BorrowProjectionUse::MutableSliceView"));
-    assert!(lowering_source.contains("rendered_vec_macro_body("));
+    assert!(lowering_source.contains("fn array2_initializer_row_items"));
+    assert!(!lowering_source.contains("rendered_vec_macro_body("));
+    assert!(!lowering_source.contains("ndarray::arr2(&[{rows}]"));
     assert!(lowering_source.contains("array2_from_elem_projection("));
     assert!(lowering_source.contains("array_from_elem_projection("));
     assert!(lowering_source.contains("java_array_creation_fallback_projection("));
@@ -38399,8 +43263,99 @@ fn operator_lowering_owns_binary_and_unary_rust_spelling() {
             )
             .unwrap(),
         ),
-        RustExpr::Raw("(acc).wrapping_mul(n as i64)".to_string())
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Grouped(Box::new(RustExpr::Var(
+                "acc".to_string(),
+            )))),
+            method: "wrapping_mul".to_string(),
+            args: vec![RustExpr::Cast {
+                expr: Box::new(RustExpr::Var("n".to_string())),
+                ty: "i64".to_string(),
+            }],
+        }
     );
+    assert_eq!(
+        lower_numeric_binary_expr(
+            new_java2rust::java_ir::BinaryOp::Shl,
+            RustExpr::Literal("31".to_string()),
+            RustExpr::Var("count".to_string()),
+            plan_numeric_binary_promotion(
+                new_java2rust::java_ir::BinaryOp::Shl,
+                &JavaType::Primitive(PrimitiveType::Int),
+                &JavaType::Primitive(PrimitiveType::Int),
+            )
+            .unwrap(),
+        ),
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Grouped(Box::new(RustExpr::Literal(
+                "31i32".to_string(),
+            )))),
+            method: "wrapping_shl".to_string(),
+            args: vec![RustExpr::Cast {
+                expr: Box::new(RustExpr::Grouped(Box::new(RustExpr::Var(
+                    "count".to_string(),
+                )))),
+                ty: "u32".to_string(),
+            }],
+        }
+    );
+    let negative_literal_shift = lower_numeric_binary_expr(
+        new_java2rust::java_ir::BinaryOp::Shr,
+        RustExpr::Unary {
+            op: "-".to_string(),
+            expr: Box::new(RustExpr::Literal("1".to_string())),
+        },
+        RustExpr::Literal("1".to_string()),
+        plan_numeric_binary_promotion(
+            new_java2rust::java_ir::BinaryOp::Shr,
+            &JavaType::Primitive(PrimitiveType::Int),
+            &JavaType::Primitive(PrimitiveType::Int),
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        emit::emit_expr(&negative_literal_shift),
+        "(-1i32).wrapping_shr((1) as u32)"
+    );
+    assert!(matches!(
+        negative_literal_shift,
+        RustExpr::MethodCall { receiver, .. }
+            if matches!(receiver.as_ref(), RustExpr::Grouped(inner)
+                if matches!(inner.as_ref(), RustExpr::Literal(literal) if literal == "-1i32"))
+    ));
+    let raw_literal_compat_boundary = lower_numeric_binary_expr(
+        new_java2rust::java_ir::BinaryOp::Shr,
+        RustExpr::Raw("1".to_string()),
+        RustExpr::Literal("1".to_string()),
+        plan_numeric_binary_promotion(
+            new_java2rust::java_ir::BinaryOp::Shr,
+            &JavaType::Primitive(PrimitiveType::Int),
+            &JavaType::Primitive(PrimitiveType::Int),
+        )
+        .unwrap(),
+    );
+    assert!(matches!(
+        raw_literal_compat_boundary,
+        RustExpr::MethodCall { receiver, .. }
+            if matches!(receiver.as_ref(), RustExpr::Grouped(inner)
+                if matches!(inner.as_ref(), RustExpr::Raw(raw) if raw == "1"))
+    ));
+    let unsigned_shift = lower_numeric_binary_expr(
+        new_java2rust::java_ir::BinaryOp::UShr,
+        RustExpr::Raw("left + right".to_string()),
+        RustExpr::Var("count".to_string()),
+        plan_numeric_binary_promotion(
+            new_java2rust::java_ir::BinaryOp::UShr,
+            &JavaType::Primitive(PrimitiveType::Int),
+            &JavaType::Primitive(PrimitiveType::Int),
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        emit::emit_expr(&unsigned_shift),
+        "((left + right) as u32).wrapping_shr((count) as u32) as i32"
+    );
+    assert!(matches!(unsigned_shift, RustExpr::Cast { .. }));
     assert_eq!(
         plan_numeric_binary_promotion(
             new_java2rust::java_ir::BinaryOp::Lt,
@@ -38449,6 +43404,19 @@ fn operator_lowering_owns_binary_and_unary_rust_spelling() {
             right_view: StringEqualityOperandView::NativeString,
         }
     );
+    let string_equality = lower_equality_comparison_expr(
+        EqualityComparisonPlan::StringView {
+            left_view: StringEqualityOperandView::NativeString,
+            right_view: StringEqualityOperandView::BorrowedStr,
+        },
+        RustExpr::Raw("left_name()".to_string()),
+        RustExpr::Var("right_name".to_string()),
+    );
+    assert_eq!(
+        emit::emit_expr(&string_equality),
+        "left_name().as_str() == right_name"
+    );
+    assert!(matches!(string_equality, RustExpr::Binary { .. }));
     assert_eq!(
         plan_equality_comparison(&optional_string_shape, &optional_string_shape),
         EqualityComparisonPlan::BothOptionalByRef
@@ -38488,7 +43456,21 @@ fn operator_lowering_owns_binary_and_unary_rust_spelling() {
             RustExpr::Var("left".to_string()),
             RustExpr::Var("right".to_string()),
         ),
-        RustExpr::Raw("Some(&left) != right.as_ref()".to_string())
+        RustExpr::Binary {
+            op: "!=".to_string(),
+            left: Box::new(RustExpr::Call {
+                function: Box::new(RustExpr::path(["Some"])),
+                args: vec![RustExpr::Unary {
+                    op: "&".to_string(),
+                    expr: Box::new(RustExpr::Var("left".to_string())),
+                }],
+            }),
+            right: Box::new(RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Var("right".to_string())),
+                method: "as_ref".to_string(),
+                args: Vec::new(),
+            }),
+        }
     );
     let mut borrowed_str_shape = RustSlotShape::conservative(JavaType::String);
     borrowed_str_shape.ownership = OwnershipShape::SharedBorrow;
@@ -38505,18 +43487,21 @@ fn operator_lowering_owns_binary_and_unary_rust_spelling() {
             left_view: OptionalStringEqualityOperandView::NativeString,
         }
     );
-    assert_eq!(
-        lower_equality_comparison_expr(
-            EqualityComparisonPlan::RightOptionalStringView {
-                right_view: OptionalStringEqualityOperandView::NativeString,
-            },
-            RustExpr::Raw("name.trim()".to_string()),
-            RustExpr::Var("sample_name".to_string()),
-        ),
-        RustExpr::Raw(
-            "Some(name.trim()) == sample_name.as_ref().map(|value| value.as_str())".to_string(),
-        )
+    let optional_native_string_equality = lower_equality_comparison_expr(
+        EqualityComparisonPlan::RightOptionalStringView {
+            right_view: OptionalStringEqualityOperandView::NativeString,
+        },
+        RustExpr::Raw("name.trim()".to_string()),
+        RustExpr::Var("sample_name".to_string()),
     );
+    assert_eq!(
+        emit::emit_expr(&optional_native_string_equality),
+        "Some(name.trim()) == sample_name.as_ref().map(|value| value.as_str())"
+    );
+    assert!(matches!(
+        optional_native_string_equality,
+        RustExpr::Binary { .. }
+    ));
     let mut optional_borrowed_str_shape = optional_string_shape.clone();
     optional_borrowed_str_shape.ownership = OwnershipShape::SharedBorrow;
     optional_borrowed_str_shape.view = ViewShape::Str;
@@ -38526,16 +43511,66 @@ fn operator_lowering_owns_binary_and_unary_rust_spelling() {
             right_view: OptionalStringEqualityOperandView::BorrowedStr,
         }
     );
-    assert_eq!(
-        lower_equality_comparison_expr(
-            EqualityComparisonPlan::RightOptionalStringView {
-                right_view: OptionalStringEqualityOperandView::BorrowedStr,
-            },
-            RustExpr::Raw("name.trim()".to_string()),
-            RustExpr::Var("sample_name".to_string()),
-        ),
-        RustExpr::Raw("Some(name.trim()) == sample_name".to_string())
+    let optional_borrowed_string_equality = lower_equality_comparison_expr(
+        EqualityComparisonPlan::RightOptionalStringView {
+            right_view: OptionalStringEqualityOperandView::BorrowedStr,
+        },
+        RustExpr::Raw("name.trim()".to_string()),
+        RustExpr::Var("sample_name".to_string()),
     );
+    assert_eq!(
+        emit::emit_expr(&optional_borrowed_string_equality),
+        "Some(name.trim()) == sample_name"
+    );
+    assert!(matches!(
+        optional_borrowed_string_equality,
+        RustExpr::Binary { .. }
+    ));
+    let optional_borrowed_infix_equality = lower_equality_comparison_expr(
+        EqualityComparisonPlan::RightOptionalStringView {
+            right_view: OptionalStringEqualityOperandView::BorrowedStr,
+        },
+        RustExpr::Raw("left + right".to_string()),
+        RustExpr::Var("sample_name".to_string()),
+    );
+    assert_eq!(
+        emit::emit_expr(&optional_borrowed_infix_equality),
+        "Some((left + right)) == sample_name"
+    );
+    assert!(matches!(
+        optional_borrowed_infix_equality,
+        RustExpr::Binary { left, .. }
+            if matches!(left.as_ref(), RustExpr::Call { args, .. }
+                if matches!(args.as_slice(), [RustExpr::Grouped(inner)]
+                    if matches!(inner.as_ref(), RustExpr::Raw(raw) if raw == "left + right")))
+    ));
+    let left_shared_borrow_equality = lower_equality_comparison_expr(
+        EqualityComparisonPlan::LeftSharedBorrowRightOwned,
+        RustExpr::Var("borrowed".to_string()),
+        RustExpr::Raw("owner.value()".to_string()),
+    );
+    assert_eq!(
+        emit::emit_expr(&left_shared_borrow_equality),
+        "borrowed == &owner.value()"
+    );
+    assert!(matches!(
+        left_shared_borrow_equality,
+        RustExpr::Binary { .. }
+    ));
+    let right_shared_borrow_equality = lower_equality_comparison_expr_for_op(
+        new_java2rust::java_ir::BinaryOp::Ne,
+        EqualityComparisonPlan::LeftOwnedRightSharedBorrow,
+        RustExpr::Raw("owner.value()".to_string()),
+        RustExpr::Var("borrowed".to_string()),
+    );
+    assert_eq!(
+        emit::emit_expr(&right_shared_borrow_equality),
+        "&owner.value() != borrowed"
+    );
+    assert!(matches!(
+        right_shared_borrow_equality,
+        RustExpr::Binary { .. }
+    ));
     let nullable_value_ty = JavaType::Named {
         name: "NullableValue".to_string(),
         args: Vec::new(),
@@ -38569,18 +43604,101 @@ fn operator_lowering_owns_binary_and_unary_rust_spelling() {
             RustExpr::Var("left".to_string()),
             RustExpr::Var("right".to_string()),
         ),
-        RustExpr::Raw(
-            "match (left, right) { (Some(left), Some(right)) => left.equals(Box::new((*right).clone())), (None, None) => true, _ => false }"
-                .to_string(),
-        )
+        RustExpr::Match {
+            expr: Box::new(RustExpr::Tuple(vec![
+                RustExpr::Var("left".to_string()),
+                RustExpr::Var("right".to_string()),
+            ])),
+            arms: vec![
+                RustMatchArm {
+                    pattern: "(Some(left), Some(right))".to_string(),
+                    body: RustExpr::MethodCall {
+                        receiver: Box::new(RustExpr::Var("left".to_string())),
+                        method: "equals".to_string(),
+                        args: vec![RustExpr::Call {
+                            function: Box::new(RustExpr::path(["Box", "new"])),
+                            args: vec![RustExpr::MethodCall {
+                                receiver: Box::new(RustExpr::Grouped(Box::new(RustExpr::Unary {
+                                    op: "*".to_string(),
+                                    expr: Box::new(RustExpr::Var("right".to_string())),
+                                }))),
+                                method: "clone".to_string(),
+                                args: Vec::new(),
+                            }],
+                        }],
+                    },
+                },
+                RustMatchArm {
+                    pattern: "(None, None)".to_string(),
+                    body: RustExpr::Literal("true".to_string()),
+                },
+                RustMatchArm {
+                    pattern: "_".to_string(),
+                    body: RustExpr::Literal("false".to_string()),
+                },
+            ],
+        }
+    );
+    let post_inc = lower_unary_expr(
+        new_java2rust::java_ir::UnaryOp::PostInc,
+        RustExpr::Var("i".to_string()),
     );
     assert_eq!(
-        lower_unary_expr(
-            new_java2rust::java_ir::UnaryOp::PostInc,
-            RustExpr::Var("i".to_string()),
-        ),
-        RustExpr::Raw("i += 1".to_string())
+        emit::emit_expr(&post_inc),
+        "{ let __java_old_value = i; i += 1; __java_old_value }"
     );
+    assert!(matches!(
+        post_inc,
+        RustExpr::Block { stmts, tail: Some(tail) }
+            if matches!(stmts.as_slice(), [
+                RustStmt::Let { name, value: Some(RustExpr::Var(value)), .. },
+                RustStmt::AssignOp { target: RustExpr::Var(target), op, value: RustExpr::Literal(increment) }
+            ] if name == "__java_old_value"
+                && value == "i"
+                && target == "i"
+                && op == "+="
+                && increment == "1")
+            && matches!(tail.as_ref(), RustExpr::Var(name) if name == "__java_old_value")
+    ));
+    let pre_inc = lower_unary_expr(
+        new_java2rust::java_ir::UnaryOp::PreInc,
+        RustExpr::Field(Box::new(RustExpr::Var("self".to_string())), "i".to_string()),
+    );
+    assert_eq!(emit::emit_expr(&pre_inc), "{ self.i += 1; self.i }");
+    assert!(matches!(
+        pre_inc,
+        RustExpr::Block { stmts, tail: Some(tail) }
+            if matches!(stmts.as_slice(), [
+                RustStmt::AssignOp { target: RustExpr::Field(receiver, field), op, value: RustExpr::Literal(increment) }
+            ] if matches!(receiver.as_ref(), RustExpr::Var(name) if name == "self")
+                && field == "i"
+                && op == "+="
+                && increment == "1")
+            && matches!(tail.as_ref(), RustExpr::Field(receiver, field)
+                if matches!(receiver.as_ref(), RustExpr::Var(name) if name == "self")
+                    && field == "i")
+    ));
+    let pre_dec = lower_unary_expr(
+        new_java2rust::java_ir::UnaryOp::PreDec,
+        RustExpr::Index(
+            Box::new(RustExpr::Var("values".to_string())),
+            Box::new(RustExpr::Var("i".to_string())),
+        ),
+    );
+    assert_eq!(emit::emit_expr(&pre_dec), "{ values[i] -= 1; values[i] }");
+    assert!(matches!(
+        pre_dec,
+        RustExpr::Block { stmts, tail: Some(tail) }
+            if matches!(stmts.as_slice(), [
+                RustStmt::AssignOp { target: RustExpr::Index(array, index), op, value: RustExpr::Literal(decrement) }
+            ] if matches!(array.as_ref(), RustExpr::Var(name) if name == "values")
+                && matches!(index.as_ref(), RustExpr::Var(name) if name == "i")
+                && op == "-="
+                && decrement == "1")
+            && matches!(tail.as_ref(), RustExpr::Index(array, index)
+                if matches!(array.as_ref(), RustExpr::Var(name) if name == "values")
+                    && matches!(index.as_ref(), RustExpr::Var(name) if name == "i"))
+    ));
     assert_eq!(
         lower_unary_expr(
             new_java2rust::java_ir::UnaryOp::Not,
@@ -38665,6 +43783,9 @@ fn access_lowering_owns_bare_field_and_member_access_fallbacks() {
         lower_bare_name("LIMIT", &env),
         RustExpr::Path(vec!["Self".to_string(), "LIMIT".to_string()])
     );
+    assert_eq!(render_bare_name("count", &env), "self.count");
+    assert_eq!(render_bare_name("local", &env), "local");
+    assert_eq!(render_bare_name("LIMIT", &env), "Self::LIMIT");
 
     let mut type_env = TypeEnv::new();
     type_env.insert_local("values", JavaType::Array(Box::new(JavaType::String)));
@@ -38867,9 +43988,83 @@ fn stream_plan_accepts_simple_captureful_lambdas_without_global_capture_veto() {
     let lowered = render_stream_plan(&plan, RustExpr::Var("values".to_string())).unwrap();
 
     assert_eq!(
-        lowered.expr,
-        RustExpr::Raw("values.iter().map(|value| *value + base).sum::<i32>()".to_string())
+        emit::emit_expr(&lowered.expr),
+        "values.iter().map(|value| *value + base).sum::<i32>()"
     );
+    assert!(matches!(
+        lowered.expr,
+        RustExpr::MethodCall { receiver, method, args }
+            if method == "sum::<i32>"
+                && args.is_empty()
+                && matches!(receiver.as_ref(), RustExpr::MethodCall { method, args, .. }
+                    if method == "map" && args.len() == 1)
+    ));
+}
+
+#[test]
+fn stream_plan_lowers_no_op_terminals_as_structured_method_chains() {
+    let mut env = TypeEnv::new();
+    env.insert_local("values", list_java_type(JavaType::String));
+
+    let collect_expr = parse_expr("values.stream().collect(Collectors.toList())");
+    let collect_plan = build_stream_plan(&collect_expr, &env, &FactSet::default()).unwrap();
+    let collect_lowered =
+        render_stream_plan(&collect_plan, RustExpr::Var("values".to_string())).unwrap();
+    assert_eq!(
+        emit::emit_expr(&collect_lowered.expr),
+        "values.iter().collect::<Vec<_>>()"
+    );
+    assert!(matches!(
+        collect_lowered.expr,
+        RustExpr::MethodCall { ref receiver, ref method, ref args }
+            if method == "collect::<Vec<_>>"
+                && args.is_empty()
+                && matches!(
+                    receiver.as_ref(),
+                    RustExpr::MethodCall { method, args, .. }
+                        if method == "iter" && args.is_empty()
+                )
+    ));
+
+    let find_first_expr = parse_expr("values.stream().findFirst()");
+    let find_first_plan = build_stream_plan(&find_first_expr, &env, &FactSet::default()).unwrap();
+    let find_first_lowered =
+        render_stream_plan(&find_first_plan, RustExpr::Var("values".to_string())).unwrap();
+    assert_eq!(
+        emit::emit_expr(&find_first_lowered.expr),
+        "values.iter().next()"
+    );
+    assert!(matches!(
+        find_first_lowered.expr,
+        RustExpr::MethodCall { ref receiver, ref method, ref args }
+            if method == "next"
+                && args.is_empty()
+                && matches!(
+                    receiver.as_ref(),
+                    RustExpr::MethodCall { method, args, .. }
+                        if method == "iter" && args.is_empty()
+                )
+    ));
+
+    let to_array_expr = parse_expr("values.stream().toArray()");
+    let to_array_plan = build_stream_plan(&to_array_expr, &env, &FactSet::default()).unwrap();
+    let to_array_lowered =
+        render_stream_plan(&to_array_plan, RustExpr::Var("values".to_string())).unwrap();
+    assert_eq!(
+        emit::emit_expr(&to_array_lowered.expr),
+        "values.iter().collect::<Vec<_>>()"
+    );
+    assert!(matches!(
+        to_array_lowered.expr,
+        RustExpr::MethodCall { ref receiver, ref method, ref args }
+            if method == "collect::<Vec<_>>"
+                && args.is_empty()
+                && matches!(
+                    receiver.as_ref(),
+                    RustExpr::MethodCall { method, args, .. }
+                        if method == "iter" && args.is_empty()
+                )
+    ));
 }
 
 #[test]
@@ -38889,11 +44084,17 @@ fn stream_plan_owns_flat_map_lambda_collection_stream_shape() {
                 && flat_map.iteration == StreamSourceIteration::Borrowed
     ));
     assert_eq!(
-        lowered.expr,
-        RustExpr::Raw(
-            "groups.iter().flat_map(|group| group.iter()).collect::<Vec<_>>()".to_string()
-        )
+        emit::emit_expr(&lowered.expr),
+        "groups.iter().flat_map(|group| group.iter()).collect::<Vec<_>>()"
     );
+    assert!(matches!(
+        lowered.expr,
+        RustExpr::MethodCall { receiver, method, args }
+            if method == "collect::<Vec<_>>"
+                && args.is_empty()
+                && matches!(receiver.as_ref(), RustExpr::MethodCall { method, args, .. }
+                    if method == "flat_map" && args.len() == 1)
+    ));
 }
 
 #[test]
@@ -38908,9 +44109,17 @@ fn stream_plan_accepts_arrays_stream_as_source() {
 
     assert_eq!(plan.source.expr, &parse_expr("values"));
     assert_eq!(
-        lowered.expr,
-        RustExpr::Raw("values.iter().map(|value| value.trim()).collect::<Vec<_>>()".to_string())
+        emit::emit_expr(&lowered.expr),
+        "values.iter().map(|value| value.trim()).collect::<Vec<_>>()"
     );
+    assert!(matches!(
+        lowered.expr,
+        RustExpr::MethodCall { receiver, method, args }
+            if method == "collect::<Vec<_>>"
+                && args.is_empty()
+                && matches!(receiver.as_ref(), RustExpr::MethodCall { method, args, .. }
+                    if method == "map" && args.len() == 1)
+    ));
 }
 
 #[test]
@@ -38926,11 +44135,17 @@ fn stream_plan_accepts_arrays_stream_range_as_source() {
 
     assert_eq!(plan.source.expr, &parse_expr("values"));
     assert_eq!(
-        lowered.expr,
-        RustExpr::Raw(
-            "{ let __java_arrays_source = &values; let __java_arrays_from = from; let __java_arrays_to = to; if __java_arrays_from > __java_arrays_to { panic!(\"Java IllegalArgumentException: fromIndex > toIndex\"); } if __java_arrays_from < 0 || __java_arrays_to as usize > __java_arrays_source.len() { panic!(\"Java ArrayIndexOutOfBoundsException\"); } let __java_arrays_from = __java_arrays_from as usize; let __java_arrays_to = __java_arrays_to as usize; &__java_arrays_source[__java_arrays_from..__java_arrays_to] }.iter().map(|value| value.trim()).collect::<Vec<_>>()".to_string()
-        )
+        emit::emit_expr(&lowered.expr),
+        "{ let __java_arrays_source = &values; let __java_arrays_from = from; let __java_arrays_to = to; if __java_arrays_from > __java_arrays_to { panic!(\"Java IllegalArgumentException: fromIndex > toIndex\"); } if __java_arrays_from < 0 || (__java_arrays_to as usize) > __java_arrays_source.len() { panic!(\"Java ArrayIndexOutOfBoundsException\"); } let __java_arrays_from = __java_arrays_from as usize; let __java_arrays_to = __java_arrays_to as usize; &__java_arrays_source[__java_arrays_from..__java_arrays_to] }.iter().map(|value| value.trim()).collect::<Vec<_>>()"
     );
+    assert!(matches!(
+        lowered.expr,
+        RustExpr::MethodCall { receiver, method, args }
+            if method == "collect::<Vec<_>>"
+                && args.is_empty()
+                && matches!(receiver.as_ref(), RustExpr::MethodCall { method, args, .. }
+                    if method == "map" && args.len() == 1)
+    ));
 }
 
 #[test]
@@ -38944,19 +44159,29 @@ fn stream_plan_lowers_arrays_stream_to_array_and_all_match_terminals() {
     let to_array_lowered =
         render_stream_plan(&to_array_plan, RustExpr::Var("values".to_string())).unwrap();
     assert_eq!(
-        to_array_lowered.expr,
-        RustExpr::Raw(
-            "values.iter().map(|value| value.len() as i32).collect::<Vec<_>>()".to_string()
-        )
+        emit::emit_expr(&to_array_lowered.expr),
+        "values.iter().map(|value| value.len() as i32).collect::<Vec<_>>()"
     );
+    assert!(matches!(
+        to_array_lowered.expr,
+        RustExpr::MethodCall { receiver, method, args }
+            if method == "collect::<Vec<_>>"
+                && args.is_empty()
+                && matches!(receiver.as_ref(), RustExpr::MethodCall { method, args, .. }
+                    if method == "map" && args.len() == 1)
+    ));
 
     let all_match_plan = build_stream_plan(&all_match, &env, &FactSet::default()).unwrap();
     let all_match_lowered =
         render_stream_plan(&all_match_plan, RustExpr::Var("values".to_string())).unwrap();
     assert_eq!(
-        all_match_lowered.expr,
-        RustExpr::Raw("values.iter().all(|value| (value.len() as i32) > 0)".to_string())
+        emit::emit_expr(&all_match_lowered.expr),
+        "values.iter().all(|value| (value.len() as i32) > 0)"
     );
+    assert!(matches!(
+        all_match_lowered.expr,
+        RustExpr::MethodCall { method, args, .. } if method == "all" && args.len() == 1
+    ));
 }
 
 #[test]
@@ -38975,12 +44200,17 @@ fn stream_plan_lowers_temporary_arrays_stream_with_owned_lambda_items() {
     .unwrap();
 
     assert_eq!(
-        lowered.expr,
-        RustExpr::Raw(
-            "line.split(\",\").collect::<Vec<_>>().into_iter().map(|value| value.parse::<f64>().unwrap()).collect::<Vec<_>>()"
-                .to_string()
-        )
+        emit::emit_expr(&lowered.expr),
+        "(line.split(\",\").collect::<Vec<_>>()).into_iter().map(|value| value.parse::<f64>().unwrap()).collect::<Vec<_>>()"
     );
+    assert!(matches!(
+        lowered.expr,
+        RustExpr::MethodCall { receiver, method, args }
+            if method == "collect::<Vec<_>>"
+                && args.is_empty()
+                && matches!(receiver.as_ref(), RustExpr::MethodCall { method, args, .. }
+                    if method == "map" && args.len() == 1)
+    ));
 }
 
 #[test]
@@ -38999,19 +44229,33 @@ fn stream_plan_lowers_method_references_in_map_and_map_to_int() {
     let count_lowered =
         render_stream_plan(&count_plan, RustExpr::Var("counts".to_string())).unwrap();
     assert_eq!(
-        count_lowered.expr,
-        RustExpr::Raw("counts.iter().map(|value| *value).sum::<i32>()".to_string())
+        emit::emit_expr(&count_lowered.expr),
+        "counts.iter().map(|value| *value).sum::<i32>()"
     );
+    assert!(matches!(
+        count_lowered.expr,
+        RustExpr::MethodCall { receiver, method, args }
+            if method == "sum::<i32>"
+                && args.is_empty()
+                && matches!(receiver.as_ref(), RustExpr::MethodCall { method, args, .. }
+                    if method == "map" && args.len() == 1)
+    ));
 
     let names_plan = build_stream_plan(&name_strings, &env, &FactSet::default()).unwrap();
     let names_lowered =
         render_stream_plan(&names_plan, RustExpr::Var("names".to_string())).unwrap();
     assert_eq!(
-        names_lowered.expr,
-        RustExpr::Raw(
-            "names.iter().map(|value| (*value).to_string()).collect::<Vec<_>>()".to_string()
-        )
+        emit::emit_expr(&names_lowered.expr),
+        "names.iter().map(|value| (*value).to_string()).collect::<Vec<_>>()"
     );
+    assert!(matches!(
+        names_lowered.expr,
+        RustExpr::MethodCall { receiver, method, args }
+            if method == "collect::<Vec<_>>"
+                && args.is_empty()
+                && matches!(receiver.as_ref(), RustExpr::MethodCall { method, args, .. }
+                    if method == "map" && args.len() == 1)
+    ));
 }
 
 #[test]
@@ -39060,12 +44304,17 @@ fn stream_method_reference_uses_facade_abi_receiver_facts() {
     .unwrap();
 
     assert_eq!(
-        lowered.expr,
-        RustExpr::Raw(
-            "values.iter().map(|value: &FacadeValue| (*value).label_text()).collect::<Vec<_>>()"
-                .to_string()
-        )
+        emit::emit_expr(&lowered.expr),
+        "values.iter().map(|value: &FacadeValue| (*value).label_text()).collect::<Vec<_>>()"
     );
+    assert!(matches!(
+        lowered.expr,
+        RustExpr::MethodCall { receiver, method, args }
+            if method == "collect::<Vec<_>>"
+                && args.is_empty()
+                && matches!(receiver.as_ref(), RustExpr::MethodCall { method, args, .. }
+                    if method == "map" && args.len() == 1)
+    ));
 }
 
 #[test]
@@ -39083,23 +44332,33 @@ fn stream_optional_objects_null_method_references_use_call_target_plan() {
     let non_null_lowered =
         render_stream_plan(&non_null_plan, RustExpr::Var("values".to_string())).unwrap();
     assert_eq!(
-        non_null_lowered.expr,
-        RustExpr::Raw(
-            "values.iter().map(|value: Option<&String>| value.is_some()).collect::<Vec<_>>()"
-                .to_string()
-        )
+        emit::emit_expr(&non_null_lowered.expr),
+        "values.iter().map(|value: Option<&String>| value.is_some()).collect::<Vec<_>>()"
     );
+    assert!(matches!(
+        non_null_lowered.expr,
+        RustExpr::MethodCall { receiver, method, args }
+            if method == "collect::<Vec<_>>"
+                && args.is_empty()
+                && matches!(receiver.as_ref(), RustExpr::MethodCall { method, args, .. }
+                    if method == "map" && args.len() == 1)
+    ));
 
     let is_null_plan = build_stream_plan(&is_null, &env, &facts).unwrap();
     let is_null_lowered =
         render_stream_plan(&is_null_plan, RustExpr::Var("values".to_string())).unwrap();
     assert_eq!(
-        is_null_lowered.expr,
-        RustExpr::Raw(
-            "values.iter().map(|value: Option<&String>| value.is_none()).collect::<Vec<_>>()"
-                .to_string()
-        )
+        emit::emit_expr(&is_null_lowered.expr),
+        "values.iter().map(|value: Option<&String>| value.is_none()).collect::<Vec<_>>()"
     );
+    assert!(matches!(
+        is_null_lowered.expr,
+        RustExpr::MethodCall { receiver, method, args }
+            if method == "collect::<Vec<_>>"
+                && args.is_empty()
+                && matches!(receiver.as_ref(), RustExpr::MethodCall { method, args, .. }
+                    if method == "map" && args.len() == 1)
+    ));
 
     let stream_lowering_source = include_str!("../src/stream_lowering.rs");
     let method_ref_call_plan = stream_lowering_source
@@ -39112,7 +44371,19 @@ fn stream_optional_objects_null_method_references_use_call_target_plan() {
         .expect("stream method-reference call-plan helper should be present");
     assert!(method_ref_call_plan.contains("NativeJavaStaticMethod::ObjectsNonNull"));
     assert!(method_ref_call_plan.contains("param_shape.is_none_or"));
-    assert!(method_ref_call_plan.contains("apply_call_target(&target_plan"));
+    assert!(method_ref_call_plan.contains("stream_call_target_projection("));
+    assert!(!method_ref_call_plan.contains("rendered_projection_or_raw_leaf(&rendered)"));
+    assert!(!method_ref_call_plan.contains(".map(RustExpr::Raw)"));
+    let instance_method_ref_call_plan = stream_lowering_source
+        .split("fn emit_stream_instance_method_reference_body_through_call_plan")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn stream_method_reference_native_instance_receiver")
+                .next()
+        })
+        .expect("stream instance method-reference call-plan helper should be present");
+    assert!(instance_method_ref_call_plan.contains("stream_call_target_projection("));
+    assert!(!instance_method_ref_call_plan.contains("Some(RustExpr::Raw(lowered_receiver))"));
 }
 
 #[test]
@@ -39126,12 +44397,14 @@ fn stream_plan_lowers_collectors_joining_terminal() {
     let lowered = render_stream_plan(&plan, RustExpr::Var("names".to_string())).unwrap();
 
     assert_eq!(
-        lowered.expr,
-        RustExpr::Raw(
-            "names.iter().map(|value| (*value).to_string()).map(|item| item.to_string()).collect::<Vec<_>>().join(\"|\")"
-                .to_string()
-        )
+        emit::emit_expr(&lowered.expr),
+        "names.iter().map(|value| (*value).to_string()).map(|item| item.to_string()).collect::<Vec<_>>().join(\"|\")"
     );
+    assert!(matches!(
+        lowered.expr,
+        RustExpr::MethodCall { method, args, .. }
+            if method == "join" && matches!(args.as_slice(), [RustExpr::Literal(delimiter)] if delimiter == "\"|\"")
+    ));
 }
 
 #[test]
@@ -39159,12 +44432,14 @@ fn stream_joining_delimiter_uses_slot_conversion_for_optional_string_field() {
     .unwrap();
 
     assert_eq!(
-        lowered.expr,
-        RustExpr::Raw(
-            "names.iter().map(|item| item.to_string()).collect::<Vec<_>>().join(self.delimiter.as_ref().expect(\"Java null receiver\").as_str())"
-                .to_string()
-        )
+        emit::emit_expr(&lowered.expr),
+        "names.iter().map(|item| item.to_string()).collect::<Vec<_>>().join(self.delimiter.as_ref().expect(\"Java null receiver\").as_str())"
     );
+    assert!(matches!(
+        lowered.expr,
+        RustExpr::MethodCall { method, args, .. }
+            if method == "join" && args.len() == 1
+    ));
 }
 
 #[test]
@@ -39215,6 +44490,62 @@ fn stream_lambda_argument_shapes_do_not_invent_string_fallbacks() {
     assert!(slot_plan.contains("let planned = render_stream_lambda_arg_to_slot_through_plan"));
     assert!(slot_plan.contains("planned.unwrap_or(rendered)"));
     assert!(slot_plan.contains("recover_stream_lambda_owned_arg_move"));
+    assert!(source.contains("fn adapt_stream_lambda_arg_for_slot_expr"));
+    assert!(source.contains("fn adapt_stream_lambda_args_for_plan_exprs"));
+    assert!(source.contains("fn adapt_stream_lambda_arg_for_explicit_slot_expr"));
+    assert!(source.contains("fn emit_stream_lambda_args_with_locals_prec"));
+    assert!(source.contains("fn emit_stream_lambda_call_args_for_resolved_exprs"));
+    let method_reference_call_plan = source
+        .split("fn emit_stream_method_reference_body_through_call_plan")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn emit_stream_instance_method_reference_body_through_call_plan")
+                .next()
+        })
+        .expect("stream method-reference call-plan helper should be present");
+    assert!(
+        method_reference_call_plan.contains("adapt_stream_lambda_args_for_plan_exprs")
+            && !method_reference_call_plan.contains("adapt_stream_lambda_args_for_plan("),
+        "stream method-reference call-plan argument adaptation should use the structured plan adapter"
+    );
+    let resolved_call_args = source
+        .split("fn emit_stream_lambda_call_args_for_resolved_exprs")
+        .nth(1)
+        .and_then(|tail| tail.split("fn stream_receiverless_call_rust_name").next())
+        .expect("receiverless stream lambda call-argument helper should be present");
+    assert!(
+        resolved_call_args.contains("emit_stream_lambda_args_with_locals_prec")
+            && resolved_call_args.contains("adapt_stream_lambda_arg_for_slot_expr")
+            && !resolved_call_args.contains(".rendered()")
+            && !resolved_call_args.contains("adapt_stream_lambda_arg_for_slot(\n"),
+        "receiverless stream lambda argument adaptation should keep lowered args structured until the render boundary"
+    );
+    let structured_adapter = source
+        .split("fn adapt_stream_lambda_arg_for_slot_expr")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn adapt_stream_lambda_arg_for_explicit_slot")
+                .next()
+        })
+        .expect("structured stream lambda argument adapter should be present");
+    assert!(
+        structured_adapter.contains("recover_stream_lambda_owned_arg_move_expr")
+            && !structured_adapter.contains("recover_stream_lambda_owned_arg_move("),
+        "structured stream lambda argument adapter should not route owned-value recovery through the string clone helper"
+    );
+    let structured_explicit_adapter = source
+        .split("fn adapt_stream_lambda_arg_for_explicit_slot_expr")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn render_stream_lambda_borrowed_str_arg")
+                .next()
+        })
+        .expect("structured stream lambda explicit-slot adapter should be present");
+    assert!(
+        structured_explicit_adapter.contains("adapt_stream_lambda_arg_for_slot_expr")
+            && !structured_explicit_adapter.contains("adapt_stream_lambda_arg_for_slot("),
+        "structured stream lambda explicit-slot adapter should keep argument slots on the structured path"
+    );
     assert!(
         !adapter.contains("shape_is_borrowed_string_content"),
         "{adapter}"
@@ -39244,16 +44575,40 @@ fn stream_lambda_argument_shapes_do_not_invent_string_fallbacks() {
     let slot_projection = source
         .split("fn render_stream_lambda_arg_to_slot_through_plan")
         .nth(1)
+        .and_then(|tail| {
+            tail.split("fn render_stream_lambda_arg_to_slot_through_plan_expr")
+                .next()
+        })
+        .expect("legacy stream lambda slot projection bridge should be present");
+    assert!(
+        slot_projection.contains("render_stream_lambda_arg_to_slot_through_plan_expr")
+            && slot_projection.contains(".map(|lowered| lowered.rendered())"),
+        "legacy stream lambda slot projection bridge should delegate to the structured helper"
+    );
+    let slot_projection_expr = source
+        .split("fn render_stream_lambda_arg_to_slot_through_plan_expr")
+        .nth(1)
         .and_then(|tail| tail.split("fn stream_lambda_arg_actual_shape").next())
-        .expect("stream lambda slot projection helper should be present");
-    assert!(slot_projection.contains("let default_facts;"));
-    assert!(!slot_projection.contains("let facts = ctx.facts?;"));
+        .expect("structured stream lambda slot projection helper should be present");
+    assert!(slot_projection_expr.contains("let default_facts;"));
+    assert!(!slot_projection_expr.contains("let facts = ctx.facts?;"));
+    assert!(
+        slot_projection_expr.contains("expr: lowered.expr")
+            && !slot_projection_expr.contains("rendered_projection_or_raw_leaf(rendered)"),
+        "structured stream lambda slot projection should pass the lowered RustExpr through slot conversion"
+    );
     let call_args = source
-        .split("fn emit_stream_lambda_call_args_for_receiver")
+        .split("fn emit_stream_lambda_call_args_for_receiver_exprs")
         .nth(1)
         .and_then(|tail| tail.split("fn adapt_stream_lambda_args_for_plan").next())
         .expect("stream lambda call-argument helper should be present");
     assert!(call_args.contains("plan_call_arguments_with_facts_and_args"));
+    assert!(
+        call_args.contains("emit_stream_lambda_args_with_locals_prec")
+            && call_args.contains("adapt_stream_lambda_args_for_plan_exprs")
+            && !call_args.contains("adapt_stream_lambda_args_for_plan("),
+        "receiver stream lambda call-argument helper should keep lowered args structured through planned adaptation"
+    );
     assert!(
         !call_args.contains("external_call_arg_shapes"),
         "{call_args}"
@@ -39276,11 +44631,17 @@ fn stream_plan_lowers_int_stream_range_source() {
 
     assert_eq!(plan.source.expr, &parse_expr("IntStream.range(0, limit)"));
     assert_eq!(
-        lowered.expr,
-        RustExpr::Raw(
-            "(0..limit).into_iter().map(|value| value + 1).collect::<Vec<_>>()".to_string()
-        )
+        emit::emit_expr(&lowered.expr),
+        "(0..limit).into_iter().map(|value| value + 1).collect::<Vec<_>>()"
     );
+    assert!(matches!(
+        lowered.expr,
+        RustExpr::MethodCall { receiver, method, args }
+            if method == "collect::<Vec<_>>"
+                && args.is_empty()
+                && matches!(receiver.as_ref(), RustExpr::MethodCall { method, args, .. }
+                    if method == "map" && args.len() == 1)
+    ));
 }
 
 #[test]
@@ -39500,12 +44861,17 @@ class NameGroup {
             if element_shape.java_ty == JavaType::String
     ));
     assert_eq!(
-        lowered.expr,
-        RustExpr::Raw(
-            "groups.iter().flat_map(|group| group.names().into_iter()).collect::<Vec<_>>()"
-                .to_string()
-        )
+        emit::emit_expr(&lowered.expr),
+        "groups.iter().flat_map(|group| group.names().into_iter()).collect::<Vec<_>>()"
     );
+    assert!(matches!(
+        lowered.expr,
+        RustExpr::MethodCall { receiver, method, args }
+            if method == "collect::<Vec<_>>"
+                && args.is_empty()
+                && matches!(receiver.as_ref(), RustExpr::MethodCall { method, args, .. }
+                    if method == "flat_map" && args.len() == 1)
+    ));
 }
 
 #[test]
@@ -39571,12 +44937,19 @@ class Group {
             if element_shape.java_ty == JavaType::String
     ));
     assert_eq!(
-        lowered.expr,
-        RustExpr::Raw(
-            "groups.iter().flat_map(|group| { let names = group.names(); names.into_iter().filter(move |name| !name.is_empty()).map(|name| name.trim()) }).collect::<Vec<_>>()"
-                .to_string()
-        )
+        emit::emit_expr(&lowered.expr),
+        "groups.iter().flat_map(|group| { let names = group.names(); names.into_iter().filter(move |name| !name.is_empty()).map(|name| name.trim()) }).collect::<Vec<_>>()"
     );
+    assert!(matches!(
+        lowered.expr,
+        RustExpr::MethodCall { receiver, method, args }
+            if method == "collect::<Vec<_>>"
+                && args.is_empty()
+                && matches!(receiver.as_ref(), RustExpr::MethodCall { method, args, .. }
+                    if method == "flat_map"
+                        && matches!(args.as_slice(), [RustExpr::Closure { body: RustClosureBody::Expr(body), .. }]
+                            if matches!(body.as_ref(), RustExpr::Block { .. })))
+    ));
 }
 
 #[test]
@@ -39608,12 +44981,19 @@ fn stream_plan_lowers_flat_map_block_temporary_collection_as_owned_subpipeline()
     .unwrap();
 
     assert_eq!(
-        lowered.expr,
-        RustExpr::Raw(
-            "partitions.iter().flat_map(|partition| { let bounds = OrgGenomicsdbGenomicsDBUtils::get_array_column_bounds(self.workspace.as_ref().expect(\"Java null receiver\").as_str(), partition.as_str()); let names = Default::default(); names.into_iter().filter(move |name| (name.len() as i32) >= bounds[0 as usize]).map(|name| name.trim()) }).collect::<Vec<_>>()"
-                .to_string()
-        )
+        emit::emit_expr(&lowered.expr),
+        "partitions.iter().flat_map(|partition| { let bounds = GenomicsDBUtils::get_array_column_bounds(self.workspace.as_ref().expect(\"Java null receiver\").as_str(), partition.as_str()); let names = Default::default(); names.into_iter().filter(move |name| (name.len() as i32) >= bounds[0 as usize]).map(|name| name.trim()) }).collect::<Vec<_>>()"
     );
+    assert!(matches!(
+        lowered.expr,
+        RustExpr::MethodCall { receiver, method, args }
+            if method == "collect::<Vec<_>>"
+                && args.is_empty()
+                && matches!(receiver.as_ref(), RustExpr::MethodCall { method, args, .. }
+                    if method == "flat_map"
+                        && matches!(args.as_slice(), [RustExpr::Closure { body: RustClosureBody::Expr(body), .. }]
+                            if matches!(body.as_ref(), RustExpr::Block { .. })))
+    ));
 }
 
 #[test]
@@ -39672,12 +45052,17 @@ fn stream_plan_accepts_value_returning_block_lambdas() {
         matches!(plan.ops.as_slice(), [StreamOp::Map { lambda, .. }] if lambda.body.prefix_statements().len() == 1)
     );
     assert_eq!(
-        lowered.expr,
-        RustExpr::Raw(
-            "values.iter().map(|value| { let trimmed = value.trim(); trimmed.to_lowercase() }).collect::<Vec<_>>()"
-                .to_string()
-        )
+        emit::emit_expr(&lowered.expr),
+        "values.iter().map(|value| { let trimmed = value.trim(); trimmed.to_lowercase() }).collect::<Vec<_>>()"
     );
+    assert!(matches!(
+        lowered.expr,
+        RustExpr::MethodCall { receiver, method, args }
+            if method == "collect::<Vec<_>>"
+                && args.is_empty()
+                && matches!(receiver.as_ref(), RustExpr::MethodCall { method, args, .. }
+                    if method == "map" && args.len() == 1)
+    ));
 }
 
 #[test]
@@ -39692,12 +45077,17 @@ fn stream_plan_keeps_mut_for_assigned_block_lambda_locals() {
     let lowered = render_stream_plan(&plan, RustExpr::Var("values".to_string())).unwrap();
 
     assert_eq!(
-        lowered.expr,
-        RustExpr::Raw(
-            "values.iter().map(|value| { let mut trimmed = value.trim(); trimmed = trimmed.to_lowercase(); trimmed }).collect::<Vec<_>>()"
-                .to_string()
-        )
+        emit::emit_expr(&lowered.expr),
+        "values.iter().map(|value| { let mut trimmed = value.trim(); trimmed = trimmed.to_lowercase(); trimmed }).collect::<Vec<_>>()"
     );
+    assert!(matches!(
+        lowered.expr,
+        RustExpr::MethodCall { receiver, method, args }
+            if method == "collect::<Vec<_>>"
+                && args.is_empty()
+                && matches!(receiver.as_ref(), RustExpr::MethodCall { method, args, .. }
+                    if method == "map" && args.len() == 1)
+    ));
 }
 
 #[test]
@@ -39715,12 +45105,17 @@ fn stream_plan_unwraps_optional_sequence_sources_before_iteration() {
 
     assert!(plan.source.optional_sequence);
     assert_eq!(
-        lowered.expr,
-        RustExpr::Raw(
-            "values.as_ref().unwrap().iter().map(|value| value.trim()).collect::<Vec<_>>()"
-                .to_string()
-        )
+        emit::emit_expr(&lowered.expr),
+        "values.as_ref().expect(\"Java null receiver\").iter().map(|value| value.trim()).collect::<Vec<_>>()"
     );
+    assert!(matches!(
+        lowered.expr,
+        RustExpr::MethodCall { receiver, method, args }
+            if method == "collect::<Vec<_>>"
+                && args.is_empty()
+                && matches!(receiver.as_ref(), RustExpr::MethodCall { method, args, .. }
+                    if method == "map" && args.len() == 1)
+    ));
 }
 
 #[test]
@@ -39746,11 +45141,17 @@ fn stream_plan_refines_non_null_filter_elements() {
             if element_shape.java_ty == JavaType::String
     ));
     assert_eq!(
-        lowered.expr,
-        RustExpr::Raw(
-            "values.iter().filter_map(|item| item.as_ref()).collect::<Vec<_>>()".to_string()
-        )
+        emit::emit_expr(&lowered.expr),
+        "values.iter().filter_map(|item| item.as_ref()).collect::<Vec<_>>()"
     );
+    assert!(matches!(
+        lowered.expr,
+        RustExpr::MethodCall { receiver, method, args }
+            if method == "collect::<Vec<_>>"
+                && args.is_empty()
+                && matches!(receiver.as_ref(), RustExpr::MethodCall { method, args, .. }
+                    if method == "filter_map" && args.len() == 1)
+    ));
 }
 
 #[test]
@@ -39773,16 +45174,29 @@ fn stream_plan_fuses_nullable_map_with_non_null_filter_shape() {
             && refined_shape.java_ty == JavaType::String
     ));
     assert_eq!(
-        lowered.expr,
-        RustExpr::Raw(
-            "values.iter().map(|value| { if value.is_empty() { None } else { Some(value.to_lowercase()) } }).filter_map(|item| item).collect::<Vec<_>>()"
-                .to_string()
-        )
+        emit::emit_expr(&lowered.expr),
+        "values.iter().map(|value| { if value.is_empty() { None } else { Some(value.to_lowercase()) } }).filter_map(|item| item).collect::<Vec<_>>()"
     );
+    assert!(matches!(
+        lowered.expr,
+        RustExpr::MethodCall { receiver, method, args }
+            if method == "collect::<Vec<_>>"
+                && args.is_empty()
+                && matches!(receiver.as_ref(), RustExpr::MethodCall { method, args, .. }
+                    if method == "filter_map" && args.len() == 1)
+    ));
     let stream_lowering_source = include_str!("../src/stream_lowering.rs");
     assert!(
         stream_lowering_source.contains("render_nullable_stream_map_body"),
-        "nullable stream map carrier should be rendered by coercion projection"
+        "legacy nullable stream map carrier renderer should remain in coercion while string callers exist"
+    );
+    assert!(
+        stream_lowering_source.contains("nullable_stream_map_body_projection"),
+        "nullable stream map expression path should compose the carrier structurally"
+    );
+    assert!(
+        !stream_lowering_source.contains("rendered_projection_or_raw_leaf(&nullable_body)"),
+        "nullable stream map expression path should not rehydrate a rendered body through Raw"
     );
     assert!(
         !stream_lowering_source.contains("Some({final_expr})"),
@@ -39810,12 +45224,17 @@ fn stream_lambda_lowers_split_length_and_integer_parse_in_nullable_map() {
             && refined_shape.java_ty == JavaType::Primitive(PrimitiveType::Int)
     ));
     assert_eq!(
-        lowered.expr,
-        RustExpr::Raw(
-            "values.iter().map(|value| { let pieces = java_string_split(&value, \",\".to_string(), 0); if (pieces.len() as i32) != 3 { None } else { Some(pieces[1 as usize].parse::<i32>().unwrap()) } }).filter_map(|item| item).collect::<Vec<_>>()"
-                .to_string()
-        )
+        emit::emit_expr(&lowered.expr),
+        "values.iter().map(|value| { let pieces = java_string_split(&value, \",\".to_string(), 0); if (pieces.len() as i32) != 3 { None } else { Some(pieces[1 as usize].parse::<i32>().unwrap()) } }).filter_map(|item| item).collect::<Vec<_>>()"
     );
+    assert!(matches!(
+        lowered.expr,
+        RustExpr::MethodCall { receiver, method, args }
+            if method == "collect::<Vec<_>>"
+                && args.is_empty()
+                && matches!(receiver.as_ref(), RustExpr::MethodCall { method, args, .. }
+                    if method == "filter_map" && args.len() == 1)
+    ));
     let mut stream_env = ShapeEnv::new();
     stream_env.insert_local_shape(
         "values",
@@ -39828,11 +45247,8 @@ fn stream_lambda_lowers_split_length_and_integer_parse_in_nullable_map() {
     )
     .unwrap();
     assert_eq!(
-        lowered_with_context.expr,
-        RustExpr::Raw(
-            "values.iter().map(|value| { let pieces = java_string_split(&value, \",\".to_string(), 0); if (pieces.len() as i32) != 3 { None } else { Some(pieces[1 as usize].parse::<i32>().unwrap()) } }).filter_map(|item| item).collect::<Vec<_>>()"
-                .to_string()
-        )
+        emit::emit_expr(&lowered_with_context.expr),
+        "values.iter().map(|value| { let pieces = java_string_split(&value, \",\".to_string(), 0); if (pieces.len() as i32) != 3 { None } else { Some(pieces[1 as usize].parse::<i32>().unwrap()) } }).filter_map(|item| item).collect::<Vec<_>>()"
     );
     let mut env = ShapeEnv::new();
     env.insert_local_shape(
@@ -39882,6 +45298,32 @@ fn stream_lambda_lowers_split_length_and_integer_parse_in_nullable_map() {
         stream_lowering_source.contains("crate::access_lowering::lower_field_access_with_facts"),
         "stream member access should render through shared access lowering"
     );
+    let planned_member_access = stream_lowering_source
+        .split("fn emit_stream_lambda_member_access_through_plan")
+        .nth(1)
+        .and_then(|tail| tail.split("fn stream_raw_expr").next())
+        .expect("stream member access plan helper should remain discoverable");
+    assert!(
+        planned_member_access.contains("emit_stream_lambda_receiver_with_locals_expr")
+            && !planned_member_access
+                .contains("rendered_projection_or_raw_leaf(&lowered_receiver)"),
+        "stream member access planning should pass structured receivers into shared access lowering"
+    );
+    let stream_raw_expr_source = stream_lowering_source
+        .split("fn stream_raw_expr")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn render_stream_plan").next())
+        .expect("stream raw expression helper should remain discoverable");
+    assert!(
+        stream_lowering_source
+            .contains("Expr::Raw(raw) => stream_lambda_expr(stream_raw_expr(raw), 12)")
+            && stream_raw_expr_source.contains("owner_associated_path_projection")
+            && stream_raw_expr_source.contains("rendered_projection_or_raw_leaf(raw)")
+            && !stream_lowering_source.contains(
+                "Expr::Raw(raw) => stream_lambda_rendered_expr(render_stream_raw_expr(raw), 12)"
+            ),
+        "stream lambda raw ingress should recover a structured expression before falling back to Raw"
+    );
 }
 
 #[test]
@@ -39914,12 +45356,17 @@ fn stream_lambda_string_char_at_uses_signature_index_slot() {
     let lowered = render_stream_plan(&plan, RustExpr::Var("values".to_string())).unwrap();
 
     assert_eq!(
-        lowered.expr,
-        RustExpr::Raw(
-            "values.iter().map(|value| value.chars().nth((index) as usize).expect(\"Java string index out of bounds\")).collect::<Vec<_>>()"
-                .to_string()
-        )
+        emit::emit_expr(&lowered.expr),
+        "values.iter().map(|value| value.chars().nth((index) as usize).expect(\"Java string index out of bounds\")).collect::<Vec<_>>()"
     );
+    assert!(matches!(
+        lowered.expr,
+        RustExpr::MethodCall { receiver, method, args }
+            if method == "collect::<Vec<_>>"
+                && args.is_empty()
+                && matches!(receiver.as_ref(), RustExpr::MethodCall { method, args, .. }
+                    if method == "map" && args.len() == 1)
+    ));
 }
 
 #[test]
@@ -39932,11 +45379,47 @@ fn stream_plan_lowers_collectors_to_map_terminal() {
     let lowered = render_stream_plan(&plan, RustExpr::Var("values".to_string())).unwrap();
 
     assert_eq!(
-        lowered.expr,
-        RustExpr::Raw(
-            "values.iter().map(|v| ((*v).clone(), v.len() as i32)).collect::<std::collections::HashMap<_, _>>()"
-                .to_string()
-        )
+        emit::emit_expr(&lowered.expr),
+        "values.iter().map(|v| ((*v).clone(), v.len() as i32)).collect::<std::collections::HashMap<_, _>>()"
+    );
+    let RustExpr::MethodCall {
+        receiver,
+        method,
+        args,
+    } = &lowered.expr
+    else {
+        panic!("Collectors.toMap should lower to a collect method call");
+    };
+    assert_eq!(method, "collect::<std::collections::HashMap<_, _>>");
+    assert!(args.is_empty());
+    let RustExpr::MethodCall {
+        method: map_method,
+        args: map_args,
+        ..
+    } = receiver.as_ref()
+    else {
+        panic!("Collectors.toMap should lower through a map call");
+    };
+    assert_eq!(map_method, "map");
+    let [
+        RustExpr::Closure {
+            body: RustClosureBody::Expr(body),
+            ..
+        },
+    ] = map_args.as_slice()
+    else {
+        panic!("Collectors.toMap map call should contain one expression closure");
+    };
+    let RustExpr::Tuple(items) = body.as_ref() else {
+        panic!("Collectors.toMap map closure should return a tuple");
+    };
+    let [key_expr, RustExpr::Cast { .. }] = items.as_slice() else {
+        panic!("Collectors.toMap map closure should return key/value projections");
+    };
+    assert_eq!(emit::emit_expr(key_expr), "(*v).clone()");
+    assert!(
+        !matches!(key_expr, RustExpr::Raw(_)),
+        "Collectors.toMap identity key should remain structured"
     );
     let LoweredType::Slot(shape) = lowered.actual else {
         panic!("Collectors.toMap should lower as a concrete map slot");
@@ -39993,16 +45476,19 @@ class Item {
     let plan = build_stream_plan(expr, &env, &resolved.facts).unwrap();
     let lowered = render_stream_plan(&plan, RustExpr::Raw("self.items()".to_string())).unwrap();
 
+    let raw = emit::emit_expr(&lowered.expr);
     assert_eq!(
-        lowered.expr,
-        RustExpr::Raw(
-            "self.items().into_iter().map(|item| (item, item.get_length())).collect::<std::collections::HashMap<_, _>>()"
-                .to_string()
-        )
+        raw,
+        "self.items().into_iter().map(|item| (item, item.get_length())).collect::<std::collections::HashMap<_, _>>()"
     );
-    let RustExpr::Raw(raw) = &lowered.expr else {
-        panic!("expected raw stream expression: {:?}", lowered.expr);
-    };
+    assert!(matches!(
+        lowered.expr,
+        RustExpr::MethodCall { receiver, method, args }
+            if method == "collect::<std::collections::HashMap<_, _>>"
+                && args.is_empty()
+                && matches!(receiver.as_ref(), RustExpr::MethodCall { method, args, .. }
+                    if method == "map" && args.len() == 1)
+    ));
     assert!(!raw.contains("(*item).clone()"), "{raw}");
 }
 
@@ -40056,9 +45542,17 @@ fn stream_lowering_owns_iterator_chain_rendering_from_plan() {
     let lowered = render_stream_plan(&plan, RustExpr::Var("values".to_string())).unwrap();
 
     assert_eq!(
-        lowered.expr,
-        RustExpr::Raw("values.iter().map(|value| value.trim()).collect::<Vec<_>>()".to_string())
+        emit::emit_expr(&lowered.expr),
+        "values.iter().map(|value| value.trim()).collect::<Vec<_>>()"
     );
+    assert!(matches!(
+        lowered.expr,
+        RustExpr::MethodCall { receiver, method, args }
+            if method == "collect::<Vec<_>>"
+                && args.is_empty()
+                && matches!(receiver.as_ref(), RustExpr::MethodCall { method, args, .. }
+                    if method == "map" && args.len() == 1)
+    ));
     assert!(matches!(
         lowered.actual,
         LoweredType::VecElementBorrow { .. }

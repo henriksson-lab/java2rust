@@ -3,13 +3,7 @@ use crate::switch_plan::{SwitchCaseLabelPlan, SwitchCasePlan, SwitchPlan};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SwitchRenderCase {
-    pub label_condition: String,
-    pub statements: Vec<RustStmt>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct SwitchMatchRenderCase {
-    pub patterns: Vec<String>,
+    pub label_condition: RustExpr,
     pub statements: Vec<RustStmt>,
 }
 
@@ -17,86 +11,108 @@ pub fn switch_case_condition(
     plan: &SwitchPlan<'_>,
     case_plan: &SwitchCasePlan,
     label_exprs: Vec<RustExpr>,
-) -> String {
+) -> RustExpr {
     if case_plan
         .labels
         .iter()
         .any(|label| matches!(label, SwitchCaseLabelPlan::Default))
     {
-        return format!("!{}", plan.matched_binding);
+        return switch_unmatched_expr(plan);
     }
     let comparisons = label_exprs
-        .iter()
-        .map(|expr| format!("{} == {}", plan.value_binding, crate::emit::emit_expr(expr)))
+        .into_iter()
+        .map(|expr| switch_value_equals_label_expr(plan, expr))
         .collect::<Vec<_>>();
-    if comparisons.is_empty() {
-        "false".to_string()
-    } else {
-        format!(
-            "!{} && ({})",
-            plan.matched_binding,
-            comparisons.join(" || ")
-        )
+    let Some(any_label_matches) = or_exprs(comparisons) else {
+        return RustExpr::Literal("false".to_string());
+    };
+    RustExpr::Binary {
+        op: "&&".to_string(),
+        left: Box::new(switch_unmatched_expr(plan)),
+        right: Box::new(RustExpr::Grouped(Box::new(any_label_matches))),
     }
 }
 
-pub fn render_switch(
+fn switch_unmatched_expr(plan: &SwitchPlan<'_>) -> RustExpr {
+    RustExpr::Unary {
+        op: "!".to_string(),
+        expr: Box::new(RustExpr::Var(plan.matched_binding.to_string())),
+    }
+}
+
+fn switch_value_equals_label_expr(plan: &SwitchPlan<'_>, label: RustExpr) -> RustExpr {
+    RustExpr::Binary {
+        op: "==".to_string(),
+        left: Box::new(RustExpr::Var(plan.value_binding.to_string())),
+        right: Box::new(label),
+    }
+}
+
+fn or_exprs(exprs: Vec<RustExpr>) -> Option<RustExpr> {
+    let mut exprs = exprs.into_iter();
+    let first = exprs.next()?;
+    Some(exprs.fold(first, |left, right| RustExpr::Binary {
+        op: "||".to_string(),
+        left: Box::new(left),
+        right: Box::new(right),
+    }))
+}
+
+pub fn lower_switch_block_stmts(
     plan: &SwitchPlan<'_>,
     selector: RustExpr,
     cases: Vec<SwitchRenderCase>,
     append_unreachable: bool,
-) -> String {
-    let mut out = String::new();
-    out.push_str("{\n");
-    out.push_str(&format!(
-        "    let {} = {};\n",
-        plan.value_binding,
-        crate::emit::emit_expr(&selector)
-    ));
-    out.push_str(&format!("    let mut {} = false;\n", plan.matched_binding));
-    out.push_str(&format!("    '{}: loop {{\n", plan.break_label));
+) -> Vec<RustStmt> {
+    let mut loop_body = Vec::new();
     for case in cases {
-        out.push_str(&format!("        if {} {{\n", case.label_condition));
-        out.push_str(&format!("            {} = true;\n", plan.matched_binding));
-        out.push_str("        }\n");
-        out.push_str(&format!("        if {} {{\n", plan.matched_binding));
-        out.push_str(&crate::emit::emit_statements(&case.statements, 3));
-        out.push_str("        }\n");
+        loop_body.push(RustStmt::If {
+            condition: case.label_condition,
+            then_body: vec![RustStmt::Assign {
+                target: RustExpr::Var(plan.matched_binding.to_string()),
+                value: RustExpr::Literal("true".to_string()),
+            }],
+            else_body: Vec::new(),
+        });
+        loop_body.push(RustStmt::If {
+            condition: RustExpr::Var(plan.matched_binding.to_string()),
+            then_body: case.statements,
+            else_body: Vec::new(),
+        });
     }
-    out.push_str(&format!("        break '{} ();\n", plan.break_label));
-    out.push_str("    }\n");
-    out.push_str("};");
+    loop_body.push(RustStmt::BreakValue {
+        label: Some(plan.break_label.to_string()),
+        value: RustExpr::Tuple(Vec::new()),
+    });
+    let mut out = vec![RustStmt::Expr(RustExpr::Block {
+        stmts: vec![
+            RustStmt::Let {
+                mutable: false,
+                name: plan.value_binding.to_string(),
+                ty: None,
+                value: Some(selector),
+            },
+            RustStmt::Let {
+                mutable: true,
+                name: plan.matched_binding.to_string(),
+                ty: None,
+                value: Some(RustExpr::Literal("false".to_string())),
+            },
+            RustStmt::Loop {
+                label: Some(plan.break_label.to_string()),
+                body: loop_body,
+            },
+        ],
+        tail: None,
+    })];
     if append_unreachable {
-        out.push_str("\n    unreachable!(\"Java switch completed without returning\");");
+        out.push(RustStmt::Expr(RustExpr::MacroCall {
+            macro_name: "unreachable".to_string(),
+            args: vec![RustExpr::Literal(
+                "\"Java switch completed without returning\"".to_string(),
+            )],
+        }));
     }
-    out
-}
-
-pub fn render_simple_return_match_switch(
-    selector: RustExpr,
-    cases: Vec<SwitchMatchRenderCase>,
-    default_statements: Option<Vec<RustStmt>>,
-) -> String {
-    let mut out = String::new();
-    out.push_str("match ");
-    out.push_str(&crate::emit::emit_expr(&selector));
-    out.push_str(" {\n");
-    for case in cases {
-        if case.patterns.is_empty() {
-            continue;
-        }
-        out.push_str("    ");
-        out.push_str(&case.patterns.join(" | "));
-        out.push_str(" => {\n");
-        out.push_str(&crate::emit::emit_statements(&case.statements, 2));
-        out.push_str("    }\n");
-    }
-    out.push_str("    _ => {\n");
-    if let Some(statements) = default_statements {
-        out.push_str(&crate::emit::emit_statements(&statements, 2));
-    }
-    out.push_str("    }\n");
-    out.push('}');
     out
 }
 

@@ -69,12 +69,44 @@ pub fn if_stmt(
     }
 }
 
+pub fn if_let_stmt(
+    pattern: impl Into<String>,
+    expr: RustExpr,
+    then_body: Vec<RustStmt>,
+    else_body: Vec<RustStmt>,
+) -> RustStmt {
+    RustStmt::IfLet {
+        pattern: pattern.into(),
+        expr,
+        then_body,
+        else_body,
+    }
+}
+
 pub fn while_stmt(condition: RustExpr, body: Vec<RustStmt>) -> RustStmt {
     RustStmt::While { condition, body }
 }
 
+pub fn while_let_stmt(
+    label: Option<String>,
+    pattern: impl Into<String>,
+    expr: RustExpr,
+    body: Vec<RustStmt>,
+) -> RustStmt {
+    RustStmt::WhileLet {
+        label,
+        pattern: pattern.into(),
+        expr,
+        body,
+    }
+}
+
 pub fn break_stmt(label: Option<String>) -> RustStmt {
     RustStmt::Break(label)
+}
+
+pub fn break_value_stmt(label: Option<String>, value: RustExpr) -> RustStmt {
+    RustStmt::BreakValue { label, value }
 }
 
 pub fn continue_stmt(label: Option<String>) -> RustStmt {
@@ -91,12 +123,17 @@ pub fn render_enhanced_for(
     body: &[RustStmt],
     label: Option<&str>,
 ) -> RustStmt {
-    let label = label.map(|label| format!("'{label}: ")).unwrap_or_default();
-    RustStmt::Raw(format!(
-        "{label}for {var_name} in {}.iter() {{\n{}\n}}",
-        crate::emit::emit_expr(iterable),
-        crate::emit::emit_statements(body, 1)
-    ))
+    let label = label.map(|label| label.to_string());
+    RustStmt::For {
+        label,
+        pattern: var_name.to_string(),
+        iterable: RustExpr::MethodCall {
+            receiver: Box::new(iterable.clone()),
+            method: "iter".to_string(),
+            args: Vec::new(),
+        },
+        body: body.to_vec(),
+    }
 }
 
 pub fn render_enhanced_for_iterator(
@@ -105,14 +142,18 @@ pub fn render_enhanced_for_iterator(
     body: &[RustStmt],
     label: Option<&str>,
 ) -> RustStmt {
-    let label = label.map(|label| format!("'{label}: ")).unwrap_or_default();
-    RustStmt::Raw(format!(
-        "{label}for {var_name} in {} {{\n{}\n}}",
-        crate::emit::emit_expr(iterator),
-        crate::emit::emit_statements(body, 1)
-    ))
+    let label = label.map(|label| label.to_string());
+    RustStmt::For {
+        label,
+        pattern: var_name.to_string(),
+        iterable: iterator.clone(),
+        body: body.to_vec(),
+    }
 }
 
 pub fn render_block_stmt(body: &[RustStmt]) -> RustStmt {
-    RustStmt::Raw(format!("{{\n{}\n}}", crate::emit::emit_statements(body, 1)))
+    RustStmt::Expr(RustExpr::Block {
+        stmts: body.to_vec(),
+        tail: None,
+    })
 }

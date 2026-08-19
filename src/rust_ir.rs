@@ -17,6 +17,7 @@ pub struct RustStruct {
     pub name: String,
     pub derives: Vec<String>,
     pub fields: Vec<RustField>,
+    pub is_unit: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -81,8 +82,23 @@ pub enum RustType {
     Array2(Box<RustType>),
     Slice(Box<RustType>),
     Option(Box<RustType>),
+    Generic {
+        base: String,
+        args: Vec<RustType>,
+    },
+    Tuple(Vec<RustType>),
+    FnPointer {
+        params: Vec<RustType>,
+        return_type: Box<RustType>,
+    },
+    DynTrait(String),
+    ImplTrait(String),
     Named(String),
-    Ref { mutable: bool, inner: Box<RustType> },
+    Ref {
+        mutable: bool,
+        lifetime: Option<String>,
+        inner: Box<RustType>,
+    },
     Raw(String),
 }
 
@@ -98,6 +114,11 @@ pub enum RustStmt {
         target: RustExpr,
         value: RustExpr,
     },
+    AssignOp {
+        target: RustExpr,
+        op: String,
+        value: RustExpr,
+    },
     Expr(RustExpr),
     Return(Option<RustExpr>),
     If {
@@ -105,8 +126,26 @@ pub enum RustStmt {
         then_body: Vec<RustStmt>,
         else_body: Vec<RustStmt>,
     },
+    IfLet {
+        pattern: String,
+        expr: RustExpr,
+        then_body: Vec<RustStmt>,
+        else_body: Vec<RustStmt>,
+    },
     While {
         condition: RustExpr,
+        body: Vec<RustStmt>,
+    },
+    WhileLet {
+        label: Option<String>,
+        pattern: String,
+        expr: RustExpr,
+        body: Vec<RustStmt>,
+    },
+    For {
+        label: Option<String>,
+        pattern: String,
+        iterable: RustExpr,
         body: Vec<RustStmt>,
     },
     Loop {
@@ -114,6 +153,10 @@ pub enum RustStmt {
         body: Vec<RustStmt>,
     },
     Break(Option<String>),
+    BreakValue {
+        label: Option<String>,
+        value: RustExpr,
+    },
     Continue(Option<String>),
     Raw(String),
 }
@@ -123,12 +166,26 @@ pub enum RustExpr {
     Literal(String),
     Var(String),
     Path(Vec<String>),
+    GenericPath {
+        base: Vec<String>,
+        args: Vec<RustType>,
+        member: Option<String>,
+    },
+    TypeAssociatedPath {
+        ty: RustType,
+        member: String,
+    },
     Field(Box<RustExpr>, String),
     Index(Box<RustExpr>, Box<RustExpr>),
     Binary {
         op: String,
         left: Box<RustExpr>,
         right: Box<RustExpr>,
+    },
+    Range {
+        start: Box<RustExpr>,
+        end: Box<RustExpr>,
+        inclusive: bool,
     },
     Unary {
         op: String,
@@ -138,6 +195,8 @@ pub enum RustExpr {
         expr: Box<RustExpr>,
         ty: String,
     },
+    Try(Box<RustExpr>),
+    Grouped(Box<RustExpr>),
     If {
         condition: Box<RustExpr>,
         then_expr: Box<RustExpr>,
@@ -154,14 +213,41 @@ pub enum RustExpr {
         function: Box<RustExpr>,
         args: Vec<RustExpr>,
     },
+    MacroCall {
+        macro_name: String,
+        args: Vec<RustExpr>,
+    },
     MethodCall {
         receiver: Box<RustExpr>,
         method: String,
         args: Vec<RustExpr>,
     },
+    Closure {
+        is_move: bool,
+        params: Vec<RustClosureParam>,
+        return_type: Option<RustType>,
+        body: RustClosureBody,
+    },
+    Pattern(RustPattern),
+    Match {
+        expr: Box<RustExpr>,
+        arms: Vec<RustMatchArm>,
+    },
+    Block {
+        stmts: Vec<RustStmt>,
+        tail: Option<Box<RustExpr>>,
+    },
     StructLit {
         name: String,
         fields: Vec<(String, RustExpr)>,
+    },
+    PostfixComment {
+        expr: Box<RustExpr>,
+        comment: String,
+    },
+    UnsupportedJavaArrayCreation {
+        element_type: String,
+        dimensions: Vec<RustExpr>,
     },
     MarkedBlock {
         marker: String,
@@ -197,6 +283,35 @@ pub enum RustExpr {
         actual: Option<Box<crate::slot_shape::RustSlotShape>>,
         expr: Box<RustExpr>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RustClosureParam {
+    /// Rust pattern text. This is deliberately not restricted to identifiers:
+    /// closures commonly bind tuple patterns such as `|(k, v)|`.
+    pub pattern: String,
+    pub ty: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RustClosureBody {
+    Expr(Box<RustExpr>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RustPattern {
+    TupleVariantWildcard {
+        enum_name: String,
+        variant_name: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RustMatchArm {
+    /// Rust pattern text. This keeps pattern syntax at the leaf while the
+    /// scrutinee and arm bodies stay structured expressions.
+    pub pattern: String,
+    pub body: RustExpr,
 }
 
 /// What an adapter turned an expression into.
@@ -236,6 +351,19 @@ impl RustExpr {
         S: Into<String>,
     {
         RustExpr::Path(segments.into_iter().map(Into::into).collect())
+    }
+
+    pub fn generic_path<I, S, M>(base: I, args: Vec<RustType>, member: Option<M>) -> RustExpr
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+        M: Into<String>,
+    {
+        RustExpr::GenericPath {
+            base: base.into_iter().map(Into::into).collect(),
+            args,
+            member: member.map(Into::into),
+        }
     }
 
     /// Tag an expression with what an adapter made it. Re-tagging replaces the

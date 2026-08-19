@@ -1,7 +1,10 @@
 use std::collections::BTreeSet;
 
 use crate::coercion::OptionalReceiverProjection;
-use crate::conversion_plan::{LoweredType, Slot, argument_slot, index_slot};
+use crate::conversion_plan::{
+    LoweredSlotExprConversionPlan, LoweredType, Slot, argument_slot, index_slot,
+    plan_lowered_slot_conversion, receiver_method_autoref_satisfies_optional_slot,
+};
 use crate::effective_facts::EffectiveFacts;
 use crate::facts::{
     AccessorInlinePolicy, CallableKey, ExternalApiArgumentEffectFact, ExternalApiRole,
@@ -239,6 +242,12 @@ pub struct OptionalReceiverSlotPlan {
     pub element_ownership: OwnershipShape,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OptionalReceiverSlotProjectionPlan {
+    pub element_shape: Option<RustSlotShape>,
+    pub conversion: Option<LoweredSlotExprConversionPlan>,
+}
+
 impl OptionalReceiverSlotPlan {
     pub fn optional_element_borrow_type(&self, option_shape: RustSlotShape) -> Option<LoweredType> {
         let target_shape = match &self.slot {
@@ -251,6 +260,50 @@ impl OptionalReceiverSlotPlan {
             Some(self.element_ownership),
             &FactSet::default(),
         )
+    }
+
+    pub fn projection_plan_for_option_shape(
+        &self,
+        option_shape: RustSlotShape,
+        facts: &FactSet,
+    ) -> OptionalReceiverSlotProjectionPlan {
+        let target_shape = match &self.slot {
+            Slot::Assignment(shape) | Slot::Return(shape) | Slot::Argument(shape) => shape,
+            _ => {
+                return OptionalReceiverSlotProjectionPlan {
+                    element_shape: None,
+                    conversion: None,
+                };
+            }
+        };
+        let Some(actual) = LoweredType::optional_element_borrow_from_option_shape(
+            option_shape,
+            target_shape.java_ty.clone(),
+            Some(self.element_ownership),
+            facts,
+        ) else {
+            return OptionalReceiverSlotProjectionPlan {
+                element_shape: None,
+                conversion: None,
+            };
+        };
+        let LoweredType::OptionalElementBorrow { element_shape, .. } = &actual else {
+            return OptionalReceiverSlotProjectionPlan {
+                element_shape: None,
+                conversion: None,
+            };
+        };
+        let element_shape = (**element_shape).clone();
+        let conversion = plan_lowered_slot_conversion(&actual, self.slot.clone(), facts);
+        let conversion = if receiver_method_autoref_satisfies_optional_slot(&conversion) {
+            None
+        } else {
+            Some(conversion)
+        };
+        OptionalReceiverSlotProjectionPlan {
+            element_shape: Some(element_shape),
+            conversion,
+        }
     }
 }
 
@@ -3549,7 +3602,19 @@ fn plan_native_java_static_call<'a>(
     let Some(Expr::Var(receiver_name)) = receiver else {
         return None;
     };
+    if !receiver_is_native_static_owner(receiver_name, types) {
+        return None;
+    }
     plan_native_java_static_owner_call(receiver_name, name, args, types)
+}
+
+fn receiver_is_native_static_owner(receiver_name: &str, types: &TypeEnv) -> bool {
+    types.static_type_alias(receiver_name).is_some()
+        || receiver_name
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_uppercase())
+        || receiver_name.contains('.')
 }
 
 fn plan_native_java_static_owner_call<'a>(

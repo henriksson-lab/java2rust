@@ -1,17 +1,17 @@
 use crate::coercion::{
-    AssociatedFunctionMethodReferenceProjection,
-    associated_function_method_reference_body_projection, current_receiver_method_call_projection,
-    current_receiver_method_reference_projection, facade_receiver_method_call_projection,
-    function_call_projection, owner_associated_path_projection, receiver_method_call_projection,
-    typed_single_input_callback_projection, unbound_method_call_projection,
-    unbound_method_reference_projection,
+    AssociatedFunctionMethodReferenceProjection, associated_function_method_reference_body_expr,
+    current_receiver_method_call_projection, current_receiver_method_reference_projection,
+    facade_receiver_method_call_projection, function_call_projection,
+    owner_associated_path_projection, receiver_method_call_projection,
+    rendered_projection_or_raw_leaf, typed_single_input_callback_expr,
+    unbound_method_call_projection, unbound_method_reference_projection,
 };
 use crate::emit;
 use crate::facts::{CallableKey, FacadeSlot, FactSet, ReceiverAbi, ResultAbi, Staticness};
 use crate::java_ir::JavaType;
-use crate::method_reference_plan::MethodReferencePlan;
+use crate::method_reference_plan::{BoundMethodReferenceReceiver, MethodReferencePlan};
 use crate::method_reference_shape::method_reference_receiver_type_for_call_plan_with_facts;
-use crate::rust_ir::RustExpr;
+use crate::rust_ir::{RustClosureBody, RustClosureParam, RustExpr};
 use crate::slot_shape::RustSlotShape;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,12 +64,12 @@ pub fn render_method_reference(plan: &MethodReferencePlan) -> RustExpr {
         }
         MethodReferencePlan::AssociatedFunction { owner, method } => {
             if owner == "Objects" && method == "non_null" {
-                return RustExpr::Raw("|_value| true".to_string());
+                return always_true_method_reference_closure_leaf();
             }
             owner_associated_path_projection(owner, method)
         }
         MethodReferencePlan::BoundReceiver { receiver, method } => {
-            RustExpr::Raw(format!("|value| {receiver}.{method}(value)"))
+            bound_receiver_method_reference_closure_leaf(receiver, method)
         }
         MethodReferencePlan::UnboundAccessor { method } => {
             unbound_method_reference_projection(method)
@@ -80,23 +80,53 @@ pub fn render_method_reference(plan: &MethodReferencePlan) -> RustExpr {
     }
 }
 
+fn always_true_method_reference_closure_leaf() -> RustExpr {
+    method_reference_closure_expr("_value", RustExpr::Literal("true".to_string()))
+}
+
+fn bound_receiver_method_reference_closure_leaf(
+    receiver: &BoundMethodReferenceReceiver,
+    method: &str,
+) -> RustExpr {
+    method_reference_closure_expr(
+        "value",
+        RustExpr::MethodCall {
+            receiver: Box::new(bound_method_reference_receiver_expr(receiver)),
+            method: method.to_string(),
+            args: vec![RustExpr::Var("value".to_string())],
+        },
+    )
+}
+
+fn bound_method_reference_receiver_expr(receiver: &BoundMethodReferenceReceiver) -> RustExpr {
+    match receiver {
+        BoundMethodReferenceReceiver::Local(name) => RustExpr::Var(name.clone()),
+        BoundMethodReferenceReceiver::InstanceField(name) => {
+            crate::coercion::self_field_projection(name)
+        }
+    }
+}
+
+fn method_reference_closure_expr(param_name: &str, body: RustExpr) -> RustExpr {
+    RustExpr::Closure {
+        is_move: false,
+        return_type: None,
+        params: vec![RustClosureParam {
+            pattern: param_name.to_string(),
+            ty: None,
+        }],
+        body: RustClosureBody::Expr(Box::new(body)),
+    }
+}
+
 pub fn render_typed_single_input_method_reference_callback(
     plan: &MethodReferencePlan,
     param_type: &str,
 ) -> RustExpr {
-    match plan {
-        MethodReferencePlan::AssociatedFunction { .. } => {
-            let body = render_single_input_method_reference_body(plan, "value", "value");
-            typed_single_input_callback_projection(param_type, &body)
-        }
-        MethodReferencePlan::BoundReceiver { .. }
-        | MethodReferencePlan::UnboundAccessor { .. }
-        | MethodReferencePlan::CurrentReceiverMethod { .. }
-        | MethodReferencePlan::Constructor { .. } => {
-            let body = render_single_input_method_reference_body(plan, "value", "value");
-            typed_single_input_callback_projection(param_type, &body)
-        }
-    }
+    typed_single_input_callback_expr(
+        param_type,
+        single_input_method_reference_body_projection(plan, "value", "value"),
+    )
 }
 
 pub fn render_typed_single_input_method_reference_callback_with_facts(
@@ -105,14 +135,14 @@ pub fn render_typed_single_input_method_reference_callback_with_facts(
     input_shape: &RustSlotShape,
     facts: &FactSet,
 ) -> RustExpr {
-    let body = render_single_input_method_reference_body_with_facts(
+    let body = single_input_method_reference_body_projection_with_facts(
         plan,
         "value",
         "value",
         input_shape,
         facts,
     );
-    typed_single_input_callback_projection(param_type, &body)
+    typed_single_input_callback_expr(param_type, body)
 }
 
 pub fn render_single_input_method_reference_body(
@@ -120,34 +150,48 @@ pub fn render_single_input_method_reference_body(
     receiver: &str,
     value_expr: &str,
 ) -> String {
+    emit::emit_expr(&single_input_method_reference_body_projection(
+        plan, receiver, value_expr,
+    ))
+}
+
+pub fn single_input_method_reference_body_projection(
+    plan: &MethodReferencePlan,
+    receiver: &str,
+    value_expr: &str,
+) -> RustExpr {
     match plan {
-        MethodReferencePlan::Constructor { type_name } => {
-            emit::emit_expr(&function_call_projection(
-                owner_associated_path_projection(type_name, "new"),
-                vec![RustExpr::Raw(receiver.to_string())],
-            ))
-        }
+        MethodReferencePlan::Constructor { type_name } => function_call_projection(
+            owner_associated_path_projection(type_name, "new"),
+            vec![method_reference_operand_expr(receiver)],
+        ),
         MethodReferencePlan::AssociatedFunction { owner, method } => {
-            render_associated_function_method_reference_body(owner, method, receiver, value_expr)
+            associated_function_method_reference_body_projection(
+                owner, method, receiver, value_expr,
+            )
         }
         MethodReferencePlan::BoundReceiver {
             receiver: bound_receiver,
             method,
-        } => emit::emit_expr(&receiver_method_call_projection(
-            RustExpr::Raw(bound_receiver.to_string()),
+        } => receiver_method_call_projection(
+            bound_method_reference_receiver_expr(bound_receiver),
             method,
-            vec![RustExpr::Raw(value_expr.to_string())],
-        )),
-        MethodReferencePlan::UnboundAccessor { method } => emit::emit_expr(
-            &unbound_method_call_projection(RustExpr::Raw(receiver.to_string()), method),
+            vec![method_reference_operand_expr(value_expr)],
         ),
+        MethodReferencePlan::UnboundAccessor { method } => {
+            unbound_method_call_projection(method_reference_operand_expr(receiver), method)
+        }
         MethodReferencePlan::CurrentReceiverMethod { method, .. } => {
-            emit::emit_expr(&current_receiver_method_call_projection(
+            current_receiver_method_call_projection(
                 method,
-                vec![RustExpr::Raw(receiver.to_string())],
-            ))
+                vec![method_reference_operand_expr(receiver)],
+            )
         }
     }
+}
+
+fn method_reference_operand_expr(rendered: &str) -> RustExpr {
+    rendered_projection_or_raw_leaf(rendered)
 }
 
 pub fn render_single_input_method_reference_body_with_facts(
@@ -159,20 +203,36 @@ pub fn render_single_input_method_reference_body_with_facts(
 ) -> String {
     if let MethodReferencePlan::AssociatedFunction { owner, method } = plan
         && let Some(body) =
-            render_facade_abi_method_reference_body(owner, method, receiver, input_shape, facts)
+            facade_abi_method_reference_body_projection(owner, method, receiver, input_shape, facts)
     {
-        return body;
+        return emit::emit_expr(&body);
     }
     render_single_input_method_reference_body(plan, receiver, value_expr)
 }
 
-fn render_associated_function_method_reference_body(
+pub fn single_input_method_reference_body_projection_with_facts(
+    plan: &MethodReferencePlan,
+    receiver: &str,
+    value_expr: &str,
+    input_shape: &RustSlotShape,
+    facts: &FactSet,
+) -> RustExpr {
+    if let MethodReferencePlan::AssociatedFunction { owner, method } = plan
+        && let Some(body) =
+            facade_abi_method_reference_body_projection(owner, method, receiver, input_shape, facts)
+    {
+        return body;
+    }
+    single_input_method_reference_body_projection(plan, receiver, value_expr)
+}
+
+fn associated_function_method_reference_body_projection(
     owner: &str,
     method: &str,
     receiver: &str,
     value_expr: &str,
-) -> String {
-    associated_function_method_reference_body_projection(
+) -> RustExpr {
+    associated_function_method_reference_body_expr(
         associated_function_method_reference_body_plan(owner, method).projection(),
         owner,
         method,
@@ -181,26 +241,26 @@ fn render_associated_function_method_reference_body(
     )
 }
 
-fn render_facade_abi_method_reference_body(
+fn facade_abi_method_reference_body_projection(
     owner: &str,
     method: &str,
     receiver: &str,
     input_shape: &RustSlotShape,
     facts: &FactSet,
-) -> Option<String> {
+) -> Option<RustExpr> {
     let abi = method_reference_facade_abi(owner, method, input_shape, facts)?;
     match abi.receiver {
         ReceiverAbi::AssociatedFunction => match abi.rust_path.as_str() {
-            "Option::is_some" => Some(emit::emit_expr(&receiver_method_call_projection(
-                RustExpr::Raw(receiver.to_string()),
+            "Option::is_some" => Some(receiver_method_call_projection(
+                method_reference_operand_expr(receiver),
                 "is_some",
                 Vec::new(),
-            ))),
-            "Option::is_none" => Some(emit::emit_expr(&receiver_method_call_projection(
-                RustExpr::Raw(receiver.to_string()),
+            )),
+            "Option::is_none" => Some(receiver_method_call_projection(
+                method_reference_operand_expr(receiver),
                 "is_none",
                 Vec::new(),
-            ))),
+            )),
             _ => None,
         },
         ReceiverAbi::BorrowedSelf | ReceiverAbi::MutBorrowedSelf | ReceiverAbi::OwnedSelf
@@ -208,11 +268,11 @@ fn render_facade_abi_method_reference_body(
                 && abi.return_slot == FacadeSlot::Owned
                 && abi.result == ResultAbi::Plain =>
         {
-            Some(emit::emit_expr(&facade_receiver_method_call_projection(
-                RustExpr::Raw(receiver.to_string()),
+            Some(facade_receiver_method_call_projection(
+                method_reference_operand_expr(receiver),
                 &abi.rust_path,
                 Vec::new(),
-            )))
+            ))
         }
         ReceiverAbi::FreeFunction => None,
         _ => None,
