@@ -1,7 +1,8 @@
 use crate::coercion::{
     Coercion, apply_coercions, function_call_projection, java_update_expression_projection,
     logical_not_projection, optional_string_view_projection, receiver_method_call_projection_exact,
-    recover_parseable_raw_operand_projection, shared_borrow_expr, string_equality_operand_projection,
+    recover_parseable_raw_operand_projection, shared_borrow_expr,
+    string_equality_operand_projection,
 };
 use crate::facts::FactSet;
 use crate::java_ir::{BinaryOp, JavaType, PrimitiveType, UnaryOp};
@@ -272,9 +273,7 @@ fn checked_java_integer_div_rem_block_leaf(
             else_expr: Box::new(function_call_projection(
                 RustExpr::path(["Ok"]),
                 vec![receiver_method_call_projection_exact(
-                    RustExpr::Grouped(Box::new(RustExpr::Var(
-                        "__java_left".to_string(),
-                    ))),
+                    RustExpr::Grouped(Box::new(RustExpr::Var("__java_left".to_string()))),
                     method,
                     vec![RustExpr::Var("__java_right".to_string())],
                 )],
@@ -470,7 +469,11 @@ pub fn lower_null_comparison_expr(
         NullComparisonMethod::IsNone => "is_none",
         NullComparisonMethod::IsSome => "is_some",
     };
-    Some(receiver_method_call_projection_exact(value, method, Vec::new()))
+    Some(receiver_method_call_projection_exact(
+        value,
+        method,
+        Vec::new(),
+    ))
 }
 
 impl EqualityComparisonPlan {

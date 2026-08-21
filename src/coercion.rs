@@ -3935,7 +3935,11 @@ pub fn primitive_f64_binary_method_projection(
     right: RustExpr,
     method: &str,
 ) -> RustExpr {
-    method_call_projection(f64_cast_projection(left), method, vec![f64_cast_projection(right)])
+    method_call_projection(
+        f64_cast_projection(left),
+        method,
+        vec![f64_cast_projection(right)],
+    )
 }
 
 pub fn math_pow_projection(base: RustExpr, exponent: RustExpr) -> RustExpr {
@@ -4379,7 +4383,10 @@ pub fn arrays_equals_projection(left: RustExpr, right: RustExpr) -> RustExpr {
 }
 
 pub fn arrays_deep_equals_projection(left: RustExpr, right: RustExpr) -> RustExpr {
-    function_call_projection(RustExpr::path(["java_arrays_deep_equals"]), vec![left, right])
+    function_call_projection(
+        RustExpr::path(["java_arrays_deep_equals"]),
+        vec![left, right],
+    )
 }
 
 pub fn arrays_deep_hash_code_projection(source: RustExpr) -> RustExpr {
@@ -14465,8 +14472,9 @@ mod tests {
             RustExpr::Call { function, args }
                 if matches!(function.as_ref(), RustExpr::Path(path)
                     if path == &vec!["pkg".to_string(), "Outer::<T>".to_string(), "new_1".to_string()])
-                    && matches!(args.as_slice(), [RustExpr::MethodCall { method, .. }]
-                        if method == "clone")
+                    && matches!(args.as_slice(), [arg]
+                        if matches!(arg.unshaped(), RustExpr::MethodCall { method, .. }
+                            if method == "clone"))
         ));
         assert_eq!(
             emit::emit_expr(&static_storage_accessor_projection("VALUES")),

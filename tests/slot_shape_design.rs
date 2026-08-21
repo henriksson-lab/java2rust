@@ -34139,7 +34139,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         .and_then(|tail| tail.split("fn no_op_stream_terminal_method").next())
         .expect("no-op stream structured renderer should remain discoverable");
     assert!(no_op_stream_source.contains("sequence_iteration_source_projection"));
-    assert!(no_op_stream_source.contains("RustExpr::MethodCall"));
+    assert!(no_op_stream_source.contains("receiver_method_call_projection_exact"));
     assert!(no_op_stream_source.contains("stream_terminal_actual_after_rendered_ops"));
     assert!(
         !no_op_stream_source.contains("emit::emit_expr"),
@@ -39958,10 +39958,10 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         .and_then(|tail| tail.split("fn stream_join_delimiter_projection").next())
         .expect("stream join item display helper should remain discoverable");
     assert!(
-        stream_join_item_display_source.contains("RustExpr::MethodCall")
+        stream_join_item_display_source.contains("receiver_method_call_projection_exact")
             && stream_join_item_display_source.contains("RustExpr::Closure")
             && stream_join_item_display_source.contains("RustExpr::Var(\"item\".to_string())")
-            && stream_join_item_display_source.contains("method: \"to_string\".to_string()")
+            && stream_join_item_display_source.contains("\"to_string\"")
             && !stream_join_item_display_source
                 .contains("item.as_ref().map(|value| value.to_string()).unwrap_or_else(||")
             && !stream_join_item_display_source

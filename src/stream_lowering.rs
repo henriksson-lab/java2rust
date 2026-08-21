@@ -7,10 +7,11 @@ use crate::coercion::{
     function_call_projection, index_to_usize_projection, indexed_access_projection,
     len_i32_projection, nullable_stream_map_body_projection,
     optional_non_null_filter_map_projection, owner_associated_path_projection,
-    receiver_method_call_projection, rust_string_literal_projection,
-    self_associated_path_projection, sequence_iteration_source_projection,
-    stream_collect_to_map_projection, stream_filter_op_projection, stream_flat_map_op_projection,
-    stream_join_terminal_projection, stream_lambda_argument_slot_plan, stream_lambda_param_expr,
+    receiver_method_call_projection, receiver_method_call_projection_exact,
+    rust_string_literal_projection, self_associated_path_projection,
+    sequence_iteration_source_projection, stream_collect_to_map_projection,
+    stream_filter_op_projection, stream_flat_map_op_projection, stream_join_terminal_projection,
+    stream_lambda_argument_slot_plan, stream_lambda_param_expr,
     stream_map_op_projection_with_param, stream_match_terminal_projection,
     stream_prefixed_flat_map_op_projection, stream_reduce_terminal_projection,
 };
@@ -1051,11 +1052,8 @@ fn render_stream_terminal_expr(
             ))
         }
         StreamTerminal::Collect(crate::stdlib::JavaCollectionKind::Map) => None,
-        _ => no_op_stream_terminal_method(&plan.terminal).map(|method| RustExpr::MethodCall {
-            receiver: Box::new(receiver),
-            method: method.to_string(),
-            args: Vec::new(),
-        }),
+        _ => no_op_stream_terminal_method(&plan.terminal)
+            .map(|method| receiver_method_call_projection_exact(receiver, method, Vec::new())),
     }
 }
 
@@ -1076,11 +1074,7 @@ fn render_no_op_stream_plan_structured(
     let item_shape = plan.source_element.shape.clone();
     let actual = stream_terminal_actual_after_rendered_ops(plan, item_is_borrowed, &item_shape);
     Some(LoweredExpr {
-        expr: RustExpr::MethodCall {
-            receiver: Box::new(iter),
-            method: terminal_method.to_string(),
-            args: Vec::new(),
-        },
+        expr: receiver_method_call_projection_exact(iter, terminal_method, Vec::new()),
         actual,
     })
 }
@@ -1300,47 +1294,53 @@ fn render_stream_sub_pipeline_expr(
 
 fn stream_join_item_display_projection(item_shape: &RustSlotShape) -> RustExpr {
     if item_shape.optional_element_type().is_some() {
-        RustExpr::MethodCall {
-            receiver: Box::new(RustExpr::MethodCall {
-                receiver: Box::new(RustExpr::MethodCall {
-                    receiver: Box::new(RustExpr::Var("item".to_string())),
-                    method: "as_ref".to_string(),
-                    args: Vec::new(),
-                }),
-                method: "map".to_string(),
-                args: vec![RustExpr::Closure {
-                    is_move: false,
-                    return_type: None,
-                    params: vec![RustClosureParam {
-                        pattern: "value".to_string(),
-                        ty: None,
-                    }],
-                    body: RustClosureBody::Expr(Box::new(RustExpr::MethodCall {
-                        receiver: Box::new(RustExpr::Var("value".to_string())),
-                        method: "to_string".to_string(),
-                        args: Vec::new(),
-                    })),
-                }],
-            }),
-            method: "unwrap_or_else".to_string(),
-            args: vec![RustExpr::Closure {
-                is_move: false,
-                return_type: None,
-                params: Vec::new(),
-                body: RustClosureBody::Expr(Box::new(RustExpr::MethodCall {
-                    receiver: Box::new(RustExpr::Literal("\"null\"".to_string())),
-                    method: "to_string".to_string(),
-                    args: Vec::new(),
-                })),
-            }],
-        }
+        optional_stream_join_item_display_projection()
     } else {
-        RustExpr::MethodCall {
-            receiver: Box::new(RustExpr::Var("item".to_string())),
-            method: "to_string".to_string(),
-            args: Vec::new(),
-        }
+        receiver_method_call_projection_exact(
+            RustExpr::Var("item".to_string()),
+            "to_string",
+            Vec::new(),
+        )
     }
+}
+
+fn optional_stream_join_item_display_projection() -> RustExpr {
+    let as_ref = receiver_method_call_projection_exact(
+        RustExpr::Var("item".to_string()),
+        "as_ref",
+        Vec::new(),
+    );
+    let mapped = receiver_method_call_projection_exact(
+        as_ref,
+        "map",
+        vec![RustExpr::Closure {
+            is_move: false,
+            return_type: None,
+            params: vec![RustClosureParam {
+                pattern: "value".to_string(),
+                ty: None,
+            }],
+            body: RustClosureBody::Expr(Box::new(receiver_method_call_projection_exact(
+                RustExpr::Var("value".to_string()),
+                "to_string",
+                Vec::new(),
+            ))),
+        }],
+    );
+    receiver_method_call_projection_exact(
+        mapped,
+        "unwrap_or_else",
+        vec![RustExpr::Closure {
+            is_move: false,
+            return_type: None,
+            params: Vec::new(),
+            body: RustClosureBody::Expr(Box::new(receiver_method_call_projection_exact(
+                RustExpr::Literal("\"null\"".to_string()),
+                "to_string",
+                Vec::new(),
+            ))),
+        }],
+    )
 }
 
 fn stream_join_delimiter_projection(
@@ -1878,9 +1878,11 @@ fn emit_stream_lambda_stmt_structured(
                                 param_shape,
                             )
                         })
-                        .unwrap_or_else(|| RustExpr::Call {
-                            function: Box::new(RustExpr::path(["Default", "default"])),
-                            args: Vec::new(),
+                        .unwrap_or_else(|| {
+                            function_call_projection(
+                                RustExpr::path(["Default", "default"]),
+                                Vec::new(),
+                            )
                         }),
                 ),
             })
