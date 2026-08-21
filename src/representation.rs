@@ -68,6 +68,12 @@ pub struct RepresentationDispatchPolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JavaEnumVariantPath {
+    pub enum_name: String,
+    pub variant_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepresentationHierarchyFactPolicy {
     pub java_ty: JavaType,
     pub extends: Option<String>,
@@ -294,7 +300,11 @@ impl RepresentationPlan {
         representation_dispatch_policy(self.representation_for(java_ty)).dispatch
     }
 
-    pub fn java_enum_variant_for_label(&self, type_name: &str, label_name: &str) -> Option<String> {
+    pub fn java_enum_variant_path_for_label(
+        &self,
+        type_name: &str,
+        label_name: &str,
+    ) -> Option<JavaEnumVariantPath> {
         let representation = self.type_representation(type_name)?;
         let ObjectRepresentation::JavaEnum {
             enum_name,
@@ -308,7 +318,10 @@ impl RepresentationPlan {
         variants
             .iter()
             .any(|known| known == &variant)
-            .then(|| format!("{rust_enum_name}::{variant}"))
+            .then(|| JavaEnumVariantPath {
+                enum_name: rust_enum_name,
+                variant_name: variant,
+            })
     }
 
     fn unique_type_representation_by_simple_name(

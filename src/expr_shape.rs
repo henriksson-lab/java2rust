@@ -1063,7 +1063,7 @@ fn source_java_enum_static_field_shape(
         .into_iter()
         .find_map(|owner| {
             representations
-                .java_enum_variant_for_label(&owner, field)
+                .java_enum_variant_path_for_label(&owner, field)
                 .map(|_| {
                     project_java_value_shape_with_representations(
                         Some(representations),

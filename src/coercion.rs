@@ -64,9 +64,7 @@ pub enum BorrowedStringViewProjection {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BorrowedStringLiteralTemporaryPlan {
-    pub replacement_expr: String,
     pub replacement: RustExpr,
-    pub initializer_expr: String,
     pub initializer: RustExpr,
 }
 
@@ -758,7 +756,7 @@ pub fn apply_shape_coercion_plan(expr: RustExpr, plan: &ShapeCoercionPlan) -> Ru
             }
             let mapped_value =
                 apply_shape_coercion_plan(RustExpr::Var("value".to_string()), element_plan);
-            return render_optional_element_projection(expr, mapped_value, &element_plan.target);
+            return optional_element_projection(expr, mapped_value, &element_plan.target);
         }
         OptionalShapeCoercionPolicy::NoChange => {}
     }
@@ -832,7 +830,7 @@ fn borrowed_set_slice_temporary_vec_view_projection(expr: RustExpr) -> RustExpr 
     ))
 }
 
-fn render_optional_element_projection(
+fn optional_element_projection(
     expr: RustExpr,
     mapped_value: RustExpr,
     target_element: &RustSlotShape,
@@ -859,21 +857,13 @@ fn render_optional_element_projection(
         }
         OptionalMappedValueProjection::SliceView => {
             return optional_projected_structured_expr(
-                RustExpr::MethodCall {
-                    receiver: Box::new(expr),
-                    method: "as_deref".to_string(),
-                    args: Vec::new(),
-                },
+                zero_arg_method_projection(expr, "as_deref"),
                 target_element,
             );
         }
         OptionalMappedValueProjection::MutableSliceView => {
             return optional_projected_structured_expr(
-                RustExpr::MethodCall {
-                    receiver: Box::new(expr),
-                    method: "as_deref_mut".to_string(),
-                    args: Vec::new(),
-                },
+                zero_arg_method_projection(expr, "as_deref_mut"),
                 target_element,
             );
         }
@@ -1169,7 +1159,7 @@ fn apply_optional_slot_construction(
         expr,
         &plan.element_plan,
     ));
-    render_option_some(expr)
+    option_some_projection(expr)
 }
 
 fn normalize_optional_constructed_element_expr(expr: RustExpr) -> RustExpr {
@@ -1192,17 +1182,21 @@ fn normalize_optional_constructed_element_expr(expr: RustExpr) -> RustExpr {
         return inner.as_ref().clone();
     }
     if let RustExpr::Raw(rendered) = expr.unshaped() {
-        if let Some(inner) = rendered
-            .strip_prefix('&')
-            .and_then(|value| value.strip_suffix(".as_str()"))
-        {
-            return string_view_expr(zero_arg_method_projection(
-                rendered_projection_or_raw_leaf(inner),
-                "as_str",
-            ));
+        if let Some(recovered) = recover_raw_optional_constructed_string_view_element(rendered) {
+            return recovered;
         }
     }
     expr
+}
+
+fn recover_raw_optional_constructed_string_view_element(rendered: &str) -> Option<RustExpr> {
+    let inner = rendered
+        .strip_prefix('&')
+        .and_then(|value| value.strip_suffix(".as_str()"))?;
+    Some(string_view_expr(zero_arg_method_projection(
+        rendered_projection_or_raw_leaf(inner),
+        "as_str",
+    )))
 }
 
 pub fn normalize_optional_constructed_string_view_expr(expr: RustExpr) -> RustExpr {
@@ -1216,23 +1210,6 @@ pub fn normalize_optional_constructed_string_view_expr(expr: RustExpr) -> RustEx
             };
         }
         return RustExpr::Call { function, args };
-    }
-    if let RustExpr::Raw(rendered) = expr.unshaped() {
-        if let Some(inner) = rendered
-            .strip_prefix("Some(&")
-            .and_then(|value| value.strip_suffix(".as_str())"))
-        {
-            return RustExpr::shaped(
-                RustExprShape::OptionalConstructed,
-                RustExpr::Call {
-                    function: Box::new(RustExpr::path(["Some"])),
-                    args: vec![string_view_expr(zero_arg_method_projection(
-                        rendered_projection_or_raw_leaf(inner),
-                        "as_str",
-                    ))],
-                },
-            );
-        }
     }
     expr
 }
@@ -1271,7 +1248,11 @@ fn rust_expr_is_single_segment_name(expr: &RustExpr, expected: &str) -> bool {
 }
 
 fn unwrap_rendered_some_raw_expr(rendered: &str) -> Option<RustExpr> {
-    rendered_complete_some_call_inner(rendered).map(rendered_projection_or_raw_leaf)
+    rendered_complete_some_call_inner(rendered).map(rendered_some_inner_projection)
+}
+
+fn rendered_some_inner_projection(inner: &str) -> RustExpr {
+    rendered_plus_expr_projection_or_raw_leaf(inner)
 }
 
 fn rendered_complete_some_call_inner(rendered: &str) -> Option<&str> {
@@ -1367,7 +1348,7 @@ fn rendered_expr_is_constructed_optional_value(rendered: &str) -> bool {
 }
 
 fn raw_expr_is_constructed_optional_value(rendered: &str) -> bool {
-    let recovered = rendered_projection_or_raw_leaf(rendered);
+    let recovered = rendered_plus_expr_projection_or_raw_leaf(rendered);
     if !matches!(recovered.unshaped(), RustExpr::Raw(_)) {
         rust_expr_is_constructed_optional_value(&recovered)
     } else {
@@ -1456,7 +1437,7 @@ pub fn parenthesize_borrowed_method_receiver(receiver: RustExpr) -> RustExpr {
             if rendered.starts_with('&')
                 && !(rendered.starts_with("(&") && rendered.ends_with(')')) =>
         {
-            RustExpr::Grouped(Box::new(rendered_projection_or_raw_leaf(&rendered)))
+            grouped_raw_leaf(rendered)
         }
         other => other,
     }
@@ -1597,6 +1578,10 @@ pub fn owner_associated_path_projection(owner: &str, member: &str) -> RustExpr {
     associated_path_projection([owner, member])
 }
 
+pub fn free_function_path_projection(name: &str) -> RustExpr {
+    RustExpr::path(name.split("::"))
+}
+
 pub fn rust_type_associated_path_projection(owner_ty: RustType, member: &str) -> RustExpr {
     match owner_ty {
         RustType::Vec(inner) => RustExpr::generic_path(["Vec"], vec![*inner], Some(member)),
@@ -1630,6 +1615,10 @@ pub fn java_class_static_path_projection(member: &str) -> RustExpr {
 
 pub fn java_class_literal_path_projection(rust_type: RustType) -> RustExpr {
     java_class_path_projection(rust_type, "literal")
+}
+
+pub fn rust_string_literal_projection(value: &str) -> RustExpr {
+    RustExpr::Literal(format!("{value:?}"))
 }
 
 pub fn java_class_for_name_path_projection(rust_type: &str) -> RustExpr {
@@ -1842,6 +1831,7 @@ pub fn function_call_projection(function: RustExpr, args: Vec<RustExpr>) -> Rust
     }
 }
 
+#[cfg(test)]
 pub fn render_function_call_projection(function: RustExpr, args: Vec<String>) -> String {
     emit::emit_expr(&function_call_projection(
         function,
@@ -1873,6 +1863,7 @@ pub fn receiver_method_call_projection(
     }
 }
 
+#[cfg(test)]
 pub fn render_receiver_method_call_projection(
     receiver: String,
     method: &str,
@@ -1885,6 +1876,7 @@ pub fn render_receiver_method_call_projection(
     ))
 }
 
+#[cfg(test)]
 pub fn render_field_projection(receiver: String, field_name: &str) -> String {
     emit::emit_expr(&field_projection(
         rendered_projection_or_raw_leaf(&receiver),
@@ -1900,6 +1892,7 @@ pub fn current_receiver_method_call_projection(method: &str, args: Vec<RustExpr>
     }
 }
 
+#[cfg(test)]
 pub fn render_current_receiver_method_call_projection(method: &str, args: Vec<String>) -> String {
     emit::emit_expr(&current_receiver_method_call_projection(
         method,
@@ -1907,66 +1900,20 @@ pub fn render_current_receiver_method_call_projection(method: &str, args: Vec<St
     ))
 }
 
+#[cfg(test)]
 fn rendered_args_to_projection_leaves(args: Vec<String>) -> Vec<RustExpr> {
     args.into_iter()
         .map(|arg| rendered_projection_or_raw_leaf(&arg))
         .collect()
 }
 
+#[cfg(test)]
 pub fn typed_single_input_callback_projection(param_type: &str, body: &str) -> RustExpr {
     typed_single_input_callback_expr(param_type, rendered_projection_or_raw_leaf(body))
 }
 
 pub fn typed_single_input_callback_expr(param_type: &str, body: RustExpr) -> RustExpr {
     typed_single_param_closure_expr("value", param_type, body)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AssociatedFunctionMethodReferenceProjection {
-    PrimitiveIdentityValue,
-    ReceiverToString,
-    AlwaysTrue,
-    StaticFunction,
-}
-
-pub fn associated_function_method_reference_body_projection(
-    projection: AssociatedFunctionMethodReferenceProjection,
-    owner: &str,
-    method: &str,
-    receiver: &str,
-    value_expr: &str,
-) -> String {
-    emit::emit_expr(&associated_function_method_reference_body_expr(
-        projection, owner, method, receiver, value_expr,
-    ))
-}
-
-pub fn associated_function_method_reference_body_expr(
-    projection: AssociatedFunctionMethodReferenceProjection,
-    owner: &str,
-    method: &str,
-    receiver: &str,
-    value_expr: &str,
-) -> RustExpr {
-    match projection {
-        AssociatedFunctionMethodReferenceProjection::PrimitiveIdentityValue => {
-            rendered_projection_or_raw_leaf(value_expr)
-        }
-        AssociatedFunctionMethodReferenceProjection::ReceiverToString => {
-            receiver_method_call_projection(
-                rendered_projection_or_raw_leaf(receiver),
-                "to_string",
-                Vec::new(),
-            )
-        }
-        AssociatedFunctionMethodReferenceProjection::AlwaysTrue => {
-            RustExpr::Literal("true".to_string())
-        }
-        AssociatedFunctionMethodReferenceProjection::StaticFunction => RustExpr::Call {
-            function: Box::new(owner_associated_path_projection(owner, method)),
-            args: vec![rendered_projection_or_raw_leaf(receiver)],
-        },
-    }
 }
 
 pub fn outer_this_field_projection(field_name: &str) -> RustExpr {
@@ -2537,7 +2484,7 @@ pub fn literal_slot_plan(literal: &Literal, slot: &Slot) -> Option<LiteralSlotPl
 pub fn apply_literal_slot_plan(plan: &LiteralSlotPlan) -> RustExpr {
     match plan {
         LiteralSlotPlan::BorrowedStringView { value } => {
-            string_view_expr(RustExpr::Literal(format!("{value:?}")))
+            string_view_expr(rust_string_literal_projection(value))
         }
         LiteralSlotPlan::NumericCharCode { ch } => RustExpr::Literal(format!("{ch:?}")),
     }
@@ -2627,6 +2574,7 @@ fn rust_expr_is_local_name(expr: &RustExpr, name: &str) -> bool {
     }
 }
 
+#[cfg(test)]
 pub fn render_index_to_usize_projection(
     rendered: &str,
     projection: IndexToUsizeProjection,
@@ -2640,8 +2588,8 @@ pub fn render_index_to_usize_projection(
 pub fn index_to_usize_projection(index: RustExpr, projection: IndexToUsizeProjection) -> RustExpr {
     let index = recover_raw_index_to_usize_operand(index);
     let index = decimal_integer_literal_projection(index);
-    if rust_expr_is_usize_cast(&index) {
-        return index;
+    if let Some(cast) = usize_cast_projection(index.clone()) {
+        return cast;
     }
     let expr = match projection {
         IndexToUsizeProjection::JavaStringCharAt
@@ -2664,7 +2612,7 @@ pub fn index_to_usize_projection(index: RustExpr, projection: IndexToUsizeProjec
 
 fn recover_raw_index_to_usize_operand(index: RustExpr) -> RustExpr {
     match index {
-        RustExpr::Raw(rendered) => rendered_projection_or_raw_leaf(&rendered),
+        RustExpr::Raw(rendered) => rendered_plus_expr_projection_or_raw_leaf(&rendered),
         other => other,
     }
 }
@@ -2686,14 +2634,31 @@ fn rust_expr_is_decimal_integer_literal(expr: &RustExpr) -> bool {
 }
 
 fn rendered_expr_is_decimal_integer_literal(rendered: &str) -> bool {
-    !rendered.is_empty() && rendered.chars().all(|ch| ch.is_ascii_digit())
+    let Some(digits) = rendered
+        .strip_suffix("usize")
+        .or_else(|| rendered.strip_suffix("isize"))
+        .or_else(|| rendered.strip_suffix("u128"))
+        .or_else(|| rendered.strip_suffix("i128"))
+        .or_else(|| rendered.strip_suffix("u64"))
+        .or_else(|| rendered.strip_suffix("i64"))
+        .or_else(|| rendered.strip_suffix("u32"))
+        .or_else(|| rendered.strip_suffix("i32"))
+        .or_else(|| rendered.strip_suffix("u16"))
+        .or_else(|| rendered.strip_suffix("i16"))
+        .or_else(|| rendered.strip_suffix("u8"))
+        .or_else(|| rendered.strip_suffix("i8"))
+        .or(Some(rendered))
+    else {
+        return false;
+    };
+    digits.chars().next().is_some_and(|ch| ch.is_ascii_digit())
+        && digits.chars().all(|ch| ch == '_' || ch.is_ascii_digit())
 }
 
 fn rust_expr_is_simple_usize_cast_operand(expr: &RustExpr) -> bool {
     match expr.unshaped() {
         RustExpr::Raw(rendered) => {
-            let recovered = rendered_projection_or_raw_leaf(rendered);
-            if !matches!(recovered.unshaped(), RustExpr::Raw(_)) {
+            if let Some(recovered) = recover_rendered_usize_cast_operand_projection(rendered) {
                 rust_expr_is_simple_usize_cast_operand(&recovered)
             } else {
                 !rendered.starts_with('*') && !rendered.contains(' ')
@@ -2711,17 +2676,33 @@ fn rust_expr_is_simple_usize_cast_operand(expr: &RustExpr) -> bool {
 }
 
 fn rust_expr_is_usize_cast(expr: &RustExpr) -> bool {
-    matches!(expr.unshaped(), RustExpr::Cast { ty, .. } if ty == "usize")
-        || matches!(
-            expr.unshaped(),
-            RustExpr::Raw(raw) if rendered_expr_is_usize_cast(raw)
-        )
+    usize_cast_projection(expr.clone()).is_some()
 }
 
-fn rendered_expr_is_usize_cast(rendered: &str) -> bool {
-    rendered.trim().ends_with(" as usize")
+fn usize_cast_projection(expr: RustExpr) -> Option<RustExpr> {
+    if matches!(expr.unshaped(), RustExpr::Cast { ty, .. } if ty == "usize") {
+        return Some(expr);
+    }
+    if let RustExpr::Raw(raw) = expr.unshaped() {
+        if let Some(recovered) = recover_rendered_usize_cast_projection(raw) {
+            return Some(recovered);
+        }
+    }
+    None
 }
 
+fn recover_rendered_usize_cast_projection(rendered: &str) -> Option<RustExpr> {
+    let recovered = rendered_projection_or_raw_leaf(rendered);
+    (!matches!(recovered.unshaped(), RustExpr::Raw(_)) && rust_expr_is_usize_cast(&recovered))
+        .then_some(recovered)
+}
+
+fn recover_rendered_usize_cast_operand_projection(rendered: &str) -> Option<RustExpr> {
+    let recovered = rendered_projection_or_raw_leaf(rendered);
+    (!matches!(recovered.unshaped(), RustExpr::Raw(_))).then_some(recovered)
+}
+
+#[cfg(test)]
 pub fn render_indexed_access_projection(
     array: &str,
     index: &str,
@@ -3023,6 +3004,7 @@ pub fn optional_clone_recovery_owned_element_projection(
     )
 }
 
+#[cfg(test)]
 pub fn render_parse_receiver(expr: RustExpr) -> String {
     emit::emit_expr(&parse_receiver_projection(expr))
 }
@@ -3054,11 +3036,15 @@ fn parse_receiver_projection(arg: RustExpr) -> RustExpr {
                 .strip_prefix('&')
                 .map(str::trim)
                 .unwrap_or(raw.trim());
-            primitive_parse_raw_receiver_projection(stripped)
-                .unwrap_or_else(|| rendered_projection_or_raw_leaf(stripped))
+            recover_rendered_parse_receiver_projection(stripped)
         }
         _ => arg,
     }
+}
+
+fn recover_rendered_parse_receiver_projection(rendered: &str) -> RustExpr {
+    primitive_parse_raw_receiver_projection(rendered)
+        .unwrap_or_else(|| rendered_plus_expr_projection_or_raw_leaf(rendered))
 }
 
 fn primitive_parse_raw_receiver_projection(raw: &str) -> Option<RustExpr> {
@@ -3101,7 +3087,7 @@ fn rust_plain_identifier(raw: &str) -> bool {
 fn primitive_parse_chain_projection(receiver: RustExpr, rust_ty: &str) -> RustExpr {
     let receiver = parenthesize_raw_method_receiver(receiver);
     zero_arg_method_projection(
-        zero_arg_method_projection(receiver, &format!("parse::<{rust_ty}>")),
+        typed_zero_arg_method_projection(receiver, "parse", rust_ty),
         "unwrap",
     )
 }
@@ -3130,35 +3116,141 @@ fn rust_string_literal_token_source(raw: &str) -> Option<String> {
     }
 }
 
+#[cfg(test)]
 pub fn render_string_join_vararg_value(value: RustExpr) -> String {
     emit::emit_expr(&string_join_vararg_value_projection(value))
 }
 
 fn string_join_vararg_value_projection(value: RustExpr) -> RustExpr {
     if let Some(literal) = string_literal_source(&value) {
-        return zero_arg_method_projection(RustExpr::Literal(format!("{literal:?}")), "to_string");
+        return zero_arg_method_projection(rust_string_literal_projection(&literal), "to_string");
     }
-    if rust_expr_is_already_to_string_call(&value) {
-        value
+    if let Some(to_string_call) = to_string_call_projection(value.clone()) {
+        to_string_call
     } else {
         zero_arg_method_projection(RustExpr::Grouped(Box::new(value)), "to_string")
     }
 }
 
-fn rust_expr_is_already_to_string_call(value: &RustExpr) -> bool {
-    match value.unshaped() {
-        RustExpr::MethodCall { method, args, .. } => method == "to_string" && args.is_empty(),
-        RustExpr::Raw(raw) => raw.ends_with(".to_string()"),
-        _ => false,
+fn to_string_call_projection(value: RustExpr) -> Option<RustExpr> {
+    if rust_expr_is_zero_arg_method_call(&value, "to_string") {
+        return Some(value);
+    }
+    if let RustExpr::Raw(raw) = value.unshaped() {
+        if let Some(to_string_call) = recover_rendered_to_string_call_projection(raw) {
+            return Some(to_string_call);
+        }
+    }
+    None
+}
+
+fn recover_rendered_to_string_call_projection(rendered: &str) -> Option<RustExpr> {
+    terminal_raw_to_string_call_projection(rendered)
+}
+
+fn terminal_raw_to_string_call_projection(raw: &str) -> Option<RustExpr> {
+    let receiver = raw.trim().strip_suffix(".to_string()")?.trim_end();
+    let receiver = terminal_to_string_receiver_projection(receiver)?;
+    Some(zero_arg_method_projection(receiver, "to_string"))
+}
+
+fn terminal_to_string_receiver_projection(receiver: &str) -> Option<RustExpr> {
+    if receiver.is_empty()
+        || rendered_expr_is_complete_string_literal(receiver)
+        || rendered_parenthesized_expr_is_complete_string_literal(receiver)
+        || (raw_contains_top_level_binary_operator(receiver)
+            && !balanced_outer_parentheses_wrap_all(receiver))
+    {
+        return None;
+    }
+    let projected = if balanced_outer_parentheses_wrap_all(receiver) {
+        terminal_grouped_to_string_receiver_projection(receiver)?
+    } else {
+        rendered_function_call_projection(receiver)
+            .or_else(|| dotted_zero_arg_or_field_projection(receiver))
+            .or_else(|| rendered_index_leaf_projection(receiver))
+            .or_else(|| rendered_path_leaf_projection(receiver))?
+    };
+    terminal_to_string_receiver_is_structured(&projected).then_some(projected)
+}
+
+fn terminal_grouped_to_string_receiver_projection(receiver: &str) -> Option<RustExpr> {
+    let RustExpr::Grouped(inner) = grouped_rendered_inner_projection(receiver)? else {
+        return None;
+    };
+    terminal_grouped_to_string_receiver_is_structured(&inner).then(|| RustExpr::Grouped(inner))
+}
+
+fn terminal_grouped_to_string_receiver_is_structured(receiver: &RustExpr) -> bool {
+    matches!(
+        receiver.unshaped(),
+        RustExpr::Var(_)
+            | RustExpr::Path(_)
+            | RustExpr::GenericPath { .. }
+            | RustExpr::TypeAssociatedPath { .. }
+            | RustExpr::Field(_, _)
+            | RustExpr::Index(_, _)
+            | RustExpr::Call { .. }
+            | RustExpr::MethodCall { .. }
+            | RustExpr::Binary { .. }
+    )
+}
+
+fn rendered_parenthesized_expr_is_complete_string_literal(rendered: &str) -> bool {
+    balanced_outer_parentheses_wrap_all(rendered)
+        && rendered_expr_is_complete_string_literal(&rendered[1..rendered.len() - 1])
+}
+
+fn terminal_to_string_receiver_is_structured(receiver: &RustExpr) -> bool {
+    match receiver.unshaped() {
+        RustExpr::Var(_)
+        | RustExpr::Path(_)
+        | RustExpr::GenericPath { .. }
+        | RustExpr::TypeAssociatedPath { .. }
+        | RustExpr::Field(_, _)
+        | RustExpr::Index(_, _)
+        | RustExpr::Call { .. }
+        | RustExpr::MethodCall { .. }
+        | RustExpr::Grouped(_) => true,
+        RustExpr::Literal(_)
+        | RustExpr::Raw(_)
+        | RustExpr::MacroCall { .. }
+        | RustExpr::StructLit { .. }
+        | RustExpr::Tuple(_)
+        | RustExpr::ArrayLiteral(_)
+        | RustExpr::VecLiteral(_)
+        | RustExpr::VecRepeat { .. }
+        | RustExpr::Unary { .. }
+        | RustExpr::Binary { .. }
+        | RustExpr::Range { .. }
+        | RustExpr::Cast { .. }
+        | RustExpr::Try(_)
+        | RustExpr::If { .. }
+        | RustExpr::Closure { .. }
+        | RustExpr::Match { .. }
+        | RustExpr::Block { .. }
+        | RustExpr::UnsupportedJavaArrayCreation { .. }
+        | RustExpr::Shaped { .. }
+        | RustExpr::PostfixComment { .. }
+        | RustExpr::MarkedBlock { .. }
+        | RustExpr::Pattern(_) => false,
     }
 }
 
 pub fn string_join_delimiter_projection(delimiter: RustExpr) -> RustExpr {
     if let Some(literal) = string_literal_source(&delimiter) {
-        RustExpr::Literal(format!("{literal:?}"))
+        rust_string_literal_projection(&literal)
     } else {
         delimiter
     }
+}
+
+pub fn string_join_collection_projection(delimiter: RustExpr, values: RustExpr) -> RustExpr {
+    method_call_projection(
+        values,
+        "join",
+        vec![string_join_delimiter_projection(delimiter)],
+    )
 }
 
 pub fn string_join_varargs_projection(delimiter: RustExpr, values: Vec<RustExpr>) -> RustExpr {
@@ -3168,13 +3260,10 @@ pub fn string_join_varargs_projection(delimiter: RustExpr, values: Vec<RustExpr>
             .map(string_join_vararg_value_projection)
             .collect(),
     );
-    method_call_projection(
-        values,
-        "join",
-        vec![string_join_delimiter_projection(delimiter)],
-    )
+    string_join_collection_projection(delimiter, values)
 }
 
+#[cfg(test)]
 pub fn render_string_equality_operand_projection(
     expr: RustExpr,
     already_string_view: bool,
@@ -3215,21 +3304,21 @@ fn optional_string_view_projection_expr(expr: RustExpr) -> RustExpr {
 }
 
 pub fn string_helper_receiver_projection(receiver: RustExpr) -> RustExpr {
+    let receiver = recover_string_helper_receiver(receiver);
     if expr_is_string_view(&receiver) {
         return receiver;
     }
     if expr_is_as_ref_unwrap_projection(&receiver) {
         return string_view_expr(zero_arg_method_projection(receiver, "as_str"));
     }
-    if let RustExpr::Raw(raw) = receiver.unshaped()
-        && raw.ends_with(".as_ref().unwrap()")
-    {
-        return string_view_expr(zero_arg_method_projection(
-            parenthesize_raw_method_receiver(receiver),
-            "as_str",
-        ));
-    }
     string_view_expr(force_shared_borrow_projection(receiver))
+}
+
+fn recover_string_helper_receiver(receiver: RustExpr) -> RustExpr {
+    match receiver {
+        RustExpr::Raw(raw) => rendered_plus_expr_projection_or_raw_leaf(&raw),
+        other => other,
+    }
 }
 
 fn expr_is_as_ref_unwrap_projection(expr: &RustExpr) -> bool {
@@ -3247,38 +3336,38 @@ fn expr_is_as_ref_unwrap_projection(expr: &RustExpr) -> bool {
 }
 
 pub fn string_hash_code_projection(receiver: RustExpr) -> RustExpr {
-    RustExpr::Call {
-        function: Box::new(RustExpr::path(["java_string_hash_code"])),
-        args: vec![string_helper_receiver_projection(receiver)],
-    }
+    function_call_projection(
+        RustExpr::path(["java_string_hash_code"]),
+        vec![string_helper_receiver_projection(receiver)],
+    )
 }
 
 pub fn java_list_hash_code_projection(receiver: RustExpr) -> RustExpr {
-    RustExpr::Call {
-        function: Box::new(RustExpr::path(["java_list_hash_code"])),
-        args: vec![force_shared_borrow_projection(receiver)],
-    }
+    function_call_projection(
+        RustExpr::path(["java_list_hash_code"]),
+        vec![force_shared_borrow_projection(receiver)],
+    )
 }
 
 pub fn java_set_hash_code_projection(receiver: RustExpr) -> RustExpr {
-    RustExpr::Call {
-        function: Box::new(RustExpr::path(["java_set_hash_code"])),
-        args: vec![force_shared_borrow_projection(receiver)],
-    }
+    function_call_projection(
+        RustExpr::path(["java_set_hash_code"]),
+        vec![force_shared_borrow_projection(receiver)],
+    )
 }
 
 pub fn java_map_hash_code_projection(receiver: RustExpr) -> RustExpr {
-    RustExpr::Call {
-        function: Box::new(RustExpr::path(["java_map_hash_code"])),
-        args: vec![force_shared_borrow_projection(receiver)],
-    }
+    function_call_projection(
+        RustExpr::path(["java_map_hash_code"]),
+        vec![force_shared_borrow_projection(receiver)],
+    )
 }
 
 pub fn java_value_hash_code_projection(receiver: RustExpr) -> RustExpr {
-    RustExpr::Call {
-        function: Box::new(RustExpr::path(["java_value_hash_code"])),
-        args: vec![force_shared_borrow_projection(receiver)],
-    }
+    function_call_projection(
+        RustExpr::path(["java_value_hash_code"]),
+        vec![force_shared_borrow_projection(receiver)],
+    )
 }
 
 pub fn string_replace_first_projection(
@@ -3303,35 +3392,35 @@ fn string_regex_replace_projection(
     regex: RustExpr,
     replacement: RustExpr,
 ) -> RustExpr {
-    RustExpr::Call {
-        function: Box::new(RustExpr::path([function])),
-        args: vec![
+    function_call_projection(
+        RustExpr::path([function]),
+        vec![
             string_helper_receiver_projection(receiver),
             regex,
             replacement,
         ],
-    }
+    )
 }
 
 pub fn string_matches_projection(receiver: RustExpr, pattern: RustExpr) -> RustExpr {
-    RustExpr::Call {
-        function: Box::new(RustExpr::path(["java_string_matches"])),
-        args: vec![string_helper_receiver_projection(receiver), pattern],
-    }
+    function_call_projection(
+        RustExpr::path(["java_string_matches"]),
+        vec![string_helper_receiver_projection(receiver), pattern],
+    )
 }
 
 pub fn string_split_projection(receiver: RustExpr, regex: RustExpr, limit: RustExpr) -> RustExpr {
-    RustExpr::Call {
-        function: Box::new(RustExpr::path(["java_string_split"])),
-        args: vec![string_helper_receiver_projection(receiver), regex, limit],
-    }
+    function_call_projection(
+        RustExpr::path(["java_string_split"]),
+        vec![string_helper_receiver_projection(receiver), regex, limit],
+    )
 }
 
 pub fn string_from_bytes_projection(bytes: RustExpr) -> RustExpr {
-    RustExpr::Call {
-        function: Box::new(RustExpr::path(["java_string_from_bytes"])),
-        args: vec![force_shared_borrow_projection(bytes)],
-    }
+    function_call_projection(
+        RustExpr::path(["java_string_from_bytes"]),
+        vec![force_shared_borrow_projection(bytes)],
+    )
 }
 
 pub fn string_from_byte_range_projection(
@@ -3339,10 +3428,10 @@ pub fn string_from_byte_range_projection(
     offset: RustExpr,
     len: RustExpr,
 ) -> RustExpr {
-    RustExpr::Call {
-        function: Box::new(RustExpr::path(["java_string_from_byte_range"])),
-        args: vec![force_shared_borrow_projection(bytes), offset, len],
-    }
+    function_call_projection(
+        RustExpr::path(["java_string_from_byte_range"]),
+        vec![force_shared_borrow_projection(bytes), offset, len],
+    )
 }
 
 pub fn string_compare_to_projection(receiver: RustExpr, other: RustExpr) -> RustExpr {
@@ -3362,10 +3451,10 @@ fn string_one_arg_runtime_helper_projection(
     receiver: RustExpr,
     other: RustExpr,
 ) -> RustExpr {
-    RustExpr::Call {
-        function: Box::new(RustExpr::path([function])),
-        args: vec![string_helper_receiver_projection(receiver), other],
-    }
+    function_call_projection(
+        RustExpr::path([function]),
+        vec![string_helper_receiver_projection(receiver), other],
+    )
 }
 
 pub fn string_get_bytes_projection(receiver: RustExpr) -> RustExpr {
@@ -3451,25 +3540,7 @@ pub fn string_char_at_projection(receiver: RustExpr, index: RustExpr) -> RustExp
 }
 
 fn string_char_at_index_to_usize_projection(index: RustExpr) -> RustExpr {
-    let index = decimal_integer_literal_projection(index);
-    if matches!(index.unshaped(), RustExpr::Cast { ty, .. } if ty == "usize") {
-        return index;
-    }
-    if let RustExpr::Raw(raw) = index.unshaped()
-        && rendered_expr_is_usize_cast(raw)
-    {
-        return index;
-    }
-    let expr = match index {
-        RustExpr::Literal(literal) if literal.chars().all(|ch| ch.is_ascii_digit()) => {
-            RustExpr::Literal(literal)
-        }
-        other => RustExpr::Grouped(Box::new(other)),
-    };
-    RustExpr::Cast {
-        expr: Box::new(expr),
-        ty: "usize".to_string(),
-    }
+    index_to_usize_projection(index, IndexToUsizeProjection::JavaStringCharAt)
 }
 
 fn parenthesize_raw_method_receiver(expr: RustExpr) -> RustExpr {
@@ -3482,7 +3553,19 @@ fn parenthesize_raw_method_receiver(expr: RustExpr) -> RustExpr {
 }
 
 fn grouped_raw_leaf(raw: String) -> RustExpr {
-    RustExpr::Grouped(Box::new(rendered_projection_or_raw_leaf(&raw)))
+    RustExpr::Grouped(Box::new(recover_parseable_rendered_operand_projection(
+        &raw,
+    )))
+}
+
+fn grouped_stable_rendered_raw_leaf(raw: String) -> RustExpr {
+    let trimmed = raw.trim();
+    let recovered = rendered_plus_expr_projection_or_raw_leaf(trimmed);
+    if !matches!(recovered.unshaped(), RustExpr::Raw(_)) && emit::emit_expr(&recovered) == trimmed {
+        RustExpr::Grouped(Box::new(recovered))
+    } else {
+        RustExpr::Grouped(Box::new(RustExpr::raw_leaf(trimmed)))
+    }
 }
 
 fn raw_leaf_or_grouped(expr: RustExpr, should_group: impl FnOnce(&str) -> bool) -> RustExpr {
@@ -3506,10 +3589,23 @@ pub(crate) fn raw_receiver_projection(
     };
     let trimmed = raw.trim();
     if raw_needs_parentheses(trimmed) {
-        RustExpr::Grouped(Box::new(rendered_projection_or_raw_leaf(trimmed)))
+        RustExpr::Grouped(Box::new(recover_parseable_rendered_operand_projection(
+            trimmed,
+        )))
     } else {
-        rendered_projection_or_raw_leaf(&raw)
+        recover_parseable_rendered_operand_projection(&raw)
     }
+}
+
+pub fn recover_parseable_raw_operand_projection(expr: RustExpr) -> RustExpr {
+    match expr {
+        RustExpr::Raw(rendered) => recover_parseable_rendered_operand_projection(&rendered),
+        other => other,
+    }
+}
+
+fn recover_parseable_rendered_operand_projection(rendered: &str) -> RustExpr {
+    rendered_plus_expr_projection_or_raw_leaf(rendered)
 }
 
 pub fn string_index_of_projection(
@@ -3520,15 +3616,15 @@ pub fn string_index_of_projection(
     let receiver = string_view_argument_projection(receiver);
     let needle = string_view_argument_projection(string_search_needle_projection(needle));
     if let Some(from_index) = from_index {
-        return RustExpr::Call {
-            function: Box::new(RustExpr::path(["java_string_index_of_from"])),
-            args: vec![receiver, needle, from_index],
-        };
+        return function_call_projection(
+            RustExpr::path(["java_string_index_of_from"]),
+            vec![receiver, needle, from_index],
+        );
     }
-    RustExpr::Call {
-        function: Box::new(RustExpr::path(["java_string_index_of"])),
-        args: vec![receiver, needle],
-    }
+    function_call_projection(
+        RustExpr::path(["java_string_index_of"]),
+        vec![receiver, needle],
+    )
 }
 
 pub fn string_last_index_of_projection(
@@ -3539,15 +3635,15 @@ pub fn string_last_index_of_projection(
     let receiver = string_view_argument_projection(receiver);
     let needle = string_view_argument_projection(string_search_needle_projection(needle));
     if let Some(from_index) = from_index {
-        return RustExpr::Call {
-            function: Box::new(RustExpr::path(["java_string_last_index_of_from"])),
-            args: vec![receiver, needle, from_index],
-        };
+        return function_call_projection(
+            RustExpr::path(["java_string_last_index_of_from"]),
+            vec![receiver, needle, from_index],
+        );
     }
-    RustExpr::Call {
-        function: Box::new(RustExpr::path(["java_string_last_index_of"])),
-        args: vec![receiver, needle],
-    }
+    function_call_projection(
+        RustExpr::path(["java_string_last_index_of"]),
+        vec![receiver, needle],
+    )
 }
 
 fn string_search_needle_projection(needle: RustExpr) -> RustExpr {
@@ -3648,11 +3744,19 @@ fn parenthesize_raw_java_char_numeric_cast_operand(expr: RustExpr) -> RustExpr {
 }
 
 fn parenthesize_raw_primitive_number_cast_operand(expr: RustExpr) -> RustExpr {
-    raw_leaf_or_grouped(expr, |trimmed| {
-        !(balanced_outer_parentheses_wrap_all(trimmed)
-            || (!raw_contains_top_level_binary_operator(trimmed)
-                && !raw_contains_top_level_as_cast(trimmed)))
-    })
+    let RustExpr::Raw(raw) = expr else {
+        return expr;
+    };
+    let trimmed = raw.trim();
+    let recovered = recover_parseable_rendered_operand_projection(trimmed);
+    if !(balanced_outer_parentheses_wrap_all(trimmed)
+        || (!raw_contains_top_level_binary_operator(trimmed)
+            && !raw_contains_top_level_as_cast(trimmed)))
+    {
+        RustExpr::Grouped(Box::new(recovered))
+    } else {
+        recovered
+    }
 }
 
 pub fn facade_receiver_method_call_projection(
@@ -3660,7 +3764,7 @@ pub fn facade_receiver_method_call_projection(
     rust_path: &str,
     args: Vec<RustExpr>,
 ) -> RustExpr {
-    receiver_method_call_projection(receiver, &facade_method_name(rust_path), args)
+    receiver_method_call_projection_exact(receiver, &facade_method_name(rust_path), args)
 }
 
 pub fn external_facade_rust_path_projection(rust_path: &str) -> RustExpr {
@@ -3710,13 +3814,19 @@ fn rust_path_segment_is_path_like(segment: &str) -> bool {
     if rust_path_segment_is_plain_ident(segment) {
         return true;
     }
-    let Some((ident, generic_args)) = segment.split_once("::<") else {
-        return false;
-    };
-    rust_path_segment_is_plain_ident(ident)
-        && !generic_args.is_empty()
-        && generic_args.ends_with('>')
-        && generic_args_is_balanced(generic_args)
+    if let Some((ident, generic_args)) = segment.split_once("::<") {
+        return rust_path_segment_is_plain_ident(ident)
+            && !generic_args.is_empty()
+            && generic_args.ends_with('>')
+            && generic_args_is_balanced(generic_args);
+    }
+    if let Some((ident, generic_args)) = segment.split_once('<') {
+        return rust_path_segment_is_plain_ident(ident)
+            && !generic_args.is_empty()
+            && generic_args.ends_with('>')
+            && generic_args_is_balanced(generic_args);
+    }
+    false
 }
 
 fn generic_args_is_balanced(generic_args: &str) -> bool {
@@ -3737,11 +3847,15 @@ fn generic_args_is_balanced(generic_args: &str) -> bool {
 }
 
 pub fn facade_method_name(rust_path: &str) -> String {
-    rust_path
-        .rsplit("::")
-        .next()
-        .unwrap_or(rust_path)
-        .to_string()
+    split_external_facade_rust_path(rust_path)
+        .and_then(|segments| segments.into_iter().last())
+        .unwrap_or_else(|| {
+            rust_path
+                .rsplit("::")
+                .next()
+                .unwrap_or(rust_path)
+                .to_string()
+        })
 }
 
 pub fn primitive_hash_code_projection(receiver: RustExpr, source: PrimitiveType) -> RustExpr {
@@ -3806,10 +3920,10 @@ fn primitive_hash_folded_bits_projection(bits: RustExpr) -> RustExpr {
 }
 
 pub fn primitive_compare_to_projection(receiver: RustExpr, other: RustExpr) -> RustExpr {
-    RustExpr::Call {
-        function: Box::new(RustExpr::path(["java_primitive_compare_to"])),
-        args: vec![receiver, other],
-    }
+    function_call_projection(
+        RustExpr::path(["java_primitive_compare_to"]),
+        vec![receiver, other],
+    )
 }
 
 pub fn primitive_f64_method_projection(arg: RustExpr, method: &str) -> RustExpr {
@@ -3821,19 +3935,15 @@ pub fn primitive_f64_binary_method_projection(
     right: RustExpr,
     method: &str,
 ) -> RustExpr {
-    RustExpr::MethodCall {
-        receiver: Box::new(f64_cast_projection(left)),
-        method: method.to_string(),
-        args: vec![f64_cast_projection(right)],
-    }
+    method_call_projection(f64_cast_projection(left), method, vec![f64_cast_projection(right)])
 }
 
 pub fn math_pow_projection(base: RustExpr, exponent: RustExpr) -> RustExpr {
-    RustExpr::MethodCall {
-        receiver: Box::new(f64_cast_projection(base)),
-        method: "powf".to_string(),
-        args: vec![f64_cast_projection(exponent)],
-    }
+    method_call_projection(
+        f64_cast_projection(base),
+        "powf",
+        vec![f64_cast_projection(exponent)],
+    )
 }
 
 fn f64_cast_projection(expr: RustExpr) -> RustExpr {
@@ -3849,10 +3959,7 @@ pub fn math_round_projection(arg: RustExpr, source: PrimitiveType) -> RustExpr {
         PrimitiveType::Double => ("java_math_round_f64", arg),
         _ => ("java_math_round_f64", f64_cast_projection(arg)),
     };
-    RustExpr::Call {
-        function: Box::new(RustExpr::path([helper])),
-        args: vec![arg],
-    }
+    function_call_projection(RustExpr::path([helper]), vec![arg])
 }
 
 pub fn math_abs_projection(arg: RustExpr, source: PrimitiveType) -> RustExpr {
@@ -3898,9 +4005,9 @@ fn math_floor_helper_call_projection(
         PrimitiveType::Long => (format!("java_math_floor_{operation}_i64"), "i64"),
         _ => (format!("java_math_floor_{operation}_i32"), "i32"),
     };
-    RustExpr::Call {
-        function: Box::new(RustExpr::path([helper])),
-        args: vec![
+    function_call_projection(
+        RustExpr::path([helper]),
+        vec![
             RustExpr::Cast {
                 expr: Box::new(parenthesize_raw_primitive_number_cast_operand(left)),
                 ty: cast_ty.to_string(),
@@ -3910,13 +4017,14 @@ fn math_floor_helper_call_projection(
                 ty: cast_ty.to_string(),
             },
         ],
-    }
+    )
 }
 
 pub fn len_i32_projection(expr: RustExpr) -> RustExpr {
     method_call_as_i32_projection(expr, "len")
 }
 
+#[cfg(test)]
 pub fn render_len_i32_projection(rendered: &str) -> String {
     emit::emit_expr(&len_i32_projection(parenthesize_raw_method_receiver(
         rendered_projection_or_raw_leaf(rendered),
@@ -4022,7 +4130,15 @@ fn erased_object_vec_clone_projection(receiver: RustExpr) -> RustExpr {
 }
 
 fn typed_collect_projection(receiver: RustExpr, ty: &str) -> RustExpr {
-    zero_arg_method_projection(receiver, &format!("collect::<{ty}>"))
+    typed_zero_arg_method_projection(receiver, "collect", ty)
+}
+
+fn typed_zero_arg_method_projection(receiver: RustExpr, method: &str, ty: &str) -> RustExpr {
+    zero_arg_method_projection(receiver, &typed_method_name(method, ty))
+}
+
+fn typed_method_name(method: &str, ty: &str) -> String {
+    format!("{method}::<{ty}>")
 }
 
 pub fn java_iterator_from_collection_projection(receiver: RustExpr) -> RustExpr {
@@ -4042,10 +4158,10 @@ pub fn erased_object_sequence_iter_cloned_projection(receiver: RustExpr) -> Rust
         "map",
         vec![single_param_closure_expr(
             "value",
-            RustExpr::Call {
-                function: Box::new(RustExpr::path(["java_clone_erased_object_ref"])),
-                args: vec![RustExpr::Var("value".to_string())],
-            },
+            function_call_projection(
+                RustExpr::path(["java_clone_erased_object_ref"]),
+                vec![RustExpr::Var("value".to_string())],
+            ),
         )],
     )
 }
@@ -4056,11 +4172,7 @@ pub fn sequence_iter_copied_projection(receiver: RustExpr) -> RustExpr {
 
 pub fn iterator_next_expect_projection(iterator: RustExpr) -> RustExpr {
     let next = zero_arg_method_projection(iterator, "next");
-    RustExpr::MethodCall {
-        receiver: Box::new(next),
-        method: "expect".to_string(),
-        args: vec![RustExpr::Literal("\"Java iterator exhausted\"".to_string())],
-    }
+    method_expect_projection(next, "Java iterator exhausted")
 }
 
 pub fn tuple_field_projection(tuple: RustExpr, field_index: usize) -> RustExpr {
@@ -4071,17 +4183,18 @@ pub fn subtype_owned_constructor_from_borrowed_projection(
     target_ty: &str,
     borrowed: RustExpr,
 ) -> RustExpr {
-    RustExpr::Call {
-        function: Box::new(associated_rust_path_expr(target_ty, "new_1")),
-        args: vec![zero_arg_method_projection(borrowed, "clone")],
-    }
+    function_call_projection(
+        associated_rust_path_expr(target_ty, "new_1"),
+        vec![apply_clone_projection(borrowed)],
+    )
 }
 
 fn associated_rust_path_expr(owner: &str, member: &str) -> RustExpr {
-    let path = format!("{owner}::{member}");
-    split_external_facade_rust_path(&path)
-        .map(RustExpr::Path)
-        .unwrap_or_else(|| rendered_projection_or_raw_leaf(&path))
+    if let Some(mut segments) = split_external_facade_rust_path(owner) {
+        segments.push(member.to_string());
+        return RustExpr::Path(segments);
+    }
+    qualified_rust_type_associated_path_projection(RustType::Raw(owner.to_string()), member)
 }
 
 fn rust_path_segment_is_plain_ident(segment: &str) -> bool {
@@ -4120,7 +4233,7 @@ fn method_expect_projection(expr: RustExpr, message: &str) -> RustExpr {
     RustExpr::MethodCall {
         receiver: Box::new(expr),
         method: "expect".to_string(),
-        args: vec![RustExpr::Literal(format!("{message:?}"))],
+        args: vec![rust_string_literal_projection(message)],
     }
 }
 
@@ -4142,38 +4255,38 @@ fn strip_terminal_unwrap_projection(expr: RustExpr) -> RustExpr {
 
 pub fn file_exists_projection(receiver: RustExpr) -> RustExpr {
     zero_arg_method_projection(
-        RustExpr::Call {
-            function: Box::new(RustExpr::path(["std", "path", "Path", "new"])),
-            args: vec![zero_arg_method_projection(
+        function_call_projection(
+            RustExpr::path(["std", "path", "Path", "new"]),
+            vec![zero_arg_method_projection(
                 zero_arg_method_projection(receiver, "get_path"),
                 "as_str",
             )],
-        },
+        ),
         "exists",
     )
 }
 
 pub fn system_exit_projection(status: RustExpr) -> RustExpr {
-    RustExpr::Call {
-        function: Box::new(RustExpr::path(["std", "process", "exit"])),
-        args: vec![primitive_number_value_projection(
+    function_call_projection(
+        RustExpr::path(["std", "process", "exit"]),
+        vec![primitive_number_value_projection(
             status,
             PrimitiveType::Int,
         )],
-    }
+    )
 }
 
 pub fn thread_sleep_millis_projection(millis: RustExpr) -> RustExpr {
-    RustExpr::Call {
-        function: Box::new(RustExpr::path(["std", "thread", "sleep"])),
-        args: vec![RustExpr::Call {
-            function: Box::new(RustExpr::path(["std", "time", "Duration", "from_millis"])),
-            args: vec![RustExpr::Cast {
+    function_call_projection(
+        RustExpr::path(["std", "thread", "sleep"]),
+        vec![function_call_projection(
+            RustExpr::path(["std", "time", "Duration", "from_millis"]),
+            vec![RustExpr::Cast {
                 expr: Box::new(group_raw_cast_operand_if_needed(millis)),
                 ty: "u64".to_string(),
             }],
-        }],
-    }
+        )],
+    )
 }
 
 pub fn print_macro_projection(macro_name: &str, arg: Option<RustExpr>) -> RustExpr {
@@ -4205,35 +4318,25 @@ pub fn logical_not_projection(expr: RustExpr) -> RustExpr {
 
 pub fn math_max_projection(left: RustExpr, right: RustExpr, primitive: PrimitiveType) -> RustExpr {
     match primitive {
-        PrimitiveType::Float => RustExpr::Call {
-            function: Box::new(RustExpr::path(["java_math_max_f32"])),
-            args: vec![left, right],
-        },
-        PrimitiveType::Double => RustExpr::Call {
-            function: Box::new(RustExpr::path(["java_math_max_f64"])),
-            args: vec![left, right],
-        },
-        _ => RustExpr::Call {
-            function: Box::new(RustExpr::path(["std", "cmp", "max"])),
-            args: vec![left, right],
-        },
+        PrimitiveType::Float => {
+            function_call_projection(RustExpr::path(["java_math_max_f32"]), vec![left, right])
+        }
+        PrimitiveType::Double => {
+            function_call_projection(RustExpr::path(["java_math_max_f64"]), vec![left, right])
+        }
+        _ => function_call_projection(RustExpr::path(["std", "cmp", "max"]), vec![left, right]),
     }
 }
 
 pub fn math_min_projection(left: RustExpr, right: RustExpr, primitive: PrimitiveType) -> RustExpr {
     match primitive {
-        PrimitiveType::Float => RustExpr::Call {
-            function: Box::new(RustExpr::path(["java_math_min_f32"])),
-            args: vec![left, right],
-        },
-        PrimitiveType::Double => RustExpr::Call {
-            function: Box::new(RustExpr::path(["java_math_min_f64"])),
-            args: vec![left, right],
-        },
-        _ => RustExpr::Call {
-            function: Box::new(RustExpr::path(["std", "cmp", "min"])),
-            args: vec![left, right],
-        },
+        PrimitiveType::Float => {
+            function_call_projection(RustExpr::path(["java_math_min_f32"]), vec![left, right])
+        }
+        PrimitiveType::Double => {
+            function_call_projection(RustExpr::path(["java_math_min_f64"]), vec![left, right])
+        }
+        _ => function_call_projection(RustExpr::path(["std", "cmp", "min"]), vec![left, right]),
     }
 }
 
@@ -4246,19 +4349,11 @@ pub fn objects_equals_projection(left: RustExpr, right: RustExpr) -> RustExpr {
 }
 
 pub fn objects_non_null_projection(arg: RustExpr) -> RustExpr {
-    RustExpr::MethodCall {
-        receiver: Box::new(arg),
-        method: "is_some".to_string(),
-        args: Vec::new(),
-    }
+    zero_arg_method_projection(arg, "is_some")
 }
 
 pub fn objects_is_null_projection(arg: RustExpr) -> RustExpr {
-    RustExpr::MethodCall {
-        receiver: Box::new(arg),
-        method: "is_none".to_string(),
-        args: Vec::new(),
-    }
+    zero_arg_method_projection(arg, "is_none")
 }
 
 pub fn arrays_as_list_projection(args: Vec<RustExpr>) -> RustExpr {
@@ -4272,11 +4367,7 @@ pub fn native_collection_from_source_projection(
     match kind {
         crate::stdlib::JavaCollectionKind::List => source,
         crate::stdlib::JavaCollectionKind::Set => typed_collect_projection(
-            RustExpr::MethodCall {
-                receiver: Box::new(source),
-                method: "into_iter".to_string(),
-                args: Vec::new(),
-            },
+            zero_arg_method_projection(source, "into_iter"),
             "std::collections::HashSet<_>",
         ),
         crate::stdlib::JavaCollectionKind::Map => source,
@@ -4284,24 +4375,15 @@ pub fn native_collection_from_source_projection(
 }
 
 pub fn arrays_equals_projection(left: RustExpr, right: RustExpr) -> RustExpr {
-    RustExpr::Call {
-        function: Box::new(RustExpr::path(["java_arrays_equals"])),
-        args: vec![left, right],
-    }
+    function_call_projection(RustExpr::path(["java_arrays_equals"]), vec![left, right])
 }
 
 pub fn arrays_deep_equals_projection(left: RustExpr, right: RustExpr) -> RustExpr {
-    RustExpr::Call {
-        function: Box::new(RustExpr::path(["java_arrays_deep_equals"])),
-        args: vec![left, right],
-    }
+    function_call_projection(RustExpr::path(["java_arrays_deep_equals"]), vec![left, right])
 }
 
 pub fn arrays_deep_hash_code_projection(source: RustExpr) -> RustExpr {
-    RustExpr::Call {
-        function: Box::new(RustExpr::path(["java_arrays_deep_hash_code"])),
-        args: vec![source],
-    }
+    function_call_projection(RustExpr::path(["java_arrays_deep_hash_code"]), vec![source])
 }
 
 pub fn arrays_equals_range_projection(
@@ -4517,7 +4599,7 @@ pub fn arrays_binary_search_range_projection(
 fn arrays_panic_expr(message: &str) -> RustExpr {
     RustExpr::MacroCall {
         macro_name: "panic".to_string(),
-        args: vec![RustExpr::Literal(format!("{message:?}"))],
+        args: vec![rust_string_literal_projection(message)],
     }
 }
 
@@ -4970,6 +5052,7 @@ pub fn native_collection_with_capacity_projection(
     kind: crate::stdlib::JavaCollectionKind,
     capacity: RustExpr,
 ) -> RustExpr {
+    let capacity = recover_parseable_raw_operand_projection(capacity);
     let capacity = RustExpr::Cast {
         expr: Box::new(group_raw_cast_operand_if_needed(capacity)),
         ty: "usize".to_string(),
@@ -5419,6 +5502,7 @@ pub fn map_get_mut_expect_projection(receiver: RustExpr, key: RustExpr) -> RustE
 }
 
 pub fn optional_copied_expect_projection(expr: RustExpr) -> RustExpr {
+    let expr = recover_parseable_raw_operand_projection(expr);
     RustExpr::shaped(
         RustExprShape::OwnedRecovery,
         method_expect_projection(
@@ -5428,6 +5512,7 @@ pub fn optional_copied_expect_projection(expr: RustExpr) -> RustExpr {
     )
 }
 
+#[cfg(test)]
 pub fn render_string_format_arg_value(arg: RustExpr) -> String {
     emit::emit_expr(&string_format_arg_value_projection(arg))
 }
@@ -5438,19 +5523,16 @@ pub fn string_format_arg_value_projection(arg: RustExpr) -> RustExpr {
 
 pub fn string_format_projection(mut args: Vec<RustExpr>) -> RustExpr {
     if args.is_empty() {
-        return RustExpr::Call {
-            function: Box::new(RustExpr::path(["String", "new"])),
-            args: Vec::new(),
-        };
+        return function_call_projection(RustExpr::path(["String", "new"]), Vec::new());
     }
     if args.len() >= 2 && is_java_locale_format_arg(&args[0]) {
         args.remove(0);
     }
     let format_arg = args.remove(0);
     let Some(java_format) = string_literal_source(&format_arg) else {
-        return RustExpr::Call {
-            function: Box::new(RustExpr::path(["java_string_format"])),
-            args: vec![
+        return function_call_projection(
+            RustExpr::path(["java_string_format"]),
+            vec![
                 format_arg,
                 RustExpr::VecLiteral(
                     args.into_iter()
@@ -5458,10 +5540,10 @@ pub fn string_format_projection(mut args: Vec<RustExpr>) -> RustExpr {
                         .collect(),
                 ),
             ],
-        };
+        );
     };
     let rust_format = java_format_to_rust_format(&java_format);
-    let mut rendered_args = vec![RustExpr::Literal(format!("{rust_format:?}"))];
+    let mut rendered_args = vec![rust_string_literal_projection(&rust_format)];
     rendered_args.extend(args);
     macro_call_projection("format", rendered_args)
 }
@@ -5548,28 +5630,18 @@ pub fn borrowed_sequence_extend_arg(
     element_shape: &RustSlotShape,
     facts: &FactSet,
 ) -> RustExpr {
-    let iter = RustExpr::MethodCall {
-        receiver: Box::new(borrow_operand_expr(arg)),
-        method: "iter".to_string(),
-        args: Vec::new(),
-    };
+    let iter = zero_arg_method_projection(borrow_operand_expr(arg), "iter");
     match borrowed_element_recovery_policy(element_shape, facts) {
         BorrowedElementRecoveryPolicy::BorrowElement => iter,
-        BorrowedElementRecoveryPolicy::StringViewToOwned => RustExpr::MethodCall {
-            receiver: Box::new(iter),
-            method: "map".to_string(),
-            args: vec![param_to_string_closure_expr("v")],
-        },
-        BorrowedElementRecoveryPolicy::CopyElements => RustExpr::MethodCall {
-            receiver: Box::new(iter),
-            method: "copied".to_string(),
-            args: Vec::new(),
-        },
-        BorrowedElementRecoveryPolicy::CloneElements { .. } => RustExpr::MethodCall {
-            receiver: Box::new(iter),
-            method: "cloned".to_string(),
-            args: Vec::new(),
-        },
+        BorrowedElementRecoveryPolicy::StringViewToOwned => receiver_method_call_projection_exact(
+            iter,
+            "map",
+            vec![param_to_string_closure_expr("v")],
+        ),
+        BorrowedElementRecoveryPolicy::CopyElements => zero_arg_method_projection(iter, "copied"),
+        BorrowedElementRecoveryPolicy::CloneElements { .. } => {
+            zero_arg_method_projection(iter, "cloned")
+        }
         BorrowedElementRecoveryPolicy::Unsupported { .. } => RustExpr::PostfixComment {
             expr: Box::new(zero_arg_method_projection(iter, "cloned")),
             comment: " /* java2rust: unsupported borrowed element recovery for extend */"
@@ -5615,6 +5687,7 @@ pub fn sequence_iteration_source_projection(
     }
 }
 
+#[cfg(test)]
 pub fn render_optional_non_null_filter_map(item_is_borrowed: bool) -> String {
     let projection = optional_non_null_filter_map_projection(
         RustExpr::Var("__java_stream".to_string()),
@@ -5643,17 +5716,6 @@ pub fn optional_non_null_filter_map_projection(
     )
 }
 
-pub fn render_nullable_stream_map_body(
-    before_guard: &str,
-    condition: &str,
-    else_body: &str,
-    final_expr: &str,
-) -> String {
-    format!(
-        "{{ {before_guard}if {condition} {{ None }} else {{ {else_body}Some({final_expr}) }} }}"
-    )
-}
-
 pub fn nullable_stream_map_body_projection(
     before_guard: Vec<RustStmt>,
     condition: RustExpr,
@@ -5678,10 +5740,7 @@ pub fn nullable_stream_map_body_projection(
 }
 
 fn some_expr(value: RustExpr) -> RustExpr {
-    RustExpr::Call {
-        function: Box::new(RustExpr::path(["Some"])),
-        args: vec![value],
-    }
+    function_call_projection(RustExpr::path(["Some"]), vec![value])
 }
 
 pub fn borrowed_collection_flat_map_projection(receiver: RustExpr, param_name: &str) -> RustExpr {
@@ -5695,6 +5754,7 @@ pub fn borrowed_collection_flat_map_projection(receiver: RustExpr, param_name: &
     )
 }
 
+#[cfg(test)]
 pub fn render_borrowed_collection_flat_map(param_name: &str) -> String {
     let projection = borrowed_collection_flat_map_projection(
         RustExpr::Var("__java_stream".to_string()),
@@ -5721,9 +5781,10 @@ pub fn stream_collect_to_map_projection(
             RustExpr::Tuple(vec![key, value]),
         )],
     );
-    zero_arg_method_projection(mapped, "collect::<std::collections::HashMap<_, _>>")
+    typed_collect_projection(mapped, "std::collections::HashMap<_, _>")
 }
 
+#[cfg(test)]
 pub fn render_stream_collect_to_map_terminal(
     param_name: &str,
     key: RustExpr,
@@ -5759,6 +5820,7 @@ pub fn stream_join_terminal_projection(
     )
 }
 
+#[cfg(test)]
 pub fn render_stream_join_terminal(item_display: RustExpr, delimiter: RustExpr) -> String {
     let projection = stream_join_terminal_projection(
         RustExpr::Var("__java_stream".to_string()),
@@ -5785,6 +5847,7 @@ pub fn stream_match_terminal_projection(
     )
 }
 
+#[cfg(test)]
 pub fn render_stream_match_terminal(
     terminal_method: &str,
     param_name: &str,
@@ -5832,6 +5895,7 @@ pub fn stream_reduce_terminal_projection(
     )
 }
 
+#[cfg(test)]
 pub fn render_stream_reduce_terminal(
     identity: RustExpr,
     left_param: &str,
@@ -5873,6 +5937,7 @@ pub fn stream_filter_op_projection(
     )
 }
 
+#[cfg(test)]
 pub fn render_stream_filter_op(
     param_pattern: &str,
     predicate: RustExpr,
@@ -5896,13 +5961,34 @@ pub fn stream_map_op_projection(
     param_pattern: &str,
     body: RustExpr,
 ) -> RustExpr {
-    method_call_projection(
+    stream_map_op_projection_with_param(
         receiver,
-        "map",
-        vec![single_param_closure_expr(param_pattern, body)],
+        RustClosureParam {
+            pattern: param_pattern.to_string(),
+            ty: None,
+        },
+        body,
     )
 }
 
+pub fn stream_map_op_projection_with_param(
+    receiver: RustExpr,
+    param: RustClosureParam,
+    body: RustExpr,
+) -> RustExpr {
+    method_call_projection(
+        receiver,
+        "map",
+        vec![RustExpr::Closure {
+            is_move: false,
+            params: vec![param],
+            return_type: None,
+            body: RustClosureBody::Expr(Box::new(body)),
+        }],
+    )
+}
+
+#[cfg(test)]
 pub fn render_stream_map_op(param_pattern: &str, body: RustExpr) -> String {
     let projection = stream_map_op_projection(
         RustExpr::Var("__java_stream".to_string()),
@@ -5928,6 +6014,7 @@ pub fn stream_flat_map_op_projection(
     )
 }
 
+#[cfg(test)]
 pub fn render_stream_flat_map_op(param_pattern: &str, body: RustExpr) -> String {
     let projection = stream_flat_map_op_projection(
         RustExpr::Var("__java_stream".to_string()),
@@ -5944,28 +6031,29 @@ pub fn render_stream_flat_map_op(param_pattern: &str, body: RustExpr) -> String 
 pub fn stream_prefixed_flat_map_op_projection(
     receiver: RustExpr,
     param_pattern: &str,
-    prefix: String,
+    prefix_stmts: Vec<RustStmt>,
     tail: RustExpr,
 ) -> RustExpr {
     stream_flat_map_op_projection(
         receiver,
         param_pattern,
         RustExpr::Block {
-            stmts: prefixed_stream_block_stmts(prefix),
+            stmts: prefix_stmts,
             tail: Some(Box::new(tail)),
         },
     )
 }
 
+#[cfg(test)]
 pub fn render_stream_prefixed_flat_map_op(
     param_pattern: &str,
-    prefix: String,
+    prefix_stmts: Vec<RustStmt>,
     tail: RustExpr,
 ) -> String {
     let projection = stream_prefixed_flat_map_op_projection(
         RustExpr::Var("__java_stream".to_string()),
         param_pattern,
-        prefix,
+        prefix_stmts,
         tail,
     );
     let rendered = emit::emit_expr(&projection);
@@ -5975,6 +6063,16 @@ pub fn render_stream_prefixed_flat_map_op(
         .to_string()
 }
 
+#[cfg(test)]
+pub fn render_stream_prefixed_flat_map_op_from_prefix_string(
+    param_pattern: &str,
+    prefix: String,
+    tail: RustExpr,
+) -> String {
+    render_stream_prefixed_flat_map_op(param_pattern, prefixed_stream_block_stmts(prefix), tail)
+}
+
+#[cfg(test)]
 fn prefixed_stream_block_stmts(prefix: String) -> Vec<RustStmt> {
     let prefix = prefix.trim();
     if prefix.is_empty() {
@@ -5991,6 +6089,7 @@ fn prefixed_stream_block_stmts(prefix: String) -> Vec<RustStmt> {
         .collect()
 }
 
+#[cfg(test)]
 fn prefixed_stream_block_let_stmt(stmt: &str) -> Option<RustStmt> {
     let stmt = stmt.strip_prefix("let ")?;
     let (mutable, stmt) = stmt
@@ -6006,22 +6105,34 @@ fn prefixed_stream_block_let_stmt(stmt: &str) -> Option<RustStmt> {
     })
 }
 
+#[cfg(test)]
 fn prefixed_stream_block_expr_stmt(stmt: &str) -> RustStmt {
     RustStmt::Expr(rendered_projection_or_raw_leaf(stmt))
 }
 
-pub fn render_stream_lambda_param_projection(
+pub fn stream_lambda_param_expr(
     projection: StreamLambdaParamProjection,
     param: &str,
     parenthesized: bool,
-) -> String {
-    match (projection, parenthesized) {
-        (StreamLambdaParamProjection::FilterBorrowed, false) => format!("**{param}"),
-        (StreamLambdaParamProjection::BorrowedItem, false) => format!("*{param}"),
-        (StreamLambdaParamProjection::OwnedItem, false) => param.to_string(),
-        (StreamLambdaParamProjection::FilterBorrowed, true) => format!("(**{param})"),
-        (StreamLambdaParamProjection::BorrowedItem, true) => format!("(*{param})"),
-        (StreamLambdaParamProjection::OwnedItem, true) => param.to_string(),
+) -> RustExpr {
+    let expr = match projection {
+        StreamLambdaParamProjection::FilterBorrowed => RustExpr::Unary {
+            op: "*".to_string(),
+            expr: Box::new(RustExpr::Unary {
+                op: "*".to_string(),
+                expr: Box::new(RustExpr::Var(param.to_string())),
+            }),
+        },
+        StreamLambdaParamProjection::BorrowedItem => RustExpr::Unary {
+            op: "*".to_string(),
+            expr: Box::new(RustExpr::Var(param.to_string())),
+        },
+        StreamLambdaParamProjection::OwnedItem => RustExpr::Var(param.to_string()),
+    };
+    if parenthesized && !matches!(projection, StreamLambdaParamProjection::OwnedItem) {
+        RustExpr::Grouped(Box::new(expr))
+    } else {
+        expr
     }
 }
 
@@ -6029,7 +6140,11 @@ pub fn project_optional_receiver(
     expr: RustExpr,
     projection: OptionalReceiverProjection,
 ) -> RustExpr {
-    let receiver = parenthesize_raw_method_receiver(strip_terminal_unwrap_projection(expr));
+    let receiver = match strip_terminal_unwrap_projection(expr) {
+        RustExpr::Raw(rendered) => rendered_plus_expr_projection_or_raw_leaf(&rendered),
+        other => other,
+    };
+    let receiver = parenthesize_raw_method_receiver(receiver);
     match projection {
         OptionalReceiverProjection::Shared => method_expect_projection(
             zero_arg_method_projection(receiver, "as_ref"),
@@ -6076,10 +6191,26 @@ pub fn rewrite_downcast_expect_message(
     expr: RustExpr,
     replacement_message: &'static str,
 ) -> RustExpr {
+    if let Some(rewritten) = rewrite_downcast_expect_message_projection(&expr, replacement_message)
+    {
+        return rewritten;
+    }
     let RustExpr::Raw(rendered) = expr.unshaped() else {
-        unreachable!("structured result recovery returns before raw fallback");
+        return expr;
     };
     let rendered = rendered.clone();
+    if let Some(rewritten) =
+        rendered_downcast_expect_message_projection(&rendered, replacement_message)
+    {
+        return rewritten;
+    }
+    let recovered = rendered_plus_expr_projection_or_raw_leaf(&rendered);
+    if !matches!(recovered.unshaped(), RustExpr::Raw(_))
+        && let Some(rewritten) =
+            rewrite_downcast_expect_message_projection(&recovered, replacement_message)
+    {
+        return rewritten;
+    }
     let cast_expect = crate::output_markers::invalid_java_cast_expect();
     if !raw_contains_outside_literals(rendered.as_str(), crate::output_markers::DOWNCAST_TURBOFISH)
     {
@@ -6092,6 +6223,170 @@ pub fn rewrite_downcast_expect_message(
     )
     .map(|rendered| rendered_projection_or_raw_leaf(&rendered))
     .unwrap_or(expr)
+}
+
+fn rendered_downcast_expect_message_projection(
+    rendered: &str,
+    replacement_message: &'static str,
+) -> Option<RustExpr> {
+    let (expect_function, expect_args) = rendered_call_parts(rendered.trim())?;
+    let (downcast_expr, expect_method) = rendered_method_call_target(expect_function)?;
+    if expect_method != "expect"
+        || expect_args.trim() != format!("{:?}", crate::output_markers::INVALID_JAVA_CAST_MESSAGE)
+    {
+        return None;
+    }
+
+    let (downcast_function, downcast_args) = rendered_call_parts(downcast_expr)?;
+    let (receiver, downcast_method) = rendered_method_call_target(downcast_function)?;
+    if !downcast_args.trim().is_empty() || !downcast_method.starts_with("downcast::<") {
+        return None;
+    }
+
+    let receiver = rendered_projection_or_raw_leaf(receiver);
+    if matches!(receiver.unshaped(), RustExpr::Raw(_)) {
+        return None;
+    }
+    Some(method_expect_projection(
+        zero_arg_method_projection(parenthesize_raw_method_receiver(receiver), downcast_method),
+        replacement_message,
+    ))
+}
+
+fn rewrite_downcast_expect_message_projection(
+    expr: &RustExpr,
+    replacement_message: &'static str,
+) -> Option<RustExpr> {
+    match expr.unshaped() {
+        RustExpr::MethodCall {
+            receiver,
+            method,
+            args,
+        } if method == "expect"
+            && matches!(args.as_slice(), [RustExpr::Literal(message)] if message == &format!("{:?}", crate::output_markers::INVALID_JAVA_CAST_MESSAGE))
+            && rust_expr_contains_downcast_call(receiver) =>
+        {
+            Some(RustExpr::MethodCall {
+                receiver: receiver.clone(),
+                method: method.clone(),
+                args: vec![RustExpr::Literal(format!("{replacement_message:?}"))],
+            })
+        }
+        RustExpr::MethodCall {
+            receiver,
+            method,
+            args,
+        } => {
+            let rewritten_receiver =
+                rewrite_downcast_expect_message_projection(receiver, replacement_message);
+            let mut changed = rewritten_receiver.is_some();
+            let rewritten_args = args
+                .iter()
+                .map(|arg| {
+                    rewrite_downcast_expect_message_projection(arg, replacement_message)
+                        .inspect(|_| changed = true)
+                        .unwrap_or_else(|| arg.clone())
+                })
+                .collect::<Vec<_>>();
+            changed.then(|| RustExpr::MethodCall {
+                receiver: Box::new(rewritten_receiver.unwrap_or_else(|| receiver.as_ref().clone())),
+                method: method.clone(),
+                args: rewritten_args,
+            })
+        }
+        RustExpr::Call { function, args } => {
+            let rewritten_function =
+                rewrite_downcast_expect_message_projection(function, replacement_message);
+            let mut changed = rewritten_function.is_some();
+            let rewritten_args = args
+                .iter()
+                .map(|arg| {
+                    rewrite_downcast_expect_message_projection(arg, replacement_message)
+                        .inspect(|_| changed = true)
+                        .unwrap_or_else(|| arg.clone())
+                })
+                .collect::<Vec<_>>();
+            changed.then(|| RustExpr::Call {
+                function: Box::new(rewritten_function.unwrap_or_else(|| function.as_ref().clone())),
+                args: rewritten_args,
+            })
+        }
+        RustExpr::Binary { op, left, right } => {
+            if let Some(left) =
+                rewrite_downcast_expect_message_projection(left, replacement_message)
+            {
+                return Some(RustExpr::Binary {
+                    op: op.clone(),
+                    left: Box::new(left),
+                    right: right.clone(),
+                });
+            }
+            rewrite_downcast_expect_message_projection(right, replacement_message).map(|right| {
+                RustExpr::Binary {
+                    op: op.clone(),
+                    left: left.clone(),
+                    right: Box::new(right),
+                }
+            })
+        }
+        RustExpr::Grouped(inner) => {
+            rewrite_downcast_expect_message_projection(inner, replacement_message)
+                .map(|rewritten| RustExpr::Grouped(Box::new(rewritten)))
+        }
+        RustExpr::Shaped {
+            shape,
+            actual,
+            expr,
+        } => {
+            rewrite_downcast_expect_message_projection(expr, replacement_message).map(|rewritten| {
+                RustExpr::Shaped {
+                    shape: *shape,
+                    actual: actual.clone(),
+                    expr: Box::new(rewritten),
+                }
+            })
+        }
+        RustExpr::MarkedBlock { marker, expr } => {
+            rewrite_downcast_expect_message_projection(expr, replacement_message).map(|rewritten| {
+                RustExpr::MarkedBlock {
+                    marker: marker.clone(),
+                    expr: Box::new(rewritten),
+                }
+            })
+        }
+        RustExpr::PostfixComment { expr, comment } => {
+            rewrite_downcast_expect_message_projection(expr, replacement_message).map(|rewritten| {
+                RustExpr::PostfixComment {
+                    expr: Box::new(rewritten),
+                    comment: comment.clone(),
+                }
+            })
+        }
+        _ => None,
+    }
+}
+
+fn rust_expr_contains_downcast_call(expr: &RustExpr) -> bool {
+    match expr.unshaped() {
+        RustExpr::MethodCall {
+            receiver,
+            method,
+            args,
+        } => {
+            method.starts_with("downcast::<")
+                || rust_expr_contains_downcast_call(receiver)
+                || args.iter().any(rust_expr_contains_downcast_call)
+        }
+        RustExpr::Call { function, args } => {
+            rust_expr_contains_downcast_call(function)
+                || args.iter().any(rust_expr_contains_downcast_call)
+        }
+        RustExpr::Grouped(expr)
+        | RustExpr::Shaped { expr, .. }
+        | RustExpr::MarkedBlock { expr, .. }
+        | RustExpr::PostfixComment { expr, .. } => rust_expr_contains_downcast_call(expr),
+        _ => false,
+    }
 }
 
 pub fn rewrite_optional_erased_borrowed_string_view_call_args(
@@ -6110,18 +6405,13 @@ pub fn rewrite_optional_erased_borrowed_string_view_call_args(
         return lowered;
     };
     let mut rendered = rendered.clone();
-    if let Some(projected) = optional_erased_string_consuming_view_projection(&rendered) {
-        return projected;
-    }
     let mut changed = false;
     for name in optional_string_locals {
-        let erased_string_box =
-            format!("{name}.map(|value| Box::new(value.clone()) as Box<dyn std::any::Any>)");
-        if let Some(rewritten) = raw_replace_all_outside_literals(
-            &rendered,
-            &erased_string_box,
-            &format!("{name}.as_ref().map(|value| value.as_str())"),
-        ) {
+        let erased_string_box = emit::emit_expr(&optional_string_erased_box_projection(name));
+        let borrowed_string_view = emit::emit_expr(&optional_string_borrowed_view_projection(name));
+        if let Some(rewritten) =
+            raw_replace_all_outside_literals(&rendered, &erased_string_box, &borrowed_string_view)
+        {
             rendered = rewritten;
             changed = true;
         }
@@ -6131,21 +6421,13 @@ pub fn rewrite_optional_erased_borrowed_string_view_call_args(
             "{name}.unwrap().downcast::<String>(){}.as_str()",
             crate::output_markers::invalid_java_cast_expect()
         );
-        if let Some(rewritten) = raw_replace_all_outside_literals(
-            &rendered,
-            &consuming_view,
-            &format!(
-                "{name}.as_ref().and_then(|value| value.downcast_ref::<String>()){}.as_str()",
-                crate::output_markers::invalid_java_cast_expect()
-            ),
-        ) {
+        let borrowed_view = emit::emit_expr(&optional_erased_string_borrowed_view_projection(name));
+        if let Some(rewritten) =
+            raw_replace_all_outside_literals(&rendered, &consuming_view, &borrowed_view)
+        {
             rendered = rewritten;
             changed = true;
         }
-    }
-    if let Some(rewritten) = rewrite_rendered_optional_erased_string_views(&rendered) {
-        rendered = rewritten;
-        changed = true;
     }
     if changed {
         rendered_projection_or_raw_leaf(&rendered)
@@ -6159,6 +6441,23 @@ fn rewrite_optional_erased_borrowed_string_view_call_args_projection(
     optional_string_locals: &[String],
     erased_string_cast_locals: &[String],
 ) -> Option<RustExpr> {
+    if let RustExpr::Shaped {
+        shape,
+        actual,
+        expr,
+    } = lowered
+    {
+        return rewrite_optional_erased_borrowed_string_view_call_args_projection(
+            expr,
+            optional_string_locals,
+            erased_string_cast_locals,
+        )
+        .map(|rewritten| RustExpr::Shaped {
+            shape: *shape,
+            actual: actual.clone(),
+            expr: Box::new(rewritten),
+        });
+    }
     if let Some(rewritten) =
         optional_string_erased_box_map_string_view_projection(lowered, optional_string_locals)
     {
@@ -6169,7 +6468,94 @@ fn rewrite_optional_erased_borrowed_string_view_call_args_projection(
     {
         return Some(rewritten);
     }
+    if let Some(rewritten) = optional_erased_string_consuming_view_expr_projection(lowered) {
+        return Some(rewritten);
+    }
     match lowered {
+        RustExpr::Grouped(expr) => {
+            rewrite_optional_erased_borrowed_string_view_call_args_projection(
+                expr,
+                optional_string_locals,
+                erased_string_cast_locals,
+            )
+            .map(|rewritten| RustExpr::Grouped(Box::new(rewritten)))
+        }
+        RustExpr::Unary { op, expr } => {
+            rewrite_optional_erased_borrowed_string_view_call_args_projection(
+                expr,
+                optional_string_locals,
+                erased_string_cast_locals,
+            )
+            .map(|rewritten| RustExpr::Unary {
+                op: op.clone(),
+                expr: Box::new(rewritten),
+            })
+        }
+        RustExpr::Cast { expr, ty } => {
+            rewrite_optional_erased_borrowed_string_view_call_args_projection(
+                expr,
+                optional_string_locals,
+                erased_string_cast_locals,
+            )
+            .map(|rewritten| RustExpr::Cast {
+                expr: Box::new(rewritten),
+                ty: ty.clone(),
+            })
+        }
+        RustExpr::Try(expr) => rewrite_optional_erased_borrowed_string_view_call_args_projection(
+            expr,
+            optional_string_locals,
+            erased_string_cast_locals,
+        )
+        .map(|rewritten| RustExpr::Try(Box::new(rewritten))),
+        RustExpr::Field(receiver, field) => {
+            rewrite_optional_erased_borrowed_string_view_call_args_projection(
+                receiver,
+                optional_string_locals,
+                erased_string_cast_locals,
+            )
+            .map(|rewritten| RustExpr::Field(Box::new(rewritten), field.clone()))
+        }
+        RustExpr::Index(target, index) => {
+            let rewritten_target =
+                rewrite_optional_erased_borrowed_string_view_call_args_projection(
+                    target,
+                    optional_string_locals,
+                    erased_string_cast_locals,
+                );
+            let rewritten_index = rewrite_optional_erased_borrowed_string_view_call_args_projection(
+                index,
+                optional_string_locals,
+                erased_string_cast_locals,
+            );
+            if rewritten_target.is_none() && rewritten_index.is_none() {
+                return None;
+            }
+            Some(RustExpr::Index(
+                Box::new(rewritten_target.unwrap_or_else(|| target.as_ref().clone())),
+                Box::new(rewritten_index.unwrap_or_else(|| index.as_ref().clone())),
+            ))
+        }
+        RustExpr::Binary { op, left, right } => {
+            let rewritten_left = rewrite_optional_erased_borrowed_string_view_call_args_projection(
+                left,
+                optional_string_locals,
+                erased_string_cast_locals,
+            );
+            let rewritten_right = rewrite_optional_erased_borrowed_string_view_call_args_projection(
+                right,
+                optional_string_locals,
+                erased_string_cast_locals,
+            );
+            if rewritten_left.is_none() && rewritten_right.is_none() {
+                return None;
+            }
+            Some(RustExpr::Binary {
+                op: op.clone(),
+                left: Box::new(rewritten_left.unwrap_or_else(|| left.as_ref().clone())),
+                right: Box::new(rewritten_right.unwrap_or_else(|| right.as_ref().clone())),
+            })
+        }
         RustExpr::MethodCall {
             receiver,
             method,
@@ -6225,6 +6611,19 @@ fn rewrite_optional_erased_borrowed_string_view_call_args_projection(
                 args: rewritten_args,
             })
         }
+        RustExpr::Raw(rendered) => optional_erased_string_consuming_view_projection(rendered)
+            .or_else(|| {
+                let recovered = rendered_plus_expr_projection_or_raw_leaf(rendered);
+                (!matches!(recovered.unshaped(), RustExpr::Raw(_)))
+                    .then(|| {
+                        rewrite_optional_erased_borrowed_string_view_call_args_projection(
+                            &recovered,
+                            optional_string_locals,
+                            erased_string_cast_locals,
+                        )
+                    })
+                    .flatten()
+            }),
         _ => None,
     }
 }
@@ -6259,11 +6658,43 @@ fn optional_string_erased_box_map_string_view_projection(
     Some(method_call_projection(
         zero_arg_method_projection(RustExpr::Var(name.clone()), "as_ref"),
         "map",
+        vec![optional_string_borrowed_view_closure_projection()],
+    ))
+}
+
+fn optional_string_erased_box_projection(name: &str) -> RustExpr {
+    method_call_projection(
+        RustExpr::Var(name.to_string()),
+        "map",
         vec![single_param_closure_expr(
             "value",
-            zero_arg_method_projection(RustExpr::Var("value".to_string()), "as_str"),
+            RustExpr::Cast {
+                expr: Box::new(function_call_projection(
+                    RustExpr::path(["Box", "new"]),
+                    vec![zero_arg_method_projection(
+                        RustExpr::Var("value".to_string()),
+                        "clone",
+                    )],
+                )),
+                ty: "Box<dyn std::any::Any>".to_string(),
+            },
         )],
-    ))
+    )
+}
+
+fn optional_string_borrowed_view_projection(name: &str) -> RustExpr {
+    method_call_projection(
+        zero_arg_method_projection(RustExpr::Var(name.to_string()), "as_ref"),
+        "map",
+        vec![optional_string_borrowed_view_closure_projection()],
+    )
+}
+
+fn optional_string_borrowed_view_closure_projection() -> RustExpr {
+    single_param_closure_expr(
+        "value",
+        zero_arg_method_projection(RustExpr::Var("value".to_string()), "as_str"),
+    )
 }
 
 fn closure_boxes_cloned_param_as_erased_object(closure: &RustExpr, param_name: &str) -> bool {
@@ -6294,6 +6725,19 @@ fn erased_string_cast_local_string_view_projection(
     lowered: &RustExpr,
     erased_string_cast_locals: &[String],
 ) -> Option<RustExpr> {
+    let name = optional_erased_string_consuming_view_local_name(lowered)?;
+    if !erased_string_cast_locals.iter().any(|local| local == name) {
+        return None;
+    }
+    Some(optional_erased_string_borrowed_view_projection(name))
+}
+
+fn optional_erased_string_consuming_view_expr_projection(lowered: &RustExpr) -> Option<RustExpr> {
+    optional_erased_string_consuming_view_local_name(lowered)
+        .map(optional_erased_string_borrowed_view_projection)
+}
+
+fn optional_erased_string_consuming_view_local_name(lowered: &RustExpr) -> Option<&str> {
     let RustExpr::MethodCall {
         receiver,
         method,
@@ -6345,23 +6789,7 @@ fn erased_string_cast_local_string_view_projection(
     let RustExpr::Var(name) = receiver.unshaped() else {
         return None;
     };
-    if !erased_string_cast_locals.iter().any(|local| local == name) {
-        return None;
-    }
-    Some(zero_arg_method_projection(
-        method_expect_projection(
-            method_call_projection(
-                zero_arg_method_projection(RustExpr::Var(name.clone()), "as_ref"),
-                "and_then",
-                vec![single_param_closure_expr(
-                    "value",
-                    erased_object_downcast_ref_call(RustExpr::Var("value".to_string()), "String"),
-                )],
-            ),
-            crate::output_markers::INVALID_JAVA_CAST_MESSAGE,
-        ),
-        "as_str",
-    ))
+    Some(name)
 }
 
 fn raw_replace_all_outside_literals(raw: &str, pattern: &str, replacement: &str) -> Option<String> {
@@ -6382,54 +6810,6 @@ fn raw_replace_all_outside_literals(raw: &str, pattern: &str, replacement: &str)
     }
 }
 
-fn rewrite_rendered_optional_erased_string_views(rendered: &str) -> Option<String> {
-    let suffix = format!(
-        ".unwrap().downcast::<String>(){}.as_str()",
-        crate::output_markers::invalid_java_cast_expect()
-    );
-    let suffix = suffix.as_str();
-    let mut out = String::with_capacity(rendered.len());
-    let mut rest = rendered;
-    let mut changed = false;
-    while let Some(pos) = raw_find_outside_literals(rest, suffix) {
-        let prefix = &rest[..pos];
-        let local_start = prefix
-            .char_indices()
-            .rev()
-            .find_map(|(index, ch)| (!rust_ident_char(ch)).then_some(index + ch.len_utf8()))
-            .unwrap_or(0);
-        let local_name = &prefix[local_start..];
-        if local_name.is_empty()
-            || !local_name
-                .chars()
-                .next()
-                .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
-        {
-            out.push_str(prefix);
-            out.push_str(suffix);
-            rest = &rest[pos + suffix.len()..];
-            continue;
-        }
-        out.push_str(&prefix[..local_start]);
-        out.push_str(&format!(
-            "{local_name}.as_ref().and_then(|value| value.downcast_ref::<String>()){}.as_str()",
-            crate::output_markers::invalid_java_cast_expect()
-        ));
-        rest = &rest[pos + suffix.len()..];
-        changed = true;
-    }
-    if changed {
-        out.push_str(rest);
-        Some(out)
-    } else {
-        None
-    }
-}
-
-fn rust_ident_char(ch: char) -> bool {
-    ch == '_' || ch.is_ascii_alphanumeric()
-}
-
 pub fn deref_borrowed_projection(expr: RustExpr) -> RustExpr {
     RustExpr::Unary {
         op: "*".to_string(),
@@ -6438,15 +6818,26 @@ pub fn deref_borrowed_projection(expr: RustExpr) -> RustExpr {
 }
 
 fn parenthesize_raw_deref_operand(expr: RustExpr) -> RustExpr {
-    raw_leaf_or_grouped(expr, |trimmed| {
-        !(balanced_outer_parentheses_wrap_all(trimmed)
-            || !raw_contains_top_level_binary_operator(trimmed))
-    })
+    let RustExpr::Raw(raw) = expr else {
+        return expr;
+    };
+    let trimmed = raw.trim();
+    let recovered = recover_parseable_rendered_operand_projection(trimmed);
+    if !(balanced_outer_parentheses_wrap_all(trimmed)
+        || !raw_contains_top_level_binary_operator(trimmed))
+    {
+        RustExpr::Grouped(Box::new(recovered))
+    } else {
+        recovered
+    }
 }
 
 pub fn unwrap_result_or_panic_uncaught_java_exception(expr: RustExpr) -> RustExpr {
     let panic_recovery = ".unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))";
     if let Some(expr) = recover_nested_result_try_operator(expr.clone(), panic_recovery) {
+        return expr;
+    }
+    if rust_expr_is_result_panic_recovered(&expr) {
         return expr;
     }
     if !matches!(expr.unshaped(), RustExpr::Raw(_)) {
@@ -6465,34 +6856,12 @@ pub fn unwrap_result_or_panic_uncaught_java_exception(expr: RustExpr) -> RustExp
     if rendered.ends_with(panic_recovery) {
         return panic_recovered_result_expr_or_raw_leaf(rendered);
     }
-    if let Some(rendered) = rendered.strip_suffix('?') {
-        if first_rust_try_operator_index(rendered).is_none() {
-            return method_call_projection(
-                rendered_projection_or_raw_leaf(rendered),
-                "unwrap_or_else",
-                vec![panic_uncaught_java_exception_closure_expr()],
-            );
-        }
-        if let Some(expr) = recover_rendered_nested_result_try_operator(rendered, panic_recovery) {
-            return expr;
-        }
-        return panic_recovered_result_expr_or_raw_leaf(format!("{rendered}{panic_recovery}"));
-    }
-    // Only a genuine `?` operator counts. `first_rust_try_operator_index` skips
-    // string and char literals; a plain `find('?')` fallback would defeat that
-    // and corrupt format specifiers such as `{:?}`.
-    if let Some(index) = first_rust_try_operator_index(&rendered) {
-        if let Some(expr) = recover_rendered_nested_result_try_operator(&rendered, panic_recovery) {
-            return expr;
-        }
-        let mut recovered = String::with_capacity(rendered.len() + panic_recovery.len());
-        recovered.push_str(&rendered[..index]);
-        recovered.push_str(panic_recovery);
-        recovered.push_str(&rendered[index + 1..]);
-        return panic_recovered_result_expr_or_raw_leaf(recovered);
+    let recovered = rendered_plus_expr_projection_or_raw_leaf(&rendered);
+    if !matches!(recovered.unshaped(), RustExpr::Raw(_)) {
+        return unwrap_result_or_panic_uncaught_java_exception(recovered);
     }
     method_call_projection(
-        rendered_projection_or_raw_leaf(&rendered),
+        recovered,
         "unwrap_or_else",
         vec![panic_uncaught_java_exception_closure_expr()],
     )
@@ -6502,12 +6871,14 @@ fn panic_recovered_result_expr_or_raw_leaf(rendered: String) -> RustExpr {
     rendered_projection_or_raw_leaf(&rendered)
 }
 
-fn recover_rendered_nested_result_try_operator(rendered: &str, recovery: &str) -> Option<RustExpr> {
-    let projected = rendered_projection_or_raw_leaf(rendered);
-    if matches!(projected.unshaped(), RustExpr::Raw(_)) {
-        return None;
+fn rust_expr_is_result_panic_recovered(expr: &RustExpr) -> bool {
+    match expr.unshaped() {
+        RustExpr::MethodCall { method, args, .. } => {
+            method == "unwrap_or_else"
+                && matches!(args.as_slice(), [arg] if arg == &panic_uncaught_java_exception_closure_expr())
+        }
+        _ => false,
     }
-    recover_nested_result_try_operator(projected, recovery)
 }
 
 fn panic_uncaught_java_exception_closure_expr() -> RustExpr {
@@ -6538,39 +6909,22 @@ fn recover_nested_result_try_operator(expr: RustExpr, recovery: &str) -> Option<
         // Rewriting the inside cannot preserve what the tag asserted, so the
         // rewritten expression comes back untagged rather than mislabelled.
         RustExpr::Shaped { expr, .. } => recover_nested_result_try_operator(*expr, recovery),
-        RustExpr::Raw(raw) => raw.trim_end().strip_suffix('?').map(|without_try| {
-            first_rust_try_operator_index(without_try)
-                .map(|index| {
-                    if let Some(expr) =
-                        recover_rendered_nested_result_try_operator(without_try, recovery)
-                    {
-                        return expr;
-                    }
-                    let mut recovered = String::with_capacity(without_try.len() + recovery.len());
-                    recovered.push_str(&without_try[..index]);
-                    recovered.push_str(recovery);
-                    recovered.push_str(&without_try[index + 1..]);
-                    panic_recovered_result_expr_or_raw_leaf(recovered)
-                })
-                .unwrap_or_else(|| {
-                    method_call_projection(
-                        rendered_projection_or_raw_leaf(without_try),
-                        "unwrap_or_else",
-                        vec![panic_uncaught_java_exception_closure_expr()],
-                    )
-                })
-        }),
-        RustExpr::Try(expr) => recover_nested_result_try_operator((*expr).clone(), recovery)
-            .map(|expr| RustExpr::Try(Box::new(expr)))
-            .or_else(|| {
-                (recovery == ".unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))")
-                    .then(|| {
-                        method_call_projection(
-                            *expr,
-                            "unwrap_or_else",
-                            vec![panic_uncaught_java_exception_closure_expr()],
-                        )
-                    })
+        RustExpr::Raw(raw) => {
+            let recovered = rendered_plus_expr_projection_or_raw_leaf(&raw);
+            (!matches!(recovered.unshaped(), RustExpr::Raw(_)))
+                .then(|| recover_nested_result_try_operator(recovered, recovery))
+                .flatten()
+        }
+        RustExpr::Try(expr) => (recovery
+            == ".unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))")
+            .then(|| {
+                let recovered_inner =
+                    recover_nested_result_try_operator((*expr).clone(), recovery).unwrap_or(*expr);
+                method_call_projection(
+                    recovered_inner,
+                    "unwrap_or_else",
+                    vec![panic_uncaught_java_exception_closure_expr()],
+                )
             }),
         RustExpr::Field(receiver, field) => recover_nested_result_try_operator(*receiver, recovery)
             .map(|receiver| RustExpr::Field(Box::new(receiver), field)),
@@ -6927,32 +7281,6 @@ fn recover_first_arg_try_operator(args: Vec<RustExpr>, recovery: &str) -> Option
     recovered.then_some(updated)
 }
 
-fn first_rust_try_operator_index(rendered: &str) -> Option<usize> {
-    let mut in_string = false;
-    let mut in_char = false;
-    let mut escaped = false;
-    for (index, ch) in rendered.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        match ch {
-            '\\' if in_string || in_char => {
-                escaped = true;
-            }
-            '"' if !in_char => {
-                in_string = !in_string;
-            }
-            '\'' if !in_string => {
-                in_char = !in_char;
-            }
-            '?' if !in_string && !in_char => return Some(index),
-            _ => {}
-        }
-    }
-    None
-}
-
 pub fn normalize_reused_clone_for_borrowed_argument(
     lowered: &RustExpr,
     name: &str,
@@ -6997,36 +7325,40 @@ pub fn borrowed_string_literal_temporary_plan(
         .and_then(|rest| rest.strip_suffix(") as Box<dyn std::any::Any>)"))
         && string_literal_to_string_expr(inner)
     {
-        return Some(BorrowedStringLiteralTemporaryPlan {
-            replacement_expr: format!("Some(&{temporary_name})"),
-            replacement: borrowed_string_optional_temporary_replacement(temporary_name),
-            initializer_expr: inner.to_string(),
-            initializer: string_literal_to_string_projection(inner)?,
-        });
+        return borrowed_string_literal_temporary_plan_from_parts(
+            borrowed_string_optional_temporary_replacement(temporary_name),
+            inner,
+        );
     }
     if let Some(inner) = raw
         .strip_prefix("Some(&")
         .and_then(|rest| rest.strip_suffix(')'))
         && string_literal_to_string_expr(inner)
     {
-        return Some(BorrowedStringLiteralTemporaryPlan {
-            replacement_expr: format!("Some(&{temporary_name})"),
-            replacement: borrowed_string_optional_temporary_replacement(temporary_name),
-            initializer_expr: inner.to_string(),
-            initializer: string_literal_to_string_projection(inner)?,
-        });
+        return borrowed_string_literal_temporary_plan_from_parts(
+            borrowed_string_optional_temporary_replacement(temporary_name),
+            inner,
+        );
     }
     if let Some(inner) = raw.strip_prefix('&')
         && string_literal_to_string_expr(inner)
     {
-        return Some(BorrowedStringLiteralTemporaryPlan {
-            replacement_expr: format!("&{temporary_name}"),
-            replacement: borrowed_string_temporary_replacement(temporary_name),
-            initializer_expr: inner.to_string(),
-            initializer: string_literal_to_string_projection(inner)?,
-        });
+        return borrowed_string_literal_temporary_plan_from_parts(
+            borrowed_string_temporary_replacement(temporary_name),
+            inner,
+        );
     }
     None
+}
+
+fn borrowed_string_literal_temporary_plan_from_parts(
+    replacement: RustExpr,
+    initializer_expr: &str,
+) -> Option<BorrowedStringLiteralTemporaryPlan> {
+    Some(BorrowedStringLiteralTemporaryPlan {
+        replacement,
+        initializer: string_literal_to_string_projection(initializer_expr)?,
+    })
 }
 
 fn borrowed_string_optional_temporary_replacement(temporary_name: &str) -> RustExpr {
@@ -7113,6 +7445,15 @@ fn split_raw_top_level_commas(raw: &str) -> Vec<RustExpr> {
     let mut angle_depth = 0usize;
     let mut chars = raw.char_indices().peekable();
     while let Some((idx, ch)) = chars.next() {
+        if let Some(end) = raw_string_literal_end_at(raw, idx) {
+            while let Some((next_idx, _)) = chars.peek() {
+                if *next_idx >= end {
+                    break;
+                }
+                chars.next();
+            }
+            continue;
+        }
         match ch {
             '(' => paren_depth += 1,
             ')' => paren_depth = paren_depth.saturating_sub(1),
@@ -7141,13 +7482,6 @@ fn split_raw_top_level_commas(raw: &str) -> Vec<RustExpr> {
                     } else if inner == '\\' {
                         escaped = true;
                     } else if inner == quote {
-                        break;
-                    }
-                }
-            }
-            'r' if raw[idx..].starts_with("r#\"") => {
-                for (_, inner) in chars.by_ref() {
-                    if inner == '"' {
                         break;
                     }
                 }
@@ -7183,7 +7517,7 @@ pub fn unsupported_deserialization_cast_handoff_projection(
 fn panic_message_projection(message: String) -> RustExpr {
     RustExpr::MacroCall {
         macro_name: "panic".to_string(),
-        args: vec![RustExpr::Literal(format!("{message:?}"))],
+        args: vec![rust_string_literal_projection(&message)],
     }
 }
 
@@ -7312,7 +7646,7 @@ fn apply_rust_borrowed_facade_return(
     };
     let erased = erased_object_box_projection(recovered);
     if policy.target.optional_element_type().is_some() {
-        render_option_some(erased)
+        option_some_projection(erased)
     } else {
         erased
     }
@@ -7472,17 +7806,17 @@ pub fn borrowed_string_view_projection(
     })
 }
 
-pub fn apply_borrowed_string_view_projection(
+pub fn apply_borrowed_string_view_projection_expr(
     rendered: &str,
     projection: &BorrowedStringViewProjection,
-) -> String {
+) -> RustExpr {
     match projection {
         BorrowedStringViewProjection::AlreadyStringView => {
-            rendered.trim_start_matches('*').to_string()
+            rendered_projection_or_raw_leaf(rendered.trim_start_matches('*'))
         }
-        BorrowedStringViewProjection::LocalStringValue { rust_name } => {
-            format!("{rust_name}.as_str()")
-        }
+        BorrowedStringViewProjection::LocalStringValue { rust_name } => string_view_expr(
+            zero_arg_method_projection(RustExpr::Var(rust_name.clone()), "as_str"),
+        ),
     }
 }
 
@@ -7502,7 +7836,7 @@ pub fn java_concat_display_plan(java_ty: &crate::java_ir::JavaType) -> JavaDispl
 pub fn apply_java_display_plan(expr: RustExpr, plan: JavaDisplayPlan) -> RustExpr {
     match plan {
         JavaDisplayPlan::ConcatValue => {
-            zero_arg_method_projection(RustExpr::Grouped(Box::new(expr)), "to_string")
+            zero_arg_method_projection(grouped_display_method_receiver(expr), "to_string")
         }
         JavaDisplayPlan::ConcatFloatValue { double } => {
             let helper = if double {
@@ -7539,15 +7873,24 @@ pub fn apply_java_display_plan(expr: RustExpr, plan: JavaDisplayPlan) -> RustExp
     }
 }
 
+fn grouped_display_method_receiver(expr: RustExpr) -> RustExpr {
+    match expr {
+        RustExpr::Raw(raw) => grouped_raw_leaf(raw),
+        other => RustExpr::Grouped(Box::new(other)),
+    }
+}
+
 fn optional_value_display_projection(expr: RustExpr) -> RustExpr {
     optional_display_chain_projection(zero_arg_method_projection(
-        parenthesize_raw_method_receiver(expr),
+        parenthesize_raw_method_receiver(recover_optional_display_receiver(expr)),
         "as_ref",
     ))
 }
 
 fn optional_borrowed_value_display_projection(expr: RustExpr) -> RustExpr {
-    optional_display_chain_projection(parenthesize_raw_method_receiver(expr))
+    optional_display_chain_projection(parenthesize_raw_method_receiver(
+        recover_optional_display_receiver(expr),
+    ))
 }
 
 fn optional_display_chain_projection(expr: RustExpr) -> RustExpr {
@@ -7560,6 +7903,13 @@ fn optional_display_chain_projection(expr: RustExpr) -> RustExpr {
 
 pub fn render_java_display_operand(expr: &RustExpr) -> String {
     emit::emit_expr(&java_display_operand_projection(expr.clone()))
+}
+
+fn recover_optional_display_receiver(expr: RustExpr) -> RustExpr {
+    match expr {
+        RustExpr::Raw(rendered) => rendered_plus_expr_projection_or_raw_leaf(&rendered),
+        other => other,
+    }
 }
 
 pub(crate) fn java_display_operand_projection(expr: RustExpr) -> RustExpr {
@@ -7635,12 +7985,30 @@ fn strip_trailing_block_comments(rendered: &str) -> String {
 /// comment-insensitive clone recovery predicate above rather than matching any
 /// particular translation marker text.
 pub fn rust_expr_has_clone_recovery(expr: &RustExpr) -> bool {
-    expr.recorded_shape() == Some(RustExprShape::OwnedRecovery)
-        || rust_expr_has_clone_recovery_projection(expr)
-        || matches!(
-            expr.unshaped(),
-            RustExpr::Raw(rendered) if rendered_expr_has_clone_recovery(rendered)
-        )
+    clone_recovery_projection(expr.clone()).is_some()
+}
+
+fn clone_recovery_projection(expr: RustExpr) -> Option<RustExpr> {
+    if expr.recorded_shape() == Some(RustExprShape::OwnedRecovery)
+        || rust_expr_has_clone_recovery_projection(&expr)
+    {
+        return Some(expr);
+    }
+    if let RustExpr::Raw(rendered) = expr.unshaped() {
+        if let Some(recovered) = recover_rendered_clone_recovery_projection(rendered) {
+            return Some(recovered);
+        }
+        if rendered_expr_has_clone_recovery(rendered) {
+            return Some(expr);
+        }
+    }
+    None
+}
+
+fn recover_rendered_clone_recovery_projection(rendered: &str) -> Option<RustExpr> {
+    let recovered = rendered_projection_or_raw_leaf(rendered);
+    (!matches!(recovered.unshaped(), RustExpr::Raw(_)) && rust_expr_has_clone_recovery(&recovered))
+        .then_some(recovered)
 }
 
 fn rust_expr_has_clone_recovery_projection(expr: &RustExpr) -> bool {
@@ -7673,15 +8041,20 @@ pub fn snapshot_rendered_shared_borrow_argument(lowered: RustExpr, name: &str) -
     let RustExpr::Raw(rendered) = lowered.unshaped() else {
         return lowered;
     };
-    snapshot_rendered_shared_borrow_argument_fallback(rendered, name)
-        .unwrap_or_else(|| rendered_projection_or_raw_leaf(rendered))
+    let recovered = rendered_projection_or_raw_leaf(rendered);
+    if !matches!(recovered.unshaped(), RustExpr::Raw(_))
+        && let Some(snapshot) = snapshot_shared_borrow_argument_projection(&recovered, name)
+    {
+        return snapshot;
+    }
+    recovered
 }
 
 fn snapshot_shared_borrow_argument_projection(lowered: &RustExpr, name: &str) -> Option<RustExpr> {
     if rust_expr_is_option_some_of(lowered, |inner| {
         rust_expr_is_shared_borrow_of_name(inner, name)
     }) {
-        return Some(render_option_some(snapshot_shared_borrow_expr(name)));
+        return Some(option_some_projection(snapshot_shared_borrow_expr(name)));
     }
     if rust_expr_is_shared_borrow_of_name(lowered, name) {
         return Some(snapshot_shared_borrow_expr(name));
@@ -7693,46 +8066,9 @@ fn snapshot_shared_borrow_argument_projection(lowered: &RustExpr, name: &str) ->
         ));
     }
     if let Some(method) = rust_expr_option_string_or_slice_view_method_of_name(lowered, name) {
-        return Some(render_option_some(zero_arg_method_projection(
+        return Some(option_some_projection(zero_arg_method_projection(
             snapshot_clone_expr(name),
             method,
-        )));
-    }
-    None
-}
-
-fn snapshot_rendered_shared_borrow_argument_fallback(
-    rendered: &str,
-    name: &str,
-) -> Option<RustExpr> {
-    if rendered == format!("Some(&{name})") {
-        return Some(render_option_some(snapshot_shared_borrow_expr(name)));
-    }
-    if rendered == format!("&{name}") {
-        return Some(snapshot_shared_borrow_expr(name));
-    }
-    if rendered == format!("{name}.as_slice()") {
-        return Some(zero_arg_method_projection(
-            snapshot_clone_expr(name),
-            "as_slice",
-        ));
-    }
-    if rendered == format!("Some({name}.as_slice())") {
-        return Some(render_option_some(zero_arg_method_projection(
-            snapshot_clone_expr(name),
-            "as_slice",
-        )));
-    }
-    if rendered == format!("{name}.as_str()") {
-        return Some(zero_arg_method_projection(
-            snapshot_clone_expr(name),
-            "as_str",
-        ));
-    }
-    if rendered == format!("Some({name}.as_str())") {
-        return Some(render_option_some(zero_arg_method_projection(
-            snapshot_clone_expr(name),
-            "as_str",
         )));
     }
     None
@@ -7816,32 +8152,25 @@ pub fn apply_audited_clone_recovery(expr: RustExpr) -> RustExpr {
 }
 
 pub fn apply_clone_projection(expr: RustExpr) -> RustExpr {
-    if let RustExpr::Raw(rendered) = expr.unshaped() {
+    let receiver = if let RustExpr::Raw(rendered) = expr.unshaped() {
         let rendered = rendered.clone();
-        let receiver = clone_method_receiver(
+        clone_method_receiver(
             expr,
             &rendered,
             true,
             rust_method_receiver_needs_parentheses,
-        );
-        RustExpr::shaped(
-            RustExprShape::OwnedRecovery,
-            RustExpr::MethodCall {
-                receiver: Box::new(receiver),
-                method: "clone".to_string(),
-                args: Vec::new(),
-            },
         )
     } else {
-        RustExpr::shaped(
-            RustExprShape::OwnedRecovery,
-            RustExpr::MethodCall {
-                receiver: Box::new(expr),
-                method: "clone".to_string(),
-                args: Vec::new(),
-            },
-        )
-    }
+        expr
+    };
+    RustExpr::shaped(
+        RustExprShape::OwnedRecovery,
+        RustExpr::MethodCall {
+            receiver: Box::new(receiver),
+            method: "clone".to_string(),
+            args: Vec::new(),
+        },
+    )
 }
 
 fn clone_method_receiver(
@@ -7866,7 +8195,12 @@ fn clone_method_receiver(
     {
         grouped_raw_leaf(trimmed.to_string())
     } else {
-        expr
+        let projected = rendered_projection_or_raw_leaf(trimmed);
+        if matches!(projected.unshaped(), RustExpr::Raw(_)) {
+            expr
+        } else {
+            projected
+        }
     }
 }
 
@@ -8006,7 +8340,10 @@ fn char_update_wrapping_value_projection(target: RustExpr, method: &str) -> Rust
 }
 
 fn parenthesized_update_method_receiver(target: RustExpr) -> RustExpr {
-    RustExpr::Grouped(Box::new(target))
+    match target {
+        RustExpr::Raw(raw) => grouped_raw_leaf(raw),
+        other => RustExpr::Grouped(Box::new(other)),
+    }
 }
 
 pub fn exception_self_as_supertype_facade_boundary_projection() -> RustExpr {
@@ -8042,13 +8379,13 @@ pub fn explicit_java_facade_cast_placeholder_projection(
 }
 
 fn rust_type_default_call_expr(rust_type: &str) -> RustExpr {
-    let function = external_facade_rust_path_projection(&format!("{rust_type}::default"));
     RustExpr::Call {
-        function: Box::new(function),
+        function: Box::new(associated_rust_path_expr(rust_type, "default")),
         args: Vec::new(),
     }
 }
 
+#[cfg(test)]
 pub fn render_audited_clone_recovery(rendered: &str) -> String {
     render_clone_recovery_expr(rendered, &CloneRecoveryPolicy::AuditRequired)
 }
@@ -8060,10 +8397,16 @@ fn arithmetic_display_conversion_receiver_expr(expr: &RustExpr) -> Option<RustEx
             method,
             args,
         } if method == "to_string" && args.is_empty() => arithmetic_display_receiver_expr(receiver),
-        RustExpr::Raw(rendered) => raw_arithmetic_display_conversion_receiver(rendered)
-            .map(|receiver| rendered_projection_or_raw_leaf(&receiver)),
+        RustExpr::Raw(rendered) => {
+            recover_rendered_arithmetic_display_conversion_receiver(rendered)
+        }
         _ => None,
     }
+}
+
+fn recover_rendered_arithmetic_display_conversion_receiver(rendered: &str) -> Option<RustExpr> {
+    raw_arithmetic_display_conversion_receiver(rendered)
+        .map(|receiver| rendered_plus_expr_projection_or_raw_leaf(&receiver))
 }
 
 fn arithmetic_display_receiver_expr(receiver: &RustExpr) -> Option<RustExpr> {
@@ -8072,11 +8415,23 @@ fn arithmetic_display_receiver_expr(receiver: &RustExpr) -> Option<RustExpr> {
         _ if rust_expr_is_arithmetic_expr(receiver) => {
             Some(RustExpr::Grouped(Box::new(receiver.clone())))
         }
-        RustExpr::Raw(rendered) if raw_contains_top_level_arithmetic_operator(rendered) => {
-            Some(rendered_projection_or_raw_leaf(rendered))
+        RustExpr::Raw(rendered)
+            if balanced_outer_parentheses_wrap_all(rendered.trim())
+                && raw_contains_top_level_arithmetic_operator(
+                    &rendered.trim()[1..rendered.trim().len() - 1],
+                ) =>
+        {
+            grouped_rendered_inner_projection(rendered.trim())
+        }
+        RustExpr::Raw(rendered) if raw_contains_top_level_arithmetic_operator(rendered.trim()) => {
+            recover_rendered_arithmetic_display_receiver(rendered)
         }
         _ => None,
     }
+}
+
+fn recover_rendered_arithmetic_display_receiver(rendered: &str) -> Option<RustExpr> {
+    Some(rendered_plus_expr_projection_or_raw_leaf(rendered.trim()))
 }
 
 fn rust_expr_is_arithmetic_expr(expr: &RustExpr) -> bool {
@@ -8183,29 +8538,31 @@ fn borrow_operand_expr(expr: RustExpr) -> RustExpr {
 }
 
 fn parenthesized_borrow_operand_leaf(rendered: &str) -> RustExpr {
-    rendered_projection_or_raw_leaf(&parenthesize_borrow_operand(rendered))
+    let recovered = rendered_plus_expr_projection_or_raw_leaf(rendered);
+    if !matches!(recovered.unshaped(), RustExpr::Raw(_)) {
+        return parenthesized_borrow_operand_expr(recovered);
+    }
+    RustExpr::raw_leaf(rendered.trim().to_string())
 }
 
-fn parenthesize_borrow_operand(rendered: &str) -> String {
-    let trimmed = rendered.trim();
-    if rendered_borrow_operand_is_prefix_safe(trimmed) {
-        rendered.to_string()
+fn parenthesized_borrow_operand_expr(expr: RustExpr) -> RustExpr {
+    if rust_expr_is_prefix_safe_borrow_operand(&expr) {
+        expr
     } else {
-        format!("({rendered})")
+        RustExpr::Grouped(Box::new(expr))
     }
 }
 
-fn rendered_borrow_operand_is_prefix_safe(rendered: &str) -> bool {
-    if rendered.starts_with('"') || raw_string_literal_end_at(rendered, 0).is_some() {
-        return rendered_expr_is_complete_string_literal(rendered);
+fn rust_expr_is_prefix_safe_borrow_operand(expr: &RustExpr) -> bool {
+    match expr.unshaped() {
+        RustExpr::Literal(rendered) => rendered_expr_is_complete_string_literal(rendered),
+        RustExpr::Var(_) | RustExpr::Path(_) | RustExpr::Field(_, _) | RustExpr::Index(_, _) => {
+            true
+        }
+        RustExpr::GenericPath { .. } | RustExpr::TypeAssociatedPath { .. } => true,
+        RustExpr::Grouped(_) => true,
+        _ => false,
     }
-    rendered
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | ':' | '.'))
-        || rendered.starts_with("self.")
-        || rendered_expr_is_complete_string_literal(rendered)
-        || rendered_expr_is_simple_index_chain(rendered)
-        || rendered.ends_with(')')
 }
 
 fn rendered_expr_is_complete_string_literal(rendered: &str) -> bool {
@@ -8258,47 +8615,6 @@ fn normal_string_literal_end_at(raw: &str, idx: usize) -> Option<usize> {
         }
     }
     None
-}
-
-fn rendered_expr_is_simple_index_chain(rendered: &str) -> bool {
-    let trimmed = rendered.trim();
-    let Some(first_open) = trimmed.find('[') else {
-        return false;
-    };
-    let base = trimmed[..first_open].trim();
-    if base.is_empty()
-        || !base
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | ':' | '.' | '#'))
-    {
-        return false;
-    }
-
-    let mut depth = 0usize;
-    let mut saw_index = false;
-    for (index, ch) in trimmed[first_open..].char_indices() {
-        match ch {
-            '[' => {
-                if depth == 0 && index != 0 {
-                    let between = trimmed[first_open..first_open + index].trim();
-                    if !between.is_empty() {
-                        return false;
-                    }
-                }
-                depth += 1;
-                saw_index = true;
-            }
-            ']' => {
-                let Some(next_depth) = depth.checked_sub(1) else {
-                    return false;
-                };
-                depth = next_depth;
-            }
-            _ if depth == 0 && !ch.is_whitespace() => return false,
-            _ => {}
-        }
-    }
-    saw_index && depth == 0
 }
 
 fn rendered_expr_is_already_borrowed_map_key(rendered: &str) -> bool {
@@ -8401,12 +8717,33 @@ fn rust_expr_is_string_view_projection(expr: &RustExpr) -> bool {
 }
 
 fn expr_is_owned_string_recovery(expr: &RustExpr) -> bool {
-    expr.recorded_shape() == Some(RustExprShape::OwnedRecovery)
-        || rust_expr_is_zero_arg_method_call(expr, "to_string")
-        || matches!(
-            expr.unshaped(),
-            RustExpr::Raw(rendered) if raw_expr_is_owned_string_recovery(rendered)
-        )
+    owned_string_recovery_projection(expr.clone()).is_some()
+}
+
+fn owned_string_recovery_projection(expr: RustExpr) -> Option<RustExpr> {
+    if expr.recorded_shape() == Some(RustExprShape::OwnedRecovery)
+        || rust_expr_is_zero_arg_method_call(&expr, "to_string")
+    {
+        return Some(expr);
+    }
+    if let RustExpr::Raw(rendered) = expr.unshaped() {
+        if let Some(recovered) = recover_rendered_owned_string_recovery_projection(rendered) {
+            return Some(recovered);
+        }
+        if let Some(to_string_call) = terminal_raw_to_string_call_projection(rendered) {
+            return Some(to_string_call);
+        }
+        if rendered_expr_is_already_owned_string_recovery(rendered) {
+            return Some(expr);
+        }
+    }
+    None
+}
+
+fn recover_rendered_owned_string_recovery_projection(rendered: &str) -> Option<RustExpr> {
+    let recovered = rendered_projection_or_raw_leaf(rendered);
+    (!matches!(recovered.unshaped(), RustExpr::Raw(_)) && expr_is_owned_string_recovery(&recovered))
+        .then_some(recovered)
 }
 
 fn rust_expr_is_zero_arg_method_call(expr: &RustExpr, expected_method: &str) -> bool {
@@ -8433,15 +8770,6 @@ fn raw_expr_is_string_view(rendered: &str) -> bool {
         expr_is_string_view(&recovered)
     } else {
         rendered_expr_is_already_string_view(rendered)
-    }
-}
-
-fn raw_expr_is_owned_string_recovery(rendered: &str) -> bool {
-    let recovered = rendered_projection_or_raw_leaf(rendered);
-    if !matches!(recovered.unshaped(), RustExpr::Raw(_)) {
-        expr_is_owned_string_recovery(&recovered)
-    } else {
-        rendered_expr_is_already_owned_string_recovery(rendered)
     }
 }
 
@@ -8506,13 +8834,13 @@ pub fn apply_instanceof_check(
     actual: &RustSlotShape,
     target: &RustSlotShape,
 ) -> RustExpr {
-    render_instanceof_check(
+    instanceof_check_projection(
         expr,
         &crate::conversion_plan::plan_instanceof_check(actual, target),
     )
 }
 
-pub fn render_instanceof_check(expr: RustExpr, check: &InstanceOfCheck) -> RustExpr {
+pub fn instanceof_check_projection(expr: RustExpr, check: &InstanceOfCheck) -> RustExpr {
     match check {
         InstanceOfCheck::JavaSerializableMarker => function_call_projection(
             RustExpr::path(["java_is_serializable"]),
@@ -8528,19 +8856,21 @@ pub fn render_instanceof_check(expr: RustExpr, check: &InstanceOfCheck) -> RustE
                 closed_enum_variant_pattern_leaf(enum_name, variant_name),
             ],
         },
-        InstanceOfCheck::DynTraitType { target_type } => zero_arg_method_projection(
+        InstanceOfCheck::DynTraitType { target_type } => typed_zero_arg_method_projection(
             zero_arg_method_projection(parenthesize_raw_method_receiver(expr), "as_any"),
-            &format!("is::<{target_type}>"),
+            "is",
+            target_type,
         ),
-        InstanceOfCheck::BoxedDynTraitType { target_type } => zero_arg_method_projection(
+        InstanceOfCheck::BoxedDynTraitType { target_type } => typed_zero_arg_method_projection(
             zero_arg_method_projection(
                 zero_arg_method_projection(parenthesize_raw_method_receiver(expr), "as_ref"),
                 "as_any",
             ),
-            &format!("is::<{target_type}>"),
+            "is",
+            target_type,
         ),
         InstanceOfCheck::ErasedObjectType { target_type } => {
-            zero_arg_method_projection(expr, &format!("is::<{target_type}>"))
+            erased_object_is_type_projection(expr, target_type)
         }
         InstanceOfCheck::OptionalErasedObjectType { target_type } => method_call_projection(
             zero_arg_method_projection(parenthesize_raw_method_receiver(expr), "as_ref"),
@@ -8566,10 +8896,7 @@ fn closed_enum_variant_pattern_leaf(enum_name: &str, variant_name: &str) -> Rust
 fn optional_erased_object_is_instance_closure_leaf(target_type: &str) -> RustExpr {
     single_param_closure_expr(
         "value",
-        zero_arg_method_projection(
-            RustExpr::Var("value".to_string()),
-            &format!("is::<{target_type}>"),
-        ),
+        erased_object_is_type_projection(RustExpr::Var("value".to_string()), target_type),
     )
 }
 
@@ -8596,9 +8923,9 @@ pub fn instanceof_pattern_downcast_ref_projection(
         }
         InstanceOfCheck::ErasedObjectType { target_type } => {
             let target_type = normalize_emitted_java_type_name(target_type);
-            Some(zero_arg_method_projection(
+            Some(erased_object_downcast_ref_projection(
                 parenthesize_raw_method_receiver(expr),
-                &format!("downcast_ref::<{target_type}>"),
+                &target_type,
             ))
         }
         InstanceOfCheck::OptionalErasedObjectType { target_type } => {
@@ -8608,9 +8935,9 @@ pub fn instanceof_pattern_downcast_ref_projection(
                 "and_then",
                 vec![single_param_closure_expr(
                     "value",
-                    zero_arg_method_projection(
+                    erased_object_downcast_ref_projection(
                         RustExpr::Var("value".to_string()),
-                        &format!("downcast_ref::<{target_type}>"),
+                        &target_type,
                     ),
                 )],
             ))
@@ -8667,9 +8994,10 @@ fn closed_enum_downcast_projection(
 }
 
 fn dyn_trait_downcast_ref_projection(expr: RustExpr, target_type: &str) -> RustExpr {
-    zero_arg_method_projection(
+    typed_zero_arg_method_projection(
         zero_arg_method_projection(parenthesize_raw_method_receiver(expr), "as_any"),
-        &format!("downcast_ref::<{target_type}>"),
+        "downcast_ref",
+        target_type,
     )
 }
 
@@ -8777,6 +9105,7 @@ fn apply_borrowed_element_slot_adapter(
     expr: RustExpr,
     policy: &BorrowedElementSlotAdapterPolicy,
 ) -> RustExpr {
+    let expr = recover_borrowed_element_slot_adapter_input(expr);
     if let Some(adapter) = &policy.adapter {
         if borrowed_option_adapter_should_unwrap_by_move(adapter, policy) {
             return method_expect_projection(expr, "Java null receiver");
@@ -8797,6 +9126,13 @@ fn apply_borrowed_element_slot_adapter(
         apply_borrowed_element_adapter(expr, adapter)
     } else {
         expr
+    }
+}
+
+fn recover_borrowed_element_slot_adapter_input(expr: RustExpr) -> RustExpr {
+    match expr {
+        RustExpr::Raw(rendered) => recover_parseable_rendered_operand_projection(&rendered),
+        other => other,
     }
 }
 
@@ -9207,27 +9543,30 @@ fn optional_erased_string_downcast_ref_view_projection(rendered: &str) -> Option
         ".unwrap().downcast::<String>(){}",
         crate::output_markers::invalid_java_cast_expect()
     ))?;
-    if local_name.is_empty()
-        || !local_name
-            .chars()
-            .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-    {
+    if !rust_plain_identifier(local_name) {
         return None;
     }
-    Some(zero_arg_method_projection(
+    Some(optional_erased_string_borrowed_view_projection(local_name))
+}
+
+fn optional_erased_string_borrowed_view_projection(local_name: &str) -> RustExpr {
+    zero_arg_method_projection(
         method_expect_projection(
             method_call_projection(
                 zero_arg_method_projection(RustExpr::Var(local_name.to_string()), "as_ref"),
                 "and_then",
                 vec![single_param_closure_expr(
                     "value",
-                    erased_object_downcast_ref_call(RustExpr::Var("value".to_string()), "String"),
+                    erased_object_downcast_ref_projection(
+                        RustExpr::Var("value".to_string()),
+                        "String",
+                    ),
                 )],
             ),
             crate::output_markers::INVALID_JAVA_CAST_MESSAGE,
         ),
         "as_str",
-    ))
+    )
 }
 
 fn optional_erased_string_consuming_view_projection(rendered: &str) -> Option<RustExpr> {
@@ -9318,22 +9657,13 @@ fn apply_borrowed_vec_clone_adapter(expr: RustExpr, policy: &CloneRecoveryPolicy
     if expr.recorded_shape() == Some(RustExprShape::OwnedRecovery) {
         return expr;
     }
-    if rust_expr_is_cloned_collect_call(&expr, "collect::<Vec<_>>") {
-        return RustExpr::shaped(RustExprShape::OwnedRecovery, expr);
-    }
-    if let Some(iterator) = rust_expr_collect_call_receiver(&expr, "collect::<Vec<_>>") {
-        return borrowed_collect_clone_projection(iterator, "collect::<Vec<_>>", policy);
-    }
-    if let Some(projected) = raw_borrowed_collect_clone_compat_projection(
-        &expr,
-        "collect::<Vec<_>>",
-        ".cloned().collect::<Vec<_>>()",
-        policy,
-    ) {
+    if let Some(projected) =
+        borrowed_collect_clone_compat_projection(&expr, "collect::<Vec<_>>", policy)
+    {
         return projected;
     }
     borrowed_collect_clone_projection(
-        zero_arg_method_projection(parenthesize_raw_method_receiver(expr), "into_iter"),
+        zero_arg_method_projection(opaque_raw_method_receiver(expr), "into_iter"),
         "collect::<Vec<_>>",
         policy,
     )
@@ -9343,31 +9673,39 @@ fn apply_borrowed_set_clone_adapter(expr: RustExpr, policy: &CloneRecoveryPolicy
     if expr.recorded_shape() == Some(RustExprShape::OwnedRecovery) {
         return expr;
     }
-    if rust_expr_is_cloned_collect_call(&expr, "collect::<std::collections::HashSet<_>>") {
-        return RustExpr::shaped(RustExprShape::OwnedRecovery, expr);
-    }
-    if let Some(iterator) =
-        rust_expr_collect_call_receiver(&expr, "collect::<std::collections::HashSet<_>>")
-    {
-        return borrowed_collect_clone_projection(
-            iterator,
-            "collect::<std::collections::HashSet<_>>",
-            policy,
-        );
-    }
-    if let Some(projected) = raw_borrowed_collect_clone_compat_projection(
+    if let Some(projected) = borrowed_collect_clone_compat_projection(
         &expr,
         "collect::<std::collections::HashSet<_>>",
-        ".cloned().collect::<std::collections::HashSet<_>>()",
         policy,
     ) {
         return projected;
     }
     borrowed_collect_clone_projection(
-        zero_arg_method_projection(parenthesize_raw_method_receiver(expr), "into_iter"),
+        zero_arg_method_projection(opaque_raw_method_receiver(expr), "into_iter"),
         "collect::<std::collections::HashSet<_>>",
         policy,
     )
+}
+
+fn opaque_raw_method_receiver(expr: RustExpr) -> RustExpr {
+    let RustExpr::Raw(raw) = expr else {
+        return parenthesize_raw_method_receiver(expr);
+    };
+    let trimmed = raw.trim();
+    if let Some(recovered) = recover_rendered_method_receiver_expr(trimmed) {
+        return parenthesize_raw_method_receiver(recovered);
+    }
+    if balanced_outer_parentheses_wrap_all(trimmed) {
+        RustExpr::raw_leaf(trimmed)
+    } else {
+        grouped_stable_rendered_raw_leaf(trimmed.to_string())
+    }
+}
+
+fn recover_rendered_method_receiver_expr(rendered: &str) -> Option<RustExpr> {
+    let recovered = rendered_projection_or_raw_leaf(rendered);
+    (!matches!(recovered.unshaped(), RustExpr::Raw(_)) && emit::emit_expr(&recovered) == rendered)
+        .then_some(recovered)
 }
 
 pub(crate) fn rendered_projection_or_raw_leaf(rendered: &str) -> RustExpr {
@@ -9387,21 +9725,35 @@ pub(crate) fn rendered_projection_or_raw_leaf(rendered: &str) -> RustExpr {
     if let Some(expr) = rendered_cast_leaf_projection(rendered) {
         return expr;
     }
+    if let Some(expr) = rendered_vec_macro_projection(rendered) {
+        return expr;
+    }
+    if let Some(expr) = rendered_some_projection(rendered) {
+        return expr;
+    }
     if let Some(expr) = rendered_function_call_projection(rendered) {
         return expr;
     }
     dotted_zero_arg_or_field_projection(rendered)
+        .or_else(|| rendered_index_leaf_projection(rendered))
         .or_else(|| grouped_rendered_leaf_projection(rendered))
         .or_else(|| rendered_path_leaf_projection(rendered))
-        .unwrap_or_else(|| RustExpr::Raw(rendered.to_string()))
+        .unwrap_or_else(|| RustExpr::raw_leaf(rendered))
+}
+
+fn rendered_some_projection(rendered: &str) -> Option<RustExpr> {
+    rendered_complete_some_call_inner(rendered)
+        .map(|inner| option_some_projection(rendered_some_inner_projection(inner)))
 }
 
 pub(crate) fn rendered_plus_expr_projection_or_raw_leaf(rendered: &str) -> RustExpr {
-    let projected = rendered_projection_or_raw_leaf(rendered);
-    if !matches!(projected.unshaped(), RustExpr::Raw(_)) {
-        return projected;
-    }
-    rendered_top_level_plus_expr_projection(rendered).unwrap_or(projected)
+    rendered_top_level_plus_expr_projection(rendered)
+        .or_else(|| rendered_top_level_simple_binary_expr_projection(rendered))
+        .or_else(|| {
+            let projected = rendered_projection_or_raw_leaf(rendered);
+            (!matches!(projected.unshaped(), RustExpr::Raw(_))).then_some(projected)
+        })
+        .unwrap_or_else(|| RustExpr::raw_leaf(rendered))
 }
 
 fn rendered_top_level_plus_expr_projection(rendered: &str) -> Option<RustExpr> {
@@ -9466,6 +9818,69 @@ fn split_rendered_top_level_plus_terms<'a>(text: &'a str) -> Option<std::vec::In
     (terms.len() > 1).then(|| terms.into_iter())
 }
 
+fn rendered_top_level_simple_binary_expr_projection(rendered: &str) -> Option<RustExpr> {
+    for op in [
+        "==", "!=", "<=", ">=", "&&", "||", "<<", ">>", "&", "^", "|", "*", "/", "%",
+    ] {
+        if let Some((left, right)) = split_rendered_top_level_binary_once(rendered, op) {
+            return Some(RustExpr::Binary {
+                op: op.to_string(),
+                left: Box::new(rendered_projection_or_raw_leaf(left)),
+                right: Box::new(rendered_projection_or_raw_leaf(right)),
+            });
+        }
+    }
+    None
+}
+
+fn split_rendered_top_level_binary_once<'a>(text: &'a str, op: &str) -> Option<(&'a str, &'a str)> {
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+    let mut cursor = 0usize;
+    let mut found = None;
+    while cursor < text.len() {
+        if let Some(end) = raw_string_literal_end_at(text, cursor) {
+            cursor = end;
+            continue;
+        }
+        let ch = text[cursor..].chars().next()?;
+        if ch == '"' {
+            cursor = normal_string_literal_end_at(text, cursor).unwrap_or(text.len());
+            continue;
+        }
+        if ch == '\'' {
+            cursor = normal_char_literal_end_at(text, cursor).unwrap_or(text.len());
+            continue;
+        }
+        if paren_depth == 0
+            && bracket_depth == 0
+            && brace_depth == 0
+            && text[cursor..].starts_with(op)
+        {
+            if found.replace(cursor).is_some() {
+                return None;
+            }
+            cursor += op.len();
+            continue;
+        }
+        match ch {
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            '{' => brace_depth += 1,
+            '}' => brace_depth = brace_depth.saturating_sub(1),
+            _ => {}
+        }
+        cursor += ch.len_utf8();
+    }
+    let index = found?;
+    let left = text[..index].trim();
+    let right = text[index + op.len()..].trim();
+    (!left.is_empty() && !right.is_empty()).then_some((left, right))
+}
+
 fn rendered_literal_leaf_projection(rendered: &str) -> Option<RustExpr> {
     (rendered_expr_is_decimal_integer_literal(rendered)
         || rendered_expr_is_complete_string_literal(rendered)
@@ -9475,7 +9890,7 @@ fn rendered_literal_leaf_projection(rendered: &str) -> Option<RustExpr> {
 
 fn rendered_try_projection(rendered: &str) -> Option<RustExpr> {
     let inner = rendered.trim_end().strip_suffix('?')?.trim();
-    (!inner.is_empty() && first_rust_try_operator_index(inner).is_none()).then_some(())?;
+    (!inner.is_empty()).then_some(())?;
     let projected = rendered_projection_or_raw_leaf(inner);
     (!matches!(projected.unshaped(), RustExpr::Raw(_))).then(|| RustExpr::Try(Box::new(projected)))
 }
@@ -9551,6 +9966,21 @@ fn simple_rust_cast_type(ty: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | ':' | '<' | '>' | ','))
 }
 
+fn rendered_vec_macro_projection(rendered: &str) -> Option<RustExpr> {
+    let body = rendered_vec_macro_body(rendered)?;
+    let body = body.trim();
+    if body.is_empty() {
+        return Some(RustExpr::VecLiteral(Vec::new()));
+    }
+    if let Some((value, len)) = split_rendered_top_level_binary_once(body, ";") {
+        return Some(RustExpr::VecRepeat {
+            value: Box::new(rendered_plus_expr_projection_or_raw_leaf(value)),
+            len: Box::new(rendered_plus_expr_projection_or_raw_leaf(len)),
+        });
+    }
+    Some(RustExpr::VecLiteral(split_raw_top_level_commas(body)))
+}
+
 fn grouped_rendered_leaf_projection(rendered: &str) -> Option<RustExpr> {
     if let Some(borrowed) = rendered.strip_prefix('&')
         && balanced_outer_parentheses_wrap_all(borrowed.trim())
@@ -9569,7 +9999,7 @@ fn grouped_rendered_leaf_projection(rendered: &str) -> Option<RustExpr> {
 fn grouped_rendered_inner_projection(rendered: &str) -> Option<RustExpr> {
     let inner = rendered.strip_prefix('(')?.strip_suffix(')')?;
     Some(RustExpr::Grouped(Box::new(
-        rendered_projection_or_raw_leaf(inner),
+        rendered_plus_expr_projection_or_raw_leaf(inner),
     )))
 }
 
@@ -9600,6 +10030,79 @@ fn rendered_function_call_projection(rendered: &str) -> Option<RustExpr> {
     })
 }
 
+pub(crate) fn recover_rendered_call_projection(rendered: &str) -> Option<RustExpr> {
+    rendered_function_call_projection(rendered)
+}
+
+pub(crate) fn recover_rendered_assignment_place_projection(rendered: &str) -> Option<RustExpr> {
+    let rendered = rendered.trim();
+    if rendered.is_empty() {
+        return None;
+    }
+    if let Some(inner) = rendered.strip_prefix('*') {
+        let inner = recover_rendered_assignment_place_projection(inner.trim())?;
+        return Some(RustExpr::Unary {
+            op: "*".to_string(),
+            expr: Box::new(inner),
+        });
+    }
+    if balanced_outer_parentheses_wrap_all(rendered) {
+        let inner = rendered.strip_prefix('(')?.strip_suffix(')')?;
+        let inner = recover_rendered_assignment_place_projection(inner)?;
+        return Some(RustExpr::Grouped(Box::new(inner)));
+    }
+    rendered_index_leaf_projection(rendered)
+        .filter(rust_expr_is_assignment_place_projection)
+        .or_else(|| rendered_field_place_projection(rendered))
+        .or_else(|| rendered_path_leaf_projection(rendered))
+        .or_else(|| plain_identifier_expr(rendered))
+}
+
+fn rendered_field_place_projection(rendered: &str) -> Option<RustExpr> {
+    let dot = last_top_level_dot(rendered)?;
+    let receiver = rendered[..dot].trim();
+    let field = rendered[dot + 1..].trim();
+    let receiver = recover_rendered_assignment_place_projection(receiver)?;
+    rust_plain_identifier(field).then(|| field_projection(receiver, field))
+}
+
+fn rust_expr_is_assignment_place_projection(expr: &RustExpr) -> bool {
+    match expr.unshaped() {
+        RustExpr::Var(_)
+        | RustExpr::Path(_)
+        | RustExpr::GenericPath { .. }
+        | RustExpr::TypeAssociatedPath { .. }
+        | RustExpr::Field(_, _) => true,
+        RustExpr::Index(base, _) => rust_expr_is_assignment_place_projection(base),
+        RustExpr::Unary { op, expr } if op == "*" => rust_expr_is_assignment_place_projection(expr),
+        RustExpr::Grouped(expr)
+        | RustExpr::Shaped { expr, .. }
+        | RustExpr::PostfixComment { expr, .. }
+        | RustExpr::MarkedBlock { expr, .. } => rust_expr_is_assignment_place_projection(expr),
+        RustExpr::Literal(_)
+        | RustExpr::Raw(_)
+        | RustExpr::MacroCall { .. }
+        | RustExpr::StructLit { .. }
+        | RustExpr::Tuple(_)
+        | RustExpr::ArrayLiteral(_)
+        | RustExpr::VecLiteral(_)
+        | RustExpr::VecRepeat { .. }
+        | RustExpr::Call { .. }
+        | RustExpr::MethodCall { .. }
+        | RustExpr::Unary { .. }
+        | RustExpr::Binary { .. }
+        | RustExpr::Range { .. }
+        | RustExpr::Cast { .. }
+        | RustExpr::Try(_)
+        | RustExpr::If { .. }
+        | RustExpr::Closure { .. }
+        | RustExpr::Match { .. }
+        | RustExpr::Block { .. }
+        | RustExpr::UnsupportedJavaArrayCreation { .. }
+        | RustExpr::Pattern(_) => false,
+    }
+}
+
 fn simple_macro_call_name(function: &str) -> Option<&str> {
     let macro_name = function.strip_suffix('!')?;
     rust_plain_identifier(macro_name).then_some(macro_name)
@@ -9611,6 +10114,72 @@ fn rendered_call_args_projection(args: &str) -> Vec<RustExpr> {
     } else {
         split_raw_top_level_commas(args)
     }
+}
+
+fn rendered_index_leaf_projection(rendered: &str) -> Option<RustExpr> {
+    let (array, index) = rendered_final_index_parts(rendered)?;
+    let array = rendered_plus_expr_projection_or_raw_leaf(array);
+    let index = rendered_plus_expr_projection_or_raw_leaf(index);
+    if matches!(array.unshaped(), RustExpr::Raw(_)) || matches!(index.unshaped(), RustExpr::Raw(_))
+    {
+        return None;
+    }
+    Some(RustExpr::Index(Box::new(array), Box::new(index)))
+}
+
+fn rendered_final_index_parts(rendered: &str) -> Option<(&str, &str)> {
+    if !rendered.ends_with(']') {
+        return None;
+    }
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+    let mut angle_depth = 0usize;
+    let mut open = None;
+    let mut cursor = 0usize;
+    while cursor < rendered.len() {
+        if let Some(end) = raw_string_literal_end_at(rendered, cursor) {
+            cursor = end;
+            continue;
+        }
+        let ch = rendered[cursor..].chars().next()?;
+        if ch == '"' {
+            cursor = normal_string_literal_end_at(rendered, cursor)?;
+            continue;
+        }
+        if ch == '\'' {
+            cursor = normal_char_literal_end_at(rendered, cursor)?;
+            continue;
+        }
+        match ch {
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.checked_sub(1)?,
+            '[' => {
+                if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 && angle_depth == 0 {
+                    open = Some(cursor);
+                }
+                bracket_depth += 1;
+            }
+            ']' => {
+                bracket_depth = bracket_depth.checked_sub(1)?;
+                if bracket_depth == 0 && cursor + ch.len_utf8() == rendered.len() {
+                    let open = open?;
+                    let array = rendered[..open].trim();
+                    let index = rendered[open + 1..cursor].trim();
+                    return (!array.is_empty() && !index.is_empty()).then_some((array, index));
+                }
+            }
+            '{' => brace_depth += 1,
+            '}' => brace_depth = brace_depth.checked_sub(1)?,
+            '<' if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => angle_depth += 1,
+            '>' if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
+                angle_depth = angle_depth.checked_sub(1)?
+            }
+            _ => {}
+        }
+        cursor += ch.len_utf8();
+    }
+    None
 }
 
 fn rendered_method_call_target(function: &str) -> Option<(&str, &str)> {
@@ -9778,10 +10347,14 @@ fn borrowed_rendered_leaf_projection(rendered: &str) -> Option<RustExpr> {
     } else {
         return None;
     };
-    dotted_zero_arg_or_field_projection(operand).map(|expr| RustExpr::Unary {
-        op: op.to_string(),
-        expr: Box::new(expr),
-    })
+    let recovered = rendered_projection_or_raw_leaf(operand);
+    if !matches!(recovered.unshaped(), RustExpr::Raw(_)) {
+        return Some(RustExpr::Unary {
+            op: op.to_string(),
+            expr: Box::new(recovered),
+        });
+    }
+    None
 }
 
 fn borrowed_collect_clone_projection(
@@ -9799,26 +10372,28 @@ fn borrowed_collect_clone_projection(
     )
 }
 
-fn raw_borrowed_collect_clone_compat_projection(
+fn borrowed_collect_clone_compat_projection(
     expr: &RustExpr,
     collect_method: &str,
-    cloned_collect_suffix: &str,
     policy: &CloneRecoveryPolicy,
 ) -> Option<RustExpr> {
-    let RustExpr::Raw(rendered) = expr.unshaped() else {
-        return None;
+    let recovered = match expr.unshaped() {
+        RustExpr::Raw(rendered) => {
+            let recovered = rendered_projection_or_raw_leaf(rendered);
+            if matches!(recovered.unshaped(), RustExpr::Raw(_))
+                || emit::emit_expr(&recovered) != rendered.trim()
+            {
+                return None;
+            }
+            recovered
+        }
+        _ => expr.clone(),
     };
-    if rendered.ends_with(cloned_collect_suffix) {
-        return Some(RustExpr::shaped(RustExprShape::OwnedRecovery, expr.clone()));
+    if rust_expr_is_cloned_collect_call(&recovered, collect_method) {
+        return Some(RustExpr::shaped(RustExprShape::OwnedRecovery, recovered));
     }
-    let collect_call_suffix = format!(".{collect_method}()");
-    rendered.strip_suffix(&collect_call_suffix).map(|iterator| {
-        borrowed_collect_clone_projection(
-            rendered_projection_or_raw_leaf(iterator),
-            collect_method,
-            policy,
-        )
-    })
+    rust_expr_collect_call_receiver(&recovered, collect_method)
+        .map(|iterator| borrowed_collect_clone_projection(iterator, collect_method, policy))
 }
 
 fn rust_expr_is_cloned_collect_call(expr: &RustExpr, collect_method: &str) -> bool {
@@ -9917,13 +10492,8 @@ fn render_borrowed_element_recovery_fallback_policy(
 }
 
 fn index_to_usize_cast_projection(expr: RustExpr) -> RustExpr {
-    if matches!(expr.unshaped(), RustExpr::Cast { ty, .. } if ty == "usize") {
-        return expr;
-    }
-    if let RustExpr::Raw(raw) = expr.unshaped() {
-        if rendered_expr_is_usize_cast(raw) {
-            return expr;
-        }
+    if let Some(cast) = usize_cast_projection(expr.clone()) {
+        return cast;
     }
     RustExpr::Cast {
         expr: Box::new(group_raw_cast_operand_if_needed(expr)),
@@ -9937,6 +10507,13 @@ fn group_raw_cast_operand_if_needed(expr: RustExpr) -> RustExpr {
             || (!raw_contains_top_level_binary_operator(trimmed)
                 && !raw_contains_top_level_as_cast(trimmed)))
     })
+}
+
+fn recover_as_str_receiver_projection(expr: RustExpr) -> RustExpr {
+    match expr {
+        RustExpr::Raw(rendered) => recover_parseable_rendered_operand_projection(&rendered),
+        other => other,
+    }
 }
 
 fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
@@ -9963,6 +10540,7 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
             if let Some(view) = deref_string_view_projection(&expr) {
                 view
             } else {
+                let expr = recover_as_str_receiver_projection(expr);
                 string_view_expr(zero_arg_method_projection(
                     parenthesize_raw_method_receiver(expr),
                     "as_str",
@@ -9970,9 +10548,13 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
             }
         }
         Coercion::ToOwnedString => {
-            if expr_is_owned_string_recovery(&expr) {
-                RustExpr::shaped(RustExprShape::OwnedRecovery, expr)
+            if let Some(recovered) = owned_string_recovery_projection(expr.clone()) {
+                RustExpr::shaped(RustExprShape::OwnedRecovery, recovered)
             } else {
+                let expr = match expr {
+                    RustExpr::Raw(rendered) => rendered_projection_or_raw_leaf(&rendered),
+                    other => other,
+                };
                 RustExpr::shaped(
                     RustExprShape::OwnedRecovery,
                     zero_arg_method_projection(parenthesize_raw_method_receiver(expr), "to_string"),
@@ -10071,7 +10653,7 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
                 ty: rust_primitive_type_name_policy(*to).rust_name.to_string(),
             }
         }
-        Coercion::WrapOption => render_raw_option_some(expr),
+        Coercion::WrapOption => option_some_projection(expr),
         Coercion::UnwrapOption => zero_arg_method_projection(expr, "unwrap"),
         Coercion::UnwrapOptionBorrowed => RustExpr::shaped(
             RustExprShape::Borrowed,
@@ -10123,18 +10705,22 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
 
 fn borrowed_item_string_view_projection(borrowed_item: &str) -> RustExpr {
     let receiver = borrowed_item_projection_or_raw_leaf(borrowed_item);
+    borrowed_item_string_view_projection_expr(receiver)
+}
+
+fn borrowed_item_string_view_projection_expr(receiver: RustExpr) -> RustExpr {
     string_view_expr(zero_arg_method_projection(receiver, "as_str"))
 }
 
 fn borrowed_item_projection_or_raw_leaf(borrowed_item: &str) -> RustExpr {
-    rendered_projection_or_raw_leaf(borrowed_item)
+    rendered_plus_expr_projection_or_raw_leaf(borrowed_item)
 }
 
 fn java_type_param_variant_name(name: &str) -> bool {
     name.len() == 1 && name.chars().all(|ch| ch.is_ascii_uppercase())
 }
 
-fn render_option_some(expr: RustExpr) -> RustExpr {
+fn option_some_projection(expr: RustExpr) -> RustExpr {
     let expr = normalize_optional_constructed_element_expr(expr);
     RustExpr::shaped(
         RustExprShape::OptionalConstructed,
@@ -10143,10 +10729,6 @@ fn render_option_some(expr: RustExpr) -> RustExpr {
             args: vec![expr],
         }),
     )
-}
-
-fn render_raw_option_some(expr: RustExpr) -> RustExpr {
-    render_option_some(expr)
 }
 
 #[cfg(test)]
@@ -10415,7 +10997,7 @@ pub fn erased_object_borrowed_downcast_ref_projection(
     let handled_inner = shared_handle_inner_type(&target_type);
     if optional_carrier {
         let downcast_body =
-            erased_object_downcast_ref_call(RustExpr::Var("value".to_string()), &target_type);
+            erased_object_downcast_ref_projection(RustExpr::Var("value".to_string()), &target_type);
         let closure_body = if handled_inner.is_some() {
             method_call_projection(downcast_body, "map", vec![value_as_ref_closure_expr()])
         } else {
@@ -10432,7 +11014,7 @@ pub fn erased_object_borrowed_downcast_ref_projection(
         );
     }
     let downcast =
-        erased_object_downcast_ref_call(parenthesize_raw_method_receiver(expr), &target_type);
+        erased_object_downcast_ref_projection(parenthesize_raw_method_receiver(expr), &target_type);
     let downcast = if handled_inner.is_some() {
         method_call_projection(downcast, "map", vec![value_as_ref_closure_expr()])
     } else {
@@ -10441,8 +11023,12 @@ pub fn erased_object_borrowed_downcast_ref_projection(
     method_expect_projection(downcast, crate::output_markers::INVALID_JAVA_CAST_MESSAGE)
 }
 
-fn erased_object_downcast_ref_call(receiver: RustExpr, target_type: &str) -> RustExpr {
-    zero_arg_method_projection(receiver, &format!("downcast_ref::<{target_type}>"))
+pub fn erased_object_is_type_projection(receiver: RustExpr, target_type: &str) -> RustExpr {
+    typed_zero_arg_method_projection(receiver, "is", target_type)
+}
+
+pub fn erased_object_downcast_ref_projection(receiver: RustExpr, target_type: &str) -> RustExpr {
+    typed_zero_arg_method_projection(receiver, "downcast_ref", target_type)
 }
 
 fn value_as_ref_closure_expr() -> RustExpr {
@@ -10475,9 +11061,10 @@ fn apply_erased_object_downcast(
         InvalidCastPolicy::Panic => RustExpr::Grouped(Box::new(RustExpr::Unary {
             op: "*".to_string(),
             expr: Box::new(method_expect_projection(
-                zero_arg_method_projection(
+                typed_zero_arg_method_projection(
                     parenthesize_raw_method_receiver(expr),
-                    &format!("downcast::<{target_type}>"),
+                    "downcast",
+                    &target_type,
                 ),
                 crate::output_markers::INVALID_JAVA_CAST_MESSAGE,
             )),
@@ -10527,11 +11114,8 @@ fn apply_to_owned_sequence(expr: RustExpr, policy: &CloneRecoveryPolicy) -> Rust
     to_owned_sequence_projection(expr, policy)
 }
 
-pub fn to_owned_sequence_projection(expr: RustExpr, policy: &CloneRecoveryPolicy) -> RustExpr {
-    if matches!(
-        expr.unshaped(),
-        RustExpr::MethodCall { method, args, .. } if method == "to_vec" && args.is_empty()
-    ) {
+pub fn to_owned_sequence_projection(mut expr: RustExpr, policy: &CloneRecoveryPolicy) -> RustExpr {
+    if rust_expr_is_to_vec_call(&expr) {
         return RustExpr::shaped(RustExprShape::OwnedRecovery, expr);
     }
     if !matches!(expr.unshaped(), RustExpr::Raw(_))
@@ -10544,10 +11128,16 @@ pub fn to_owned_sequence_projection(expr: RustExpr, policy: &CloneRecoveryPolicy
     }
     let rendered = if let RustExpr::Raw(rendered) = expr.unshaped() {
         let rendered = rendered.clone();
-        if rendered.ends_with(".to_vec()") {
-            return RustExpr::shaped(RustExprShape::OwnedRecovery, expr);
+        if let Some(recovered) = recover_rendered_to_owned_sequence_expr(&rendered) {
+            return RustExpr::shaped(RustExprShape::OwnedRecovery, recovered);
         }
-        Some(rendered)
+        let recovered = rendered_projection_or_raw_leaf(&rendered);
+        if !matches!(recovered.unshaped(), RustExpr::Raw(_)) {
+            expr = recovered;
+            None
+        } else {
+            Some(rendered)
+        }
     } else {
         None
     };
@@ -10560,6 +11150,18 @@ pub fn to_owned_sequence_projection(expr: RustExpr, policy: &CloneRecoveryPolicy
             ),
             policy,
         ),
+    )
+}
+
+fn recover_rendered_to_owned_sequence_expr(rendered: &str) -> Option<RustExpr> {
+    let recovered = rendered_projection_or_raw_leaf(rendered);
+    rust_expr_is_to_vec_call(&recovered).then_some(recovered)
+}
+
+fn rust_expr_is_to_vec_call(expr: &RustExpr) -> bool {
+    matches!(
+        expr.unshaped(),
+        RustExpr::MethodCall { method, args, .. } if method == "to_vec" && args.is_empty()
     )
 }
 
@@ -10614,8 +11216,8 @@ fn rust_owned_sequence_receiver_needs_parentheses(expr: &RustExpr, rendered: Opt
 }
 
 fn apply_clone_recovery(expr: RustExpr, policy: &CloneRecoveryPolicy) -> RustExpr {
-    if rust_expr_has_clone_recovery(&expr) {
-        return RustExpr::shaped(RustExprShape::OwnedRecovery, expr);
+    if let Some(recovered) = clone_recovery_projection(expr.clone()) {
+        return RustExpr::shaped(RustExprShape::OwnedRecovery, recovered);
     }
     let expr = match expr {
         RustExpr::MethodCall {
@@ -10637,7 +11239,7 @@ fn apply_clone_recovery(expr: RustExpr, policy: &CloneRecoveryPolicy) -> RustExp
     if let Some(inner) = unwrap_some_expr(&expr) {
         return RustExpr::shaped(
             RustExprShape::OwnedRecovery,
-            render_option_some(apply_clone_recovery(inner, policy)),
+            option_some_projection(apply_clone_recovery(inner, policy)),
         );
     }
     if !matches!(expr.unshaped(), RustExpr::Raw(_)) {
@@ -10668,6 +11270,7 @@ fn clone_recovery_method_receiver(expr: RustExpr, rendered: &str) -> RustExpr {
     })
 }
 
+#[cfg(test)]
 fn render_clone_recovery_expr(rendered: &str, policy: &CloneRecoveryPolicy) -> String {
     render_clone_projection_expr_with_receiver_policy(
         rendered,
@@ -10676,10 +11279,12 @@ fn render_clone_recovery_expr(rendered: &str, policy: &CloneRecoveryPolicy) -> S
     )
 }
 
+#[cfg(test)]
 pub fn render_clone_projection(rendered: &str) -> String {
     render_clone_projection_expr(rendered, "")
 }
 
+#[cfg(test)]
 fn render_clone_projection_expr(rendered: &str, suffix: &str) -> String {
     render_clone_projection_expr_with_receiver_policy(
         rendered,
@@ -10688,6 +11293,7 @@ fn render_clone_projection_expr(rendered: &str, suffix: &str) -> String {
     )
 }
 
+#[cfg(test)]
 fn render_clone_projection_expr_with_receiver_policy(
     rendered: &str,
     suffix: &str,
@@ -11158,14 +11764,27 @@ mod tests {
         let complex_borrowed_item = borrowed_item_string_view_projection("left + right");
         assert_eq!(
             emit::emit_expr(&complex_borrowed_item),
-            "left + right.as_str()"
+            "(left + right).as_str()"
         );
         assert!(matches!(
             complex_borrowed_item.into_unshaped(),
             RustExpr::MethodCall { receiver, method, args }
                 if method == "as_str"
                     && args.is_empty()
-                    && matches!(receiver.as_ref(), RustExpr::Raw(raw) if raw == "left + right")
+                    && matches!(receiver.as_ref(), RustExpr::Binary { op, .. } if op == "+")
+        ));
+
+        let structured_borrowed_item = borrowed_item_string_view_projection_expr(RustExpr::Field(
+            Box::new(RustExpr::Var("owner".to_string())),
+            "name".to_string(),
+        ));
+        assert_eq!(
+            emit::emit_expr(&structured_borrowed_item),
+            "owner.name.as_str()"
+        );
+        assert!(!matches!(
+            structured_borrowed_item.unshaped(),
+            RustExpr::Raw(_)
         ));
     }
 
@@ -11193,9 +11812,27 @@ mod tests {
             expr,
             RustExpr::Unary {
                 op: "&".to_string(),
-                expr: Box::new(RustExpr::Raw("(left + right)".to_string())),
+                expr: Box::new(RustExpr::Grouped(Box::new(RustExpr::Binary {
+                    op: "+".to_string(),
+                    left: Box::new(RustExpr::Var("left".to_string())),
+                    right: Box::new(RustExpr::Var("right".to_string())),
+                }))),
             }
         );
+
+        let opaque = ensure_borrow_projection(
+            RustExpr::Raw("left +".to_string()),
+            None,
+            None,
+            BorrowProjectionUse::Argument,
+        );
+        assert_eq!(emit::emit_expr(&opaque), "&left +");
+        assert!(matches!(
+            opaque,
+            RustExpr::Unary { op, expr }
+                if op == "&"
+                    && matches!(expr.as_ref(), RustExpr::Raw(raw) if raw == "left +")
+        ));
     }
 
     #[test]
@@ -11207,6 +11844,16 @@ mod tests {
             BorrowProjectionUse::Argument,
         );
         assert_eq!(emit::emit_expr(&simple_index), "&values[i]");
+        assert!(matches!(
+            simple_index.clone().into_unshaped(),
+            RustExpr::Unary { expr, .. }
+                if matches!(
+                    expr.as_ref(),
+                    RustExpr::Index(array, index)
+                        if matches!(array.as_ref(), RustExpr::Var(name) if name == "values")
+                            && matches!(index.as_ref(), RustExpr::Var(name) if name == "i")
+                )
+        ));
 
         let compound_index = ensure_borrow_projection(
             RustExpr::Raw("left + values[i]".to_string()),
@@ -11215,6 +11862,26 @@ mod tests {
             BorrowProjectionUse::Argument,
         );
         assert_eq!(emit::emit_expr(&compound_index), "&(left + values[i])");
+        assert!(matches!(
+            compound_index.clone().into_unshaped(),
+            RustExpr::Unary { expr, .. }
+                if matches!(
+                    expr.as_ref(),
+                    RustExpr::Grouped(inner)
+                        if matches!(
+                            inner.as_ref(),
+                            RustExpr::Binary { op, left, right }
+                                if op == "+"
+                                    && matches!(left.as_ref(), RustExpr::Var(name) if name == "left")
+                                    && matches!(
+                                        right.as_ref(),
+                                        RustExpr::Index(array, index)
+                                            if matches!(array.as_ref(), RustExpr::Var(name) if name == "values")
+                                                && matches!(index.as_ref(), RustExpr::Var(name) if name == "i")
+                                    )
+                        )
+                )
+        ));
 
         let mutable_compound = apply_one(
             RustExpr::Raw("left + values[i]".to_string()),
@@ -11224,6 +11891,20 @@ mod tests {
             emit::emit_expr(&mutable_compound),
             "&mut (left + values[i])"
         );
+        assert!(matches!(
+            mutable_compound.into_unshaped(),
+            RustExpr::Unary { expr, .. }
+                if matches!(
+                    expr.as_ref(),
+                    RustExpr::Grouped(inner)
+                        if matches!(
+                            inner.as_ref(),
+                            RustExpr::Binary { op, right, .. }
+                                if op == "+"
+                                    && matches!(right.as_ref(), RustExpr::Index(_, _))
+                        )
+                )
+        ));
     }
 
     #[test]
@@ -11507,6 +12188,26 @@ mod tests {
             Some(RustExprShape::Borrowed)
         );
 
+        let forced_raw_binary =
+            force_shared_borrow_projection(RustExpr::Raw("left + right".to_string()));
+        assert_eq!(emit::emit_expr(&forced_raw_binary), "&(left + right)");
+        assert!(matches!(
+            forced_raw_binary.clone().into_unshaped(),
+            RustExpr::Unary { expr, .. }
+                if matches!(
+                    expr.as_ref(),
+                    RustExpr::Binary { op, .. } if op == "+"
+                ) || matches!(
+                    expr.as_ref(),
+                    RustExpr::Grouped(grouped)
+                        if matches!(grouped.as_ref(), RustExpr::Binary { op, .. } if op == "+")
+                )
+        ));
+        assert_eq!(
+            forced_raw_binary.recorded_shape(),
+            Some(RustExprShape::Borrowed)
+        );
+
         let forced =
             force_shared_borrow_projection(RustExpr::Raw("custom_view(value)".to_string()));
         assert_eq!(emit::emit_expr(&forced), "&custom_view(value)");
@@ -11514,7 +12215,10 @@ mod tests {
             forced.clone().into_unshaped(),
             RustExpr::Unary {
                 op: "&".to_string(),
-                expr: Box::new(RustExpr::Raw("custom_view(value)".to_string())),
+                expr: Box::new(function_call_projection(
+                    RustExpr::Var("custom_view".to_string()),
+                    vec![RustExpr::Var("value".to_string())],
+                )),
             }
         );
         assert_eq!(forced.recorded_shape(), Some(RustExprShape::Borrowed));
@@ -11788,7 +12492,7 @@ mod tests {
         let mut string_target = RustSlotShape::conservative(JavaType::String);
         string_target.ownership = OwnershipShape::SharedBorrow;
         string_target.view = ViewShape::Str;
-        let string_projected = render_optional_element_projection(
+        let string_projected = optional_element_projection(
             RustExpr::Var("name".to_string()),
             string_view_expr(RustExpr::Raw("custom_string_view(value)".to_string())),
             &string_target,
@@ -11817,7 +12521,7 @@ mod tests {
             Some(RustExprShape::OptionalProjected)
         );
         assert_eq!(string_projected.recorded_slot_shape(), Some(&string_target));
-        let raw_string_projected = render_optional_element_projection(
+        let raw_string_projected = optional_element_projection(
             RustExpr::Raw("make_name()".to_string()),
             string_view_expr(RustExpr::Raw("custom_string_view(value)".to_string())),
             &string_target,
@@ -11842,7 +12546,7 @@ mod tests {
             }
         );
 
-        let builtin_string_projected = render_optional_element_projection(
+        let builtin_string_projected = optional_element_projection(
             RustExpr::Var("name".to_string()),
             apply_one(RustExpr::Var("value".to_string()), &Coercion::AsStr),
             &string_target,
@@ -11861,7 +12565,7 @@ mod tests {
         )));
         slice_target.ownership = OwnershipShape::SharedBorrow;
         slice_target.view = ViewShape::Slice;
-        let slice_projected = render_optional_element_projection(
+        let slice_projected = optional_element_projection(
             RustExpr::Var("values".to_string()),
             slice_view_expr(RustExpr::Raw("custom_slice_view(value)".to_string())),
             &slice_target,
@@ -11887,7 +12591,7 @@ mod tests {
         );
         assert_eq!(slice_projected.recorded_slot_shape(), Some(&slice_target));
 
-        let builtin_slice_projected = render_optional_element_projection(
+        let builtin_slice_projected = optional_element_projection(
             RustExpr::Var("values".to_string()),
             apply_one(RustExpr::Var("value".to_string()), &Coercion::AsSlice),
             &slice_target,
@@ -11903,7 +12607,7 @@ mod tests {
 
         let mut mut_slice_target = slice_target.clone();
         mut_slice_target.ownership = OwnershipShape::MutableBorrow;
-        let builtin_mut_slice_projected = render_optional_element_projection(
+        let builtin_mut_slice_projected = optional_element_projection(
             RustExpr::Var("values".to_string()),
             apply_one(RustExpr::Var("value".to_string()), &Coercion::AsMutSlice),
             &mut_slice_target,
@@ -11916,7 +12620,7 @@ mod tests {
             builtin_mut_slice_projected.recorded_slot_shape(),
             Some(&mut_slice_target)
         );
-        let custom_mut_slice_projected = render_optional_element_projection(
+        let custom_mut_slice_projected = optional_element_projection(
             RustExpr::Var("values".to_string()),
             mutable_slice_view_expr(RustExpr::Raw("custom_mut_slice_view(value)".to_string())),
             &mut_slice_target,
@@ -11948,7 +12652,7 @@ mod tests {
         );
 
         let owned_target = RustSlotShape::conservative(JavaType::String);
-        let owned_projected = render_optional_element_projection(
+        let owned_projected = optional_element_projection(
             RustExpr::Var("name".to_string()),
             RustExpr::Raw("custom_owned_string(value)".to_string()),
             &owned_target,
@@ -11973,7 +12677,7 @@ mod tests {
             Some(RustExprShape::OptionalProjected)
         );
         assert_eq!(owned_projected.recorded_slot_shape(), Some(&owned_target));
-        let raw_owned_projected = render_optional_element_projection(
+        let raw_owned_projected = optional_element_projection(
             RustExpr::Raw("make_name()".to_string()),
             RustExpr::Raw("custom_owned_string(value)".to_string()),
             &owned_target,
@@ -12057,9 +12761,11 @@ mod tests {
         assert_eq!(
             raw_index_cast,
             RustExpr::Cast {
-                expr: Box::new(RustExpr::Grouped(Box::new(RustExpr::Raw(
-                    "left + right".to_string(),
-                )))),
+                expr: Box::new(RustExpr::Grouped(Box::new(RustExpr::Binary {
+                    op: "+".to_string(),
+                    left: Box::new(RustExpr::Var("left".to_string())),
+                    right: Box::new(RustExpr::Var("right".to_string())),
+                }))),
                 ty: "usize".to_string(),
             }
         );
@@ -12068,7 +12774,17 @@ mod tests {
             RustExpr::Raw("index as usize".to_string()),
             &Coercion::IndexToUsize,
         );
-        assert_eq!(already_usize, RustExpr::Raw("index as usize".to_string()));
+        assert_eq!(
+            already_usize,
+            RustExpr::Cast {
+                expr: Box::new(RustExpr::Var("index".to_string())),
+                ty: "usize".to_string(),
+            }
+        );
+        assert!(
+            usize_cast_projection(RustExpr::Raw("opaque ? value as usize".to_string())).is_none(),
+            "suffix-only raw text should not count as a structured usize cast"
+        );
 
         let structured_usize = RustExpr::Cast {
             expr: Box::new(RustExpr::Var("index".to_string())),
@@ -12115,7 +12831,10 @@ mod tests {
             RustExpr::Cast { expr, ty }
                 if ty == "usize"
                     && matches!(expr.as_ref(), RustExpr::Grouped(grouped)
-                        if matches!(grouped.as_ref(), RustExpr::Raw(raw) if raw == "left + right"))
+                        if matches!(grouped.as_ref(), RustExpr::Binary { op, left, right }
+                            if op == "+"
+                                && matches!(left.as_ref(), RustExpr::Var(name) if name == "left")
+                                && matches!(right.as_ref(), RustExpr::Var(name) if name == "right")))
         ));
     }
 
@@ -12168,49 +12887,22 @@ mod tests {
         let raw = normalize_optional_constructed_string_view_expr(RustExpr::Raw(
             "Some(&value.as_str())".to_string(),
         ));
-        assert_eq!(emit::emit_expr(&raw), "Some(value.as_str())");
-        assert_eq!(
-            raw.recorded_shape(),
-            Some(RustExprShape::OptionalConstructed)
+        assert_eq!(emit::emit_expr(&raw), "Some(&value.as_str())");
+        assert_eq!(raw.recorded_shape(), None);
+        assert!(
+            matches!(raw.unshaped(), RustExpr::Raw(rendered) if rendered == "Some(&value.as_str())")
         );
-        assert_eq!(
-            raw.clone().into_unshaped(),
-            RustExpr::Call {
-                function: Box::new(RustExpr::path(["Some"])),
-                args: vec![string_view_expr(RustExpr::MethodCall {
-                    receiver: Box::new(RustExpr::Var("value".to_string())),
-                    method: "as_str".to_string(),
-                    args: Vec::new(),
-                })],
-            }
-        );
-        assert!(rust_expr_is_constructed_optional_value(&raw));
 
         let dotted_raw = normalize_optional_constructed_string_view_expr(RustExpr::Raw(
             "Some(&owner.value().as_str())".to_string(),
         ));
-        assert_eq!(emit::emit_expr(&dotted_raw), "Some(owner.value().as_str())");
-        assert!(matches!(
-            dotted_raw.into_unshaped(),
-            RustExpr::Call { args, .. }
-                if matches!(
-                    args.as_slice(),
-                    [RustExpr::Shaped { expr, .. }]
-                        if matches!(
-                            expr.as_ref(),
-                            RustExpr::MethodCall { receiver, method, args }
-                                if method == "as_str"
-                                    && args.is_empty()
-                                    && matches!(
-                                        receiver.as_ref(),
-                                        RustExpr::MethodCall { receiver, method, args }
-                                            if method == "value"
-                                                && args.is_empty()
-                                                && matches!(receiver.as_ref(), RustExpr::Var(owner) if owner == "owner")
-                                    )
-                        )
-                )
-        ));
+        assert_eq!(
+            emit::emit_expr(&dotted_raw),
+            "Some(&owner.value().as_str())"
+        );
+        assert!(
+            matches!(dotted_raw.unshaped(), RustExpr::Raw(rendered) if rendered == "Some(&owner.value().as_str())")
+        );
 
         let wrapped = apply_one(
             RustExpr::Unary {
@@ -12321,6 +13013,24 @@ mod tests {
                 if method == "as_str"
                     && matches!(receiver.as_ref(), RustExpr::Var(name) if name == "partition")
         ));
+
+        let raw_method_chain = apply_coercions(
+            RustExpr::Raw("name.as_ref().unwrap()".to_string()),
+            &[Coercion::AsStr],
+        );
+        assert_eq!(
+            emit::emit_expr(&raw_method_chain),
+            "name.as_ref().unwrap().as_str()"
+        );
+        assert!(matches!(
+            raw_method_chain.unshaped(),
+            RustExpr::MethodCall { receiver, method, .. }
+                if method == "as_str"
+                    && matches!(
+                        receiver.as_ref(),
+                        RustExpr::MethodCall { method, .. } if method == "unwrap"
+                    )
+        ));
     }
 
     #[test]
@@ -12359,6 +13069,13 @@ mod tests {
                 args: Vec::new(),
             }
         );
+        let collect = typed_collect_projection(RustExpr::Var("items".to_string()), "Vec<_>");
+        assert_eq!(emit::emit_expr(&collect), "items.collect::<Vec<_>>()");
+        assert!(matches!(
+            collect,
+            RustExpr::MethodCall { method, args, .. }
+                if method == "collect::<Vec<_>>" && args.is_empty()
+        ));
 
         let structured_borrow = primitive_parse_projection(
             RustExpr::Unary {
@@ -12423,6 +13140,43 @@ mod tests {
             )),
             "value.as_str().parse::<f64>().unwrap()"
         );
+        let raw_call =
+            primitive_parse_projection(RustExpr::Raw("factory()".to_string()), PrimitiveType::Long);
+        assert_eq!(
+            emit::emit_expr(&raw_call),
+            "factory().parse::<i64>().unwrap()"
+        );
+        assert!(matches!(
+            raw_call,
+            RustExpr::MethodCall { receiver, method, args }
+                if method == "unwrap"
+                    && args.is_empty()
+                    && matches!(receiver.as_ref(), RustExpr::MethodCall { receiver, method, args }
+                        if method == "parse::<i64>"
+                            && args.is_empty()
+                            && matches!(receiver.as_ref(), RustExpr::Call { function, args }
+                                if args.is_empty()
+                                    && matches!(function.as_ref(), RustExpr::Var(name) if name == "factory")))
+        ));
+        let raw_method_receiver = primitive_parse_projection(
+            RustExpr::Raw("value.clone()".to_string()),
+            PrimitiveType::Int,
+        );
+        assert_eq!(
+            emit::emit_expr(&raw_method_receiver),
+            "value.clone().parse::<i32>().unwrap()"
+        );
+        assert!(matches!(
+            raw_method_receiver,
+            RustExpr::MethodCall { receiver, method, args }
+                if method == "unwrap"
+                    && args.is_empty()
+                    && matches!(receiver.as_ref(), RustExpr::MethodCall { receiver, method, args }
+                        if method == "parse::<i32>"
+                            && args.is_empty()
+                            && matches!(receiver.as_ref(), RustExpr::MethodCall { method, args, .. }
+                                if method == "clone" && args.is_empty()))
+        ));
         let compound = primitive_parse_projection(
             RustExpr::Raw("left + right".to_string()),
             PrimitiveType::Int,
@@ -12436,12 +13190,21 @@ mod tests {
             RustExpr::MethodCall { receiver, method, args }
                 if method == "unwrap"
                     && args.is_empty()
-                    && matches!(receiver.as_ref(), RustExpr::MethodCall { receiver, method, args }
-                        if method == "parse::<i32>"
-                            && args.is_empty()
-                            && matches!(receiver.as_ref(), RustExpr::Grouped(grouped)
-                                if matches!(grouped.as_ref(), RustExpr::Raw(raw)
-                                    if raw == "left + right")))
+                            && matches!(receiver.as_ref(), RustExpr::MethodCall { receiver, method, args }
+                                if method == "parse::<i32>"
+                                    && args.is_empty()
+                                    && matches!(receiver.as_ref(), RustExpr::Binary { op, left, right }
+                                        if op == "+"
+                                            && matches!(left.as_ref(), RustExpr::Var(name) if name == "left")
+                                            && matches!(right.as_ref(), RustExpr::Var(name) if name == "right"))
+                                    || matches!(receiver.as_ref(), RustExpr::Grouped(grouped)
+                                        if matches!(
+                                            grouped.as_ref(),
+                                            RustExpr::Binary { op, left, right }
+                                                if op == "+"
+                                                    && matches!(left.as_ref(), RustExpr::Var(name) if name == "left")
+                                            && matches!(right.as_ref(), RustExpr::Var(name) if name == "right")
+                                )))
         ));
         let borrowed_compound = primitive_parse_projection(
             RustExpr::Raw("&left + right".to_string()),
@@ -12455,9 +13218,18 @@ mod tests {
             borrowed_compound,
             RustExpr::MethodCall { receiver, .. }
                 if matches!(receiver.as_ref(), RustExpr::MethodCall { receiver, .. }
-                    if matches!(receiver.as_ref(), RustExpr::Grouped(grouped)
-                        if matches!(grouped.as_ref(), RustExpr::Raw(raw)
-                            if raw == "left + right")))
+                    if matches!(receiver.as_ref(), RustExpr::Binary { op, left, right }
+                        if op == "+"
+                            && matches!(left.as_ref(), RustExpr::Var(name) if name == "left")
+                            && matches!(right.as_ref(), RustExpr::Var(name) if name == "right"))
+                    || matches!(receiver.as_ref(), RustExpr::Grouped(grouped)
+                        if matches!(
+                            grouped.as_ref(),
+                            RustExpr::Binary { op, left, right }
+                                if op == "+"
+                                    && matches!(left.as_ref(), RustExpr::Var(name) if name == "left")
+                                    && matches!(right.as_ref(), RustExpr::Var(name) if name == "right")
+                        )))
         ));
     }
 
@@ -12524,9 +13296,11 @@ mod tests {
         assert_eq!(
             raw_int_hash,
             RustExpr::Cast {
-                expr: Box::new(RustExpr::Grouped(Box::new(RustExpr::Raw(
-                    "left + right".to_string(),
-                )))),
+                expr: Box::new(RustExpr::Grouped(Box::new(RustExpr::Binary {
+                    op: "+".to_string(),
+                    left: Box::new(RustExpr::Var("left".to_string())),
+                    right: Box::new(RustExpr::Var("right".to_string())),
+                }))),
                 ty: "i32".to_string(),
             }
         );
@@ -12560,9 +13334,11 @@ mod tests {
             raw_float_hash,
             RustExpr::Cast {
                 expr: Box::new(RustExpr::MethodCall {
-                    receiver: Box::new(RustExpr::Grouped(Box::new(RustExpr::Raw(
-                        "left + right".to_string(),
-                    )))),
+                    receiver: Box::new(RustExpr::Grouped(Box::new(RustExpr::Binary {
+                        op: "+".to_string(),
+                        left: Box::new(RustExpr::Var("left".to_string())),
+                        right: Box::new(RustExpr::Var("right".to_string())),
+                    }))),
                     method: "to_bits".to_string(),
                     args: Vec::new(),
                 }),
@@ -12806,6 +13582,18 @@ mod tests {
             )),
             "value.chars().nth(index as usize).expect(\"Java string index out of bounds\")"
         );
+        let raw_usize_index = string_char_at_projection(
+            RustExpr::Var("value".to_string()),
+            RustExpr::Raw("index as usize".to_string()),
+        );
+        assert!(matches!(
+            raw_usize_index,
+            RustExpr::MethodCall { receiver, .. }
+                if matches!(receiver.as_ref(), RustExpr::MethodCall { args, .. }
+                    if matches!(args.as_slice(), [RustExpr::Cast { expr, ty }]
+                        if ty == "usize"
+                            && matches!(expr.as_ref(), RustExpr::Var(name) if name == "index")))
+        ));
     }
 
     #[test]
@@ -13110,22 +13898,81 @@ mod tests {
         ));
         assert_eq!(
             emit::emit_expr(&nested_try),
-            "outer(inner().unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex)))"
+            "outer(inner().unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))).unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))"
         );
         assert!(matches!(
             nested_try,
-            RustExpr::Call { function, args }
-                if matches!(function.as_ref(), RustExpr::Var(name) if name == "outer")
+            RustExpr::MethodCall { receiver, method, args }
+                if method == "unwrap_or_else"
+                    && args.len() == 1
                     && matches!(
-                        args.as_slice(),
-                        [RustExpr::MethodCall { receiver, method, args }]
-                            if method == "unwrap_or_else"
-                                && args.len() == 1
+                        receiver.as_ref(),
+                        RustExpr::Call { function, args }
+                            if matches!(function.as_ref(), RustExpr::Var(name) if name == "outer")
                                 && matches!(
-                                    receiver.as_ref(),
-                                    RustExpr::Call { function, args }
-                                        if args.is_empty()
-                                            && matches!(function.as_ref(), RustExpr::Var(name) if name == "inner")
+                                    args.as_slice(),
+                                    [RustExpr::MethodCall { receiver, method, args }]
+                                        if method == "unwrap_or_else"
+                                            && args.len() == 1
+                                            && matches!(
+                                                receiver.as_ref(),
+                                                RustExpr::Call { function, args }
+                                                    if args.is_empty()
+                                                        && matches!(function.as_ref(), RustExpr::Var(name) if name == "inner")
+                                            )
+                                )
+                    )
+        ));
+        let raw_binary = unwrap_result_or_panic_uncaught_java_exception(RustExpr::Raw(
+            "left + right".to_string(),
+        ));
+        assert_eq!(
+            emit::emit_expr(&raw_binary),
+            "(left + right).unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))"
+        );
+        assert!(matches!(
+            raw_binary,
+            RustExpr::MethodCall { receiver, method, args }
+                if method == "unwrap_or_else"
+                    && args.len() == 1
+                    && matches!(
+                        receiver.as_ref(),
+                        RustExpr::Binary { op, left, right }
+                            if op == "+"
+                                && matches!(left.as_ref(), RustExpr::Var(name) if name == "left")
+                                && matches!(right.as_ref(), RustExpr::Var(name) if name == "right")
+                    )
+        ));
+        let nested_raw_binary_child =
+            unwrap_result_or_panic_uncaught_java_exception(RustExpr::Binary {
+                op: "+".to_string(),
+                left: Box::new(RustExpr::Var("base".to_string())),
+                right: Box::new(RustExpr::Raw("left + fallible()?".to_string())),
+            });
+        assert_eq!(
+            emit::emit_expr(&nested_raw_binary_child),
+            "base + (left + fallible().unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex)))"
+        );
+        assert!(matches!(
+            nested_raw_binary_child,
+            RustExpr::Binary { op, left, right }
+                if op == "+"
+                    && matches!(left.as_ref(), RustExpr::Var(name) if name == "base")
+                    && matches!(
+                        right.as_ref(),
+                        RustExpr::Binary { op, right, .. }
+                            if op == "+"
+                                && matches!(
+                                    right.as_ref(),
+                                    RustExpr::MethodCall { receiver, method, args }
+                                        if method == "unwrap_or_else"
+                                            && args.len() == 1
+                                            && matches!(
+                                                receiver.as_ref(),
+                                                RustExpr::Call { function, args }
+                                                    if args.is_empty()
+                                                        && matches!(function.as_ref(), RustExpr::Var(name) if name == "fallible")
+                                            )
                                 )
                     )
         ));
@@ -13244,9 +14091,11 @@ mod tests {
             logical_not_projection(RustExpr::Raw("left && right".to_string())),
             RustExpr::Unary {
                 op: "!".to_string(),
-                expr: Box::new(RustExpr::Grouped(Box::new(RustExpr::Raw(
-                    "left && right".to_string()
-                )))),
+                expr: Box::new(RustExpr::Grouped(Box::new(RustExpr::Binary {
+                    op: "&&".to_string(),
+                    left: Box::new(RustExpr::Var("left".to_string())),
+                    right: Box::new(RustExpr::Var("right".to_string())),
+                }))),
             }
         );
         let optional_owned =
@@ -13603,6 +14452,22 @@ mod tests {
             RustExpr::TypeAssociatedPath { ty, member }
                 if member == "new" && matches!(ty, RustType::Ref { .. })
         ));
+        let subtype_ctor = subtype_owned_constructor_from_borrowed_projection(
+            "pkg::Outer::<T>",
+            RustExpr::Var("value".to_string()),
+        );
+        assert_eq!(
+            emit::emit_expr(&subtype_ctor),
+            "pkg::Outer::<T>::new_1(value.clone())"
+        );
+        assert!(matches!(
+            subtype_ctor,
+            RustExpr::Call { function, args }
+                if matches!(function.as_ref(), RustExpr::Path(path)
+                    if path == &vec!["pkg".to_string(), "Outer::<T>".to_string(), "new_1".to_string()])
+                    && matches!(args.as_slice(), [RustExpr::MethodCall { method, .. }]
+                        if method == "clone")
+        ));
         assert_eq!(
             emit::emit_expr(&static_storage_accessor_projection("VALUES")),
             "Self::__static_v_a_l_u_e_s()"
@@ -13727,36 +14592,6 @@ mod tests {
             "|value: String| value.trim()"
         );
         assert_eq!(
-            associated_function_method_reference_body_projection(
-                AssociatedFunctionMethodReferenceProjection::PrimitiveIdentityValue,
-                "Integer",
-                "int_value",
-                "value",
-                "value",
-            ),
-            "value"
-        );
-        assert_eq!(
-            associated_function_method_reference_body_expr(
-                AssociatedFunctionMethodReferenceProjection::PrimitiveIdentityValue,
-                "Integer",
-                "int_value",
-                "value",
-                "value",
-            ),
-            RustExpr::Var("value".to_string())
-        );
-        assert_eq!(
-            associated_function_method_reference_body_expr(
-                AssociatedFunctionMethodReferenceProjection::AlwaysTrue,
-                "Objects",
-                "non_null",
-                "value",
-                "value",
-            ),
-            RustExpr::Literal("true".to_string())
-        );
-        assert_eq!(
             rendered_vec_macro_body(" vec![1, f(2, 3), vec![4]] "),
             Some("1, f(2, 3), vec![4]".to_string())
         );
@@ -13855,9 +14690,11 @@ mod tests {
         assert_eq!(
             raw_updated_value,
             RustExpr::MethodCall {
-                receiver: Box::new(RustExpr::Grouped(Box::new(RustExpr::Raw(
-                    "left + right".to_string(),
-                )))),
+                receiver: Box::new(RustExpr::Grouped(Box::new(RustExpr::Binary {
+                    op: "+".to_string(),
+                    left: Box::new(RustExpr::Var("left".to_string())),
+                    right: Box::new(RustExpr::Var("right".to_string())),
+                }))),
                 method: "wrapping_sub".to_string(),
                 args: vec![RustExpr::Literal("1".to_string())],
             }
@@ -14229,6 +15066,31 @@ mod tests {
         assert_eq!(
             native_collection_with_capacity_projection(
                 crate::stdlib::JavaCollectionKind::List,
+                RustExpr::Raw("names.as_ref().unwrap().len()".to_string()),
+            ),
+            RustExpr::Call {
+                function: Box::new(RustExpr::path(["Vec", "with_capacity"])),
+                args: vec![RustExpr::Cast {
+                    expr: Box::new(RustExpr::MethodCall {
+                        receiver: Box::new(RustExpr::MethodCall {
+                            receiver: Box::new(RustExpr::MethodCall {
+                                receiver: Box::new(RustExpr::Var("names".to_string())),
+                                method: "as_ref".to_string(),
+                                args: Vec::new(),
+                            }),
+                            method: "unwrap".to_string(),
+                            args: Vec::new(),
+                        }),
+                        method: "len".to_string(),
+                        args: Vec::new(),
+                    }),
+                    ty: "usize".to_string(),
+                }],
+            }
+        );
+        assert_eq!(
+            native_collection_with_capacity_projection(
+                crate::stdlib::JavaCollectionKind::List,
                 RustExpr::Cast {
                     expr: Box::new(RustExpr::Var("capacity".to_string())),
                     ty: "i32".to_string(),
@@ -14591,7 +15453,16 @@ mod tests {
         let prefixed_flat_map = stream_prefixed_flat_map_op_projection(
             RustExpr::Var("groups".to_string()),
             "group",
-            "let names = group.names();".to_string(),
+            vec![RustStmt::Let {
+                mutable: false,
+                name: "names".to_string(),
+                ty: None,
+                value: Some(RustExpr::MethodCall {
+                    receiver: Box::new(RustExpr::Var("group".to_string())),
+                    method: "names".to_string(),
+                    args: Vec::new(),
+                }),
+            }],
             RustExpr::MethodCall {
                 receiver: Box::new(RustExpr::Var("names".to_string())),
                 method: "into_iter".to_string(),
@@ -14618,7 +15489,7 @@ mod tests {
                                         if method == "into_iter"))))
         ));
         assert_eq!(
-            render_stream_prefixed_flat_map_op(
+            render_stream_prefixed_flat_map_op_from_prefix_string(
                 "group",
                 "let names = group.names();".to_string(),
                 RustExpr::Var("body".to_string()),
@@ -14628,7 +15499,11 @@ mod tests {
         let expr_prefixed_flat_map = stream_prefixed_flat_map_op_projection(
             RustExpr::Var("groups".to_string()),
             "group",
-            "group.prepare()".to_string(),
+            vec![RustStmt::Expr(RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Var("group".to_string())),
+                method: "prepare".to_string(),
+                args: Vec::new(),
+            })],
             RustExpr::Var("body".to_string()),
         );
         assert_eq!(
@@ -15128,7 +16003,11 @@ mod tests {
                 expr: Box::new(RustExpr::Call {
                     function: Box::new(RustExpr::path(["Box", "new"])),
                     args: vec![RustExpr::Tuple(vec![
-                        RustExpr::Raw("left + right".to_string()),
+                        RustExpr::Binary {
+                            op: "+".to_string(),
+                            left: Box::new(RustExpr::Var("left".to_string())),
+                            right: Box::new(RustExpr::Var("right".to_string())),
+                        },
                         RustExpr::Var("value".to_string()),
                     ])],
                 }),
@@ -15615,9 +16494,53 @@ mod tests {
             "values.get(key).copied().expect(\"Java null receiver\")"
         );
         assert_eq!(
+            copied_expect.clone().into_unshaped(),
+            RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::MethodCall {
+                    receiver: Box::new(RustExpr::MethodCall {
+                        receiver: Box::new(RustExpr::Var("values".to_string())),
+                        method: "get".to_string(),
+                        args: vec![RustExpr::Var("key".to_string())],
+                    }),
+                    method: "copied".to_string(),
+                    args: Vec::new(),
+                }),
+                method: "expect".to_string(),
+                args: vec![RustExpr::Literal("\"Java null receiver\"".to_string())],
+            }
+        );
+        assert_eq!(
             copied_expect.recorded_shape(),
             Some(RustExprShape::OwnedRecovery)
         );
+        let compound_copied_expect =
+            optional_copied_expect_projection(RustExpr::Raw("left + right".to_string()));
+        assert_eq!(
+            emit::emit_expr(&compound_copied_expect),
+            "(left + right).copied().expect(\"Java null receiver\")"
+        );
+        assert!(matches!(
+            compound_copied_expect.unshaped(),
+            RustExpr::MethodCall {
+                receiver,
+                method,
+                args
+            } if method == "expect"
+                && matches!(args.as_slice(), [RustExpr::Literal(message)] if message == "\"Java null receiver\"")
+                && matches!(
+                    receiver.as_ref(),
+                    RustExpr::MethodCall { receiver, method, args }
+                        if method == "copied"
+                            && args.is_empty()
+                            && matches!(
+                                receiver.as_ref(),
+                                RustExpr::Binary { op, left, right }
+                                    if op == "+"
+                                        && matches!(left.as_ref(), RustExpr::Var(name) if name == "left")
+                                        && matches!(right.as_ref(), RustExpr::Var(name) if name == "right")
+                            )
+                )
+        ));
         let structured_copied_expect =
             optional_copied_expect_projection(RustExpr::Var("value".to_string()));
         assert_eq!(
@@ -15648,17 +16571,23 @@ mod tests {
             emit::emit_expr(&subtype_constructor),
             "Locatable::new_1(value.clone())"
         );
-        assert_eq!(
+        assert!(matches!(
             subtype_constructor,
-            RustExpr::Call {
-                function: Box::new(RustExpr::path(["Locatable", "new_1"])),
-                args: vec![RustExpr::MethodCall {
-                    receiver: Box::new(RustExpr::Var("value".to_string())),
-                    method: "clone".to_string(),
-                    args: Vec::new(),
-                }],
-            }
-        );
+            RustExpr::Call { function, args }
+                if matches!(function.as_ref(), RustExpr::Path(path)
+                    if path == &vec!["Locatable".to_string(), "new_1".to_string()])
+                    && matches!(
+                        args.as_slice(),
+                        [arg] if arg.recorded_shape() == Some(RustExprShape::OwnedRecovery)
+                            && matches!(
+                                arg.unshaped(),
+                                RustExpr::MethodCall { receiver, method, args }
+                                    if method == "clone"
+                                        && args.is_empty()
+                                        && matches!(receiver.as_ref(), RustExpr::Var(name) if name == "value")
+                            )
+                    )
+        ));
         let generic_subtype_constructor = subtype_owned_constructor_from_borrowed_projection(
             "JavaClass::<Vec<T>>",
             RustExpr::Var("value".to_string()),
@@ -15687,8 +16616,16 @@ mod tests {
         assert!(matches!(
             generic_owner_fallback,
             RustExpr::Call { function, .. }
-                if matches!(function.as_ref(), RustExpr::Raw(raw)
-                    if raw == "std::rc::Rc<FormatLine>::new_1")
+                if matches!(
+                    function.as_ref(),
+                    RustExpr::Path(path)
+                        if path == &vec![
+                            "std".to_string(),
+                            "rc".to_string(),
+                            "Rc<FormatLine>".to_string(),
+                            "new_1".to_string(),
+                        ]
+                )
         ));
         let raw_subtype_constructor = subtype_owned_constructor_from_borrowed_projection(
             "Locatable",
@@ -15696,19 +16633,35 @@ mod tests {
         );
         assert_eq!(
             emit::emit_expr(&raw_subtype_constructor),
-            "Locatable::new_1(left + right.clone())"
+            "Locatable::new_1((left + right).clone())"
         );
-        assert_eq!(
+        assert!(matches!(
             raw_subtype_constructor,
-            RustExpr::Call {
-                function: Box::new(RustExpr::path(["Locatable", "new_1"])),
-                args: vec![RustExpr::MethodCall {
-                    receiver: Box::new(RustExpr::Raw("left + right".to_string())),
-                    method: "clone".to_string(),
-                    args: Vec::new(),
-                }],
-            }
-        );
+            RustExpr::Call { function, args }
+                if matches!(function.as_ref(), RustExpr::Path(path)
+                    if path == &vec!["Locatable".to_string(), "new_1".to_string()])
+                    && matches!(
+                        args.as_slice(),
+                        [arg] if arg.recorded_shape() == Some(RustExprShape::OwnedRecovery)
+                            && matches!(
+                                arg.unshaped(),
+                                RustExpr::MethodCall { receiver, method, args }
+                                    if method == "clone"
+                                        && args.is_empty()
+                                        && matches!(
+                                            receiver.as_ref(),
+                                            RustExpr::Grouped(grouped)
+                                                if matches!(
+                                                    grouped.as_ref(),
+                                                    RustExpr::Binary { op, left, right }
+                                                        if op == "+"
+                                                            && matches!(left.as_ref(), RustExpr::Var(name) if name == "left")
+                                                            && matches!(right.as_ref(), RustExpr::Var(name) if name == "right")
+                                                )
+                                        )
+                            )
+                    )
+        ));
         assert_eq!(
             emit::emit_expr(&exception_self_as_supertype_facade_boundary_projection()),
             "Default::default()/* TODO(translation): Java exception self-as-supertype facade boundary */"
@@ -15804,6 +16757,23 @@ mod tests {
                     )
                 )
         ));
+        let raw_generic_facade_default = rust_type_default_call_expr("(Box<dyn Readable>)");
+        assert_eq!(
+            emit::emit_expr(&raw_generic_facade_default),
+            "<(Box<dyn Readable>)>::default()"
+        );
+        assert!(matches!(
+            raw_generic_facade_default,
+            RustExpr::Call { function, args }
+                if args.is_empty()
+                    && matches!(
+                        function.as_ref(),
+                        RustExpr::TypeAssociatedPath {
+                            ty: RustType::Raw(owner),
+                            member,
+                        } if owner == "(Box<dyn Readable>)" && member == "default"
+                    )
+        ));
         let angle_generic_facade_default = explicit_java_facade_cast_placeholder_projection(
             RustExpr::Var("line".to_string()),
             "std::rc::Rc<FormatLine>",
@@ -15824,8 +16794,16 @@ mod tests {
                         tail.as_ref(),
                         RustExpr::Call { function, args }
                             if args.is_empty()
-                                && matches!(function.as_ref(), RustExpr::Raw(raw)
-                                    if raw == "std::rc::Rc<FormatLine>::default")
+                                && matches!(
+                                    function.as_ref(),
+                                    RustExpr::Path(path)
+                                        if path == &vec![
+                                            "std".to_string(),
+                                            "rc".to_string(),
+                                            "Rc<FormatLine>".to_string(),
+                                            "default".to_string(),
+                                        ]
+                                )
                     )
                 )
         ));
@@ -15877,6 +16855,21 @@ mod tests {
             )),
             "obj.downcast_ref::<GuideTreeNode>().expect(\"invalid Java cast\")"
         );
+        let is_type = erased_object_is_type_projection(RustExpr::Var("obj".to_string()), "Target");
+        assert_eq!(emit::emit_expr(&is_type), "obj.is::<Target>()");
+        assert!(matches!(
+            is_type.unshaped(),
+            RustExpr::MethodCall { method, args, .. }
+                if method == "is::<Target>" && args.is_empty()
+        ));
+        let downcast =
+            erased_object_downcast_ref_projection(RustExpr::Var("obj".to_string()), "Target");
+        assert_eq!(emit::emit_expr(&downcast), "obj.downcast_ref::<Target>()");
+        assert!(matches!(
+            downcast.unshaped(),
+            RustExpr::MethodCall { method, args, .. }
+                if method == "downcast_ref::<Target>" && args.is_empty()
+        ));
     }
 
     #[test]
@@ -15915,6 +16908,52 @@ mod tests {
             "extra.to_string()"
         );
         assert_eq!(
+            string_join_vararg_value_projection(RustExpr::Raw("extra.to_string()".to_string())),
+            RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Var("extra".to_string())),
+                method: "to_string".to_string(),
+                args: Vec::new(),
+            }
+        );
+        assert_eq!(
+            terminal_raw_to_string_call_projection("cache[slot].to_string()"),
+            Some(RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Index(
+                    Box::new(RustExpr::Var("cache".to_string())),
+                    Box::new(RustExpr::Var("slot".to_string())),
+                )),
+                method: "to_string".to_string(),
+                args: Vec::new(),
+            })
+        );
+        assert_eq!(
+            emit::emit_expr(
+                &terminal_raw_to_string_call_projection("factory().build(value).to_string()")
+                    .expect("method-call receiver should recover")
+            ),
+            "factory().build(value).to_string()"
+        );
+        assert_eq!(
+            emit::emit_expr(
+                &terminal_raw_to_string_call_projection("Owner::VALUE.to_string()")
+                    .expect("associated path receiver should recover")
+            ),
+            "Owner::VALUE.to_string()"
+        );
+        assert_eq!(
+            emit::emit_expr(
+                &terminal_raw_to_string_call_projection("(left + right).to_string()")
+                    .expect("grouped binary receiver should recover")
+            ),
+            "(left + right).to_string()"
+        );
+        assert!(terminal_raw_to_string_call_projection("left + right.to_string()").is_none());
+        assert!(terminal_raw_to_string_call_projection("\"bin\".to_string()").is_none());
+        assert!(terminal_raw_to_string_call_projection("(\"left + right\").to_string()").is_none());
+        assert!(terminal_raw_to_string_call_projection("fallible()?.to_string()").is_none());
+        assert!(terminal_raw_to_string_call_projection("(value as Target).to_string()").is_none());
+        assert!(terminal_raw_to_string_call_projection("(&value).to_string()").is_none());
+        assert_eq!(
             render_string_join_vararg_value(RustExpr::Raw("format!(\"{}\", name)".to_string())),
             "(format!(\"{}\", name)).to_string()"
         );
@@ -15936,6 +16975,21 @@ mod tests {
             ))),
             "sep"
         );
+        let join_collection = string_join_collection_projection(
+            RustExpr::Literal("\",\"".to_string()),
+            RustExpr::Var("values".to_string()),
+        );
+        assert_eq!(emit::emit_expr(&join_collection), "values.join(\",\")");
+        assert!(matches!(
+            join_collection.unshaped(),
+            RustExpr::MethodCall {
+                receiver,
+                method,
+                args
+            } if matches!(receiver.as_ref(), RustExpr::Var(name) if name == "values")
+                && method == "join"
+                && matches!(args.as_slice(), [RustExpr::Literal(delimiter)] if delimiter == "\",\"")
+        ));
         let join_varargs = string_join_varargs_projection(
             RustExpr::Var("sep".to_string()),
             vec![
@@ -15964,7 +17018,11 @@ mod tests {
                         method: "to_string".to_string(),
                         args: Vec::new(),
                     },
-                    RustExpr::Raw("suffix.to_string()".to_string()),
+                    RustExpr::MethodCall {
+                        receiver: Box::new(RustExpr::Var("suffix".to_string())),
+                        method: "to_string".to_string(),
+                        args: Vec::new(),
+                    },
                 ])),
                 method: "join".to_string(),
                 args: vec![RustExpr::Var("sep".to_string())],
@@ -15973,7 +17031,35 @@ mod tests {
     }
 
     #[test]
+    fn erased_object_type_method_projections_are_structured() {
+        let is_type = erased_object_is_type_projection(RustExpr::Var("obj".to_string()), "Target");
+        assert_eq!(emit::emit_expr(&is_type), "obj.is::<Target>()");
+        assert!(matches!(
+            is_type.unshaped(),
+            RustExpr::MethodCall { method, args, .. }
+                if method == "is::<Target>" && args.is_empty()
+        ));
+
+        let downcast =
+            erased_object_downcast_ref_projection(RustExpr::Var("obj".to_string()), "Target");
+        assert_eq!(emit::emit_expr(&downcast), "obj.downcast_ref::<Target>()");
+        assert!(matches!(
+            downcast.unshaped(),
+            RustExpr::MethodCall { method, args, .. }
+                if method == "downcast_ref::<Target>" && args.is_empty()
+        ));
+    }
+
+    #[test]
     fn string_format_arg_projection_owns_display_to_string_spelling() {
+        fn grouped_plus_literal(left_name: &str, right_literal: &str) -> RustExpr {
+            RustExpr::Grouped(Box::new(RustExpr::Binary {
+                op: "+".to_string(),
+                left: Box::new(RustExpr::Var(left_name.to_string())),
+                right: Box::new(RustExpr::Literal(right_literal.to_string())),
+            }))
+        }
+
         assert_eq!(
             render_string_format_arg_value(RustExpr::Var("count".to_string())),
             "count.to_string()"
@@ -15993,9 +17079,7 @@ mod tests {
         assert_eq!(
             string_format_arg_value_projection(RustExpr::Raw("value + 1".to_string())),
             RustExpr::MethodCall {
-                receiver: Box::new(RustExpr::Grouped(Box::new(RustExpr::Raw(
-                    "value + 1".to_string(),
-                )))),
+                receiver: Box::new(grouped_plus_literal("value", "1")),
                 method: "to_string".to_string(),
                 args: Vec::new(),
             }
@@ -16133,7 +17217,15 @@ mod tests {
             string_helper_receiver_projection(RustExpr::Raw("left.as_ref().unwrap()".to_string()))
                 .into_unshaped(),
             RustExpr::MethodCall {
-                receiver: Box::new(RustExpr::Raw("left.as_ref().unwrap()".to_string())),
+                receiver: Box::new(RustExpr::MethodCall {
+                    receiver: Box::new(RustExpr::MethodCall {
+                        receiver: Box::new(RustExpr::Var("left".to_string())),
+                        method: "as_ref".to_string(),
+                        args: Vec::new(),
+                    }),
+                    method: "unwrap".to_string(),
+                    args: Vec::new(),
+                }),
                 method: "as_str".to_string(),
                 args: Vec::new(),
             }
@@ -16158,7 +17250,11 @@ mod tests {
             raw_compound_receiver.into_unshaped(),
             RustExpr::Unary {
                 op: "&".to_string(),
-                expr: Box::new(RustExpr::Raw("(left + right)".to_string())),
+                expr: Box::new(RustExpr::Binary {
+                    op: "+".to_string(),
+                    left: Box::new(RustExpr::Var("left".to_string())),
+                    right: Box::new(RustExpr::Var("right".to_string())),
+                }),
             }
         );
     }
@@ -16273,6 +17369,14 @@ mod tests {
 
     #[test]
     fn primitive_number_value_projection_owns_boxed_value_cast_spelling() {
+        fn grouped_left_plus_right_binary() -> RustExpr {
+            RustExpr::Grouped(Box::new(RustExpr::Binary {
+                op: "+".to_string(),
+                left: Box::new(RustExpr::Var("left".to_string())),
+                right: Box::new(RustExpr::Var("right".to_string())),
+            }))
+        }
+
         let cast = primitive_number_value_projection(
             RustExpr::Var("value".to_string()),
             PrimitiveType::Double,
@@ -16292,9 +17396,7 @@ mod tests {
                 PrimitiveType::Double
             ),
             RustExpr::Cast {
-                expr: Box::new(RustExpr::Grouped(Box::new(RustExpr::Raw(
-                    "left + right".to_string(),
-                )))),
+                expr: Box::new(grouped_left_plus_right_binary()),
                 ty: "f64".to_string(),
             }
         );
@@ -16346,9 +17448,7 @@ mod tests {
             raw_narrowing,
             RustExpr::MethodCall {
                 receiver: Box::new(RustExpr::MethodCall {
-                    receiver: Box::new(RustExpr::Grouped(Box::new(RustExpr::Raw(
-                        "left + right".to_string(),
-                    )))),
+                    receiver: Box::new(grouped_left_plus_right_binary()),
                     method: "try_into".to_string(),
                     args: Vec::new(),
                 }),
@@ -16368,10 +17468,44 @@ mod tests {
             )),
             "value.display_name()"
         );
+        assert_eq!(
+            facade_method_name("StringFacade::lookup::<TargetType>"),
+            "lookup::<TargetType>"
+        );
+        assert_eq!(
+            facade_method_name("pkg::StringFacade::<T>::display_name"),
+            "display_name"
+        );
+
+        let generic_call = facade_receiver_method_call_projection(
+            RustExpr::Var("value".to_string()),
+            "StringFacade::lookup::<TargetType>",
+            vec![RustExpr::Var("key".to_string())],
+        );
+        assert_eq!(
+            emit::emit_expr(&generic_call),
+            "value.lookup::<TargetType>(key)"
+        );
+        assert_eq!(
+            generic_call,
+            RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Var("value".to_string())),
+                method: "lookup::<TargetType>".to_string(),
+                args: vec![RustExpr::Var("key".to_string())],
+            }
+        );
     }
 
     #[test]
     fn primitive_f64_method_projection_owns_math_cast_spelling() {
+        fn grouped_plus_binary(left_name: &str, right_name: &str) -> RustExpr {
+            RustExpr::Grouped(Box::new(RustExpr::Binary {
+                op: "+".to_string(),
+                left: Box::new(RustExpr::Var(left_name.to_string())),
+                right: Box::new(RustExpr::Var(right_name.to_string())),
+            }))
+        }
+
         let projected = primitive_f64_method_projection(RustExpr::Var("value".to_string()), "ln");
         assert_eq!(emit::emit_expr(&projected), "(value as f64).ln()");
         assert_eq!(
@@ -16397,9 +17531,7 @@ mod tests {
             primitive_f64_method_projection(RustExpr::Raw("left + right".to_string()), "ln"),
             RustExpr::MethodCall {
                 receiver: Box::new(RustExpr::Cast {
-                    expr: Box::new(RustExpr::Grouped(Box::new(RustExpr::Raw(
-                        "left + right".to_string(),
-                    )))),
+                    expr: Box::new(grouped_plus_binary("left", "right")),
                     ty: "f64".to_string(),
                 }),
                 method: "ln".to_string(),
@@ -16446,9 +17578,7 @@ mod tests {
             ),
             RustExpr::MethodCall {
                 receiver: Box::new(RustExpr::Cast {
-                    expr: Box::new(RustExpr::Grouped(Box::new(RustExpr::Raw(
-                        "left + middle".to_string(),
-                    )))),
+                    expr: Box::new(grouped_plus_binary("left", "middle")),
                     ty: "f64".to_string(),
                 }),
                 method: "atan2".to_string(),
@@ -16497,9 +17627,7 @@ mod tests {
                 }),
                 method: "powf".to_string(),
                 args: vec![RustExpr::Cast {
-                    expr: Box::new(RustExpr::Grouped(Box::new(RustExpr::Raw(
-                        "exponent + delta".to_string(),
-                    )))),
+                    expr: Box::new(grouped_plus_binary("exponent", "delta")),
                     ty: "f64".to_string(),
                 }],
             }
@@ -16547,9 +17675,7 @@ mod tests {
             RustExpr::Call {
                 function: Box::new(RustExpr::path(["java_math_round_f64"])),
                 args: vec![RustExpr::Cast {
-                    expr: Box::new(RustExpr::Grouped(Box::new(RustExpr::Raw(
-                        "left + right".to_string(),
-                    )))),
+                    expr: Box::new(grouped_plus_binary("left", "right")),
                     ty: "f64".to_string(),
                 }],
             }
@@ -16590,9 +17716,7 @@ mod tests {
                 PrimitiveType::Int
             ),
             RustExpr::MethodCall {
-                receiver: Box::new(RustExpr::Grouped(Box::new(RustExpr::Raw(
-                    "left + right".to_string()
-                )))),
+                receiver: Box::new(grouped_plus_binary("left", "right")),
                 method: "wrapping_abs".to_string(),
                 args: Vec::new(),
             }
@@ -16876,6 +18000,14 @@ mod tests {
 
     #[test]
     fn java_display_plan_renders_optional_null_policy() {
+        fn grouped_plus_binary(left_name: &str, right_name: &str) -> RustExpr {
+            RustExpr::Grouped(Box::new(RustExpr::Binary {
+                op: "+".to_string(),
+                left: Box::new(RustExpr::Var(left_name.to_string())),
+                right: Box::new(RustExpr::Var(right_name.to_string())),
+            }))
+        }
+
         let concat_value = apply_java_display_plan(
             RustExpr::Var("name".to_string()),
             JavaDisplayPlan::ConcatValue,
@@ -16899,7 +18031,15 @@ mod tests {
             emit::emit_expr(&compound_concat),
             "(left + right).to_string()"
         );
-        assert!(matches!(compound_concat, RustExpr::MethodCall { .. }));
+        assert!(matches!(
+            compound_concat,
+            RustExpr::MethodCall { receiver, .. }
+                if matches!(receiver.as_ref(), RustExpr::Grouped(inner)
+                    if matches!(inner.as_ref(), RustExpr::Binary { op, left, right }
+                        if op == "+"
+                            && matches!(left.as_ref(), RustExpr::Var(name) if name == "left")
+                            && matches!(right.as_ref(), RustExpr::Var(name) if name == "right")))
+        ));
 
         let format_value = apply_java_display_plan(
             RustExpr::Raw("left + right".to_string()),
@@ -16909,9 +18049,7 @@ mod tests {
         assert_eq!(
             format_value,
             RustExpr::MethodCall {
-                receiver: Box::new(RustExpr::Grouped(Box::new(RustExpr::Raw(
-                    "left + right".to_string(),
-                )))),
+                receiver: Box::new(grouped_plus_binary("left", "right")),
                 method: "to_string".to_string(),
                 args: Vec::new(),
             }
@@ -17006,9 +18144,7 @@ mod tests {
             raw_optional_string,
             RustExpr::MethodCall {
                 receiver: Box::new(RustExpr::MethodCall {
-                    receiver: Box::new(RustExpr::Grouped(Box::new(RustExpr::Raw(
-                        "left + right".to_string(),
-                    )))),
+                    receiver: Box::new(grouped_plus_binary("left", "right")),
                     method: "as_deref".to_string(),
                     args: Vec::new(),
                 }),
@@ -17129,7 +18265,25 @@ mod tests {
         );
         assert!(matches!(
             raw_optional_value,
-            RustExpr::MethodCall { method, .. } if method == "unwrap_or_else"
+            RustExpr::MethodCall { method, receiver, .. }
+                if method == "unwrap_or_else"
+                    && matches!(
+                        receiver.as_ref(),
+                        RustExpr::MethodCall { method, receiver, .. }
+                            if method == "map"
+                                && matches!(
+                                    receiver.as_ref(),
+                                    RustExpr::MethodCall { method, receiver, .. }
+                                        if method == "as_ref"
+                                            && matches!(
+                                                receiver.as_ref(),
+                                                RustExpr::Binary { op, left, right }
+                                                    if op == "+"
+                                                        && matches!(left.as_ref(), RustExpr::Var(name) if name == "left")
+                                                        && matches!(right.as_ref(), RustExpr::Var(name) if name == "right")
+                                            )
+                                )
+                    )
         ));
         assert_eq!(
             emit::emit_expr(&apply_java_display_plan(
@@ -17148,7 +18302,20 @@ mod tests {
         );
         assert!(matches!(
             raw_optional_borrowed_value,
-            RustExpr::MethodCall { method, .. } if method == "unwrap_or_else"
+            RustExpr::MethodCall { method, receiver, .. }
+                if method == "unwrap_or_else"
+                    && matches!(
+                        receiver.as_ref(),
+                        RustExpr::MethodCall { method, receiver, .. }
+                            if method == "map"
+                                && matches!(
+                                    receiver.as_ref(),
+                                    RustExpr::Binary { op, left, right }
+                                        if op == "+"
+                                            && matches!(left.as_ref(), RustExpr::Var(name) if name == "left")
+                                            && matches!(right.as_ref(), RustExpr::Var(name) if name == "right")
+                                )
+                    )
         ));
     }
 
@@ -17163,7 +18330,7 @@ mod tests {
             method: "to_string".to_string(),
             args: Vec::new(),
         };
-        assert_eq!(render_java_display_operand(&structured), "left + right");
+        assert_eq!(render_java_display_operand(&structured), "(left + right)");
 
         let expr = RustExpr::Raw("(value * 100).to_string()".to_string());
         assert_eq!(render_java_display_operand(&expr), "(value * 100)");
@@ -17175,19 +18342,19 @@ mod tests {
         };
         assert_eq!(
             render_java_display_operand(&structured_raw_arithmetic),
-            "value * 100"
+            "(value * 100)"
         );
 
-        let grouped_raw_arithmetic = RustExpr::MethodCall {
-            receiver: Box::new(RustExpr::Grouped(Box::new(RustExpr::Raw(
-                "value * (100 as f64)".to_string(),
-            )))),
+        let grouped_arithmetic = RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Grouped(Box::new(
+                rendered_plus_expr_projection_or_raw_leaf("value * (100 as f64)"),
+            ))),
             method: "to_string".to_string(),
             args: Vec::new(),
         };
         assert_eq!(
-            render_java_display_operand(&grouped_raw_arithmetic),
-            "value * (100 as f64)"
+            render_java_display_operand(&grouped_arithmetic),
+            "(value * (100 as f64))"
         );
 
         let generated_numeric_cast = RustExpr::Raw("value * (100 as f64).to_string()".to_string());
@@ -17219,7 +18386,7 @@ mod tests {
     fn snapshot_rendered_shared_borrow_argument_keeps_replacements_structured() {
         let cases = [
             (
-                render_option_some(RustExpr::Unary {
+                option_some_projection(RustExpr::Unary {
                     op: "&".to_string(),
                     expr: Box::new(RustExpr::Var("value".to_string())),
                 }),
@@ -17237,7 +18404,7 @@ mod tests {
                 "value.clone()/* TODO(translation): validate same-call alias snapshot */.as_slice()",
             ),
             (
-                render_option_some(zero_arg_method_projection(
+                option_some_projection(zero_arg_method_projection(
                     RustExpr::Var("value".to_string()),
                     "as_slice",
                 )),
@@ -17248,7 +18415,7 @@ mod tests {
                 "value.clone()/* TODO(translation): validate same-call alias snapshot */.as_str()",
             ),
             (
-                render_option_some(zero_arg_method_projection(
+                option_some_projection(zero_arg_method_projection(
                     RustExpr::Var("value".to_string()),
                     "as_str",
                 )),
@@ -17260,6 +18427,29 @@ mod tests {
             let snapshot = snapshot_rendered_shared_borrow_argument(lowered, "value");
             assert_eq!(emit::emit_expr(&snapshot), expected);
             assert!(!matches!(snapshot.into_unshaped(), RustExpr::Raw(_)));
+        }
+
+        let raw_cases = [
+            (
+                RustExpr::Raw("Some(&value)".to_string()),
+                "Some(&value.clone()/* TODO(translation): validate same-call alias snapshot */)",
+            ),
+            (
+                RustExpr::Raw("value.as_str()".to_string()),
+                "value.clone()/* TODO(translation): validate same-call alias snapshot */.as_str()",
+            ),
+            (
+                RustExpr::Raw("Some(value.as_slice())".to_string()),
+                "Some(value.clone()/* TODO(translation): validate same-call alias snapshot */.as_slice())",
+            ),
+        ];
+        for (lowered, expected) in raw_cases {
+            let snapshot = snapshot_rendered_shared_borrow_argument(lowered, "value");
+            assert_eq!(emit::emit_expr(&snapshot), expected);
+            assert!(
+                !matches!(snapshot.into_unshaped(), RustExpr::Raw(_)),
+                "raw compatibility input should recover to structured snapshot replacement"
+            );
         }
 
         let unrelated = zero_arg_method_projection(RustExpr::Var("other".to_string()), "as_str");
@@ -17304,10 +18494,53 @@ mod tests {
                                 && matches!(
                                     receiver.as_ref(),
                                     RustExpr::Grouped(grouped)
-                                        if matches!(grouped.as_ref(), RustExpr::Raw(raw) if raw == "left + right")
+                                        if matches!(grouped.as_ref(), RustExpr::Binary { op, left, right }
+                                            if op == "+"
+                                                && matches!(left.as_ref(), RustExpr::Var(name) if name == "left")
+                                                && matches!(right.as_ref(), RustExpr::Var(name) if name == "right"))
                                 )
                     )
         ));
+
+        let recoverable_raw =
+            apply_audited_clone_recovery(RustExpr::Raw("value.to_owned()".to_string()));
+        assert_eq!(
+            emit::emit_expr(&recoverable_raw),
+            "value.to_owned().clone()/* TODO(translation): validate added clone */"
+        );
+        assert!(matches!(
+            recoverable_raw.into_unshaped(),
+            RustExpr::PostfixComment { expr, comment }
+                if comment == "/* TODO(translation): validate added clone */"
+                    && matches!(
+                        expr.as_ref(),
+                        RustExpr::MethodCall { receiver, method, args }
+                            if method == "clone"
+                                && args.is_empty()
+                                && matches!(
+                                    receiver.as_ref(),
+                                    RustExpr::MethodCall { receiver, method, args }
+                                        if method == "to_owned"
+                                            && args.is_empty()
+                                            && matches!(receiver.as_ref(), RustExpr::Var(name) if name == "value")
+                                )
+                    )
+        ));
+
+        let already_cloned_raw =
+            apply_audited_clone_recovery(RustExpr::Raw("value.clone()".to_string()));
+        assert_eq!(
+            already_cloned_raw.clone().into_unshaped(),
+            RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Var("value".to_string())),
+                method: "clone".to_string(),
+                args: Vec::new(),
+            }
+        );
+        assert_eq!(
+            already_cloned_raw.recorded_shape(),
+            Some(RustExprShape::OwnedRecovery)
+        );
     }
 
     #[test]
@@ -17394,7 +18627,12 @@ mod tests {
                 if method == "clone"
                     && args.is_empty()
                     && matches!(receiver.as_ref(), RustExpr::Grouped(grouped)
-                        if matches!(grouped.as_ref(), RustExpr::Raw(raw) if raw == "value as Target"))
+                        if matches!(
+                            grouped.as_ref(),
+                            RustExpr::Cast { expr, ty }
+                                if ty == "Target"
+                                    && matches!(expr.as_ref(), RustExpr::Var(name) if name == "value")
+                        ))
         ));
         assert_eq!(
             emit::emit_expr(&apply_clone_projection(RustExpr::Raw(
@@ -17433,6 +18671,19 @@ mod tests {
             ))),
             "Table::VALUES[index as usize].clone()"
         );
+        assert!(matches!(
+            apply_clone_projection(RustExpr::Raw("value.to_owned()".to_string())).into_unshaped(),
+            RustExpr::MethodCall { receiver, method, args }
+                if method == "clone"
+                    && args.is_empty()
+                    && matches!(
+                        receiver.as_ref(),
+                        RustExpr::MethodCall { receiver, method, args }
+                            if method == "to_owned"
+                                && args.is_empty()
+                                && matches!(receiver.as_ref(), RustExpr::Var(name) if name == "value")
+                    )
+        ));
         assert_eq!(
             emit::emit_expr(&apply_clone_projection(RustExpr::Raw("*value".to_string()))),
             "(*value).clone()"
@@ -17446,7 +18697,7 @@ mod tests {
             simple.clone().into_unshaped(),
             RustExpr::Unary {
                 op: "*".to_string(),
-                expr: Box::new(RustExpr::Raw("value".to_string())),
+                expr: Box::new(RustExpr::Var("value".to_string())),
             }
         );
         assert_eq!(emit::emit_expr(&simple), "*value");
@@ -17456,9 +18707,11 @@ mod tests {
             compound.clone().into_unshaped(),
             RustExpr::Unary {
                 op: "*".to_string(),
-                expr: Box::new(RustExpr::Grouped(Box::new(RustExpr::Raw(
-                    "left + right".to_string(),
-                )))),
+                expr: Box::new(RustExpr::Grouped(Box::new(RustExpr::Binary {
+                    op: "+".to_string(),
+                    left: Box::new(RustExpr::Var("left".to_string())),
+                    right: Box::new(RustExpr::Var("right".to_string())),
+                }))),
             }
         );
         assert_eq!(emit::emit_expr(&compound), "*(left + right)");
@@ -17651,14 +18904,54 @@ mod tests {
 
     #[test]
     fn downcast_expect_message_rewrite_ignores_literal_text() {
+        let structured = method_expect_projection(
+            zero_arg_method_projection(RustExpr::Var("value".to_string()), "downcast::<Target>"),
+            crate::output_markers::INVALID_JAVA_CAST_MESSAGE,
+        );
+        let structured_rewritten = rewrite_downcast_expect_message(structured, "replacement");
+        assert_eq!(
+            emit::emit_expr(&structured_rewritten),
+            "value.downcast::<Target>().expect(\"replacement\")"
+        );
+        assert!(!matches!(structured_rewritten.unshaped(), RustExpr::Raw(_)));
+
         let real = RustExpr::Raw(format!(
             "value.downcast::<Target>(){}",
             crate::output_markers::invalid_java_cast_expect()
         ));
+        let real_rewritten = rewrite_downcast_expect_message(real, "replacement");
         assert_eq!(
-            emit::emit_expr(&rewrite_downcast_expect_message(real, "replacement")),
+            emit::emit_expr(&real_rewritten),
             "value.downcast::<Target>().expect(\"replacement\")"
         );
+        assert!(
+            !matches!(real_rewritten.unshaped(), RustExpr::Raw(_)),
+            "direct raw downcast expect rewrites should recover a structured projection"
+        );
+
+        let nested_binary = RustExpr::Raw(format!(
+            "left + value.downcast::<Target>(){}",
+            crate::output_markers::invalid_java_cast_expect()
+        ));
+        let nested_rewritten = rewrite_downcast_expect_message(nested_binary, "replacement");
+        assert_eq!(
+            emit::emit_expr(&nested_rewritten),
+            "left + value.downcast::<Target>().expect(\"replacement\")"
+        );
+        assert!(matches!(
+            nested_rewritten.unshaped(),
+            RustExpr::Binary { op, right, .. }
+                if op == "+"
+                    && matches!(
+                        right.as_ref(),
+                        RustExpr::MethodCall { method, args, .. }
+                            if method == "expect"
+                                && matches!(
+                                    args.as_slice(),
+                                    [RustExpr::Literal(message)] if message == "\"replacement\""
+                                )
+                    )
+        ));
 
         let marker_text = RustExpr::Raw(format!(
             "format!(\"{} {}\")",
@@ -17711,6 +19004,18 @@ mod tests {
                  let real = name.as_ref().map(|value| value.as_str());"
             )
         );
+        assert!(matches!(rewritten.unshaped(), RustExpr::Raw(_)));
+
+        let call_rewritten = rewrite_optional_erased_borrowed_string_view_call_args(
+            RustExpr::Raw(format!("use_name({erased_string_box})")),
+            &["name".to_string()],
+            &[],
+        );
+        assert_eq!(
+            emit::emit_expr(&call_rewritten),
+            "use_name(name.as_ref().map(|value| value.as_str()))"
+        );
+        assert!(!matches!(call_rewritten.unshaped(), RustExpr::Raw(_)));
     }
 
     #[test]
@@ -17735,7 +19040,7 @@ mod tests {
         let nested = function_call_projection(RustExpr::Var("use_name".to_string()), vec![boxed]);
 
         let rewritten = rewrite_optional_erased_borrowed_string_view_call_args(
-            nested,
+            nested.clone(),
             &["name".to_string()],
             &[],
         );
@@ -17745,6 +19050,29 @@ mod tests {
             "use_name(name.as_ref().map(|value| value.as_str()))"
         );
         assert!(!matches!(rewritten, RustExpr::Raw(_)));
+
+        let shaped = rewrite_optional_erased_borrowed_string_view_call_args(
+            RustExpr::shaped(RustExprShape::OwnedRecovery, nested.clone()),
+            &["name".to_string()],
+            &[],
+        );
+        assert_eq!(
+            emit::emit_expr(&shaped),
+            "use_name(name.as_ref().map(|value| value.as_str()))"
+        );
+        assert_eq!(shaped.recorded_shape(), Some(RustExprShape::OwnedRecovery));
+        assert!(!matches!(shaped.unshaped(), RustExpr::Raw(_)));
+
+        let grouped = rewrite_optional_erased_borrowed_string_view_call_args(
+            RustExpr::Grouped(Box::new(nested)),
+            &["name".to_string()],
+            &[],
+        );
+        assert_eq!(
+            emit::emit_expr(&grouped),
+            "(use_name(name.as_ref().map(|value| value.as_str())))"
+        );
+        assert!(!matches!(grouped.unshaped(), RustExpr::Raw(_)));
     }
 
     #[test]
@@ -17791,10 +19119,35 @@ mod tests {
             "name.as_ref().and_then(|value| value.downcast_ref::<String>()).expect(\"invalid Java cast\").as_str()"
         );
         assert!(!matches!(rewritten.unshaped(), RustExpr::Raw(_)));
+
+        let nested = rewrite_optional_erased_borrowed_string_view_call_args(
+            function_call_projection(
+                RustExpr::Var("use_name".to_string()),
+                vec![RustExpr::Raw(format!("name{suffix}"))],
+            ),
+            &[],
+            &[],
+        );
+
+        assert_eq!(
+            emit::emit_expr(&nested),
+            "use_name(name.as_ref().and_then(|value| value.downcast_ref::<String>()).expect(\"invalid Java cast\").as_str())"
+        );
+        assert!(!matches!(nested.unshaped(), RustExpr::Raw(_)));
+        let raw_call = rewrite_optional_erased_borrowed_string_view_call_args(
+            RustExpr::Raw(format!("use_name(name{suffix})")),
+            &[],
+            &[],
+        );
+        assert_eq!(
+            emit::emit_expr(&raw_call),
+            "use_name(name.as_ref().and_then(|value| value.downcast_ref::<String>()).expect(\"invalid Java cast\").as_str())"
+        );
+        assert!(!matches!(raw_call.unshaped(), RustExpr::Raw(_)));
     }
 
     #[test]
-    fn optional_erased_string_suffix_rewrite_ignores_literal_text() {
+    fn optional_erased_string_statement_like_raw_stays_leaf() {
         let suffix = format!(
             ".unwrap().downcast::<String>(){}.as_str()",
             crate::output_markers::invalid_java_cast_expect()
@@ -17806,18 +19159,13 @@ mod tests {
              let real = name{suffix};"
         );
 
-        let rewritten = rewrite_rendered_optional_erased_string_views(&rendered)
-            .expect("the real suffix outside literals should be rewritten");
-
-        assert_eq!(
-            rewritten,
-            format!(
-                "let text = {literal:?};\n\
-                 let raw = r#\"{literal}\"#;\n\
-                 let real = name.as_ref().and_then(|value| value.downcast_ref::<String>()){}.as_str();",
-                crate::output_markers::invalid_java_cast_expect()
-            )
+        let rewritten = rewrite_optional_erased_borrowed_string_view_call_args(
+            RustExpr::Raw(rendered.clone()),
+            &[],
+            &[],
         );
+
+        assert_eq!(rewritten, RustExpr::Raw(rendered));
     }
 
     #[test]
@@ -18117,6 +19465,14 @@ mod tests {
             RustExpr::Literal("12".to_string())
         );
         assert_eq!(
+            rendered_projection_or_raw_leaf("4499201580859392i64"),
+            RustExpr::Literal("4499201580859392i64".to_string())
+        );
+        assert_eq!(
+            rendered_projection_or_raw_leaf("1_024usize"),
+            RustExpr::Literal("1_024usize".to_string())
+        );
+        assert_eq!(
             rendered_projection_or_raw_leaf("\"literal\""),
             RustExpr::Literal("\"literal\"".to_string())
         );
@@ -18139,12 +19495,113 @@ mod tests {
             }
         );
         assert_eq!(
+            rendered_projection_or_raw_leaf("vec![1, 2, value]"),
+            RustExpr::VecLiteral(vec![
+                RustExpr::Literal("1".to_string()),
+                RustExpr::Literal("2".to_string()),
+                RustExpr::Var("value".to_string()),
+            ])
+        );
+        assert_eq!(
+            rendered_projection_or_raw_leaf("vec![value; count as usize]"),
+            RustExpr::VecRepeat {
+                value: Box::new(RustExpr::Var("value".to_string())),
+                len: Box::new(RustExpr::Cast {
+                    expr: Box::new(RustExpr::Var("count".to_string())),
+                    ty: "usize".to_string(),
+                }),
+            }
+        );
+        let borrowed_vec = rendered_projection_or_raw_leaf("&vec![2, 3, 6, 4]");
+        assert_eq!(emit::emit_expr(&borrowed_vec), "&vec![2, 3, 6, 4]");
+        assert!(matches!(
+            borrowed_vec,
+            RustExpr::Unary { op, expr }
+                if op == "&" && matches!(expr.as_ref(), RustExpr::VecLiteral(items) if items.len() == 4)
+        ));
+        let borrowed_string = rendered_projection_or_raw_leaf("&\"actual\".to_string()");
+        assert_eq!(emit::emit_expr(&borrowed_string), "&\"actual\".to_string()");
+        assert!(matches!(
+            borrowed_string,
+            RustExpr::Unary { op, expr }
+                if op == "&" && matches!(
+                    expr.as_ref(),
+                    RustExpr::MethodCall { receiver, method, args }
+                        if method == "to_string"
+                            && args.is_empty()
+                            && matches!(
+                                receiver.as_ref(),
+                                RustExpr::Literal(literal) if literal == "\"actual\""
+                            )
+                )
+        ));
+        let optional_borrowed_string =
+            rendered_projection_or_raw_leaf("Some(&\"actual\".to_string())");
+        assert_eq!(
+            emit::emit_expr(&optional_borrowed_string),
+            "Some(&\"actual\".to_string())"
+        );
+        assert!(matches!(
+            optional_borrowed_string.into_unshaped(),
+            RustExpr::Call { function, args }
+                if rust_expr_is_single_segment_name(function.as_ref(), "Some")
+                    && matches!(
+                        args.as_slice(),
+                        [RustExpr::Unary { op, expr }]
+                            if op == "&" && matches!(
+                                expr.as_ref(),
+                                RustExpr::MethodCall { method, .. } if method == "to_string"
+                            )
+                    )
+        ));
+        let optional_borrowed_name = rendered_projection_or_raw_leaf("Some(&value)");
+        assert!(matches!(
+            optional_borrowed_name.into_unshaped(),
+            RustExpr::Call { function, args }
+                if rust_expr_is_single_segment_name(function.as_ref(), "Some")
+                    && matches!(
+                        args.as_slice(),
+                        [RustExpr::Unary { op, expr }]
+                            if op == "&"
+                                && matches!(expr.as_ref(), RustExpr::Var(name) if name == "value")
+                    )
+        ));
+        let optional_slice_view = rendered_projection_or_raw_leaf("Some(value.as_slice())");
+        assert!(matches!(
+            optional_slice_view.into_unshaped(),
+            RustExpr::Call { function, args }
+                if rust_expr_is_single_segment_name(function.as_ref(), "Some")
+                    && matches!(
+                        args.as_slice(),
+                        [RustExpr::MethodCall { receiver, method, args }]
+                            if method == "as_slice"
+                                && args.is_empty()
+                                && matches!(receiver.as_ref(), RustExpr::Var(name) if name == "value")
+                    )
+        ));
+        assert_eq!(
             rendered_projection_or_raw_leaf("index as usize"),
             RustExpr::Cast {
                 expr: Box::new(RustExpr::Var("index".to_string())),
                 ty: "usize".to_string(),
             }
         );
+        let indexed_static = rendered_projection_or_raw_leaf("Table::VALUES[index as usize]");
+        assert_eq!(
+            emit::emit_expr(&indexed_static),
+            "Table::VALUES[index as usize]"
+        );
+        assert!(matches!(
+            indexed_static,
+            RustExpr::Index(array, index)
+                if matches!(array.as_ref(), RustExpr::Path(segments) if segments == &["Table", "VALUES"])
+                    && matches!(
+                        index.as_ref(),
+                        RustExpr::Cast { expr, ty }
+                            if ty == "usize"
+                                && matches!(expr.as_ref(), RustExpr::Var(name) if name == "index")
+                    )
+        ));
         assert_eq!(
             rendered_projection_or_raw_leaf("value.clone() as Target"),
             RustExpr::Cast {
@@ -18192,6 +19649,45 @@ mod tests {
             RustExpr::Literal("r#\"left + right\"#".to_string())
         );
         assert_eq!(
+            rendered_plus_expr_projection_or_raw_leaf("self.value * scale"),
+            RustExpr::Binary {
+                op: "*".to_string(),
+                left: Box::new(RustExpr::Field(
+                    Box::new(RustExpr::Var("self".to_string())),
+                    "value".to_string(),
+                )),
+                right: Box::new(RustExpr::Var("scale".to_string())),
+            }
+        );
+        assert_eq!(
+            rendered_plus_expr_projection_or_raw_leaf("self.value == other.value"),
+            RustExpr::Binary {
+                op: "==".to_string(),
+                left: Box::new(RustExpr::Field(
+                    Box::new(RustExpr::Var("self".to_string())),
+                    "value".to_string(),
+                )),
+                right: Box::new(RustExpr::Field(
+                    Box::new(RustExpr::Var("other".to_string())),
+                    "value".to_string(),
+                )),
+            }
+        );
+        assert_eq!(
+            rendered_plus_expr_projection_or_raw_leaf("\"left * right\""),
+            RustExpr::Literal("\"left * right\"".to_string())
+        );
+        assert_eq!(
+            rendered_projection_or_raw_leaf("factory(r#\"a \", b\"#, value)"),
+            RustExpr::Call {
+                function: Box::new(RustExpr::Var("factory".to_string())),
+                args: vec![
+                    RustExpr::Literal("r#\"a \", b\"#".to_string()),
+                    RustExpr::Var("value".to_string()),
+                ],
+            }
+        );
+        assert_eq!(
             rendered_projection_or_raw_leaf("&value"),
             RustExpr::Unary {
                 op: "&".to_string(),
@@ -18222,6 +19718,29 @@ mod tests {
                 args: Vec::new(),
             }))
         );
+        assert!(matches!(
+            rendered_projection_or_raw_leaf("outer(inner()?)?"),
+            RustExpr::Try(outer)
+                if matches!(
+                    outer.as_ref(),
+                    RustExpr::Call { function, args }
+                        if matches!(function.as_ref(), RustExpr::Var(name) if name == "outer")
+                            && matches!(
+                                args.as_slice(),
+                                [RustExpr::Try(inner)]
+                                    if matches!(
+                                        inner.as_ref(),
+                                        RustExpr::Call { function, args }
+                                            if args.is_empty()
+                                                && matches!(function.as_ref(), RustExpr::Var(name) if name == "inner")
+                                    )
+                            )
+                )
+        ));
+        assert!(matches!(
+            rendered_projection_or_raw_leaf("a ? b"),
+            RustExpr::Raw(raw) if raw == "a ? b"
+        ));
         assert_eq!(
             rendered_projection_or_raw_leaf("OuterB::new_1_with_outer(__outer.clone(), value)"),
             RustExpr::Call {
@@ -18292,10 +19811,42 @@ mod tests {
             rendered_projection_or_raw_leaf("&(left + right)"),
             RustExpr::Unary {
                 op: "&".to_string(),
-                expr: Box::new(RustExpr::Grouped(Box::new(RustExpr::Raw(
-                    "left + right".to_string()
-                )))),
+                expr: Box::new(RustExpr::Grouped(Box::new(RustExpr::Binary {
+                    op: "+".to_string(),
+                    left: Box::new(RustExpr::Var("left".to_string())),
+                    right: Box::new(RustExpr::Var("right".to_string())),
+                }))),
             }
+        );
+        assert_eq!(
+            rendered_projection_or_raw_leaf("values[left + right]"),
+            RustExpr::Index(
+                Box::new(RustExpr::Var("values".to_string())),
+                Box::new(RustExpr::Binary {
+                    op: "+".to_string(),
+                    left: Box::new(RustExpr::Var("left".to_string())),
+                    right: Box::new(RustExpr::Var("right".to_string())),
+                }),
+            )
+        );
+    }
+
+    #[test]
+    fn raw_comma_splitter_ignores_commas_inside_raw_string_literals() {
+        assert_eq!(
+            split_raw_top_level_commas("r#\"a \", b\"#, value"),
+            vec![
+                RustExpr::Literal("r#\"a \", b\"#".to_string()),
+                RustExpr::Var("value".to_string()),
+            ]
+        );
+
+        assert_eq!(
+            split_raw_top_level_commas("r##\"a \", b\"##, value"),
+            vec![
+                RustExpr::Literal("r##\"a \", b\"##".to_string()),
+                RustExpr::Var("value".to_string()),
+            ]
         );
     }
 
@@ -18357,6 +19908,45 @@ mod tests {
         );
         assert_eq!(already, proven);
 
+        let recoverable_raw = to_owned_sequence_projection(
+            RustExpr::Raw("values.to_vec()".to_string()),
+            &CloneRecoveryPolicy::AuditRequired,
+        );
+        assert_eq!(emit::emit_expr(&recoverable_raw), "values.to_vec()");
+        assert_eq!(
+            recoverable_raw.clone().into_unshaped(),
+            RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Var("values".to_string())),
+                method: "to_vec".to_string(),
+                args: Vec::new(),
+            }
+        );
+        assert_eq!(
+            recoverable_raw.recorded_shape(),
+            Some(RustExprShape::OwnedRecovery)
+        );
+
+        let literal_like_raw = to_owned_sequence_projection(
+            RustExpr::Raw("\"values.to_vec()\"".to_string()),
+            &CloneRecoveryPolicy::AuditRequired,
+        );
+        assert_eq!(
+            emit::emit_expr(&literal_like_raw),
+            "\"values.to_vec()\".to_vec()/* TODO(translation): validate added clone */"
+        );
+        assert!(matches!(
+            literal_like_raw.clone().into_unshaped(),
+            RustExpr::PostfixComment { expr, .. }
+                if matches!(
+                    expr.as_ref(),
+                    RustExpr::MethodCall { receiver, method, args }
+                        if method == "to_vec"
+                            && args.is_empty()
+                            && matches!(receiver.as_ref(), RustExpr::Literal(literal)
+                                if literal == "\"values.to_vec()\"")
+                )
+        ));
+
         let audited = to_owned_sequence_projection(
             RustExpr::Var("values".to_string()),
             &CloneRecoveryPolicy::AuditRequired,
@@ -18377,6 +19967,154 @@ mod tests {
             }
         );
         assert_eq!(audited.recorded_shape(), Some(RustExprShape::OwnedRecovery));
+    }
+
+    #[test]
+    fn raw_borrowed_collect_clone_compat_recovers_structured_collect_calls() {
+        let policy = CloneRecoveryPolicy::AuditRequired;
+
+        let recoverable = apply_borrowed_vec_clone_adapter(
+            RustExpr::Raw("make_values().iter().collect::<Vec<_>>()".to_string()),
+            &policy,
+        );
+        assert_eq!(
+            emit::emit_expr(&recoverable),
+            "make_values().iter().cloned()/* TODO(translation): validate added clone */.collect::<Vec<_>>()"
+        );
+        assert_eq!(
+            recoverable.recorded_shape(),
+            Some(RustExprShape::OwnedRecovery)
+        );
+        assert!(!matches!(recoverable.unshaped(), RustExpr::Raw(_)));
+
+        let already_cloned = apply_borrowed_vec_clone_adapter(
+            RustExpr::Raw("make_values().iter().cloned().collect::<Vec<_>>()".to_string()),
+            &policy,
+        );
+        assert_eq!(
+            emit::emit_expr(&already_cloned),
+            "make_values().iter().cloned().collect::<Vec<_>>()"
+        );
+        assert_eq!(
+            already_cloned.recorded_shape(),
+            Some(RustExprShape::OwnedRecovery)
+        );
+
+        let structured_collect = apply_borrowed_vec_clone_adapter(
+            zero_arg_method_projection(
+                zero_arg_method_projection(RustExpr::Var("values".to_string()), "iter"),
+                "collect::<Vec<_>>",
+            ),
+            &policy,
+        );
+        assert_eq!(
+            emit::emit_expr(&structured_collect),
+            "values.iter().cloned()/* TODO(translation): validate added clone */.collect::<Vec<_>>()"
+        );
+        assert_eq!(
+            structured_collect.recorded_shape(),
+            Some(RustExprShape::OwnedRecovery)
+        );
+        assert!(!matches!(structured_collect.unshaped(), RustExpr::Raw(_)));
+
+        let opaque = apply_borrowed_vec_clone_adapter(
+            RustExpr::Raw("opaque collect::<Vec<_>>()".to_string()),
+            &policy,
+        );
+        assert_eq!(
+            emit::emit_expr(&opaque),
+            "(opaque collect::<Vec<_>>()).into_iter().cloned()/* TODO(translation): validate added clone */.collect::<Vec<_>>()"
+        );
+
+        let fallback_receiver =
+            apply_borrowed_vec_clone_adapter(RustExpr::Raw("make_values()".to_string()), &policy);
+        assert_eq!(
+            emit::emit_expr(&fallback_receiver),
+            "make_values().into_iter().cloned()/* TODO(translation): validate added clone */.collect::<Vec<_>>()"
+        );
+        assert!(matches!(
+            fallback_receiver.unshaped(),
+            RustExpr::MethodCall {
+                receiver,
+                method,
+                args
+            } if method == "collect::<Vec<_>>"
+                && args.is_empty()
+                && matches!(
+                    receiver.as_ref(),
+                    RustExpr::PostfixComment { expr, .. }
+                        if matches!(
+                            expr.as_ref(),
+                            RustExpr::MethodCall { receiver, method, args }
+                                if method == "cloned"
+                                    && args.is_empty()
+                                    && matches!(
+                                        receiver.as_ref(),
+                                        RustExpr::MethodCall { receiver, method, args }
+                                            if method == "into_iter"
+                                                && args.is_empty()
+                                                && matches!(
+                                                    receiver.as_ref(),
+                                                    RustExpr::Call { function, args }
+                                                        if args.is_empty()
+                                                            && matches!(
+                                                                function.as_ref(),
+                                                                RustExpr::Var(name) if name == "make_values"
+                                                            )
+                                                )
+                                    )
+                        )
+                )
+        ));
+
+        let compound_fallback_receiver =
+            apply_borrowed_vec_clone_adapter(RustExpr::Raw("left + right".to_string()), &policy);
+        assert_eq!(
+            emit::emit_expr(&compound_fallback_receiver),
+            "(left + right).into_iter().cloned()/* TODO(translation): validate added clone */.collect::<Vec<_>>()"
+        );
+        assert!(matches!(
+            compound_fallback_receiver.unshaped(),
+            RustExpr::MethodCall {
+                receiver,
+                method,
+                args
+            } if method == "collect::<Vec<_>>"
+                && args.is_empty()
+                && matches!(
+                    receiver.as_ref(),
+                    RustExpr::PostfixComment { expr, .. }
+                        if matches!(
+                            expr.as_ref(),
+                            RustExpr::MethodCall { receiver, method, args }
+                                if method == "cloned"
+                                    && args.is_empty()
+                                    && matches!(
+                                        receiver.as_ref(),
+                                        RustExpr::MethodCall { receiver, method, args }
+                                            if method == "into_iter"
+                                                && args.is_empty()
+                                                && matches!(
+                                                    receiver.as_ref(),
+                                                    RustExpr::Grouped(grouped)
+                                                        if matches!(
+                                                            grouped.as_ref(),
+                                                            RustExpr::Binary { op, left, right }
+                                                                if op == "+"
+                                                                    && matches!(
+                                                                        left.as_ref(),
+                                                                        RustExpr::Var(name) if name == "left"
+                                                                    )
+                                                                    && matches!(
+                                                                        right.as_ref(),
+                                                                        RustExpr::Var(name) if name == "right"
+                                                                    )
+                                                        )
+                                                )
+                                    )
+                        )
+                )
+        ));
     }
 
     #[test]
@@ -18432,17 +20170,45 @@ mod tests {
         let recovered_tagged = apply_one(tagged.clone(), &Coercion::ToOwnedString);
         assert_eq!(recovered_tagged, tagged);
 
-        let legacy_raw = apply_one(
+        let recoverable_raw = apply_one(
             RustExpr::Raw("make_name().to_string()".to_string()),
             &Coercion::ToOwnedString,
         );
         assert_eq!(
-            legacy_raw.recorded_shape(),
+            recoverable_raw.recorded_shape(),
             Some(RustExprShape::OwnedRecovery)
         );
+        assert!(matches!(
+            recoverable_raw.into_unshaped(),
+            RustExpr::MethodCall { method, args, .. } if method == "to_string" && args.is_empty()
+        ));
+
+        let terminal_raw = apply_one(
+            RustExpr::Raw("(left + right).to_string()".to_string()),
+            &Coercion::ToOwnedString,
+        );
+        assert_eq!(emit::emit_expr(&terminal_raw), "(left + right).to_string()");
         assert_eq!(
-            legacy_raw.into_unshaped(),
-            RustExpr::Raw("make_name().to_string()".to_string())
+            terminal_raw.recorded_shape(),
+            Some(RustExprShape::OwnedRecovery)
+        );
+        assert!(matches!(
+            terminal_raw.unshaped(),
+            RustExpr::MethodCall {
+                receiver,
+                method,
+                args
+            } if method == "to_string"
+                && args.is_empty()
+                && matches!(
+                    receiver.as_ref(),
+                    RustExpr::Grouped(grouped)
+                        if matches!(grouped.as_ref(), RustExpr::Binary { op, .. } if op == "+")
+                )
+        ));
+        assert_eq!(
+            terminal_raw_to_string_call_projection("left + right.to_string()"),
+            None
         );
 
         let fresh = apply_one(RustExpr::Var("name".to_string()), &Coercion::ToOwnedString);
@@ -18617,7 +20383,13 @@ mod tests {
         assert!(matches!(
             compound,
             RustExpr::Unary { op, expr } if op == "&mut "
-                && matches!(expr.as_ref(), RustExpr::Raw(raw) if raw == "(left + right)")
+                && matches!(
+                    expr.as_ref(),
+                    RustExpr::Binary { op, left, right }
+                        if op == "+"
+                            && matches!(left.as_ref(), RustExpr::Var(left) if left == "left")
+                            && matches!(right.as_ref(), RustExpr::Var(right) if right == "right")
+                )
         ));
     }
 

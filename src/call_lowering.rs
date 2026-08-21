@@ -17,27 +17,28 @@ use crate::coercion::{
     collections_unmodifiable_projection, discard_value_projection,
     erased_object_constructor_projection, external_crate_associated_path_projection,
     external_crate_path_projection, external_facade_rust_path_projection, facade_method_name,
-    file_exists_projection, function_call_projection, java_class_literal_path_projection,
-    java_class_static_path_projection, java_iterator_from_collection_projection,
-    java_list_hash_code_projection, java_map_hash_code_projection, java_set_hash_code_projection,
-    java_value_hash_code_projection, len_i32_projection, math_abs_projection,
-    math_floor_div_projection, math_floor_mod_projection, math_max_projection, math_min_projection,
-    math_pow_projection, math_round_projection, native_collection_default_constructor_projection,
-    native_collection_empty_new_projection, native_collection_from_source_projection,
-    native_collection_with_capacity_projection, objects_equals_projection,
-    objects_is_null_projection, objects_non_null_projection, optional_get_owned_value_projection,
-    optional_or_else_owned_value_projection, owned_collection_to_vec_projection_for_receiver_type,
-    owned_map_keys_vec_projection, owned_map_values_vec_projection,
-    owner_associated_path_projection, primitive_compare_to_projection,
-    primitive_f64_binary_method_projection, primitive_f64_method_projection,
-    primitive_hash_code_projection, primitive_is_nan_projection, primitive_number_value_projection,
-    primitive_parse_projection, receiver_method_call_projection,
-    receiver_method_call_projection_exact, rust_type_associated_path_projection,
-    self_associated_path_projection, sequence_index_of_projection, string_char_at_projection,
+    file_exists_projection, free_function_path_projection, function_call_projection,
+    java_class_literal_path_projection, java_class_static_path_projection,
+    java_iterator_from_collection_projection, java_list_hash_code_projection,
+    java_map_hash_code_projection, java_set_hash_code_projection, java_value_hash_code_projection,
+    len_i32_projection, math_abs_projection, math_floor_div_projection, math_floor_mod_projection,
+    math_max_projection, math_min_projection, math_pow_projection, math_round_projection,
+    native_collection_default_constructor_projection, native_collection_empty_new_projection,
+    native_collection_from_source_projection, native_collection_with_capacity_projection,
+    objects_equals_projection, objects_is_null_projection, objects_non_null_projection,
+    optional_get_owned_value_projection, optional_or_else_owned_value_projection,
+    owned_collection_to_vec_projection_for_receiver_type, owned_map_keys_vec_projection,
+    owned_map_values_vec_projection, owner_associated_path_projection,
+    primitive_compare_to_projection, primitive_f64_binary_method_projection,
+    primitive_f64_method_projection, primitive_hash_code_projection, primitive_is_nan_projection,
+    primitive_number_value_projection, primitive_parse_projection, receiver_method_call_projection,
+    receiver_method_call_projection_exact, rust_string_literal_projection,
+    rust_type_associated_path_projection, self_associated_path_projection,
+    sequence_index_of_projection, string_char_at_projection,
     string_compare_to_ignore_case_projection, string_compare_to_projection,
     string_equals_ignore_case_projection, string_format_projection,
     string_from_byte_range_projection, string_from_bytes_projection, string_get_bytes_projection,
-    string_hash_code_projection, string_index_of_projection, string_join_delimiter_projection,
+    string_hash_code_projection, string_index_of_projection, string_join_collection_projection,
     string_join_varargs_projection, string_last_index_of_projection, string_matches_projection,
     string_replace_all_projection, string_replace_first_projection, string_split_projection,
     string_substring_projection, string_to_char_array_projection, system_exit_projection,
@@ -50,7 +51,7 @@ use crate::output_markers::noop_facade_method_call_site_marker;
 use crate::representation::RepresentationPlan;
 use crate::rust_ir::RustExpr;
 use crate::shape_projection::shape_is_erased_object_boundary;
-use crate::slot_render::{rust_name_for_java_named_type, rust_type_for_slot_with_facts};
+use crate::slot_render::rust_type_for_slot_with_facts;
 use crate::stream_lowering::{StreamLambdaValue, emit_stream_lambda_body_expr};
 
 pub fn apply_call_target(
@@ -99,7 +100,7 @@ pub fn apply_call_target(
             args,
         ),
         CallTargetPlan::FallbackFree { rust_name } => {
-            function_call_projection(RustExpr::Var(rust_name.clone()), args)
+            function_call_projection(free_function_path_projection(rust_name), args)
         }
         CallTargetPlan::JavaClassStatic { rust_name } => {
             function_call_projection(java_class_static_path_projection(rust_name), args)
@@ -198,7 +199,7 @@ fn apply_external_facade_receiver_call(
             function_call_projection(external_facade_rust_path_projection(rust_path), args)
         }
         ReceiverAbi::BorrowedSelf | ReceiverAbi::MutBorrowedSelf | ReceiverAbi::OwnedSelf => {
-            receiver_method_call_projection(receiver, &facade_method_name(rust_path), args)
+            receiver_method_call_projection_exact(receiver, &facade_method_name(rust_path), args)
         }
     }
 }
@@ -220,10 +221,7 @@ fn apply_super_boundary_call(return_type: &JavaType, propagates_result: bool) ->
 }
 
 fn ok_unit_expr() -> RustExpr {
-    RustExpr::Call {
-        function: Box::new(RustExpr::path(["Ok"])),
-        args: vec![unit_expr()],
-    }
+    function_call_projection(RustExpr::path(["Ok"]), vec![unit_expr()])
 }
 
 fn unit_expr() -> RustExpr {
@@ -231,14 +229,15 @@ fn unit_expr() -> RustExpr {
 }
 
 fn default_trait_expr() -> RustExpr {
-    RustExpr::Call {
-        function: Box::new(RustExpr::path(["Default", "default"])),
-        args: Vec::new(),
-    }
+    function_call_projection(RustExpr::path(["Default", "default"]), Vec::new())
 }
 
 fn compile_error_call(message: &str) -> RustExpr {
     crate::unsupported::compile_error_expr(message)
+}
+
+fn math_arity_error(java_name: &str, expected: &str) -> RustExpr {
+    compile_error_call(&format!("Math.{java_name} requires {expected}"))
 }
 
 fn apply_native_java_instance_method(
@@ -421,14 +420,21 @@ fn apply_string_matches_helper(receiver: RustExpr, args: Vec<RustExpr>) -> RustE
 }
 
 fn apply_string_substring(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
-    if args.is_empty() || args.len() > 2 {
-        return compile_error_call("Java String.substring requires one or two arguments");
+    match args.len() {
+        1 => {
+            let mut args = args.into_iter();
+            let begin = args.next().unwrap();
+            let end = len_i32_projection(receiver.clone());
+            string_substring_projection(receiver, begin, end)
+        }
+        2 => {
+            let mut args = args.into_iter();
+            let begin = args.next().unwrap();
+            let end = args.next().unwrap();
+            string_substring_projection(receiver, begin, end)
+        }
+        _ => compile_error_call("Java String.substring requires one or two arguments"),
     }
-    let mut args = args.into_iter();
-    let begin = args.next().unwrap();
-    let receiver_for_len = len_i32_projection(receiver.clone());
-    let end = args.next().unwrap_or(receiver_for_len);
-    string_substring_projection(receiver, begin, end)
 }
 
 fn apply_string_compare_to(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
@@ -539,7 +545,7 @@ fn apply_native_java_static_method(
             rust_method,
         } => {
             let Some(arg) = args.into_iter().next() else {
-                return compile_error_call(&format!("Math.{java_name} requires one argument"));
+                return math_arity_error(java_name, "one argument");
             };
             primitive_f64_method_projection(arg, rust_method)
         }
@@ -549,10 +555,10 @@ fn apply_native_java_static_method(
         } => {
             let mut args = args.into_iter();
             let Some(left) = args.next() else {
-                return compile_error_call(&format!("Math.{java_name} requires two arguments"));
+                return math_arity_error(java_name, "two arguments");
             };
             let Some(right) = args.next() else {
-                return compile_error_call(&format!("Math.{java_name} requires two arguments"));
+                return math_arity_error(java_name, "two arguments");
             };
             primitive_f64_binary_method_projection(left, right, rust_method)
         }
@@ -682,11 +688,7 @@ fn apply_string_join(args: Vec<RustExpr>) -> RustExpr {
         varargs.extend(rest);
         return string_join_varargs_projection(delimiter, varargs);
     }
-    receiver_method_call_projection_exact(
-        values,
-        "join",
-        vec![string_join_delimiter_projection(delimiter)],
-    )
+    string_join_collection_projection(delimiter, values)
 }
 
 fn apply_native_collection_static_method(
@@ -937,7 +939,7 @@ pub fn apply_class_literal_token(ty: &JavaType, facts: &FactSet) -> RustExpr {
     let plan = crate::stdlib::class_literal_token_plan(ty, facts);
     function_call_projection(
         java_class_literal_path_projection(plan.rust_type),
-        vec![RustExpr::Literal(format!("{:?}", plan.java_name))],
+        vec![rust_string_literal_projection(&plan.java_name)],
     )
 }
 
@@ -1018,28 +1020,17 @@ fn apply_new_target_with_optional_representations(
         return string_from_byte_range_constructor_expr(args);
     }
     function_call_projection(
-        constructor_owner_associated_path_expr(&target.owner_shape, &target.rust_name, facts),
+        constructor_owner_associated_path_projection(&target.owner_shape, &target.rust_name, facts),
         args,
     )
 }
 
-fn constructor_owner_associated_path_expr(
+fn constructor_owner_associated_path_projection(
     owner_shape: &crate::slot_shape::RustSlotShape,
     member: &str,
     facts: &FactSet,
 ) -> RustExpr {
-    match &owner_shape.java_ty {
-        JavaType::Named { name, .. } | JavaType::Unknown(name) => RustExpr::path([
-            rust_name_for_java_named_type(&crate::stdlib::canonical_external_receiver_type_key(
-                name,
-            )),
-            member.to_string(),
-        ]),
-        _ => rust_type_associated_path_projection(
-            rust_type_for_slot_with_facts(owner_shape, facts),
-            member,
-        ),
-    }
+    rust_type_associated_path_projection(rust_type_for_slot_with_facts(owner_shape, facts), member)
 }
 
 fn constructor_owner_is_string(java_ty: &JavaType) -> bool {

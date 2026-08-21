@@ -31,6 +31,7 @@ pub struct RustField {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RustImpl {
     pub target: String,
+    pub trait_name: Option<String>,
     pub associated_consts: Vec<RustAssociatedConst>,
     pub functions: Vec<RustFunction>,
 }
@@ -90,6 +91,11 @@ pub enum RustType {
     FnPointer {
         params: Vec<RustType>,
         return_type: Box<RustType>,
+    },
+    ImplFnTrait {
+        trait_name: String,
+        params: Vec<RustType>,
+        return_type: Option<Box<RustType>>,
     },
     DynTrait(String),
     ImplTrait(String),
@@ -345,6 +351,10 @@ pub enum RustExprShape {
 }
 
 impl RustExpr {
+    pub fn raw_leaf(rendered: impl Into<String>) -> RustExpr {
+        RustExpr::Raw(rendered.into())
+    }
+
     pub fn path<I, S>(segments: I) -> RustExpr
     where
         I: IntoIterator<Item = S>,
@@ -429,6 +439,12 @@ impl RustExpr {
             RustExpr::Shaped { expr, .. } => expr.into_unshaped(),
             other => other,
         }
+    }
+}
+
+impl RustStmt {
+    pub fn raw_leaf(rendered: impl Into<String>) -> RustStmt {
+        RustStmt::Raw(rendered.into())
     }
 }
 

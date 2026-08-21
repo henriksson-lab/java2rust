@@ -476,7 +476,7 @@ pub fn default_expr_for_slot_with_effective_facts(
     facts: &EffectiveFacts<'_>,
 ) -> RustExpr {
     let rendered =
-        render_slot_default_policy(&slot_default_policy_with_effective_facts(shape, facts));
+        slot_default_policy_expr(&slot_default_policy_with_effective_facts(shape, facts));
     shared_handle_construction_expr(shape, facts, rendered)
 }
 
@@ -507,6 +507,7 @@ pub fn storage_placement_construction_expr(
     placement: StoragePlacement,
     rendered: RustExpr,
 ) -> RustExpr {
+    let rendered = recover_storage_placement_construction_expr(rendered);
     if storage_placement_construction_expr_is_wrapped(placement, &rendered) {
         return rendered;
     }
@@ -520,6 +521,15 @@ pub fn storage_placement_construction_expr(
         .unwrap_or(celled)
 }
 
+fn recover_storage_placement_construction_expr(expr: RustExpr) -> RustExpr {
+    match expr {
+        RustExpr::Raw(rendered) => {
+            crate::coercion::rendered_plus_expr_projection_or_raw_leaf(&rendered)
+        }
+        other => other,
+    }
+}
+
 fn storage_placement_construction_expr_is_wrapped(
     placement: StoragePlacement,
     expr: &RustExpr,
@@ -529,18 +539,8 @@ fn storage_placement_construction_expr_is_wrapped(
     };
     match expr.unshaped() {
         RustExpr::Call { function, .. } => rust_path_expr_matches(function, handle, "new"),
-        RustExpr::Raw(rendered) => {
-            raw_storage_placement_construction_leaf_is_wrapped(placement, rendered)
-        }
         _ => false,
     }
-}
-
-fn raw_storage_placement_construction_leaf_is_wrapped(
-    placement: StoragePlacement,
-    rendered: &str,
-) -> bool {
-    placement.construction_expr_is_wrapped(rendered)
 }
 
 fn rust_path_expr_matches(expr: &RustExpr, base: &str, leaf: &str) -> bool {
@@ -648,7 +648,7 @@ pub fn slot_default_value_policy_with_effective_facts(
     }
 }
 
-pub fn render_slot_default_policy(policy: &SlotDefaultPolicy) -> RustExpr {
+pub fn slot_default_policy_expr(policy: &SlotDefaultPolicy) -> RustExpr {
     match policy {
         SlotDefaultPolicy::NoDefaultForClosedEnum { .. }
         | SlotDefaultPolicy::NoDefaultForDynTrait { .. }
@@ -656,7 +656,7 @@ pub fn render_slot_default_policy(policy: &SlotDefaultPolicy) -> RustExpr {
         | SlotDefaultPolicy::NoDefaultForErasedObject => {
             slot_no_default_message_policy(policy).compile_error_expr()
         }
-        SlotDefaultPolicy::Value { policy } => render_slot_default_value_policy(policy),
+        SlotDefaultPolicy::Value { policy } => slot_default_value_policy_expr(policy),
     }
 }
 
@@ -681,7 +681,7 @@ pub fn slot_no_default_message_policy(policy: &SlotDefaultPolicy) -> SlotNoDefau
     SlotNoDefaultMessagePolicy { message }
 }
 
-pub fn render_slot_default_value_policy(policy: &SlotDefaultValuePolicy) -> RustExpr {
+pub fn slot_default_value_policy_expr(policy: &SlotDefaultValuePolicy) -> RustExpr {
     match policy {
         SlotDefaultValuePolicy::EmptyStringView => RustExpr::Literal("\"\"".to_string()),
         SlotDefaultValuePolicy::EmptySliceView => RustExpr::Unary {
@@ -1495,7 +1495,30 @@ mod tests {
         );
         assert_eq!(
             raw_already_wrapped,
-            RustExpr::Raw("std::rc::Rc::new(value)".to_string())
+            RustExpr::Call {
+                function: Box::new(RustExpr::path(["std", "rc", "Rc", "new"])),
+                args: vec![RustExpr::Var("value".to_string())],
+            }
+        );
+
+        let opaque_raw_payload = storage_placement_construction_expr(
+            StoragePlacement {
+                shared: true,
+                interior_mutable: false,
+                sync: false,
+            },
+            RustExpr::Raw("left + right".to_string()),
+        );
+        assert_eq!(
+            opaque_raw_payload,
+            RustExpr::Call {
+                function: Box::new(RustExpr::path(["std", "rc", "Rc", "new"])),
+                args: vec![RustExpr::Binary {
+                    op: "+".to_string(),
+                    left: Box::new(RustExpr::Var("left".to_string())),
+                    right: Box::new(RustExpr::Var("right".to_string())),
+                }],
+            }
         );
     }
 

@@ -1,14 +1,14 @@
 use new_java2rust::coercion::{
     BorrowedStringViewProjection, Coercion, CoercionDiagnostic, IndexToUsizeProjection,
     JavaDisplayPlan, LiteralSlotPlan, LoweredExpr, RustPrimitiveTypeNamePolicy,
-    UnsupportedCoercionMessagePolicy, apply_borrowed_string_view_projection, apply_coercions,
+    UnsupportedCoercionMessagePolicy, apply_borrowed_string_view_projection_expr, apply_coercions,
     apply_expr_to_slot, apply_expr_to_slot_with_facts, apply_instanceof_check,
     apply_java_display_plan, apply_literal_slot_plan, apply_lowered_expr_to_slot,
     apply_lowered_expr_to_slot_with_facts, apply_shape_coercion_plan, apply_slot_conversion_plan,
     apply_syntax_coercion_plan, borrowed_element_recovery_fallback_message_policy,
     borrowed_string_view_projection, collapse_redundant_shared_borrow_projection,
     dispatch_coercion_fallback_message_policy, index_to_usize_projection,
-    indexed_access_projection, instanceof_fallback_message_policy,
+    indexed_access_projection, instanceof_check_projection, instanceof_fallback_message_policy,
     instanceof_pattern_downcast_ref_projection, into_projection, java_integral_literal_char,
     literal_slot_plan, normalize_map_key_borrow_projection,
     normalize_reused_clone_for_borrowed_argument, optional_string_view_projection,
@@ -17,8 +17,7 @@ use new_java2rust::coercion::{
     owned_map_values_vec_projection, ownership_coercion_fallback_message_policy,
     parenthesize_borrowed_method_receiver, plan_coercion, plan_coercion_with_facts,
     plan_shape_coercion, plan_shape_coercion_with_facts, project_optional_element_borrow_carrier,
-    project_optional_element_borrow_carrier_with_shape, render_index_to_usize_projection,
-    render_instanceof_check, rust_expr_is_constructed_optional_value,
+    project_optional_element_borrow_carrier_with_shape, rust_expr_is_constructed_optional_value,
     rust_primitive_type_name_policy, unwrap_some_expr,
 };
 use new_java2rust::conversion_lowering::{
@@ -88,17 +87,44 @@ use new_java2rust::member_access_plan::{
 };
 use new_java2rust::parser::{parse_expr, parse_type};
 use new_java2rust::rust_ir::{
-    RustClosureBody, RustClosureParam, RustExpr, RustExprShape, RustMatchArm, RustPattern,
+    RustClosureBody, RustClosureParam, RustExpr, RustExprShape, RustMatchArm, RustPattern, RustStmt,
 };
 use new_java2rust::slot_shape::{DispatchShape, OwnershipShape, RustSlotShape, ViewShape};
 use new_java2rust::storage_strategy::{Escape, StoragePlan, TypeStorageFacts};
 use new_java2rust::string_concat::is_string_concat;
 use new_java2rust::string_concat_plan::build_string_concat_plan;
-use new_java2rust::string_concat_render::render_string_concat;
+use new_java2rust::string_concat_render::string_concat_expr;
 use new_java2rust::types::{
     TypeEnv, infer_expr_type, list_java_type, optional_java_type, set_java_type,
 };
 use new_java2rust::unsupported;
+
+fn assert_compile_error_block_consuming(
+    expr: RustExpr,
+    consumed_rendered: &str,
+    message_fragment: &str,
+) {
+    let RustExpr::Block { stmts, tail } = expr else {
+        panic!("expected compile_error block");
+    };
+    assert_eq!(stmts.len(), 1);
+    assert!(matches!(
+        &stmts[0],
+        RustStmt::Let {
+            mutable: false,
+            name,
+            ty: None,
+            value: Some(value),
+        } if name == "_" && emit_expr(value) == consumed_rendered
+    ));
+    assert!(matches!(
+        tail.as_deref(),
+        Some(RustExpr::MacroCall { macro_name, args })
+            if macro_name == "compile_error"
+                && matches!(args.as_slice(), [RustExpr::Literal(message)]
+                    if message.contains(message_fragment))
+    ));
+}
 
 fn single_param_closure(pattern: &str, body: RustExpr) -> RustExpr {
     RustExpr::Closure {
@@ -110,6 +136,58 @@ fn single_param_closure(pattern: &str, body: RustExpr) -> RustExpr {
         }],
         body: RustClosureBody::Expr(Box::new(body)),
     }
+}
+
+fn values_iter_next_expr() -> RustExpr {
+    RustExpr::MethodCall {
+        receiver: Box::new(RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("values".to_string())),
+            method: "iter".to_string(),
+            args: Vec::new(),
+        }),
+        method: "next".to_string(),
+        args: Vec::new(),
+    }
+}
+
+fn temporary_as_slice_expr() -> RustExpr {
+    RustExpr::MethodCall {
+        receiver: Box::new(RustExpr::Var("temporary".to_string())),
+        method: "as_slice".to_string(),
+        args: Vec::new(),
+    }
+}
+
+fn values_get_key_as_str_expr() -> RustExpr {
+    RustExpr::MethodCall {
+        receiver: Box::new(RustExpr::Var("values".to_string())),
+        method: "get".to_string(),
+        args: vec![RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("key".to_string())),
+            method: "as_str".to_string(),
+            args: Vec::new(),
+        }],
+    }
+}
+
+fn intervals_get_zero_expr() -> RustExpr {
+    RustExpr::MethodCall {
+        receiver: Box::new(RustExpr::Var("intervals".to_string())),
+        method: "get".to_string(),
+        args: vec![RustExpr::Literal("0".to_string())],
+    }
+}
+
+fn intervals_get_zero_expect_expr() -> RustExpr {
+    RustExpr::MethodCall {
+        receiver: Box::new(intervals_get_zero_expr()),
+        method: "expect".to_string(),
+        args: vec![RustExpr::Literal("\"Java null receiver\"".to_string())],
+    }
+}
+
+fn expr_unshaped_eq(expr: &RustExpr, expected: &RustExpr) -> bool {
+    expr.unshaped() == expected
 }
 
 fn value_as_str_closure() -> RustExpr {
@@ -268,7 +346,15 @@ fn optional_some_unwrap_prefers_structured_expr_before_raw_fallback() {
     );
     assert_eq!(
         unwrap_some_expr(&RustExpr::Raw("Some(left + right)".to_string())),
-        Some(RustExpr::Raw("left + right".to_string()))
+        Some(RustExpr::Binary {
+            left: Box::new(RustExpr::Var("left".to_string())),
+            op: "+".to_string(),
+            right: Box::new(RustExpr::Var("right".to_string())),
+        })
+    );
+    assert_eq!(
+        unwrap_some_expr(&RustExpr::Raw("Some(\"left + right\")".to_string())),
+        Some(RustExpr::Literal("\"left + right\"".to_string()))
     );
 }
 
@@ -998,14 +1084,21 @@ fn type_inference_identifies_string_concat() {
     assert_eq!(plan.format_string, "name={}{}");
     assert_eq!(plan.args.len(), 2);
     assert_eq!(
-        render_string_concat(
+        string_concat_expr(
             &plan,
             vec![
                 RustExpr::Var("name".to_string()),
                 RustExpr::Var("count".to_string()),
             ],
         ),
-        RustExpr::Raw("format!(\"name={}{}\", name, count)".to_string())
+        RustExpr::MacroCall {
+            macro_name: "format".to_string(),
+            args: vec![
+                RustExpr::Literal("\"name={}{}\"".to_string()),
+                RustExpr::Var("name".to_string()),
+                RustExpr::Var("count".to_string()),
+            ],
+        }
     );
 }
 
@@ -1023,8 +1116,10 @@ fn string_concat_semantics_do_not_render_rust() {
     assert!(!plan_source.contains("format!("));
     assert!(!render_source.contains("analyze_string_concat"));
     assert!(!render_source.contains("build_string_concat_plan"));
-    assert!(render_source.contains("format!("));
-    assert!(render_source.contains("render_java_display_operand"));
+    assert!(render_source.contains("macro_call_projection(\"format\""));
+    assert!(render_source.contains("java_display_operand_projection"));
+    assert!(!render_source.contains("pub fn render_string_concat"));
+    assert!(!render_source.contains("render_java_display_operand"));
     assert!(!render_source.contains("strip_arithmetic_display_conversion"));
 }
 
@@ -1065,7 +1160,14 @@ fn borrowed_native_string_can_coerce_to_string_view() {
     assert_eq!(emit_expr(&projected), "parts[0].as_str()");
     assert!(matches!(
         projected.into_unshaped(),
-        RustExpr::MethodCall { method, .. } if method == "as_str"
+        RustExpr::MethodCall { receiver, method, .. }
+            if method == "as_str"
+                && matches!(
+                    receiver.as_ref(),
+                    RustExpr::Index(array, index)
+                        if matches!(array.as_ref(), RustExpr::Var(name) if name == "parts")
+                            && matches!(index.as_ref(), RustExpr::Literal(value) if value == "0")
+                )
     ));
 
     let parenthesized = apply_shape_coercion_plan(
@@ -1073,6 +1175,23 @@ fn borrowed_native_string_can_coerce_to_string_view() {
         &shape_coercion_plan_with_facts(&actual, &target, &FactSet::default()),
     );
     assert_eq!(emit_expr(&parenthesized), "(left + right).as_str()");
+    let is_left_plus_right = |expr: &RustExpr| {
+        matches!(
+            expr,
+            RustExpr::Binary { op, left, right }
+                if op == "+"
+                    && matches!(left.as_ref(), RustExpr::Var(name) if name == "left")
+                    && matches!(right.as_ref(), RustExpr::Var(name) if name == "right")
+        )
+    };
+    assert!(matches!(
+        parenthesized.into_unshaped(),
+        RustExpr::MethodCall { receiver, method, args }
+            if method == "as_str"
+                && args.is_empty()
+                && (is_left_plus_right(receiver.as_ref())
+                    || matches!(receiver.as_ref(), RustExpr::Grouped(inner) if is_left_plus_right(inner)))
+    ));
 }
 
 #[test]
@@ -1267,8 +1386,19 @@ fn borrowed_string_view_projection_owns_rendered_view_compatibility() {
     let existing = borrowed_string_view_projection("*value.as_str()", Some("value")).unwrap();
     assert_eq!(existing, BorrowedStringViewProjection::AlreadyStringView);
     assert_eq!(
-        apply_borrowed_string_view_projection("*value.as_str()", &existing),
+        emit_expr(&apply_borrowed_string_view_projection_expr(
+            "*value.as_str()",
+            &existing
+        )),
         "value.as_str()"
+    );
+    assert_eq!(
+        apply_borrowed_string_view_projection_expr("*value.as_str()", &existing),
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("value".to_string())),
+            method: "as_str".to_string(),
+            args: Vec::new(),
+        }
     );
 
     let local = borrowed_string_view_projection("*value", Some("value")).unwrap();
@@ -1279,8 +1409,21 @@ fn borrowed_string_view_projection_owns_rendered_view_compatibility() {
         }
     );
     assert_eq!(
-        apply_borrowed_string_view_projection("*value", &local),
+        emit_expr(&apply_borrowed_string_view_projection_expr(
+            "*value", &local
+        )),
         "value.as_str()"
+    );
+    assert_eq!(
+        apply_borrowed_string_view_projection_expr("*value", &local),
+        RustExpr::shaped(
+            RustExprShape::StringView,
+            RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Var("value".to_string())),
+                method: "as_str".to_string(),
+                args: Vec::new(),
+            },
+        )
     );
 
     assert_eq!(borrowed_string_view_projection("*value", None), None);
@@ -1495,14 +1638,23 @@ fn syntax_slot_coercion_policy_owns_index_condition_and_concat_segments() {
     assert_eq!(
         raw_index,
         RustExpr::Cast {
-            expr: Box::new(RustExpr::Grouped(Box::new(RustExpr::Raw(
-                "(bits & 4499201580859392i64) >> 42".to_string(),
-            )))),
+            expr: Box::new(RustExpr::Grouped(Box::new(RustExpr::Binary {
+                op: ">>".to_string(),
+                left: Box::new(RustExpr::Grouped(Box::new(RustExpr::Binary {
+                    op: "&".to_string(),
+                    left: Box::new(RustExpr::Var("bits".to_string())),
+                    right: Box::new(RustExpr::Literal("4499201580859392i64".to_string())),
+                }))),
+                right: Box::new(RustExpr::Literal("42".to_string())),
+            }))),
             ty: "usize".to_string(),
         }
     );
     assert_eq!(
-        render_index_to_usize_projection("0", IndexToUsizeProjection::JavaStringCharAt),
+        emit_expr(&index_to_usize_projection(
+            RustExpr::Literal("0".to_string()),
+            IndexToUsizeProjection::JavaStringCharAt,
+        )),
         "0 as usize"
     );
     assert_eq!(
@@ -1516,7 +1668,10 @@ fn syntax_slot_coercion_policy_owns_index_condition_and_concat_segments() {
         }
     );
     assert_eq!(
-        render_index_to_usize_projection("index", IndexToUsizeProjection::JavaStringCharAt),
+        emit_expr(&index_to_usize_projection(
+            RustExpr::Var("index".to_string()),
+            IndexToUsizeProjection::JavaStringCharAt,
+        )),
         "(index) as usize"
     );
     assert_eq!(
@@ -1532,7 +1687,10 @@ fn syntax_slot_coercion_policy_owns_index_condition_and_concat_segments() {
         }
     );
     assert_eq!(
-        render_index_to_usize_projection("index", IndexToUsizeProjection::StreamLambdaArgument),
+        emit_expr(&index_to_usize_projection(
+            RustExpr::Var("index".to_string()),
+            IndexToUsizeProjection::StreamLambdaArgument,
+        )),
         "index as usize"
     );
     assert_eq!(
@@ -1540,7 +1698,10 @@ fn syntax_slot_coercion_policy_owns_index_condition_and_concat_segments() {
             RustExpr::Raw("index as usize".to_string()),
             IndexToUsizeProjection::StreamLambdaArgument
         ),
-        RustExpr::Raw("index as usize".to_string())
+        RustExpr::Cast {
+            expr: Box::new(RustExpr::Var("index".to_string())),
+            ty: "usize".to_string(),
+        }
     );
     assert_eq!(
         index_to_usize_projection(
@@ -1553,7 +1714,10 @@ fn syntax_slot_coercion_policy_owns_index_condition_and_concat_segments() {
         }
     );
     assert_eq!(
-        render_index_to_usize_projection("*value", IndexToUsizeProjection::StreamLambdaArgument),
+        emit_expr(&index_to_usize_projection(
+            RustExpr::Raw("*value".to_string()),
+            IndexToUsizeProjection::StreamLambdaArgument,
+        )),
         "(*value) as usize"
     );
     assert_eq!(
@@ -2050,12 +2214,19 @@ fn optional_string_view_projection_records_projected_family_shape() {
             args: vec![value_as_str_closure()],
         }
     );
+    let compound_projected = optional_string_view_projection(RustExpr::Binary {
+        left: Box::new(RustExpr::Var("left".to_string())),
+        op: "+".to_string(),
+        right: Box::new(RustExpr::Var("right".to_string())),
+    });
     assert_eq!(
-        emit_expr(&optional_string_view_projection(RustExpr::Raw(
-            "left + right".to_string()
-        ))),
+        emit_expr(&compound_projected),
         "(left + right).as_ref().map(|value| value.as_str())"
     );
+    assert!(!matches!(
+        compound_projected.clone().into_unshaped(),
+        RustExpr::Raw(_)
+    ));
 }
 
 #[test]
@@ -2102,7 +2273,7 @@ fn optional_array_carrier_to_optional_slice_target_uses_view_projection_policy()
     assert_eq!(
         projected.clone().into_unshaped(),
         RustExpr::MethodCall {
-            receiver: Box::new(RustExpr::Raw("values".to_string())),
+            receiver: Box::new(RustExpr::Var("values".to_string())),
             method: "as_deref".to_string(),
             args: Vec::new(),
         }
@@ -2110,7 +2281,7 @@ fn optional_array_carrier_to_optional_slice_target_uses_view_projection_policy()
     assert_eq!(
         apply_slot_conversion_plan(projected, &plan).into_unshaped(),
         RustExpr::MethodCall {
-            receiver: Box::new(RustExpr::Raw("values".to_string())),
+            receiver: Box::new(RustExpr::Var("values".to_string())),
             method: "as_deref".to_string(),
             args: Vec::new(),
         },
@@ -2127,14 +2298,27 @@ fn optional_array_carrier_to_optional_slice_target_uses_view_projection_policy()
     let stale_identity_projected = RustExpr::shaped_as(
         RustExprShape::OptionalProjected,
         Some(stale_identity_actual),
-        RustExpr::Raw("values.as_deref()".to_string()),
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("values".to_string())),
+            method: "as_deref".to_string(),
+            args: Vec::new(),
+        },
     );
+    let stale_identity_result = apply_slot_conversion_plan(stale_identity_projected, &plan);
     assert_eq!(
-        apply_slot_conversion_plan(stale_identity_projected, &plan).into_unshaped(),
-        RustExpr::Raw("values.as_deref()".to_string()),
+        stale_identity_result.clone().into_unshaped(),
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("values".to_string())),
+            method: "as_deref".to_string(),
+            args: Vec::new(),
+        },
         "idempotence must compare the produced slot semantics, not stale \
          type_identity metadata"
     );
+    assert!(!matches!(
+        stale_identity_result.into_unshaped(),
+        RustExpr::Raw(_)
+    ));
 }
 
 #[test]
@@ -2401,7 +2585,7 @@ fn optional_array_carrier_to_required_slice_target_borrows_before_unwrap() {
                 Some(optional_projected_element.clone()),
                 RustExpr::MethodCall {
                     receiver: Box::new(RustExpr::MethodCall {
-                        receiver: Box::new(RustExpr::Raw("values".to_string())),
+                        receiver: Box::new(RustExpr::Var("values".to_string())),
                         method: "as_ref".to_string(),
                         args: Vec::new(),
                     }),
@@ -2428,7 +2612,7 @@ fn optional_array_carrier_to_required_slice_target_borrows_before_unwrap() {
                 Some(optional_projected_element),
                 RustExpr::MethodCall {
                     receiver: Box::new(RustExpr::MethodCall {
-                        receiver: Box::new(RustExpr::Raw("values".to_string())),
+                        receiver: Box::new(RustExpr::Var("values".to_string())),
                         method: "as_ref".to_string(),
                         args: Vec::new(),
                     }),
@@ -2555,7 +2739,11 @@ fn clone_recovery_policy_is_explicit_in_coercion_adapter() {
     );
     assert_eq!(
         already_recovered.clone().into_unshaped(),
-        RustExpr::Raw("value.clone()".to_string())
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("value".to_string())),
+            method: "clone".to_string(),
+            args: Vec::new(),
+        }
     );
     assert_eq!(
         already_recovered.recorded_shape(),
@@ -2771,12 +2959,11 @@ fn ownership_coercion_policy_owns_borrow_clone_and_unsupported_recovery() {
         RustExpr::Var("handle".to_string()),
         &ownership_coercion_policy(&borrowed_handle, &owned_handle, &facts).coercions(),
     );
-    assert!(matches!(
+    assert_compile_error_block_consuming(
         rendered,
-        RustExpr::Raw(ref raw)
-            if raw.contains("unsupported Java borrowed-to-owned recovery for non-cloneable type")
-                && raw.contains("ExternalHandle")
-    ));
+        "handle",
+        "unsupported Java borrowed-to-owned recovery for non-cloneable type",
+    );
 }
 
 #[test]
@@ -3135,12 +3322,11 @@ fn shape_coercion_rejects_borrowed_to_owned_for_non_cloneable_types() {
         &Slot::Argument(target),
         &facts,
     );
-    assert!(matches!(
+    assert_compile_error_block_consuming(
         rendered,
-        RustExpr::Raw(ref raw)
-            if raw.contains("unsupported Java borrowed-to-owned recovery for non-cloneable type")
-                && raw.contains("ExternalHandle")
-    ));
+        "handle",
+        "unsupported Java borrowed-to-owned recovery for non-cloneable type",
+    );
 }
 
 #[test]
@@ -3362,7 +3548,7 @@ fn optional_assignment_adapter_preserves_structured_none_without_rendering() {
         preconverted_optional_slot_construction_plan(&target, actual.java_ty.clone(), &facts);
     let adapted = adapt_optional_assignment_value_for_target(
         RustExpr::Call {
-            function: Box::new(RustExpr::Raw("SharedNode::new".to_string())),
+            function: Box::new(RustExpr::path(["SharedNode", "new"])),
             args: Vec::new(),
         },
         actual,
@@ -3383,7 +3569,7 @@ fn optional_assignment_adapter_preserves_structured_none_without_rendering() {
         &[RustExpr::Call {
             function: Box::new(RustExpr::path(["std", "rc", "Rc", "new"])),
             args: vec![RustExpr::Call {
-                function: Box::new(RustExpr::Raw("SharedNode::new".to_string())),
+                function: Box::new(RustExpr::path(["SharedNode", "new"])),
                 args: Vec::new(),
             }],
         }]
@@ -3645,7 +3831,14 @@ fn optional_platform_facade_display_segments_use_display_value_policy() {
     );
     assert!(matches!(
         raw_borrowed_display,
-        RustExpr::MethodCall { method, .. } if method == "unwrap_or_else"
+        RustExpr::MethodCall { method, receiver, .. }
+            if method == "unwrap_or_else"
+                && matches!(
+                    receiver.as_ref(),
+                    RustExpr::MethodCall { receiver, method, .. }
+                        if method == "map"
+                            && receiver.as_ref() == &values_get_key_as_str_expr()
+                )
     ));
 }
 
@@ -3695,7 +3888,17 @@ fn optional_element_borrow_display_segments_use_lowered_slot_policy() {
         emit_expr(&converted),
         "values.get(key.as_str()).map(|value| value.to_string()).unwrap_or_else(|| \"null\".to_string())"
     );
-    assert!(matches!(converted, RustExpr::MethodCall { method, .. } if method == "unwrap_or_else"));
+    assert!(matches!(
+        converted,
+        RustExpr::MethodCall { method, receiver, .. }
+            if method == "unwrap_or_else"
+                && matches!(
+                    receiver.as_ref(),
+                    RustExpr::MethodCall { receiver, method, .. }
+                        if method == "map"
+                            && receiver.as_ref() == &values_get_key_as_str_expr()
+                )
+    ));
 }
 
 #[test]
@@ -3843,7 +4046,11 @@ fn view_coercion_policy_owns_string_view_adapters() {
     assert_eq!(
         recovered.clone().into_unshaped(),
         RustExpr::MethodCall {
-            receiver: Box::new(RustExpr::Raw("name.as_str()".to_string())),
+            receiver: Box::new(RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Var("name".to_string())),
+                method: "as_str".to_string(),
+                args: Vec::new(),
+            }),
             method: "to_string".to_string(),
             args: Vec::new(),
         }
@@ -3855,13 +4062,21 @@ fn view_coercion_policy_owns_string_view_adapters() {
     assert_eq!(recovered.recorded_slot_shape(), Some(&owned));
 
     let already_owned = apply_expr_to_slot(
-        RustExpr::Raw("name.to_string()".to_string()),
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("name".to_string())),
+            method: "to_string".to_string(),
+            args: Vec::new(),
+        },
         borrowed_str.clone(),
         &Slot::Argument(owned.clone()),
     );
     assert_eq!(
         already_owned.clone().into_unshaped(),
-        RustExpr::Raw("name.to_string()".to_string())
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("name".to_string())),
+            method: "to_string".to_string(),
+            args: Vec::new(),
+        }
     );
     assert_eq!(
         already_owned.recorded_shape(),
@@ -4027,7 +4242,7 @@ fn set_to_borrowed_slice_collects_temporary_vec_view() {
     let tagged_slice = RustExpr::shaped_as(
         RustExprShape::SliceView,
         Some(target.clone()),
-        RustExpr::Raw("temporary.as_slice()".to_string()),
+        temporary_as_slice_expr(),
     );
     assert_eq!(
         apply_expr_to_slot(
@@ -4042,7 +4257,7 @@ fn set_to_borrowed_slice_collects_temporary_vec_view() {
             &Slot::Argument(target.clone()),
         )
         .into_unshaped(),
-        RustExpr::Raw("temporary.as_slice()".to_string()),
+        temporary_as_slice_expr(),
         "a recorded target shape, not the rendered suffix, proves idempotence"
     );
 
@@ -4361,7 +4576,7 @@ fn coercion_owns_closed_enum_instanceof_predicates() {
             variant_name: "Dog".to_string(),
         }
     );
-    let predicate = render_instanceof_check(RustExpr::Var("animal".to_string()), &check);
+    let predicate = instanceof_check_projection(RustExpr::Var("animal".to_string()), &check);
     assert_eq!(
         emit_expr(&predicate),
         "matches!(animal, AnimalValue::Dog(_))"
@@ -4400,7 +4615,7 @@ fn coercion_owns_closed_enum_instanceof_predicates() {
 
 #[test]
 fn coercion_owns_dyn_boxed_dyn_and_erased_instanceof_predicates() {
-    let serializable_marker = render_instanceof_check(
+    let serializable_marker = instanceof_check_projection(
         RustExpr::Var("value".to_string()),
         &InstanceOfCheck::JavaSerializableMarker,
     );
@@ -4463,7 +4678,8 @@ fn coercion_owns_dyn_boxed_dyn_and_erased_instanceof_predicates() {
             target_type: "Dog".to_string(),
         }
     );
-    let dyn_predicate = render_instanceof_check(RustExpr::Var("animal".to_string()), &dyn_check);
+    let dyn_predicate =
+        instanceof_check_projection(RustExpr::Var("animal".to_string()), &dyn_check);
     assert_eq!(emit_expr(&dyn_predicate), "animal.as_any().is::<Dog>()");
     assert!(matches!(dyn_predicate, RustExpr::MethodCall { .. }));
     let dyn_downcast =
@@ -4481,7 +4697,7 @@ fn coercion_owns_dyn_boxed_dyn_and_erased_instanceof_predicates() {
         }
     );
     let boxed_predicate =
-        render_instanceof_check(RustExpr::Var("animal".to_string()), &boxed_check);
+        instanceof_check_projection(RustExpr::Var("animal".to_string()), &boxed_check);
     assert_eq!(
         emit_expr(&boxed_predicate),
         "animal.as_ref().as_any().is::<Dog>()"
@@ -4504,7 +4720,7 @@ fn coercion_owns_dyn_boxed_dyn_and_erased_instanceof_predicates() {
         }
     );
     assert_eq!(
-        render_instanceof_check(RustExpr::Var("object".to_string()), &erased_check),
+        instanceof_check_projection(RustExpr::Var("object".to_string()), &erased_check),
         RustExpr::MethodCall {
             receiver: Box::new(RustExpr::Var("object".to_string())),
             method: "is::<Dog>".to_string(),
@@ -4525,7 +4741,7 @@ fn coercion_owns_dyn_boxed_dyn_and_erased_instanceof_predicates() {
         }
     );
     let optional_erased_predicate =
-        render_instanceof_check(RustExpr::Var("object".to_string()), &optional_erased_check);
+        instanceof_check_projection(RustExpr::Var("object".to_string()), &optional_erased_check);
     assert_eq!(
         emit_expr(&optional_erased_predicate),
         "object.as_ref().is_some_and(|value| value.is::<Dog>())"
@@ -4591,7 +4807,7 @@ fn optional_erased_instanceof_uses_shared_handle_carrier_for_shared_targets() {
         }
     );
     let optional_erased_predicate =
-        render_instanceof_check(RustExpr::Var("object".to_string()), &check);
+        instanceof_check_projection(RustExpr::Var("object".to_string()), &check);
     assert_eq!(
         emit_expr(&optional_erased_predicate),
         "object.as_ref().is_some_and(|value| value.is::<std::rc::Rc<Dog>>())"
@@ -4778,7 +4994,7 @@ fn instanceof_allows_reifiable_raw_list_runtime_target() {
         }
     );
     assert_eq!(
-        render_instanceof_check(RustExpr::Var("value".to_string()), &raw_check),
+        instanceof_check_projection(RustExpr::Var("value".to_string()), &raw_check),
         RustExpr::MethodCall {
             receiver: Box::new(RustExpr::Var("value".to_string())),
             method: "is::<Vec<Box<dyn std::any::Any>>>".to_string(),
@@ -5027,7 +5243,7 @@ fn instanceof_names_missing_runtime_targets() {
         }]
     );
     assert_eq!(
-        render_instanceof_check(RustExpr::Var("animal".to_string()), &check),
+        instanceof_check_projection(RustExpr::Var("animal".to_string()), &check),
         unsupported::compile_error_expr(
             "unsupported Java instanceof check: raw or wildcard target type Wildcard(None)"
         )
@@ -5245,7 +5461,7 @@ fn instanceof_policy_names_erased_object_interface_target_fallbacks() {
         }]
     );
     assert_eq!(
-        render_instanceof_check(RustExpr::Var("object".to_string()), &dyn_check),
+        instanceof_check_projection(RustExpr::Var("object".to_string()), &dyn_check),
         unsupported::compile_error_expr(
             "unsupported Java erased object instanceof borrowed dyn trait check for Animal; a concrete runtime target is required"
         )
@@ -5273,7 +5489,7 @@ fn instanceof_policy_names_erased_object_interface_target_fallbacks() {
         }]
     );
     assert_eq!(
-        render_instanceof_check(RustExpr::Var("object".to_string()), &boxed_check),
+        instanceof_check_projection(RustExpr::Var("object".to_string()), &boxed_check),
         unsupported::compile_error_expr(
             "unsupported Java erased object instanceof owned boxed dyn trait check for Animal; a concrete runtime target is required"
         )
@@ -5989,7 +6205,7 @@ fn erased_object_runtime_contract_covers_carrier_downcast_instanceof_and_recover
         }]
     );
     assert_eq!(
-        render_instanceof_check(
+        instanceof_check_projection(
             RustExpr::Var("object".to_string()),
             &plan_instanceof_check(&erased, &concrete),
         ),
@@ -6149,7 +6365,7 @@ fn coercion_owns_borrowed_optional_to_owned_optional_slot() {
     assert_eq!(
         expr.clone().into_unshaped(),
         RustExpr::MethodCall {
-            receiver: Box::new(RustExpr::Raw("values.iter().next()".to_string())),
+            receiver: Box::new(values_iter_next_expr()),
             method: "cloned".to_string(),
             args: Vec::new(),
         }
@@ -6222,7 +6438,7 @@ fn coercion_uses_copy_capability_for_borrowed_optional_elements() {
     assert_eq!(
         expr.clone().into_unshaped(),
         RustExpr::MethodCall {
-            receiver: Box::new(RustExpr::Raw("values.iter().next()".to_string())),
+            receiver: Box::new(values_iter_next_expr()),
             method: "copied".to_string(),
             args: Vec::new(),
         }
@@ -6263,7 +6479,7 @@ fn coercion_uses_type_capability_facts_for_borrowed_optional_elements() {
     assert_eq!(
         expr.clone().into_unshaped(),
         RustExpr::MethodCall {
-            receiver: Box::new(RustExpr::Raw("values.iter().next()".to_string())),
+            receiver: Box::new(values_iter_next_expr()),
             method: "copied".to_string(),
             args: Vec::new(),
         }
@@ -6465,7 +6681,26 @@ fn borrowed_sequence_ownership_recovery_uses_to_vec() {
         RustExpr::PostfixComment { expr, .. }
             if matches!(
                 expr.as_ref(),
-                RustExpr::MethodCall { method, .. } if method == "to_vec"
+                RustExpr::MethodCall { receiver, method, .. }
+                    if method == "to_vec"
+                        && matches!(
+                            receiver.as_ref(),
+                            RustExpr::Grouped(grouped)
+                                if matches!(
+                                    grouped.as_ref(),
+                                    RustExpr::Index(array, index)
+                                        if emit_expr(array) == "Table::VALUES"
+                                            && matches!(
+                                                index.as_ref(),
+                                                RustExpr::Cast { expr, ty }
+                                                    if ty == "usize"
+                                                        && matches!(
+                                                            expr.as_ref(),
+                                                            RustExpr::Var(name) if name == "index"
+                                                        )
+                                            )
+                                )
+                        )
             )
     ));
     assert!(
@@ -6486,7 +6721,11 @@ fn borrowed_sequence_ownership_recovery_uses_to_vec() {
     );
     assert_eq!(
         already_recovered.clone().into_unshaped(),
-        RustExpr::Raw("values.to_vec()".to_string())
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("values".to_string())),
+            method: "to_vec".to_string(),
+            args: Vec::new(),
+        }
     );
     assert_eq!(
         already_recovered.recorded_shape(),
@@ -6734,7 +6973,14 @@ fn optional_borrowed_element_adapter_unwraps_to_concrete_copy_target() {
             receiver: Box::new(RustExpr::shaped(
                 RustExprShape::OwnedRecovery,
                 RustExpr::MethodCall {
-                    receiver: Box::new(RustExpr::Raw("values.get(&key)".to_string())),
+                    receiver: Box::new(RustExpr::MethodCall {
+                        receiver: Box::new(RustExpr::Var("values".to_string())),
+                        method: "get".to_string(),
+                        args: vec![RustExpr::Unary {
+                            op: "&".to_string(),
+                            expr: Box::new(RustExpr::Var("key".to_string())),
+                        }],
+                    }),
                     method: "copied".to_string(),
                     args: Vec::new(),
                 },
@@ -6776,7 +7022,14 @@ fn optional_borrowed_element_unwrap_records_same_target_shape() {
     assert_eq!(
         projected.clone().into_unshaped(),
         RustExpr::MethodCall {
-            receiver: Box::new(RustExpr::Raw("values.get(&key)".to_string())),
+            receiver: Box::new(RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Var("values".to_string())),
+                method: "get".to_string(),
+                args: vec![RustExpr::Unary {
+                    op: "&".to_string(),
+                    expr: Box::new(RustExpr::Var("key".to_string())),
+                }],
+            }),
             method: "expect".to_string(),
             args: vec![RustExpr::Literal("\"Java null receiver\"".to_string())],
         }
@@ -6878,7 +7131,9 @@ fn optional_borrowed_concrete_element_unwraps_to_dyn_trait_target() {
     assert!(
         matches!(
             projected_unshaped,
-            RustExpr::Cast { ref ty, .. } if ty == "&dyn Locatable"
+            RustExpr::Cast { ref ty, ref expr }
+                if ty == "&dyn Locatable"
+                    && expr_unshaped_eq(expr, &intervals_get_zero_expect_expr())
         ),
         "dyn trait target adapter should compose the cast structurally: {projected_unshaped:?}"
     );
@@ -6951,8 +7206,13 @@ fn optional_borrowed_concrete_element_unwraps_to_concrete_facade_target() {
     );
     assert!(matches!(
         projected.clone().into_unshaped(),
-        RustExpr::Block { tail: Some(tail), .. }
+        RustExpr::Block { stmts, tail: Some(tail) }
             if matches!(
+                stmts.as_slice(),
+                [RustStmt::Let { name, value: Some(value), .. }]
+                    if name == "_java_value"
+                        && expr_unshaped_eq(value, &intervals_get_zero_expect_expr())
+            ) && matches!(
                 tail.as_ref(),
                 RustExpr::Unary { op, expr }
                     if op == "&" && matches!(expr.as_ref(), RustExpr::Path(segments) if segments == &["Locatable".to_string()])
@@ -7013,13 +7273,11 @@ fn coercion_rejects_non_cloneable_borrowed_optional_elements() {
         &facts,
     );
 
-    assert!(matches!(
+    assert_compile_error_block_consuming(
         expr,
-        RustExpr::Raw(ref raw)
-            if raw.contains(
-                "unsupported Java borrowed element ownership recovery for non-cloneable type"
-            ) && raw.contains("ExternalHandle")
-    ));
+        "handles.iter().next()",
+        "unsupported Java borrowed element ownership recovery for non-cloneable type",
+    );
 }
 
 #[test]
@@ -7028,9 +7286,22 @@ fn coercion_uses_element_shape_for_borrowed_vec_string_view() {
     element_shape.ownership = OwnershipShape::SharedBorrow;
     element_shape.view = ViewShape::Str;
 
+    let borrowed_string_view_vec = RustExpr::MethodCall {
+        receiver: Box::new(RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Var("values".to_string())),
+                method: "iter".to_string(),
+                args: Vec::new(),
+            }),
+            method: "map".to_string(),
+            args: vec![RustExpr::Raw("|v| v.trim()".to_string())],
+        }),
+        method: "collect::<Vec<_>>".to_string(),
+        args: Vec::new(),
+    };
     let expr = apply_lowered_expr_to_slot(
         LoweredExpr {
-            expr: RustExpr::Raw("values.iter().map(|v| v.trim()).collect::<Vec<_>>()".to_string()),
+            expr: borrowed_string_view_vec.clone(),
             actual: LoweredType::vec_element_borrow(element_shape),
         },
         &Slot::Return(RustSlotShape::conservative(list_java_type(
@@ -7043,9 +7314,7 @@ fn coercion_uses_element_shape_for_borrowed_vec_string_view() {
         RustExpr::MethodCall {
             receiver: Box::new(RustExpr::MethodCall {
                 receiver: Box::new(RustExpr::MethodCall {
-                    receiver: Box::new(RustExpr::Raw(
-                        "values.iter().map(|v| v.trim()).collect::<Vec<_>>()".to_string()
-                    )),
+                    receiver: Box::new(borrowed_string_view_vec),
                     method: "into_iter".to_string(),
                     args: Vec::new(),
                 }),
@@ -7077,11 +7346,18 @@ fn coercion_uses_element_shape_for_borrowed_vec_string_view() {
     let mut copied_element_shape =
         RustSlotShape::conservative(JavaType::Primitive(PrimitiveType::Int));
     copied_element_shape.ownership = OwnershipShape::SharedBorrow;
+    let borrowed_int_set = RustExpr::MethodCall {
+        receiver: Box::new(RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("values".to_string())),
+            method: "iter".to_string(),
+            args: Vec::new(),
+        }),
+        method: "collect::<std::collections::HashSet<_>>".to_string(),
+        args: Vec::new(),
+    };
     let copied_set = apply_lowered_expr_to_slot(
         LoweredExpr {
-            expr: RustExpr::Raw(
-                "values.iter().collect::<std::collections::HashSet<_>>()".to_string(),
-            ),
+            expr: borrowed_int_set.clone(),
             actual: LoweredType::set_element_borrow(copied_element_shape),
         },
         &Slot::Return(RustSlotShape::conservative(set_java_type(
@@ -7093,9 +7369,7 @@ fn coercion_uses_element_shape_for_borrowed_vec_string_view() {
         RustExpr::MethodCall {
             receiver: Box::new(RustExpr::MethodCall {
                 receiver: Box::new(RustExpr::MethodCall {
-                    receiver: Box::new(RustExpr::Raw(
-                        "values.iter().collect::<std::collections::HashSet<_>>()".to_string()
-                    )),
+                    receiver: Box::new(borrowed_int_set),
                     method: "into_iter".to_string(),
                     args: Vec::new(),
                 }),
@@ -7158,23 +7432,6 @@ fn coercion_fuses_borrowed_collection_clone_recovery_into_terminal_collect() {
         Some(RustExprShape::OwnedRecovery)
     );
 
-    let already_cloned_vec_expr = apply_lowered_expr_to_slot(
-        LoweredExpr {
-            expr: RustExpr::Raw("values.iter().cloned().collect::<Vec<_>>()".to_string()),
-            actual: LoweredType::vec_element_borrow(element_shape.clone()),
-        },
-        &Slot::Return(RustSlotShape::conservative(list_java_type(
-            JavaType::String,
-        ))),
-    );
-    assert_eq!(
-        already_cloned_vec_expr.clone().into_unshaped(),
-        RustExpr::Raw("values.iter().cloned().collect::<Vec<_>>()".to_string())
-    );
-    assert_eq!(
-        already_cloned_vec_expr.recorded_shape(),
-        Some(RustExprShape::OwnedRecovery)
-    );
     let structured_already_cloned_vec_expr = apply_lowered_expr_to_slot(
         LoweredExpr {
             expr: RustExpr::MethodCall {
@@ -7204,6 +7461,10 @@ fn coercion_fuses_borrowed_collection_clone_recovery_into_terminal_collect() {
         structured_already_cloned_vec_expr.recorded_shape(),
         Some(RustExprShape::OwnedRecovery)
     );
+    assert!(!matches!(
+        structured_already_cloned_vec_expr.into_unshaped(),
+        RustExpr::Raw(_)
+    ));
 
     let tagged_vec_expr = apply_lowered_expr_to_slot(
         LoweredExpr {
@@ -7287,21 +7548,43 @@ fn coercion_fuses_borrowed_collection_clone_recovery_into_terminal_collect() {
 
     let already_cloned_set_expr = apply_lowered_expr_to_slot(
         LoweredExpr {
-            expr: RustExpr::Raw(
-                "groups.iter().flat_map(|item| item.iter()).cloned().collect::<std::collections::HashSet<_>>()"
-                    .to_string(),
-            ),
+            expr: RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::MethodCall {
+                    receiver: Box::new(RustExpr::MethodCall {
+                        receiver: Box::new(RustExpr::MethodCall {
+                            receiver: Box::new(RustExpr::Var("groups".to_string())),
+                            method: "iter".to_string(),
+                            args: Vec::new(),
+                        }),
+                        method: "flat_map".to_string(),
+                        args: vec![RustExpr::Raw("|item| item.iter()".to_string())],
+                    }),
+                    method: "cloned".to_string(),
+                    args: Vec::new(),
+                }),
+                method: "collect::<std::collections::HashSet<_>>".to_string(),
+                args: Vec::new(),
+            },
             actual: LoweredType::set_element_borrow(element_shape.clone()),
         },
         &Slot::Return(RustSlotShape::conservative(set_java_type(JavaType::String))),
     );
-    assert_eq!(
+    assert!(matches!(
         already_cloned_set_expr.clone().into_unshaped(),
-        RustExpr::Raw(
-            "groups.iter().flat_map(|item| item.iter()).cloned().collect::<std::collections::HashSet<_>>()"
-                .to_string()
-        )
-    );
+        RustExpr::MethodCall { method, receiver, .. }
+            if method == "collect::<std::collections::HashSet<_>>"
+                && matches!(
+                    receiver.as_ref(),
+                    RustExpr::MethodCall { method, receiver, .. }
+                        if method == "cloned"
+                            && matches!(
+                                receiver.as_ref(),
+                                RustExpr::MethodCall { method, args, .. }
+                                    if method == "flat_map"
+                                        && matches!(args.as_slice(), [RustExpr::Raw(raw)] if raw == "|item| item.iter()")
+                            )
+                )
+    ));
     assert_eq!(
         already_cloned_set_expr.recorded_shape(),
         Some(RustExprShape::OwnedRecovery)
@@ -7388,13 +7671,11 @@ fn coercion_rejects_non_cloneable_borrowed_vec_elements() {
         &facts,
     );
 
-    assert!(matches!(
+    assert_compile_error_block_consuming(
         expr,
-        RustExpr::Raw(ref raw)
-            if raw.contains(
-                "unsupported Java borrowed element ownership recovery for non-cloneable type"
-            ) && raw.contains("ExternalHandle")
-    ));
+        "handles.iter().collect::<Vec<_>>()",
+        "unsupported Java borrowed element ownership recovery for non-cloneable type",
+    );
 }
 
 #[test]

@@ -1,7 +1,7 @@
 use crate::coercion::{
-    Coercion, apply_coercions, java_update_expression_projection, logical_not_projection,
-    optional_string_view_projection, raw_receiver_projection, shared_borrow_expr,
-    string_equality_operand_projection,
+    Coercion, apply_coercions, function_call_projection, java_update_expression_projection,
+    logical_not_projection, optional_string_view_projection, receiver_method_call_projection_exact,
+    recover_parseable_raw_operand_projection, shared_borrow_expr, string_equality_operand_projection,
 };
 use crate::facts::FactSet;
 use crate::java_ir::{BinaryOp, JavaType, PrimitiveType, UnaryOp};
@@ -255,30 +255,30 @@ fn checked_java_integer_div_rem_block_leaf(
                 left: Box::new(RustExpr::Var("__java_right".to_string())),
                 right: Box::new(RustExpr::Literal("0".to_string())),
             }),
-            then_expr: Box::new(RustExpr::Call {
-                function: Box::new(RustExpr::path(["Err"])),
-                args: vec![RustExpr::Call {
-                    function: Box::new(RustExpr::path(["JavaException", "new"])),
-                    args: vec![
+            then_expr: Box::new(function_call_projection(
+                RustExpr::path(["Err"]),
+                vec![function_call_projection(
+                    RustExpr::path(["JavaException", "new"]),
+                    vec![
                         RustExpr::Literal("\"ArithmeticException\"".to_string()),
-                        RustExpr::MethodCall {
-                            receiver: Box::new(RustExpr::Literal("\"/ by zero\"".to_string())),
-                            method: "to_string".to_string(),
-                            args: Vec::new(),
-                        },
+                        receiver_method_call_projection_exact(
+                            RustExpr::Literal("\"/ by zero\"".to_string()),
+                            "to_string",
+                            Vec::new(),
+                        ),
                     ],
-                }],
-            }),
-            else_expr: Box::new(RustExpr::Call {
-                function: Box::new(RustExpr::path(["Ok"])),
-                args: vec![RustExpr::MethodCall {
-                    receiver: Box::new(RustExpr::Grouped(Box::new(RustExpr::Var(
+                )],
+            )),
+            else_expr: Box::new(function_call_projection(
+                RustExpr::path(["Ok"]),
+                vec![receiver_method_call_projection_exact(
+                    RustExpr::Grouped(Box::new(RustExpr::Var(
                         "__java_left".to_string(),
-                    )))),
-                    method: method.to_string(),
-                    args: vec![RustExpr::Var("__java_right".to_string())],
-                }],
-            }),
+                    ))),
+                    method,
+                    vec![RustExpr::Var("__java_right".to_string())],
+                )],
+            )),
         })),
     }
 }
@@ -317,24 +317,17 @@ fn lower_java_integer_binary_expr(
 }
 
 fn integer_wrapping_method_projection(left: RustExpr, method: &str, right: RustExpr) -> RustExpr {
-    RustExpr::MethodCall {
-        receiver: Box::new(integer_wrapping_grouped_expr(left)),
-        method: method.to_string(),
-        args: vec![right],
-    }
+    receiver_method_call_projection_exact(integer_wrapping_grouped_expr(left), method, vec![right])
 }
 
 fn integer_wrapping_receiver_expr(expr: RustExpr, primitive: PrimitiveType) -> RustExpr {
     match expr {
         RustExpr::Literal(rendered) if integer_wrapping_receiver_is_literal(&rendered) => {
-            RustExpr::Literal(integer_wrapping_receiver_literal(rendered, primitive))
+            integer_wrapping_receiver_literal_expr(None, rendered, primitive)
         }
         RustExpr::Unary { op, expr } if op == "-" => match *expr {
             RustExpr::Literal(rendered) if integer_wrapping_receiver_is_literal(&rendered) => {
-                RustExpr::Literal(integer_wrapping_receiver_literal(
-                    format!("-{rendered}"),
-                    primitive,
-                ))
+                integer_wrapping_receiver_literal_expr(Some("-"), rendered, primitive)
             }
             other => RustExpr::Unary {
                 op,
@@ -359,12 +352,22 @@ fn integer_wrapping_receiver_is_literal(rendered: &str) -> bool {
     !digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit())
 }
 
-fn integer_wrapping_receiver_literal(rendered: String, primitive: PrimitiveType) -> String {
-    match primitive {
-        PrimitiveType::Long => format!("{rendered}i64"),
-        PrimitiveType::Int => format!("{rendered}i32"),
-        _ => rendered,
+fn integer_wrapping_receiver_literal_expr(
+    sign: Option<&str>,
+    rendered: String,
+    primitive: PrimitiveType,
+) -> RustExpr {
+    let mut literal = String::new();
+    if let Some(sign) = sign {
+        literal.push_str(sign);
     }
+    literal.push_str(&rendered);
+    match primitive {
+        PrimitiveType::Long => literal.push_str("i64"),
+        PrimitiveType::Int => literal.push_str("i32"),
+        _ => {}
+    };
+    RustExpr::Literal(literal)
 }
 
 pub fn lower_unsigned_right_shift_expr(
@@ -385,17 +388,17 @@ pub fn lower_unsigned_right_shift_expr(
     ));
     let right = apply_coercions(right, &plan.right);
     RustExpr::Cast {
-        expr: Box::new(RustExpr::MethodCall {
-            receiver: Box::new(RustExpr::Cast {
+        expr: Box::new(receiver_method_call_projection_exact(
+            RustExpr::Cast {
                 expr: Box::new(left),
                 ty: unsigned_ty.to_string(),
-            }),
-            method: "wrapping_shr".to_string(),
-            args: vec![RustExpr::Cast {
+            },
+            "wrapping_shr",
+            vec![RustExpr::Cast {
                 expr: Box::new(integer_wrapping_grouped_expr(right)),
                 ty: "u32".to_string(),
             }],
-        }),
+        )),
         ty: signed_ty.to_string(),
     }
 }
@@ -467,11 +470,7 @@ pub fn lower_null_comparison_expr(
         NullComparisonMethod::IsNone => "is_none",
         NullComparisonMethod::IsSome => "is_some",
     };
-    Some(RustExpr::MethodCall {
-        receiver: Box::new(value),
-        method: method.to_string(),
-        args: Vec::new(),
-    })
+    Some(receiver_method_call_projection_exact(value, method, Vec::new()))
 }
 
 impl EqualityComparisonPlan {
@@ -775,10 +774,7 @@ fn shared_handle_ptr_eq_projection(handle_path: &str, left: RustExpr, right: Rus
 }
 
 fn shared_handle_call(handle_path: &str, method: &str, args: Vec<RustExpr>) -> RustExpr {
-    RustExpr::Call {
-        function: Box::new(shared_handle_method_path(handle_path, method)),
-        args,
-    }
+    function_call_projection(shared_handle_method_path(handle_path, method), args)
 }
 
 fn shared_handle_method_path(handle_path: &str, method: &str) -> RustExpr {
@@ -795,11 +791,11 @@ fn optional_shared_handle_ptr_eq_projection(
     handle_path: &str,
     other: RustExpr,
 ) -> RustExpr {
-    RustExpr::MethodCall {
-        receiver: Box::new(option_as_ref(option)),
-        method: "is_some_and".to_string(),
-        args: vec![shared_handle_ptr_eq_closure_leaf(handle_path, other)],
-    }
+    receiver_method_call_projection_exact(
+        option_as_ref(option),
+        "is_some_and",
+        vec![shared_handle_ptr_eq_closure_leaf(handle_path, other)],
+    )
 }
 
 fn shared_handle_ptr_eq_closure_leaf(handle_path: &str, other: RustExpr) -> RustExpr {
@@ -861,13 +857,13 @@ fn both_optional_custom_equals_match_leaf(
 ) -> RustExpr {
     let true_expr = matches!(op, "==");
     let false_expr = !true_expr;
-    let some_expr = RustExpr::MethodCall {
-        receiver: Box::new(RustExpr::Var("left".to_string())),
-        method: method_name.to_string(),
-        args: vec![erased_optional_custom_equals_arg_expr(
+    let some_expr = receiver_method_call_projection_exact(
+        RustExpr::Var("left".to_string()),
+        method_name,
+        vec![erased_optional_custom_equals_arg_expr(
             erased_arg_handle_path,
         )],
-    };
+    );
     let some_expr = if true_expr {
         some_expr
     } else {
@@ -896,21 +892,18 @@ fn both_optional_custom_equals_match_leaf(
 }
 
 fn erased_optional_custom_equals_arg_expr(handle_path: Option<&str>) -> RustExpr {
-    let cloned = RustExpr::MethodCall {
-        receiver: Box::new(RustExpr::Grouped(Box::new(RustExpr::Unary {
+    let cloned = receiver_method_call_projection_exact(
+        RustExpr::Grouped(Box::new(RustExpr::Unary {
             op: "*".to_string(),
             expr: Box::new(RustExpr::Var("right".to_string())),
-        }))),
-        method: "clone".to_string(),
-        args: Vec::new(),
-    };
+        })),
+        "clone",
+        Vec::new(),
+    );
     let boxed_value = handle_path
         .map(|handle_path| shared_handle_call(handle_path, "new", vec![cloned.clone()]))
         .unwrap_or(cloned);
-    RustExpr::Call {
-        function: Box::new(RustExpr::path(["Box", "new"])),
-        args: vec![boxed_value],
-    }
+    function_call_projection(RustExpr::path(["Box", "new"]), vec![boxed_value])
 }
 
 fn borrowed_handle_operand_expr(expr: RustExpr, already_borrowed: bool) -> RustExpr {
@@ -942,11 +935,7 @@ fn erased_custom_equals_arg_expr(
     } else {
         RustExpr::Grouped(Box::new(expr))
     };
-    let cloned = RustExpr::MethodCall {
-        receiver: Box::new(clone_receiver),
-        method: "clone".to_string(),
-        args: Vec::new(),
-    };
+    let cloned = receiver_method_call_projection_exact(clone_receiver, "clone", Vec::new());
     let boxed_value = if borrowed {
         handle_path
             .map(|handle_path| shared_handle_call(handle_path, "new", vec![cloned.clone()]))
@@ -954,10 +943,7 @@ fn erased_custom_equals_arg_expr(
     } else {
         cloned
     };
-    RustExpr::Call {
-        function: Box::new(RustExpr::path(["Box", "new"])),
-        args: vec![boxed_value],
-    }
+    function_call_projection(RustExpr::path(["Box", "new"]), vec![boxed_value])
 }
 
 fn custom_equals_method(java_ty: &JavaType, facts: &FactSet) -> Option<String> {
@@ -1092,15 +1078,15 @@ pub fn lower_equality_comparison_expr_for_op(
             erased_arg_handle_path,
         } => maybe_negate_equality(
             op,
-            RustExpr::MethodCall {
-                receiver: Box::new(left),
-                method: method_name,
-                args: vec![erased_custom_equals_arg_expr(
+            receiver_method_call_projection_exact(
+                left,
+                &method_name,
+                vec![erased_custom_equals_arg_expr(
                     right,
                     right_borrowed,
                     erased_arg_handle_path.as_deref(),
                 )],
-            },
+            ),
         ),
         EqualityComparisonPlan::LeftSharedBorrowRightOwned => RustExpr::Binary {
             op: op.to_string(),
@@ -1130,18 +1116,11 @@ fn string_equality_operand_expr(expr: RustExpr, view: StringEqualityOperandView)
 }
 
 fn option_as_ref(expr: RustExpr) -> RustExpr {
-    RustExpr::MethodCall {
-        receiver: Box::new(expr),
-        method: "as_ref".to_string(),
-        args: Vec::new(),
-    }
+    receiver_method_call_projection_exact(expr, "as_ref", Vec::new())
 }
 
 fn some_expr(expr: RustExpr) -> RustExpr {
-    RustExpr::Call {
-        function: Box::new(RustExpr::path(["Some"])),
-        args: vec![expr],
-    }
+    function_call_projection(RustExpr::path(["Some"]), vec![expr])
 }
 
 fn borrow_for_some_expr(expr: RustExpr) -> RustExpr {
@@ -1149,16 +1128,15 @@ fn borrow_for_some_expr(expr: RustExpr) -> RustExpr {
 }
 
 fn borrow_for_equality_expr(expr: RustExpr) -> RustExpr {
-    shared_borrow_expr(expr)
+    shared_borrow_expr(recover_parseable_raw_operand_projection(expr))
 }
 
 fn parenthesize_raw_operand_for_prefix_or_call_arg(expr: RustExpr) -> RustExpr {
+    let expr = recover_parseable_raw_operand_projection(expr);
     if structured_operand_needs_parentheses_for_prefix_or_call_arg(&expr) {
         return RustExpr::Grouped(Box::new(expr));
     }
-    raw_receiver_projection(expr, |trimmed| {
-        !trimmed.starts_with('(') && raw_borrow_operand_needs_parentheses(trimmed)
-    })
+    expr
 }
 
 fn structured_operand_needs_parentheses_for_prefix_or_call_arg(expr: &RustExpr) -> bool {
@@ -1171,20 +1149,6 @@ fn structured_operand_needs_parentheses_for_prefix_or_call_arg(expr: &RustExpr) 
             | RustExpr::Match { .. }
             | RustExpr::Block { .. }
     )
-}
-
-fn raw_borrow_operand_needs_parentheses(raw: &str) -> bool {
-    raw.contains(char::is_whitespace)
-        || raw.contains('+')
-        || raw.contains('-')
-        || raw.contains('*')
-        || raw.contains('/')
-        || raw.contains('%')
-        || raw.contains('&')
-        || raw.contains('|')
-        || raw.contains('=')
-        || raw.contains('<')
-        || raw.contains('>')
 }
 
 fn option_as_string_view(expr: RustExpr, view: OptionalStringEqualityOperandView) -> RustExpr {
@@ -1411,7 +1375,13 @@ mod equality_symmetry_tests {
         };
         assert!(matches!(
             args.as_slice(),
-            [RustExpr::Grouped(grouped)] if matches!(grouped.as_ref(), RustExpr::Binary { .. })
+            [RustExpr::Grouped(grouped)] if matches!(
+                grouped.as_ref(),
+                RustExpr::Binary { op, left, right }
+                    if op == "+"
+                        && matches!(left.as_ref(), RustExpr::Var(name) if name == "left")
+                        && matches!(right.as_ref(), RustExpr::Var(name) if name == "right")
+            )
         ));
 
         let raw = lower_equality_comparison_expr(
@@ -1422,6 +1392,44 @@ mod equality_symmetry_tests {
             RustExpr::Var("maybe".to_string()),
         );
         assert_eq!(crate::emit::emit_expr(&raw), expected);
+        let RustExpr::Binary { left, .. } = raw else {
+            panic!("raw optional string equality should lower to a binary expression");
+        };
+        let RustExpr::Call { args, .. } = left.as_ref() else {
+            panic!("left side should be Some(grouped recovered value)");
+        };
+        assert!(matches!(
+            args.as_slice(),
+            [RustExpr::Grouped(grouped)] if matches!(
+                grouped.as_ref(),
+                RustExpr::Binary { op, left, right }
+                    if op == "+"
+                        && matches!(left.as_ref(), RustExpr::Var(name) if name == "left")
+                        && matches!(right.as_ref(), RustExpr::Var(name) if name == "right")
+            )
+        ));
+
+        let opaque = lower_equality_comparison_expr(
+            EqualityComparisonPlan::RightOptionalStringView {
+                right_view: OptionalStringEqualityOperandView::NativeString,
+            },
+            RustExpr::Raw("left +".to_string()),
+            RustExpr::Var("maybe".to_string()),
+        );
+        assert_eq!(
+            crate::emit::emit_expr(&opaque),
+            "Some(left +) == maybe.as_ref().map(|value| value.as_str())"
+        );
+        let RustExpr::Binary { left, .. } = opaque else {
+            panic!("raw optional string equality should lower to a binary expression");
+        };
+        let RustExpr::Call { args, .. } = left.as_ref() else {
+            panic!("left side should be Some(opaque raw leaf)");
+        };
+        assert!(matches!(
+            args.as_slice(),
+            [RustExpr::Raw(raw)] if raw == "left +"
+        ));
     }
 }
 

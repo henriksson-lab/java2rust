@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 
 use crate::coercion::{
-    function_call_projection, owner_associated_path_projection, self_associated_path_projection,
+    function_call_projection, owner_associated_path_projection, rust_string_literal_projection,
+    self_associated_path_projection,
 };
 use crate::exception_lowering::exception_result_type;
 use crate::exception_plan::MethodExceptionPlan;
@@ -88,6 +89,7 @@ pub fn impl_item_for_type_with_support_context(
 ) -> RustItem {
     RustItem::Impl(RustImpl {
         target: rust_impl_target_for_source_type(ty, support_program),
+        trait_name: None,
         associated_consts: associated_consts_for_type(ty),
         functions,
     })
@@ -1328,6 +1330,7 @@ fn rust_type_supports_struct_derive_clone(
             )
         }),
         RustType::FnPointer { .. } => true,
+        RustType::ImplFnTrait { .. } => false,
         RustType::Generic { args, .. } => args.iter().all(|arg| {
             rust_type_supports_struct_derive_clone(
                 arg,
@@ -1567,7 +1570,8 @@ pub fn rust_type_supports_struct_derive_default(
             )
         }),
         RustType::FnPointer { .. } => true,
-        RustType::Generic { .. }
+        RustType::ImplFnTrait { .. }
+        | RustType::Generic { .. }
         | RustType::DynTrait(_)
         | RustType::ImplTrait(_)
         | RustType::Slice(_)
@@ -1699,7 +1703,8 @@ fn rust_type_supports_struct_derive_partial_eq(ty: &RustType) -> bool {
             .iter()
             .all(rust_type_supports_struct_derive_partial_eq),
         RustType::FnPointer { .. } => true,
-        RustType::Generic { .. }
+        RustType::ImplFnTrait { .. }
+        | RustType::Generic { .. }
         | RustType::DynTrait(_)
         | RustType::ImplTrait(_)
         | RustType::Named(_) => false,
@@ -1722,7 +1727,8 @@ fn rust_type_supports_struct_derive_eq_hash(ty: &RustType) -> bool {
         }
         RustType::Tuple(items) => items.iter().all(rust_type_supports_struct_derive_eq_hash),
         RustType::FnPointer { .. } => true,
-        RustType::F32
+        RustType::ImplFnTrait { .. }
+        | RustType::F32
         | RustType::F64
         | RustType::Generic { .. }
         | RustType::DynTrait(_)
@@ -1859,13 +1865,10 @@ fn non_literal_static_final_const_type_and_value(
     {
         return Some((
             RustType::Named(rust_name),
-            RustExpr::Call {
-                function: Box::new(owner_associated_path_projection(
-                    "Pattern",
-                    "compile_static",
-                )),
-                args: vec![RustExpr::Literal(format!("{value:?}"))],
-            },
+            function_call_projection(
+                owner_associated_path_projection("Pattern", "compile_static"),
+                vec![rust_string_literal_projection(&value)],
+            ),
         ));
     }
     Some((RustType::Named(rust_name.clone()), RustExpr::Var(rust_name)))
@@ -1969,7 +1972,7 @@ fn const_expr_value(
             ..
         } if matches!(expected_ty, Some(JavaType::String)) => {
             const_string_expr_value(expr, const_infos, expected_ty)
-                .map(|value| RustExpr::Literal(format!("{value:?}")))
+                .map(|value| rust_string_literal_projection(&value))
         }
         Expr::Literal(literal) => const_literal_expr_value(literal, expected_ty),
         Expr::Var(name) => {
@@ -2103,7 +2106,7 @@ fn expected_array_element_type(expected_ty: Option<&JavaType>) -> Option<&JavaTy
 
 fn const_literal_expr_value(literal: &Literal, expected_ty: Option<&JavaType>) -> Option<RustExpr> {
     match (literal, expected_ty) {
-        (Literal::String(value), _) => Some(RustExpr::Literal(format!("{value:?}"))),
+        (Literal::String(value), _) => Some(rust_string_literal_projection(value)),
         (Literal::Int(value), Some(JavaType::Primitive(PrimitiveType::Long))) => {
             Some(RustExpr::Literal(format!("{value}i64")))
         }
@@ -2237,12 +2240,9 @@ fn method_params_with_optional_lifetime(
                     param.name.clone()
                 },
                 ty: if callback_param {
-                    functional_callback_param_type(&param.java_ty, facts).unwrap_or_else(|| {
-                        maybe_add_lifetime_to_refs(
-                            rust_type_for_slot_with_facts(&param.shape, facts),
-                            lifetime,
-                        )
-                    })
+                    let callback_ty = functional_callback_param_type(&param.java_ty, facts)
+                        .unwrap_or_else(|| rust_type_for_slot_with_facts(&param.shape, facts));
+                    maybe_add_lifetime_to_refs(callback_ty, lifetime)
                 } else {
                     maybe_add_lifetime_to_refs(
                         rust_type_for_slot_with_facts(&param.shape, facts),
@@ -2495,29 +2495,32 @@ fn functional_callback_param_type(java_ty: &JavaType, facts: &FactSet) -> Option
     let simple = canonical.rsplit('.').next().unwrap_or(name.as_str());
     let shape = crate::stdlib::functional_interface_shape(simple)?;
 
-    let render = |source: &crate::stdlib::FunctionalTypeSource| match source {
+    let source_ty = |source: &crate::stdlib::FunctionalTypeSource| match source {
         crate::stdlib::FunctionalTypeSource::TypeArgument(index) => args
             .get(*index)
-            .map(|ty| crate::emit::emit_type(&rust_type_for_java_type_with_facts(ty, facts))),
-        crate::stdlib::FunctionalTypeSource::Primitive(primitive) => Some(crate::emit::emit_type(
-            &rust_type_for_java_type_with_facts(&JavaType::Primitive(*primitive), facts),
-        )),
+            .map(|ty| rust_type_for_java_type_with_facts(ty, facts)),
+        crate::stdlib::FunctionalTypeSource::Primitive(primitive) => Some(
+            rust_type_for_java_type_with_facts(&JavaType::Primitive(*primitive), facts),
+        ),
     };
 
     let inputs = shape
         .inputs
         .iter()
-        .map(render)
-        .collect::<Option<Vec<_>>>()?
-        .join(", ");
+        .map(source_ty)
+        .collect::<Option<Vec<_>>>()?;
     // A missing result *type argument* means the source did not spell the
     // generic out; keep the previous behaviour rather than guess.
-    let rendered = match shape.returns.as_ref().map(render) {
-        Some(Some(result)) => format!("impl FnMut({inputs}) -> {result}"),
+    let return_type = match shape.returns.as_ref().map(source_ty) {
+        Some(Some(result)) => Some(Box::new(result)),
         Some(None) => return None,
-        None => format!("impl FnMut({inputs})"),
+        None => None,
     };
-    Some(RustType::Raw(rendered))
+    Some(RustType::ImplFnTrait {
+        trait_name: "FnMut".to_string(),
+        params: inputs,
+        return_type,
+    })
 }
 
 pub(crate) fn method_param_is_nonescaping_functional_callback(
@@ -3319,6 +3322,15 @@ fn add_lifetime_to_refs(ty: RustType) -> RustType {
         RustType::Vec(inner) => RustType::Vec(Box::new(add_lifetime_to_refs(*inner))),
         RustType::Array2(inner) => RustType::Array2(Box::new(add_lifetime_to_refs(*inner))),
         RustType::Slice(inner) => RustType::Slice(Box::new(add_lifetime_to_refs(*inner))),
+        RustType::ImplFnTrait {
+            trait_name,
+            params,
+            return_type,
+        } => RustType::ImplFnTrait {
+            trait_name,
+            params: params.into_iter().map(add_lifetime_to_refs).collect(),
+            return_type: return_type.map(|ty| Box::new(add_lifetime_to_refs(*ty))),
+        },
         other => other,
     }
 }
@@ -3336,6 +3348,14 @@ fn rust_type_contains_ref(ty: &RustType) -> bool {
             params,
             return_type,
         } => params.iter().any(rust_type_contains_ref) || rust_type_contains_ref(return_type),
+        RustType::ImplFnTrait {
+            params,
+            return_type,
+            ..
+        } => {
+            params.iter().any(rust_type_contains_ref)
+                || return_type.as_deref().is_some_and(rust_type_contains_ref)
+        }
         RustType::Unit
         | RustType::Bool
         | RustType::I8

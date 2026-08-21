@@ -30,7 +30,7 @@ pub fn apply_cast_conversion(expr: RustExpr, plan: &CastConversionPlan) -> RustE
 }
 
 pub fn apply_instanceof(expr: RustExpr, plan: &InstanceOfPlan) -> RustExpr {
-    crate::coercion::render_instanceof_check(expr, &plan.check)
+    crate::coercion::instanceof_check_projection(expr, &plan.check)
 }
 
 pub fn apply_slot_expr_conversion(expr: RustExpr, plan: &SlotExprConversionPlan) -> RustExpr {
@@ -42,6 +42,19 @@ pub fn apply_lowered_slot_expr_conversion(
     plan: &LoweredSlotExprConversionPlan,
 ) -> RustExpr {
     apply_slot_conversion_plan(lowered.expr, &plan.conversion)
+}
+
+pub fn apply_lowered_slot_conversion_to_expr(
+    expr: RustExpr,
+    plan: &LoweredSlotExprConversionPlan,
+) -> RustExpr {
+    apply_lowered_slot_expr_conversion(
+        LoweredExpr {
+            expr,
+            actual: plan.actual.clone(),
+        },
+        plan,
+    )
 }
 
 pub fn apply_optional_receiver_slot_projection(

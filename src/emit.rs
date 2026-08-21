@@ -49,7 +49,9 @@ fn emit_struct(strukt: &RustStruct) -> String {
 
 fn emit_impl(imp: &RustImpl) -> String {
     let target = rust_ident(&imp.target);
-    let mut out = if target.starts_with('<') {
+    let mut out = if let Some(trait_name) = &imp.trait_name {
+        emit_trait_impl_header(&target, trait_name)
+    } else if target.starts_with('<') {
         format!("impl{target} {{\n")
     } else {
         format!("impl {target} {{\n")
@@ -69,6 +71,15 @@ fn emit_impl(imp: &RustImpl) -> String {
     }
     out.push_str("}\n");
     out
+}
+
+fn emit_trait_impl_header(target: &str, trait_name: &str) -> String {
+    if let Some((generics, ty)) = target.split_once(' ')
+        && generics.starts_with('<')
+    {
+        return format!("impl{generics} {trait_name} for {ty} {{\n");
+    }
+    format!("impl {trait_name} for {target} {{\n")
 }
 
 fn emit_function(function: &RustFunction, indent: usize) -> String {
@@ -953,6 +964,27 @@ mod tests {
         }
     }
 
+    fn empty_impl(target: &str, trait_name: Option<&str>) -> RustItem {
+        RustItem::Impl(RustImpl {
+            target: target.to_string(),
+            trait_name: trait_name.map(str::to_string),
+            associated_consts: Vec::new(),
+            functions: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn structured_impl_items_emit_trait_headers() {
+        assert_eq!(
+            emit_item(&empty_impl("Target", Some("From<Source>"))),
+            "impl From<Source> for Target {\n}\n"
+        );
+        assert_eq!(
+            emit_item(&empty_impl("<T> Target<T>", Some("From<Source<T>>"))),
+            "impl<T> From<Source<T>> for Target<T> {\n}\n"
+        );
+    }
+
     #[test]
     fn binary_expressions_do_not_emit_outer_parentheses() {
         let expr = binary("&&", binary("<", var("i"), var("n")), var("ready"));
@@ -1291,6 +1323,30 @@ mod tests {
             }),
             "Box<dyn Animal>"
         );
+        assert_eq!(
+            emit_type(&RustType::ImplFnTrait {
+                trait_name: "FnMut".to_string(),
+                params: vec![],
+                return_type: None,
+            }),
+            "impl FnMut()"
+        );
+        assert_eq!(
+            emit_type(&RustType::ImplFnTrait {
+                trait_name: "FnMut".to_string(),
+                params: vec![RustType::String, RustType::I32],
+                return_type: None,
+            }),
+            "impl FnMut(String, i32)"
+        );
+        assert_eq!(
+            emit_type(&RustType::ImplFnTrait {
+                trait_name: "FnMut".to_string(),
+                params: vec![],
+                return_type: Some(Box::new(RustType::String)),
+            }),
+            "impl FnMut() -> String"
+        );
     }
 
     #[test]
@@ -1434,6 +1490,19 @@ pub fn emit_type(ty: &RustType) -> String {
         } => {
             let params = params.iter().map(emit_type).collect::<Vec<_>>().join(", ");
             format!("fn({params}) -> {}", emit_type(return_type))
+        }
+        RustType::ImplFnTrait {
+            trait_name,
+            params,
+            return_type,
+        } => {
+            let params = params.iter().map(emit_type).collect::<Vec<_>>().join(", ");
+            match return_type {
+                Some(return_type) => {
+                    format!("impl {trait_name}({params}) -> {}", emit_type(return_type))
+                }
+                None => format!("impl {trait_name}({params})"),
+            }
         }
         RustType::DynTrait(trait_name) => format!("dyn {trait_name}"),
         RustType::ImplTrait(trait_name) => format!("impl {trait_name}"),

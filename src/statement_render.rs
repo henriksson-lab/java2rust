@@ -1,3 +1,4 @@
+use crate::coercion::receiver_method_call_projection_exact;
 use crate::facts::FactSet;
 use crate::representation::RepresentationPlan;
 use crate::rust_ir::{RustExpr, RustStmt};
@@ -51,6 +52,14 @@ pub fn local_let_stmt_with_facts_representations_and_type_annotation(
 
 pub fn assignment_stmt(target: RustExpr, value: RustExpr) -> RustStmt {
     RustStmt::Assign { target, value }
+}
+
+pub fn assignment_op_stmt(target: RustExpr, op: impl Into<String>, value: RustExpr) -> RustStmt {
+    RustStmt::AssignOp {
+        target,
+        op: op.into(),
+        value,
+    }
 }
 
 pub fn expr_stmt(expr: RustExpr) -> RustStmt {
@@ -114,7 +123,7 @@ pub fn continue_stmt(label: Option<String>) -> RustStmt {
 }
 
 pub fn raw_stmt(raw: String) -> RustStmt {
-    RustStmt::Raw(raw)
+    RustStmt::raw_leaf(raw)
 }
 
 pub fn render_enhanced_for(
@@ -127,11 +136,7 @@ pub fn render_enhanced_for(
     RustStmt::For {
         label,
         pattern: var_name.to_string(),
-        iterable: RustExpr::MethodCall {
-            receiver: Box::new(iterable.clone()),
-            method: "iter".to_string(),
-            args: Vec::new(),
-        },
+        iterable: receiver_method_call_projection_exact(iterable.clone(), "iter", Vec::new()),
         body: body.to_vec(),
     }
 }

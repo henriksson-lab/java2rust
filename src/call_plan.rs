@@ -94,6 +94,14 @@ pub enum CallTargetPlan<'a> {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CallTargetSignatureOwner<'receiver, 'target> {
+    CurrentType,
+    StaticOwner(&'target str),
+    Receiver(&'receiver Expr),
+    CallReceiver,
+}
+
 impl<'a> CallTargetPlan<'a> {
     pub fn receiver_expr(&self) -> Option<&'a Expr> {
         match self {
@@ -183,6 +191,51 @@ impl<'a> CallTargetPlan<'a> {
                 | CallTargetPlan::ExternalFacadeReceiver { .. }
                 | CallTargetPlan::NativeCollectionMethod { .. }
         )
+    }
+
+    pub fn signature_owner_source(&self) -> Option<CallTargetSignatureOwner<'a, '_>> {
+        match self {
+            CallTargetPlan::StaticOwner { owner, .. } if owner == "Self" => {
+                Some(CallTargetSignatureOwner::CurrentType)
+            }
+            CallTargetPlan::StaticOwner { owner, .. } => {
+                Some(CallTargetSignatureOwner::StaticOwner(owner.as_str()))
+            }
+            CallTargetPlan::StaticSelf { .. }
+            | CallTargetPlan::FallbackSelf { .. }
+            | CallTargetPlan::FallbackFree { .. }
+            | CallTargetPlan::InstanceSelf { .. } => Some(CallTargetSignatureOwner::CurrentType),
+            CallTargetPlan::InstanceReceiver { receiver, .. }
+            | CallTargetPlan::FallbackReceiver { receiver, .. }
+            | CallTargetPlan::ExternalCrateReceiver { receiver, .. } => {
+                Some(CallTargetSignatureOwner::Receiver(receiver))
+            }
+            CallTargetPlan::ExternalFacadeReceiver { .. } => {
+                Some(CallTargetSignatureOwner::CallReceiver)
+            }
+            _ => None,
+        }
+    }
+
+    pub fn receiver_overload_current_name(&self) -> Option<&str> {
+        match self {
+            CallTargetPlan::FallbackReceiver { rust_name, .. } => Some(rust_name.as_str()),
+            CallTargetPlan::InstanceReceiver { rust_name, .. } => Some(*rust_name),
+            _ => None,
+        }
+    }
+
+    pub fn into_fallback_receiver_with_rust_name(self, rust_name: String) -> Self {
+        match self {
+            CallTargetPlan::FallbackReceiver { receiver, .. }
+            | CallTargetPlan::InstanceReceiver { receiver, .. } => {
+                CallTargetPlan::FallbackReceiver {
+                    receiver,
+                    rust_name,
+                }
+            }
+            other => other,
+        }
     }
 }
 
@@ -2445,6 +2498,27 @@ fn plan_call_target_with_external_index_impl<'a>(
 
     if let Some(call) = resolved
         && let (CallKind::Instance, Some(receiver)) = (&call.kind, receiver)
+        && let Some(external_rust_name) =
+            resolved_external_instance_call_rust_name(call, name, arg_count, facts)
+    {
+        return CallTargetPlan::FallbackReceiver {
+            receiver,
+            rust_name: external_rust_name,
+        };
+    }
+
+    if let Some(call) = resolved
+        && let (CallKind::Instance, None) = (&call.kind, receiver)
+        && let Some(external_rust_name) =
+            resolved_external_instance_call_rust_name(call, name, arg_count, facts)
+    {
+        return CallTargetPlan::FallbackSelf {
+            rust_name: external_rust_name,
+        };
+    }
+
+    if let Some(call) = resolved
+        && let (CallKind::Instance, Some(receiver)) = (&call.kind, receiver)
     {
         return CallTargetPlan::InstanceReceiver {
             receiver,
@@ -2581,6 +2655,13 @@ fn resolved_external_instance_call_rust_name(
         .or_else(|| {
             crate::external_packs::external_api_effect_for_receiver_with_arity(
                 Some(&call.declaring_type),
+                java_name,
+                Some(arg_count),
+            )
+        })
+        .or_else(|| {
+            crate::external_packs::java_platform_api_effect_for_receiver_with_arity(
+                &call.declaring_type,
                 java_name,
                 Some(arg_count),
             )

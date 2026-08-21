@@ -955,14 +955,27 @@ mod tests {
 
     #[test]
     fn fallback_exception_message_keeps_structured_value() {
+        fn grouped_plus_binary(left_name: &str, right_literal: &str) -> RustExpr {
+            RustExpr::Grouped(Box::new(RustExpr::Binary {
+                op: "+".to_string(),
+                left: Box::new(RustExpr::Var(left_name.to_string())),
+                right: Box::new(RustExpr::Literal(right_literal.to_string())),
+            }))
+        }
+        fn grouped_plus_vars(left_name: &str, right_name: &str) -> RustExpr {
+            RustExpr::Grouped(Box::new(RustExpr::Binary {
+                op: "+".to_string(),
+                left: Box::new(RustExpr::Var(left_name.to_string())),
+                right: Box::new(RustExpr::Var(right_name.to_string())),
+            }))
+        }
+
         let message = exception_message_expr(RustExpr::Raw("value + 1".to_string()));
         assert_eq!(crate::emit::emit_expr(&message), "(value + 1).to_string()");
         assert_eq!(
             message,
             RustExpr::MethodCall {
-                receiver: Box::new(RustExpr::Grouped(Box::new(RustExpr::Raw(
-                    "value + 1".to_string()
-                )))),
+                receiver: Box::new(grouped_plus_binary("value", "1")),
                 method: "to_string".to_string(),
                 args: Vec::new(),
             }
@@ -1015,9 +1028,7 @@ mod tests {
         assert_eq!(
             cause_or_self,
             RustExpr::MethodCall {
-                receiver: Box::new(RustExpr::Grouped(Box::new(RustExpr::Raw(
-                    "left + right".to_string()
-                )))),
+                receiver: Box::new(grouped_plus_vars("left", "right")),
                 method: "cause_or_self_if_instance".to_string(),
                 args: vec![RustExpr::Unary {
                     op: "&".to_string(),
