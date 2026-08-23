@@ -1247,6 +1247,14 @@ fn add_direct_subtype(plan: &mut RepresentationPlan, super_name: &str, subtype_n
         .any(|existing| existing == subtype_name)
     {
         entry.direct_subtypes.push(subtype_name.to_string());
+        refresh_closed_enum_representation_variants(entry);
+    }
+}
+
+fn refresh_closed_enum_representation_variants(entry: &mut TypeRepresentation) {
+    if let ObjectRepresentation::ClosedEnum { variants, .. } = &mut entry.representation {
+        *variants =
+            crate::object_model::closed_enum_variant_names_for_subtypes(&entry.direct_subtypes);
     }
 }
 

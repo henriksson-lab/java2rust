@@ -12,10 +12,23 @@ use new_java2rust::output_markers;
 fn main() -> ExitCode {
     let Some(args) = parse_args(env::args().skip(1)) else {
         eprintln!(
-            "usage: new-java2rust [--context-dir dir] [--context-dir-emitted] [--context-source-summary-dir dir] [--context-dir-package dir:package.prefix] [--facts facts.txt] [--external-pack-manifest pack.txt] <file.java>\n       new-java2rust translate-batch --primary dir --out-dir dir [--generated-dir dir] [--jobs n, default 10] [--phase-events path] [--worker-events path] [--context-dir dir] [--context-dir-emitted] [--context-source-summary-dir dir] [--context-dir-package dir:package.prefix] [--facts facts.txt] [--external-pack-manifest pack.txt]\n       new-java2rust resolver-bench [--source-root mode:path] [--source-root-package mode:path:package.prefix] [--no-builtin-external-packs] [--builtin-external-pack name] [--facts facts.txt] [--external-pack-manifest pack.txt] <dir>"
+            "usage: new-java2rust [--context-dir dir] [--context-dir-emitted] [--context-source-summary-dir dir] [--context-dir-package dir:package.prefix] [--facts facts.txt] [--external-pack-manifest pack.txt] <file.java>\n       new-java2rust translate-batch --primary dir --out-dir dir [--generated-dir dir] [--jobs n, default 10] [--phase-events path] [--worker-events path] [--context-dir dir] [--context-dir-emitted] [--context-source-summary-dir dir] [--context-dir-package dir:package.prefix] [--facts facts.txt] [--external-pack-manifest pack.txt]\n       new-java2rust resolver-bench [--source-root mode:path] [--source-root-package mode:path:package.prefix] [--no-builtin-external-packs] [--builtin-external-pack name] [--facts facts.txt] [--external-pack-manifest pack.txt] <dir>\n       new-java2rust count-invalid-patterns <file.rs>"
         );
         return ExitCode::from(2);
     };
+
+    if let Args::CountInvalidPatterns { rust_path } = args {
+        return match fs::read_to_string(&rust_path) {
+            Ok(rust) => {
+                println!("{}", output_markers::count_invalid_patterns(&rust));
+                ExitCode::SUCCESS
+            }
+            Err(err) => {
+                eprintln!("failed to read {rust_path}: {err}");
+                ExitCode::from(1)
+            }
+        };
+    }
 
     if let Args::ResolverBench {
         root_path,
@@ -185,6 +198,9 @@ enum Args {
         external_inputs: ExternalInputPaths,
         source_roots: Vec<CliSourceRoot>,
     },
+    CountInvalidPatterns {
+        rust_path: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -227,6 +243,17 @@ fn parse_args(args: impl Iterator<Item = String>) -> Option<Args> {
     let mut context_dir_packages = Vec::new();
     let mut context_dirs_are_emitted = false;
     let mut args = args.peekable();
+    if args
+        .peek()
+        .is_some_and(|arg| arg == "count-invalid-patterns")
+    {
+        args.next();
+        let rust_path = args.next()?;
+        if args.next().is_some() {
+            return None;
+        }
+        return Some(Args::CountInvalidPatterns { rust_path });
+    }
     if args.peek().is_some_and(|arg| arg == "translate-batch") {
         args.next();
         let mut primary_path = None;

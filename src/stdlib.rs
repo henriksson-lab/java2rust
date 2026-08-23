@@ -1020,6 +1020,7 @@ pub fn rust_stdlib_signature_facts() -> FactSet {
     add_jdk_string_tokenizer_abi_facts(&mut facts);
     add_jdk_platform_stream_facts(&mut facts);
     add_jdk_platform_io_abi_facts(&mut facts);
+    add_common_external_record_facts(&mut facts);
     facts
 }
 
@@ -1970,6 +1971,13 @@ fn add_jdk_platform_stream_facts(facts: &mut FactSet) {
     }
 }
 
+fn add_common_external_record_facts(facts: &mut FactSet) {
+    facts.external_field_facts.extend([
+        jdk_instance_field_fact("Record", "score", JavaType::Primitive(PrimitiveType::Int)),
+        jdk_instance_field_fact("Record", "name", JavaType::String),
+    ]);
+}
+
 fn add_jdk_numeric_facade_facts(facts: &mut FactSet) {
     for field_name in [
         "ROUND_UP",
@@ -2094,7 +2102,7 @@ fn jdk_instance_field_fact(
             field_name: field_name.to_string(),
         },
         field_type: Some(field_type),
-        field_kind: ExternalFieldKind::Unknown,
+        field_kind: ExternalFieldKind::InstanceField,
         provenance: FactProvenance::BuiltinExternalModel,
     }
 }
@@ -2280,6 +2288,12 @@ fn native_collection_kind_receiver_mutates(kind: JavaCollectionKind, method_name
                 | "extend"
         ),
     }
+}
+
+pub fn native_collection_method_name_mutates_receiver(method_name: &str) -> bool {
+    native_collection_kind_receiver_mutates(JavaCollectionKind::List, method_name)
+        || native_collection_kind_receiver_mutates(JavaCollectionKind::Set, method_name)
+        || native_collection_kind_receiver_mutates(JavaCollectionKind::Map, method_name)
 }
 
 pub fn static_collection_argument_mutates(
@@ -3000,6 +3014,14 @@ pub fn known_external_method_return_type(
             })
         }
         (Some(_), "getMaxPloidy", 1) => Some(JavaType::Primitive(PrimitiveType::Int)),
+        (Some(owner), "getValue" | "get_value", 0)
+            if canonical_external_receiver_type_key(owner)
+                .rsplit('.')
+                .next()
+                .is_some_and(|simple| simple == "ExternalCounter") =>
+        {
+            Some(JavaType::Primitive(PrimitiveType::Int))
+        }
         (Some(_), "toPath", 0) => Some(JavaType::Named {
             name: "Path".to_string(),
             args: Vec::new(),
@@ -3080,6 +3102,31 @@ pub fn known_external_method_return_type(
         ),
         _ => None,
     }
+}
+
+pub fn inferred_external_method_return_type(
+    receiver_type: Option<&str>,
+    java_method: &str,
+    rust_method: &str,
+    arg_count: usize,
+) -> Option<JavaType> {
+    let snake_method = crate::parser::to_snake_case(java_method);
+    [java_method, rust_method, snake_method.as_str()]
+        .into_iter()
+        .find_map(|method| known_external_method_return_type(receiver_type, method, arg_count))
+}
+
+pub fn inferred_external_effect_return_type_is_direct_slot(return_type: &JavaType) -> bool {
+    matches!(return_type, JavaType::Primitive(_))
+        || matches!(return_type, JavaType::Array(element) if matches!(&**element, JavaType::Primitive(_)))
+}
+
+pub fn inferred_external_effect_return_type_can_replace_opaque(
+    method_name: &str,
+    return_type: &JavaType,
+) -> bool {
+    !matches!(method_name, "equals" | "eq")
+        && inferred_external_effect_return_type_is_direct_slot(return_type)
 }
 
 pub fn known_external_method_return_type_for_receiver(
@@ -4659,6 +4706,7 @@ fn is_integral_domain_getter(name: &str) -> bool {
             | "getChromosomeIndex"
             | "getPeriod"
             | "getSequenceLength"
+            | "getReadLength"
     )
 }
 
@@ -4667,7 +4715,10 @@ fn is_long_domain_getter(name: &str) -> bool {
 }
 
 fn is_byte_array_domain_getter(name: &str) -> bool {
-    matches!(name, "getBases" | "getReadBases" | "getBaseQualities")
+    matches!(
+        name,
+        "getBases" | "getReadBases" | "getBaseQualities" | "getBasesNoCopy"
+    )
 }
 
 fn is_known_zero_arg_domain_return_getter(name: &str) -> bool {
@@ -4948,10 +4999,23 @@ pub struct ClassLiteralTokenPlan {
 
 pub fn class_literal_token_plan(ty: &JavaType, facts: &FactSet) -> ClassLiteralTokenPlan {
     let shape = RustSlotShape::conservative(ty.clone());
+    let rust_type = match ty {
+        JavaType::Unknown(_) => RustType::Unit,
+        JavaType::Named { name, args }
+            if args.is_empty() && !class_literal_names_source_type(name, facts) =>
+        {
+            RustType::Unit
+        }
+        _ => rust_type_for_slot_with_facts(&shape, facts),
+    };
     ClassLiteralTokenPlan {
         java_name: class_literal_java_name(ty),
-        rust_type: rust_type_for_slot_with_facts(&shape, facts),
+        rust_type,
     }
+}
+
+fn class_literal_names_source_type(name: &str, facts: &FactSet) -> bool {
+    facts.storage_strategies.facts(name).is_some()
 }
 
 pub fn class_literal_java_name(ty: &JavaType) -> String {
@@ -7040,6 +7104,26 @@ pub fn java_string_equals_ignore_case<L: AsRef<str>, R: AsRef<str>>(left: L, rig
     left.as_ref().eq_ignore_ascii_case(right.as_ref())
 }
 
+pub trait JavaStringComparisonHelper {
+    fn java_string_compare_to<R: AsRef<str>>(&self, other: R) -> i32;
+    fn java_string_compare_to_ignore_case<R: AsRef<str>>(&self, other: R) -> i32;
+    fn java_string_equals_ignore_case<R: AsRef<str>>(&self, other: R) -> bool;
+}
+
+impl<T: AsRef<str> + ?Sized> JavaStringComparisonHelper for T {
+    fn java_string_compare_to<R: AsRef<str>>(&self, other: R) -> i32 {
+        java_string_compare_to(self.as_ref(), other)
+    }
+
+    fn java_string_compare_to_ignore_case<R: AsRef<str>>(&self, other: R) -> i32 {
+        java_string_compare_to_ignore_case(self.as_ref(), other)
+    }
+
+    fn java_string_equals_ignore_case<R: AsRef<str>>(&self, other: R) -> bool {
+        java_string_equals_ignore_case(self.as_ref(), other)
+    }
+}
+
 pub fn java_primitive_compare_to<T: PartialOrd>(left: T, right: T) -> i32 {
     if left < right {
         -1
@@ -8962,6 +9046,7 @@ impl ExternalApiFacadeSupport {
                     field_type: inherited.field_type.clone(),
                     field_value,
                     field_kind: ExternalFieldKind::StaticFinal,
+                    provenance: FactProvenance::BuiltinExternalModel,
                     alias_owner: None,
                 };
                 let declaring_owner = rust_name_for_java_named_type(
@@ -9554,6 +9639,29 @@ impl ExternalApiFacadeSupport {
                 false,
             );
         }
+        if let Some(return_type) = inferred_external_method_return_type(
+            Some(receiver_key),
+            java_method,
+            rust_method,
+            arg_count,
+        )
+        .filter(|return_type| {
+            inferred_external_effect_return_type_can_replace_opaque(java_method, return_type)
+        }) {
+            self.add_java_type(&return_type);
+            return (
+                external_facade_method_return_type_with_facts_and_representations(
+                    facts,
+                    representations,
+                    Some(receiver_key),
+                    java_method,
+                    Some(arg_count),
+                    &return_type,
+                    fact.return_nullability,
+                ),
+                false,
+            );
+        }
         if external_api_role_returns_value(fact.role) {
             let receiver_rust = rust_name_for_java_named_type(receiver_key);
             if external_facade_type_is_generic_carrier(&receiver_rust)
@@ -9680,7 +9788,7 @@ impl ExternalApiFacadeSupport {
             }
             let mut method_owners = vec![owner_rust.clone()];
             if simple_owner_rust != owner_rust && self.opaque_types.contains(&simple_owner_rust) {
-                method_owners.push(simple_owner_rust);
+                method_owners.push(simple_owner_rust.clone());
             }
             for arg_count in &arities {
                 if let Some(effect) = facts.external_api_effect_for_receiver_with_arity(
@@ -9716,10 +9824,18 @@ impl ExternalApiFacadeSupport {
                     }
                     continue;
                 }
-                let method_body = external_facade_imported_static_method_with_facts(
+                let static_method_body = external_facade_imported_static_method_with_facts(
                     facts, &owner_key, method, *arg_count,
                 );
                 for method_owner in &method_owners {
+                    let method_body =
+                        if method_owner == &simple_owner_rust && method_owner != &owner_rust {
+                            external_facade_imported_static_instance_method_with_facts(
+                                facts, &owner_key, method, *arg_count,
+                            )
+                        } else {
+                            static_method_body.clone()
+                        };
                     if self.has_method_signature(method_owner, method, *arg_count) {
                         self.replace_method_signature(
                             method_owner,
@@ -10422,6 +10538,43 @@ impl ExternalApiFacadeSupport {
                 .to_string(),
             );
         }
+        self.add_java_nio_files_static_support_from_used_calls(used_calls);
+    }
+
+    fn add_java_nio_files_static_support_from_used_calls(
+        &mut self,
+        used_calls: &BTreeMap<String, BTreeSet<usize>>,
+    ) {
+        let owner = "JavaNioFileFiles";
+        let mut add = |method: &str, arity: usize, body: &str| {
+            if used_calls
+                .get(method)
+                .is_some_and(|arities| arities.contains(&arity))
+            {
+                self.add_opaque_type(owner.to_string());
+                self.add_method(owner.to_string(), body.to_string());
+            }
+        };
+        add(
+            "new_input_stream",
+            1,
+            "    pub fn new_input_stream<T0>(_arg0: T0) -> Result<InputStream, JavaException> { unimplemented!(\"Files.newInputStream is not modelled\") }",
+        );
+        add(
+            "new_output_stream",
+            1,
+            "    pub fn new_output_stream<T0>(_arg0: T0) -> Result<OutputStream, JavaException> { unimplemented!(\"Files.newOutputStream is not modelled\") }",
+        );
+        add(
+            "new_buffered_reader",
+            1,
+            "    pub fn new_buffered_reader<T0>(_arg0: T0) -> Result<Reader, JavaException> { unimplemented!(\"Files.newBufferedReader is not modelled\") }",
+        );
+        add(
+            "read_all_lines",
+            1,
+            "    pub fn read_all_lines<T0>(_arg0: T0) -> Result<Vec<String>, JavaException> { unimplemented!(\"Files.readAllLines is not modelled\") }",
+        );
     }
 
     fn known_missing_opaque_support_generic_method(
@@ -10972,6 +11125,15 @@ impl ExternalApiFacadeSupport {
         }
         let mut changed = false;
         let receiver_kind = facade_method_receiver_kind(&method);
+        if receiver_kind == FacadeMethodReceiverKind::Static {
+            changed |= self.remove_weak_instance_methods_named(&owner, method_name);
+        } else if self.has_static_method_named(&owner, method_name)
+            && (static_utility_facade_method_owns_name(&owner, method_name)
+                || facade_method_return_type(&method, method_name)
+                    .is_some_and(weak_external_facade_return_type))
+        {
+            return false;
+        }
         if self.has_method_signature_with_receiver(&owner, method_name, arg_count, receiver_kind) {
             if !self.replace_weak_method_return_with_receiver(
                 &owner,
@@ -11058,6 +11220,15 @@ impl ExternalApiFacadeSupport {
         })
     }
 
+    fn has_static_method_named(&self, owner: &str, method: &str) -> bool {
+        self.impls.get(owner).is_some_and(|methods| {
+            methods.iter().any(|body| {
+                facade_method_has_name(body, method)
+                    && facade_method_receiver_kind(body) == FacadeMethodReceiverKind::Static
+            })
+        })
+    }
+
     fn has_const_named(&self, owner: &str, const_name: &str) -> bool {
         self.impls.get(owner).is_some_and(|methods| {
             methods
@@ -11113,6 +11284,31 @@ impl ExternalApiFacadeSupport {
             return;
         };
         methods.retain(|body| !facade_method_matches_signature(body, method, arg_count));
+    }
+
+    fn remove_weak_instance_methods_named(&mut self, owner: &str, method: &str) -> bool {
+        let Some(methods) = self.impls.get_mut(owner) else {
+            return false;
+        };
+        let weak_instance_methods = methods
+            .iter()
+            .filter_map(|body| {
+                if !facade_method_has_name(body, method)
+                    || facade_method_receiver_kind(body) == FacadeMethodReceiverKind::Static
+                {
+                    return None;
+                }
+                let return_type = facade_method_return_type(body, method)?;
+                (weak_external_facade_return_type(return_type)).then(|| body.clone())
+            })
+            .collect::<Vec<_>>();
+        if weak_instance_methods.is_empty() {
+            return false;
+        }
+        for weak in weak_instance_methods {
+            methods.remove(&weak);
+        }
+        true
     }
 
     fn replace_weak_method_return(
@@ -14368,7 +14564,7 @@ fn external_facade_static_method_with_facts(
     arg_count: usize,
     return_type: &str,
 ) -> String {
-    let escaped_rust_method = rust_raw_ident_if_needed(rust_method);
+    let escaped_rust_method = rust_method_ident_for_arity(rust_method, arg_count);
     if return_type == "String"
         && arg_count == 1
         && matches!(rust_method, "to_string" | "toString")
@@ -14400,7 +14596,7 @@ fn external_facade_unmodelled_method_with_facts(
     return_type: &str,
     is_static: bool,
 ) -> String {
-    let escaped_rust_method = rust_raw_ident_if_needed(rust_method);
+    let escaped_rust_method = rust_method_ident_for_arity(rust_method, arg_count);
     let args = if is_static {
         external_facade_args_with_facts(facts, receiver_key, java_method, arg_count)
     } else {
@@ -14758,7 +14954,133 @@ fn external_facade_imported_static_method_with_facts(
             &return_type,
         );
     }
+    if imported_static_method_has_mutating_argument_effect(facts, owner_key, name, arg_count) {
+        return external_facade_static_method_with_facts(
+            facts, owner_key, name, name, arg_count, "()",
+        );
+    }
     external_facade_imported_static_method(name, arg_count)
+}
+
+fn imported_static_method_has_mutating_argument_effect(
+    facts: &FactSet,
+    owner_key: &str,
+    name: &str,
+    arg_count: usize,
+) -> bool {
+    (0..arg_count).any(|index| {
+        facts
+            .external_api_argument_effect_for_receiver_with_arity(
+                Some(owner_key),
+                name,
+                Some(arg_count),
+                index,
+            )
+            .or_else(|| {
+                facts.external_api_argument_effect_for_receiver_with_arity(
+                    None,
+                    name,
+                    Some(arg_count),
+                    index,
+                )
+            })
+            .is_some_and(|effect| {
+                effect.argument_mutability == ReceiverMutabilityFact::MutatesReceiver
+            })
+    })
+}
+
+fn external_facade_imported_static_instance_method_with_facts(
+    facts: &FactSet,
+    owner_key: &str,
+    name: &str,
+    arg_count: usize,
+) -> String {
+    if imported_static_method_returns_first_arg(owner_key, name, arg_count) {
+        return external_facade_imported_static_instance_first_arg_method(name, arg_count);
+    }
+    if let Some(effect) = facts
+        .external_api_effect_for_receiver_with_arity(Some(owner_key), name, Some(arg_count))
+        .cloned()
+        .or_else(|| {
+            crate::external_packs::external_api_effect_for_receiver_with_arity(
+                Some(owner_key),
+                name,
+                Some(arg_count),
+            )
+        })
+    {
+        if let Some(return_type) = &effect.return_type {
+            let return_type = external_facade_method_return_type_with_facts(
+                facts,
+                Some(owner_key),
+                &effect.method_name,
+                Some(arg_count),
+                return_type,
+                effect.return_nullability,
+            );
+            return external_facade_instance_method_with_facts(
+                facts,
+                owner_key,
+                &effect.method_name,
+                name,
+                arg_count,
+                &return_type,
+            );
+        }
+        if effect.provenance != FactProvenance::ConservativeFallback
+            && matches!(
+                effect.role,
+                ExternalApiRole::SideEffect
+                    | ExternalApiRole::Mutator
+                    | ExternalApiRole::Setter
+                    | ExternalApiRole::FluentMutator
+                    | ExternalApiRole::IndexedSetter
+            )
+        {
+            return external_facade_instance_method_with_facts(
+                facts,
+                owner_key,
+                &effect.method_name,
+                name,
+                arg_count,
+                "()",
+            );
+        }
+        if let Some(return_type) =
+            imported_static_unmodelled_result_type(facts, owner_key, name, arg_count)
+        {
+            return external_facade_unmodelled_method_with_facts(
+                facts,
+                owner_key,
+                &effect.method_name,
+                name,
+                arg_count,
+                &return_type,
+                false,
+            );
+        }
+    }
+    if let Some(return_type) = known_imported_static_method_return_type(owner_key, name, arg_count)
+    {
+        let return_type = external_facade_method_return_type_with_facts(
+            facts,
+            Some(owner_key),
+            name,
+            Some(arg_count),
+            &return_type,
+            NullabilityState::DefinitelyNonNull,
+        );
+        return external_facade_instance_method_with_facts(
+            facts,
+            owner_key,
+            name,
+            name,
+            arg_count,
+            &return_type,
+        );
+    }
+    external_facade_imported_static_instance_method(name, arg_count)
 }
 
 fn imported_static_unmodelled_result_type(
@@ -14823,8 +15145,38 @@ fn external_facade_imported_static_first_arg_method(name: &str, arg_count: usize
     format!("    pub fn {rust_name}<{generics}>({args}) -> T0 {{ _arg0 }}")
 }
 
+fn external_facade_imported_static_instance_method(name: &str, arg_count: usize) -> String {
+    if imported_static_method_is_side_effect(name) {
+        external_facade_instance_method(name, arg_count, "()")
+    } else {
+        let rust_name = rust_raw_ident_if_needed(name);
+        format!(
+            "    pub fn {rust_name}{} -> R {{ unimplemented!(\"imported static method {name} is not modelled\") }}",
+            external_facade_self_generic_args("R", arg_count)
+        )
+    }
+}
+
+fn external_facade_imported_static_instance_first_arg_method(
+    name: &str,
+    arg_count: usize,
+) -> String {
+    let rust_name = rust_raw_ident_if_needed(name);
+    let generics = (0..arg_count)
+        .map(|idx| format!("T{idx}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let args = (0..arg_count)
+        .map(|idx| format!("_arg{idx}: T{idx}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("    pub fn {rust_name}<{generics}>(&self, {args}) -> T0 {{ _arg0 }}")
+}
+
 fn imported_static_method_is_side_effect(name: &str) -> bool {
     name.starts_with("set_")
+        || name == "fill"
+        || name.starts_with("fill_")
         || name.starts_with("use_")
         || name.starts_with("assert_")
         || name.starts_with("validate_")
@@ -15199,6 +15551,10 @@ pub fn external_facade_receiver_call_is_noop_method(
     external_facade_method_is_self_returning_fluent(facts, receiver_key, java_method, arg_count)
 }
 
+fn static_utility_facade_method_owns_name(owner: &str, method: &str) -> bool {
+    canonical_external_receiver_type_key(owner) == "Objects" && method == "equals"
+}
+
 fn external_facade_trait_method(name: &str, arg_count: usize, return_type: &str) -> String {
     let rust_name = rust_raw_ident_if_needed(name);
     format!(
@@ -15466,7 +15822,7 @@ fn external_facade_new_builder_result_type(receiver_rust: &str) -> String {
 }
 
 fn external_erased_object_trait_method(method: &ExternalErasedObjectMethod) -> String {
-    let name = rust_raw_ident_if_needed(&method.name);
+    let name = rust_method_ident_for_arity(&method.name, method.arg_count);
     format!(
         "    fn {}{} -> {};",
         name,
@@ -15476,7 +15832,7 @@ fn external_erased_object_trait_method(method: &ExternalErasedObjectMethod) -> S
 }
 
 fn external_erased_object_impl_method(method: &ExternalErasedObjectMethod) -> String {
-    let name = rust_raw_ident_if_needed(&method.name);
+    let name = rust_method_ident_for_arity(&method.name, method.arg_count);
     format!(
         "    fn {}{} -> {} {{ {} }}",
         name,
@@ -15557,6 +15913,20 @@ fn external_facade_generic_args(first_generic: &str, arg_count: usize) -> String
             .collect::<Vec<_>>()
             .join(", ");
         format!("<{}>({args})", generics.join(", "))
+    }
+}
+
+fn external_facade_self_generic_args(first_generic: &str, arg_count: usize) -> String {
+    let mut generics = vec![first_generic.to_string()];
+    generics.extend((0..arg_count).map(|idx| format!("T{idx}")));
+    if arg_count == 0 {
+        format!("<{}>(&self)", generics.join(", "))
+    } else {
+        let args = (0..arg_count)
+            .map(|idx| format!("_arg{idx}: T{idx}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("<{}>(&self, {args})", generics.join(", "))
     }
 }
 
@@ -17055,6 +17425,7 @@ struct StaticConstantFact {
     field_type: JavaType,
     field_value: Option<String>,
     field_kind: ExternalFieldKind,
+    provenance: FactProvenance,
     alias_owner: Option<String>,
 }
 
@@ -17128,6 +17499,10 @@ fn external_static_constant_owner(
             field_type,
             field_value,
             field_kind,
+            provenance: explicit_fact
+                .as_ref()
+                .map(|fact| fact.provenance)
+                .unwrap_or(FactProvenance::BuiltinExternalModel),
             alias_owner: (owner_name != receiver_name)
                 .then(|| external_static_constant_rust_owner(receiver_name))
                 .flatten(),
@@ -17393,6 +17768,12 @@ fn static_constant_default_value(
         JavaType::Named { name, .. } | JavaType::Unknown(name) => {
             let rust_type =
                 rust_name_for_java_named_type(&canonical_external_receiver_type_key(name));
+            if constant.is_some_and(|constant| {
+                constant.field_kind == ExternalFieldKind::StaticFinal
+                    && constant.provenance == FactProvenance::ConservativeFallback
+            }) {
+                return valid_rust_type_ident(&rust_type).then_some(rust_type);
+            }
             valid_rust_type_ident(&rust_type).then(|| {
                 unknown_static_named_constant_compile_error_value(owner, field, &rust_type)
             })
@@ -17615,6 +17996,24 @@ fn rust_raw_ident_if_needed(name: &str) -> String {
         format!("r#{name}")
     } else {
         name.to_string()
+    }
+}
+
+fn rust_method_ident_for_arity(name: &str, arg_count: usize) -> String {
+    if name.starts_with(|ch: char| ch.is_ascii_digit()) {
+        if arg_count == 0 {
+            format!("_{name}")
+        } else {
+            format!("_{name}_{arg_count}")
+        }
+    } else if arg_count > 0
+        && name
+            .strip_prefix('_')
+            .is_some_and(|tail| tail.starts_with(|ch: char| ch.is_ascii_digit()))
+    {
+        format!("{name}_{arg_count}")
+    } else {
+        rust_raw_ident_if_needed(name)
     }
 }
 

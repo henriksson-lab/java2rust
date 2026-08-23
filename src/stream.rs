@@ -1,4 +1,5 @@
 use crate::conversion_plan::LoweredType;
+use crate::conversion_plan::effective_stream_item_shape;
 use crate::expr_shape::{ExprShapeContext, ShapeEnv, infer_expr_shape_with_context};
 use crate::facts::FactSet;
 use crate::java_ir::{Block, Expr, JavaType, LambdaBody, PrimitiveType, Stmt};
@@ -171,6 +172,23 @@ pub fn build_stream_plan<'a>(
     env: &TypeEnv,
     facts: &FactSet,
 ) -> Option<StreamPlan<'a>> {
+    build_stream_plan_core(expr, env, facts, false)
+}
+
+pub fn build_stream_plan_for_slot<'a>(
+    expr: &'a Expr,
+    env: &TypeEnv,
+    facts: &FactSet,
+) -> Option<StreamPlan<'a>> {
+    build_stream_plan_core(expr, env, facts, true)
+}
+
+fn build_stream_plan_core<'a>(
+    expr: &'a Expr,
+    env: &TypeEnv,
+    facts: &FactSet,
+    allow_implicit_primitive_sum: bool,
+) -> Option<StreamPlan<'a>> {
     let Expr::Call {
         receiver: Some(receiver),
         name,
@@ -190,16 +208,28 @@ pub fn build_stream_plan<'a>(
         "collect" if args.len() == 1 => stream_collect_terminal(&args[0])?,
         "toArray" | "to_array" if args.is_empty() => StreamTerminal::ToArray,
         "findFirst" if args.is_empty() => StreamTerminal::FindFirst,
-        "anyMatch" if args.len() == 1 => StreamTerminal::AnyMatch(lambda_plan(&args[0])?),
+        "anyMatch" | "any_match" if args.len() == 1 => {
+            StreamTerminal::AnyMatch(lambda_plan(&args[0])?)
+        }
         "allMatch" | "all_match" if args.len() == 1 => {
             StreamTerminal::AllMatch(lambda_plan(&args[0])?)
         }
+        "mapToInt" | "map_to_int" | "mapToDouble" | "map_to_double" if args.len() == 1 => {
+            if !allow_implicit_primitive_sum {
+                return None;
+            }
+            StreamTerminal::Sum
+        }
         _ => return None,
     };
-    let source_spec = receiver_source_spec(receiver)?;
+    let chain_root = match name.as_str() {
+        "mapToInt" | "map_to_int" | "mapToDouble" | "map_to_double" if args.len() == 1 => expr,
+        _ => receiver,
+    };
+    let source_spec = receiver_source_spec(chain_root)?;
     let source_expr = source_spec.expr;
     let source_shape = infer_stream_source_element_shape_with_facts(source_expr, env, facts)?;
-    let (source, ops, current_shape) = collect_stream_chain(receiver, source_shape, env, facts)?;
+    let (source, ops, current_shape) = collect_stream_chain(chain_root, source_shape, env, facts)?;
     let actual = stream_terminal_actual(&terminal, current_shape.clone(), env, facts);
     Some(StreamPlan {
         source: StreamSource {
@@ -825,9 +855,17 @@ fn infer_flat_map_output_shape(
             let mut lambda_env = env.clone();
             lambda_env.insert_local(plan.lambda.param_name.clone(), input_shape.java_ty.clone());
             infer_stream_source_element_shape_with_facts(plan.source, &lambda_env, facts)
+                .map(|shape| stream_iteration_effective_element_shape(shape, plan.iteration))
         }
         FlatMapPlan::LambdaStreamChain { pipeline, .. } => Some(pipeline.output_shape.clone()),
     }
+}
+
+fn stream_iteration_effective_element_shape(
+    shape: RustSlotShape,
+    iteration: StreamSourceIteration,
+) -> RustSlotShape {
+    effective_stream_item_shape(&shape, matches!(iteration, StreamSourceIteration::Borrowed))
 }
 
 pub fn stream_terminal_actual(

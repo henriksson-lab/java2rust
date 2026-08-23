@@ -10,24 +10,33 @@
 //! `public static String run()` and a `main` that prints it. Java's stdout is
 //! the oracle; the translation must produce the same bytes.
 //!
-//! Requires `javac`, `java` and `rustc` on PATH; skips cleanly without them.
+//! Requires `javac`, `java` and `rustc` on PATH. Missing prerequisites are
+//! failures, because a skipped behavioural oracle is indistinguishable from a
+//! passing one in the gate.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+const EXPECTED_DIFFERENTIAL_FIXTURES: usize = 23;
+
 #[test]
 fn translated_output_matches_java_output() {
-    let Some(translator) = translator_binary() else {
-        eprintln!("skipping: translator binary not built");
-        return;
-    };
-    if !have_tool("javac") || !have_tool("java") || !have_tool("rustc") {
-        eprintln!("skipping: javac/java/rustc not all available");
-        return;
+    let translator = translator_binary().unwrap_or_else(|| {
+        panic!("translator binary not built; run `cargo build --release` before differential tests")
+    });
+    for tool in ["javac", "java", "rustc"] {
+        assert!(
+            have_tool(tool),
+            "required differential test tool `{tool}` is not available"
+        );
     }
 
     let fixtures = fixture_paths();
-    assert!(!fixtures.is_empty(), "no differential fixtures found");
+    assert_eq!(
+        fixtures.len(),
+        EXPECTED_DIFFERENTIAL_FIXTURES,
+        "differential fixture count changed; update EXPECTED_DIFFERENTIAL_FIXTURES intentionally"
+    );
 
     let mut failures = Vec::new();
     for fixture in &fixtures {

@@ -1,12 +1,21 @@
 # 0049 — A static call to an erased-object class is re-attributed to the *calling* class
 
-Status: **validated by execution** — reproduced with `target/release/new-java2rust`,
-minimal Java, generated Rust quoted
+Status: **fixed** — erased static calls preserve the resolved owner, and free
+helper names preserve the owner/method boundary.
 Severity: **high** — the worst case is **silent wrong output**: it compiles and
 calls a different method than the Java did
 Live or latent: **live** — triggered by one `erased-object` fact on the callee,
 which is the representation the corpus assigns widely
 Kind: call-target identity lost at an erasure boundary
+
+Codex follow-up 2026-08-23: fixed. Explicit static receiver fallback now wins
+before resolved-static fallback, erased static retargeting prefers
+`resolved.declaring_type` before the lexical current type, and retargeting
+refuses to mint an erased free-helper name unless the chosen owner actually
+declares that static method. The owner/method helper-name boundary is now
+unambiguous (`__erased_static_{owner}__{method}`), so `Node.xY` and `NodeX.y`
+no longer collapse onto one `node_x_y` helper. Regressions:
+`cargo test --release --test idiom_gaps erased_source_static`.
 
 Found while verifying [0048](0048-erased-static-trait-body-is-rewritten-by-substring.md);
 it is a different subsystem (call planning, not text rewriting) and is filed

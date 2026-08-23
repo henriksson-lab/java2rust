@@ -272,6 +272,35 @@ public class ModeledPrimary {
 }
 
 #[test]
+fn count_invalid_patterns_cli_uses_registry_counter() {
+    let dir = unique_temp_dir("count_invalid_patterns_cli");
+    let rust_path = dir.join("generated.rs");
+    fs::write(
+        &rust_path,
+        r#"
+pub fn bad() {
+    compile_error!("unsupported Java expression: lambda");
+    let literal = "compile_error!";
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_new-java2rust"))
+        .arg("count-invalid-patterns")
+        .arg(&rust_path)
+        .output()
+        .expect("run count-invalid-patterns");
+    assert!(
+        output.status.success(),
+        "count-invalid-patterns failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "1");
+}
+
+#[test]
 fn translate_batch_cli_writes_phase_and_worker_events() {
     let dir = unique_temp_dir("translate_batch_events");
     let source_dir = dir.join("java");
@@ -742,6 +771,10 @@ public class Broken {
         r#"#!/usr/bin/env bash
 set -u
 set -o pipefail
+if [[ "${1:-}" == "count-invalid-patterns" ]]; then
+  printf '0\n'
+  exit 0
+fi
 printf 'Warning unsupported_member: static initializer\n' >&2
 printf 'pub struct Broken {\n'
 "#,
@@ -784,6 +817,138 @@ printf 'pub struct Broken {\n'
     assert!(
         parse_failures.contains("this file contains an unclosed delimiter"),
         "{parse_failures}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn focused_package_missing_idiom_sweep_signal_fails_summary() {
+    let dir = unique_temp_dir("focused_missing_idiom_signal");
+    let primary = dir.join("java");
+    let out = dir.join("out");
+    fs::create_dir_all(&primary).unwrap();
+    fs::write(
+        primary.join("Clean.java"),
+        r#"
+public class Clean {
+    public int value() {
+        return 1;
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let fake_translator = dir.join("fake-translator.sh");
+    fs::write(
+        &fake_translator,
+        r#"#!/usr/bin/env bash
+set -u
+set -o pipefail
+if [[ "${1:-}" == "count-invalid-patterns" ]]; then
+  printf '0\n'
+  exit 0
+fi
+printf 'pub struct Clean;\n'
+"#,
+    )
+    .unwrap();
+    let mut translator_permissions = fs::metadata(&fake_translator).unwrap().permissions();
+    translator_permissions.set_mode(0o755);
+    fs::set_permissions(&fake_translator, translator_permissions).unwrap();
+
+    let real_python = Command::new("which")
+        .arg("python3")
+        .output()
+        .expect("locate python3");
+    assert!(
+        real_python.status.success(),
+        "python3 is required for focused wrapper test"
+    );
+    let real_python = String::from_utf8(real_python.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let fake_bin = dir.join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_python = fake_bin.join("python3");
+    fs::write(
+        &fake_python,
+        format!(
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${{1:-}}" == *"/scripts/sweep-generated-idioms.py" ]]; then
+  out_tsv=""
+  out_md=""
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      --out-tsv)
+        out_tsv="$2"
+        shift 2
+        ;;
+      --out-md)
+        out_md="$2"
+        shift 2
+        ;;
+      *)
+        shift
+        ;;
+    esac
+  done
+  printf 'signal\tcount\tfiles\n' > "$out_tsv"
+  printf 'unsupported_statements\t0\t0\n' >> "$out_tsv"
+  printf 'unsupported_members\t0\t0\n' >> "$out_tsv"
+  printf 'unsupported_expressions\t0\t0\n' >> "$out_tsv"
+  printf 'unmodelled_types\t0\t0\n' >> "$out_tsv"
+  printf 'unmodelled_call_sites\t0\t0\n' >> "$out_tsv"
+  printf 'noop_facade_methods\t0\t0\n' >> "$out_tsv"
+  printf 'noop_facade_call_sites\t0\t0\n' >> "$out_tsv"
+  printf 'unmodelled_upcast_conversions\t0\t0\n' >> "$out_tsv"
+  printf '# fake sweep\n' > "$out_md"
+  exit 0
+fi
+exec "{}" "$@"
+"#,
+            real_python
+        ),
+    )
+    .unwrap();
+    let mut python_permissions = fs::metadata(&fake_python).unwrap().permissions();
+    python_permissions.set_mode(0o755);
+    fs::set_permissions(&fake_python, python_permissions).unwrap();
+
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/translate-focused-package.sh");
+    let output = Command::new(&script)
+        .arg("--skip-resolver-bench")
+        .arg("--no-batch-translate")
+        .arg("--jobs")
+        .arg("1")
+        .arg("--primary")
+        .arg(&primary)
+        .arg("--out")
+        .arg(&out)
+        .env("NEW_JAVA2RUST_BIN", &fake_translator)
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                fake_bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .output()
+        .expect("run focused package wrapper");
+    assert!(
+        !output.status.success(),
+        "focused wrapper should fail when the idiom sweep omits a required signal\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("missing idiom signal: stubbed_constants"),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 

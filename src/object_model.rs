@@ -1121,6 +1121,13 @@ fn add_direct_subtype_to_strategy(
         .any(|existing| existing == subtype_name)
     {
         strategy.direct_subtypes.push(subtype_name.to_string());
+        refresh_closed_enum_strategy_variants(strategy);
+    }
+}
+
+fn refresh_closed_enum_strategy_variants(strategy: &mut ObjectStrategyPlan) {
+    if let ObjectRepresentation::ClosedEnum { variants, .. } = &mut strategy.strategy {
+        *variants = closed_enum_variant_names_for_subtypes(&strategy.direct_subtypes);
     }
 }
 
@@ -1773,7 +1780,7 @@ fn closed_enum_inference_policy_with_effective_facts_and_requirements(
     }
 }
 
-fn closed_enum_variant_names_for_subtypes(subtypes: &[String]) -> Vec<String> {
+pub(crate) fn closed_enum_variant_names_for_subtypes(subtypes: &[String]) -> Vec<String> {
     subtypes
         .iter()
         .map(|subtype| crate::slot_render::rust_name_for_java_named_type(subtype))

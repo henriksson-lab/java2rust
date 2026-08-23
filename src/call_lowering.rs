@@ -41,7 +41,8 @@ use crate::coercion::{
     string_hash_code_projection, string_index_of_projection, string_join_collection_projection,
     string_join_varargs_projection, string_last_index_of_projection, string_matches_projection,
     string_replace_all_projection, string_replace_first_projection, string_split_projection,
-    string_substring_projection, string_to_char_array_projection, system_exit_projection,
+    string_substring_projection, string_to_char_array_projection,
+    strip_redundant_java_null_expect_after_unwrap, system_exit_projection,
     thread_sleep_millis_projection,
 };
 use crate::facts::FactSet;
@@ -49,7 +50,7 @@ use crate::facts::ReceiverAbi;
 use crate::java_ir::{Expr, JavaType, LambdaBody, PrimitiveType};
 use crate::output_markers::noop_facade_method_call_site_marker;
 use crate::representation::RepresentationPlan;
-use crate::rust_ir::RustExpr;
+use crate::rust_ir::{RustExpr, RustType};
 use crate::shape_projection::shape_is_erased_object_boundary;
 use crate::slot_render::rust_type_for_slot_with_facts;
 use crate::stream_lowering::{StreamLambdaValue, emit_stream_lambda_body_expr};
@@ -150,12 +151,16 @@ pub fn apply_call_target(
             arg_count,
             ..
         } => {
-            let lowered = apply_external_facade_receiver_call(
-                lowered_receiver.expect("external facade target must provide receiver"),
-                rust_path,
-                *receiver_abi,
-                args,
-            );
+            let lowered = if *receiver_abi == ReceiverAbi::AssociatedFunction {
+                function_call_projection(external_facade_rust_path_projection(rust_path), args)
+            } else {
+                apply_external_facade_receiver_call(
+                    lowered_receiver.expect("external facade target must provide receiver"),
+                    rust_path,
+                    *receiver_abi,
+                    args,
+                )
+            };
             if *noop_facade_method_call {
                 mark_noop_facade_method_call_site(lowered, receiver_type, method_name, *arg_count)
             } else {
@@ -246,7 +251,9 @@ fn apply_native_java_instance_method(
     args: Vec<RustExpr>,
 ) -> RustExpr {
     match method {
-        NativeJavaInstanceMethod::StringLen => len_i32_projection(receiver),
+        NativeJavaInstanceMethod::StringLen => {
+            len_i32_projection(strip_redundant_java_null_expect_after_unwrap(receiver))
+        }
         NativeJavaInstanceMethod::StringIsEmpty => {
             receiver_method_call_projection(receiver, "is_empty", args)
         }
@@ -877,8 +884,13 @@ fn apply_native_collection_method(
     args: Vec<RustExpr>,
 ) -> RustExpr {
     if matches!(method, NativeCollectionMethod::Len) {
-        return len_i32_projection(receiver);
+        return len_i32_projection(strip_redundant_java_null_expect_after_unwrap(receiver));
     }
+    let receiver = if matches!(method, NativeCollectionMethod::IsEmpty) {
+        strip_redundant_java_null_expect_after_unwrap(receiver)
+    } else {
+        receiver
+    };
     if matches!(method, NativeCollectionMethod::MapKeys) {
         return owned_map_keys_vec_projection(receiver);
     }
@@ -937,9 +949,15 @@ pub fn apply_native_collection_extend(receiver: RustExpr, arg: RustExpr) -> Rust
 
 pub fn apply_class_literal_token(ty: &JavaType, facts: &FactSet) -> RustExpr {
     let plan = crate::stdlib::class_literal_token_plan(ty, facts);
+    apply_class_literal_token_with_rust_type(ty, plan.rust_type)
+}
+
+pub fn apply_class_literal_token_with_rust_type(ty: &JavaType, rust_type: RustType) -> RustExpr {
     function_call_projection(
-        java_class_literal_path_projection(plan.rust_type),
-        vec![rust_string_literal_projection(&plan.java_name)],
+        java_class_literal_path_projection(rust_type),
+        vec![rust_string_literal_projection(
+            &crate::stdlib::class_literal_java_name(ty),
+        )],
     )
 }
 

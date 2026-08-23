@@ -1,9 +1,12 @@
 # 0052 — The example corpora are asserted on, never compiled, and almost never run
 
 Recorded 2026-08-21.
-Status: **measured** — every number below is reproduced by a command in this file.
-Severity: **high** — 58 of 189 checked-in Java fixtures translate to Rust that does
-not compile, and 57 of those 58 are invisible to every metric the project has.
+Status: **partially fixed** — the corpus compile visibility gap is now covered by
+`tests/corpus_compile.rs`; behavioural coverage and per-assertion compile
+discipline remain open.
+Severity: **high** — 14 of 189 checked-in Java fixtures in the current dirty tree
+translate to Rust that does not compile, and most of those failures are invisible
+to the old summary metric.
 Kind: measurement / coverage.
 
 Extends [0018](done/0018-the-compile-error-metric-cannot-see-silent-failures.md)
@@ -18,10 +21,24 @@ corpora themselves* — the Java files the whole project is organised around.
 ## Symptom
 
 `examples/java` (67 files) and `examples/idiom-gaps` (122 files) are the
-project's curated inputs. 918 tests assert on the Rust rendered from them and
+project's curated inputs. 921 tests assert on the Rust rendered from them and
 from inline sources. **Nothing compiles the corpora.** Doing so once, by hand,
-finds 58 files whose output `rustc` rejects — including two that produce Rust
-that does not even *parse*.
+originally found 58 files whose output `rustc` rejects — including two that
+produce Rust that does not even *parse*. Follow-up fixes reduced that baseline
+to 20 files; a later corpus guard run surfaced eight stale baseline deltas in
+the dirty tree. Follow-up fixes brought the checked baseline to 24 files, and
+return-slot structural-form fixes reduced it to 20 files. A follow-up optional
+method-receiver equality fix reduced it to 19 files by making
+`InstanceofGuardNarrowsCast` compile. External public-field facts for the
+comparator fixture then reduced it to 18 files by making
+`ComparatorInterface` compile. Callable-return inference for raw `submit(Callable)`
+callbacks then reduced it to 17 files by making `ExecutorSubmitBlockLambda`
+compile. Raw collection erasure for `List.add` / `List.get` then reduced it to
+16 files by making `RawTypes` compile. Fallback static-final external field
+surfaces then reduced it to 15 files by making
+`ExternalFieldThrowingCallInTry` compile without injected facts. Java NIO `Files`
+static support plus mutable-byte-buffer reborrowing then reduced it to 14 files
+by making `TryWithResourcesCopy` compile.
 
 ### Reproduction
 
@@ -36,13 +53,13 @@ done
 
 | corpus | files | compile | do **not** compile |
 |---|---:|---:|---:|
-| `examples/java` | 67 | 49 | **18** |
-| `examples/idiom-gaps` | 122 | 82 | **40** |
-| total | 189 | 131 | **58** |
+| `examples/java` | 67 | 58 | **9** |
+| `examples/idiom-gaps` | 122 | 117 | **5** |
+| total | 189 | 175 | **14** |
 
-Only one of the 58 is a harness artefact: `ArrayInitializers` needs the
+Only one of the 15 is a harness artefact: `ArrayInitializers` needs the
 `ndarray` crate, the limitation `tests/differential/ObjectArray2D.java` already
-records. The other 57 are translator output that `rustc` rejects on its own
+records. The other 14 are translator output that `rustc` rejects on its own
 terms — no unlinked crates, checked by `grep -l 'unlinked crate' *.err`.
 
 ---
@@ -51,108 +68,182 @@ terms — no unlinked crates, checked by `grep -l 'unlinked crate' *.err`.
 
 `count_invalid_patterns` (`src/output_markers.rs:236`) is the signal that is
 supposed to mean *"the translator produced something it cannot stand behind"*.
-Across the 58 failures it fires **three times**:
+Across the 15 failures it fires **four times**:
 
 | corpus | non-compiling | of which emit `compile_error!` |
 |---|---:|---:|
-| `examples/java` | 18 | **1** (`LocalClassCapture`) |
-| `examples/idiom-gaps` | 40 | **2** (`SuperConstructorState`, `UnresolvedConstructorDelegation`) |
+| `examples/java` | 9 | **2** (`LocalClassCapture`, `NullOverloadAmbiguity`) |
+| `examples/idiom-gaps` | 6 | **2** (`SuperConstructorState`, `UnresolvedConstructorDelegation`) |
 
-So 55 of 58 files are scored as clean translations. This is exactly 0018's
+So 10 of 14 files are scored as clean translations. This is exactly 0018's
 thesis, now with a corpus-sized number attached: a file can be *rejected by the
 Rust compiler* and still contribute zero to every counter in `summary.tsv`.
 
 `unimplemented!` is present in many of them (24 occurrences in
-`TryWithResources`, 18 in `NullOverloadAmbiguity`), but it is a *stub* marker
-counted separately and it is never at the site of the error — `NullOverloadAmbiguity`
-fails on `cannot find function 'pick' in this scope`, which no stub explains.
+`TryWithResources`), but it is a *stub* marker counted separately and it is
+never at the site of the error.
 
 ---
 
-## Verified backlog A — `examples/java`, 18 files
+## Verified backlog A — `examples/java`, 9 files
 
 Work queue. Error code is the first `rustc` diagnostic; `refs` is how many test
 files mention the fixture path at all.
 
 | fixture | first error | refs |
 |---|---|---:|
-| `03-methods/NullOverloadAmbiguity.java` | `E0425` cannot find function `pick` | 0 |
+| `03-methods/NullOverloadAmbiguity.java` | `compile_error!` ambiguous null overload | 1 |
 | `04-objects/AnonymousInterface.java` | `E0782` expected a type, found a trait | 3 |
 | `04-objects/DynTraitMethodCompatibility.java` | `E0038`/`E0782`, 27 errors | 1 |
-| `04-objects/EnumConstantsWithFields.java` | `E0592` duplicate definitions `id` | 0 |
 | `04-objects/LocalClassCapture.java` | `compile_error!` local type declaration | 2 |
 | `05-types/ArrayInitializers.java` | `E0433` unlinked crate `ndarray` *(harness)* | 0 |
-| `05-types/RawTypes.java` | `E0308` | 0 |
 | `05-types/WildcardBounds.java` | `E0599` `int_value` on `&Box<dyn Any>` | 1 |
-| `06-stdlib/CheckedPropagation.java` | `E0599` `expect` on `&String` | 0 |
-| `06-stdlib/CollectionCapacityConstructor.java` | `E0599` `expect` on `&Vec<String>` | 1 |
-| `06-stdlib/ExternalStringConstantArgument.java` | `E0515` returns value referencing param | 1 |
-| `06-stdlib/ImportedStaticUtilityOwner.java` | `E0599` `read_value` on `ExternalUtility` | 1 |
-| `06-stdlib/StaticOwnerShadowing.java` | `E0308` `return Vec::new()` from `-> i32` | 0 |
 | `06-stdlib/StreamFlatMapBlockPipeline.java` | `E0282`/`E0599` `trim` on `Vec<String>` | 1 |
-| `06-stdlib/StreamFlatMapLambda.java` | `E0308` | 1 |
-| `06-stdlib/StreamFlatMapProjection.java` | `E0271`/`E0599` | 1 |
 | `06-stdlib/TryCatchFinally.java` | `E0308` | 1 |
 | `06-stdlib/TryWithResources.java` | `E0433` undeclared type `JavaNioFileFiles` | 1 |
 
-Three are worth reading in full because the emitted Rust is not subtly wrong,
+Two are worth reading in full because the emitted Rust is not subtly wrong,
 it is nonsense:
 
 ```rust
-// StaticOwnerShadowing.rs:1814
-pub fn count(&self) -> i32 {
-    return Vec::new();
-}
-
-// CollectionCapacityConstructor.rs:1789 — .expect() applied after .unwrap()
-let headers: Vec<String> =
-    Vec::with_capacity((self.names.as_ref().unwrap().expect("Java null receiver").len() as i32) as usize);
-
 // TryWithResources.rs:3260 — a facade type that is never emitted
 let reader: Box<dyn std::any::Any> = (Box::new(JavaNioFileFiles::new_buffered_reader(&path)…
 ```
 
-**Six of the 18 are referenced by no test whatsoever** (`refs=0`). They exist
+**Four of the 9 are referenced by no test whatsoever** (`refs=0`). They exist
 only to be counted by `all_java_fixtures_are_loadable`, which asserts
 `fixtures.len() == 65` and currently *fails* because there are 67 — the count
 was never updated when two files were added
 (`tests/fixtures.rs:16`, `left: 67  right: 65`).
 
-More generally, **25 of the 67 `examples/java` files are referenced by no test**:
+More generally, **21 of the 67 `examples/java` files are referenced by no test**:
 `MixedNumericArithmetic`, `NumericPromotion`, `StringConcat`, `ForOmittedParts`,
 `LabeledBreak`, `LabeledContinueForUpdate`, `NamingPolicy`, `NullOverloadAmbiguity`,
 `Varargs`, `VarargsCalls`, `AliasingSharedMutation`, `ConstructorExpressions`,
-`EnumConstantsWithFields`, `FieldWriteReceiverMutation`, `StaticFinalFields`,
-`ArrayInitializers`, `ArraysAndVarMutation`, `GenericsAndWildcards`, `RawTypes`,
-`CheckedException`, `CheckedPropagation`, `OptionalAndObjects`,
-`StaticOwnerShadowing`, `StringFormatAndThrow`, `SynchronizedBlock`.
+`FieldWriteReceiverMutation`, `StaticFinalFields`,
+`ArrayInitializers`, `ArraysAndVarMutation`, `GenericsAndWildcards`,
+`CheckedException`, `OptionalAndObjects`,
+`StringFormatAndThrow`, `SynchronizedBlock`.
 
 ---
 
-## Verified backlog B — `examples/idiom-gaps`, 40 files
+## Verified backlog B — `examples/idiom-gaps`, 5 files
 
-Only **18 of the 122** idiom-gaps fixtures are reached by any test that compiles
-its output. `tests/idiom_gaps.rs` has 328 compile-checked tests, but they check
-*inline* Java sources: of the 694 tests that assert on `translation.rust`,
-571 use inline source (317 compile-checked) and **123 use a fixture file, of
-which 11 compile-checked**.
+Only **43 of the 122** idiom-gaps fixtures are reached by any test that compiles
+its output. `tests/idiom_gaps.rs` has 351 compile-checked tests, but they check
+mostly *inline* Java sources: of the 696 tests that assert on `translation.rust`,
+571 use inline source (317 compile-checked) and **124 use a fixture file, of
+which 34 compile-checked**.
 
-So **38 of the 40 non-compiling fixtures are unreached by any compile check**:
+So **4 of the 5 non-compiling fixtures are unreached by any compile check**:
 
 | error | fixtures |
 |---|---|
-| unparseable Rust | `SparkRddVariantPipeline`, `StreamCallbackChain` |
-| `E0308` mismatched types (18) | `BooleanGetterDispatchCoercion`, `ByteArrayGetterDispatchCoercion`, `ClassLiteralToken`, `ExceptionBaseCatchCoversSubclass`, `ExceptionRuntimeCheckedHierarchy`, `ExceptionSubclassCatchOrder`, `ExecutorSubmitBlockLambda`, `ExternalGetterReadOnly`, `ExternalGetterSetterMutability`, `ExternalIndexedAccessors`, `FfiNativeHandoverCall`, `JalignerFallthroughTryCatch`, `MapForEachBlockLambda`, `PrimitiveGetterDispatchCoercion`, `TypedFeatureReaderHeaderCast`, `TypedGetterAvoidsDowncast`, `WhileAssignmentNotNull`, `WhileAssignmentNullVariants` |
-| `E0599` no method (5) | `ExternalFluentMutation`, `IndexedStringArrayOwnership`, `MapEntrySetFirstKeyFromNullableField`, `NullableTrimEqualsOriginal`, `OptionalArgumentWrapReuse` |
-| `E0433` undeclared type (3) | `ExternalFieldThrowingCallInTry`, `TryWithResourcesCopy`, `TryWithResourcesReturn` |
-| `E0592` duplicate definitions (2) | `EqualsAndObjects`, `NullableEqualsComparison` — this is [0009](0009-overload-identity-collapses-onto-rust-name.md) |
-| other singles (8) | `ArraySetterOwnedStorage` `E0507`, `ClassLiteralRegistration` `E0412`, `ComparatorInterface` `E0609`, `FallbackStaticMutBorrowArgument` `E0282`, `JalignerTryCatchFinallyCleanup` `E0277`, `MapForEachTryCatchLambda` `E0596`, `UnresolvedSetReturnAddAll` `E0425`, `SuperConstructorState` (`compile_error!`) |
+| `E0599` no method (2) | `SparkRddVariantPipeline`, `StreamCallbackChain` |
+| `E0277`/`E0308` try-with-resources uncaught-result wrapping (1) | `TryWithResourcesReturn` |
+| `compile_error!` diagnostics (2) | `SuperConstructorState`, `UnresolvedConstructorDelegation` |
 
-Four fixtures are referenced by nothing at all: `ExternalGetterReadOnly`,
-`NonNullFieldViaHelper`, `PackagePrivateGetterSetterInlining`,
-`ToArrayEmptyStringArray`.
+Three fixtures are referenced by nothing at all: `NonNullFieldViaHelper`,
+`PackagePrivateGetterSetterInlining`, `ToArrayEmptyStringArray`.
 
-### The sharpest instance: a facade method named `1`
+### Fixed sharp edge: optional array field read into owned setter parameter
+
+`ArraySetterOwnedStorage.copy` passed `source.letters` into a setter whose
+signature wants owned `Vec<char>`. The old lowering unwrapped the `Option` by
+value (`source.letters.expect(...)`), which tried to move a field out of the
+borrowed source object and failed with `E0507`. A 2026-08-23 follow-up now
+treats optional field reads feeding owned array parameters as borrowed carrier
+reads, emitting `as_ref().cloned()` before the Java-null check. The fixture is
+compile-checked in `tests/idiom_gaps.rs`.
+
+### Fixed sharp edge: imported static side-effect fallback returns generic `R`
+
+`FallbackStaticMutBorrowArgument` calls an unresolved imported static
+`ExternalApi.fill(config)` as a statement. The fallback facade used to render
+`pub fn fill<R, T0>(_arg0: T0) -> R`, leaving `R` unconstrained at the call site
+and failing with `E0282`. A 2026-08-23 follow-up classifies `fill` with the
+other side-effect-style imported static names, so the no-facts corpus path now
+renders a unit-returning stub and compiles. The existing argument-effect test
+also asserts the more precise `&mut MutableConfig` unit-returning facade when an
+explicit mutating argument fact is supplied.
+
+### Fixed sharp edge: fallible nullable assignment into erased optional local
+
+`JalignerTryCatchFinallyCleanup` assigned `resource.read()` into a nullable
+`String` local inside a `try` block. The local currently lowers through an
+erased optional carrier, and the conversion pipeline lost the fact that `?` had
+already been applied while wrapping the value as `Some(Box<dyn Any>)`. That
+emitted `Some(...) ?` inside a `Result` closure and failed with `E0277`. A
+2026-08-23 follow-up preserves the `ResultPropagated` shape through structured
+`Some` and `Box::new(... as dyn Any)` wrappers, so the generated assignment is
+`sequence = Some(Box::new(resource.read()?) as Box<dyn std::any::Any>);`.
+The same shape fix also made `JalignerFallthroughTryCatch` compile. Both
+fixtures have generated-crate checks.
+
+### Fixed sharp edge: captured collection mutation inside `forEach`
+
+`MapForEachTryCatchLambda` lowered `Map.forEach` to a loop, but signature
+planning did not look through lambda bodies when deciding whether a method
+parameter binding needed `mut`. The generated body inserted into `dest`, while
+the generated parameter was immutable:
+
+```rust
+pub fn copy(&self, futures: &HashMap<String, Future>, dest: HashMap<String, Rc<Item>>) -> Result<(), JavaException> {
+    // ...
+    dest.insert(name.clone(), item);
+}
+```
+
+That failed with `E0596`. A 2026-08-23 follow-up makes the signature mutation
+walk recurse into lambda bodies, excludes lambda parameters from the captured
+mutation set, and reuses the native collection mutator table for calls such as
+`put`, `add`, and `addAll`. The generated `copy` parameter is now `mut dest`,
+and the fixture compiles directly.
+
+### Fixed sharp edge: unresolved collection source calls in `addAll`
+
+`UnresolvedSetReturnAddAll` used the argument slot from `Set.addAll`, but still
+rendered an unresolved receiverless source call as a Rust free function:
+
+```rust
+self.names.as_mut().unwrap().extend(default_names());
+```
+
+Because the Java fixture has no `defaultNames` declaration, the generated Rust
+failed with `E0425`. A 2026-08-23 follow-up keeps the target collection shape
+but renders an unresolved collection-producing call as a typed empty fallback
+with an audit marker:
+
+```rust
+self.names.as_mut().unwrap().extend(
+    <std::collections::HashSet<String> as Default>::default()
+    /* TODO(translation): unresolved Java collection source call defaultNames */
+);
+```
+
+The fixture now compiles directly and has a fixture-backed generated-crate check.
+
+### Fixed sharp edge: unresolved class literal token types
+
+`ClassLiteralRegistration` compiled Java code that referenced
+`RegisteredType.class` without declaring `RegisteredType` in the fixture. The
+lowering kept the Java class name but used it as the Rust token type:
+
+```rust
+kryo.register_1(JavaClass::<RegisteredType>::literal("RegisteredType"));
+```
+
+That made the output fail with `E0412`. A 2026-08-23 follow-up keeps concrete
+source class literals typed, but renders unresolved named literals as
+`JavaClass<()>` while preserving the runtime Java name:
+
+```rust
+kryo.register_1(JavaClass::<()>::literal("RegisteredType"));
+```
+
+The fixture now compiles directly and has a fixture-backed generated-crate check.
+
+### Fixed sharp edge: a facade method named `1`
 
 `Tuple2::_1` / `Tuple2::_2` (Spark) lose their leading underscore when the
 facade **definition** is synthesised, while the **call site** keeps it:
@@ -170,17 +261,19 @@ impl Tuple2 {
 return sorted.map(|value: Tuple2| value._1());
 ```
 
-`pub fn 1` is not valid Rust, so **the entire file fails to parse** — which per
-0018 means the file reports *zero type errors* in a corpus run, the strongest
-form of the erasure-rewards-the-metric problem.
+`pub fn 1` is not valid Rust, so **the entire file failed to parse** — which per
+0018 meant the file reported *zero type errors* in a corpus run, the strongest
+form of the erasure-rewards-the-metric problem. A 2026-08-23 follow-up now
+normalizes digit-leading facade aliases to `_1` / `_1_1` style Rust identifiers.
+Both fixtures still fail later type checks, but they no longer poison the corpus
+measurement as parse failures.
 
-Two tests cover these fixtures and both pass:
+Two tests cover these fixtures:
 `corpus_spark_rdd_pipeline_keeps_stream_lowering_at_noop_spark_boundary`
 (`tests/idiom_gaps.rs:15300`) asserts `value._1()`, and
 `documents_stream_callback_chain_gap` (`tests/idiom_gaps.rs:13414`) asserts
-`value._2()`. Both assert the **call site**, which is correct. Neither can see
-the **definition**, which is not. A string assertion checks one side of a
-two-sided contract; only the compiler checks that the two agree.
+`value._2()`. They now also assert that the generated facade does not contain
+digit-leading method definitions.
 
 ---
 
@@ -192,24 +285,24 @@ Counted by scanning each `#[test]` block for `.rust` and for
 
 | suite | tests | assert on `translation.rust` | compile it | **unchecked** |
 |---|---:|---:|---:|---:|
-| `tests/idiom_gaps.rs` | 765 | 694 | 328 | **366** |
+| `tests/idiom_gaps.rs` | 767 | 696 | 349 | **347** |
 | `tests/slot_shape_design.rs` | 604 | 160 | 104 | **56** |
-| `tests/fixtures.rs` | 51 | 39 | **0** | **39** |
+| `tests/fixtures.rs` | 54 | 42 | **4** | **38** |
 | `tests/semantic_facts.rs` | 170 | 11 | 0 | 11 |
 | `tests/output_markers.rs` | 23 | 8 | 0 | 8 |
 | `tests/batch_translation.rs` | 11 | 3 | 0 | 3 |
 | `tests/external_packs.rs` | 167 | 2 | 0 | 2 |
 | `tests/idiom_sweep_script.rs` | 48 | 1 | 0 | 1 |
-| **total** | | **918** | **432** | **486** |
+| **total** | | **923** | **456** | **467** |
 
 The remaining nine suites (`dependency_mode`, `resolve_calls`, `type_coercion`,
 `object_model`, `parser_gaps`, `parser_tree_sitter`, `capture_facts`,
 `effective_facts`, `differential`) assert on facts/IR, not on rendered Rust, and
 are correctly out of scope here.
 
-`tests/fixtures.rs` is 0041's finding repeated verbatim one suite over: **39
-tests assert on rendered Rust and zero of them compile it**, and it is the suite
-that owns `examples/java` — the corpus with 18 non-compiling files.
+`tests/fixtures.rs` is 0041's finding repeated one suite over: **38
+tests assert on rendered Rust and only four of them compile it**, and it is the
+suite that owns `examples/java` — the corpus with 9 non-compiling files.
 
 ### The backlog 0041 opened is growing, silently
 
@@ -335,26 +428,151 @@ Three separate decisions, each locally reasonable:
 
 ---
 
+## Codex update — 2026-08-23
+
+Implemented the first direction item:
+
+- Added `tests/corpus_compile.rs::checked_in_example_corpora_have_named_compile_failures`.
+  It translates every checked-in Java fixture under `examples/java` and
+  `examples/idiom-gaps`, runs `rustc --crate-type lib --emit=metadata` on each
+  generated file, and compares the failing fixture names against
+  `tests/baselines/corpus-compile-failures.txt`.
+- The sweep is bounded by the existing test watchdog and parallelized with a
+  conservative default of four workers. Override with
+  `NEW_JAVA2RUST_CORPUS_COMPILE_JOBS`.
+- HEAD then had **59** named corpus compile failures. Claude's measured 58 were
+  still valid as a shape, but the tree also failed
+  `idiom-gaps/MethodReferenceFlatMap.java`.
+- Fixed the stale `all_java_fixtures_are_loadable` count from 65 to the current
+  67 files.
+
+Still open from this audit:
+
+- The corpus compile failures are now visible but not all fixed. A 2026-08-23
+  follow-up fixed borrowed stream terminal collection for flat-map pipelines,
+  removing `idiom-gaps/MethodReferenceFlatMap.java` and
+  `java/06-stdlib/StreamFlatMapLambda.java`. A second pass fixed owned
+  flat-map projection shape, removing
+  `java/06-stdlib/StreamFlatMapProjection.java`. A third pass fixed source
+  static owners shadowing JDK facade owners, removing
+  `java/06-stdlib/StaticOwnerShadowing.java`. A fourth pass fixed redundant
+  Java-null receiver projection after optional collection `unwrap()` in native
+  capacity arguments, removing
+  `java/06-stdlib/CollectionCapacityConstructor.java`. A fifth pass applied the
+  same normalization to required borrowed string views after fallible optional
+  reads, removing `java/06-stdlib/CheckedPropagation.java`; the same projection
+  fix also removed `idiom-gaps/IndexedStringArrayOwnership.java`,
+  `idiom-gaps/NullableTrimEqualsOriginal.java`, and
+  `idiom-gaps/OptionalArgumentWrapReuse.java`. A sixth pass fixed imported
+  static-owner support where the fully qualified facade owns the associated
+  function while the simple instantiated facade needs an instance-compatible
+  wrapper, removing `java/06-stdlib/ImportedStaticUtilityOwner.java`. A seventh
+  pass made string return signatures respect the merged owner/view constraint
+  result instead of raw rejected borrowed constraints, removing
+  `java/06-stdlib/ExternalStringConstantArgument.java`. An eighth pass skipped
+  source enum methods that duplicate generated constructor-payload accessors,
+  removing `java/04-objects/EnumConstantsWithFields.java`. A ninth pass made
+  effect-backed external getter facades reuse known direct return types for
+  audited primitive and primitive-array getters, removing
+  `idiom-gaps/BooleanGetterDispatchCoercion.java`,
+  `idiom-gaps/ByteArrayGetterDispatchCoercion.java`,
+  `idiom-gaps/ExternalGetterReadOnly.java`,
+  `idiom-gaps/ExternalGetterSetterMutability.java`, and
+  `idiom-gaps/PrimitiveGetterDispatchCoercion.java`. A tenth pass recursively
+  stripped redundant Java-null receiver `expect` calls after optional
+  `unwrap()` inside map-entry iteration receivers, removing
+  `idiom-gaps/MapEntrySetFirstKeyFromNullableField.java`. An eleventh pass
+  seeded self-returning fluent facts for chained external calls whose expression
+  shape or declared return type proves that the external receiver is returned,
+  removing `idiom-gaps/ExternalFluentMutation.java`. A twelfth pass fixed
+  digit-leading external facade aliases for Scala tuple accessors, changing
+  `SparkRddVariantPipeline.java` and `StreamCallbackChain.java` from parse
+  failures into ordinary type-check failures. Later focused fixes, including
+  optional array field reads into owned setter parameters, imported static
+  side-effect fallback stubs, fallible nullable assignment into erased
+  optional locals, and duplicate static/instance `Objects.equals` facade
+  pruning, reduced the known corpus compile baseline to **30** failures. A
+  subsequent pass lowered class literals as erased `JavaClass<()>` tokens when
+  returning into `Class<?>` slots or comparing against `getClass()`, removing
+  `idiom-gaps/ClassLiteralToken.java` and reducing the baseline to **29**
+  failures. Another pass made expected assignment/variable types seed guessed
+  external call return surfaces and allowed known external `String` returns to
+  replace opaque placeholders, removing `idiom-gaps/TypedGetterAvoidsDowncast.java`
+  and `idiom-gaps/ExternalIndexedAccessors.java`; the baseline is now **27**
+  failures. The same target-type seeding now also applies to return expressions
+  for unknown external calls, removing
+  `idiom-gaps/ExceptionBaseCatchCoversSubclass.java`,
+  `idiom-gaps/ExceptionSubclassCatchOrder.java`, and
+  `idiom-gaps/ExceptionRuntimeCheckedHierarchy.java`; the baseline is now
+  **24** failures. A later narrow return-slot fix wraps `return this` values
+  when the same-type return slot is shared, removing
+  `idiom-gaps/MapForEachBlockLambda.java`; the baseline is now **23**
+  failures. A subsequent pass let declared local/assignment target types seed
+  named external call return surfaces, propagated expected primitive types
+  through arithmetic, and marked null-compared assignment calls as nullable,
+  removing `idiom-gaps/FfiNativeHandoverCall.java`,
+  `idiom-gaps/WhileAssignmentNotNull.java`, and
+  `idiom-gaps/WhileAssignmentNullVariants.java`; the baseline is now **20**
+  failures. A later return-slot ABI alignment made source method bodies lower
+  against the same erased external return boundary emitted in the signature,
+  removing `idiom-gaps/TypedFeatureReaderHeaderCast.java`; the same corpus guard
+  run exposed eight stale baseline deltas already present in the dirty tree, so
+  the checked baseline moved back to **24** named failures after the source
+  static-owner fix for `java/06-stdlib/StaticOwnerShadowing.java` and primitive
+  stream-sum lowering for `java/06-stdlib/StreamsUse.java` and
+  `java/06-stdlib/StreamCapturesLocal.java`. A subsequent pass made
+  return-slot external-call adaptation decline recognized stream expressions,
+  so `anyMatch` terminals are lowered by the stream planner instead of as raw
+  receiver method calls, removing `java/06-stdlib/StreamsFindMatch.java` and
+  `java/06-stdlib/StreamStringMethodReferences.java`; the checked baseline is
+  now **22** named failures. The same return-slot preemption class also hid the
+  existing map-entry chain lowering behind external-call adaptation; declining
+  recognized map-entry accessors there and normalizing optional receiver
+  projections removed `idiom-gaps/MapEntrySetFirstKeyFromNullableField.java`
+  and `idiom-gaps/MapEntrySetFirstKey.java`. The checked baseline is now
+  **20** named failures. A follow-up made raw `submit(Callable)` parameters lower
+  as generic zero-argument closures and taught callback return inference to see
+  block-local declarations before return expressions, removing
+  `idiom-gaps/ExecutorSubmitBlockLambda.java`. A follow-up made raw `List`
+  arguments use erased-object element slots for `add`, and made raw sequence
+  `get` clone through the erased-object runtime helper before returning an owned
+  erased value, removing `java/05-types/RawTypes.java`. A subsequent pass made
+  inferred fallback static-final external fields emit opaque associated-const
+  surfaces instead of undeclared owner paths or intentional compile errors,
+  removing `idiom-gaps/ExternalFieldThrowingCallInTry.java`. A follow-up added
+  `JavaNioFileFiles` support for static `Files` calls and made one-argument
+  `InputStream.read(byte[])` lowering reborrow mutable byte buffers instead of
+  consuming `&mut [i8]`, removing `idiom-gaps/TryWithResourcesCopy.java`. The
+  checked baseline is now **14** named failures after the comparator,
+  submit-callable, raw collection erasure, fallback static-field, and
+  try-with-resources copy fixes.
+- Many tests still assert on `translation.rust` without local compile checks;
+  the corpus sweep catches checked-in fixtures, not every inline assertion.
+- Behavioural coverage is still thin; differential fixtures for `null`,
+  collections and `throw` remain the highest-value next step.
+- The stale hand-written behaviour harnesses in `tests/fixtures.rs` still need
+  repair or replacement.
+
 ## Direction
 
-Cheapest first; the first item is minutes of work and closes 55 of the 58
-invisible failures.
+Cheapest first; the first item has landed, so the remaining work is shrinking
+the named baseline and closing the still-unchecked rendered-Rust assertions.
 
-1. **One corpus compile test.** A single `#[test]` that translates every file
+1. **Keep the corpus compile test strict.** A single `#[test]` translates every file
    under `examples/` and `rustc --crate-type lib --emit=metadata`s the output,
    with an allow-list checked in at `tests/baselines/corpus-compile-failures.txt`
-   holding today's 58 names. Cost: no cargo, one `rustc` per file, ~2 minutes.
-   Value: the whole of backlogs A and B becomes a named, shrinking list instead
-   of an unknown, and every future fixture is compiled the day it is added.
-   Note this is the *corpus* analogue of what 0041 did per test.
+   holding the current 14 names. Cost: no cargo, one `rustc` per file, ~2
+   minutes. Value: the whole of backlogs A and B stays a named, shrinking list
+   instead of an unknown, and every future fixture is compiled the day it is
+   added. Note this is the *corpus* analogue of what 0041 did per test.
 2. **Make the check non-optional where it is cheap.** A test that mentions
-   `translation.rust` and does not compile it is the 0041 pattern. The 39 in
+   `translation.rust` and does not compile it is the 0041 pattern. The tests in
    `fixtures.rs` are the obvious next batch — they already have the corpus, and
    the fixture-level compile test from (1) subsumes most of them.
-3. **`pub fn 1`.** Fix the facade-name mangling that strips a leading
-   underscore. It is one defect, it makes two files unparseable, and an
-   unparseable file poisons the corpus error count for every other file in the
-   run.
+3. **Continue the Spark tuple fixtures.** `Tuple2::_1` and `_2` now render as
+   valid Rust facade method names. The remaining failures are ordinary Spark
+   receiver/iterator type mismatches, so the corpus sweep can now report useful
+   compiler diagnostics for both files.
 4. **Differential fixtures for `null`, collections and `throw`,** in that order.
    0018 records that the harness found a defect in every batch added to it; the
    three largest untouched areas are the three above, and backlog A's five
@@ -372,7 +590,9 @@ invisible failures.
   compiler-rejected files score as clean.
 - [0041](done/0041-slot-shape-design-had-no-generated-crate-checks.md) — same
   hole, three suites over, plus evidence that its backlog grows without a rule.
-- [0009](0009-overload-identity-collapses-onto-rust-name.md) — `E0592` in
-  `EqualsAndObjects`, `NullableEqualsComparison`, `EnumConstantsWithFields`.
+- [0009](0009-overload-identity-collapses-onto-rust-name.md) — the former
+  `E0592` failures in `EqualsAndObjects` and `NullableEqualsComparison` are now
+  fixed; `EnumConstantsWithFields` remains covered by the original overload
+  identity audit history.
 - [0011](done/0011-dyn-any-fallback-fails-at-every-use.md) — `E0599` on
   `&Box<dyn Any>` in `WildcardBounds`, exactly as predicted.

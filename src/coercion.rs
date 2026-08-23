@@ -1845,6 +1845,9 @@ pub fn receiver_method_call_projection_exact(
     method: &str,
     args: Vec<RustExpr>,
 ) -> RustExpr {
+    if method == "sum" && args.is_empty() && rust_expr_is_i32_iterator_sum(&receiver) {
+        return receiver;
+    }
     RustExpr::MethodCall {
         receiver: Box::new(receiver),
         method: method.to_string(),
@@ -1857,6 +1860,9 @@ pub fn receiver_method_call_projection(
     method: &str,
     args: Vec<RustExpr>,
 ) -> RustExpr {
+    if method == "sum" && args.is_empty() && rust_expr_is_i32_iterator_sum(&receiver) {
+        return receiver;
+    }
     RustExpr::MethodCall {
         receiver: Box::new(receiver),
         method: crate::parser::to_snake_case(method),
@@ -3722,7 +3728,19 @@ pub fn facade_receiver_method_call_projection(
     rust_path: &str,
     args: Vec<RustExpr>,
 ) -> RustExpr {
-    receiver_method_call_projection_exact(receiver, &facade_method_name(rust_path), args)
+    let method_name = facade_method_name(rust_path);
+    if matches!(
+        method_name.as_str(),
+        "java_string_compare_to"
+            | "java_string_compare_to_ignore_case"
+            | "java_string_equals_ignore_case"
+    ) {
+        let mut helper_args = Vec::with_capacity(args.len() + 1);
+        helper_args.push(force_shared_borrow_projection(receiver));
+        helper_args.extend(args);
+        return function_call_projection(RustExpr::path([method_name]), helper_args);
+    }
+    receiver_method_call_projection_exact(receiver, &method_name, args)
 }
 
 pub fn external_facade_rust_path_projection(rust_path: &str) -> RustExpr {
@@ -4184,11 +4202,21 @@ fn zero_arg_method_projection(receiver: RustExpr, method: &str) -> RustExpr {
 }
 
 fn method_call_projection(receiver: RustExpr, method: &str, args: Vec<RustExpr>) -> RustExpr {
+    if method == "sum" && args.is_empty() && rust_expr_is_i32_iterator_sum(&receiver) {
+        return receiver;
+    }
     RustExpr::MethodCall {
         receiver: Box::new(receiver),
         method: method.to_string(),
         args,
     }
+}
+
+fn rust_expr_is_i32_iterator_sum(expr: &RustExpr) -> bool {
+    matches!(
+        expr,
+        RustExpr::MethodCall { method, args, .. } if method == "sum::<i32>" && args.is_empty()
+    )
 }
 
 fn method_expect_projection(expr: RustExpr, message: &str) -> RustExpr {
@@ -4211,6 +4239,54 @@ fn strip_terminal_unwrap_projection(expr: RustExpr) -> RustExpr {
             .strip_suffix(".unwrap()")
             .map(rendered_projection_or_raw_leaf)
             .unwrap_or_else(|| rendered_projection_or_raw_leaf(&raw)),
+        other => other,
+    }
+}
+
+pub fn strip_redundant_java_null_expect_after_unwrap(expr: RustExpr) -> RustExpr {
+    match expr {
+        RustExpr::Shaped {
+            shape,
+            actual,
+            expr,
+        } => RustExpr::Shaped {
+            shape,
+            actual,
+            expr: Box::new(strip_redundant_java_null_expect_after_unwrap(*expr)),
+        },
+        RustExpr::MethodCall {
+            receiver,
+            method,
+            args,
+        } => {
+            let receiver = Box::new(strip_redundant_java_null_expect_after_unwrap(*receiver));
+            let args = args
+                .into_iter()
+                .map(strip_redundant_java_null_expect_after_unwrap)
+                .collect::<Vec<_>>();
+            if method == "expect"
+                && matches!(args.as_slice(), [RustExpr::Literal(message)] if message == "\"Java null receiver\"")
+                && matches!(
+                    receiver.unshaped(),
+                    RustExpr::MethodCall {
+                        method,
+                        args,
+                        ..
+                    } if method == "unwrap" && args.is_empty()
+                )
+            {
+                *receiver
+            } else {
+                RustExpr::MethodCall {
+                    receiver,
+                    method,
+                    args,
+                }
+            }
+        }
+        RustExpr::Raw(raw) => rendered_projection_or_raw_leaf(
+            &raw.replace(".unwrap().expect(\"Java null receiver\")", ".unwrap()"),
+        ),
         other => other,
     }
 }
@@ -7373,12 +7449,18 @@ pub fn boxed_dyn_trait_projection(value: RustExpr, trait_name: &str) -> RustExpr
 }
 
 fn boxed_cast_projection(value: RustExpr, ty: String) -> RustExpr {
-    RustExpr::Cast {
+    let result_propagated = expr_is_result_propagated(&value);
+    let boxed = RustExpr::Cast {
         expr: Box::new(function_call_projection(
             RustExpr::path(["Box", "new"]),
             vec![preserve_raw_tuple_operand(value)],
         )),
         ty,
+    };
+    if result_propagated {
+        RustExpr::shaped(RustExprShape::ResultPropagated, boxed)
+    } else {
+        boxed
     }
 }
 
@@ -9493,7 +9575,10 @@ fn apply_required_borrowed_element_target_view(
             Some(RustExpr::shaped_as(
                 RustExprShape::StringView,
                 Some(policy.target.clone()),
-                zero_arg_method_projection(expr.clone(), "as_str"),
+                zero_arg_method_projection(
+                    strip_redundant_java_null_expect_after_unwrap(expr.clone()),
+                    "as_str",
+                ),
             ))
         }
         _ => None,
@@ -10550,6 +10635,7 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
                 view
             } else {
                 let expr = recover_as_str_receiver_projection(expr);
+                let expr = strip_redundant_java_null_expect_after_unwrap(expr);
                 string_view_expr(zero_arg_method_projection(
                     parenthesize_raw_method_receiver(expr),
                     "as_str",
@@ -10662,7 +10748,7 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
                 ty: rust_primitive_type_name_policy(*to).rust_name.to_string(),
             }
         }
-        Coercion::WrapOption => option_some_projection(expr),
+        Coercion::WrapOption => option_some_projection_for_coercion(expr),
         Coercion::UnwrapOption => zero_arg_method_projection(expr, "unwrap"),
         Coercion::UnwrapOptionBorrowed => RustExpr::shaped(
             RustExprShape::Borrowed,
@@ -10738,6 +10824,16 @@ fn option_some_projection(expr: RustExpr) -> RustExpr {
             args: vec![expr],
         }),
     )
+}
+
+fn option_some_projection_for_coercion(expr: RustExpr) -> RustExpr {
+    let result_propagated = expr_is_result_propagated(&expr);
+    let wrapped = option_some_projection(expr);
+    if result_propagated {
+        RustExpr::shaped(RustExprShape::ResultPropagated, wrapped)
+    } else {
+        wrapped
+    }
 }
 
 #[cfg(test)]
@@ -11482,6 +11578,31 @@ mod tests {
                 ty: "i32".to_string(),
             },
         )
+    }
+
+    #[test]
+    fn redundant_java_null_expect_after_unwrap_is_stripped_inside_receiver_chain() {
+        let holder_unwrap = RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::MethodCall {
+                    receiver: Box::new(RustExpr::Var("holder".to_string())),
+                    method: "as_ref".to_string(),
+                    args: Vec::new(),
+                }),
+                method: "unwrap".to_string(),
+                args: Vec::new(),
+            }),
+            method: "expect".to_string(),
+            args: vec![RustExpr::Literal("\"Java null receiver\"".to_string())],
+        };
+        let chained = zero_arg_method_projection(holder_unwrap, "get_values");
+
+        let stripped = strip_redundant_java_null_expect_after_unwrap(chained);
+
+        assert_eq!(
+            emit::emit_expr(&stripped),
+            "holder.as_ref().unwrap().get_values()"
+        );
     }
 
     fn required_borrowed_array_policy(
@@ -12878,6 +12999,35 @@ mod tests {
         assert!(rust_expr_is_constructed_optional_value(&RustExpr::Raw(
             "values.get(index).copied()".to_string()
         )));
+    }
+
+    #[test]
+    fn option_wrap_preserves_result_propagation_marker() {
+        let propagated = propagate_result_projection(RustExpr::Raw("resource.read()".to_string()));
+        let wrapped = apply_one(propagated, &Coercion::WrapOption);
+
+        assert_eq!(emit::emit_expr(&wrapped), "Some(resource.read()?)");
+        assert_eq!(
+            wrapped.recorded_shape(),
+            Some(RustExprShape::ResultPropagated)
+        );
+        assert!(expr_is_result_propagated(&wrapped));
+    }
+
+    #[test]
+    fn boxed_erased_object_wrap_preserves_result_propagation_marker() {
+        let propagated = propagate_result_projection(RustExpr::Raw("resource.read()".to_string()));
+        let boxed = apply_one(propagated, &Coercion::EraseObject);
+
+        assert_eq!(
+            emit::emit_expr(&boxed),
+            "Box::new(resource.read()?) as Box<dyn std::any::Any>"
+        );
+        assert_eq!(
+            boxed.recorded_shape(),
+            Some(RustExprShape::ResultPropagated)
+        );
+        assert!(expr_is_result_propagated(&boxed));
     }
 
     #[test]

@@ -1,0 +1,6 @@
+# semantic_facts known failures
+# Recorded by scripts/gate.sh --record. Diff names, not counts.
+external_argument_effects_shape_method_params_in_signature_solver
+external_field_provenance_uses_builtin_model_for_known_field_types
+lowers_package_private_trivial_accessor_calls_as_field_access
+readonly_external_receiver_usage_can_borrow_public_helper_param

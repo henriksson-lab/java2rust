@@ -1,7 +1,7 @@
 # 0048 — The erased-static trait body is produced by substring-rewriting emitted Rust
 
-Status: **validated by execution** — reproduced with `target/release/new-java2rust`,
-bad Rust shown, `rustc` errors quoted
+Status: **fixed** — the erased-static companion trait body rewrite is structural
+and no longer substring-edits rendered Rust.
 Severity: **high** — emits Rust that does not parse; the corruption is unbounded
 (it can rewrite any identifier in the function) and there is no diagnostic
 Live or latent: **live** — the feature runs in the VCF corpus
@@ -9,6 +9,19 @@ Live or latent: **live** — the feature runs in the VCF corpus
 `.tmp/corpus-rerun-20260731-…/generated-crate/src/generated/00004_VCFHeaderLine.rs`);
 it is correct there only because that owner's prefix happens to be long
 Kind: decision (here: a *rewrite*) made by inspecting rendered Rust text
+
+Codex follow-up 2026-08-23: fixed for erased-static trait bodies. The companion
+trait emitter no longer renders a free helper and substring-rewrites the emitted
+Rust. It now rewrites the cloned `RustFunction` body structurally, retargeting
+only `RustExpr::Call` callees whose function is exactly one of the owner helper
+functions (`owner_method`) to `Self::method`. Literals, method calls,
+associated paths, raw text, and unrelated helper names are left untouched.
+Regressions:
+`cargo test --release lower::tests::erased_static_trait_helper_rewrite_only_touches_structured_helper_calls`
+and
+`cargo test --release --test idiom_gaps erased_source_static_trait_body_rewrites_only_helper_callees`.
+This closes the concrete 0048 erased-static rewrite defect; `0007` remains open
+for other rendered-string decisions.
 
 Extends [0007](0007-rust-ir-is-mostly-opaque-strings.md). 0007 has been worked
 hard on the *expression* side — `RustExprShape`, `actual: RustSlotShape`, and

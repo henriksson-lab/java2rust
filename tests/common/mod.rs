@@ -45,9 +45,9 @@ pub(crate) fn generated_crate_verify_timeout() -> Duration {
 /// Outcome of a watched child process. `status` is `None` when the watchdog
 /// fired and the child was killed.
 pub(crate) struct WatchedOutput {
-    status: Option<std::process::ExitStatus>,
-    stdout: String,
-    stderr: String,
+    pub(crate) status: Option<std::process::ExitStatus>,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
 }
 
 pub(crate) fn run_with_watchdog(command: &mut Command, timeout: Duration) -> WatchedOutput {

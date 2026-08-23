@@ -125,8 +125,9 @@ struct ExternalApiParameterMatch {
     specificity: usize,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct HierarchyFactLookupIndex {
+#[derive(Debug, Clone)]
+pub struct HierarchyFactLookupIndex<'a> {
+    facts: &'a FactSet,
     reachable_by_sub_name: HashMap<String, HierarchyReachabilityResult>,
 }
 
@@ -638,8 +639,8 @@ impl<'a> ExternalFactLookupIndex<'a> {
     }
 }
 
-impl HierarchyFactLookupIndex {
-    pub fn new(facts: &FactSet) -> Self {
+impl<'a> HierarchyFactLookupIndex<'a> {
+    pub fn new(facts: &'a FactSet) -> Self {
         let mut reachable_by_sub_name = HashMap::new();
         for type_name in facts.hierarchy_fact_type_names() {
             let java_ty = JavaType::Named {
@@ -652,13 +653,13 @@ impl HierarchyFactLookupIndex {
             );
         }
         Self {
+            facts,
             reachable_by_sub_name,
         }
     }
 
     pub fn reachable_hierarchy_edges_for_type_with_stats(
         &self,
-        facts: &FactSet,
         java_ty: &JavaType,
     ) -> HierarchyReachabilityResult {
         let Some(sub_name) = java_type_name(java_ty) else {
@@ -671,25 +672,23 @@ impl HierarchyFactLookupIndex {
         self.reachable_by_sub_name
             .get(sub_name)
             .cloned()
-            .unwrap_or_else(|| facts.reachable_hierarchy_edges_for_type_with_stats(java_ty))
+            .unwrap_or_else(|| {
+                self.facts
+                    .reachable_hierarchy_edges_for_type_with_stats(java_ty)
+            })
     }
 
-    pub fn reachable_hierarchy_edges_for_type(
-        &self,
-        facts: &FactSet,
-        java_ty: &JavaType,
-    ) -> Vec<HierarchyEdgeFact> {
-        self.reachable_hierarchy_edges_for_type_with_stats(facts, java_ty)
+    pub fn reachable_hierarchy_edges_for_type(&self, java_ty: &JavaType) -> Vec<HierarchyEdgeFact> {
+        self.reachable_hierarchy_edges_for_type_with_stats(java_ty)
             .edges
     }
 
     pub fn hierarchy_subtype_policy(
         &self,
-        facts: &FactSet,
         subtype: &JavaType,
         supertype: &JavaType,
     ) -> HierarchySubtypePolicy {
-        let result = self.reachable_hierarchy_edges_for_type_with_stats(facts, subtype);
+        let result = self.reachable_hierarchy_edges_for_type_with_stats(subtype);
         let reaches = match (java_type_name(subtype), java_type_name(supertype)) {
             (Some(sub_name), Some(super_name)) if sub_name == super_name => true,
             (Some(_), Some(super_name)) => result
@@ -1763,7 +1762,7 @@ impl FactSet {
         ExternalFactLookupIndex::new(self)
     }
 
-    pub fn hierarchy_lookup_index(&self) -> HierarchyFactLookupIndex {
+    pub fn hierarchy_lookup_index(&self) -> HierarchyFactLookupIndex<'_> {
         HierarchyFactLookupIndex::new(self)
     }
 

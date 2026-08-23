@@ -491,17 +491,39 @@ count_concrete_none_assignment_files() {
 idiom_signal_count() {
   local path="$1"
   local signal="$2"
-  awk -F '\t' -v signal="$signal" 'NR > 1 && $1 == signal { found = 1; print $2 } END { if (!found) print 0 }' "$path"
+  awk -F '\t' -v signal="$signal" '
+    NR > 1 && $1 == signal {
+      found = 1
+      print $2
+    }
+    END {
+      if (!found) {
+        printf "missing idiom signal: %s\n", signal > "/dev/stderr"
+        exit 1
+      }
+    }
+  ' "$path"
 }
 
 analysis_profile_metric() {
   local path="$1"
   local metric="$2"
   if [[ ! -f "$path" ]]; then
-    printf '0\n'
-    return
+    printf 'missing analysis profile: %s\n' "$path" >&2
+    return 1
   fi
-  awk -F '\t' -v metric="$metric" 'NR > 1 && $1 == metric { found = 1; print $2 } END { if (!found) print 0 }' "$path"
+  awk -F '\t' -v metric="$metric" '
+    NR > 1 && $1 == metric {
+      found = 1
+      print $2
+    }
+    END {
+      if (!found) {
+        printf "missing analysis profile metric: %s\n", metric > "/dev/stderr"
+        exit 1
+      }
+    }
+  ' "$path"
 }
 
 analysis_profile_metric_or_idiom_signal() {
@@ -510,11 +532,9 @@ analysis_profile_metric_or_idiom_signal() {
   local metric="$3"
   local value
   if [[ -f "$profile_path" ]]; then
-    value="$(awk -F '\t' -v metric="$metric" 'NR > 1 && $1 == metric { print $2; found = 1; exit }' "$profile_path")"
-    if [[ -n "$value" ]]; then
-      printf '%s\n' "$value"
-      return
-    fi
+    value="$(analysis_profile_metric "$profile_path" "$metric")" || return 1
+    printf '%s\n' "$value"
+    return
   fi
   idiom_signal_count "$idiom_path" "$metric"
 }
@@ -531,10 +551,18 @@ status_column_sum() {
       }
       next
     }
+    NR == 2 && target == 0 {
+      printf "missing status column: %s\n", column > "/dev/stderr"
+      exit 1
+    }
     target > 0 {
       sum += $target
     }
     END {
+      if (target == 0) {
+        printf "missing status column: %s\n", column > "/dev/stderr"
+        exit 1
+      }
       print sum + 0
     }
   ' "$path"
@@ -582,13 +610,7 @@ translate_one() {
   local diagnostics invalid_patterns unsupported_members
   diagnostics="$(wc -l < "$log_path" | tr -d ' ')"
   unsupported_members="$(grep -E '(^|[[:space:]])unsupported_member:' "$log_path" | wc -l | tr -d ' ')"
-  invalid_patterns="$(
-    {
-      grep -E 'compile_error!|downcast::<.*>\(\)\.expect\("invalid Java cast"\)|\.add_all\(|\.put\(|unsupported Java lambda|unsupported Java method reference|unsupported Java array creation' "$rust_path" || true
-      grep -E '= None;' "$rust_path" \
-        | grep -v -E 'let mut [A-Za-z_][A-Za-z0-9_]*: Option<.*> = None;' || true
-    } | wc -l | tr -d ' '
-  )"
+  invalid_patterns="$("$binary" count-invalid-patterns "$rust_path")" || exit 1
   printf "%s\t%s\t%s\t%s\t%s\t%s\n" "$java_file" "$rust_path" "$status" "$diagnostics" "$invalid_patterns" "$unsupported_members"
 }
 
@@ -2785,29 +2807,10 @@ if [[ "$compile_status" != "ok" ]]; then
   fi
 fi
 invalid_scan_start_ms="$(now_ms)"
+invalid_pattern_count="$(status_column_sum "$status_path" "invalid_patterns")" || exit 1
 {
   printf "pattern\tcount\tfiles\n"
-  for spec in \
-    'compile_error_placeholder	compile_error!' \
-    'invalid_java_cast_downcast	downcast::<.*>\(\)\.expect\("invalid Java cast"\)' \
-    'concrete_none_assignment	= None;' \
-    'java_add_all_call	\.add_all\(' \
-    'java_put_call	\.put\(' \
-    'unsupported_lambda	unsupported Java expression: lambda' \
-    'unsupported_method_reference	unsupported Java expression: method reference' \
-    'unsupported_array_creation	unsupported Java array creation'
-  do
-    name="${spec%%	*}"
-    pattern="${spec#*	}"
-    if [[ "$name" == "concrete_none_assignment" ]]; then
-      count="$(count_concrete_none_assignments "$generated_dir")"
-      files="$(count_concrete_none_assignment_files "$generated_dir")"
-    else
-      count="$(grep -R -E "$pattern" "$generated_dir" | wc -l | tr -d ' ')"
-      files="$(grep -R -l -E "$pattern" "$generated_dir" | wc -l | tr -d ' ')"
-    fi
-    printf "%s\t%s\t%s\n" "$name" "$count" "$files"
-  done
+  printf "registry_invalid_patterns\t%s\t%s\n" "$invalid_pattern_count" "$invalid_pattern_files"
 } > "$invalid_patterns_path"
 invalid_scan_elapsed_ms="$(elapsed_ms_since "$invalid_scan_start_ms")"
 printf "invalid_pattern_scan\tok\t%s\t%s\n" "$invalid_scan_elapsed_ms" "$invalid_patterns_path" >> "$phase_events_path"
@@ -2830,15 +2833,17 @@ python3 "$repo_root/scripts/sweep-generated-idioms.py" \
   --out-md "$idiom_sweep_md"
 idiom_sweep_elapsed_ms="$(elapsed_ms_since "$idiom_sweep_start_ms")"
 printf "idiom_sweep\tok\t%s\t%s\n" "$idiom_sweep_elapsed_ms" "$idiom_sweep_md" >> "$phase_events_path"
-unsupported_statement_count="$(idiom_signal_count "$idiom_sweep_tsv" "unsupported_statements")"
-unsupported_member_count="$(( $(idiom_signal_count "$idiom_sweep_tsv" "unsupported_members") + $(status_column_sum "$status_path" "unsupported_members") ))"
-unsupported_expression_count="$(idiom_signal_count "$idiom_sweep_tsv" "unsupported_expressions")"
-unmodelled_type_count="$(idiom_signal_count "$idiom_sweep_tsv" "unmodelled_types")"
-unmodelled_call_site_count="$(idiom_signal_count "$idiom_sweep_tsv" "unmodelled_call_sites")"
-noop_facade_method_count="$(idiom_signal_count "$idiom_sweep_tsv" "noop_facade_methods")"
-noop_facade_call_site_count="$(analysis_profile_metric_or_idiom_signal "$analysis_profile_path" "$idiom_sweep_tsv" "noop_facade_call_sites")"
-unmodelled_upcast_count="$(idiom_signal_count "$idiom_sweep_tsv" "unmodelled_upcast_conversions")"
-stubbed_constant_count="$(idiom_signal_count "$idiom_sweep_tsv" "stubbed_constants")"
+unsupported_statement_count="$(idiom_signal_count "$idiom_sweep_tsv" "unsupported_statements")" || exit 1
+unsupported_member_idiom_count="$(idiom_signal_count "$idiom_sweep_tsv" "unsupported_members")" || exit 1
+unsupported_member_status_count="$(status_column_sum "$status_path" "unsupported_members")" || exit 1
+unsupported_member_count="$(( unsupported_member_idiom_count + unsupported_member_status_count ))"
+unsupported_expression_count="$(idiom_signal_count "$idiom_sweep_tsv" "unsupported_expressions")" || exit 1
+unmodelled_type_count="$(idiom_signal_count "$idiom_sweep_tsv" "unmodelled_types")" || exit 1
+unmodelled_call_site_count="$(idiom_signal_count "$idiom_sweep_tsv" "unmodelled_call_sites")" || exit 1
+noop_facade_method_count="$(idiom_signal_count "$idiom_sweep_tsv" "noop_facade_methods")" || exit 1
+noop_facade_call_site_count="$(analysis_profile_metric_or_idiom_signal "$analysis_profile_path" "$idiom_sweep_tsv" "noop_facade_call_sites")" || exit 1
+unmodelled_upcast_count="$(idiom_signal_count "$idiom_sweep_tsv" "unmodelled_upcast_conversions")" || exit 1
+stubbed_constant_count="$(idiom_signal_count "$idiom_sweep_tsv" "stubbed_constants")" || exit 1
 total_elapsed_ms="$(elapsed_ms_since "$script_start_ms")"
 printf "total\tok\t%s\t%s\n" "$total_elapsed_ms" "$out_dir" >> "$phase_events_path"
 

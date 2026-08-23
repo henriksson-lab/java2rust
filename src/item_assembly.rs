@@ -424,6 +424,7 @@ pub fn constructor_function_shell_with_facts_and_support_contexts(
     RustFunction {
         name: ctor.rust_name.clone().unwrap_or_else(|| "new".to_string()),
         type_params: function_type_params_with_optional_lifetime_and_support_contexts(
+            None,
             &ctor.type_params,
             &ctor.type_param_bounds,
             false,
@@ -464,6 +465,7 @@ pub fn with_type_param_marker_field_values(
 }
 
 fn function_type_params_with_optional_lifetime_and_support_contexts(
+    callable_name: Option<&str>,
     type_params: &[String],
     type_param_bounds: &[Option<JavaType>],
     needs_lifetime: bool,
@@ -490,7 +492,28 @@ fn function_type_params_with_optional_lifetime_and_support_contexts(
             format!("{name}: {}", bounds.join(" + "))
         }
     }));
+    if callable_params
+        .iter()
+        .any(|param| submit_callable_param_needs_synthetic_return_type(callable_name, param))
+    {
+        params.push(submit_callable_synthetic_return_type_param(type_params));
+    }
     params
+}
+
+fn submit_callable_synthetic_return_type_param(type_params: &[String]) -> String {
+    let base = "__JavaCallableReturn";
+    if !type_params.iter().any(|param| param == base) {
+        return base.to_string();
+    }
+    let mut index = 0usize;
+    loop {
+        let candidate = format!("{base}{index}");
+        if !type_params.iter().any(|param| param == &candidate) {
+            return candidate;
+        }
+        index += 1;
+    }
 }
 
 fn reorder_struct_literal_moves_after_reads(
@@ -852,6 +875,7 @@ pub fn method_function_shell_with_facts_exception_plan_and_support_contexts(
     RustFunction {
         name,
         type_params: function_type_params_with_optional_lifetime_and_support_contexts(
+            Some(&method.name),
             &method.type_params,
             &method.type_param_bounds,
             needs_lifetime,
@@ -2252,6 +2276,8 @@ fn method_params_with_optional_lifetime(
         .map(|(index, param)| {
             let callback_param =
                 method_param_is_nonescaping_functional_callback(method, &param.name);
+            let submit_callable_param =
+                method_param_is_submit_callable_callback(method, &param.name);
             let mutable_optional_sequence_param = mutable_array_target_params.contains(&param.name)
                 && optional_sequence_slot(&param.shape);
             let mutable_owned_binding_param = param.binding_mutable
@@ -2267,6 +2293,7 @@ fn method_params_with_optional_lifetime(
                 .unwrap_or_else(|| param.name.clone());
             RustParam {
                 name: if callback_param
+                    || submit_callable_param
                     || mutable_optional_sequence_param
                     || mutable_owned_binding_param
                 {
@@ -2274,9 +2301,13 @@ fn method_params_with_optional_lifetime(
                 } else {
                     name
                 },
-                ty: if callback_param {
-                    let callback_ty = functional_callback_param_type(&param.java_ty, facts)
-                        .unwrap_or_else(|| rust_type_for_slot_with_facts(&param.shape, facts));
+                ty: if callback_param || submit_callable_param {
+                    let callback_ty = if submit_callable_param {
+                        submit_callable_callback_param_type(method, &param.java_ty, facts)
+                    } else {
+                        functional_callback_param_type(&param.java_ty, facts)
+                    }
+                    .unwrap_or_else(|| rust_type_for_slot_with_facts(&param.shape, facts));
                     maybe_add_lifetime_to_refs(callback_ty, lifetime)
                 } else {
                     maybe_add_lifetime_to_refs(
@@ -2556,6 +2587,63 @@ fn functional_callback_param_type(java_ty: &JavaType, facts: &FactSet) -> Option
         params: inputs,
         return_type,
     })
+}
+
+fn method_param_is_submit_callable_callback(method: &MethodDecl, param_name: &str) -> bool {
+    crate::parser::to_snake_case(&method.name) == "submit"
+        && method
+            .params
+            .iter()
+            .any(|param| param.name == param_name && java_type_is_callable(&param.ty))
+}
+
+fn submit_callable_param_needs_synthetic_return_type(
+    callable_name: Option<&str>,
+    param: &crate::java_ir::Param,
+) -> bool {
+    callable_name.is_some_and(|name| crate::parser::to_snake_case(name) == "submit")
+        && java_type_is_raw_callable(&param.ty)
+}
+
+fn submit_callable_callback_param_type(
+    method: &MethodDecl,
+    java_ty: &JavaType,
+    facts: &FactSet,
+) -> Option<RustType> {
+    if !java_type_is_callable(java_ty) {
+        return None;
+    }
+    let return_type = match java_ty {
+        JavaType::Named { args, .. } => args
+            .first()
+            .map(|ty| rust_type_for_java_type_with_facts(ty, facts))
+            .unwrap_or_else(|| {
+                RustType::Named(submit_callable_synthetic_return_type_param(
+                    &method.type_params,
+                ))
+            }),
+        _ => return None,
+    };
+    Some(RustType::ImplFnTrait {
+        trait_name: "FnMut".to_string(),
+        params: Vec::new(),
+        return_type: Some(Box::new(return_type)),
+    })
+}
+
+fn java_type_is_raw_callable(java_ty: &JavaType) -> bool {
+    matches!(java_ty, JavaType::Named { name, args } if args.is_empty() && java_type_name_is_callable(name))
+}
+
+fn java_type_is_callable(java_ty: &JavaType) -> bool {
+    matches!(java_ty, JavaType::Named { name, .. } if java_type_name_is_callable(name))
+}
+
+fn java_type_name_is_callable(name: &str) -> bool {
+    crate::stdlib::canonical_external_receiver_type_key(name)
+        .rsplit('.')
+        .next()
+        .is_some_and(|simple| simple == "Callable")
 }
 
 pub(crate) fn method_param_is_nonescaping_functional_callback(

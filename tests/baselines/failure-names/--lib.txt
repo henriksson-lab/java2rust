@@ -1,0 +1,7 @@
+# --lib known failures
+# Recorded by scripts/gate.sh --record. Diff names, not counts.
+coercion::tests::borrow_producers_record_borrow_shapes_for_idempotence
+coercion::tests::borrow_projection_keeps_map_key_helper_idempotent
+coercion::tests::borrow_projection_keeps_tagged_map_key_string_view_idempotent
+coercion::tests::borrow_projection_only_treats_complete_string_literals_as_prefix_safe
+coercion::tests::mutable_slice_projection_uses_the_recorded_shape_not_the_suffix

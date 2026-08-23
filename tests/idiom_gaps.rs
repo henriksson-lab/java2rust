@@ -2713,7 +2713,7 @@ class JavaStringComparisonMethods {
     assert!(
         translation
             .rust
-            .contains("java_string_compare_to(&left, right)")
+            .contains("java_string_compare_to(&left, right.as_str())")
             && translation
                 .rust
                 .contains("java_string_compare_to_ignore_case(&left, right.as_str())")
@@ -2853,6 +2853,15 @@ class NumericWrapperStaticToString {
             && translation.rust.contains("_arg0.to_string()"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "jaligner_fallthrough_try_catch",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -3326,7 +3335,11 @@ fn fallback_static_call_uses_translated_signature_arg_shapes() {
     assert!(
         translation
             .rust
-            .contains("StaticConfigMutator::refresh(&mut config);"),
+            .contains("StaticConfigMutator::refresh(&mut config);")
+            && translation
+                .rust
+                .contains("pub fn fill(_arg0: &mut MutableConfig) -> ()")
+            && !translation.rust.contains("pub fn fill<R, T0>"),
         "{}",
         translation.rust
     );
@@ -3342,6 +3355,27 @@ fn reused_map_argument_uses_owned_recovery_fact_for_clone() {
         ),
         "{}",
         translation.rust
+    );
+
+    let corpus_translation = translate_source(&idiom_gap("FallbackStaticMutBorrowArgument.java"));
+    assert!(
+        corpus_translation
+            .rust
+            .contains("pub fn fill<T0>(_arg0: T0) -> ()")
+            && corpus_translation
+                .rust
+                .contains("ExternalApi::fill(config);")
+            && !corpus_translation.rust.contains("pub fn fill<R, T0>"),
+        "{}",
+        corpus_translation.rust
+    );
+    cargo_check_generated_modules(
+        "fallback_static_mut_borrow_argument",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: corpus_translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -6500,6 +6534,23 @@ fn external_get_name_getter_no_longer_requires_runtime_downcast() {
         "{}",
         translation.rust
     );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn get_name(&self) -> String")
+            && !translation.rust.contains("ExternalBoxGetNameResult"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "typed_getter_avoids_downcast",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -6556,12 +6607,25 @@ fn typed_feature_reader_header_cast_uses_external_pack_return_fact() {
     );
 
     assert!(
-        translation.rust.contains("return reader.get_header();")
+        translation
+            .rust
+            .contains("-> Option<Box<dyn std::any::Any>>")
+            && translation.rust.contains(
+                "return reader.get_header().map(|value| Box::new(value) as Box<dyn std::any::Any>);"
+            )
             && !translation.rust.contains("downcast::<VCFHeader>()")
             && !translation.rust.contains("Some(reader.get_header())")
             && !translation.rust.contains("invalid Java cast"),
         "{}",
         translation.rust
+    );
+    cargo_check_generated_modules(
+        "typed_feature_reader_header_cast",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -7179,6 +7243,15 @@ fn source_array_setter_arguments_follow_owned_storage_signature() {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "array_setter_owned_storage",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -7319,6 +7392,26 @@ fn documents_external_byte_array_getter_dispatch_coercion_gap() {
         "{}",
         translation.rust
     );
+}
+
+#[test]
+fn external_direct_getter_facades_compile_with_inferred_returns() {
+    let modules = [
+        ("primitive_getter", "PrimitiveGetterDispatchCoercion.java"),
+        ("boolean_getter", "BooleanGetterDispatchCoercion.java"),
+        ("byte_array_getter", "ByteArrayGetterDispatchCoercion.java"),
+        ("readonly_getter", "ExternalGetterReadOnly.java"),
+        ("getter_setter", "ExternalGetterSetterMutability.java"),
+    ]
+    .into_iter()
+    .map(|(name, fixture)| GeneratedCrateModule {
+        name,
+        rust: translate_source(&idiom_gap(fixture)).rust,
+        tests: "",
+    })
+    .collect();
+
+    cargo_check_generated_modules("external_direct_getter_facades", modules);
 }
 
 #[test]
@@ -8310,12 +8403,24 @@ fn translates_map_for_each_block_lambda_as_loop() {
             .rust
             .contains("for (name, item) in source.iter()")
             && translation.rust.contains("dest.insert(name")
+            && translation
+                .rust
+                .contains("return std::rc::Rc::new(self.clone()")
             && !translation.rust.contains(".for_each(")
             && !translation
                 .rust
                 .contains("unsupported Java expression: lambda"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "map_for_each_block_lambda",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -8326,6 +8431,9 @@ fn translates_map_for_each_try_catch_lambda_without_placeholder() {
     assert!(
         translation
             .rust
+            .contains("pub fn copy(&self, futures: &std::collections::HashMap<String, Future>, mut dest: std::collections::HashMap<String, std::rc::Rc<Item>>) -> Result<(), JavaException>")
+            && translation
+                .rust
             .contains("for (name, future) in futures.iter()")
             && translation
                 .rust
@@ -8337,6 +8445,15 @@ fn translates_map_for_each_try_catch_lambda_without_placeholder() {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "map_for_each_try_catch_lambda",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -8346,13 +8463,23 @@ fn translates_executor_submit_block_lambda_as_closure() {
     assert!(
         translation.rust.contains(".submit(|| {")
             && translation.rust.contains("let mut value")
-            && translation.rust.contains("return value.trim();")
+            && translation
+                .rust
+                .contains("return value.trim().to_string();")
             && !translation.rust.contains("downcast::<Callable>")
             && !translation
                 .rust
                 .contains("unsupported Java expression: lambda"),
         "{}",
         translation.rust
+    );
+    cargo_check_generated_modules(
+        "executor_submit_block_lambda",
+        vec![GeneratedCrateModule {
+            name: "executor_submit_block_lambda",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -8379,9 +8506,7 @@ class ExecutorSubmitReceiverlessHelper {
 
     assert!(
         translation.rust.contains(".submit(|| {")
-            && translation
-                .rust
-                .contains("return self.helper(value.as_str());")
+            && translation.rust.contains("return self.helper(&value);")
             && !translation.rust.contains("return helper(value")
             && !translation
                 .rust
@@ -8426,7 +8551,9 @@ class Reader {
             && translation
                 .rust
                 .contains("match (|| -> Result<Reader, JavaException>")
-            && translation.rust.contains("Ok(value) => return Ok(value)")
+            && translation
+                .rust
+                .contains("Ok(value) => { return Ok(value); }")
             && translation
                 .rust
                 .contains("return Err(JavaException::with_cause(\"RuntimeException\"")
@@ -10111,6 +10238,15 @@ fn map_entry_set_iterator_next_get_key_uses_receiver_signature_shape() {
             && !translation.rust.contains(".get_key()"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "map_entry_set_iterator_next_get_key_receiver_shape",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -13976,12 +14112,22 @@ fn unresolved_set_return_in_add_all_uses_target_slot_shape() {
     assert!(
         translation
             .rust
-            .contains("self.names.as_mut().unwrap().extend(default_names())")
+            .contains("self.names.as_mut().unwrap().extend(<std::collections::HashSet<String> as Default>::default()/* TODO(translation): unresolved Java collection source call defaultNames */)")
             && !translation.rust.contains("downcast::<Set>()")
             && !translation.rust.contains("expect(\"invalid Java cast\")")
+            && !translation.rust.contains("extend(default_names())")
             && !translation.rust.contains(".add_all("),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "unresolved_set_return_add_all",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -14051,6 +14197,8 @@ fn documents_stream_callback_chain_gap() {
         translation
             .rust
             .contains("read_hits.map(|value| value._2())")
+            && !translation.rust.contains("pub fn 2")
+            && !translation.rust.contains("fn 2")
             && translation.rust.contains("Score::add")
             && !translation
                 .rust
@@ -14125,12 +14273,21 @@ fn documents_class_literal_registration_gap() {
         translation.rust.contains("pub struct JavaClass<T>")
             && translation
                 .rust
-                .contains("JavaClass::<RegisteredType>::literal(\"RegisteredType\")")
+                .contains("JavaClass::<()>::literal(\"RegisteredType\")")
             && !translation
                 .rust
                 .contains("unsupported Java expression: class literal"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "class_literal_registration",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -14145,6 +14302,15 @@ fn documents_instanceof_guard_narrowing_gap() {
             || translation.rust.contains("downcast::"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "instanceof_guard_narrows_cast",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -15959,6 +16125,8 @@ fn corpus_spark_rdd_pipeline_keeps_stream_lowering_at_noop_spark_boundary() {
             && translation
                 .rust
                 .contains("return sorted.map(|value: Tuple2| value._1());")
+            && !translation.rust.contains("pub fn 1")
+            && !translation.rust.contains("fn 1")
             && translation
                 .diagnostics
                 .has_code("external_pack_boundary_call")
@@ -19643,6 +19811,31 @@ class OptionalTernaryListAssignment {
 }
 
 #[test]
+fn corpus_ffi_native_handover_uses_source_declared_external_return_shapes() {
+    let translation = translate_source(&idiom_gap("FfiNativeHandoverCall.java"));
+
+    assert!(
+        translation.rust.contains(
+            "let array: NativeArray = NativeRuntimeNativeLibrary::open_array(workspace);"
+        ) && translation
+            .rust
+            .contains("let query: NativeQuery = array.query(interval);")
+            && translation.rust.contains("return Ok(query.count());")
+            && !translation.rust.contains("let query: NativeQuery = ();"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "ffi_native_handover_call",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn corpus_ffi_boundary_manifest_shapes_native_handover_calls() {
     let manifest = parse_external_pack_manifest(
         r#"
@@ -20059,6 +20252,9 @@ fn documents_try_with_resources_copy_gap() {
         translation.rust.contains("pub fn copy")
             && translation.rust.contains("new_input_stream")
             && translation.rust.contains("input.read_3(")
+            && translation
+                .rust
+                .contains("input.read_3(&mut *buffer, 0, __java_read_len)?")
             && translation.rust.contains(")?;")
             && translation.rust.contains("output.write_3(")
             && translation.rust.contains("output.close()?;")
@@ -20068,6 +20264,15 @@ fn documents_try_with_resources_copy_gap() {
                 .contains("unsupported Java statement: try/catch/finally"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "try_with_resources_copy",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -20579,7 +20784,10 @@ fn translates_jaligner_try_catch_finally_cleanup_without_placeholder() {
             .contains("let __java_try_result = match (|| -> Result<(), JavaException>")
             && translation
                 .rust
-                .contains("sequence = Some(resource.read()?);")
+                .contains("sequence = Some(Box::new(resource.read()?) as Box<dyn std::any::Any>);")
+            && !translation
+                .rust
+                .contains("sequence = Some(Box::new(Some(Box::new(resource.read()?)")
             && translation.rust.contains("resource.close()?;")
             && translation.rust.contains("__java_try_result?;")
             && translation.rust.contains("return Ok(Sequence::new")
@@ -20589,6 +20797,15 @@ fn translates_jaligner_try_catch_finally_cleanup_without_placeholder() {
             && !translation.rust.contains("compile_error!"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "jaligner_try_catch_finally_cleanup",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -21747,12 +21964,27 @@ fn documents_class_literal_token_gap() {
         translation.rust.contains("pub struct JavaClass<T>")
             && translation
                 .rust
-                .contains("JavaClass::<String>::literal(\"String\")")
+                .contains("pub fn string_token(&self) -> JavaClass<()>")
+            && translation
+                .rust
+                .contains("return JavaClass::<()>::literal(\"String\");")
+            && translation
+                .rust
+                .contains("return value.get_class() == JavaClass::<()>::literal(\"String\");")
             && !translation
                 .rust
                 .contains("unsupported Java expression: class literal"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "class_literal_token",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -24062,19 +24294,178 @@ class ErasedStaticHelper {
             .contains("pub type ErasedStaticHelper = Box<dyn std::any::Any>;")
             && translation
                 .rust
-                .contains("pub fn erased_static_helper_encode(value: i32) -> i32")
+                .contains("pub fn __erased_static_erased_static_helper__encode(value: i32) -> i32")
             && translation
                 .rust
-                .contains("pub fn erased_static_helper_call(value: i32) -> i32")
+                .contains("pub fn __erased_static_erased_static_helper__call(value: i32) -> i32")
             && translation
                 .rust
-                .contains("return erased_static_helper_encode(value);")
+                .contains("return __erased_static_erased_static_helper__encode(value);")
             && !translation.rust.contains("ErasedStaticHelper::encode"),
         "{}",
         translation.rust
     );
     cargo_check_generated_modules(
         "erased_source_static_methods_free_helpers",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn erased_source_static_receiverless_call_uses_resolved_owner() {
+    let mut facts = FactSet::default();
+    for type_name in ["AlphaStaticOwner", "BetaStaticOwner"] {
+        facts.hierarchy_overrides.push(HierarchyOverride {
+            type_name: type_name.to_string(),
+            strategy: HierarchyStrategy::ErasedObject,
+            provenance: FactProvenance::UserOverride,
+        });
+    }
+    let translation = translate_source_with_facts(
+        r#"
+class AlphaStaticOwner {
+    static int run() {
+        return 1;
+    }
+}
+
+class BetaStaticOwner extends AlphaStaticOwner {
+    static int run() {
+        return 2;
+    }
+
+    static int go() {
+        return AlphaStaticOwner.run();
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn __erased_static_alpha_static_owner__run() -> i32")
+            && translation
+                .rust
+                .contains("pub fn __erased_static_beta_static_owner__go() -> i32")
+            && translation
+                .rust
+                .contains("return __erased_static_alpha_static_owner__run();")
+            && !translation
+                .rust
+                .contains("return __erased_static_beta_static_owner__run();")
+            && !translation.rust.contains("Self::run()"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "erased_source_static_receiverless_call_uses_resolved_owner",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn erased_source_static_helpers_preserve_owner_method_boundary() {
+    let mut facts = FactSet::default();
+    for type_name in ["Node", "NodeX"] {
+        facts.hierarchy_overrides.push(HierarchyOverride {
+            type_name: type_name.to_string(),
+            strategy: HierarchyStrategy::ErasedObject,
+            provenance: FactProvenance::UserOverride,
+        });
+    }
+    let translation = translate_source_with_facts(
+        r#"
+class Node {
+    static int xY() {
+        return 1;
+    }
+}
+
+class NodeX {
+    static int y() {
+        return 2;
+    }
+
+    static int both() {
+        return Node.xY() + NodeX.y();
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn __erased_static_node__x_y() -> i32")
+            && translation
+                .rust
+                .contains("pub fn __erased_static_node_x__y() -> i32")
+            && translation.rust.contains(
+                "return (__erased_static_node__x_y()).wrapping_add(__erased_static_node_x__y());"
+            ),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "erased_source_static_helpers_preserve_owner_method_boundary",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn erased_source_static_trait_body_rewrites_only_helper_callees() {
+    let mut facts = FactSet::default();
+    facts.hierarchy_overrides.push(HierarchyOverride {
+        type_name: "CfgStaticRewrite".to_string(),
+        strategy: HierarchyStrategy::ErasedObject,
+        provenance: FactProvenance::UserOverride,
+    });
+    let translation = translate_source_with_facts(
+        r#"
+class CfgStaticRewrite {
+    static int base() {
+        return 3;
+    }
+
+    static int read() {
+        return base() + 1;
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation.rust.contains("fn read() -> i32")
+            && translation.rust.contains("Self::base()")
+            && translation
+                .rust
+                .contains("__erased_static_cfg_static_rewrite__base()")
+            && !translation.rust.contains("value.Self::")
+            && !translation.rust.contains("CfgStaticRewrite::Self::")
+            && !translation
+                .rust
+                .contains("java_erased_object_to_stringSelf::"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "erased_source_static_trait_body_rewrites_only_helper_callees",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
@@ -24970,11 +25361,21 @@ fn documents_equals_and_objects_gap() {
     let translation = translate_source(&idiom_gap("EqualsAndObjects.java"));
 
     assert!(
-        translation.rust.contains("return left == right;")
+        translation
+            .rust
+            .contains("return left.as_str() == right.as_str();")
             && !translation.rust.contains(".equals(")
             && !translation.rust.contains("objects.equals("),
         "{}",
         translation.rust
+    );
+    cargo_check_generated_modules(
+        "documents_equals_and_objects_gap",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -25094,11 +25495,21 @@ fn nullable_equals_comparisons_use_option_reference_policy() {
         translation
             .rust
             .contains("return left.as_ref() == right.as_ref();")
-            && translation.rust.contains("return Some(left) == right;")
+            && translation
+                .rust
+                .contains("return Some(&left) == right.as_ref();")
             && !translation.rust.contains(".equals(")
             && !translation.rust.contains("objects.equals("),
         "{}",
         translation.rust
+    );
+    cargo_check_generated_modules(
+        "nullable_equals_comparisons_use_option_reference_policy",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -25853,11 +26264,29 @@ fn documents_comparator_interface_gap() {
     let translation = translate_source(&idiom_gap("ComparatorInterface.java"));
 
     assert!(
-        translation.rust.contains("collections.sort(")
-            || translation.rust.contains("integer.compare(")
-            || translation.rust.contains(".compare_to("),
+        translation.rust.contains("pub struct Record")
+            && translation.rust.contains("pub name: String")
+            && translation.rust.contains("pub score: i32")
+            && translation
+                .rust
+                .contains("Integer::compare(left.score, right.score)")
+            && (translation
+                .rust
+                .contains("java_string_compare_to(left.name.as_str(), &right.name)")
+                || translation
+                    .rust
+                    .contains("left.name.as_str().java_string_compare_to(&right.name)")),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "comparator_interface_gap",
+        vec![GeneratedCrateModule {
+            name: "comparator_interface",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -25996,6 +26425,14 @@ fn documents_while_assignment_not_null_gap() {
         "{:?}",
         translation.diagnostics
     );
+    cargo_check_generated_modules(
+        "while_assignment_not_null",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -26023,6 +26460,14 @@ fn documents_while_assignment_null_variants_gap() {
             .has_code("control_flow_rewrite_pending"),
         "{:?}",
         translation.diagnostics
+    );
+    cargo_check_generated_modules(
+        "while_assignment_null_variants",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -26093,9 +26538,26 @@ fn documents_external_fluent_mutation_gap() {
     assert!(
         translation.rust.contains("request.set_name(")
             && translation.rust.contains(".set_limit(")
-            && translation.rust.contains(".enable_retries("),
+            && translation.rust.contains(".enable_retries(")
+            && translation
+                .rust
+                .contains("pub fn set_name<T0>(&self, _arg0: T0) -> Self")
+            && translation
+                .rust
+                .contains("pub fn set_limit<T0>(&self, _arg0: T0) -> Self")
+            && translation
+                .rust
+                .contains("pub fn enable_retries<T0>(&self, _arg0: T0) -> Self"),
         "{}",
         translation.rust
+    );
+    cargo_check_generated_modules(
+        "external_fluent_mutation",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -26106,9 +26568,22 @@ fn documents_external_indexed_accessors_gap() {
     assert!(
         translation.rust.contains("table.get(row, column)")
             && translation.rust.contains("table.set(row, column, value)")
-            && translation.rust.contains("table: &mut ExternalTable"),
+            && translation.rust.contains("table: &mut ExternalTable")
+            && translation
+                .rust
+                .contains("pub fn get<T0, T1>(&self, _arg0: T0, _arg1: T1) -> String")
+            && !translation.rust.contains("ExternalTableGet2Result"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "external_indexed_accessors",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -26134,6 +26609,15 @@ fn documents_exception_subclass_catch_order_gap() {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "exception_subclass_catch_order",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -26152,6 +26636,15 @@ fn documents_exception_base_catch_covers_subclass_gap() {
             && translation.rust.contains("MissingFileProblem"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "exception_base_catch_covers_subclass",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -26550,6 +27043,35 @@ fn external_field_throwing_call_in_try_uses_external_field_facts() {
 }
 
 #[test]
+fn external_field_throwing_call_in_try_compiles_with_fallback_static_field_surface() {
+    let translation = translate_source(&idiom_gap("ExternalFieldThrowingCallInTry.java"));
+
+    assert!(
+        translation.rust.contains("pub struct Registry;")
+            && translation
+                .rust
+                .contains("pub const DEFAULT_VALIDATOR: DEFAULT_VALIDATOR = DEFAULT_VALIDATOR;")
+            && translation
+                .rust
+                .contains("Registry::DEFAULT_VALIDATOR.validate();")
+            && !translation
+                .rust
+                .contains("use of undeclared type `Registry`"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "external_field_throwing_call_in_try_fallback_static_field",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn commons_math_localized_formats_constants_are_pack_enum_fields() {
     let translation = translate_source(
         r#"
@@ -26866,6 +27388,15 @@ fn documents_exception_runtime_checked_hierarchy_gap() {
             && translation.rust.contains("UncheckedProblem"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "exception_runtime_checked_hierarchy",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 

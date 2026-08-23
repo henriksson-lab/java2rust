@@ -23,6 +23,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 
 BASELINE=tests/baselines/suite-results.tsv
+FAILURE_BASELINE_DIR=tests/baselines/failure-names
 SLOW_TARGETS="idiom_gaps"
 RECORD=0
 INCLUDE_SLOW=0
@@ -50,20 +51,111 @@ cargo build --release --tests >/dev/null 2>&1 || {
 targets=$(find tests -maxdepth 1 -name '*.rs' -printf '%f\n' | sed 's/\.rs$//' | sort)
 
 results=$(mktemp)
+outputs_dir=$(mktemp -d)
+
+failure_baseline_for_target() {
+  target="$1"
+  case "$target" in
+    idiom_gaps) printf '%s\n' "tests/baselines/idiom-gaps-failures.txt" ;;
+    *) printf '%s\n' "$FAILURE_BASELINE_DIR/$target.txt" ;;
+  esac
+}
+
+extract_failed_test_names() {
+  header_names=$(awk '
+    /^---- [A-Za-z0-9_][A-Za-z0-9_:]* stdout ----$/ {
+      print $2
+    }
+  ' "$1" | sort)
+  if [ -n "$header_names" ]; then
+    printf '%s\n' "$header_names"
+    return
+  fi
+  awk '
+    /^failures:$/ { in_failures = 1; next }
+    in_failures && /^test result:/ { in_failures = 0 }
+    in_failures && /^    [A-Za-z0-9_][A-Za-z0-9_:]*$/ {
+      name = $1
+      if (name != "") print name
+    }
+  ' "$1" | sort
+}
+
+record_failure_names() {
+  target="$1"
+  output="$2"
+  failed="$3"
+  baseline_path="$(failure_baseline_for_target "$target")"
+  if [ "$failed" = "0" ] || [ "$failed" = "?" ]; then
+    rm -f "$baseline_path"
+    return
+  fi
+  mkdir -p "$(dirname "$baseline_path")"
+  {
+    printf '# %s known failures\n' "$target"
+    printf '# Recorded by scripts/gate.sh --record. Diff names, not counts.\n'
+    extract_failed_test_names "$output"
+  } > "$baseline_path"
+}
+
+compare_failure_names() {
+  target="$1"
+  output="$2"
+  failed="$3"
+  baseline_path="$(failure_baseline_for_target "$target")"
+  if [ "$failed" = "0" ]; then
+    if [ -f "$baseline_path" ]; then
+      printf '%-24s %-14s %-14s %s\n' "$target failures" "baseline" "none" "<<< failure-name baseline still exists"
+      return 1
+    fi
+    return 0
+  fi
+  if [ "$failed" = "?" ]; then
+    printf '%-24s %-14s %-14s %s\n' "$target failures" "-" "unknown" "<<< could not parse test result"
+    return 1
+  fi
+  if [ ! -f "$baseline_path" ]; then
+    printf '%-24s %-14s %-14s %s\n' "$target failures" "-" "$failed failing" "(no failure-name baseline yet)"
+    return 1
+  fi
+  actual_names=$(mktemp)
+  baseline_names=$(mktemp)
+  extract_failed_test_names "$output" > "$actual_names"
+  grep -v '^#' "$baseline_path" | sed '/^[[:space:]]*$/d' | sort > "$baseline_names"
+  if ! diff -u "$baseline_names" "$actual_names" >/tmp/new_java2rust_gate_failure_names.diff; then
+    printf '%-24s %-14s %-14s %s\n' "$target failures" "$baseline_path" "changed" "<<< FAILURE NAMES CHANGED"
+    cat /tmp/new_java2rust_gate_failure_names.diff
+    rm -f "$actual_names" "$baseline_names" /tmp/new_java2rust_gate_failure_names.diff
+    return 1
+  fi
+  rm -f "$actual_names" "$baseline_names" /tmp/new_java2rust_gate_failure_names.diff
+  return 0
+}
+
 for target in $targets; do
   if [ "$INCLUDE_SLOW" -eq 0 ] && echo "$SLOW_TARGETS" | grep -qw "$target"; then
     continue
   fi
-  line=$(cargo test --release --test "$target" 2>&1 | grep '^test result' | head -1)
+  output="$outputs_dir/$target.out"
+  cargo test --release --test "$target" > "$output" 2>&1
+  line=$(grep '^test result' "$output" | head -1)
   passed=$(echo "$line" | sed -n 's/.*result: [a-zA-Z]*\. \([0-9]*\) passed.*/\1/p')
   failed=$(echo "$line" | sed -n 's/.*passed; \([0-9]*\) failed.*/\1/p')
   printf '%s\t%s\t%s\n' "$target" "${passed:-?}" "${failed:-?}" >> "$results"
+  if [ "$RECORD" -eq 1 ]; then
+    record_failure_names "$target" "$output" "${failed:-?}"
+  fi
 done
 
-lib_line=$(cargo test --release --lib 2>&1 | grep '^test result' | head -1)
+lib_output="$outputs_dir/__lib.out"
+cargo test --release --lib > "$lib_output" 2>&1
+lib_line=$(grep '^test result' "$lib_output" | head -1)
 lib_passed=$(echo "$lib_line" | sed -n 's/.*result: [a-zA-Z]*\. \([0-9]*\) passed.*/\1/p')
 lib_failed=$(echo "$lib_line" | sed -n 's/.*passed; \([0-9]*\) failed.*/\1/p')
 printf '%s\t%s\t%s\n' "--lib" "${lib_passed:-?}" "${lib_failed:-?}" >> "$results"
+if [ "$RECORD" -eq 1 ]; then
+  record_failure_names "--lib" "$lib_output" "${lib_failed:-?}"
+fi
 
 if [ "$RECORD" -eq 1 ]; then
   mkdir -p "$(dirname "$BASELINE")"
@@ -74,6 +166,7 @@ if [ "$RECORD" -eq 1 ]; then
   } > "$BASELINE"
   echo "recorded $(wc -l < "$results") targets to $BASELINE"
   rm -f "$results"
+  rm -rf "$outputs_dir"
   exit 0
 fi
 
@@ -104,6 +197,13 @@ while IFS=$'\t' read -r target passed failed; do
     status=1
   fi
   printf '%-24s %-14s %-14s %s\n' "$target" "$bp/$bf" "$passed/$failed" "$delta"
+  output_target="$target"
+  if [ "$target" = "--lib" ]; then
+    output_file="$lib_output"
+  else
+    output_file="$outputs_dir/$output_target.out"
+  fi
+  compare_failure_names "$target" "$output_file" "$failed" || status=1
 done < "$results"
 
 # A target in the baseline that no longer runs is also a gate failure.
@@ -120,4 +220,5 @@ while IFS=$'\t' read -r target _ _; do
 done < "$BASELINE"
 
 rm -f "$results"
+rm -rf "$outputs_dir"
 exit "$status"

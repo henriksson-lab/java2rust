@@ -3108,6 +3108,24 @@ class DiamondConstructedTypeResolution {
             }],
         }
     );
+    assert_eq!(
+        nested.params,
+        vec![param(
+            "value",
+            JavaType::Named {
+                name: "Box".to_string(),
+                args: vec![JavaType::String],
+            }
+        )]
+    );
+    assert_eq!(nested.arg_coercions.len(), 1);
+    assert_eq!(
+        nested.arg_coercions[0].target,
+        JavaType::Named {
+            name: "Box".to_string(),
+            args: vec![JavaType::String],
+        }
+    );
     let Expr::New {
         resolved: Some(inner),
         ..

@@ -2550,7 +2550,7 @@ fn apply_target_type_to_constructor_expr(
         symbols,
         external_facts,
     );
-    resolved.params = constructor_params_for_constructed_type(resolved, symbols);
+    refresh_constructor_derived_fields(resolved, None, symbols, external_facts);
     apply_constructor_param_targets(args, resolved, symbols, external_facts);
 }
 
@@ -2590,6 +2590,52 @@ fn constructor_params_for_constructed_type(
             is_varargs: param.is_varargs,
         })
         .collect()
+}
+
+fn refresh_constructor_derived_fields(
+    constructor: &mut ResolvedConstructor,
+    arg_types: Option<&[JavaType]>,
+    symbols: &ProgramSymbols,
+    external_facts: &FactSet,
+) {
+    let recovered_arg_types = arg_types
+        .is_none()
+        .then(|| constructor_arg_actual_types(constructor))
+        .flatten();
+    let effective_arg_types = arg_types.or(recovered_arg_types.as_deref());
+
+    constructor.params = constructor_params_for_constructed_type(constructor, symbols);
+
+    if let Some(arg_types) = effective_arg_types {
+        let param_types = constructor
+            .params
+            .iter()
+            .map(|param| param.ty.clone())
+            .collect::<Vec<_>>();
+        constructor.arg_coercions = java_coercion_evidence_for_params(
+            &constructor.params,
+            &param_types,
+            arg_types,
+            symbols,
+            external_facts,
+        );
+    }
+}
+
+fn constructor_arg_actual_types(constructor: &ResolvedConstructor) -> Option<Vec<JavaType>> {
+    let arg_count = constructor
+        .arg_coercions
+        .iter()
+        .map(|coercion| coercion.arg_index)
+        .max()
+        .map_or(0, |index| index + 1);
+    let mut arg_types = vec![None; arg_count];
+    for coercion in &constructor.arg_coercions {
+        if let Some(slot) = arg_types.get_mut(coercion.arg_index) {
+            *slot = Some(coercion.actual.clone());
+        }
+    }
+    arg_types.into_iter().collect()
 }
 
 fn inferred_constructed_type(
@@ -3063,6 +3109,12 @@ fn resolve_expr_calls(
                             ty,
                             None,
                             &constructor.declaring_type,
+                            symbols,
+                            external_facts,
+                        );
+                        refresh_constructor_derived_fields(
+                            &mut constructor,
+                            Some(&arg_types),
                             symbols,
                             external_facts,
                         );

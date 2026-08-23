@@ -672,13 +672,17 @@ fn plan_canonical_equality_comparison(
         };
     }
     match (left.optional_element_type(), right.optional_element_type()) {
-        (Some(left_element), Some(right_element)) if left_element == right_element => {
+        (Some(left_element), Some(right_element))
+            if java_types_match_for_equality(&left_element, &right_element) =>
+        {
             if source == EqualityComparisonSource::EqualsCall
-                && let Some(method_name) = custom_equals_method(&left_element, facts)
+                && let Some(custom_element) =
+                    equality_custom_method_carrier(&left_element, &right_element, facts)
+                && let Some(method_name) = custom_equals_method(custom_element, facts)
             {
                 return EqualityComparisonPlan::BothOptionalCustomEquals {
                     erased_arg_handle_path: custom_equals_erased_arg_handle_path(
-                        &left_element,
+                        custom_element,
                         facts,
                     ),
                     method_name,
@@ -693,7 +697,9 @@ fn plan_canonical_equality_comparison(
                 left_view: optional_string_equality_operand_view(left, left_element),
             }
         }
-        (Some(left_element), None) if left_element == right.java_ty => {
+        (Some(left_element), None)
+            if java_types_match_for_equality(&left_element, &right.java_ty) =>
+        {
             EqualityComparisonPlan::LeftOptionalByRef
         }
         _ if left.java_ty == right.java_ty
@@ -704,6 +710,43 @@ fn plan_canonical_equality_comparison(
         }
         _ => EqualityComparisonPlan::Direct,
     }
+}
+
+fn java_types_match_for_equality(left: &JavaType, right: &JavaType) -> bool {
+    if left == right {
+        return true;
+    }
+    let Some(left_name) = equality_java_type_name(left) else {
+        return false;
+    };
+    let Some(right_name) = equality_java_type_name(right) else {
+        return false;
+    };
+    crate::stdlib::canonical_external_receiver_type_key(left_name)
+        == crate::stdlib::canonical_external_receiver_type_key(right_name)
+}
+
+fn equality_java_type_name(java_ty: &JavaType) -> Option<&str> {
+    match java_ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(name),
+        JavaType::String => Some("String"),
+        _ => None,
+    }
+}
+
+fn equality_custom_method_carrier<'a>(
+    left: &'a JavaType,
+    right: &'a JavaType,
+    facts: &FactSet,
+) -> Option<&'a JavaType> {
+    custom_equals_method(left, facts)
+        .is_some()
+        .then_some(left)
+        .or_else(|| {
+            custom_equals_method(right, facts)
+                .is_some()
+                .then_some(right)
+        })
 }
 
 fn string_equality_operand_view(shape: &RustSlotShape) -> StringEqualityOperandView {

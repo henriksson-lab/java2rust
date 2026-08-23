@@ -1,12 +1,32 @@
 # 0053 — The gate compares counts, not names, and three metric readers fall back to zero
 
 Recorded 2026-08-21.
-Status: **measured** — every claim below is reproduced by a command in this file.
+Status: **fixed** — the gate now compares failure names for every red target,
+and metric readers fail loudly instead of treating missing signals as zero.
 Severity: **high (process)** — it is the mechanism that decides whether any of the
 other audits' fixes are believed.
 Kind: measurement.
 
-Companion to [0052](0052-the-example-corpora-are-asserted-on-but-never-compiled.md)
+Codex follow-up 2026-08-23: measurement hardening slices landed. The differential
+harness no longer returns `ok` when the translator binary or required tools are
+missing; it panics instead, and it asserts the active fixture count is 23. Verified
+both directions: `cargo test --release --test differential` runs the fixtures and
+passes, while `env PATH=/nonexistent ./target/release/deps/differential-...`
+now fails on missing `javac` instead of reporting a green skip. `scripts/gate.sh`
+also now extracts failed test names and compares them when a per-target
+failure-name baseline exists, so the existing `idiom_gaps` name baseline is no
+longer dead prose. `scripts/translate-focused-package.sh` now fails loudly when
+required idiom-sweep signals, analysis-profile metrics, or status columns are
+missing instead of converting absence to `0`; the wrapper has a regression that
+shadows the idiom sweep and confirms a missing `stubbed_constants` row fails the
+summary. The focused wrapper also no longer has a hand-copied invalid-marker
+scan: non-batch translation calls the registry-backed `count-invalid-patterns`
+CLI, and `invalid-patterns.tsv` is aggregated from the status rows. The final
+measurement slice recorded failure-name baselines for every red target, made
+missing red-target name baselines a gate failure, and verified the full gate
+with `scripts/gate.sh --all`.
+
+Companion to [0052](../0052-the-example-corpora-are-asserted-on-but-never-compiled.md)
 (what the suites cannot see) and to
 [0018](done/0018-the-compile-error-metric-cannot-see-silent-failures.md), whose
 second-pass conclusion was *"a metric whose detectors can silently stop matching
@@ -56,7 +76,7 @@ Obtained by running the prebuilt test binaries directly
 (`./target/release/deps/<target>-<hash>`), which needs no cargo and no build lock.
 
 **`fixtures` — 20 failures** (this is `examples/java`, see
-[0052](0052-the-example-corpora-are-asserted-on-but-never-compiled.md)):
+[0052](../0052-the-example-corpora-are-asserted-on-but-never-compiled.md)):
 
 | test | failure |
 |---|---|
@@ -83,6 +103,16 @@ Obtained by running the prebuilt test binaries directly
 
 Three of those 20 are the project's *behavioural* tests. Three of ten
 run-the-Rust checks are dark and the gate reports the same `21/20` either way.
+
+Codex follow-up 2026-08-23: implemented for all current red targets. The gate
+now extracts top-level failed test names from `---- test stdout ----` headers
+(falling back to the final `failures:` block only when no headers are present),
+records them for every failing target, and treats a missing failure-name
+baseline as a gate failure. `scripts/gate.sh --record` wrote baselines for
+`dependency_mode` (16), `external_packs` (2), `fixtures` (21), `idiom_gaps`
+(190), `parser_tree_sitter` (1), `resolve_calls` (11), `semantic_facts` (4),
+`slot_shape_design` (77), and `--lib` (5). `scripts/gate.sh --all` then passed
+with matching counts and names across all 18 targets.
 
 **`dependency_mode` — 16 failures:**
 `external_fact_closed_enum_override_cleans_multilevel_hierarchy_shape`,
@@ -205,6 +235,14 @@ and give the caller an explicit `--allow-missing` for the legacy
 `--no-batch-translate` path that genuinely has no profile. A metric may be
 absent; it must not be absent *and* spelled `0`.
 
+Codex follow-up 2026-08-23: implemented. `idiom_signal_count`,
+`analysis_profile_metric`, and `status_column_sum` now exit non-zero on missing
+inputs or keys, and each required summary assignment propagates that failure.
+`analysis_profile_metric_or_idiom_signal` keeps the intended legacy fallback
+only when the profile file is absent; if the file exists, a missing metric is now
+an error. Regression:
+`cargo test --release --test batch_translation focused_package_missing_idiom_sweep_signal_fails_summary`.
+
 ---
 
 ## 4. The marker list has a third implementation, and it still has the dead detectors
@@ -257,6 +295,15 @@ shell. The obvious fix is to delete the shell's scan and read
 if the report is wanted standalone, it should be generated *from* the registry,
 not typed alongside it.
 
+Codex follow-up 2026-08-23: implemented. The shell's third marker list is gone.
+The serial fallback asks `new-java2rust count-invalid-patterns <file.rs>` for
+the same `src/output_markers.rs` registry-backed count used by
+`translate-batch`, and `invalid-patterns.tsv` now reports the aggregate
+registry-backed count from `status.tsv`. Regression:
+`cargo test --release --test batch_translation count_invalid_patterns_cli_uses_registry_counter`;
+wrapper coverage:
+`cargo test --release --test batch_translation focused_package`.
+
 ---
 
 ## Why all four went unnoticed
@@ -282,18 +329,18 @@ readers, and it is why item (3) is worth doing even though every individual
 
 ## Direction, cheapest first
 
-1. **Record failure *names*, not counts, for every target.** `gate.sh --record`
+1. **Done: record failure *names*, not counts, for every target.** `gate.sh --record`
    already runs each suite; capturing the `failures:` block costs nothing and
    turns the 264-test budget into eight diffable files. Start with `fixtures`
    (20, listed above) and `slot_shape_design` (73, not yet listed) — the two
    with the most behavioural and generated-crate content.
-2. **Make `gate.sh` diff `tests/baselines/idiom-gaps-failures.txt`.** The file
+2. **Done: make `gate.sh` diff `tests/baselines/idiom-gaps-failures.txt`.** The file
    exists and has been maintained for three weeks; nothing reads it. This is the
    smallest possible step and validates the format for (1).
-3. **Make the differential skip observable.** Assert the fixture count, or fail
+3. **Done: make the differential skip observable.** Assert the fixture count, or fail
    on a missing toolchain.
-4. **Make the three `awk` readers fail on a missing key.**
-5. **Delete the shell's marker scan** in favour of the registry-backed counters.
+4. **Done: make the three `awk` readers fail on a missing key.**
+5. **Done: delete the shell's marker scan** in favour of the registry-backed counters.
 
 Items 1 and 2 are the ones that matter: until the gate compares sets, every
 other audit's fix is verified by an integer that a simultaneous regression can
@@ -309,5 +356,5 @@ restore.
   by 52 and made it impossible to tell which kind of problem any future change
   caused"* is precisely the property a count-based baseline lacks and a name-based
   one has for free.
-- [0052](0052-the-example-corpora-are-asserted-on-but-never-compiled.md) — the
+- [0052](../0052-the-example-corpora-are-asserted-on-but-never-compiled.md) — the
   20 named `fixtures` failures are that file's corpus, seen from the gate side.

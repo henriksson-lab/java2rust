@@ -1,0 +1,3 @@
+# parser_tree_sitter known failures
+# Recorded by scripts/gate.sh --record. Diff names, not counts.
+parses_static_utility_method_receiver_as_identifier

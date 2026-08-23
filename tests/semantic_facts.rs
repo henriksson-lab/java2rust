@@ -211,16 +211,16 @@ fn indexed_hierarchy_reachability_matches_legacy_worklist() {
     let indexed = facts.hierarchy_lookup_index();
 
     assert_eq!(
-        indexed.reachable_hierarchy_edges_for_type_with_stats(&facts, &concrete_ty),
+        indexed.reachable_hierarchy_edges_for_type_with_stats(&concrete_ty),
         facts.reachable_hierarchy_edges_for_type_with_stats(&concrete_ty)
     );
     assert_eq!(
-        indexed.hierarchy_subtype_policy(&facts, &concrete_ty, &base_ty),
+        indexed.hierarchy_subtype_policy(&concrete_ty, &base_ty),
         facts.hierarchy_subtype_policy(&concrete_ty, &base_ty)
     );
     assert!(
         indexed
-            .hierarchy_subtype_policy(&facts, &concrete_ty, &base_ty)
+            .hierarchy_subtype_policy(&concrete_ty, &base_ty)
             .reaches
     );
 }

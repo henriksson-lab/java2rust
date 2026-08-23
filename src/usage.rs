@@ -1049,7 +1049,7 @@ fn exception_assignable_to_catch(thrown: &JavaType, catch_ty: &JavaType, facts: 
     }
     facts
         .hierarchy_lookup_index()
-        .hierarchy_subtype_policy(facts, thrown, catch_ty)
+        .hierarchy_subtype_policy(thrown, catch_ty)
         .reaches
 }
 

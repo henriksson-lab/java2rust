@@ -5939,6 +5939,7 @@ fn collect_type_signatures(
                             ty,
                             method,
                             representations,
+                            method_constraints,
                             &constraints,
                             facts,
                             &type_param_scope,
@@ -6183,6 +6184,7 @@ fn inherited_source_method_signature(
                 inherited.declaring_ty,
                 inherited.method,
                 representations,
+                method_constraints,
                 &constraints,
                 facts,
                 &type_param_scope,
@@ -13000,6 +13002,11 @@ fn collect_mutated_local_names_from_expr(expr: &Expr, mutated: &mut HashSet<Stri
                 collect_assignment_target_name(&args[0], mutated);
             }
             if let Some(receiver) = receiver {
+                if crate::stdlib::native_collection_method_name_mutates_receiver(name)
+                    && let Some(name) = receiver_root_name(receiver)
+                {
+                    mutated.insert(name.to_string());
+                }
                 collect_mutated_local_names_from_expr(receiver, mutated);
             }
             for arg in args {
@@ -13011,8 +13018,22 @@ fn collect_mutated_local_names_from_expr(expr: &Expr, mutated: &mut HashSet<Stri
                 collect_mutated_local_names_from_expr(arg, mutated);
             }
         }
-        Expr::Lambda { .. }
-        | Expr::MethodReference { .. }
+        Expr::Lambda { params, body } => {
+            let mut lambda_mutated = HashSet::new();
+            match body {
+                LambdaBody::Expr(expr) => {
+                    collect_mutated_local_names_from_expr(expr, &mut lambda_mutated);
+                }
+                LambdaBody::Block(block) => {
+                    collect_mutated_local_names_from_stmts(&block.statements, &mut lambda_mutated);
+                }
+            }
+            for param in params {
+                lambda_mutated.remove(&param.name);
+            }
+            mutated.extend(lambda_mutated);
+        }
+        Expr::MethodReference { .. }
         | Expr::Literal(_)
         | Expr::Var(_)
         | Expr::This
@@ -13058,6 +13079,16 @@ fn array_access_root_name(expr: &Expr) -> Option<&str> {
     match expr {
         Expr::Var(name) => Some(name),
         Expr::ArrayAccess(array, _) => array_access_root_name(array),
+        _ => None,
+    }
+}
+
+fn receiver_root_name(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Var(name) => Some(name),
+        Expr::FieldAccess(receiver, _) | Expr::ArrayAccess(receiver, _) => {
+            receiver_root_name(receiver)
+        }
         _ => None,
     }
 }
@@ -14004,18 +14035,22 @@ fn constrained_return_shape(
     ty: &TypeDecl,
     method: &MethodDecl,
     representations: &RepresentationPlan,
+    method_constraints: Option<&MethodConstraintSet>,
     constraints: &[SignatureConstraint],
     facts: &FactSet,
     type_param_scope: TypeParamScope<'_>,
 ) -> Option<RustSlotShape> {
     let return_type = method_return_type_for_signature(method).unwrap_or(&method.return_type);
     let public_api_return = signature_member_api_boundary_policy(&method.modifiers).public_api;
+    let merged_constraints = MergedSignatureConstraints::from_constraints(constraints);
+    let borrowed_string_return_requested =
+        constraints.contains(&SignatureConstraint::RequiredOwnership(
+            OwnershipShape::SharedBorrow,
+        )) && string_return_can_use_borrowed_view(method, method_constraints);
     if java_type_is_string_like_signature_type(return_type)
         && !constraints_require_nullable_storage(constraints)
         && !public_api_return
-        && constraints.contains(&SignatureConstraint::RequiredOwnership(
-            OwnershipShape::SharedBorrow,
-        ))
+        && borrowed_string_return_requested
     {
         let constraints = constraints
             .iter()
@@ -14041,9 +14076,9 @@ fn constrained_return_shape(
     if java_type_is_string_like_signature_type(return_type)
         && !constraints_require_nullable_storage(constraints)
         && (public_api_return
-            || (!constraints.contains(&SignatureConstraint::RequiredOwnership(
-                OwnershipShape::SharedBorrow,
-            )) && !constraints.contains(&SignatureConstraint::RequiredView(ViewShape::Str))))
+            || (!borrowed_string_return_requested
+                && merged_constraints.required_owner != Some(OwnershipShape::SharedBorrow)
+                && merged_constraints.slot_view_req != Some(ViewShape::Str)))
     {
         let constraints = constraints
             .iter()
@@ -14109,6 +14144,40 @@ fn constrained_return_shape(
         apply_required_ownership(&mut shape, OwnershipShape::SharedBorrow);
     }
     Some(shape)
+}
+
+fn string_return_can_use_borrowed_view(
+    method: &MethodDecl,
+    method_constraints: Option<&MethodConstraintSet>,
+) -> bool {
+    let Some(body) = method.body.as_ref() else {
+        return true;
+    };
+    let returned_names = exact_returned_var_names_from_stmts(&body.statements);
+    if returned_names.is_empty() {
+        return true;
+    }
+    for returned_name in returned_names {
+        if !method
+            .params
+            .iter()
+            .any(|param| param.name == returned_name)
+        {
+            continue;
+        }
+        let Some(method_constraints) = method_constraints else {
+            continue;
+        };
+        let binding_constraints = binding_slot_requirements(method_constraints, returned_name)
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let merged = MergedSignatureConstraints::from_constraints(&binding_constraints);
+        if merged.required_owner != Some(OwnershipShape::SharedBorrow) {
+            return false;
+        }
+    }
+    true
 }
 
 fn method_return_type_for_signature(method: &MethodDecl) -> Option<&JavaType> {

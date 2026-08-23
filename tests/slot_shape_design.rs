@@ -4044,6 +4044,43 @@ class Dog {}
 }
 
 #[test]
+fn representation_plan_refreshes_closed_enum_variants_after_hierarchy_edges() {
+    let parsed = parse_java_source(
+        r#"
+interface Animal {}
+class Dog implements Animal {}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let mut facts = resolved.facts.clone();
+    facts.hierarchy_overrides.push(HierarchyOverride {
+        type_name: "Animal".to_string(),
+        strategy: HierarchyStrategy::ClosedEnum {
+            enum_name: "AnimalValue".to_string(),
+            variants: Vec::new(),
+        },
+        provenance: FactProvenance::UserOverride,
+    });
+
+    let representations = plan_representations(&resolved.program, &facts);
+
+    assert_eq!(
+        representations.direct_subtypes_of("Animal"),
+        ["Dog".to_string()].as_slice()
+    );
+    assert_eq!(
+        representations.representation_for(&JavaType::Named {
+            name: "Animal".to_string(),
+            args: Vec::new(),
+        }),
+        ObjectRepresentation::ClosedEnum {
+            enum_name: "AnimalValue".to_string(),
+            variants: vec!["Dog".to_string()],
+        }
+    );
+}
+
+#[test]
 fn hierarchy_edge_diagnostic_policy_owns_unsupported_hierarchy_diagnostics() {
     let parsed = parse_java_source(
         r#"
@@ -5103,6 +5140,41 @@ fn class_literal_tokens_are_planned_before_lowering() {
         RustType::Generic {
             base: "JavaClass".to_string(),
             args: vec![RustType::String],
+        }
+    );
+
+    let unresolved = class_literal_token_plan(
+        &JavaType::Named {
+            name: "RegisteredType".to_string(),
+            args: Vec::new(),
+        },
+        &FactSet::default(),
+    );
+    assert_eq!(
+        unresolved,
+        new_java2rust::stdlib::ClassLiteralTokenPlan {
+            java_name: "RegisteredType".to_string(),
+            rust_type: RustType::Unit,
+        }
+    );
+
+    let mut source_facts = FactSet::default();
+    source_facts.storage_strategies.insert(
+        "RegisteredType".to_string(),
+        new_java2rust::storage_strategy::TypeStorageFacts::default(),
+    );
+    let source = class_literal_token_plan(
+        &JavaType::Named {
+            name: "RegisteredType".to_string(),
+            args: Vec::new(),
+        },
+        &source_facts,
+    );
+    assert_eq!(
+        source,
+        new_java2rust::stdlib::ClassLiteralTokenPlan {
+            java_name: "RegisteredType".to_string(),
+            rust_type: RustType::Named("RegisteredType".to_string()),
         }
     );
 }
@@ -35241,9 +35313,12 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     );
     assert!(coercion_source.contains("fn option_some_projection"));
     assert!(
-        coercion_source.contains("Coercion::WrapOption => option_some_projection(expr)")
+        coercion_source
+            .contains("Coercion::WrapOption => option_some_projection_for_coercion(expr)")
+            && coercion_source.contains("fn option_some_projection_for_coercion")
+            && coercion_source.contains("RustExprShape::ResultPropagated")
             && !coercion_source.contains("fn render_raw_option_some"),
-        "option wrapping should call the structured Some projection directly"
+        "option wrapping should call the structured Some projection and preserve result propagation"
     );
     assert!(coercion_source.contains("pub fn unwrap_rendered_some_expr"));
     assert!(coercion_source.contains("pub fn unwrap_some_expr"));
@@ -47369,8 +47444,8 @@ class NameGroup {
     ));
     assert!(matches!(
         plan.actual,
-        LoweredType::VecElementBorrow { element_shape, .. }
-            if element_shape.java_ty == JavaType::String
+        LoweredType::Slot(shape)
+            if shape.java_ty == list_java_type(JavaType::String)
     ));
     assert_eq!(
         emit::emit_expr(&lowered.expr),

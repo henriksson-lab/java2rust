@@ -1,0 +1,14 @@
+idiom-gaps/SparkRddVariantPipeline.java
+idiom-gaps/StreamCallbackChain.java
+idiom-gaps/SuperConstructorState.java
+idiom-gaps/TryWithResourcesReturn.java
+idiom-gaps/UnresolvedConstructorDelegation.java
+java/03-methods/NullOverloadAmbiguity.java
+java/04-objects/AnonymousInterface.java
+java/04-objects/DynTraitMethodCompatibility.java
+java/04-objects/LocalClassCapture.java
+java/05-types/ArrayInitializers.java
+java/05-types/WildcardBounds.java
+java/06-stdlib/StreamFlatMapBlockPipeline.java
+java/06-stdlib/TryCatchFinally.java
+java/06-stdlib/TryWithResources.java

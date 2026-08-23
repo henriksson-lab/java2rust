@@ -110,15 +110,20 @@ impl<'a> CallTargetPlan<'a> {
             CallTargetPlan::InstanceReceiver { receiver, .. }
             | CallTargetPlan::FallbackReceiver { receiver, .. }
             | CallTargetPlan::ExternalCrateReceiver { receiver, .. }
-            | CallTargetPlan::ExternalFacadeReceiver { receiver, .. }
             | CallTargetPlan::NativeCollectionMethod { receiver, .. }
             | CallTargetPlan::NativeJavaInstance { receiver, .. } => Some(receiver),
+            CallTargetPlan::ExternalFacadeReceiver {
+                receiver,
+                receiver_abi,
+                ..
+            } if *receiver_abi != ReceiverAbi::AssociatedFunction => Some(receiver),
             CallTargetPlan::StaticSelf { .. }
             | CallTargetPlan::StaticOwner { .. }
             | CallTargetPlan::InstanceSelf { .. }
             | CallTargetPlan::FallbackSelf { .. }
             | CallTargetPlan::FallbackFree { .. }
             | CallTargetPlan::JavaClassStatic { .. }
+            | CallTargetPlan::ExternalFacadeReceiver { .. }
             | CallTargetPlan::NativeCollectionStatic { .. }
             | CallTargetPlan::NativeJavaStatic { .. }
             | CallTargetPlan::SuperBoundary { .. } => None,
@@ -131,8 +136,14 @@ impl<'a> CallTargetPlan<'a> {
             CallTargetPlan::InstanceReceiver { .. }
                 | CallTargetPlan::FallbackReceiver { .. }
                 | CallTargetPlan::ExternalCrateReceiver { .. }
-                | CallTargetPlan::ExternalFacadeReceiver { .. }
                 | CallTargetPlan::NativeJavaInstance { .. }
+                | CallTargetPlan::ExternalFacadeReceiver {
+                    receiver_abi: ReceiverAbi::BorrowedSelf
+                        | ReceiverAbi::MutBorrowedSelf
+                        | ReceiverAbi::OwnedSelf
+                        | ReceiverAbi::FreeFunction,
+                    ..
+                }
         ) && !matches!(
             self,
             CallTargetPlan::NativeJavaInstance {
@@ -190,8 +201,14 @@ impl<'a> CallTargetPlan<'a> {
             self,
             CallTargetPlan::FallbackReceiver { .. }
                 | CallTargetPlan::ExternalCrateReceiver { .. }
-                | CallTargetPlan::ExternalFacadeReceiver { .. }
                 | CallTargetPlan::NativeCollectionMethod { .. }
+                | CallTargetPlan::ExternalFacadeReceiver {
+                    receiver_abi: ReceiverAbi::BorrowedSelf
+                        | ReceiverAbi::MutBorrowedSelf
+                        | ReceiverAbi::OwnedSelf
+                        | ReceiverAbi::FreeFunction,
+                    ..
+                }
         )
     }
 
@@ -611,6 +628,12 @@ pub fn native_collection_lowered_type(
     let receiver_ty = infer_expr_type(receiver, types);
     let receiver_ty = effective_native_collection_receiver_type(&receiver_ty);
     match method {
+        NativeCollectionMethod::Len => Some(LoweredType::from_java(JavaType::Primitive(
+            PrimitiveType::Int,
+        ))),
+        NativeCollectionMethod::IsEmpty => Some(LoweredType::from_java(JavaType::Primitive(
+            PrimitiveType::Boolean,
+        ))),
         NativeCollectionMethod::ListGet => {
             let element_ty = crate::types::sequence_element_type(&receiver_ty)?;
             Some(LoweredType::optional_element_borrow_shape(
@@ -932,9 +955,26 @@ pub fn external_call_lowered_type_with_external_index(
             return_ty,
         ));
     };
+    let rust_method = receiver_key
+        .as_deref()
+        .map(|receiver_key| external_method_rust_name(receiver_key, name, arg_count, facts))
+        .unwrap_or_else(|| crate::parser::to_snake_case(name));
     let return_ty = crate::types::receiver_generic_return_type(
         receiver_ty.as_ref(),
-        effect.return_type.clone()?,
+        effect.return_type.clone().or_else(|| {
+            crate::stdlib::inferred_external_method_return_type(
+                receiver_key.as_deref(),
+                name,
+                &rust_method,
+                arg_count,
+            )
+            .filter(|return_type| {
+                crate::stdlib::inferred_external_effect_return_type_can_replace_opaque(
+                    name,
+                    return_type,
+                )
+            })
+        })?,
     );
     if let Some(facade_lowered) = facade_abi_external_call_lowered_type(
         receiver_key.as_deref(),
@@ -2380,7 +2420,7 @@ fn plan_call_target_with_external_index_impl<'a>(
         return target;
     }
 
-    if let Some(target) = plan_native_collection_static_call(receiver, name) {
+    if let Some(target) = plan_native_collection_static_call(receiver, name, resolved, types) {
         return target;
     }
 
@@ -2391,7 +2431,7 @@ fn plan_call_target_with_external_index_impl<'a>(
         return target;
     }
 
-    if let Some(target) = plan_native_java_static_call(receiver, name, args, types) {
+    if let Some(target) = plan_native_java_static_call(receiver, name, args, types, resolved) {
         return target;
     }
 
@@ -3225,11 +3265,19 @@ fn is_static_constant_member(member: &str) -> bool {
 fn plan_native_collection_static_call<'a>(
     receiver: Option<&'a Expr>,
     name: &str,
+    resolved: Option<&ResolvedCall>,
+    types: &TypeEnv,
 ) -> Option<CallTargetPlan<'a>> {
     let Some(Expr::Var(receiver_name)) = receiver else {
         return None;
     };
-    if crate::stdlib::canonical_external_receiver_type_key(receiver_name) == "Arrays" {
+    let receiver_key = crate::stdlib::canonical_external_receiver_type_key(receiver_name);
+    if receiver_key == "Arrays" {
+        if resolved_static_owner_shadows_native_owner(resolved, "Arrays")
+            || static_type_alias_shadows_native_owner(receiver_name, "Arrays", types)
+        {
+            return None;
+        }
         let method = match name {
             "asList" | "as_list" => NativeCollectionStaticMethod::ArraysAsList,
             "equals" => NativeCollectionStaticMethod::ArraysEquals,
@@ -3247,7 +3295,12 @@ fn plan_native_collection_static_call<'a>(
         };
         return Some(CallTargetPlan::NativeCollectionStatic { method });
     }
-    if crate::stdlib::canonical_external_receiver_type_key(receiver_name) == "Collections" {
+    if receiver_key == "Collections" {
+        if resolved_static_owner_shadows_native_owner(resolved, "Collections")
+            || static_type_alias_shadows_native_owner(receiver_name, "Collections", types)
+        {
+            return None;
+        }
         let method = match name {
             "emptyList" | "empty_list" => NativeCollectionStaticMethod::CollectionsEmptyList,
             "emptySet" | "empty_set" => NativeCollectionStaticMethod::CollectionsEmptySet,
@@ -3461,7 +3514,7 @@ fn plan_native_java_receiver_call<'a>(
         (JavaType::Named { name, .. }, "format") if arg_count == 1 && is_format_receiver(name) => {
             NativeJavaInstanceMethod::DecimalFormatFormat
         }
-        (_, "equals") => NativeJavaInstanceMethod::Equals,
+        (_, "equals") if arg_count == 1 => NativeJavaInstanceMethod::Equals,
         _ => return None,
     };
     Some(CallTargetPlan::NativeJavaInstance { receiver, method })
@@ -3656,6 +3709,7 @@ fn plan_native_java_static_call<'a>(
     name: &str,
     args: Option<&'a [Expr]>,
     types: &TypeEnv,
+    resolved: Option<&ResolvedCall>,
 ) -> Option<CallTargetPlan<'a>> {
     let Some(Expr::Var(receiver_name)) = receiver else {
         return None;
@@ -3663,7 +3717,65 @@ fn plan_native_java_static_call<'a>(
     if !receiver_is_native_static_owner(receiver_name, types) {
         return None;
     }
+    let receiver_key = crate::stdlib::canonical_external_receiver_type_key(receiver_name);
+    let receiver_key =
+        crate::javalibs::native_java_static_owner_alias(&receiver_key).unwrap_or(&receiver_key);
+    let receiver_simple = receiver_key.rsplit('.').next().unwrap_or(receiver_key);
+    if resolved_static_owner_shadows_native_owner(resolved, receiver_simple)
+        || static_type_alias_shadows_native_owner(receiver_name, receiver_simple, types)
+    {
+        return None;
+    }
     plan_native_java_static_owner_call(receiver_name, name, args, types)
+}
+
+fn resolved_static_owner_shadows_native_owner(
+    resolved: Option<&ResolvedCall>,
+    native_owner: &str,
+) -> bool {
+    let Some(call) = resolved else {
+        return false;
+    };
+    if call.kind != CallKind::Static {
+        return false;
+    }
+    !native_static_owner_matches(&call.declaring_type, native_owner)
+}
+
+fn static_type_alias_shadows_native_owner(
+    receiver_name: &str,
+    native_owner: &str,
+    types: &TypeEnv,
+) -> bool {
+    types
+        .static_type_alias(receiver_name)
+        .is_some_and(|alias| !native_static_owner_matches(alias, native_owner))
+}
+
+fn native_static_owner_matches(owner: &str, native_owner: &str) -> bool {
+    native_static_owner_qualified_names(native_owner)
+        .iter()
+        .any(|known| owner == *known)
+}
+
+fn native_static_owner_qualified_names(native_owner: &str) -> &'static [&'static str] {
+    match native_owner {
+        "Arrays" => &["java.util.Arrays"],
+        "Collections" => &["java.util.Collections"],
+        "Objects" => &["java.util.Objects"],
+        "Math" => &[
+            "java.lang.Math",
+            "java.lang.StrictMath",
+            "org.apache.commons.math3.util.FastMath",
+        ],
+        "Integer" => &["java.lang.Integer"],
+        "Float" => &["java.lang.Float"],
+        "Double" => &["java.lang.Double"],
+        "System" => &["java.lang.System"],
+        "Thread" => &["java.lang.Thread"],
+        "String" => &["java.lang.String"],
+        _ => &[],
+    }
 }
 
 fn receiver_is_native_static_owner(receiver_name: &str, types: &TypeEnv) -> bool {
@@ -4092,7 +4204,7 @@ pub fn external_method_rust_name(
     arg_count: usize,
     facts: &FactSet,
 ) -> String {
-    let base = crate::parser::to_snake_case(method_name);
+    let base = external_method_base_rust_name(method_name);
     let receiver_key = crate::stdlib::canonical_external_receiver_type_key(receiver_type);
     if boxed_primitive_static_to_string_uses_unsuffixed_name(&receiver_key, &base, arg_count) {
         return base;
@@ -4112,6 +4224,17 @@ pub fn external_method_rust_name(
         format!("{base}_{arg_count}")
     } else {
         base
+    }
+}
+
+fn external_method_base_rust_name(method_name: &str) -> String {
+    if method_name
+        .strip_prefix('_')
+        .is_some_and(|tail| tail.starts_with(|ch: char| ch.is_ascii_digit()))
+    {
+        method_name.to_string()
+    } else {
+        crate::parser::to_snake_case(method_name)
     }
 }
 
@@ -4561,11 +4684,6 @@ pub fn plan_call_arguments_with_facts(
         {
             return ArgumentLoweringPlan::Shaped(shapes);
         }
-        if let Some(plan) =
-            facade_abi_call_arg_plan_for_resolved(call, name, arg_count, None, facts, types)
-        {
-            return plan;
-        }
         if let Some(shapes) =
             resolved_call_signature_arg_shapes_by_java_key(call, name, arg_count, signatures)
         {
@@ -4573,6 +4691,11 @@ pub fn plan_call_arguments_with_facts(
         }
         if let Some(shapes) = resolved_call_signature_arg_shapes(call, arg_count, signatures) {
             return ArgumentLoweringPlan::Shaped(shapes);
+        }
+        if let Some(plan) =
+            facade_abi_call_arg_plan_for_resolved(call, name, arg_count, None, facts, types)
+        {
+            return plan;
         }
         if let Some(shapes) = external_call_arg_shapes_for_resolved(call, name, arg_count, facts) {
             return ArgumentLoweringPlan::Shaped(shapes);
@@ -4609,11 +4732,6 @@ pub fn plan_call_arguments_with_facts_and_args(
         {
             return ArgumentLoweringPlan::Shaped(shapes);
         }
-        if let Some(plan) =
-            facade_abi_call_arg_plan_for_resolved(call, name, arg_count, Some(args), facts, types)
-        {
-            return plan;
-        }
         if let Some(shapes) =
             resolved_call_signature_arg_shapes_by_java_key(call, name, arg_count, signatures)
         {
@@ -4626,6 +4744,11 @@ pub fn plan_call_arguments_with_facts_and_args(
             resolved_call_signature_arg_shapes_by_args(call, name, args, signatures, facts, types)
         {
             return ArgumentLoweringPlan::Shaped(shapes);
+        }
+        if let Some(plan) =
+            facade_abi_call_arg_plan_for_resolved(call, name, arg_count, Some(args), facts, types)
+        {
+            return plan;
         }
         if let Some(shapes) = external_call_arg_shapes_for_resolved(call, name, arg_count, facts) {
             return ArgumentLoweringPlan::Shaped(shapes);
@@ -4738,8 +4861,31 @@ fn collection_element_arg_shape_with_effective_facts(
     receiver_ty: &JavaType,
     facts: &EffectiveFacts<'_>,
 ) -> Option<RustSlotShape> {
-    let element_ty = crate::types::sequence_element_type(receiver_ty)?;
+    let element_ty = crate::types::sequence_element_type(receiver_ty)
+        .or_else(|| raw_sequence_receiver_erased_element_type(receiver_ty))?;
     Some(storage_arg_shape_with_effective_facts(element_ty, facts))
+}
+
+pub(crate) fn raw_sequence_receiver_erased_element_type(
+    receiver_ty: &JavaType,
+) -> Option<JavaType> {
+    let JavaType::Named { name, args } = receiver_ty else {
+        return None;
+    };
+    if !args.is_empty()
+        || !crate::stdlib::java_collection_kind_for_name(name).is_some_and(|kind| {
+            matches!(
+                kind,
+                crate::stdlib::JavaCollectionKind::List | crate::stdlib::JavaCollectionKind::Set
+            )
+        })
+    {
+        return None;
+    }
+    Some(JavaType::Named {
+        name: "Object".to_string(),
+        args: Vec::new(),
+    })
 }
 
 pub fn plan_native_collection_extend_arg(

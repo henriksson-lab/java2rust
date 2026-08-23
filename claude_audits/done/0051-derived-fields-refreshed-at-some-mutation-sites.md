@@ -1,7 +1,8 @@
 # 0051 — Three more derived fields refreshed at only some of their mutation sites, and a repair pass that fixes one of two cases
 
-Status: **verified by census** (every mutation site of every source field
-enumerated and classified); live-vs-latent stated per instance
+Status: **fixed** — the documented derived fields are refreshed at the mutation
+sites, and `HierarchyFactLookupIndex` can no longer be reused with a different
+`FactSet`.
 Severity: **medium-high** — the first instance can emit a Rust `enum` that is
 missing variants; the other two are latent
 Kind: derived state that is stored and can go stale
@@ -126,6 +127,15 @@ gains a member from `object_plan.hierarchy_edges` afterwards. That is exactly
 the situation `expand_source_hierarchy_carrier_variants` was written to handle
 for the sibling representation, so it is known to occur.
 
+Codex follow-up 2026-08-23: fixed at the representation-plan mutation site.
+`representation::add_direct_subtype` now refreshes `ClosedEnum.variants` from
+the final `direct_subtypes` immediately after a successful push, matching the
+existing source-hierarchy carrier repair invariant. The object-model helper
+also refreshes an already-`ClosedEnum` strategy after subtype pushes, but
+explicit closed-enum override variants still intentionally define the represented
+subtype set at that layer. Regression:
+`cargo test --release --test slot_shape_design representation_plan_refreshes_closed_enum_variants_after_hierarchy_edges`.
+
 ---
 
 ## Instance 2 — `ResolvedConstructor.params` vs `constructed_type` (one of two sites omits the refresh)
@@ -179,6 +189,21 @@ derived from `params`
 (`src/resolve.rs:4931 java_coercion_evidence_for_params(&selected.params, …)`)
 and is refreshed at **neither** site — including the "good" one at
 `resolve.rs:2552`.
+
+Codex follow-up 2026-08-23: the missing `params` refresh at the second
+`constructed_type` mutation site is fixed. The `Expr::New` resolution path now
+recomputes `constructor.params` before propagating constructor parameter targets,
+matching `apply_target_type_to_constructor_expr`. Regression:
+`cargo test --release --test resolve_calls resolver_records_target_typed_diamond_constructed_types`
+now asserts that `Holder<Box<String>>` has a substituted constructor param type.
+Codex follow-up 2026-08-23, second pass: fixed the remaining
+`arg_coercions` derived-state issue. Both constructed-type mutation sites now
+refresh constructor `params` and, when argument types are available or can be
+recovered from existing evidence, refresh `arg_coercions` from the same final
+parameter targets. Regression:
+`cargo test --release --test resolve_calls resolver_records_target_typed_diamond_constructed_types`
+now asserts that the nested diamond constructor's coercion target is
+`Box<String>`, not the stale pre-target type variable/raw fallback.
 
 ---
 
@@ -241,6 +266,16 @@ per lookup. `HierarchyFactLookupIndex` is the same idea written without the
 lifetime — and with a `Default` derive, so a default-constructed one answers
 "no hierarchy edges" for every type without anyone noticing.
 
+Codex follow-up 2026-08-23: fixed. `HierarchyFactLookupIndex` now stores the
+`&FactSet` it indexed, no longer derives `Default`, and its query methods no
+longer accept a later arbitrary `&FactSet`. The semantic-analysis exception and
+catch phases were split into immutable collection phases so the index cannot be
+held across mutation of the same `FactSet`; exception facts are appended before
+a fresh index is built for catch facts. Regressions:
+`cargo test --release --test semantic_facts indexed_hierarchy_reachability_matches_legacy_worklist`
+and
+`cargo test --release --test semantic_facts records_catch_assignability_from_reachable_exception_hierarchy`.
+
 ---
 
 ## Why it went unnoticed
@@ -268,7 +303,7 @@ lifetime — and with a `Default` derive, so a default-constructed one answers
 
 Ranked by how completely each removes the failure mode rather than patching it.
 
-1. **`add_direct_subtype` is already the single mutation point** for
+1. **Done for the live mutation path: `add_direct_subtype` is already the single mutation point** for
    `direct_subtypes` (`src/representation.rs:1234`). Make it re-derive the
    variant list for `ClosedEnum` as well as `SourceHierarchyCarrier`, and then
    **delete** `expand_source_hierarchy_carrier_variants` rather than extend it —
@@ -283,7 +318,7 @@ Ranked by how completely each removes the failure mode rather than patching it.
    `constructor_params_for_constructed_type`. The substitution then happens
    unconditionally and `resolve.rs:3060` becomes correct for free — as does
    `arg_coercions`, which is derived one step further and refreshed nowhere.
-3. **Pin the memo to what it memoized.** Give `HierarchyFactLookupIndex` a
+3. **Done: pin the memo to what it memoized.** Give `HierarchyFactLookupIndex` a
    `facts: &'a FactSet` field, drop the `facts` parameter from its three query
    methods, and drop the `Default` derive — the `ExternalFactLookupIndex<'a>`
    pattern already present in the same file. The borrow checker then rejects

@@ -13,7 +13,7 @@ fn fixture(path: &str) -> String {
 #[test]
 fn all_java_fixtures_are_loadable() {
     let fixtures = load_java_fixtures("examples/java").unwrap();
-    assert_eq!(fixtures.len(), 65);
+    assert_eq!(fixtures.len(), 67);
     assert!(
         fixtures
             .iter()
@@ -51,6 +51,20 @@ fn translates_static_import_and_qualified_static_utility_owner() {
 }
 
 #[test]
+fn null_overload_ambiguity_emits_loud_compile_error() {
+    let translation = translate_source(&fixture("03-methods/NullOverloadAmbiguity.java"));
+    assert!(translation.diagnostics.has_code("resolve_call_ambiguous"));
+    assert!(
+        translation
+            .rust
+            .contains("compile_error!(\"ambiguous overload of pick for null argument\")"),
+        "{}",
+        translation.rust
+    );
+    assert!(!translation.rust.contains("return pick(None);"));
+}
+
+#[test]
 fn translates_imported_static_utility_owner_without_module_receiver() {
     let translation = translate_source(&fixture("06-stdlib/ImportedStaticUtilityOwner.java"));
     assert!(
@@ -61,7 +75,7 @@ fn translates_imported_static_utility_owner_without_module_receiver() {
     assert!(
         translation
             .rust
-            .contains("ExternalUtility::read_value(path)"),
+            .contains("ExternalLibExternalUtility::read_value(path)"),
         "{}",
         translation.rust
     );
@@ -71,11 +85,105 @@ fn translates_imported_static_utility_owner_without_module_receiver() {
         translation.rust
     );
     assert!(
+        translation
+            .rust
+            .contains("pub fn read_value<R, T0>(&self, _arg0: T0) -> R"),
+        "{}",
+        translation.rust
+    );
+    assert!(
         translation.rust.contains("local.read_value(path)"),
         "{}",
         translation.rust
     );
     assert!(!translation.rust.contains("external_utility::read_value"));
+    let rust_path = std::env::temp_dir().join("new_java2rust_imported_static_utility_owner.rs");
+    let metadata_path =
+        std::env::temp_dir().join("new_java2rust_imported_static_utility_owner.rmeta");
+    fs::write(&rust_path, &translation.rust).unwrap();
+    let output = Command::new("rustc")
+        .arg("--edition")
+        .arg("2021")
+        .arg("--crate-type")
+        .arg("lib")
+        .arg("--crate-name")
+        .arg("imported_static_utility_owner")
+        .arg("--emit=metadata")
+        .arg("-o")
+        .arg(&metadata_path)
+        .arg(&rust_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "imported static utility owner generated Rust did not compile\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn static_owner_shadowing_uses_source_owner_before_jdk_facade() {
+    let translation = translate_source(&fixture("06-stdlib/StaticOwnerShadowing.java"));
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("return StaticOwnerShadowingObjects::equals(&left, &right);")
+            && translation
+                .rust
+                .contains("return StaticOwnerShadowingCollections::empty_list();")
+            && translation
+                .rust
+                .contains("return StaticOwnerShadowingInteger::max(left, right);"),
+        "{}",
+        translation.rust
+    );
+    let test_source = format!(
+        "{}\n{}",
+        translation.rust,
+        r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn static_owner_shadowing_uses_nested_source_types() {
+        let subject = StaticOwnerShadowing {};
+        assert!(!subject.same("a".to_string(), "a".to_string()));
+        assert_eq!(subject.count(), 42);
+        assert_eq!(subject.max(9, 4), 5);
+    }
+}
+"#
+    );
+    let rust_path = std::env::temp_dir().join("new_java2rust_static_owner_shadowing_test.rs");
+    let bin_path = std::env::temp_dir().join("new_java2rust_static_owner_shadowing_test");
+    fs::write(&rust_path, test_source).unwrap();
+    let output = Command::new("rustc")
+        .arg("--test")
+        .arg(&rust_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "static owner shadowing test did not compile\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = Command::new(&bin_path).output().unwrap();
+    assert!(
+        output.status.success(),
+        "static owner shadowing behavior test failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -167,6 +275,90 @@ fn translates_external_string_constant_argument_without_downcast() {
         translation.rust
     );
     assert!(!translation.rust.contains("downcast::<String>()"));
+    let rust_path = std::env::temp_dir().join("new_java2rust_external_string_constant_argument.rs");
+    let metadata_path =
+        std::env::temp_dir().join("new_java2rust_external_string_constant_argument.rmeta");
+    fs::write(&rust_path, &translation.rust).unwrap();
+    let output = Command::new("rustc")
+        .arg("--edition")
+        .arg("2021")
+        .arg("--crate-type")
+        .arg("lib")
+        .arg("--crate-name")
+        .arg("external_string_constant_argument")
+        .arg("--emit=metadata")
+        .arg("-o")
+        .arg(&metadata_path)
+        .arg(&rust_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "external string constant argument generated Rust did not compile\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn enum_constants_with_fields_compile_with_single_payload_accessor() {
+    let translation = translate_source(&fixture("04-objects/EnumConstantsWithFields.java"));
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert_eq!(
+        translation.rust.matches("pub fn id(&self) -> i32").count(),
+        1,
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("return self.id();"),
+        "{}",
+        translation.rust
+    );
+    let test_source = format!(
+        "{}\n{}",
+        translation.rust,
+        r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn enum_payload_ids_match_constructor_args() {
+        let fixture = EnumConstantsWithFields {};
+        assert_eq!(fixture.id(Mode::FAST), 1);
+        assert_eq!(fixture.id(Mode::SLOW), 2);
+    }
+}
+"#
+    );
+    let rust_path = std::env::temp_dir().join("new_java2rust_enum_constants_with_fields_test.rs");
+    let bin_path = std::env::temp_dir().join("new_java2rust_enum_constants_with_fields_test");
+    fs::write(&rust_path, test_source).unwrap();
+    let output = Command::new("rustc")
+        .arg("--test")
+        .arg(&rust_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "enum constants with fields test did not compile\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = Command::new(&bin_path).output().unwrap();
+    assert!(
+        output.status.success(),
+        "enum constants with fields behavior test failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -579,7 +771,7 @@ fn translates_simple_stream_sum_to_iterator_chain() {
     assert!(
         translation
             .rust
-            .contains("pub fn positive_sum(&self, values: &Vec<i32>) -> i32")
+            .contains("pub fn positive_sum(&self, values: &[i32]) -> i32")
     );
     assert!(
         translation
@@ -761,7 +953,7 @@ fn stream_flat_map_lambda_generated_rust_preserves_behavior() {
     assert!(
         translation
             .rust
-            .contains("groups.iter().flat_map(|group| group.iter()).collect::<Vec<_>>()"),
+            .contains("groups.iter().flat_map(|group| group.iter()).cloned().collect::<Vec<_>>()"),
         "{}",
         translation.rust
     );
@@ -887,6 +1079,52 @@ fn stream_flat_map_projection_generated_rust_preserves_behavior() {
         ),
         "{}",
         translation.rust
+    );
+    let test_source = format!(
+        "{}\n{}",
+        translation.rust,
+        r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn stream_flat_map_projection_flattens_named_groups() {
+        let streams = StreamFlatMapProjection {};
+        let groups = vec![
+            NameGroup::new(vec!["a".to_string(), "b".to_string()]),
+            NameGroup::new(vec!["c".to_string()]),
+        ];
+        assert_eq!(
+            streams.flatten(&groups),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+    }
+}
+"#
+    );
+    let rust_path = std::env::temp_dir().join("new_java2rust_stream_flat_map_projection_test.rs");
+    let bin_path = std::env::temp_dir().join("new_java2rust_stream_flat_map_projection_test");
+    fs::write(&rust_path, test_source).unwrap();
+    let output = Command::new("rustc")
+        .arg("--test")
+        .arg(&rust_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stream flatMap projection test did not compile\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = Command::new(&bin_path).output().unwrap();
+    assert!(
+        output.status.success(),
+        "stream flatMap projection behavior test failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
@@ -1109,7 +1347,7 @@ fn translates_stream_find_first_and_any_match_through_slot_coercion() {
     assert!(
         translation
             .rust
-            .contains("pub fn first_long(&self, values: &Vec<String>) -> Option<String>")
+            .contains("pub fn first_long(&self, values: &[String]) -> Option<String>")
     );
     assert!(
         translation
@@ -1303,6 +1541,91 @@ fn collection_capacity_constructor_uses_with_capacity() {
             .contains("Vec::with_capacity((self.names.as_ref().unwrap().len() as i32) as usize)")
     );
     assert!(!translation.rust.contains("self.names.size()"));
+    let test_source = format!(
+        "{}\n{}",
+        translation.rust,
+        r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn collection_capacity_constructor_compiles_and_returns_empty_headers() {
+        let subject = CollectionCapacityConstructor {
+            names: Some(vec!["id".to_string(), "sample".to_string()]),
+        };
+        assert_eq!(subject.copy_headers(), Vec::<String>::new());
+    }
+}
+"#
+    );
+    let rust_path =
+        std::env::temp_dir().join("new_java2rust_collection_capacity_constructor_test.rs");
+    let bin_path = std::env::temp_dir().join("new_java2rust_collection_capacity_constructor_test");
+    fs::write(&rust_path, test_source).unwrap();
+    let output = Command::new("rustc")
+        .arg("--test")
+        .arg(&rust_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "collection capacity constructor test did not compile\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = Command::new(&bin_path).output().unwrap();
+    assert!(
+        output.status.success(),
+        "collection capacity constructor behavior test failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn checked_propagation_string_length_after_fallible_optional_read_compiles() {
+    let translation = translate_source(&fixture("06-stdlib/CheckedPropagation.java"));
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("reader.read_line()?.as_ref().unwrap().as_str().len() as i32"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains(".unwrap().expect(\"Java null receiver\").as_str().len()"),
+        "{}",
+        translation.rust
+    );
+    let rust_path = std::env::temp_dir().join("new_java2rust_checked_propagation_test.rs");
+    fs::write(&rust_path, translation.rust).unwrap();
+    let output = Command::new("rustc")
+        .arg("--edition")
+        .arg("2021")
+        .arg("--crate-type")
+        .arg("lib")
+        .arg("--crate-name")
+        .arg("checked_propagation_fixture")
+        .arg("--emit=metadata")
+        .arg(&rust_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "checked propagation fixture did not compile\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -1397,4 +1720,58 @@ fn first_slice_generated_rust_compiles() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+}
+
+#[test]
+fn raw_types_generated_rust_compiles_with_erased_list_elements() {
+    let translation = translate_source(&fixture("05-types/RawTypes.java"));
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("values.push(Box::new(\"text\".to_string()) as Box<dyn std::any::Any>);"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("values.push(Box::new(1) as Box<dyn std::any::Any>);"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains(
+            "Some(java_clone_erased_object_ref(&values.get(0 as usize).expect(\"Java index out of bounds\")))"
+        ),
+        "{}",
+        translation.rust
+    );
+
+    let rust_path = std::env::temp_dir().join("new_java2rust_raw_types.rs");
+    let metadata_path = std::env::temp_dir().join("new_java2rust_raw_types.rmeta");
+    fs::write(&rust_path, translation.rust).unwrap();
+    let output = Command::new("rustc")
+        .arg("--edition")
+        .arg("2021")
+        .arg("--crate-type")
+        .arg("lib")
+        .arg("--crate-name")
+        .arg("raw_types")
+        .arg("--emit=metadata")
+        .arg("-o")
+        .arg(&metadata_path)
+        .arg(&rust_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "raw types generated Rust did not compile\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

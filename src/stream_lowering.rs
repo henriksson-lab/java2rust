@@ -14,6 +14,7 @@ use crate::coercion::{
     stream_lambda_argument_slot_plan, stream_lambda_param_expr,
     stream_map_op_projection_with_param, stream_match_terminal_projection,
     stream_prefixed_flat_map_op_projection, stream_reduce_terminal_projection,
+    unwrap_java_null_receiver_projection,
 };
 use crate::conversion_lowering::apply_lowered_slot_conversion_to_expr;
 use crate::conversion_plan::{
@@ -35,6 +36,8 @@ use crate::stream::{
     FilterPlan, FlatMapPlan, LambdaPlan, StreamLambdaBody, StreamOp, StreamPlan,
     StreamSourceIteration, StreamSourceRange, StreamSubPipeline, StreamTerminal,
 };
+use crate::stream_shape::infer_stream_source_element_shape_with_facts;
+use crate::types::TypeEnv;
 use std::collections::HashSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -937,6 +940,7 @@ fn apply_stream_ops_structured(
             StreamOp::FlatMap(FlatMapPlan::CollectionStreamMethodReference { param_name }) => {
                 expr = borrowed_collection_flat_map_projection(expr, param_name);
                 item_is_borrowed = true;
+                item_shape = collection_flat_map_element_shape(&item_shape, ctx)?;
             }
             StreamOp::FlatMap(FlatMapPlan::LambdaCollectionStream(plan)) => {
                 let param_shape = effective_stream_item_shape(&item_shape, item_is_borrowed);
@@ -970,6 +974,10 @@ fn apply_stream_ops_structured(
                     )
                 };
                 item_is_borrowed = matches!(plan.iteration, StreamSourceIteration::Borrowed);
+                item_shape = effective_stream_item_shape(
+                    &lambda_collection_flat_map_element_shape(plan, &param_shape, ctx)?,
+                    item_is_borrowed,
+                );
             }
             StreamOp::FlatMap(FlatMapPlan::LambdaStreamChain { lambda, pipeline }) => {
                 let param_shape = effective_stream_item_shape(&item_shape, item_is_borrowed);
@@ -997,6 +1005,43 @@ fn apply_stream_ops_structured(
         }
     }
     Some((expr, item_is_borrowed, item_shape))
+}
+
+fn lambda_collection_flat_map_element_shape(
+    plan: &crate::stream::LambdaCollectionStreamPlan<'_>,
+    param_shape: &RustSlotShape,
+    ctx: StreamRenderContext<'_>,
+) -> Option<RustSlotShape> {
+    if matches!(plan.source, Expr::Var(name) if name == &plan.lambda.param_name) {
+        return collection_flat_map_element_shape(param_shape, ctx);
+    }
+    let default_facts;
+    let facts = if let Some(facts) = ctx.facts {
+        facts
+    } else {
+        default_facts = FactSet::default();
+        &default_facts
+    };
+    let mut env = TypeEnv::new();
+    env.insert_local(plan.lambda.param_name.clone(), param_shape.java_ty.clone());
+    infer_stream_source_element_shape_with_facts(plan.source, &env, facts)
+}
+
+fn collection_flat_map_element_shape(
+    collection_shape: &RustSlotShape,
+    ctx: StreamRenderContext<'_>,
+) -> Option<RustSlotShape> {
+    let element_ty = collection_shape.sequence_element_type()?;
+    let default_facts;
+    let facts = if let Some(facts) = ctx.facts {
+        facts
+    } else {
+        default_facts = FactSet::default();
+        &default_facts
+    };
+    Some(crate::shape_projection::iteration_element_shape(
+        element_ty, facts,
+    ))
 }
 
 fn render_stream_terminal_expr(
@@ -1324,6 +1369,9 @@ fn render_stream_sub_pipeline_expr(
     };
     let expr =
         sequence_iteration_source_projection(source, pipeline.source.optional_sequence, iteration);
+    let item_is_borrowed = source_is_lambda_param
+        && matches!(pipeline.source.iteration, StreamSourceIteration::Borrowed);
+    let item_shape = effective_stream_item_shape(&pipeline.source_element.shape, item_is_borrowed);
     apply_stream_ops_structured(
         expr,
         &pipeline.ops,
@@ -1331,8 +1379,8 @@ fn render_stream_sub_pipeline_expr(
         StreamRenderOptions {
             move_filter_closures: true,
         },
-        matches!(pipeline.source.iteration, StreamSourceIteration::Borrowed),
-        pipeline.source_element.shape.clone(),
+        item_is_borrowed,
+        item_shape,
     )
     .map(|(expr, _, _)| expr)
 }
@@ -2141,7 +2189,7 @@ fn emit_stream_lambda_local_initializer_expr(
     ctx: StreamRenderContext<'_>,
     param_shape: Option<&RustSlotShape>,
 ) -> Option<RustExpr> {
-    let lowered = emit_stream_lambda_body_with_locals_prec(
+    let mut lowered = emit_stream_lambda_body_with_locals_prec(
         expr,
         param,
         param_rust,
@@ -2153,11 +2201,35 @@ fn emit_stream_lambda_local_initializer_expr(
         false,
     )?
     .expr;
+    if stream_lambda_initializer_needs_optional_unwrap(ty, expr, ctx) {
+        lowered = unwrap_java_null_receiver_projection(lowered);
+    }
     if matches!(ty, JavaType::String) && matches!(expr, Expr::ArrayAccess(_, _)) {
         Some(apply_clone_projection(lowered))
     } else {
         Some(lowered)
     }
+}
+
+fn stream_lambda_initializer_needs_optional_unwrap(
+    target_ty: &JavaType,
+    expr: &Expr,
+    ctx: StreamRenderContext<'_>,
+) -> bool {
+    let Some(env) = ctx.env else {
+        return false;
+    };
+    let actual_shape = infer_expr_shape_with_context(
+        expr,
+        env,
+        ExprShapeContext {
+            signatures: ctx.signatures,
+            representations: None,
+            facts: ctx.facts,
+        },
+    );
+    crate::types::optional_element_type(&actual_shape.java_ty)
+        .is_some_and(|element_ty| element_ty == *target_ty)
 }
 
 fn stream_lambda_mutated_locals(
