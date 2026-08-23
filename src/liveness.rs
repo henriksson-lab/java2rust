@@ -623,6 +623,7 @@ mod tests {
     fn decl(name: &str, init: Expr) -> Stmt {
         Stmt::VarDecl {
             name: name.to_string(),
+            source_name: name.to_string(),
             ty: crate::java_ir::JavaType::String,
             initializer: Some(init),
         }

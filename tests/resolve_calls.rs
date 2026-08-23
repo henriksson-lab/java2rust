@@ -17,6 +17,7 @@ use new_java2rust::resolver_benchmark::{
 fn param(name: &str, ty: JavaType) -> Param {
     Param {
         name: name.to_string(),
+        source_name: name.to_string(),
         ty,
         is_varargs: false,
     }
@@ -25,6 +26,7 @@ fn param(name: &str, ty: JavaType) -> Param {
 fn varargs_param(name: &str, element_ty: JavaType) -> Param {
     Param {
         name: name.to_string(),
+        source_name: name.to_string(),
         ty: JavaType::Array(Box::new(element_ty)),
         is_varargs: true,
     }

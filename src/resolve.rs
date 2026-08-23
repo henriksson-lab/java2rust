@@ -1985,6 +1985,7 @@ fn substitute_method_symbol(
             .iter()
             .map(|param| Param {
                 name: param.name.clone(),
+                source_name: param.source_name.clone(),
                 ty: substitute_method_type_variables(&param.ty, substitutions),
                 is_varargs: param.is_varargs,
             })
@@ -2584,6 +2585,7 @@ fn constructor_params_for_constructed_type(
         .iter()
         .map(|param| Param {
             name: param.name.clone(),
+            source_name: param.source_name.clone(),
             ty: substitute_method_type_variables(&param.ty, &substitutions),
             is_varargs: param.is_varargs,
         })
@@ -4512,13 +4514,13 @@ fn known_external_or_pack_field_type_for_receiver(
     member: &str,
     external_facts: &FactSet,
 ) -> Option<JavaType> {
-    if let Some(receiver_name) = external_receiver_type_name(receiver_ty)
+    if let Some(receiver_name) = crate::stdlib::external_named_receiver_owner_key(receiver_ty)
         && let Some(field) = external_facts.external_field_for(&receiver_name, member)
         && let Some(field_type) = field.field_type.clone()
     {
         return Some(field_type);
     }
-    if let Some(receiver_name) = external_receiver_type_name(receiver_ty)
+    if let Some(receiver_name) = crate::stdlib::external_named_receiver_owner_key(receiver_ty)
         && let Some(field) = crate::external_packs::external_field_for(&receiver_name, member)
         && let Some(field_type) = field.field_type
     {
@@ -4533,7 +4535,7 @@ fn external_fact_method_return_type_for_call(
     arg_types: &[JavaType],
     external_facts: &FactSet,
 ) -> Option<JavaType> {
-    let receiver_name = receiver_type.and_then(external_receiver_type_name);
+    let receiver_name = receiver_type.and_then(crate::stdlib::external_named_receiver_owner_key);
     external_facts
         .external_api_effect_for_receiver_with_arity(
             receiver_name.as_deref(),
@@ -4541,15 +4543,6 @@ fn external_fact_method_return_type_for_call(
             Some(arg_types.len()),
         )
         .and_then(|effect| effect.return_type.clone())
-}
-
-fn external_receiver_type_name(receiver_ty: &JavaType) -> Option<String> {
-    match receiver_ty {
-        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
-            Some(crate::stdlib::canonical_external_receiver_type_key(name))
-        }
-        _ => None,
-    }
 }
 
 fn is_collection_like_type_name(name: &str) -> bool {
@@ -4655,6 +4648,7 @@ fn resolve_same_class_call(
         .iter()
         .map(|param| Param {
             name: param.name.clone(),
+            source_name: param.source_name.clone(),
             ty: substitute_method_type_variables(&param.ty, &substitutions),
             is_varargs: param.is_varargs,
         })
@@ -4920,6 +4914,7 @@ fn resolve_same_class_constructor(
         .iter()
         .map(|param| Param {
             name: param.name.clone(),
+            source_name: param.source_name.clone(),
             ty: substitute_method_type_variables(&param.ty, &substitutions),
             is_varargs: param.is_varargs,
         })

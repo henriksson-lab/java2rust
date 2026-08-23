@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::OnceLock;
 
 use crate::diagnostics::DiagnosticBag;
@@ -11,16 +11,15 @@ use crate::facts::{
     ExternalCrateConstructorMappingFact, ExternalCrateTypeMappingFact, ExternalFfiHandoverFact,
     ExternalFfiHandoverSlot, ExternalFieldFact, ExternalFieldKind, ExternalFieldValueFact,
     ExternalLibraryMode, ExternalLibraryPackFact, ExternalRustResultFact,
-    ExternalRustReturnTypeFact, FacadeSlot, FactProvenance, FactSet, FieldKey,
-    FieldNullabilityFact, FieldNullabilityProvenance, HierarchyOverride, HierarchyStrategy,
-    NullabilityState, ObjectSafetyFact, ObjectSafetyViolation, OwnedRecoveryCapability,
-    OwnedRecoveryCapabilityFact, ReceiverMutabilityFact, TypeCapabilityOverride, TypePattern,
-    UnsupportedExternalApiFact, UnsupportedExternalConstructorFact, UnsupportedExternalFieldFact,
-    external_type_name_matches,
+    ExternalRustReturnTypeFact, FactProvenance, FactSet, FieldKey, FieldNullabilityFact,
+    FieldNullabilityProvenance, HierarchyOverride, HierarchyStrategy, NullabilityState,
+    ObjectSafetyFact, ObjectSafetyViolation, OwnedRecoveryCapability, OwnedRecoveryCapabilityFact,
+    ReceiverMutabilityFact, TypeCapabilityOverride, TypePattern, UnsupportedExternalApiFact,
+    UnsupportedExternalConstructorFact, UnsupportedExternalFieldFact, external_type_name_matches,
+    facade_slot_for_rust_type,
 };
 use crate::java_ir::{JavaType, PrimitiveType};
 use crate::parser::parse_type;
-use crate::types::raw_rust_option_inner;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalPackManifestParse {
@@ -2240,7 +2239,7 @@ fn push_external_pack_api_fact(
             });
     }
     if let Some(rust_type_name) = parsed_metadata.rust_return_type {
-        let return_slot = facade_slot_for_manifest_rust_type(&rust_type_name);
+        let return_slot = facade_slot_for_rust_type(&rust_type_name);
         facts
             .external_rust_return_type_facts
             .push(ExternalRustReturnTypeFact {
@@ -4109,32 +4108,6 @@ struct ExternalApiMetadata {
     rust_result: Option<bool>,
     rust_return_type: Option<String>,
     borrowed_return_recovery: Option<BorrowedReturnRecovery>,
-}
-
-fn facade_slot_for_manifest_rust_type(ty: &str) -> FacadeSlot {
-    let ty = ty.trim();
-    if ty == "usize" {
-        return FacadeSlot::Index;
-    }
-    if let Some(inner) = raw_rust_option_inner(ty) {
-        return FacadeSlot::Optional(Box::new(facade_slot_for_manifest_rust_type(inner)));
-    }
-    if let Some(inner) = ty.strip_prefix("&mut ") {
-        if let Some(slice) = inner.strip_prefix('[').and_then(|ty| ty.strip_suffix(']')) {
-            return FacadeSlot::Slice(Box::new(facade_slot_for_manifest_rust_type(&format!(
-                "&mut {slice}"
-            ))));
-        }
-        return FacadeSlot::MutBorrowed;
-    }
-    if let Some(inner) = ty.strip_prefix('&') {
-        let inner = inner.trim();
-        if let Some(slice) = inner.strip_prefix('[').and_then(|ty| ty.strip_suffix(']')) {
-            return FacadeSlot::Slice(Box::new(facade_slot_for_manifest_rust_type(slice)));
-        }
-        return FacadeSlot::Borrowed;
-    }
-    FacadeSlot::Owned
 }
 
 fn parse_external_api_metadata(
@@ -29010,75 +28983,77 @@ fn java_platform_field_fact_set() -> FactSet {
     facts
 }
 
-pub fn builtin_external_library_packs() -> FactSet {
-    let mut facts = FactSet::default();
-    facts.extend_from(java_platform_field_fact_set());
-    facts.extend_from(htsjdk_variantcontext_pack_facts());
-    facts.extend_from(htsjdk_vcf_pack_facts());
-    facts.extend_from(htsjdk_bcf_pack_facts());
-    facts.extend_from(htsjdk_sam_header_pack_facts());
-    facts.extend_from(htsjdk_sam_record_pack_facts());
-    facts.extend_from(htsjdk_sam_reference_pack_facts());
-    facts.extend_from(htsjdk_sam_reader_pack_facts());
-    facts.extend_from(htsjdk_sam_writer_pack_facts());
-    facts.extend_from(htsjdk_sam_bam_pack_facts());
-    facts.extend_from(htsjdk_sam_cram_pack_facts());
-    facts.extend_from(htsjdk_sam_metrics_pack_facts());
-    facts.extend_from(htsjdk_nested_helper_pack_facts());
-    facts.extend_from(htsjdk_tribble_feature_pack_facts());
-    facts.extend_from(htsjdk_tribble_index_pack_facts());
-    facts.extend_from(htsjdk_samtools_util_pack_facts());
-    facts.extend_from(apache_commons_math_pack_facts());
-    facts.extend_from(apache_commons_math_optim_pack_facts());
-    facts.extend_from(apache_commons_math_stats_pack_facts());
-    facts.extend_from(apache_commons_collections_pack_facts());
-    facts.extend_from(apache_commons_compress_pack_facts());
-    facts.extend_from(apache_commons_lang_pack_facts());
-    facts.extend_from(apache_commons_codec_pack_facts());
-    facts.extend_from(iharder_base64_pack_facts());
-    facts.extend_from(jama_pack_facts());
-    facts.extend_from(hipparchus_distribution_pack_facts());
-    facts.extend_from(apache_http_pack_facts());
-    facts.extend_from(google_bigquery_pack_facts());
-    facts.extend_from(google_bigquery_storage_pack_facts());
-    facts.extend_from(google_storage_pack_facts());
-    facts.extend_from(google_cloud_nio_pack_facts());
-    facts.extend_from(genomicsdb_pack_facts());
-    facts.extend_from(picard_programgroups_pack_facts());
-    facts.extend_from(picard_markduplicates_pack_facts());
-    facts.extend_from(picard_metrics_pack_facts());
-    facts.extend_from(avro_pack_facts());
-    facts.extend_from(barclay_help_pack_facts());
-    facts.extend_from(barclay_argparser_pack_facts());
-    facts.extend_from(barclay_utils_pack_facts());
-    facts.extend_from(scala_tuple_pack_facts());
-    facts.extend_from(kryo_pack_facts());
-    facts.extend_from(opencsv_pack_facts());
-    facts.extend_from(org_json_pack_facts());
-    facts.extend_from(reflections_pack_facts());
-    facts.extend_from(hadoop_conf_pack_facts());
-    facts.extend_from(apache_commons_config_pack_facts());
-    facts.extend_from(spark_pack_facts());
-    facts.extend_from(bwa_pack_facts());
-    facts.extend_from(jgrapht_pack_facts());
-    facts.extend_from(fastutil_pack_facts());
-    facts.extend_from(kryo_serializers_pack_facts());
-    facts.extend_from(disq_write_pack_facts());
-    facts.extend_from(intel_gkl_pack_facts());
-    facts.extend_from(guava_immutable_collect_pack_facts());
-    facts.extend_from(guava_concurrent_pack_facts());
-    facts.extend_from(broad_hellbender_utils_pack_facts());
-    facts.extend_from(broad_http_pack_facts());
-    facts.extend_from(picard_vcf_pack_facts());
-    facts.extend_from(jackson_databind_pack_facts());
-    facts.extend_from(hdf5_pack_facts());
-    facts.extend_from(sqlite_pack_facts());
-    facts.extend_from(java_sql_pack_facts());
-    facts
+pub fn builtin_external_library_pack_facts() -> &'static FactSet {
+    static FACTS: OnceLock<FactSet> = OnceLock::new();
+    FACTS.get_or_init(|| {
+        let mut facts = FactSet::default();
+        for (_, pack_facts) in builtin_external_pack_fact_sets() {
+            facts.extend_from(pack_facts.clone());
+        }
+        facts
+    })
 }
 
-pub fn builtin_external_api_argument_effect_facts() -> Vec<ExternalApiArgumentEffectFact> {
-    builtin_external_library_packs().external_api_argument_effect_facts
+pub fn builtin_external_library_packs() -> FactSet {
+    builtin_external_library_pack_facts().clone()
+}
+
+pub fn builtin_external_api_argument_effect_facts()
+-> impl Iterator<Item = &'static ExternalApiArgumentEffectFact> {
+    builtin_external_pack_fact_sets()
+        .iter()
+        .flat_map(|(_, facts)| facts.external_api_argument_effect_facts.iter())
+}
+
+pub fn builtin_external_field_facts() -> impl Iterator<Item = &'static ExternalFieldFact> {
+    builtin_external_pack_fact_sets()
+        .iter()
+        .flat_map(|(_, facts)| facts.external_field_facts.iter())
+}
+
+pub fn builtin_external_api_effect_facts() -> impl Iterator<Item = &'static ExternalApiEffectFact> {
+    builtin_external_pack_fact_sets()
+        .iter()
+        .flat_map(|(_, facts)| facts.external_api_effect_facts.iter())
+}
+
+pub fn builtin_external_constructor_facts() -> impl Iterator<Item = &'static ExternalConstructorFact>
+{
+    builtin_external_pack_fact_sets()
+        .iter()
+        .flat_map(|(_, facts)| facts.external_constructor_facts.iter())
+}
+
+pub fn builtin_field_nullability_for(
+    type_name: &str,
+    field_name: &str,
+) -> Option<NullabilityState> {
+    builtin_field_nullability_fact_for(type_name, field_name, true)
+        .or_else(|| builtin_field_nullability_fact_for(type_name, field_name, false))
+        .map(|fact| fact.state)
+}
+
+fn builtin_field_nullability_fact_for(
+    type_name: &str,
+    field_name: &str,
+    external_override_only: bool,
+) -> Option<&'static FieldNullabilityFact> {
+    builtin_external_pack_fact_sets()
+        .iter()
+        .rev()
+        .flat_map(|(_, facts)| facts.field_nullability_facts.iter().rev())
+        .find(|fact| {
+            (!external_override_only
+                || fact.provenance == FieldNullabilityProvenance::ExternalOverride)
+                && external_type_name_matches(&fact.field.type_name, type_name)
+                && external_field_name_lookup_aliases(&fact.field.field_name)
+                    .iter()
+                    .any(|alias| {
+                        external_field_name_lookup_aliases(field_name)
+                            .iter()
+                            .any(|query_alias| query_alias == alias)
+                    })
+        })
 }
 
 pub fn java_platform_api_argument_effect_facts() -> Vec<ExternalApiArgumentEffectFact> {
@@ -29292,6 +29267,12 @@ pub fn builtin_external_pack_facts(pack_name: &str) -> Option<FactSet> {
         .map(|(_, facts)| facts.clone())
 }
 
+pub fn builtin_external_pack_fact_sets_iter() -> impl Iterator<Item = &'static FactSet> {
+    builtin_external_pack_fact_sets()
+        .iter()
+        .map(|(_, facts)| facts)
+}
+
 fn builtin_external_pack_fact_sets() -> &'static [(String, FactSet)] {
     static FACT_SETS: OnceLock<Vec<(String, FactSet)>> = OnceLock::new();
     FACT_SETS.get_or_init(|| {
@@ -29464,11 +29445,13 @@ pub fn builtin_external_final_erased_object_type(name: &str) -> bool {
 struct BuiltinExternalPackLookupIndex {
     api_effects_by_key: HashMap<CallableKey, ExternalApiEffectFact>,
     api_effects: HashMap<(String, String, Option<usize>), ExternalApiEffectFact>,
+    api_effect_arities: HashMap<(String, String), BTreeSet<usize>>,
     api_argument_effects:
         HashMap<(String, String, Option<usize>, usize), ExternalApiArgumentEffectFact>,
     unsupported_apis: HashMap<(String, String), UnsupportedExternalApiFact>,
     constructors_by_key: HashMap<CallableKey, ExternalConstructorFact>,
     constructors: HashMap<(String, usize), ExternalConstructorFact>,
+    constructor_arities: HashMap<String, BTreeSet<usize>>,
     unsupported_constructors: HashMap<(String, usize), UnsupportedExternalConstructorFact>,
     fields_by_key: HashMap<CallableKey, ExternalFieldFact>,
     fields: HashMap<(String, String), ExternalFieldFact>,
@@ -29505,8 +29488,19 @@ fn builtin_external_pack_lookup_index() -> &'static BuiltinExternalPackLookupInd
                             }
                             index
                                 .api_effects
-                                .entry((receiver_alias.clone(), method_alias, fact.arg_count))
+                                .entry((
+                                    receiver_alias.clone(),
+                                    method_alias.clone(),
+                                    fact.arg_count,
+                                ))
                                 .or_insert_with(|| fact.clone());
+                            if let Some(arg_count) = fact.arg_count {
+                                index
+                                    .api_effect_arities
+                                    .entry((receiver_alias.clone(), method_alias.clone()))
+                                    .or_default()
+                                    .insert(arg_count);
+                            }
                         }
                     }
                 }
@@ -29530,10 +29524,12 @@ fn builtin_external_pack_lookup_index() -> &'static BuiltinExternalPackLookupInd
             }
             for fact in facts.unsupported_external_api_facts.iter().rev() {
                 for receiver_alias in external_receiver_lookup_aliases(&fact.receiver_type) {
-                    index
-                        .unsupported_apis
-                        .entry((receiver_alias, fact.method_name.clone()))
-                        .or_insert_with(|| fact.clone());
+                    for method_alias in external_method_name_lookup_aliases(&fact.method_name) {
+                        index
+                            .unsupported_apis
+                            .entry((receiver_alias.clone(), method_alias))
+                            .or_insert_with(|| fact.clone());
+                    }
                 }
             }
             for fact in facts.external_constructor_facts.iter().rev() {
@@ -29546,8 +29542,13 @@ fn builtin_external_pack_lookup_index() -> &'static BuiltinExternalPackLookupInd
                         .or_insert_with(|| fact.clone());
                     index
                         .constructors
-                        .entry((type_alias, fact.arg_types.len()))
+                        .entry((type_alias.clone(), fact.arg_types.len()))
                         .or_insert_with(|| fact.clone());
+                    index
+                        .constructor_arities
+                        .entry(type_alias)
+                        .or_default()
+                        .insert(fact.arg_types.len());
                 }
             }
             for fact in facts.unsupported_external_constructor_facts.iter().rev() {
@@ -29785,6 +29786,36 @@ pub fn builtin_external_pack_models_api(receiver_type: &str, method_name: &str) 
         }
     }
     false
+}
+
+pub fn external_api_arities_for_receiver(
+    receiver_type: &str,
+    method_name: &str,
+) -> BTreeSet<usize> {
+    let index = builtin_external_pack_lookup_index();
+    let mut arities = BTreeSet::new();
+    for receiver_alias in external_receiver_lookup_aliases(receiver_type) {
+        for method_alias in external_method_name_lookup_aliases(method_name) {
+            if let Some(indexed) = index
+                .api_effect_arities
+                .get(&(receiver_alias.clone(), method_alias))
+            {
+                arities.extend(indexed.iter().copied());
+            }
+        }
+    }
+    arities
+}
+
+pub fn external_constructor_arities_for(type_name: &str) -> BTreeSet<usize> {
+    let index = builtin_external_pack_lookup_index();
+    let mut arities = BTreeSet::new();
+    for type_alias in external_receiver_lookup_aliases(type_name) {
+        if let Some(indexed) = index.constructor_arities.get(&type_alias) {
+            arities.extend(indexed.iter().copied());
+        }
+    }
+    arities
 }
 
 pub fn external_api_effect_for_receiver_with_arity(
@@ -31364,10 +31395,16 @@ pub fn unsupported_external_api_for_receiver(
     method_name: &str,
 ) -> Option<UnsupportedExternalApiFact> {
     let receiver_type = receiver_type?;
-    builtin_external_pack_lookup_index()
-        .unsupported_apis
-        .get(&(receiver_type.to_string(), method_name.to_string()))
-        .cloned()
+    let index = builtin_external_pack_lookup_index();
+    for method_alias in external_method_name_lookup_aliases(method_name) {
+        if let Some(fact) = index
+            .unsupported_apis
+            .get(&(receiver_type.to_string(), method_alias))
+        {
+            return Some(fact.clone());
+        }
+    }
+    None
 }
 
 pub fn external_constructor_for(

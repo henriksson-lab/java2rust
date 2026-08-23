@@ -146,8 +146,6 @@ fn rust_type_for_slot_with_facts_and_representations_unwrapped(
     if let Some(element_ty) = shape.optional_element_type() {
         let mut element_shape = shape.clone();
         element_shape.java_ty = element_ty;
-        element_shape.type_identity =
-            crate::slot_shape::TypeIdentity::from_java_type(element_shape.java_ty.clone());
         // Through the wrapping entry point: the element is where the handle
         // belongs, giving `Option<Rc<T>>`.
         return RustType::Option(Box::new(rust_type_for_slot_with_facts_and_representations(
@@ -199,8 +197,6 @@ pub fn rust_type_for_slot_with_effective_facts(
     if let Some(element_ty) = shape.optional_element_type() {
         let mut element_shape = shape.clone();
         element_shape.java_ty = element_ty;
-        element_shape.type_identity =
-            crate::slot_shape::TypeIdentity::from_java_type(element_shape.java_ty.clone());
         return RustType::Option(Box::new(rust_type_for_slot_with_effective_facts(
             &element_shape,
             facts,

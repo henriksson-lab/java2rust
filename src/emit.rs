@@ -1,5 +1,7 @@
 use crate::rust_ir::*;
 
+use crate::java_naming::rust_keyword_is_rawable_identifier;
+
 pub fn emit_file(file: &RustFile) -> String {
     let mut out = String::new();
     for item in &file.items {
@@ -656,7 +658,7 @@ fn rust_ident(name: &str) -> String {
     {
         return name.to_string();
     }
-    if is_raw_identifier_keyword(name) {
+    if rust_keyword_is_rawable_identifier(name) {
         format!("r#{name}")
     } else {
         name.to_string()
@@ -681,58 +683,6 @@ fn rust_param_ident(name: &str) -> String {
         return format!("mut {}", rust_ident(inner));
     }
     rust_ident(name)
-}
-
-fn is_raw_identifier_keyword(name: &str) -> bool {
-    matches!(
-        name,
-        "as" | "async"
-            | "await"
-            | "break"
-            | "const"
-            | "continue"
-            | "dyn"
-            | "else"
-            | "enum"
-            | "extern"
-            | "false"
-            | "fn"
-            | "for"
-            | "if"
-            | "impl"
-            | "in"
-            | "let"
-            | "loop"
-            | "match"
-            | "mod"
-            | "move"
-            | "mut"
-            | "pub"
-            | "ref"
-            | "return"
-            | "static"
-            | "struct"
-            | "trait"
-            | "true"
-            | "type"
-            | "unsafe"
-            | "use"
-            | "where"
-            | "while"
-            | "abstract"
-            | "become"
-            | "box"
-            | "do"
-            | "final"
-            | "macro"
-            | "override"
-            | "priv"
-            | "try"
-            | "typeof"
-            | "unsized"
-            | "virtual"
-            | "yield"
-    )
 }
 
 fn expr_needs_parentheses(

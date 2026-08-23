@@ -966,22 +966,34 @@ fn static_storage_owner_qualifier(name: &str, env: &ShapeEnv, ctx: LowerCtx) -> 
 }
 
 fn seed_support_type_fields_for_type(env: &mut ShapeEnv, ty: &TypeDecl) {
+    let source_static_field_rust_names = crate::java_naming::source_static_field_rust_names(ty);
     for member in &ty.members {
         match member {
             Member::Field(field) => {
                 let shape = storage_shape(field.ty.clone());
+                let static_access_name = source_static_field_rust_names
+                    .get(&field.name)
+                    .cloned()
+                    .unwrap_or_else(|| field.name.clone());
                 if crate::item_assembly::static_final_field_has_associated_const(ty, field) {
                     env.insert_type_field_shape(&ty.name, field.name.clone(), shape.clone());
-                    env.insert_static_field_shape_for_owner(&ty.name, field.name.clone(), shape);
-                } else if field.modifiers.contains(&Modifier::Static) {
-                    env.insert_type_static_storage_field_shape(
+                    env.insert_static_field_shape_for_owner_with_access_name(
                         &ty.name,
                         field.name.clone(),
+                        static_access_name,
+                        shape,
+                    );
+                } else if field.modifiers.contains(&Modifier::Static) {
+                    env.insert_type_static_storage_field_shape_with_access_name(
+                        &ty.name,
+                        field.name.clone(),
+                        static_access_name.clone(),
                         shape.clone(),
                     );
-                    env.insert_static_storage_field_shape_owned_by(
+                    env.insert_static_storage_field_shape_owned_by_with_access_name(
                         &ty.name,
                         field.name.clone(),
+                        static_access_name,
                         shape,
                     );
                 } else {
@@ -1717,8 +1729,9 @@ fn static_storage_accessors_for_field(
 ) -> Vec<RustFunction> {
     let shape = ctx.signatures.required_field_shape(&ty.name, &field.name);
     let rust_ty = crate::slot_render::rust_type_for_slot_with_facts(&shape, ctx.facts);
-    let getter_name = format!("__static_{}", crate::parser::to_snake_case(&field.name));
-    let setter_name = format!("__set_static_{}", crate::parser::to_snake_case(&field.name));
+    let rust_field_name = crate::java_naming::source_static_field_rust_name(ty, &field.name);
+    let getter_name = format!("__static_{rust_field_name}");
+    let setter_name = format!("__set_static_{rust_field_name}");
     let storage_name = static_storage_symbol_name(ty, &field.name);
     // The accessor's return type is handle-wrapped, so its initial value must be
     // too. A static field initializer is a fresh construction (0002b).
@@ -2046,13 +2059,13 @@ fn static_storage_reference_expr(
     let owner = owner_name.map(crate::slot_render::rust_name_for_java_named_type);
     if crate::item_assembly::static_final_field_has_associated_const(owner_ty, field) {
         return Some(match owner {
-            Some(owner) => owner_associated_path_projection(&owner, member),
-            None => self_associated_path_projection(member),
+            Some(owner) => owner_associated_path_projection(&owner, &member),
+            None => self_associated_path_projection(&member),
         });
     }
     Some(match owner {
-        Some(owner) => qualified_static_storage_accessor_projection(&owner, member),
-        None => static_storage_accessor_projection(member),
+        Some(owner) => qualified_static_storage_accessor_projection(&owner, &member),
+        None => static_storage_accessor_projection(&member),
     })
 }
 
@@ -2144,9 +2157,9 @@ fn static_string_storage_reference_expr(
     let owner = owner_name.map(crate::slot_render::rust_name_for_java_named_type);
     if crate::item_assembly::static_final_field_has_associated_const(owner_ty, field) {
         let path = if let Some(owner) = owner {
-            owner_associated_path_projection(&owner, member)
+            owner_associated_path_projection(&owner, &member)
         } else {
-            self_associated_path_projection(member)
+            self_associated_path_projection(&member)
         };
         return Some(receiver_method_call_projection_exact(
             path,
@@ -2155,51 +2168,84 @@ fn static_string_storage_reference_expr(
         ));
     }
     Some(match owner {
-        Some(owner) => qualified_static_storage_accessor_projection(&owner, member),
-        None => static_storage_accessor_projection(member),
+        Some(owner) => qualified_static_storage_accessor_projection(&owner, &member),
+        None => static_storage_accessor_projection(&member),
     })
 }
 
 fn static_field_decl_by_name<'a>(ty: &'a TypeDecl, name: &str) -> Option<&'a FieldDecl> {
     let normalized = crate::parser::to_snake_case(name);
-    ty.members.iter().find_map(|member| {
-        let Member::Field(field) = member else {
-            return None;
-        };
-        (field.modifiers.contains(&Modifier::Static)
-            && (field.name == name || crate::parser::to_snake_case(&field.name) == normalized))
-            .then_some(field)
-    })
-}
-
-fn static_const_reference_name_for_type<'a>(ty: &'a TypeDecl, name: &'a str) -> &'a str {
     ty.members
         .iter()
         .find_map(|member| {
             let Member::Field(field) = member else {
                 return None;
             };
-            (is_static_final_field(field)
-                && (field.name == name || crate::parser::to_snake_case(&field.name) == name))
-                .then_some(field.name.as_str())
+            (field.modifiers.contains(&Modifier::Static) && field.name == name).then_some(field)
         })
-        .unwrap_or(name)
+        .or_else(|| {
+            ty.members.iter().find_map(|member| {
+                let Member::Field(field) = member else {
+                    return None;
+                };
+                (field.modifiers.contains(&Modifier::Static)
+                    && crate::parser::to_snake_case(&field.name) == normalized)
+                    .then_some(field)
+            })
+        })
+}
+
+fn static_const_reference_name_for_type(ty: &TypeDecl, name: &str) -> String {
+    let normalized = crate::parser::to_snake_case(name);
+    let semantic_name = ty
+        .members
+        .iter()
+        .find_map(|member| {
+            let Member::Field(field) = member else {
+                return None;
+            };
+            (is_static_final_field(field) && field.name == name).then_some(field.name.as_str())
+        })
+        .or_else(|| {
+            ty.members.iter().find_map(|member| {
+                let Member::Field(field) = member else {
+                    return None;
+                };
+                (is_static_final_field(field)
+                    && crate::parser::to_snake_case(&field.name) == normalized)
+                    .then_some(field.name.as_str())
+            })
+        })
+        .unwrap_or(name);
+    crate::java_naming::source_static_field_rust_name(ty, semantic_name)
+}
+
+fn static_storage_rust_field_name_for_owner(owner_ty: &TypeDecl, field_name: &str) -> String {
+    static_field_decl_by_name(owner_ty, field_name)
+        .map(|field| crate::java_naming::source_static_field_rust_name(owner_ty, &field.name))
+        .unwrap_or_else(|| {
+            crate::java_naming::allocate_rust_ident(field_name, &std::collections::HashSet::new())
+        })
 }
 
 fn static_storage_symbol_name(ty: &TypeDecl, field_name: &str) -> String {
-    static_storage_symbol_name_for_owner(&ty.name, field_name)
+    static_storage_symbol_name_for_owner_and_rust_field(
+        &ty.name,
+        &static_storage_rust_field_name_for_owner(ty, field_name),
+    )
 }
 
-/// The storage global's name, from the owner's *Java* name.
-///
-/// Split out so the element-write path can name the same global the accessors
-/// do without holding the `TypeDecl`; one spelling, so they cannot drift.
-fn static_storage_symbol_name_for_owner(owner_java_name: &str, field_name: &str) -> String {
+/// The storage global's name, from the owner's *Java* name and the field's
+/// emitted Rust name.
+fn static_storage_symbol_name_for_owner_and_rust_field(
+    owner_java_name: &str,
+    rust_field_name: &str,
+) -> String {
     let type_name = crate::slot_render::rust_name_for_java_named_type(owner_java_name);
     let raw = format!(
         "{}_{}",
         crate::parser::to_snake_case(&type_name),
-        crate::parser::to_snake_case(field_name)
+        rust_field_name
     );
     raw.chars()
         .map(|ch| {
@@ -3985,7 +4031,7 @@ fn lower_constructor(
         current_local_shapes: constructor_signature.locals.as_slice(),
         ..ctx
     };
-    let mut env = shape_env_for_constructor(ty, constructor_signature, ctx.signatures);
+    let mut env = shape_env_for_constructor(ty, ctor, constructor_signature, ctx.signatures);
     seed_imported_static_type_aliases(&mut env, program);
     seed_context_static_type_aliases(&mut env, ctx);
     seed_support_type_fields(&mut env, ctx.support_local_type_program);
@@ -4160,15 +4206,34 @@ fn lower_constructor_field_value_plan(
             let lowered =
                 wrap_optional_assignment_value_if_needed(value, env, slot.clone(), lowered, ctx);
             (
-                field_name,
+                source_instance_field_rust_name(owner, &field_name, ctx),
                 adapt_reused_owned_value_for_slot(lowered, value, &slot, env, ctx),
             )
         }
         ConstructorFieldValuePlan::Default { field_name, shape } => {
             let shape = final_constructor_field_shape(owner, &field_name, &shape, ctx);
-            constructor_default_field_value_with_facts(field_name, shape, ctx.facts)
+            let (_, value) =
+                constructor_default_field_value_with_facts(field_name.clone(), shape, ctx.facts);
+            (
+                source_instance_field_rust_name(owner, &field_name, ctx),
+                value,
+            )
         }
     }
+}
+
+fn source_instance_field_rust_name(owner: &str, field_name: &str, ctx: LowerCtx) -> String {
+    [
+        ctx.program,
+        ctx.support_local_type_program,
+        ctx.source_summary_type_program,
+    ]
+    .into_iter()
+    .find_map(|program| find_context_type_by_key(program, owner))
+    .map(|ty| crate::java_naming::source_instance_field_rust_name(ty, field_name))
+    .unwrap_or_else(|| {
+        crate::java_naming::allocate_rust_ident(field_name, &std::collections::HashSet::new())
+    })
 }
 
 fn final_constructor_field_shape(
@@ -4436,7 +4501,11 @@ fn constructor_field_plans_with_body_local_decls(
         let (field_name, value, shape) = constructor_assigned_field_parts(plan);
         let lowered = lower_self_dependent_constructor_field_value(value, shape, &local_env, ctx);
         lowered_body.push(assignment_stmt(
-            constructor_self_field_projection(&field_name),
+            constructor_self_field_projection(&source_instance_field_rust_name(
+                ctx.current_type.unwrap_or_default(),
+                &field_name,
+                ctx,
+            )),
             lowered,
         ));
     }
@@ -4505,7 +4574,11 @@ fn constructor_field_plans_with_trailing_body_ordered(
         let (field_name, value, shape) = constructor_assigned_field_parts(plan);
         let lowered = lower_self_dependent_constructor_field_value(value, shape, env, ctx);
         body.push(assignment_stmt(
-            constructor_self_field_projection(&field_name),
+            constructor_self_field_projection(&source_instance_field_rust_name(
+                &ty.name,
+                &field_name,
+                ctx,
+            )),
             lowered,
         ));
     }
@@ -4534,9 +4607,9 @@ fn constructor_body_field_assignment_order(
         .filter_map(|(index, stmt)| match stmt {
             Stmt::Assign { target, .. } => match target {
                 Expr::FieldAccess(receiver, field) if matches!(receiver.as_ref(), Expr::This) => {
-                    Some((crate::parser::to_snake_case(field), index))
+                    Some((crate::parser::to_snake_case_unescaped(field), index))
                 }
-                Expr::Var(field) => Some((crate::parser::to_snake_case(field), index)),
+                Expr::Var(field) => Some((crate::parser::to_snake_case_unescaped(field), index)),
                 _ => None,
             },
             _ => None,
@@ -6226,9 +6299,11 @@ fn substitute_stmt_vars(stmt: &Stmt, bindings: &[(&str, &Expr)]) -> Stmt {
             ty,
             name,
             initializer,
+            source_name,
         } => Stmt::VarDecl {
             ty: ty.clone(),
             name: name.clone(),
+            source_name: source_name.clone(),
             initializer: initializer
                 .as_ref()
                 .map(|expr| substitute_expr_vars(expr, bindings)),
@@ -6467,6 +6542,7 @@ fn learn_delegated_constructor_trailing_stmt_shapes(
         ty,
         name,
         initializer,
+        ..
     } = stmt
     {
         let mut local_plan = if let Some(local_plan) =
@@ -7449,6 +7525,7 @@ fn lower_block_with_refinements(
         exact_erased_object_locals: refinements.exact_erased_object_locals.clone(),
         map_entry_locals: refinements.map_entry_locals.clone(),
     };
+    seed_block_binding_access_names(&block.statements, env);
     for stmt in &block.statements {
         // The solved liveness result is authoritative and covers loop back
         // edges, `break`/`continue`, switch fallthrough and exception edges, so
@@ -7480,6 +7557,25 @@ fn lower_block_with_refinements(
     body
 }
 
+fn seed_block_binding_access_names(statements: &[Stmt], env: &mut ShapeEnv) {
+    let source_names = statements
+        .iter()
+        .filter_map(|stmt| match stmt {
+            Stmt::VarDecl { source_name, .. } => Some(source_name.as_str()),
+            Stmt::EnhancedFor {
+                source_var_name, ..
+            } => Some(source_var_name.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let access_names = crate::java_naming::source_binding_rust_names(source_names.iter().copied());
+    for source_name in source_names {
+        if let Some(access_name) = access_names.get(source_name) {
+            env.insert_binding_access_name(source_name.to_string(), access_name.clone());
+        }
+    }
+}
+
 fn lower_lambda_block_with_result_carrier(
     block: &Block,
     env: &mut ShapeEnv,
@@ -7497,6 +7593,7 @@ fn lower_lambda_block_with_result_carrier(
         ..ctx
     };
     let mut body = Vec::new();
+    seed_block_binding_access_names(&block.statements, env);
     for stmt in &block.statements {
         let stmt_ctx = LowerCtx {
             current_stmt: Some(stmt),
@@ -7547,7 +7644,9 @@ fn lower_stmt(
         Stmt::VarDecl {
             ty,
             name,
+            source_name,
             initializer,
+            ..
         } => {
             let mut local_plan = if let Some(local_plan) =
                 env.next_local_plan_for_declared_type(ctx.current_local_shapes, name, ty)
@@ -7639,9 +7738,15 @@ fn lower_stmt(
             if let Some(initializer) = lowered_initializer.as_mut() {
                 hoist_borrowed_string_temporaries_in_initializer(name, initializer, out);
             }
+            let access_name = env
+                .binding_access_name(source_name)
+                .map(str::to_string)
+                .unwrap_or_else(|| name.clone());
+            let mut emitted_local_plan = local_plan.clone();
+            emitted_local_plan.name = access_name.clone();
             out.push(
                 local_let_stmt_with_facts_representations_and_type_annotation(
-                    &local_plan,
+                    &emitted_local_plan,
                     lowered_initializer,
                     ctx.facts,
                     ctx.representations,
@@ -7656,7 +7761,28 @@ fn lower_stmt(
             let env_shape =
                 local_env_shape_from_initializer(&local_plan.shape, initializer.as_ref(), env, ctx)
                     .unwrap_or_else(|| local_plan.shape.clone());
-            env.insert_local_shape(name.clone(), env_shape);
+            env.insert_local_shape_with_access_name_and_java_type(
+                source_name.clone(),
+                access_name.clone(),
+                env_shape.clone(),
+                local_plan.java_ty.clone(),
+            );
+            if name != source_name {
+                if env.binding_access_name(name).is_some() {
+                    env.insert_local_shape_with_java_type(
+                        name.clone(),
+                        env_shape,
+                        local_plan.java_ty,
+                    );
+                } else {
+                    env.insert_local_shape_with_access_name_and_java_type(
+                        name.clone(),
+                        access_name,
+                        env_shape,
+                        local_plan.java_ty,
+                    );
+                }
+            }
         }
         Stmt::Assign { target, value } => {
             let shape_ctx = ExprShapeContext {
@@ -8022,12 +8148,15 @@ fn lower_stmt(
         Stmt::EnhancedFor {
             var_type,
             var_name,
+            source_var_name,
             iterable,
             body,
             label,
+            ..
         } => out.push(lower_enhanced_for_stmt(
             var_type,
             var_name,
+            source_var_name,
             iterable,
             body,
             env,
@@ -8457,6 +8586,31 @@ fn current_instance_field_name(expr: &Expr) -> Option<&str> {
         Expr::FieldAccess(receiver, field) if is_this_receiver_expr(receiver) => Some(field),
         _ => None,
     }
+}
+
+fn current_type_source_instance_field_rust_name(field_name: &str, ctx: LowerCtx) -> Option<String> {
+    let current_type = ctx.current_type?;
+    [
+        ctx.program,
+        ctx.support_local_type_program,
+        ctx.source_summary_type_program,
+    ]
+    .into_iter()
+    .find_map(|program| find_context_type_by_key(program, current_type))
+    .and_then(|ty| {
+        let semantic_name = crate::parser::to_snake_case_unescaped(field_name);
+        ty.members
+            .iter()
+            .any(|member| {
+                matches!(
+                    member,
+                    Member::Field(field)
+                        if !field.modifiers.contains(&Modifier::Static)
+                            && field.name == semantic_name
+                )
+            })
+            .then(|| crate::java_naming::source_instance_field_rust_name(ty, &semantic_name))
+    })
 }
 
 fn source_java_enum_instance_field_accessor_name(name: &str, ctx: LowerCtx) -> Option<String> {
@@ -10217,7 +10371,6 @@ fn declared_generic_local_slot_shape(
 ) -> RustSlotShape {
     let mut shape = local_shape.clone();
     shape.java_ty = declared_ty.clone();
-    shape.type_identity = crate::slot_shape::TypeIdentity::from_java_type(declared_ty.clone());
     shape
 }
 
@@ -12325,16 +12478,15 @@ fn static_collection_mutator_target<'a>(
     let Some(Expr::Var(receiver_name)) = receiver else {
         return None;
     };
-    let receiver_key = crate::stdlib::canonical_external_receiver_type_key(receiver_name);
-    if receiver_key == "Arrays"
-        && matches!(name, "sort" | "parallelSort" | "parallel_sort" | "fill")
-    {
-        return args.first();
-    }
-    if receiver_key == "Collections" && name == "sort" && matches!(args.len(), 1 | 2) {
-        return args.first();
-    }
-    None
+    args.iter().enumerate().find_map(|(arg_index, arg)| {
+        crate::stdlib::static_collection_argument_mutates(
+            Some(receiver_name),
+            name,
+            args.len(),
+            arg_index,
+        )
+        .then_some(arg)
+    })
 }
 
 pub fn collect_stmt_read_counts_for_liveness(
@@ -13488,8 +13640,16 @@ fn lower_planned_call_expr_stmt(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> O
         CallStatementPlan::IterableForEach {
             receiver,
             param_names,
+            param_source_names,
             body,
-        } => lower_iterable_for_each_stmt(receiver, &param_names, body, env, ctx),
+        } => lower_iterable_for_each_stmt(
+            receiver,
+            &param_names,
+            &param_source_names,
+            body,
+            env,
+            ctx,
+        ),
         CallStatementPlan::NativeArraysSort { target, from, to } => {
             let target = lower_expr(target, env, ctx);
             let expr = match (from, to) {
@@ -13629,6 +13789,7 @@ fn statement_expr_is_super_call(expr: &Expr) -> bool {
 fn lower_iterable_for_each_stmt(
     receiver: &Expr,
     param_names: &[String],
+    param_source_names: &[String],
     body: &LambdaBody,
     env: &ShapeEnv,
     ctx: LowerCtx,
@@ -13658,7 +13819,7 @@ fn lower_iterable_for_each_stmt(
     };
     let lambda_liveness = crate::liveness::LivenessAnalysis::for_loop_body(
         analyzed_block,
-        param_names,
+        param_source_names,
         &enclosing_live,
     );
     let ctx = LowerCtx {
@@ -13683,8 +13844,32 @@ fn lower_iterable_for_each_stmt(
                     });
             vec![element_shape; param_names.len()]
         });
-    for (param_name, shape) in param_names.iter().zip(param_shapes) {
-        loop_env.insert_local_shape(param_name.clone(), shape);
+    let access_names = crate::java_naming::source_binding_rust_names(
+        param_source_names.iter().map(String::as_str),
+    );
+    for ((param_name, source_name), shape) in param_names
+        .iter()
+        .zip(param_source_names.iter())
+        .zip(param_shapes)
+    {
+        let access_name = access_names
+            .get(source_name)
+            .cloned()
+            .unwrap_or_else(|| param_name.clone());
+        loop_env.insert_param_shape_with_access_name_and_java_type(
+            source_name.clone(),
+            access_name.clone(),
+            shape.clone(),
+            shape.java_ty.clone(),
+        );
+        if param_name != source_name {
+            loop_env.insert_param_shape_with_access_name_and_java_type(
+                param_name.clone(),
+                access_name,
+                shape.clone(),
+                shape.java_ty.clone(),
+            );
+        }
     }
     let loop_body = match body {
         LambdaBody::Expr(expr) if param_names.len() == 1 => vec![expr_stmt(
@@ -13704,10 +13889,20 @@ fn lower_iterable_for_each_stmt(
             )
         }
     };
-    let pattern = if param_names.len() == 1 {
-        param_names[0].clone()
+    let emitted_param_names = param_names
+        .iter()
+        .zip(param_source_names.iter())
+        .map(|(param_name, source_name)| {
+            access_names
+                .get(source_name)
+                .cloned()
+                .unwrap_or_else(|| param_name.clone())
+        })
+        .collect::<Vec<_>>();
+    let pattern = if emitted_param_names.len() == 1 {
+        emitted_param_names[0].clone()
     } else {
-        format!("({})", param_names.join(", "))
+        format!("({})", emitted_param_names.join(", "))
     };
     if let Some(iterator) = lower_int_stream_range_expr(receiver, env, ctx) {
         return Some(render_enhanced_for_iterator(
@@ -13741,6 +13936,7 @@ fn map_for_each_lambda_param_shapes(
 fn lower_enhanced_for_stmt(
     var_type: &JavaType,
     var_name: &str,
+    source_var_name: &str,
     iterable: &Expr,
     body: &Block,
     env: &ShapeEnv,
@@ -13750,24 +13946,40 @@ fn lower_enhanced_for_stmt(
     label: Option<&str>,
 ) -> RustStmt {
     let mut loop_env = env.clone();
+    let access_name = env
+        .binding_access_name(source_var_name)
+        .map(str::to_string)
+        .unwrap_or_else(|| var_name.to_string());
     let var_is_assigned = enhanced_for_var_is_assigned(var_name, body);
     if var_is_assigned && matches!(var_type, JavaType::String) {
-        loop_env.insert_local_shape(var_name.to_string(), value_shape(JavaType::String));
+        insert_enhanced_for_binding_shape(
+            &mut loop_env,
+            var_name,
+            source_var_name,
+            &access_name,
+            value_shape(JavaType::String),
+        );
         let iterator =
             sequence_iter_cloned_projection(lower_enhanced_for_iterable_expr(iterable, env, ctx));
         return render_enhanced_for_iterator(
-            &format!("mut {var_name}"),
+            &format!("mut {access_name}"),
             &iterator,
             &lower_block(body, &mut loop_env, wrap_returns_in_ok, ctx),
             label,
         );
     }
     if static_string_sequence_field_iterable(iterable, env, ctx) {
-        loop_env.insert_local_shape(var_name.to_string(), borrowed_string_content_shape());
+        insert_enhanced_for_binding_shape(
+            &mut loop_env,
+            var_name,
+            source_var_name,
+            &access_name,
+            borrowed_string_content_shape(),
+        );
         let iterator =
             sequence_iter_copied_projection(lower_enhanced_for_iterable_expr(iterable, env, ctx));
         return render_enhanced_for_iterator(
-            var_name,
+            &access_name,
             &iterator,
             &lower_block(body, &mut loop_env, wrap_returns_in_ok, ctx),
             label,
@@ -13777,13 +13989,19 @@ fn lower_enhanced_for_stmt(
         && enhanced_for_iterable_element_type(iterable, env, ctx)
             .is_some_and(|element_ty| matches!(element_ty, JavaType::Primitive(_)))
     {
-        loop_env.insert_local_shape(var_name.to_string(), value_shape(var_type.clone()));
+        insert_enhanced_for_binding_shape(
+            &mut loop_env,
+            var_name,
+            source_var_name,
+            &access_name,
+            value_shape(var_type.clone()),
+        );
         let iterator =
             sequence_iter_copied_projection(lower_enhanced_for_iterable_expr(iterable, env, ctx));
         let pattern = if var_is_assigned {
-            format!("mut {var_name}")
+            format!("mut {access_name}")
         } else {
-            var_name.to_string()
+            access_name.clone()
         };
         return render_enhanced_for_iterator(
             &pattern,
@@ -13797,11 +14015,17 @@ fn lower_enhanced_for_stmt(
         && let Some(element_name) = concrete_java_type_name(&element_ty)
         && matches_source_java_enum_type(element_name, ctx)
     {
-        loop_env.insert_local_shape(var_name.to_string(), value_shape(element_ty));
+        insert_enhanced_for_binding_shape(
+            &mut loop_env,
+            var_name,
+            source_var_name,
+            &access_name,
+            value_shape(element_ty),
+        );
         let iterator =
             sequence_iter_copied_projection(lower_enhanced_for_iterable_expr(iterable, env, ctx));
         return render_enhanced_for_iterator(
-            var_name,
+            &access_name,
             &iterator,
             &lower_block(body, &mut loop_env, wrap_returns_in_ok, ctx),
             label,
@@ -13810,7 +14034,13 @@ fn lower_enhanced_for_stmt(
     if let Some(element_shape) =
         infer_stream_source_element_shape_with_facts(iterable, env.type_env(), ctx.facts)
     {
-        loop_env.insert_local_shape(var_name.to_string(), element_shape);
+        insert_enhanced_for_binding_shape(
+            &mut loop_env,
+            var_name,
+            source_var_name,
+            &access_name,
+            element_shape,
+        );
     }
     if var_is_assigned
         && let Some(element_ty) = enhanced_for_iterable_element_type(iterable, env, ctx)
@@ -13823,7 +14053,13 @@ fn lower_enhanced_for_stmt(
             element_shape.dispatch,
             DispatchShape::ClosedEnum { .. } | DispatchShape::ErasedObject
         ) {
-            loop_env.insert_local_shape(var_name.to_string(), element_shape);
+            insert_enhanced_for_binding_shape(
+                &mut loop_env,
+                var_name,
+                source_var_name,
+                &access_name,
+                element_shape,
+            );
             let lowered_iterable = lower_enhanced_for_iterable_expr(iterable, env, ctx);
             let iterator = if matches!(
                 loop_env.local_shape(var_name).map(|shape| &shape.dispatch),
@@ -13834,7 +14070,7 @@ fn lower_enhanced_for_stmt(
                 sequence_iter_cloned_projection(lowered_iterable)
             };
             return render_enhanced_for_iterator(
-                &format!("mut {var_name}"),
+                &format!("mut {access_name}"),
                 &iterator,
                 &lower_block(body, &mut loop_env, wrap_returns_in_ok, ctx),
                 label,
@@ -13843,7 +14079,7 @@ fn lower_enhanced_for_stmt(
     }
     if let Some(iterator) = lower_int_stream_range_expr(iterable, env, ctx) {
         return render_enhanced_for_iterator(
-            var_name,
+            &access_name,
             &iterator,
             &lower_block(body, &mut loop_env, wrap_returns_in_ok, ctx),
             label,
@@ -13852,8 +14088,11 @@ fn lower_enhanced_for_stmt(
     if let Some((iterator, key_ty, value_ty)) =
         lower_map_entry_set_expr(iterable, env, ctx, refinements)
     {
-        loop_env.insert_local_shape(
-            var_name.to_string(),
+        insert_enhanced_for_binding_shape(
+            &mut loop_env,
+            var_name,
+            source_var_name,
+            &access_name,
             borrowed_sequence_element_shape(JavaType::Named {
                 name: "java.util.Map.Entry".to_string(),
                 args: vec![key_ty.clone(), value_ty.clone()],
@@ -13861,7 +14100,7 @@ fn lower_enhanced_for_stmt(
         );
         let loop_refinements = refinements.with_map_entry_local(var_name, key_ty, value_ty);
         return render_enhanced_for_iterator(
-            var_name,
+            &access_name,
             &iterator,
             &lower_block_with_refinements(
                 body,
@@ -13874,17 +14113,45 @@ fn lower_enhanced_for_stmt(
         );
     }
     if let Some(element_ty) = enhanced_for_iterable_element_type(iterable, env, ctx) {
-        loop_env.insert_local_shape(
-            var_name.to_string(),
+        insert_enhanced_for_binding_shape(
+            &mut loop_env,
+            var_name,
+            source_var_name,
+            &access_name,
             borrowed_sequence_element_shape_with_facts(element_ty, ctx.facts, ctx.representations),
         );
     }
     render_enhanced_for(
-        var_name,
+        &access_name,
         &lower_enhanced_for_iterable_expr(iterable, env, ctx),
         &lower_block(body, &mut loop_env, wrap_returns_in_ok, ctx),
         label,
     )
+}
+
+fn insert_enhanced_for_binding_shape(
+    env: &mut ShapeEnv,
+    var_name: &str,
+    source_var_name: &str,
+    access_name: &str,
+    shape: RustSlotShape,
+) {
+    env.insert_loop_variable_shape_with_access_name(
+        source_var_name.to_string(),
+        access_name.to_string(),
+        shape.clone(),
+    );
+    if var_name != source_var_name {
+        if env.binding_access_name(var_name).is_some() {
+            env.insert_loop_variable_shape(var_name.to_string(), shape);
+        } else {
+            env.insert_loop_variable_shape_with_access_name(
+                var_name.to_string(),
+                access_name.to_string(),
+                shape,
+            );
+        }
+    }
 }
 
 fn enhanced_for_iterable_element_type(
@@ -14293,6 +14560,15 @@ fn lower_expr_with_refinements(
                     lower_optional_sequence_length_access(receiver, env, ctx, refinements)
             {
                 return expr;
+            }
+            if is_this_receiver_expr(receiver)
+                && let Some(rust_field_name) =
+                    current_type_source_instance_field_rust_name(field, ctx)
+            {
+                return field_projection(
+                    lower_expr_with_refinements(receiver, env, ctx, refinements),
+                    &rust_field_name,
+                );
             }
             lower_field_access_with_facts(
                 receiver,
@@ -15078,6 +15354,9 @@ fn lower_callback_lambda_expr_with_shapes(
     param_shapes: Option<&[RustSlotShape]>,
 ) -> RustExpr {
     let mut lambda_env = env.clone();
+    let access_names = crate::java_naming::source_binding_rust_names(
+        params.iter().map(|param| param.source_name.as_str()),
+    );
     for (index, param) in params.iter().enumerate() {
         let shape = param_shapes
             .and_then(|shapes| shapes.get(index))
@@ -15089,11 +15368,28 @@ fn lower_callback_lambda_expr_with_shapes(
                     .unwrap_or_else(|| JavaType::Unknown(format!("lambda_param:{}", param.name)));
                 fallback_local_shape_from_declared_type(&ty)
             });
-        lambda_env.insert_local_shape(param.name.clone(), shape);
+        let access_name = access_names
+            .get(&param.source_name)
+            .cloned()
+            .unwrap_or_else(|| param.name.clone());
+        lambda_env.insert_param_shape_with_access_name_and_java_type(
+            param.source_name.clone(),
+            access_name.clone(),
+            shape.clone(),
+            shape.java_ty.clone(),
+        );
+        if param.name != param.source_name {
+            lambda_env.insert_param_shape_with_access_name_and_java_type(
+                param.name.clone(),
+                access_name,
+                shape.clone(),
+                shape.java_ty.clone(),
+            );
+        }
     }
     let param_names = params
         .iter()
-        .map(|param| param.name.clone())
+        .map(|param| param.source_name.clone())
         .collect::<Vec<_>>();
     let closure_params = params
         .iter()
@@ -15102,10 +15398,11 @@ fn lower_callback_lambda_expr_with_shapes(
             let ty = param_shapes
                 .and_then(|shapes| shapes.get(index))
                 .map(|shape| render_callback_param_type(shape, ctx));
-            RustClosureParam {
-                pattern: param.name.clone(),
-                ty,
-            }
+            let pattern = access_names
+                .get(&param.source_name)
+                .cloned()
+                .unwrap_or_else(|| param.name.clone());
+            RustClosureParam { pattern, ty }
         })
         .collect::<Vec<_>>();
     match body {
@@ -16583,9 +16880,11 @@ fn lower_source_associated_const_field_access(
         return None;
     }
     let rust_owner = crate::slot_render::rust_name_for_java_named_type(&owner);
+    let rust_field_name =
+        crate::java_naming::source_static_field_rust_name(owner_ty, &field_decl.name);
     Some(owner_associated_path_projection(
         &rust_owner,
-        &field_decl.name,
+        &rust_field_name,
     ))
 }
 
@@ -17181,7 +17480,7 @@ fn lower_static_storage_element_assignment_stmt(
     let shape = ctx
         .signatures
         .required_field_shape(&owner.name, &field.name);
-    let storage_name = static_storage_symbol_name_for_owner(&owner.name, &field.name);
+    let storage_name = static_storage_symbol_name(owner, &field.name);
     let initial = static_storage_initial_value_expr(owner, field, &shape, ctx);
 
     let JavaType::Array(element_ty) = &shape.java_ty else {
@@ -17237,7 +17536,7 @@ fn static_storage_element_target_owner_field<'a>(
             if env.local_type(name).is_some() || env.is_instance_field(name) {
                 return None;
             }
-            let static_name = env.static_storage_field_access_name(name)?.to_string();
+            let static_name = env.static_storage_field_semantic_name(name)?.to_string();
             let owner_name = env
                 .static_storage_field_owner(&static_name)
                 .or(ctx.current_type)?;
@@ -17485,7 +17784,7 @@ fn matches_source_java_enum_type(type_name: &str, ctx: LowerCtx) -> bool {
 }
 
 fn static_storage_field_shape(name: &str, env: &ShapeEnv, ctx: LowerCtx) -> Option<RustSlotShape> {
-    let static_name = env.static_storage_field_access_name(name).unwrap_or(name);
+    let static_name = env.static_storage_field_semantic_name(name).unwrap_or(name);
     ctx.current_type
         .and_then(|type_name| {
             ctx.signatures
@@ -18449,7 +18748,7 @@ fn static_owner_receiver_is_emitted_context(
         fallback_receiver_is_static_owner_expr(receiver, env, ctx)
             && static_owner_expr_candidates(receiver, env)
                 .iter()
-                .any(|owner| static_context_owner_is_emitted(owner, ctx))
+                .any(|owner| static_context_owner_is_emitted(owner.as_str(), ctx))
     })
 }
 
@@ -18463,21 +18762,24 @@ fn static_owner_receiver_is_non_program_emitted_context(
             && static_owner_expr_candidates(receiver, env)
                 .iter()
                 .any(|owner| {
-                    static_context_owner_is_emitted(owner, ctx)
-                        && find_context_type_by_key(ctx.program, owner).is_none()
+                    static_context_owner_is_emitted(owner.as_str(), ctx)
+                        && find_context_type_by_key(ctx.program, owner.as_str()).is_none()
                 })
     })
 }
 
-fn static_owner_expr_candidates(receiver: &Expr, env: &ShapeEnv) -> Vec<String> {
+fn static_owner_expr_candidates(receiver: &Expr, env: &ShapeEnv) -> Vec<SourceContextOwnerKey> {
     let mut owners = Vec::new();
     let Expr::Var(receiver_name) = receiver else {
         return owners;
     };
     if let Some(alias) = env.type_env().static_type_alias(receiver_name) {
-        push_unique_receiver_type_name(&mut owners, alias.to_string());
+        push_unique_source_context_owner_key(&mut owners, SourceContextOwnerKey::new(alias));
     }
-    push_unique_receiver_type_name(&mut owners, receiver_name.clone());
+    push_unique_source_context_owner_key(
+        &mut owners,
+        SourceContextOwnerKey::new(receiver_name.as_str()),
+    );
     owners
 }
 
@@ -18782,7 +19084,7 @@ fn static_owner_receiver_is_emitted_program_type(
     };
     static_owner_expr_candidates(receiver, env)
         .iter()
-        .any(|owner| ctx.program.types.iter().any(|ty| ty.name == *owner))
+        .any(|owner| ctx.program.types.iter().any(|ty| ty.name == owner.as_str()))
 }
 
 /// Puts a value recovered out of a borrow back behind its shared handle.
@@ -29644,9 +29946,15 @@ fn source_context_static_method_fallback_signature(
     }
     let mut owner_candidates = Vec::new();
     if let Some(alias) = env.type_env().static_type_alias(receiver_name) {
-        push_unique_receiver_type_name(&mut owner_candidates, alias.to_string());
+        push_unique_source_context_owner_key(
+            &mut owner_candidates,
+            SourceContextOwnerKey::new(alias),
+        );
     }
-    push_unique_receiver_type_name(&mut owner_candidates, receiver_name.clone());
+    push_unique_source_context_owner_key(
+        &mut owner_candidates,
+        SourceContextOwnerKey::new(receiver_name.as_str()),
+    );
     let shape_ctx = ExprShapeContext {
         signatures: Some(ctx.signatures),
         representations: Some(ctx.representations),
@@ -29657,9 +29965,9 @@ fn source_context_static_method_fallback_signature(
         .map(|arg| infer_expr_shape_with_context(arg, env, shape_ctx).java_ty)
         .collect::<Vec<_>>();
     for owner in owner_candidates {
-        let Some(ty) = find_context_type_by_key(ctx.program, &owner)
-            .or_else(|| find_context_type_by_key(ctx.support_local_type_program, &owner))
-            .or_else(|| find_context_type_by_key(ctx.source_summary_type_program, &owner))
+        let Some(ty) = find_context_type_by_key(ctx.program, owner.as_str())
+            .or_else(|| find_context_type_by_key(ctx.support_local_type_program, owner.as_str()))
+            .or_else(|| find_context_type_by_key(ctx.source_summary_type_program, owner.as_str()))
         else {
             continue;
         };
@@ -29668,7 +29976,7 @@ fn source_context_static_method_fallback_signature(
             .iter()
             .filter_map(|member| match member {
                 Member::Method(method)
-                    if (static_context_owner_is_emitted(&owner, ctx)
+                    if (static_context_owner_is_emitted(owner.as_str(), ctx)
                         || method.modifiers.contains(&Modifier::Static))
                         && method.name == name
                         && method.params.len() == args.len() =>
@@ -29683,7 +29991,7 @@ fn source_context_static_method_fallback_signature(
         }
         let declared_method = unique_method_matching_known_arg_types(&matching_methods, &arg_types)
             .or_else(|| (matching_methods.len() == 1).then_some(matching_methods[0]));
-        if static_context_owner_is_emitted(&owner, ctx) {
+        if static_context_owner_is_emitted(owner.as_str(), ctx) {
             let isolated_program = Program {
                 package: ctx.support_local_type_program.package.clone(),
                 imports: ctx.support_local_type_program.imports.clone(),
@@ -29710,7 +30018,7 @@ fn source_context_static_method_fallback_signature(
                 })
             {
                 return Some(ContextFallbackMethodSignature {
-                    owner: Some(owner.clone()),
+                    owner: Some(owner.as_str().to_string()),
                     rust_name,
                     arg_shapes: non_emitted_static_context_arg_shapes_from_signature(signature),
                     receiver: signature.receiver,
@@ -29720,7 +30028,9 @@ fn source_context_static_method_fallback_signature(
             if matching_methods.len() == 1 {
                 let method = matching_methods[0];
                 return Some(non_emitted_static_context_fallback_signature_for_method(
-                    &owner, method, ctx,
+                    owner.as_str(),
+                    method,
+                    ctx,
                 ));
             }
             continue;
@@ -29750,7 +30060,7 @@ fn source_context_static_method_fallback_signature(
             })
         {
             return Some(ContextFallbackMethodSignature {
-                owner: Some(owner.clone()),
+                owner: Some(owner.as_str().to_string()),
                 rust_name,
                 arg_shapes: declared_method
                     .map(|method| non_emitted_static_context_arg_shapes_for_method(method, ctx))
@@ -29769,12 +30079,12 @@ fn source_context_static_method_fallback_signature(
             .clone()
             .unwrap_or_else(|| crate::parser::to_snake_case(&method.name));
         return Some(ContextFallbackMethodSignature {
-            owner: Some(owner.clone()),
+            owner: Some(owner.as_str().to_string()),
             rust_name: rust_name.clone(),
             arg_shapes: non_emitted_static_context_arg_shapes_for_method(method, ctx),
             receiver: ctx
                 .signatures
-                .method_signature_by_rust_name(&owner, &rust_name)
+                .method_signature_by_rust_name(owner.as_str(), &rust_name)
                 .map(|signature| signature.receiver)
                 .unwrap_or(ReceiverPlan::Shared),
             arg_shapes_are_authoritative: true,
@@ -29906,14 +30216,18 @@ fn explicit_static_receiver_matches_resolved_owner(
     if env.local_type(receiver_name).is_some() || env.field_type(receiver_name).is_some() {
         return false;
     }
+    let receiver_key = SourceContextOwnerKey::new(receiver_name.as_str());
     env.type_env()
         .static_type_alias(receiver_name)
-        .is_some_and(|alias| context_type_key_matches(alias, owner))
-        || context_type_key_matches(receiver_name, owner)
+        .map(SourceContextOwnerKey::new)
+        .is_some_and(|alias| alias.matches_context_type(owner))
+        || receiver_key.matches_context_type(owner)
         || find_context_type_by_key(ctx.program, receiver_name)
             .or_else(|| find_context_type_by_key(ctx.support_local_type_program, receiver_name))
             .or_else(|| find_context_type_by_key(ctx.source_summary_type_program, receiver_name))
-            .is_some_and(|ty| context_type_key_matches(&ty.name, owner))
+            .is_some_and(|ty| {
+                SourceContextOwnerKey::new(ty.name.as_str()).matches_context_type(owner)
+            })
 }
 
 fn non_emitted_static_context_fallback_signature_for_method(
@@ -30513,13 +30827,47 @@ fn context_type_key_is_summary_only(ctx: LowerCtx, type_key: &str) -> bool {
 }
 
 fn find_context_type_by_key_in_type<'a>(ty: &'a TypeDecl, type_key: &str) -> Option<&'a TypeDecl> {
-    if context_type_key_matches(&ty.name, type_key) {
+    if SourceContextOwnerKey::new(type_key).matches_context_type(&ty.name) {
         return Some(ty);
     }
     ty.members.iter().find_map(|member| match member {
         Member::Type(nested) => find_context_type_by_key_in_type(nested, type_key),
         _ => None,
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SourceContextOwnerKey(String);
+
+impl SourceContextOwnerKey {
+    fn new(owner: impl Into<String>) -> Self {
+        Self(owner.into())
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn into_string(self) -> String {
+        self.0
+    }
+
+    fn rust_owner_alias(&self) -> Self {
+        Self(crate::slot_render::rust_name_for_java_named_type(
+            self.as_str(),
+        ))
+    }
+
+    fn nested_owner_candidates(&self, ctx: LowerCtx) -> Vec<Self> {
+        nested_type_owner_candidates_for_receiver(self.as_str(), ctx)
+            .into_iter()
+            .map(Self)
+            .collect()
+    }
+
+    fn matches_context_type(&self, candidate: &str) -> bool {
+        context_type_key_matches(candidate, self.as_str())
+    }
 }
 
 fn context_type_key_matches(candidate: &str, query: &str) -> bool {
@@ -30552,17 +30900,14 @@ fn fallback_receiver_type_name_candidates(
     let mut candidates = Vec::new();
     if let Some(receiver) = receiver {
         if let Some(receiver_name) = receiver_type_name_from_shape(receiver, env, ctx) {
-            let rust_receiver_name =
-                crate::slot_render::rust_name_for_java_named_type(&receiver_name);
-            let nested_receiver_candidates =
-                nested_type_owner_candidates_for_receiver(&receiver_name, ctx);
-            push_unique_receiver_type_name(&mut candidates, receiver_name);
-            push_unique_receiver_type_name(&mut candidates, rust_receiver_name);
+            let rust_receiver_name = receiver_name.rust_owner_alias();
+            let nested_receiver_candidates = receiver_name.nested_owner_candidates(ctx);
+            push_unique_source_context_owner_key(&mut candidates, receiver_name);
+            push_unique_source_context_owner_key(&mut candidates, rust_receiver_name);
             for nested_receiver in nested_receiver_candidates {
-                let rust_nested_receiver =
-                    crate::slot_render::rust_name_for_java_named_type(&nested_receiver);
-                push_unique_receiver_type_name(&mut candidates, nested_receiver);
-                push_unique_receiver_type_name(&mut candidates, rust_nested_receiver);
+                let rust_nested_receiver = nested_receiver.rust_owner_alias();
+                push_unique_source_context_owner_key(&mut candidates, nested_receiver);
+                push_unique_source_context_owner_key(&mut candidates, rust_nested_receiver);
             }
         }
         if let Expr::Var(receiver_name) = receiver
@@ -30570,21 +30915,35 @@ fn fallback_receiver_type_name_candidates(
             && env.field_type(receiver_name).is_none()
         {
             if let Some(alias) = env.type_env().static_type_alias(receiver_name) {
-                push_unique_receiver_type_name(&mut candidates, alias.to_string());
+                push_unique_source_context_owner_key(
+                    &mut candidates,
+                    SourceContextOwnerKey::new(alias),
+                );
             }
-            push_unique_receiver_type_name(&mut candidates, receiver_name.clone());
+            push_unique_source_context_owner_key(
+                &mut candidates,
+                SourceContextOwnerKey::new(receiver_name.as_str()),
+            );
         }
     } else if let Some(current_type) = ctx.current_type {
-        push_unique_receiver_type_name(&mut candidates, current_type.to_string());
+        push_unique_source_context_owner_key(
+            &mut candidates,
+            SourceContextOwnerKey::new(current_type),
+        );
     }
     candidates.retain(|candidate| {
         ctx.signatures
-            .has_method_signature_by_base_name_accepting_arity(candidate, name, arg_count)
-            || find_context_type_by_key(ctx.program, candidate).is_some()
-            || find_context_type_by_key(ctx.support_local_type_program, candidate).is_some()
-            || find_context_type_by_key(ctx.source_summary_type_program, candidate).is_some()
+            .has_method_signature_by_base_name_accepting_arity(candidate.as_str(), name, arg_count)
+            || find_context_type_by_key(ctx.program, candidate.as_str()).is_some()
+            || find_context_type_by_key(ctx.support_local_type_program, candidate.as_str())
+                .is_some()
+            || find_context_type_by_key(ctx.source_summary_type_program, candidate.as_str())
+                .is_some()
     });
     candidates
+        .into_iter()
+        .map(SourceContextOwnerKey::into_string)
+        .collect()
 }
 
 fn nested_type_owner_candidates_for_receiver(receiver_name: &str, ctx: LowerCtx) -> Vec<String> {
@@ -30625,7 +30984,20 @@ fn push_unique_receiver_type_name(candidates: &mut Vec<String>, receiver_name: S
     }
 }
 
-fn receiver_type_name_from_shape(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> Option<String> {
+fn push_unique_source_context_owner_key(
+    candidates: &mut Vec<SourceContextOwnerKey>,
+    owner: SourceContextOwnerKey,
+) {
+    if !candidates.iter().any(|candidate| candidate == &owner) {
+        candidates.push(owner);
+    }
+}
+
+fn receiver_type_name_from_shape(
+    expr: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<SourceContextOwnerKey> {
     let shape_ctx = ExprShapeContext {
         signatures: Some(ctx.signatures),
         representations: Some(ctx.representations),
@@ -30634,7 +31006,7 @@ fn receiver_type_name_from_shape(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> 
     let receiver_shape = infer_expr_shape_with_context(expr, env, shape_ctx);
     match &receiver_shape.dispatch {
         DispatchShape::DynTrait { trait_name } | DispatchShape::BoxedDynTrait { trait_name } => {
-            return Some(trait_name.clone());
+            return Some(SourceContextOwnerKey::new(trait_name.as_str()));
         }
         DispatchShape::Concrete
         | DispatchShape::ClosedEnum { .. }
@@ -30643,7 +31015,7 @@ fn receiver_type_name_from_shape(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> 
     let receiver_ty = crate::types::optional_element_type(&receiver_shape.java_ty)
         .unwrap_or(receiver_shape.java_ty);
     match receiver_ty {
-        JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(name),
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(SourceContextOwnerKey(name)),
         _ => None,
     }
 }
@@ -31524,13 +31896,21 @@ fn source_trivial_accessor_getter_lowered_type(
 }
 
 fn source_receiver_type_name(receiver: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> Option<String> {
+    source_receiver_owner_key(receiver, env, ctx).map(SourceContextOwnerKey::into_string)
+}
+
+fn source_receiver_owner_key(
+    receiver: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<SourceContextOwnerKey> {
     if let Expr::Var(name) = receiver
         && let Some(local_ty) = env.local_type(name)
     {
         let receiver_ty =
             crate::types::optional_element_type(local_ty).unwrap_or_else(|| local_ty.clone());
         if let JavaType::Named { name, .. } | JavaType::Unknown(name) = receiver_ty {
-            return Some(name);
+            return Some(SourceContextOwnerKey(name));
         }
     }
     let receiver_shape = infer_expr_shape_with_context(
@@ -31545,7 +31925,7 @@ fn source_receiver_type_name(receiver: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> 
     let receiver_ty = crate::types::optional_element_type(&receiver_shape.java_ty)
         .unwrap_or(receiver_shape.java_ty);
     match receiver_ty {
-        JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(name),
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(SourceContextOwnerKey(name)),
         _ => None,
     }
 }
@@ -31617,18 +31997,18 @@ fn source_call_method_decl<'a>(
     }
     let owner = receiver
         .and_then(static_owner_expr_candidates_for_source_call)
-        .or_else(|| ctx.current_type.map(str::to_string))?;
-    find_context_type_by_key(ctx.program, &owner)
-        .or_else(|| find_context_type_by_key(ctx.support_local_type_program, &owner))
-        .or_else(|| find_context_type_by_key(ctx.source_summary_type_program, &owner))
+        .or_else(|| ctx.current_type.map(SourceContextOwnerKey::new))?;
+    find_context_type_by_key(ctx.program, owner.as_str())
+        .or_else(|| find_context_type_by_key(ctx.support_local_type_program, owner.as_str()))
+        .or_else(|| find_context_type_by_key(ctx.source_summary_type_program, owner.as_str()))
         .and_then(|ty| find_declared_method_by_name_and_arity(ty, method_name, arg_count))
 }
 
-fn static_owner_expr_candidates_for_source_call(receiver: &Expr) -> Option<String> {
+fn static_owner_expr_candidates_for_source_call(receiver: &Expr) -> Option<SourceContextOwnerKey> {
     match receiver {
-        Expr::Var(name) => Some(name.clone()),
+        Expr::Var(name) => Some(SourceContextOwnerKey::new(name.as_str())),
         Expr::FieldAccess(owner, field) => static_owner_expr_candidates_for_source_call(owner)
-            .map(|owner| format!("{owner}.{field}")),
+            .map(|owner| SourceContextOwnerKey::new(format!("{}.{field}", owner.as_str()))),
         _ => None,
     }
 }

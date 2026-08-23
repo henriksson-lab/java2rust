@@ -8,7 +8,6 @@ pub struct RustSlotShape {
     pub view: ViewShape,
     pub dispatch: DispatchShape,
     pub mutability: MutabilityShape,
-    pub type_identity: TypeIdentity,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,7 +70,6 @@ impl RustSlotShape {
             view: ViewShape::Native,
             dispatch: DispatchShape::Concrete,
             mutability: MutabilityShape::Immutable,
-            type_identity: TypeIdentity::from_java_type(java_ty.clone()),
             java_ty,
         }
     }
@@ -82,7 +80,6 @@ impl RustSlotShape {
             view: ViewShape::Native,
             dispatch: DispatchShape::Concrete,
             mutability: MutabilityShape::Mutable,
-            type_identity: TypeIdentity::from_java_type(java_ty.clone()),
             java_ty,
         }
     }
@@ -111,6 +108,10 @@ impl RustSlotShape {
 
     pub fn is_shared_borrowed_value(&self) -> bool {
         self.ownership == OwnershipShape::SharedBorrow
+    }
+
+    pub fn type_identity(&self) -> TypeIdentity {
+        TypeIdentity::from_java_type(self.java_ty.clone())
     }
 }
 
@@ -205,8 +206,8 @@ impl RustSlotShape {
         }
     }
 
-    fn erased_java_type(&self) -> &JavaType {
-        self.type_identity.erasure.as_ref().unwrap_or(&self.java_ty)
+    fn erased_java_type(&self) -> JavaType {
+        java_type_erasure(&self.java_ty).unwrap_or_else(|| self.java_ty.clone())
     }
 }
 

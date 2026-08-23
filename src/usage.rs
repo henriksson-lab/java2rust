@@ -1,12 +1,13 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::facts::{ExceptionKind, FacadeSlot, FactSet, TrivialAccessorKind};
+use crate::facts::{ExceptionKind, FactSet, TrivialAccessorKind};
 use crate::java_ir::{
     Block, ConstructorInvocationKind, Expr, JavaType, LambdaBody, Member, Modifier, Program,
     ResolvedCall, ResolvedConstructor, Stmt, SwitchLabel, TypeDecl,
 };
 use crate::java_signature::{JavaCallableKey, source_method_rust_name};
 use crate::stdlib::is_content_read_method;
+use crate::types::TypeEnv;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UsageFacts {
@@ -367,6 +368,7 @@ fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts, semantic_facts: &Fa
         match member {
             Member::Method(method) => {
                 let mut method_facts = MethodUsageFacts::default();
+                let type_env = usage_type_env(ty, &method.type_params, &method.type_param_bounds);
                 for param in &method.params {
                     method_facts.bindings.insert(
                         param.name.clone(),
@@ -387,6 +389,7 @@ fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts, semantic_facts: &Fa
                             &field_names,
                             &field_types,
                             semantic_facts,
+                            &type_env,
                         );
                     }
                 }
@@ -415,6 +418,7 @@ fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts, semantic_facts: &Fa
             }
             Member::Constructor(ctor) => {
                 let mut ctor_facts = MethodUsageFacts::default();
+                let type_env = usage_type_env(ty, &ctor.type_params, &ctor.type_param_bounds);
                 for param in &ctor.params {
                     ctor_facts.bindings.insert(
                         param.name.clone(),
@@ -435,6 +439,7 @@ fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts, semantic_facts: &Fa
                             &field_names,
                             &field_types,
                             semantic_facts,
+                            &type_env,
                         );
                     }
                 }
@@ -448,6 +453,29 @@ fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts, semantic_facts: &Fa
             }
             Member::Type(nested) => analyze_type_usage(nested, facts, semantic_facts),
             _ => {}
+        }
+    }
+}
+
+fn usage_type_env(
+    ty: &TypeDecl,
+    member_type_params: &[String],
+    member_type_param_bounds: &[Option<JavaType>],
+) -> TypeEnv {
+    let mut env = TypeEnv::new();
+    insert_usage_type_param_bounds(&mut env, &ty.type_params, &ty.type_param_bounds);
+    insert_usage_type_param_bounds(&mut env, member_type_params, member_type_param_bounds);
+    env
+}
+
+fn insert_usage_type_param_bounds(
+    env: &mut TypeEnv,
+    type_params: &[String],
+    type_param_bounds: &[Option<JavaType>],
+) {
+    for (name, bound) in type_params.iter().zip(type_param_bounds.iter()) {
+        if let Some(bound) = bound {
+            env.insert_type_param_bound(name.clone(), bound.clone());
         }
     }
 }
@@ -1167,12 +1195,14 @@ fn analyze_stmt(
     field_names: &HashSet<String>,
     field_types: &HashMap<String, JavaType>,
     semantic_facts: &FactSet,
+    type_env: &TypeEnv,
 ) {
     match stmt {
         Stmt::VarDecl {
             ty,
             name,
             initializer,
+            ..
         } => {
             facts
                 .bindings
@@ -1200,6 +1230,7 @@ fn analyze_stmt(
                     field_names,
                     field_types,
                     semantic_facts,
+                    type_env,
                 ) {
                     record_use(
                         facts,
@@ -1219,6 +1250,7 @@ fn analyze_stmt(
                     field_names,
                     field_types,
                     semantic_facts,
+                    type_env,
                 );
             }
         }
@@ -1234,6 +1266,7 @@ fn analyze_stmt(
                         field_names,
                         field_types,
                         semantic_facts,
+                        type_env,
                     ) {
                         facts.field_uses.push(FieldUse::AssignedFromCall {
                             field_name: name.clone(),
@@ -1262,6 +1295,7 @@ fn analyze_stmt(
                         field_names,
                         field_types,
                         semantic_facts,
+                        type_env,
                     ) {
                         record_use(
                             facts,
@@ -1287,6 +1321,7 @@ fn analyze_stmt(
                     field_names,
                     field_types,
                     semantic_facts,
+                    type_env,
                 ) {
                     facts.field_uses.push(FieldUse::AssignedFromCall {
                         field_name: field_name.clone(),
@@ -1308,6 +1343,7 @@ fn analyze_stmt(
                 field_names,
                 field_types,
                 semantic_facts,
+                type_env,
             );
             analyze_expr(
                 value,
@@ -1317,6 +1353,7 @@ fn analyze_stmt(
                 field_names,
                 field_types,
                 semantic_facts,
+                type_env,
             );
         }
         Stmt::Return(Some(expr)) => {
@@ -1337,6 +1374,7 @@ fn analyze_stmt(
                 field_names,
                 field_types,
                 semantic_facts,
+                type_env,
             );
             if let Expr::FieldAccess(receiver, field_name) = expr
                 && matches!(receiver.as_ref(), Expr::This)
@@ -1353,11 +1391,19 @@ fn analyze_stmt(
                 field_names,
                 field_types,
                 semantic_facts,
+                type_env,
             );
         }
         Stmt::Return(None) => {}
         Stmt::Expr(expr) => {
-            if expr_mutates_self_field(expr, facts, field_names) {
+            if expr_mutates_self_field(
+                expr,
+                facts,
+                current_type,
+                field_names,
+                field_types,
+                semantic_facts,
+            ) {
                 facts.mutates_self = true;
             }
             analyze_expr(
@@ -1368,6 +1414,7 @@ fn analyze_stmt(
                 field_names,
                 field_types,
                 semantic_facts,
+                type_env,
             );
         }
         Stmt::If {
@@ -1383,6 +1430,7 @@ fn analyze_stmt(
                 field_names,
                 field_types,
                 semantic_facts,
+                type_env,
             );
             for stmt in &then_block.statements {
                 analyze_stmt(
@@ -1393,6 +1441,7 @@ fn analyze_stmt(
                     field_names,
                     field_types,
                     semantic_facts,
+                    type_env,
                 );
             }
             if let Some(else_block) = else_block {
@@ -1405,6 +1454,7 @@ fn analyze_stmt(
                         field_names,
                         field_types,
                         semantic_facts,
+                        type_env,
                     );
                 }
             }
@@ -1423,6 +1473,7 @@ fn analyze_stmt(
                 field_names,
                 field_types,
                 semantic_facts,
+                type_env,
             );
             for stmt in &body.statements {
                 analyze_stmt(
@@ -1433,6 +1484,7 @@ fn analyze_stmt(
                     field_names,
                     field_types,
                     semantic_facts,
+                    type_env,
                 );
             }
         }
@@ -1452,6 +1504,7 @@ fn analyze_stmt(
                     field_names,
                     field_types,
                     semantic_facts,
+                    type_env,
                 );
             }
             if let Some(condition) = condition {
@@ -1463,6 +1516,7 @@ fn analyze_stmt(
                     field_names,
                     field_types,
                     semantic_facts,
+                    type_env,
                 );
             }
             for expr in update {
@@ -1474,6 +1528,7 @@ fn analyze_stmt(
                     field_names,
                     field_types,
                     semantic_facts,
+                    type_env,
                 );
             }
             for stmt in &body.statements {
@@ -1485,6 +1540,7 @@ fn analyze_stmt(
                     field_names,
                     field_types,
                     semantic_facts,
+                    type_env,
                 );
             }
         }
@@ -1503,6 +1559,7 @@ fn analyze_stmt(
                 field_names,
                 field_types,
                 semantic_facts,
+                type_env,
             );
             let saved_binding = facts.bindings.remove(var_name);
             facts.bindings.insert(
@@ -1522,6 +1579,7 @@ fn analyze_stmt(
                     field_names,
                     field_types,
                     semantic_facts,
+                    type_env,
                 );
             }
             if let Some(saved_binding) = saved_binding {
@@ -1538,6 +1596,7 @@ fn analyze_stmt(
                 field_names,
                 field_types,
                 semantic_facts,
+                type_env,
             );
             for case in cases {
                 for stmt in &case.statements {
@@ -1549,6 +1608,7 @@ fn analyze_stmt(
                         field_names,
                         field_types,
                         semantic_facts,
+                        type_env,
                     );
                 }
             }
@@ -1563,6 +1623,7 @@ fn analyze_stmt(
                     field_names,
                     field_types,
                     semantic_facts,
+                    type_env,
                 );
             }
         }
@@ -1578,6 +1639,7 @@ fn analyze_stmt(
                     field_names,
                     field_types,
                     semantic_facts,
+                    type_env,
                 );
             }
             for stmt in &body.statements {
@@ -1589,6 +1651,7 @@ fn analyze_stmt(
                     field_names,
                     field_types,
                     semantic_facts,
+                    type_env,
                 );
             }
         }
@@ -1600,6 +1663,7 @@ fn analyze_stmt(
             field_names,
             field_types,
             semantic_facts,
+            type_env,
         ),
         Stmt::ConstructorInvocation {
             kind,
@@ -1636,6 +1700,7 @@ fn analyze_stmt(
                     field_names,
                     field_types,
                     semantic_facts,
+                    type_env,
                 );
             }
         }
@@ -1668,6 +1733,7 @@ pub fn call_result_boundary_policy(
 ) -> Option<CallResultBoundaryPolicy> {
     let empty_field_types = HashMap::new();
     let empty_facts = FactSet::default();
+    let empty_type_env = TypeEnv::new();
     call_result_boundary_policy_with_context(
         expr,
         internal_methods,
@@ -1676,6 +1742,7 @@ pub fn call_result_boundary_policy(
         &HashSet::new(),
         &empty_field_types,
         &empty_facts,
+        &empty_type_env,
     )
 }
 
@@ -1687,6 +1754,7 @@ fn call_result_boundary_policy_with_context(
     field_names: &HashSet<String>,
     field_types: &HashMap<String, JavaType>,
     semantic_facts: &FactSet,
+    type_env: &TypeEnv,
 ) -> Option<CallResultBoundaryPolicy> {
     match expr {
         Expr::Call {
@@ -1718,6 +1786,7 @@ fn call_result_boundary_policy_with_context(
                 name,
                 args.len(),
                 semantic_facts,
+                type_env,
             );
             Some(CallResultBoundaryPolicy {
                 name: name.clone(),
@@ -1777,6 +1846,7 @@ fn analyze_expr(
     field_names: &HashSet<String>,
     field_types: &HashMap<String, JavaType>,
     semantic_facts: &FactSet,
+    type_env: &TypeEnv,
 ) {
     analyze_expr_with_context(
         expr,
@@ -1786,6 +1856,7 @@ fn analyze_expr(
         field_names,
         field_types,
         semantic_facts,
+        type_env,
         false,
     );
 }
@@ -1798,6 +1869,7 @@ fn analyze_return_expr(
     field_names: &HashSet<String>,
     field_types: &HashMap<String, JavaType>,
     semantic_facts: &FactSet,
+    type_env: &TypeEnv,
 ) {
     analyze_expr_with_context(
         expr,
@@ -1807,6 +1879,7 @@ fn analyze_return_expr(
         field_names,
         field_types,
         semantic_facts,
+        type_env,
         true,
     );
 }
@@ -1819,6 +1892,7 @@ fn analyze_nested_argument_expr(
     field_names: &HashSet<String>,
     field_types: &HashMap<String, JavaType>,
     semantic_facts: &FactSet,
+    type_env: &TypeEnv,
 ) {
     if matches!(expr, Expr::Var(_)) {
         return;
@@ -1831,6 +1905,7 @@ fn analyze_nested_argument_expr(
         field_names,
         field_types,
         semantic_facts,
+        type_env,
     );
 }
 
@@ -1855,9 +1930,17 @@ fn analyze_expr_with_context(
     field_names: &HashSet<String>,
     field_types: &HashMap<String, JavaType>,
     semantic_facts: &FactSet,
+    type_env: &TypeEnv,
     result_returned: bool,
 ) {
-    if expr_mutates_self_field(expr, facts, field_names) {
+    if expr_mutates_self_field(
+        expr,
+        facts,
+        current_type,
+        field_names,
+        field_types,
+        semantic_facts,
+    ) {
         facts.mutates_self = true;
     }
     match expr {
@@ -1875,6 +1958,7 @@ fn analyze_expr_with_context(
                 field_names,
                 field_types,
                 semantic_facts,
+                type_env,
             );
         }
         Expr::Call {
@@ -1904,6 +1988,7 @@ fn analyze_expr_with_context(
                 name,
                 args.len(),
                 semantic_facts,
+                type_env,
             );
             record_trivial_accessor_call_use(
                 facts,
@@ -1981,6 +2066,7 @@ fn analyze_expr_with_context(
                     field_names,
                     field_types,
                     semantic_facts,
+                    type_env,
                 );
             }
             if let Some(receiver) = receiver {
@@ -1992,6 +2078,7 @@ fn analyze_expr_with_context(
                     field_names,
                     field_types,
                     semantic_facts,
+                    type_env,
                 );
             }
         }
@@ -2004,6 +2091,7 @@ fn analyze_expr_with_context(
                 field_names,
                 field_types,
                 semantic_facts,
+                type_env,
             );
             analyze_expr(
                 right,
@@ -2013,6 +2101,7 @@ fn analyze_expr_with_context(
                 field_names,
                 field_types,
                 semantic_facts,
+                type_env,
             );
         }
         Expr::Cast { expr, .. } => analyze_expr_with_context(
@@ -2023,6 +2112,7 @@ fn analyze_expr_with_context(
             field_names,
             field_types,
             semantic_facts,
+            type_env,
             result_returned,
         ),
         Expr::Unary { expr, .. } => analyze_expr(
@@ -2033,6 +2123,7 @@ fn analyze_expr_with_context(
             field_names,
             field_types,
             semantic_facts,
+            type_env,
         ),
         Expr::InstanceOf { expr, ty, .. } => {
             if let Expr::Var(binding) = expr.as_ref() {
@@ -2052,6 +2143,7 @@ fn analyze_expr_with_context(
                 field_names,
                 field_types,
                 semantic_facts,
+                type_env,
             );
         }
         Expr::ArrayAccess(array, index) => {
@@ -2063,6 +2155,7 @@ fn analyze_expr_with_context(
                 field_names,
                 field_types,
                 semantic_facts,
+                type_env,
             );
             analyze_expr(
                 index,
@@ -2072,6 +2165,7 @@ fn analyze_expr_with_context(
                 field_names,
                 field_types,
                 semantic_facts,
+                type_env,
             );
         }
         Expr::ArrayCreation {
@@ -2088,6 +2182,7 @@ fn analyze_expr_with_context(
                     field_names,
                     field_types,
                     semantic_facts,
+                    type_env,
                 );
             }
             if let Some(initializer) = initializer {
@@ -2100,6 +2195,7 @@ fn analyze_expr_with_context(
                         field_names,
                         field_types,
                         semantic_facts,
+                        type_env,
                     );
                 }
             }
@@ -2114,6 +2210,7 @@ fn analyze_expr_with_context(
                     field_names,
                     field_types,
                     semantic_facts,
+                    type_env,
                 );
             }
         }
@@ -2130,6 +2227,7 @@ fn analyze_expr_with_context(
                 field_names,
                 field_types,
                 semantic_facts,
+                type_env,
             );
             analyze_expr_with_context(
                 then_expr,
@@ -2139,6 +2237,7 @@ fn analyze_expr_with_context(
                 field_names,
                 field_types,
                 semantic_facts,
+                type_env,
                 result_returned,
             );
             analyze_expr_with_context(
@@ -2149,6 +2248,7 @@ fn analyze_expr_with_context(
                 field_names,
                 field_types,
                 semantic_facts,
+                type_env,
                 result_returned,
             );
         }
@@ -2177,6 +2277,7 @@ fn analyze_expr_with_context(
                     field_names,
                     field_types,
                     semantic_facts,
+                    type_env,
                 );
             }
         }
@@ -2189,6 +2290,7 @@ fn analyze_expr_with_context(
             field_names,
             field_types,
             semantic_facts,
+            type_env,
         ),
         Expr::Switch { selector, cases } => {
             analyze_expr(
@@ -2199,6 +2301,7 @@ fn analyze_expr_with_context(
                 field_names,
                 field_types,
                 semantic_facts,
+                type_env,
             );
             for case in cases {
                 for label in &case.labels {
@@ -2211,6 +2314,7 @@ fn analyze_expr_with_context(
                             field_names,
                             field_types,
                             semantic_facts,
+                            type_env,
                         );
                     }
                 }
@@ -2222,6 +2326,7 @@ fn analyze_expr_with_context(
                     field_names,
                     field_types,
                     semantic_facts,
+                    type_env,
                 );
             }
         }
@@ -2245,6 +2350,7 @@ fn analyze_lambda_body(
     field_names: &HashSet<String>,
     field_types: &HashMap<String, JavaType>,
     semantic_facts: &FactSet,
+    type_env: &TypeEnv,
 ) {
     let saved_params = params
         .iter()
@@ -2274,6 +2380,7 @@ fn analyze_lambda_body(
             field_names,
             field_types,
             semantic_facts,
+            type_env,
         ),
         LambdaBody::Block(block) => {
             for stmt in &block.statements {
@@ -2285,6 +2392,7 @@ fn analyze_lambda_body(
                     field_names,
                     field_types,
                     semantic_facts,
+                    type_env,
                 );
             }
         }
@@ -2306,6 +2414,7 @@ fn record_returned_call_result_use(
     field_names: &HashSet<String>,
     field_types: &HashMap<String, JavaType>,
     semantic_facts: &FactSet,
+    type_env: &TypeEnv,
 ) {
     match expr {
         Expr::Call { .. } | Expr::New { .. } => {
@@ -2317,6 +2426,7 @@ fn record_returned_call_result_use(
                 field_names,
                 field_types,
                 semantic_facts,
+                type_env,
             ) else {
                 return;
             };
@@ -2336,6 +2446,7 @@ fn record_returned_call_result_use(
             field_names,
             field_types,
             semantic_facts,
+            type_env,
         ),
         Expr::Ternary {
             then_expr,
@@ -2350,6 +2461,7 @@ fn record_returned_call_result_use(
                 field_names,
                 field_types,
                 semantic_facts,
+                type_env,
             );
             record_returned_call_result_use(
                 else_expr,
@@ -2359,6 +2471,7 @@ fn record_returned_call_result_use(
                 field_names,
                 field_types,
                 semantic_facts,
+                type_env,
             );
         }
         _ => {}
@@ -2442,7 +2555,7 @@ fn call_mut_borrow_arg_targets_self_field(
         })
         .any(|abi| {
             abi.args.iter().enumerate().any(|(index, slot)| {
-                facade_slot_requires_mut_borrow(slot)
+                slot.contains_mut_borrow()
                     && args
                         .get(index)
                         .is_some_and(|arg| expr_targets_self_field(arg, usage, field_names))
@@ -2463,20 +2576,6 @@ fn facade_abi_matches_call_receiver(
     }
     crate::stdlib::canonical_external_receiver_type_key(receiver_name)
         == crate::stdlib::canonical_external_receiver_type_key(owner)
-}
-
-fn facade_slot_requires_mut_borrow(slot: &FacadeSlot) -> bool {
-    match slot {
-        FacadeSlot::MutBorrowed => true,
-        FacadeSlot::Optional(inner) | FacadeSlot::Slice(inner) => {
-            facade_slot_requires_mut_borrow(inner)
-        }
-        FacadeSlot::Owned
-        | FacadeSlot::Borrowed
-        | FacadeSlot::Index
-        | FacadeSlot::DynTrait(_)
-        | FacadeSlot::CrateHandle(_) => false,
-    }
 }
 
 fn expr_targets_self_field(
@@ -2659,7 +2758,10 @@ fn array_expr_targets_self_field(
 fn expr_mutates_self_field(
     expr: &Expr,
     facts: &MethodUsageFacts,
+    current_type: &str,
     field_names: &HashSet<String>,
+    field_types: &HashMap<String, JavaType>,
+    semantic_facts: &FactSet,
 ) -> bool {
     match expr {
         Expr::Binary {
@@ -2684,32 +2786,43 @@ fn expr_mutates_self_field(
             receiver: Some(receiver),
             name,
             ..
-        } if is_mutating_collection_method_name(name) => match receiver.as_ref() {
-            Expr::Var(name) => is_unshadowed_field_name(facts, field_names, name),
-            target => target_is_this_field(target),
-        },
+        } if call_receiver_java_type_with_context(
+            Some(receiver.as_ref()),
+            facts,
+            current_type,
+            field_names,
+            field_types,
+            semantic_facts,
+        )
+        .is_some_and(|ty| crate::stdlib::native_collection_receiver_mutates(&ty, name)) =>
+        {
+            match receiver.as_ref() {
+                Expr::Var(name) => is_unshadowed_field_name(facts, field_names, name),
+                target => target_is_this_field(target),
+            }
+        }
+        Expr::Call {
+            receiver,
+            name,
+            args,
+            ..
+        } => args.iter().enumerate().any(|(arg_index, arg)| {
+            crate::stdlib::static_collection_argument_mutates(
+                receiver.as_deref().and_then(static_receiver_name),
+                name,
+                args.len(),
+                arg_index,
+            ) && expr_targets_self_field(arg, facts, field_names)
+        }),
         _ => false,
     }
 }
 
-fn is_mutating_collection_method_name(name: &str) -> bool {
-    matches!(
-        name,
-        "add"
-            | "addAll"
-            | "add_all"
-            | "clear"
-            | "put"
-            | "putAll"
-            | "put_all"
-            | "remove"
-            | "removeIf"
-            | "remove_if"
-            | "insert"
-            | "extend"
-            | "push"
-            | "retain"
-    )
+fn static_receiver_name(receiver: &Expr) -> Option<&str> {
+    match receiver {
+        Expr::Var(name) => Some(name),
+        _ => None,
+    }
 }
 
 fn analyze_stored_expr(expr: &Expr, facts: &mut MethodUsageFacts, field_name: &str) {
@@ -2795,11 +2908,14 @@ fn modeled_receiver_call_boundary(
     name: &str,
     arg_count: usize,
     semantic_facts: &FactSet,
+    type_env: &TypeEnv,
 ) -> CallArgumentBoundary {
     if boundary != CallArgumentBoundary::Unknown {
         return boundary;
     }
-    let Some(receiver_key) = external_receiver_type_key(receiver_type) else {
+    let Some(receiver_key) = receiver_type.and_then(|receiver_type| {
+        crate::stdlib::external_api_receiver_owner_key(receiver_type, type_env)
+    }) else {
         return boundary;
     };
     if semantic_facts
@@ -2830,15 +2946,6 @@ fn modeled_receiver_call_boundary(
         return CallArgumentBoundary::KnownContentRead;
     }
     boundary
-}
-
-fn external_receiver_type_key(receiver_type: Option<&JavaType>) -> Option<String> {
-    match receiver_type? {
-        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
-            Some(crate::stdlib::canonical_external_receiver_type_key(name))
-        }
-        _ => None,
-    }
 }
 
 fn receiver_static_type_matches_declaring_type(

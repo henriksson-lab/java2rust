@@ -537,10 +537,11 @@ fn build_batch_translation_context(
         "semantic_analysis::analyze_program",
     );
     let semantic_start = Instant::now();
-    let mut semantic = semantic_analysis::analyze_program(
+    let mut semantic = semantic_analysis::analyze_program_with_config(
         &resolved_context.program,
         &resolved_context.facts,
         external_facts,
+        semantic_analysis_config_from_facts(external_facts),
     );
     semantic.facts.storage_strategies =
         storage_strategy::plan_storage_strategies(&resolved_context.program, &semantic.usage);
@@ -943,8 +944,12 @@ fn translate_parsed_source_with_context(
     } else {
         resolved.program.clone()
     };
-    let mut semantic =
-        semantic_analysis::analyze_program(&semantic_program, &resolved.facts, external_facts);
+    let mut semantic = semantic_analysis::analyze_program_with_config(
+        &semantic_program,
+        &resolved.facts,
+        external_facts,
+        semantic_analysis_config_from_facts(external_facts),
+    );
     // Step 3 of the 0002b design: the storage decision has to be visible to
     // *every* place that renders a type, or a struct field and a parameter of
     // the same Java type get different Rust spellings and the output does not
@@ -1015,6 +1020,15 @@ fn report_post_lowering_translation_diagnostics(
     // A non-static inner class compiles and then panics on construction. The
     // translator has to say so; a compile-error count cannot see it.
     inner_class_capture::report_unconstructable_inner_classes(program, facts, diagnostics);
+}
+
+fn semantic_analysis_config_from_facts(
+    external_facts: &FactSet,
+) -> semantic_analysis::SemanticAnalysisConfig {
+    semantic_analysis::SemanticAnalysisConfig {
+        enable_builtin_external_packs: !external_facts.disable_builtin_external_packs,
+        ..semantic_analysis::SemanticAnalysisConfig::default()
+    }
 }
 
 fn merge_program_context(target: &mut Program, source: Program) {

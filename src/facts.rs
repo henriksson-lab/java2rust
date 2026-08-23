@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use crate::fact_saturation::{
     FiniteFactDomain, WorklistSaturationPolicy, WorklistStats, saturate_worklist,
@@ -6,7 +7,7 @@ use crate::fact_saturation::{
 use crate::java_ir::JavaType;
 use crate::slot_shape::TypeCapabilities;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FactSet {
     /// How values of each source type are *held* — by value, or behind a shared
     /// handle.
@@ -59,6 +60,54 @@ pub struct FactSet {
     pub unsupported_external_api_facts: Vec<UnsupportedExternalApiFact>,
     pub unsupported_external_constructor_facts: Vec<UnsupportedExternalConstructorFact>,
     pub unsupported_external_field_facts: Vec<UnsupportedExternalFieldFact>,
+    pub disable_builtin_external_packs: bool,
+}
+
+impl Default for FactSet {
+    fn default() -> Self {
+        Self {
+            storage_strategies: crate::storage_strategy::StoragePlan::default(),
+            notes: Vec::new(),
+            captures: CaptureFacts::default(),
+            hierarchy_overrides: Vec::new(),
+            closed_hierarchy_facts: Vec::new(),
+            sealed_permits_facts: Vec::new(),
+            object_safety_facts: Vec::new(),
+            type_capability_overrides: Vec::new(),
+            owned_recovery_capability_facts: Vec::new(),
+            field_nullability_facts: Vec::new(),
+            trivial_accessor_facts: Vec::new(),
+            external_api_effect_facts: Vec::new(),
+            external_api_argument_effect_facts: Vec::new(),
+            external_ffi_handover_facts: Vec::new(),
+            external_constructor_argument_effect_facts: Vec::new(),
+            external_conversion_adapter_facts: Vec::new(),
+            external_crate_api_mapping_facts: Vec::new(),
+            external_crate_type_mapping_facts: Vec::new(),
+            external_crate_constructor_mapping_facts: Vec::new(),
+            facade_abi_facts: Vec::new(),
+            external_rust_result_facts: Vec::new(),
+            external_rust_return_type_facts: Vec::new(),
+            external_constructor_rust_result_facts: Vec::new(),
+            external_constructor_facts: Vec::new(),
+            external_field_facts: Vec::new(),
+            external_field_value_facts: Vec::new(),
+            source_equals_override_facts: Vec::new(),
+            method_effect_facts: Vec::new(),
+            recursion_facts: Vec::new(),
+            constructor_recursion_facts: Vec::new(),
+            control_flow_facts: Vec::new(),
+            unresolved_target_facts: Vec::new(),
+            dispatch_requirement_facts: Vec::new(),
+            exception_facts: Vec::new(),
+            catch_facts: Vec::new(),
+            external_library_packs: Vec::new(),
+            unsupported_external_api_facts: Vec::new(),
+            unsupported_external_constructor_facts: Vec::new(),
+            unsupported_external_field_facts: Vec::new(),
+            disable_builtin_external_packs: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -85,9 +134,9 @@ impl<'a> ExternalFactLookupIndex<'a> {
     pub fn new(facts: &'a FactSet) -> Self {
         let mut external_api_by_method_alias = HashMap::<String, Vec<usize>>::new();
         for (index, fact) in facts.external_api_effect_facts.iter().enumerate() {
-            for alias in external_method_name_aliases(&fact.method_name) {
+            for alias in external_method_name_aliases(&fact.method_name).iter() {
                 external_api_by_method_alias
-                    .entry(alias)
+                    .entry(alias.clone())
                     .or_default()
                     .push(index);
             }
@@ -146,6 +195,10 @@ impl<'a> ExternalFactLookupIndex<'a> {
             external_field_by_name_alias,
             external_pack_member_by_type_alias,
         }
+    }
+
+    pub fn facts(&self) -> &'a FactSet {
+        self.facts
     }
 
     pub fn external_api_effect_for_receiver(
@@ -488,8 +541,8 @@ impl<'a> ExternalFactLookupIndex<'a> {
     fn external_api_candidate_indices(&self, method_name: &str) -> Vec<usize> {
         let mut seen = HashSet::new();
         let mut indices = Vec::new();
-        for alias in external_method_name_aliases(method_name) {
-            if let Some(alias_indices) = self.external_api_by_method_alias.get(&alias) {
+        for alias in external_method_name_aliases(method_name).iter() {
+            if let Some(alias_indices) = self.external_api_by_method_alias.get(alias) {
                 for index in alias_indices {
                     if seen.insert(*index) {
                         indices.push(*index);
@@ -562,8 +615,8 @@ impl<'a> ExternalFactLookupIndex<'a> {
         }
         let mut seen = HashSet::new();
         let mut indices = Vec::new();
-        for alias in external_type_name_aliases(type_name) {
-            if let Some(alias_indices) = self.external_pack_member_by_type_alias.get(&alias) {
+        for alias in external_type_name_aliases(type_name).iter() {
+            if let Some(alias_indices) = self.external_pack_member_by_type_alias.get(alias) {
                 for index in alias_indices {
                     if seen.insert(*index) {
                         indices.push(*index);
@@ -654,7 +707,24 @@ impl HierarchyFactLookupIndex {
     }
 }
 
-fn external_method_name_aliases(method_name: &str) -> Vec<String> {
+fn external_method_name_aliases(method_name: &str) -> Rc<[String]> {
+    thread_local! {
+        static CACHE: std::cell::RefCell<HashMap<String, Rc<[String]>>> =
+            std::cell::RefCell::new(HashMap::new());
+    }
+    if let Some(cached) = CACHE.with(|cache| cache.borrow().get(method_name).cloned()) {
+        return cached;
+    }
+    let aliases = Rc::<[String]>::from(external_method_name_aliases_uncached(method_name));
+    CACHE.with(|cache| {
+        cache
+            .borrow_mut()
+            .insert(method_name.to_string(), aliases.clone())
+    });
+    aliases
+}
+
+fn external_method_name_aliases_uncached(method_name: &str) -> Vec<String> {
     let mut aliases = crate::java_naming::java_method_name_aliases(method_name);
     aliases.sort();
     aliases.dedup();
@@ -666,8 +736,8 @@ fn index_external_pack_member_type(
     type_name: &str,
     pack_index: usize,
 ) {
-    for alias in external_type_name_aliases(type_name) {
-        index.entry(alias).or_default().push(pack_index);
+    for alias in external_type_name_aliases(type_name).iter() {
+        index.entry(alias.clone()).or_default().push(pack_index);
     }
 }
 
@@ -1100,6 +1170,60 @@ pub enum FacadeSlot {
     Slice(Box<FacadeSlot>),
     DynTrait(String),
     CrateHandle(String),
+}
+
+impl FacadeSlot {
+    pub fn contains_shared_borrow(&self) -> bool {
+        match self {
+            FacadeSlot::Borrowed => true,
+            FacadeSlot::Optional(inner) | FacadeSlot::Slice(inner) => {
+                inner.contains_shared_borrow()
+            }
+            FacadeSlot::Owned
+            | FacadeSlot::Index
+            | FacadeSlot::MutBorrowed
+            | FacadeSlot::DynTrait(_)
+            | FacadeSlot::CrateHandle(_) => false,
+        }
+    }
+
+    pub fn contains_mut_borrow(&self) -> bool {
+        match self {
+            FacadeSlot::MutBorrowed => true,
+            FacadeSlot::Optional(inner) | FacadeSlot::Slice(inner) => inner.contains_mut_borrow(),
+            FacadeSlot::Owned
+            | FacadeSlot::Index
+            | FacadeSlot::Borrowed
+            | FacadeSlot::DynTrait(_)
+            | FacadeSlot::CrateHandle(_) => false,
+        }
+    }
+}
+
+pub fn facade_slot_for_rust_type(ty: &str) -> FacadeSlot {
+    let ty = ty.trim();
+    if ty == "usize" {
+        return FacadeSlot::Index;
+    }
+    if let Some(inner) = crate::types::raw_rust_option_inner(ty) {
+        return FacadeSlot::Optional(Box::new(facade_slot_for_rust_type(inner)));
+    }
+    if let Some(inner) = ty.strip_prefix("&mut ") {
+        if let Some(slice) = inner.strip_prefix('[').and_then(|ty| ty.strip_suffix(']')) {
+            return FacadeSlot::Slice(Box::new(facade_slot_for_rust_type(&format!(
+                "&mut {slice}"
+            ))));
+        }
+        return FacadeSlot::MutBorrowed;
+    }
+    if let Some(inner) = ty.strip_prefix('&') {
+        let inner = inner.trim();
+        if let Some(slice) = inner.strip_prefix('[').and_then(|ty| ty.strip_suffix(']')) {
+            return FacadeSlot::Slice(Box::new(facade_slot_for_rust_type(slice)));
+        }
+        return FacadeSlot::Borrowed;
+    }
+    FacadeSlot::Owned
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1668,6 +1792,7 @@ impl FactSet {
     }
 
     pub fn extend_from(&mut self, other: FactSet) {
+        self.disable_builtin_external_packs |= other.disable_builtin_external_packs;
         self.storage_strategies
             .extend_from(other.storage_strategies);
         self.notes.extend(other.notes);
@@ -3471,15 +3596,15 @@ fn external_api_argument_effects_agree(
 ///
 /// Safe to cache per thread precisely because it depends on nothing but the
 /// string: no facts, no program, no configuration.
-fn external_type_name_aliases(type_name: &str) -> Vec<String> {
+fn external_type_name_aliases(type_name: &str) -> Rc<[String]> {
     thread_local! {
-        static CACHE: std::cell::RefCell<HashMap<String, Vec<String>>> =
+        static CACHE: std::cell::RefCell<HashMap<String, Rc<[String]>>> =
             std::cell::RefCell::new(HashMap::new());
     }
     if let Some(cached) = CACHE.with(|cache| cache.borrow().get(type_name).cloned()) {
         return cached;
     }
-    let aliases = external_type_name_aliases_uncached(type_name);
+    let aliases = Rc::<[String]>::from(external_type_name_aliases_uncached(type_name));
     CACHE.with(|cache| {
         cache
             .borrow_mut()

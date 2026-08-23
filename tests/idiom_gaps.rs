@@ -85,8 +85,10 @@ class RustKeywordLocalNames {
 
     assert!(
         translation.rust.contains("r#in: i32")
-            && translation.rust.contains("let match_: i32 = r#in + 1;")
-            && translation.rust.contains("return match_;")
+            && translation
+                .rust
+                .contains("let r#match: i32 = (r#in).wrapping_add(1);")
+            && translation.rust.contains("return r#match;")
             && !translation.rust.contains("let match:")
             && !translation.rust.contains("let in:"),
         "{}",
@@ -96,6 +98,599 @@ class RustKeywordLocalNames {
         "rust_keyword_local_names",
         vec![GeneratedCrateModule {
             name: "keyword_local_names",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn rust_keyword_and_underscore_field_names_do_not_collapse() {
+    let translation = translate_source(
+        r#"
+class RustKeywordFieldCollision {
+    private int type;
+    private int type_;
+
+    RustKeywordFieldCollision() {
+        this.type = 1;
+        this.type_ = 2;
+    }
+
+    int sum() {
+        return this.type + this.type_;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("r#type: i32")
+            && translation.rust.contains("type_: i32")
+            && translation.rust.contains("r#type: 1")
+            && translation.rust.contains("type_: 2")
+            && translation
+                .rust
+                .contains("return (self.r#type).wrapping_add(self.type_);"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "rust_keyword_field_collision",
+        vec![GeneratedCrateModule {
+            name: "keyword_field_collision",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn non_rawable_rust_keyword_and_underscore_field_names_do_not_collapse() {
+    let translation = translate_source(
+        r#"
+class NonRawableRustKeywordFieldCollision {
+    private int self;
+    private int self__;
+
+    NonRawableRustKeywordFieldCollision() {
+        this.self = 1;
+        this.self__ = 2;
+    }
+
+    int sum() {
+        return this.self + this.self__;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("self___: i32")
+            && translation.rust.contains("self__: i32")
+            && translation.rust.contains("self___: 1")
+            && translation.rust.contains("self__: 2")
+            && translation
+                .rust
+                .contains("return (self.self___).wrapping_add(self.self__);"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "non_rawable_rust_keyword_field_collision",
+        vec![GeneratedCrateModule {
+            name: "non_rawable_keyword_field_collision",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn non_rawable_rust_keyword_method_params_do_not_collapse() {
+    let translation = translate_source(
+        r#"
+class NonRawableParamCollision {
+    int sum(int self, int self__) {
+        return self + self__;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn sum(&self, self___: i32, self__: i32) -> i32")
+            && translation
+                .rust
+                .contains("return (self___).wrapping_add(self__);"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "non_rawable_keyword_method_param_collision",
+        vec![GeneratedCrateModule {
+            name: "non_rawable_keyword_method_param_collision",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn non_rawable_rust_keyword_constructor_params_do_not_collapse() {
+    let translation = translate_source(
+        r#"
+class NonRawableCtorParamCollision {
+    private int value;
+
+    NonRawableCtorParamCollision(int self, int self__) {
+        this.value = self + self__;
+    }
+
+    int get() {
+        return value;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn new(self___: i32, self__: i32) -> NonRawableCtorParamCollision")
+            && translation
+                .rust
+                .contains("value: (self___).wrapping_add(self__)"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "non_rawable_keyword_constructor_param_collision",
+        vec![GeneratedCrateModule {
+            name: "non_rawable_keyword_constructor_param_collision",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn non_rawable_rust_keyword_local_names_do_not_collapse() {
+    let translation = translate_source(
+        r#"
+class NonRawableLocalCollision {
+    int sum() {
+        int self = 1;
+        int self__ = 2;
+        return self + self__;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("let self___: i32 = 1;")
+            && translation.rust.contains("let self__: i32 = 2;")
+            && translation
+                .rust
+                .contains("return (self___).wrapping_add(self__);"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "non_rawable_keyword_local_collision",
+        vec![GeneratedCrateModule {
+            name: "non_rawable_keyword_local_collision",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn non_rawable_rust_keyword_enhanced_for_names_do_not_collapse() {
+    let translation = translate_source(
+        r#"
+class NonRawableEnhancedForCollision {
+    int sum(int[] values) {
+        int total = 0;
+        for (int self : values) {
+            total += self;
+        }
+        for (int self__ : values) {
+            total += self__;
+        }
+        return total;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("for self___ in")
+            && translation.rust.contains("for self__ in")
+            && translation
+                .rust
+                .contains("total = (total).wrapping_add(self___);")
+            && translation
+                .rust
+                .contains("total = (total).wrapping_add(self__);"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "non_rawable_keyword_enhanced_for_collision",
+        vec![GeneratedCrateModule {
+            name: "non_rawable_keyword_enhanced_for_collision",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn non_rawable_rust_keyword_lambda_params_do_not_collapse() {
+    let translation = translate_source(
+        r#"
+import java.util.function.IntBinaryOperator;
+
+class NonRawableLambdaCollision {
+    int run(IntBinaryOperator fn) {
+        return fn.applyAsInt(1, 2);
+    }
+
+    int sum() {
+        return run((self, self__) -> self + self__);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("|self___: i32, self__: i32|")
+            && translation.rust.contains("(self___).wrapping_add(self__)"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "non_rawable_keyword_lambda_param_collision",
+        vec![GeneratedCrateModule {
+            name: "non_rawable_keyword_lambda_param_collision",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn non_rawable_rust_keyword_stream_lambda_param_is_allocated() {
+    let translation = translate_source(
+        r#"
+import java.util.Arrays;
+
+class NonRawableStreamLambdaParam {
+    int sum(int[] values) {
+        return Arrays.stream(values).map(self -> self + 1).sum();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("|self__")
+            && translation.rust.contains("*self__ + 1")
+            && !translation.rust.contains("|self:"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "non_rawable_keyword_stream_lambda_param",
+        vec![GeneratedCrateModule {
+            name: "non_rawable_keyword_stream_lambda_param",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn non_rawable_rust_keyword_stream_block_param_and_local_do_not_collapse() {
+    let translation = translate_source(
+        r#"
+import java.util.Arrays;
+
+class NonRawableStreamBlockParamLocalCollision {
+    int sum(int[] values) {
+        return Arrays.stream(values).map(self -> {
+            int self__ = self + 1;
+            return self + self__;
+        }).sum();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("|self___")
+            && translation.rust.contains("let self__")
+            && translation.rust.contains("*self___ + 1")
+            && translation.rust.contains("*self___ + self__")
+            && !translation.rust.contains("|self:")
+            && !translation.rust.contains("|self__|"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "non_rawable_keyword_stream_block_param_local_collision",
+        vec![GeneratedCrateModule {
+            name: "non_rawable_keyword_stream_block_param_local_collision",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn non_rawable_rust_keyword_stream_block_locals_do_not_collapse() {
+    let translation = translate_source(
+        r#"
+import java.util.Arrays;
+
+class NonRawableStreamBlockLocalCollision {
+    int sum(int[] values) {
+        return Arrays.stream(values).map(value -> {
+            int self = value + 1;
+            int self__ = value + 2;
+            return self + self__;
+        }).sum();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("let self___")
+            && translation.rust.contains("let self__")
+            && translation.rust.contains("self___ + self__")
+            && !translation.rust.contains("let self:"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "non_rawable_keyword_stream_block_local_collision",
+        vec![GeneratedCrateModule {
+            name: "non_rawable_keyword_stream_block_local_collision",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn non_rawable_rust_keyword_stream_reduce_params_do_not_collapse() {
+    let translation = translate_source(
+        r#"
+import java.util.Arrays;
+
+class NonRawableStreamReduceCollision {
+    int sum(int[] values) {
+        return Arrays.stream(values).reduce(0, (self, self__) -> self + self__);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("|self___, self__|")
+            && translation.rust.contains("self___ + self__"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "non_rawable_keyword_stream_reduce_collision",
+        vec![GeneratedCrateModule {
+            name: "non_rawable_keyword_stream_reduce_collision",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn bare_non_rawable_keyword_field_names_do_not_collapse() {
+    let translation = translate_source(
+        r#"
+class BareNonRawableRustKeywordFieldCollision {
+    private int self;
+    private int self__;
+
+    BareNonRawableRustKeywordFieldCollision() {
+        self = 1;
+        self__ = 2;
+    }
+
+    int sum() {
+        return self + self__;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("self___: i32")
+            && translation.rust.contains("self__: i32")
+            && translation.rust.contains("self___: 1")
+            && translation.rust.contains("self__: 2")
+            && translation
+                .rust
+                .contains("return (self.self___).wrapping_add(self.self__);"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "bare_non_rawable_keyword_field_collision",
+        vec![GeneratedCrateModule {
+            name: "bare_non_rawable_keyword_field_collision",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn bare_non_rawable_keyword_field_alias_does_not_overwrite_semantic_field() {
+    let translation = translate_source(
+        r#"
+class BareNonRawableRustKeywordFieldReverseCollision {
+    private int self__;
+    private int self;
+
+    BareNonRawableRustKeywordFieldReverseCollision() {
+        self__ = 2;
+        self = 1;
+    }
+
+    int sum() {
+        return self + self__;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("self__: i32")
+            && translation.rust.contains("self___: i32")
+            && translation.rust.contains("self__: 2")
+            && translation.rust.contains("self___: 1")
+            && translation
+                .rust
+                .contains("return (self.self___).wrapping_add(self.self__);"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "bare_non_rawable_keyword_field_reverse_collision",
+        vec![GeneratedCrateModule {
+            name: "bare_non_rawable_keyword_field_reverse_collision",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn bare_non_rawable_keyword_field_preserves_local_shadowing() {
+    let translation = translate_source(
+        r#"
+class BareNonRawableRustKeywordFieldShadowing {
+    private int self;
+    private int self__;
+
+    BareNonRawableRustKeywordFieldShadowing() {
+        this.self = 1;
+        this.self__ = 2;
+    }
+
+    int sum(int self__) {
+        return self + self__;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("self___: i32")
+            && translation.rust.contains("self__: i32")
+            && translation.rust.contains("pub fn sum(&self, self__: i32)")
+            && translation
+                .rust
+                .contains("return (self.self___).wrapping_add(self__);"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "bare_non_rawable_keyword_field_shadowing",
+        vec![GeneratedCrateModule {
+            name: "bare_non_rawable_keyword_field_shadowing",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn qualified_static_storage_keyword_fields_do_not_collapse() {
+    let translation = translate_source(
+        r#"
+class StaticKeywordFields {
+    static int self;
+    static int self__;
+
+    static void set() {
+        StaticKeywordFields.self = 1;
+        StaticKeywordFields.self__ = 2;
+    }
+
+    static int sum() {
+        return StaticKeywordFields.self + StaticKeywordFields.self__;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("fn __static_self___() -> i32")
+            && translation.rust.contains("fn __static_self__() -> i32")
+            && translation.rust.contains("fn __set_static_self___")
+            && translation.rust.contains("fn __set_static_self__")
+            && translation.rust.contains("Self::__set_static_self___(1);")
+            && translation.rust.contains("Self::__set_static_self__(2);")
+            && translation.rust.contains(
+                "return (StaticKeywordFields::__static_self___()).wrapping_add(StaticKeywordFields::__static_self__());"
+            ),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "qualified_static_storage_keyword_fields_do_not_collapse",
+        vec![GeneratedCrateModule {
+            name: "qualified_static_storage_keyword_fields",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn qualified_static_final_keyword_consts_do_not_collapse() {
+    let translation = translate_source(
+        r#"
+class StaticKeywordConsts {
+    static final int self = 1;
+    static final int self__ = 2;
+
+    static int sum() {
+        return StaticKeywordConsts.self + StaticKeywordConsts.self__;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("pub const self___: i32 = 1;")
+            && translation.rust.contains("pub const self__: i32 = 2;")
+            && translation.rust.contains(
+                "return (StaticKeywordConsts::self___).wrapping_add(StaticKeywordConsts::self__);"
+            ),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "qualified_static_final_keyword_consts_do_not_collapse",
+        vec![GeneratedCrateModule {
+            name: "qualified_static_final_keyword_consts",
             rust: translation.rust,
             tests: "",
         }],
@@ -7641,6 +8236,44 @@ class CollectionRemoveAllStatement {
 
     cargo_check_generated_modules(
         "collection_remove_all_statement",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn collection_remove_all_on_field_marks_self_mutable() {
+    let translation = translate_source(
+        r#"
+import java.util.ArrayList;
+import java.util.List;
+
+class CollectionRemoveAllField {
+    private List<String> names = new ArrayList<>();
+
+    void dropAll(List<String> other) {
+        this.names.removeAll(other);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn drop_all(&mut self, other: Vec<String>)")
+            && translation
+                .rust
+                .contains("self.names.retain(|item| !__java_remove_all_values.contains(item));"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "collection_remove_all_field",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
@@ -19228,6 +19861,110 @@ fn documents_optional_get_is_present_java_api_gap() {
             )
             && !translation.rust.contains(".is_present()")
             && !translation.rust.contains(".get()"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn java_optional_get_does_not_use_element_owner_external_fact() {
+    let mut facts = FactSet::default();
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "get".to_string(),
+        receiver_type: Some("Widget".to_string()),
+        arg_count: Some(0),
+        parameter_patterns: None,
+        role: ExternalApiRole::Mutator,
+        receiver_mutability: ReceiverMutabilityFact::MutatesReceiver,
+        return_type: None,
+        return_nullability: NullabilityState::Unknown,
+        thrown: Vec::new(),
+        provenance: FactProvenance::UserOverride,
+    });
+    let translation = translate_source_with_facts(
+        r#"
+import java.util.Optional;
+
+class OptionalGetOwnerKey {
+    void f(Optional<Widget> o) {
+        Widget w = o.get();
+        use(w);
+    }
+
+    void use(Widget w) {}
+}
+
+class Widget {}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn f(&self, o: Option<&Widget>)"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("pub fn f(&self, mut o: Option<Widget>)"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn type_param_bound_external_receiver_fact_shapes_signature_mutability() {
+    let mut facts = FactSet::default();
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "label".to_string(),
+        receiver_type: Some("Widget".to_string()),
+        arg_count: Some(0),
+        parameter_patterns: None,
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::String),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::UserOverride,
+    });
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "scramble".to_string(),
+        receiver_type: Some("Widget".to_string()),
+        arg_count: Some(0),
+        parameter_patterns: None,
+        role: ExternalApiRole::Mutator,
+        receiver_mutability: ReceiverMutabilityFact::MutatesReceiver,
+        return_type: None,
+        return_nullability: NullabilityState::Unknown,
+        thrown: Vec::new(),
+        provenance: FactProvenance::UserOverride,
+    });
+    let translation = translate_source_with_facts(
+        r#"
+class BoundOwnerKey<X extends Widget> {
+    int viaBound(X w) {
+        w.scramble();
+        return w.label().length();
+    }
+}
+
+class Widget {}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn via_bound(&self, w: &mut X) -> i32"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("return w.label().len() as i32;"),
         "{}",
         translation.rust
     );

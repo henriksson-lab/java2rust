@@ -994,6 +994,63 @@ fn usage_treats_native_collection_field_mutators_as_self_mutation() {
 }
 
 #[test]
+fn usage_treats_static_collection_argument_mutators_as_self_mutation() {
+    let parsed = parse_java_source(
+        r#"
+import java.util.Collections;
+import java.util.List;
+
+class StaticCollectionArgumentMutator {
+    private List<String> values;
+
+    void order() {
+        Collections.sort(this.values);
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let usage = analyze_usage(&resolved.program);
+    let order = usage
+        .methods
+        .get(&UsageMethodKey {
+            type_name: "StaticCollectionArgumentMutator".to_string(),
+            method_name: "order".to_string(),
+        })
+        .unwrap();
+
+    assert!(order.mutates_self, "{order:?}");
+}
+
+#[test]
+fn usage_collection_receiver_mutation_is_type_aware() {
+    let parsed = parse_java_source(
+        r#"
+import java.util.Map;
+
+class CollectionReceiverMutationKind {
+    private Map<String, String> values;
+
+    void pushLikeList(String value) {
+        this.values.push(value);
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let usage = analyze_usage(&resolved.program);
+    let push_like_list = usage
+        .methods
+        .get(&UsageMethodKey {
+            type_name: "CollectionReceiverMutationKind".to_string(),
+            method_name: "pushLikeList".to_string(),
+        })
+        .unwrap();
+
+    assert!(!push_like_list.mutates_self, "{push_like_list:?}");
+}
+
+#[test]
 fn usage_propagates_self_mutability_through_same_receiver_calls() {
     let parsed = parse_java_source(
         r#"
@@ -6352,6 +6409,36 @@ class TypeParameterBoundExternalApiUse<A extends Allele> {
 }
 
 #[test]
+fn method_reference_type_targets_use_type_parameter_bounds() {
+    let semantic = analyze(
+        r#"
+import java.util.stream.Stream;
+
+class MethodReferenceTypeParameterBoundExternalApiUse<A extends Allele> {
+    Object run(Stream<A> alleles) {
+        return alleles.map(A::getBaseString);
+    }
+}
+"#,
+    );
+
+    assert!(
+        semantic
+            .facts
+            .external_api_effect_for_receiver(Some("Allele"), "getBaseString")
+            .is_some(),
+        "expected bounded method-reference receiver fact for Allele.getBaseString"
+    );
+    assert!(
+        semantic
+            .facts
+            .external_api_effect_for_receiver(Some("A"), "getBaseString")
+            .is_none(),
+        "method-reference target A should be normalized through its bound"
+    );
+}
+
+#[test]
 fn external_array_length_on_domain_getter_result_is_not_receiver_method_fact() {
     let semantic = analyze(
         r#"
@@ -7669,6 +7756,50 @@ class ReadOnlyExternalReceiverParam {
         .clone();
 
     assert_eq!(param_shape.ownership, OwnershipShape::SharedBorrow);
+}
+
+#[test]
+fn readonly_external_receiver_usage_uses_type_parameter_bounds() {
+    let source = r#"
+class ReadOnlyExternalBoundReceiverParam<A extends ExternalHandle> {
+    public static <A extends ExternalHandle> String read(A handle) {
+        return handle.getName();
+    }
+}
+"#;
+    let parsed = parser::parse_java_source(source);
+    let resolved = resolve::resolve_program(&parsed.program, parsed.diagnostics);
+    let mut external_facts = new_java2rust::facts::FactSet::default();
+    external_facts
+        .external_api_effect_facts
+        .push(ExternalApiEffectFact {
+            method_name: "getName".to_string(),
+            receiver_type: Some("ExternalHandle".to_string()),
+            arg_count: Some(0),
+            parameter_patterns: None,
+            role: ExternalApiRole::Getter,
+            receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+            return_type: Some(JavaType::String),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: Vec::new(),
+            provenance: FactProvenance::UserOverride,
+        });
+    let semantic =
+        semantic_analysis::analyze_program(&resolved.program, &resolved.facts, &external_facts);
+    let method_usage = semantic
+        .usage
+        .methods
+        .get(&UsageMethodKey {
+            type_name: "ReadOnlyExternalBoundReceiverParam".to_string(),
+            method_name: "read".to_string(),
+        })
+        .expect("read usage should be recorded");
+    assert!(
+        method_usage.call_sites.iter().any(|call| {
+            call.name == "getName" && call.boundary == CallArgumentBoundary::KnownContentRead
+        }),
+        "usage should key the modeled receiver through the type-parameter bound"
+    );
 }
 
 #[test]

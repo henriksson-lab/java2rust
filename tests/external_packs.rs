@@ -9,10 +9,11 @@ use new_java2rust::external_packs::{
     apache_commons_math_pack_facts, apache_commons_math_stats_pack_facts, apache_http_pack_facts,
     audit_external_pack_fact_boundaries, audit_external_pack_manifest_coverage, avro_pack_facts,
     barclay_argparser_pack_facts, barclay_help_pack_facts, barclay_utils_pack_facts,
-    broad_hellbender_utils_pack_facts, broad_http_pack_facts, builtin_external_library_packs,
+    broad_hellbender_utils_pack_facts, broad_http_pack_facts, builtin_external_library_pack_facts,
     builtin_external_pack_facts, builtin_external_pack_manifest,
     builtin_external_pack_manifest_for_provider_name, builtin_external_pack_manifests,
-    bwa_pack_facts, disq_write_pack_facts, external_api_effect_for_receiver_with_arity,
+    bwa_pack_facts, disq_write_pack_facts, external_api_arities_for_receiver,
+    external_api_effect_for_receiver_with_arity, external_constructor_arities_for,
     external_constructor_for, external_crate_api_mapping_for_receiver,
     external_crate_constructor_mapping_for, external_field_for, external_library_pack_for_type,
     fastutil_pack_facts, genomicsdb_pack_facts, google_bigquery_pack_facts,
@@ -652,6 +653,35 @@ fn builtin_external_member_lookup_uses_cached_pack_facts() {
     )
     .expect("VariantContext.fullyDecode should resolve as unsupported pack coverage");
     assert_eq!(unsupported.pack_name, "htsjdk.variant.variantcontext");
+    let unsupported_snake = unsupported_external_api_for_receiver(
+        Some("htsjdk.variant.variantcontext.VariantContext"),
+        "fully_decode",
+    )
+    .expect("VariantContext.fully_decode should resolve through method-name aliases");
+    assert_eq!(
+        unsupported_snake.method_name, unsupported.method_name,
+        "unsupported API lookup should be insensitive to Java/camel vs Rust/snake spelling"
+    );
+
+    let parsing_split_arities = external_api_arities_for_receiver("ParsingUtils", "split");
+    assert!(
+        [2, 3, 4]
+            .into_iter()
+            .all(|arity| parsing_split_arities.contains(&arity)),
+        "{parsing_split_arities:?}"
+    );
+    let csv_read_next_arities = external_api_arities_for_receiver("CSVReader", "read_next");
+    assert!(
+        csv_read_next_arities.contains(&0),
+        "{csv_read_next_arities:?}"
+    );
+    let builder_ctor_arities = external_constructor_arities_for("VariantContextBuilder");
+    assert!(
+        [0, 1, 5]
+            .into_iter()
+            .all(|arity| builder_ctor_arities.contains(&arity)),
+        "{builder_ctor_arities:?}"
+    );
 
     let hdf5_ctor = external_constructor_for(
         "HDF5File",
@@ -702,7 +732,7 @@ fn builtin_external_member_lookup_uses_cached_pack_facts() {
         FactProvenance::ExternalLibraryPack
     );
 
-    let utils_facts = builtin_external_library_packs();
+    let utils_facts = builtin_external_library_pack_facts();
     let utils_validate_arg0 = utils_facts
         .external_api_argument_effect_for_receiver(
             Some("org.broadinstitute.hellbender.utils.Utils"),
@@ -931,7 +961,7 @@ fn builtin_external_member_lookup_uses_cached_pack_facts() {
 
 #[test]
 fn commons_math_localized_formats_implements_localizable_pack_trait() {
-    let facts = builtin_external_library_packs();
+    let facts = builtin_external_library_pack_facts();
     let localizable = JavaType::Named {
         name: "Localizable".to_string(),
         args: Vec::new(),
@@ -966,7 +996,7 @@ fn commons_math_localized_formats_implements_localizable_pack_trait() {
 
 #[test]
 fn builtin_external_pack_facts_are_generated_from_manifest_boundaries() {
-    let facts = builtin_external_library_packs();
+    let facts = builtin_external_library_pack_facts();
 
     for manifest in builtin_external_pack_manifests() {
         for owned_type in manifest.owned_type_patterns {
@@ -14364,6 +14394,33 @@ class GenomicsDbImportConfigUse {
             .rust
             .contains("pub fn set_output_callsetmap_json_file<T0>(_arg0: T0) -> ()"),
         "a local named importConfig should not reserve a static ImportConfig setter facade"
+    );
+}
+
+#[test]
+fn disabling_builtin_external_packs_suppresses_builtin_support_surfaces() {
+    let source = r#"
+import htsjdk.samtools.SAMRecord;
+
+class NoBuiltinExternalPacksProbe {
+    String readName(SAMRecord record) {
+        return record.getReadName();
+    }
+}
+"#;
+
+    let default_rust = new_java2rust::translate_source(source).rust;
+    let mut disabled_facts = FactSet::default();
+    disabled_facts.disable_builtin_external_packs = true;
+    let disabled_rust = new_java2rust::translate_source_with_facts(source, &disabled_facts).rust;
+
+    assert!(
+        default_rust.contains("pub fn get_read_name(&self) -> Option<String>"),
+        "default translation should emit builtin SAMRecord support:\n{default_rust}"
+    );
+    assert!(
+        !disabled_rust.contains("pub fn get_read_name(&self) -> Option<String>"),
+        "--no-builtin-external-packs should suppress builtin SAMRecord support:\n{disabled_rust}"
     );
 }
 

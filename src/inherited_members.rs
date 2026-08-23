@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::facts::{ExternalApiEffectFact, ExternalFieldKind, FactSet, NullabilityState};
+use crate::facts::{
+    ExternalApiEffectFact, ExternalFieldFact, ExternalFieldKind, FactSet, NullabilityState,
+};
 use crate::java_ir::{FieldDecl, JavaType, Member, MethodDecl, Modifier, Program, TypeDecl};
 use crate::java_signature::{JavaCallableSlotKey, source_method_overload_rust_name};
 
@@ -193,42 +195,79 @@ pub fn external_inherited_instance_fields_for_type(
     let super_names = external_super_names_for_type(ty, facts);
     let mut fields = Vec::new();
     let mut seen_fields = direct_fields;
-    let mut effective_facts = facts.clone();
-    effective_facts.extend_from(crate::external_packs::builtin_external_library_packs());
-    let field_facts = effective_facts.external_field_facts.clone();
     for super_name in super_names {
-        for fact in &field_facts {
-            if !matches!(
-                fact.field_kind,
-                ExternalFieldKind::Unknown | ExternalFieldKind::InstanceField
-            ) {
-                continue;
-            }
-            if !external_field_fact_matches_super_type(
-                &fact.field.type_name,
+        for fact in &facts.external_field_facts {
+            push_external_inherited_instance_field_from_fact(
+                &mut fields,
+                &mut seen_fields,
+                facts,
+                fact,
                 &super_name,
-                fact.provenance,
-            ) {
-                continue;
+            );
+        }
+        if !facts.disable_builtin_external_packs {
+            for fact in crate::external_packs::builtin_external_field_facts() {
+                push_external_inherited_instance_field_from_fact(
+                    &mut fields,
+                    &mut seen_fields,
+                    facts,
+                    fact,
+                    &super_name,
+                );
             }
-            let rust_name = rust_field_name(&fact.field.field_name);
-            if !seen_fields.insert(rust_name.clone()) {
-                continue;
-            }
-            fields.push(ExternalInheritedInstanceField {
-                declaring_type: fact.field.type_name.clone(),
-                field_name: fact.field.field_name.clone(),
-                rust_name,
-                field_type: fact
-                    .field_type
-                    .clone()
-                    .unwrap_or_else(|| JavaType::Unknown("Object".to_string())),
-                field_nullability: effective_facts
-                    .field_nullability_for(&fact.field.type_name, &fact.field.field_name),
-            });
         }
     }
     fields
+}
+
+fn push_external_inherited_instance_field_from_fact(
+    fields: &mut Vec<ExternalInheritedInstanceField>,
+    seen_fields: &mut HashSet<String>,
+    facts: &FactSet,
+    fact: &ExternalFieldFact,
+    super_name: &str,
+) {
+    if !matches!(
+        fact.field_kind,
+        ExternalFieldKind::Unknown | ExternalFieldKind::InstanceField
+    ) {
+        return;
+    }
+    if !external_field_fact_matches_super_type(&fact.field.type_name, super_name, fact.provenance) {
+        return;
+    }
+    let rust_name = rust_field_name(&fact.field.field_name);
+    if !seen_fields.insert(rust_name.clone()) {
+        return;
+    }
+    fields.push(ExternalInheritedInstanceField {
+        declaring_type: fact.field.type_name.clone(),
+        field_name: fact.field.field_name.clone(),
+        rust_name,
+        field_type: fact
+            .field_type
+            .clone()
+            .unwrap_or_else(|| JavaType::Unknown("Object".to_string())),
+        field_nullability: inherited_external_field_nullability(
+            facts,
+            &fact.field.type_name,
+            &fact.field.field_name,
+        ),
+    });
+}
+
+fn inherited_external_field_nullability(
+    facts: &FactSet,
+    type_name: &str,
+    field_name: &str,
+) -> Option<NullabilityState> {
+    if !facts.disable_builtin_external_packs
+        && let Some(state) =
+            crate::external_packs::builtin_field_nullability_for(type_name, field_name)
+    {
+        return Some(state);
+    }
+    facts.field_nullability_for(type_name, field_name)
 }
 
 pub fn external_inherited_static_final_fields_for_type(
@@ -239,35 +278,52 @@ pub fn external_inherited_static_final_fields_for_type(
     let super_names = external_super_names_for_type(ty, facts);
     let mut fields = Vec::new();
     let mut seen_fields = direct_fields;
-    let mut field_facts = facts.external_field_facts.clone();
-    field_facts
-        .extend(crate::external_packs::builtin_external_library_packs().external_field_facts);
     for super_name in super_names {
-        for fact in &field_facts {
-            if fact.field_kind != ExternalFieldKind::StaticFinal {
-                continue;
-            }
-            if !external_field_fact_matches_super_type(
-                &fact.field.type_name,
+        for fact in &facts.external_field_facts {
+            push_external_inherited_static_final_field_from_fact(
+                &mut fields,
+                &mut seen_fields,
+                fact,
                 &super_name,
-                fact.provenance,
-            ) {
-                continue;
+            );
+        }
+        if !facts.disable_builtin_external_packs {
+            for fact in crate::external_packs::builtin_external_field_facts() {
+                push_external_inherited_static_final_field_from_fact(
+                    &mut fields,
+                    &mut seen_fields,
+                    fact,
+                    &super_name,
+                );
             }
-            if !seen_fields.insert(fact.field.field_name.clone()) {
-                continue;
-            }
-            let Some(field_type) = fact.field_type.clone() else {
-                continue;
-            };
-            fields.push(ExternalInheritedStaticField {
-                declaring_type: fact.field.type_name.clone(),
-                field_name: fact.field.field_name.clone(),
-                field_type,
-            });
         }
     }
     fields
+}
+
+fn push_external_inherited_static_final_field_from_fact(
+    fields: &mut Vec<ExternalInheritedStaticField>,
+    seen_fields: &mut HashSet<String>,
+    fact: &ExternalFieldFact,
+    super_name: &str,
+) {
+    if fact.field_kind != ExternalFieldKind::StaticFinal {
+        return;
+    }
+    if !external_field_fact_matches_super_type(&fact.field.type_name, super_name, fact.provenance) {
+        return;
+    }
+    if !seen_fields.insert(fact.field.field_name.clone()) {
+        return;
+    }
+    let Some(field_type) = fact.field_type.clone() else {
+        return;
+    };
+    fields.push(ExternalInheritedStaticField {
+        declaring_type: fact.field.type_name.clone(),
+        field_name: fact.field.field_name.clone(),
+        field_type,
+    });
 }
 
 pub fn external_inherited_instance_methods_for_type(
@@ -275,37 +331,19 @@ pub fn external_inherited_instance_methods_for_type(
     facts: &FactSet,
 ) -> Vec<ExternalInheritedInstanceMethod> {
     let super_names = external_super_names_for_type(ty, facts);
-    let mut api_facts = facts.external_api_effect_facts.clone();
-    api_facts
-        .extend(crate::external_packs::builtin_external_library_packs().external_api_effect_facts);
     let mut methods = HashMap::<(String, usize), ExternalInheritedInstanceMethod>::new();
     for super_name in super_names {
-        for fact in &api_facts {
-            let Some(receiver_type) = fact.receiver_type.as_deref() else {
-                continue;
-            };
-            if !type_name_matches(receiver_type, &super_name) {
-                continue;
+        for fact in &facts.external_api_effect_facts {
+            record_external_inherited_instance_method_from_fact(&mut methods, fact, &super_name);
+        }
+        if !facts.disable_builtin_external_packs {
+            for fact in crate::external_packs::builtin_external_api_effect_facts() {
+                record_external_inherited_instance_method_from_fact(
+                    &mut methods,
+                    fact,
+                    &super_name,
+                );
             }
-            let Some(arg_count) = fact.arg_count else {
-                continue;
-            };
-            let rust_name = crate::parser::to_snake_case(&fact.method_name);
-            let method = ExternalInheritedInstanceMethod {
-                declaring_type: receiver_type.to_string(),
-                method_name: fact.method_name.clone(),
-                rust_name: rust_name.clone(),
-                arg_count,
-                fact: fact.clone(),
-            };
-            methods
-                .entry((rust_name, arg_count))
-                .and_modify(|existing| {
-                    if external_inherited_method_fact_should_replace(&existing.fact, fact) {
-                        *existing = method.clone();
-                    }
-                })
-                .or_insert(method);
         }
     }
     let mut methods = methods.into_values().collect::<Vec<_>>();
@@ -315,6 +353,38 @@ pub fn external_inherited_instance_methods_for_type(
             .then(left.arg_count.cmp(&right.arg_count))
     });
     methods
+}
+
+fn record_external_inherited_instance_method_from_fact(
+    methods: &mut HashMap<(String, usize), ExternalInheritedInstanceMethod>,
+    fact: &ExternalApiEffectFact,
+    super_name: &str,
+) {
+    let Some(receiver_type) = fact.receiver_type.as_deref() else {
+        return;
+    };
+    if !type_name_matches(receiver_type, super_name) {
+        return;
+    }
+    let Some(arg_count) = fact.arg_count else {
+        return;
+    };
+    let rust_name = crate::parser::to_snake_case(&fact.method_name);
+    let method = ExternalInheritedInstanceMethod {
+        declaring_type: receiver_type.to_string(),
+        method_name: fact.method_name.clone(),
+        rust_name: rust_name.clone(),
+        arg_count,
+        fact: fact.clone(),
+    };
+    methods
+        .entry((rust_name, arg_count))
+        .and_modify(|existing| {
+            if external_inherited_method_fact_should_replace(&existing.fact, fact) {
+                *existing = method.clone();
+            }
+        })
+        .or_insert(method);
 }
 
 fn external_inherited_method_fact_should_replace(
@@ -533,6 +603,7 @@ mod tests {
                 .enumerate()
                 .map(|(index, ty)| crate::java_ir::Param {
                     name: format!("arg{index}"),
+                    source_name: format!("arg{index}"),
                     ty,
                     is_varargs: false,
                 })

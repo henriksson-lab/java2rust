@@ -122,7 +122,7 @@ fn assert_compile_error_block_consuming(
         Some(RustExpr::MacroCall { macro_name, args })
             if macro_name == "compile_error"
                 && matches!(args.as_slice(), [RustExpr::Literal(message)]
-                    if message.contains(message_fragment))
+                    if message.replace("\\\"", "\"").contains(message_fragment))
     ));
 }
 
@@ -1062,6 +1062,7 @@ fn member_access_plan_uses_type_inference_and_shape_projection() {
     assert!(source.contains("pub fn java_member_access_policy"));
     assert!(source.contains("let policy = java_member_access_policy"));
     assert!(source.contains("project_java_value_shape"));
+    assert!(!source.contains("builtin_external_library_packs"));
     assert!(!source.contains("PrimitiveType"));
     assert!(!source.contains("JavaType::Primitive"));
     assert!(!source.contains("RustSlotShape::conservative"));
@@ -2016,9 +2017,6 @@ fn crate_mapped_handle_and_source_helper_use_same_slot_conversion_policy() {
         view: ViewShape::Native,
         dispatch: DispatchShape::Concrete,
         mutability: new_java2rust::slot_shape::MutabilityShape::Immutable,
-        type_identity: new_java2rust::slot_shape::TypeIdentity::from_java_type(
-            crate_mapped_ty.clone(),
-        ),
     };
     let crate_mapped_target = RustSlotShape::conservative(crate_mapped_ty);
     let source_actual = RustSlotShape {
@@ -2027,9 +2025,6 @@ fn crate_mapped_handle_and_source_helper_use_same_slot_conversion_policy() {
         view: ViewShape::Native,
         dispatch: DispatchShape::Concrete,
         mutability: new_java2rust::slot_shape::MutabilityShape::Immutable,
-        type_identity: new_java2rust::slot_shape::TypeIdentity::from_java_type(
-            source_helper_ty.clone(),
-        ),
     };
     let source_target = RustSlotShape::conservative(source_helper_ty);
 
@@ -2289,34 +2284,32 @@ fn optional_array_carrier_to_optional_slice_target_uses_view_projection_policy()
          fall through to other borrowed-element adapters"
     );
 
-    let mut stale_identity_actual =
+    let mut cloned_element_actual =
         RustSlotShape::conservative(target.optional_element_type().unwrap());
-    stale_identity_actual.ownership = OwnershipShape::SharedBorrow;
-    stale_identity_actual.view = ViewShape::Slice;
-    stale_identity_actual.type_identity =
-        new_java2rust::slot_shape::TypeIdentity::from_java_type(target.java_ty.clone());
-    let stale_identity_projected = RustExpr::shaped_as(
+    cloned_element_actual.ownership = OwnershipShape::SharedBorrow;
+    cloned_element_actual.view = ViewShape::Slice;
+    let cloned_element_projected = RustExpr::shaped_as(
         RustExprShape::OptionalProjected,
-        Some(stale_identity_actual),
+        Some(cloned_element_actual),
         RustExpr::MethodCall {
             receiver: Box::new(RustExpr::Var("values".to_string())),
             method: "as_deref".to_string(),
             args: Vec::new(),
         },
     );
-    let stale_identity_result = apply_slot_conversion_plan(stale_identity_projected, &plan);
+    let cloned_element_result = apply_slot_conversion_plan(cloned_element_projected, &plan);
     assert_eq!(
-        stale_identity_result.clone().into_unshaped(),
+        cloned_element_result.clone().into_unshaped(),
         RustExpr::MethodCall {
             receiver: Box::new(RustExpr::Var("values".to_string())),
             method: "as_deref".to_string(),
             args: Vec::new(),
         },
-        "idempotence must compare the produced slot semantics, not stale \
-         type_identity metadata"
+        "idempotence must compare the produced slot semantics; derived type \
+         identity makes stale metadata unrepresentable"
     );
     assert!(!matches!(
-        stale_identity_result.into_unshaped(),
+        cloned_element_result.into_unshaped(),
         RustExpr::Raw(_)
     ));
 }
@@ -5195,16 +5188,14 @@ fn coercion_names_missing_runtime_targets_for_dispatch_downcasts() {
                     .to_string(),
         }]
     );
-    assert_eq!(
+    assert_compile_error_block_consuming(
         apply_expr_to_slot(
             RustExpr::Var("animal".to_string()),
             actual,
-            &Slot::Argument(target)
+            &Slot::Argument(target),
         ),
-        RustExpr::Raw(
-            "{ let _ = animal; compile_error!(\"unsupported Java dispatch coercion: target type Array(String) has no concrete runtime type\") }"
-                .to_string()
-        )
+        "animal",
+        "unsupported Java dispatch coercion: target type Array(String) has no concrete runtime type",
     );
 }
 
@@ -6121,16 +6112,14 @@ fn shape_coercion_owns_unsupported_dispatch_fallback_policy() {
             policy: DispatchCoercionFallbackPolicy::CompileError,
         }]
     );
-    assert_eq!(
+    assert_compile_error_block_consuming(
         apply_expr_to_slot(
             RustExpr::Var("animal".to_string()),
             actual,
-            &Slot::Argument(target)
+            &Slot::Argument(target),
         ),
-        RustExpr::Raw(format!(
-            "{{ let _ = animal; compile_error!({:?}) }}",
-            "unsupported Java dispatch coercion: actual=ClosedEnum { enum_name: \"AnimalValue\" }, target=DynTrait { trait_name: \"Animal\" }"
-        ))
+        "animal",
+        "unsupported Java dispatch coercion: actual=ClosedEnum { enum_name: \"AnimalValue\" }, target=DynTrait { trait_name: \"Animal\" }",
     );
 }
 
@@ -6295,16 +6284,14 @@ fn dispatch_coercion_names_erased_object_trait_recovery_fallbacks() {
                     .to_string(),
         }]
     );
-    assert_eq!(
+    assert_compile_error_block_consuming(
         apply_expr_to_slot(
             RustExpr::Var("object".to_string()),
             erased_actual.clone(),
-            &Slot::Argument(borrowed_dyn_target)
+            &Slot::Argument(borrowed_dyn_target),
         ),
-        RustExpr::Raw(
-            "{ let _ = object; compile_error!(\"unsupported Java erased object to borrowed dyn trait recovery for Animal; a concrete downcast target is required\") }"
-                .to_string()
-        )
+        "object",
+        "unsupported Java erased object to borrowed dyn trait recovery for Animal; a concrete downcast target is required",
     );
 
     let mut boxed_dyn_target = RustSlotShape::conservative(JavaType::Named {
@@ -6337,16 +6324,14 @@ fn dispatch_coercion_names_erased_object_trait_recovery_fallbacks() {
                     .to_string(),
         }]
     );
-    assert_eq!(
+    assert_compile_error_block_consuming(
         apply_expr_to_slot(
             RustExpr::Var("object".to_string()),
             erased_actual,
-            &Slot::Argument(boxed_dyn_target)
+            &Slot::Argument(boxed_dyn_target),
         ),
-        RustExpr::Raw(
-            "{ let _ = object; compile_error!(\"unsupported Java erased object to owned boxed dyn trait recovery for Animal; a concrete downcast target and ownership proof are required\") }"
-                .to_string()
-        )
+        "object",
+        "unsupported Java erased object to owned boxed dyn trait recovery for Animal; a concrete downcast target and ownership proof are required",
     );
 }
 

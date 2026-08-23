@@ -1,3 +1,7 @@
+use std::collections::{HashMap, HashSet};
+
+use crate::java_ir::{Member, Modifier, TypeDecl};
+
 pub fn java_getter_method_name(name: &str) -> bool {
     java_getter_property_suffix(name).is_some()
 }
@@ -28,6 +32,138 @@ pub fn rust_name_for_java_named_type(name: &str) -> String {
         .filter(|part| !part.trim().is_empty())
         .map(upper_camel_identifier_part)
         .collect::<String>()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RustKeywordEscape {
+    Raw,
+    Rename,
+}
+
+pub fn rust_keyword_escape(name: &str) -> Option<RustKeywordEscape> {
+    match name {
+        "crate" | "self" | "Self" | "super" => Some(RustKeywordEscape::Rename),
+        "as" | "async" | "await" | "break" | "const" | "continue" | "dyn" | "else" | "enum"
+        | "extern" | "false" | "fn" | "for" | "if" | "impl" | "in" | "let" | "loop" | "match"
+        | "mod" | "move" | "mut" | "pub" | "ref" | "return" | "static" | "struct" | "trait"
+        | "true" | "type" | "unsafe" | "use" | "where" | "while" | "abstract" | "become"
+        | "box" | "do" | "final" | "macro" | "override" | "priv" | "try" | "typeof" | "unsized"
+        | "virtual" | "yield" => Some(RustKeywordEscape::Raw),
+        _ => None,
+    }
+}
+
+pub fn rust_keyword_is_rawable_identifier(name: &str) -> bool {
+    rust_keyword_escape(name) == Some(RustKeywordEscape::Raw)
+}
+
+pub fn rust_keyword_needs_rename(name: &str) -> bool {
+    rust_keyword_escape(name) == Some(RustKeywordEscape::Rename)
+}
+
+pub fn rename_non_rawable_rust_keyword(name: &str) -> String {
+    debug_assert!(rust_keyword_needs_rename(name));
+    format!("{name}__")
+}
+
+pub fn allocate_rust_ident(base: &str, occupied: &HashSet<String>) -> String {
+    let mut candidate = if rust_keyword_needs_rename(base) {
+        rename_non_rawable_rust_keyword(base)
+    } else {
+        base.to_string()
+    };
+    while occupied.contains(&candidate) {
+        candidate.push('_');
+    }
+    candidate
+}
+
+pub fn source_binding_rust_names<'a>(
+    source_names: impl IntoIterator<Item = &'a str>,
+) -> HashMap<String, String> {
+    let source_names = source_names.into_iter().collect::<Vec<_>>();
+    let mut occupied = source_names
+        .iter()
+        .filter(|name| !rust_keyword_needs_rename(name))
+        .map(|name| (*name).to_string())
+        .collect::<HashSet<_>>();
+    let mut names = HashMap::new();
+    for source_name in source_names {
+        let rust_name = if rust_keyword_needs_rename(source_name) {
+            allocate_rust_ident(source_name, &occupied)
+        } else {
+            source_name.to_string()
+        };
+        occupied.insert(rust_name.clone());
+        names.insert(source_name.to_string(), rust_name);
+    }
+    names
+}
+
+pub fn source_instance_field_rust_names(ty: &TypeDecl) -> HashMap<String, String> {
+    let fields = ty
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            Member::Field(field) if !field.modifiers.contains(&Modifier::Static) => Some(field),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let mut occupied = fields
+        .iter()
+        .filter(|field| !rust_keyword_needs_rename(&field.name))
+        .map(|field| field.name.clone())
+        .collect::<HashSet<_>>();
+    let mut names = HashMap::new();
+    for field in fields {
+        let rust_name = if rust_keyword_needs_rename(&field.name) {
+            allocate_rust_ident(&field.name, &occupied)
+        } else {
+            field.name.clone()
+        };
+        occupied.insert(rust_name.clone());
+        names.insert(field.name.clone(), rust_name);
+    }
+    names
+}
+
+pub fn source_instance_field_rust_name(ty: &TypeDecl, field_name: &str) -> String {
+    source_instance_field_rust_names(ty)
+        .remove(field_name)
+        .unwrap_or_else(|| allocate_rust_ident(field_name, &HashSet::new()))
+}
+
+pub fn source_static_field_rust_names(ty: &TypeDecl) -> HashMap<String, String> {
+    let fields = ty
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            Member::Field(field) if field.modifiers.contains(&Modifier::Static) => Some(field),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let mut occupied = fields
+        .iter()
+        .filter(|field| !rust_keyword_needs_rename(&field.name))
+        .map(|field| field.name.clone())
+        .collect::<HashSet<_>>();
+    let mut names = HashMap::new();
+    for field in fields {
+        let rust_name = if rust_keyword_needs_rename(&field.name) {
+            allocate_rust_ident(&field.name, &occupied)
+        } else {
+            field.name.clone()
+        };
+        occupied.insert(rust_name.clone());
+        names.insert(field.name.clone(), rust_name);
+    }
+    names
+}
+
+pub fn source_static_field_rust_name(ty: &TypeDecl, field_name: &str) -> String {
+    source_static_field_rust_names(ty)
+        .remove(field_name)
+        .unwrap_or_else(|| allocate_rust_ident(field_name, &HashSet::new()))
 }
 
 fn java_getter_property_suffix(name: &str) -> Option<&str> {
@@ -129,5 +265,30 @@ mod tests {
         assert!(java_accessor_method_reference_fallback_name("get_name"));
         assert!(!java_accessor_method_reference_fallback_name("getName"));
         assert!(!java_accessor_method_reference_fallback_name("is_active"));
+    }
+
+    #[test]
+    fn rust_keyword_policy_separates_rawable_from_path_keywords() {
+        for name in ["type", "match", "loop", "box", "try", "yield"] {
+            assert_eq!(rust_keyword_escape(name), Some(RustKeywordEscape::Raw));
+        }
+        for name in ["crate", "self", "Self", "super"] {
+            assert_eq!(rust_keyword_escape(name), Some(RustKeywordEscape::Rename));
+            assert_eq!(rename_non_rawable_rust_keyword(name), format!("{name}__"));
+        }
+        assert_eq!(rust_keyword_escape("type_"), None);
+    }
+
+    #[test]
+    fn non_rawable_keyword_allocator_avoids_occupied_suffixes() {
+        let occupied = ["self__".to_string()].into_iter().collect();
+        assert_eq!(allocate_rust_ident("self", &occupied), "self___");
+    }
+
+    #[test]
+    fn source_binding_allocator_preserves_occupied_user_suffixes() {
+        let names = source_binding_rust_names(["self", "self__"]);
+        assert_eq!(names.get("self").map(String::as_str), Some("self___"));
+        assert_eq!(names.get("self__").map(String::as_str), Some("self__"));
     }
 }

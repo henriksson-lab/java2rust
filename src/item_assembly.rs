@@ -982,20 +982,26 @@ fn struct_fields_for_type(
         });
     }
     let upcast_visible_fields = source_type_has_context_subtypes(ty, support_program);
-    fields.extend(ty.members.iter().filter_map(|member| match member {
-        Member::Field(field) if !is_static_field(field) => Some(RustField {
-            name: field.name.clone(),
-            ty: rust_type_for_instance_field(
-                ty,
-                &field.name,
-                &signatures.required_field_shape(&ty.name, &field.name),
-                facts,
-                representations,
-            ),
-            is_pub: source_field_is_public(field),
-            is_pub_crate: !source_field_is_public(field) && upcast_visible_fields,
-        }),
-        _ => None,
+    let source_field_rust_names = crate::java_naming::source_instance_field_rust_names(ty);
+    fields.extend(ty.members.iter().filter_map(|member| {
+        match member {
+            Member::Field(field) if !is_static_field(field) => Some(RustField {
+                name: source_field_rust_names
+                    .get(&field.name)
+                    .cloned()
+                    .unwrap_or_else(|| field.name.clone()),
+                ty: rust_type_for_instance_field(
+                    ty,
+                    &field.name,
+                    &signatures.required_field_shape(&ty.name, &field.name),
+                    facts,
+                    representations,
+                ),
+                is_pub: source_field_is_public(field),
+                is_pub_crate: !source_field_is_public(field) && upcast_visible_fields,
+            }),
+            _ => None,
+        }
     }));
     fields.extend(
         crate::inherited_members::inherited_instance_fields_for_type(ty, support_program)
@@ -1760,12 +1766,18 @@ pub fn is_static_final_non_const_field(field: &FieldDecl) -> bool {
 
 fn associated_consts_for_type(ty: &TypeDecl) -> Vec<RustAssociatedConst> {
     let const_infos = static_final_const_infos(ty);
+    let source_static_field_rust_names = crate::java_naming::source_static_field_rust_names(ty);
     ty.members
         .iter()
         .filter_map(|member| match member {
-            Member::Field(field) if is_static_final_field(field) => {
-                associated_const_for_field(field, &const_infos)
-            }
+            Member::Field(field) if is_static_final_field(field) => associated_const_for_field(
+                field,
+                source_static_field_rust_names
+                    .get(&field.name)
+                    .map(String::as_str)
+                    .unwrap_or(&field.name),
+                &const_infos,
+            ),
             _ => None,
         })
         .collect()
@@ -1776,7 +1788,7 @@ pub fn static_final_field_has_associated_const(ty: &TypeDecl, field: &FieldDecl)
         return false;
     }
     let const_infos = static_final_const_infos(ty);
-    associated_const_for_field(field, &const_infos).is_some()
+    associated_const_for_field(field, &field.name, &const_infos).is_some()
 }
 
 #[derive(Debug, Clone)]
@@ -1833,6 +1845,7 @@ fn static_final_array_initializer_len(field: &FieldDecl) -> Option<usize> {
 
 fn associated_const_for_field(
     field: &FieldDecl,
+    rust_name: &str,
     const_infos: &[StaticFinalConstInfo],
 ) -> Option<RustAssociatedConst> {
     let (ty, value) = field
@@ -1842,7 +1855,7 @@ fn associated_const_for_field(
         .or_else(|| non_literal_static_final_const_type_and_value(field))
         .or_else(|| static_final_default_const_type_and_value(field))?;
     Some(RustAssociatedConst {
-        name: field.name.clone(),
+        name: rust_name.to_string(),
         ty,
         value,
         is_pub: !field.modifiers.contains(&Modifier::Private),
@@ -2179,13 +2192,25 @@ fn constructor_params(
     signatures: &SignaturePlan,
     facts: &FactSet,
 ) -> Vec<RustParam> {
-    signatures
-        .required_constructor_signature(ty, ctor)
+    let signature = signatures.required_constructor_signature(ty, ctor);
+    let access_names = crate::java_naming::source_binding_rust_names(
+        ctor.params.iter().map(|param| param.source_name.as_str()),
+    );
+    signature
         .params
         .iter()
-        .map(|param| RustParam {
-            name: param.name.clone(),
-            ty: rust_type_for_slot_with_facts(&param.shape, facts),
+        .enumerate()
+        .map(|(index, param)| {
+            let name = ctor
+                .params
+                .get(index)
+                .and_then(|source_param| access_names.get(&source_param.source_name))
+                .cloned()
+                .unwrap_or_else(|| param.name.clone());
+            RustParam {
+                name,
+                ty: rust_type_for_slot_with_facts(&param.shape, facts),
+            }
         })
         .collect()
 }
@@ -2217,10 +2242,14 @@ fn method_params_with_optional_lifetime(
 ) -> Vec<RustParam> {
     let signature = signatures.required_method_signature(ty, method);
     let mutable_array_target_params = mutable_array_target_params(method);
+    let access_names = crate::java_naming::source_binding_rust_names(
+        method.params.iter().map(|param| param.source_name.as_str()),
+    );
     signature
         .params
         .iter()
-        .map(|param| {
+        .enumerate()
+        .map(|(index, param)| {
             let callback_param =
                 method_param_is_nonescaping_functional_callback(method, &param.name);
             let mutable_optional_sequence_param = mutable_array_target_params.contains(&param.name)
@@ -2230,14 +2259,20 @@ fn method_params_with_optional_lifetime(
                     param.shape.ownership,
                     OwnershipShape::Owned | OwnershipShape::CopyValue
                 );
+            let name = method
+                .params
+                .get(index)
+                .and_then(|source_param| access_names.get(&source_param.source_name))
+                .cloned()
+                .unwrap_or_else(|| param.name.clone());
             RustParam {
                 name: if callback_param
                     || mutable_optional_sequence_param
                     || mutable_owned_binding_param
                 {
-                    format!("mut {}", param.name)
+                    format!("mut {name}")
                 } else {
-                    param.name.clone()
+                    name
                 },
                 ty: if callback_param {
                     let callback_ty = functional_callback_param_type(&param.java_ty, facts)

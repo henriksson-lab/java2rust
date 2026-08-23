@@ -89,12 +89,15 @@ pub struct ReducePlan<'a> {
 #[derive(Clone)]
 pub struct LambdaPlan<'a> {
     pub param_name: String,
+    pub rust_param_name: String,
     pub body: StreamLambdaBody<'a>,
 }
 
 pub struct ReduceLambdaPlan<'a> {
     pub left_param_name: String,
+    pub left_rust_param_name: String,
     pub right_param_name: String,
+    pub right_rust_param_name: String,
     pub body: StreamLambdaBody<'a>,
 }
 
@@ -514,7 +517,7 @@ fn stream_source_iteration(source: &Expr) -> StreamSourceIteration {
 fn lambda_plan(lambda: &Expr) -> Option<LambdaPlan<'_>> {
     match lambda {
         Expr::Lambda { params, body } => {
-            let param = params.first()?.name.clone();
+            let param = params.first()?;
             let body = match body {
                 LambdaBody::Expr(body) => StreamLambdaBody::Expr(body),
                 LambdaBody::Block(block) if block_returns_value(block) => {
@@ -522,13 +525,21 @@ fn lambda_plan(lambda: &Expr) -> Option<LambdaPlan<'_>> {
                 }
                 LambdaBody::Block(_) => return None,
             };
+            let access_names = crate::java_naming::source_binding_rust_names(
+                stream_lambda_binding_source_names(&[param.source_name.as_str()], body),
+            );
             Some(LambdaPlan {
-                param_name: param,
+                param_name: param.source_name.clone(),
+                rust_param_name: access_names
+                    .get(&param.source_name)
+                    .cloned()
+                    .unwrap_or_else(|| param.name.clone()),
                 body,
             })
         }
         Expr::MethodReference { target, method } => Some(LambdaPlan {
             param_name: "value".to_string(),
+            rust_param_name: "value".to_string(),
             body: StreamLambdaBody::MethodReference { target, method },
         }),
         _ => None,
@@ -545,14 +556,45 @@ fn reduce_lambda_plan(lambda: &Expr) -> Option<ReduceLambdaPlan<'_>> {
                 }
                 LambdaBody::Block(_) => return None,
             };
+            let param_sources = [
+                params[0].source_name.as_str(),
+                params[1].source_name.as_str(),
+            ];
+            let access_names = crate::java_naming::source_binding_rust_names(
+                stream_lambda_binding_source_names(&param_sources, body),
+            );
             Some(ReduceLambdaPlan {
-                left_param_name: params[0].name.clone(),
-                right_param_name: params[1].name.clone(),
+                left_param_name: params[0].source_name.clone(),
+                left_rust_param_name: access_names
+                    .get(&params[0].source_name)
+                    .cloned()
+                    .unwrap_or_else(|| params[0].name.clone()),
+                right_param_name: params[1].source_name.clone(),
+                right_rust_param_name: access_names
+                    .get(&params[1].source_name)
+                    .cloned()
+                    .unwrap_or_else(|| params[1].name.clone()),
                 body,
             })
         }
         _ => None,
     }
+}
+
+fn stream_lambda_binding_source_names<'a>(
+    params: &[&'a str],
+    body: StreamLambdaBody<'a>,
+) -> Vec<&'a str> {
+    let mut source_names = params.to_vec();
+    source_names.extend(
+        body.prefix_statements()
+            .iter()
+            .filter_map(|stmt| match stmt {
+                Stmt::VarDecl { source_name, .. } => Some(source_name.as_str()),
+                _ => None,
+            }),
+    );
+    source_names
 }
 
 fn block_returns_value(block: &Block) -> bool {

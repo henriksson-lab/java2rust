@@ -16,12 +16,13 @@ pub fn lower_bare_name(name: &str, env: &ShapeEnv) -> RustExpr {
         && env.is_instance_field(name)
         && !bare_name_looks_like_static_owner(name)
     {
-        self_field_projection(name)
-    } else if env.local_type(name).is_none()
+        let field_name = env.instance_field_access_name(name).unwrap_or(name);
+        self_field_projection(field_name)
+    } else if bare_name_local_type(name, env).is_none()
         && let Some(static_name) = env.static_storage_field_access_name(name)
     {
         static_storage_accessor_for(static_name, env)
-    } else if env.local_type(name).is_none()
+    } else if bare_name_local_type(name, env).is_none()
         && let Some(static_name) = env.static_field_access_name(name)
     {
         if let Some(owner) = env.static_field_access_owner(name) {
@@ -32,9 +33,18 @@ pub fn lower_bare_name(name: &str, env: &ShapeEnv) -> RustExpr {
         } else {
             self_associated_path_projection(static_name)
         }
+    } else if let Some(access_name) = env.binding_access_name(name) {
+        RustExpr::Var(access_name.to_string())
     } else {
         RustExpr::Var(crate::parser::to_snake_case(name))
     }
+}
+
+fn bare_name_local_type<'a>(name: &str, env: &'a ShapeEnv) -> Option<&'a crate::java_ir::JavaType> {
+    env.local_type(name).or_else(|| {
+        let alias = crate::parser::to_snake_case(name);
+        (alias != name).then(|| env.local_type(&alias)).flatten()
+    })
 }
 
 pub fn render_bare_name(name: &str, env: &ShapeEnv) -> String {

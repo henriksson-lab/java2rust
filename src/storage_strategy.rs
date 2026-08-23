@@ -915,6 +915,7 @@ fn collect_stmt_facts(
             ty,
             name,
             initializer,
+            ..
         } => {
             // `T b = a;` where `a` is a bare handle: a second name for one
             // object. This is exactly the shape that makes lowering insert a

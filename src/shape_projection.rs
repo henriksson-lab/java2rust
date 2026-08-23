@@ -1,9 +1,9 @@
 use crate::effective_facts::EffectiveFacts;
-use crate::facts::{DispatchRequirementKind, FactSet};
+use crate::facts::{DispatchRequirementKind, FacadeSlot, FactSet, HierarchyStrategy};
 use crate::java_ir::JavaType;
 use crate::representation::RepresentationPlan;
-use crate::slot_shape::{DispatchShape, OwnershipShape, RustSlotShape, ViewShape};
-use crate::types::{optional_element_type, sequence_element_type};
+use crate::slot_shape::{DispatchShape, MutabilityShape, OwnershipShape, RustSlotShape, ViewShape};
+use crate::types::{optional_element_type, optional_java_type, sequence_element_type};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DispatchProjectionPolicy {
@@ -129,6 +129,111 @@ pub fn borrowed_string_content_shape() -> RustSlotShape {
 
 pub fn storage_shape(java_ty: JavaType) -> RustSlotShape {
     RustSlotShape::for_storage(java_ty)
+}
+
+pub fn storage_arg_shape_with_effective_facts(
+    java_ty: JavaType,
+    facts: &EffectiveFacts<'_>,
+) -> RustSlotShape {
+    let mut shape = RustSlotShape::for_storage(java_ty.clone());
+    if let Some(HierarchyStrategy::DynTrait { trait_name }) =
+        facts.object_representation_override_strategy_for(&java_ty)
+    {
+        apply_required_dispatch(
+            &mut shape,
+            DispatchShape::BoxedDynTrait {
+                trait_name: trait_name.clone(),
+            },
+        );
+        return shape;
+    }
+    if let JavaType::Named { name, args } = &java_ty
+        && args.is_empty()
+        && facts.object_safe_trait_fact_for_name(name) == Some(true)
+    {
+        apply_required_dispatch(
+            &mut shape,
+            DispatchShape::BoxedDynTrait {
+                trait_name: name.clone(),
+            },
+        );
+        return shape;
+    }
+    if java_type_is_erased_object_storage(&java_ty)
+        || matches!(
+            facts.object_representation_override_strategy_for(&java_ty),
+            Some(HierarchyStrategy::ErasedObject)
+        ) && !facts.is_final_type(&java_ty)
+            && !crate::javalibs::generic_facade_interface_erases_to_named_rust_type(&java_ty)
+    {
+        apply_required_dispatch(&mut shape, DispatchShape::ErasedObject);
+    }
+    shape
+}
+
+pub fn rust_slot_shape_from_facade_arg_slot(
+    slot: &FacadeSlot,
+    java_ty: JavaType,
+    facts: &EffectiveFacts<'_>,
+) -> RustSlotShape {
+    match slot {
+        FacadeSlot::Optional(inner) => {
+            if let Some(element_ty) = optional_element_type(&java_ty) {
+                let mut shape = rust_slot_shape_from_facade_arg_slot(inner, element_ty, facts);
+                shape.java_ty = java_ty;
+                return shape;
+            }
+            let mut shape = rust_slot_shape_from_facade_arg_slot(
+                inner,
+                optional_java_type(java_ty.clone()),
+                facts,
+            );
+            shape.java_ty = optional_java_type(java_ty);
+            shape
+        }
+        FacadeSlot::Borrowed => {
+            let mut shape = RustSlotShape::conservative(java_ty.clone());
+            if java_ty == JavaType::String {
+                apply_borrowed_string_content_projection(&mut shape);
+            } else if matches!(java_ty, JavaType::Array(_)) {
+                apply_borrowed_sequence_content_projection(&mut shape);
+            } else if !matches!(java_ty, JavaType::Primitive(_) | JavaType::Void) {
+                shape.ownership = OwnershipShape::SharedBorrow;
+            }
+            shape
+        }
+        FacadeSlot::MutBorrowed => {
+            let mut shape = RustSlotShape::conservative(java_ty);
+            if !matches!(shape.java_ty, JavaType::Primitive(_) | JavaType::Void) {
+                shape.ownership = OwnershipShape::MutableBorrow;
+                shape.mutability = MutabilityShape::Mutable;
+            }
+            shape
+        }
+        FacadeSlot::Slice(inner) => {
+            let shape_ty = optional_element_type(&java_ty).unwrap_or(java_ty);
+            let mut shape = RustSlotShape::conservative(shape_ty);
+            apply_borrowed_sequence_content_projection(&mut shape);
+            if inner.contains_mut_borrow() {
+                shape.ownership = OwnershipShape::MutableBorrow;
+                shape.mutability = MutabilityShape::Mutable;
+            }
+            shape
+        }
+        FacadeSlot::Owned
+        | FacadeSlot::Index
+        | FacadeSlot::DynTrait(_)
+        | FacadeSlot::CrateHandle(_) => storage_arg_shape_with_effective_facts(java_ty, facts),
+    }
+}
+
+pub fn java_type_is_erased_object_storage(java_ty: &JavaType) -> bool {
+    matches!(
+        java_ty,
+        JavaType::Named { name, args }
+            if args.is_empty()
+                && crate::stdlib::canonical_external_receiver_type_key(name) == "Object"
+    )
 }
 
 pub fn value_shape(java_ty: JavaType) -> RustSlotShape {

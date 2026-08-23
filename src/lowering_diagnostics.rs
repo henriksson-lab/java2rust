@@ -287,6 +287,7 @@ fn collect_stmt_reference_identity_equality_diagnostics(
             ty,
             name,
             initializer,
+            ..
         } => {
             if let Some(initializer) = initializer {
                 collect_expr_reference_identity_equality_diagnostics(

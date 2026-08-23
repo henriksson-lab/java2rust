@@ -19,7 +19,8 @@ use new_java2rust::call_plan::{
     CallTargetPlan, NativeCollectionMethod, NativeCollectionNewTarget,
     NativeCollectionStaticMethod, NativeJavaInstanceMethod, NativeJavaStaticMethod,
     TrivialAccessorCallPlan, apply_fallback_receiver_rust_name, external_call_lowered_type,
-    external_call_returns_rust_result, external_constructor_arg_shapes, facade_receiver_slot_plan,
+    external_call_returns_rust_result, external_constructor_arg_shapes,
+    facade_abi_argument_plan_for_rust_path, facade_receiver_slot_plan,
     native_collection_arg_shapes, native_collection_arg_shapes_with_facts,
     native_collection_lowered_type, native_java_call_lowered_type,
     native_java_instance_receiver_type_hint, optional_borrowed_receiver_slot_plan,
@@ -175,9 +176,10 @@ use new_java2rust::shape_projection::{
     indexed_read_shape_for_access_with_facts, indexed_read_shape_with_effective_facts,
     indexed_read_shape_with_facts, iteration_element_projection_policy, iteration_element_shape,
     owned_string_value_shape, param_shape_for_java_type, project_java_value_shape,
-    return_shape_for_java_type, sequence_element_projection_policy,
-    shape_projection_capability_policy, shape_projection_capability_policy_with_effective_facts,
-    storage_shape_for_java_type, value_shape_for_java_type,
+    return_shape_for_java_type, rust_slot_shape_from_facade_arg_slot,
+    sequence_element_projection_policy, shape_projection_capability_policy,
+    shape_projection_capability_policy_with_effective_facts, storage_shape_for_java_type,
+    value_shape_for_java_type,
 };
 use new_java2rust::signature::{
     BindingBoundaryPolicy, ConstructorKey, ConstructorParamBoundaryPolicy, FieldBoundaryPolicy,
@@ -682,14 +684,12 @@ fn type_capabilities_drive_copy_string_and_sequence_facts() {
 fn type_identity_preserves_generic_erasure_and_wildcard_bounds() {
     let list_of_string = list_java_type(JavaType::String);
     let list_shape = RustSlotShape::conservative(list_of_string.clone());
+    let list_identity = list_shape.type_identity();
 
-    assert_eq!(list_shape.type_identity.declared_java_ty, list_of_string);
+    assert_eq!(list_identity.declared_java_ty, list_of_string);
+    assert_eq!(list_identity.generic_args, vec![JavaType::String]);
     assert_eq!(
-        list_shape.type_identity.generic_args,
-        vec![JavaType::String]
-    );
-    assert_eq!(
-        list_shape.type_identity.erasure,
+        list_identity.erasure,
         Some(JavaType::Named {
             name: "List".to_string(),
             args: Vec::new(),
@@ -701,17 +701,18 @@ fn type_identity_preserves_generic_erasure_and_wildcard_bounds() {
         args: Vec::new(),
     }))));
     let wildcard_shape = RustSlotShape::conservative(bounded.clone());
+    let wildcard_identity = wildcard_shape.type_identity();
 
-    assert_eq!(wildcard_shape.type_identity.declared_java_ty, bounded);
+    assert_eq!(wildcard_identity.declared_java_ty, bounded);
     assert_eq!(
-        wildcard_shape.type_identity.runtime_bounds,
+        wildcard_identity.runtime_bounds,
         vec![JavaType::Named {
             name: "Animal".to_string(),
             args: Vec::new(),
         }]
     );
     assert_eq!(
-        wildcard_shape.type_identity.erasure,
+        wildcard_identity.erasure,
         Some(JavaType::Named {
             name: "Animal".to_string(),
             args: Vec::new(),
@@ -8088,6 +8089,88 @@ class Helper {
 }
 
 #[test]
+fn native_collection_field_push_uses_shared_typed_receiver_recognition() {
+    let parsed = parse_java_source(
+        r#"
+import java.util.ArrayDeque;
+
+class NativeCollectionFieldPush {
+    private ArrayDeque<String> values;
+
+    void pushValue(String value) {
+        this.values.push(value);
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let usage = analyze_usage(&resolved.program);
+    let constraints = collect_signature_constraints(&resolved.program, &usage, &resolved.facts);
+    let (solved_constraints, _) = solve_signature_constraints_to_fixpoint(constraints, &usage);
+    let field_constraints = solved_constraints
+        .fields
+        .get(&FieldKey {
+            type_name: "NativeCollectionFieldPush".to_string(),
+            field_name: "values".to_string(),
+        })
+        .unwrap();
+
+    assert!(
+        field_constraints.iter().any(|constraint| matches!(
+            constraint,
+            SignatureConstraint::RequiredDispatch(DispatchShape::Concrete)
+        )),
+        "{field_constraints:?}"
+    );
+    assert!(
+        field_constraints.iter().any(|constraint| matches!(
+            constraint,
+            SignatureConstraint::RequiredView(ViewShape::Native)
+        )),
+        "{field_constraints:?}"
+    );
+}
+
+#[test]
+fn native_collection_field_recognition_is_type_aware_for_map_push() {
+    let parsed = parse_java_source(
+        r#"
+import java.util.Map;
+
+class NativeCollectionMapPush {
+    private Map<String, String> values;
+
+    void pushValue(String value) {
+        this.values.push(value);
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let usage = analyze_usage(&resolved.program);
+    let constraints = collect_signature_constraints(&resolved.program, &usage, &resolved.facts);
+    let (solved_constraints, _) = solve_signature_constraints_to_fixpoint(constraints, &usage);
+    let field_constraints = solved_constraints.fields.get(&FieldKey {
+        type_name: "NativeCollectionMapPush".to_string(),
+        field_name: "values".to_string(),
+    });
+
+    assert!(
+        field_constraints.is_none_or(|constraints| {
+            !constraints.iter().any(|constraint| {
+                matches!(
+                    constraint,
+                    SignatureConstraint::RequiredDispatch(DispatchShape::Concrete)
+                        | SignatureConstraint::RequiredView(ViewShape::Native)
+                        | SignatureConstraint::RequiredOwnership(OwnershipShape::Owned)
+                )
+            })
+        }),
+        "{field_constraints:?}"
+    );
+}
+
+#[test]
 fn signature_fixpoint_propagates_constructor_internal_call_result_constraints_to_field() {
     let parsed = parse_java_source(
         r#"
@@ -11621,6 +11704,67 @@ fn facade_abi_mut_slice_slot_shapes_array_argument_as_mutable_borrow() {
 }
 
 #[test]
+fn facade_slot_shape_mapping_strips_optional_wrappers_once() {
+    let facts = FactSet::default();
+    let effective_facts = EffectiveFacts::new(&facts);
+    let optional_string = optional_java_type(JavaType::String);
+
+    let optional_shape = rust_slot_shape_from_facade_arg_slot(
+        &FacadeSlot::Optional(Box::new(FacadeSlot::Borrowed)),
+        optional_string.clone(),
+        &effective_facts,
+    );
+    assert_eq!(optional_shape.java_ty, optional_string);
+    assert_eq!(optional_shape.ownership, OwnershipShape::SharedBorrow);
+    assert_eq!(optional_shape.view, ViewShape::Str);
+
+    let optional_array = optional_java_type(JavaType::Array(Box::new(JavaType::Primitive(
+        PrimitiveType::Byte,
+    ))));
+    let slice_shape = rust_slot_shape_from_facade_arg_slot(
+        &FacadeSlot::Slice(Box::new(FacadeSlot::MutBorrowed)),
+        optional_array,
+        &effective_facts,
+    );
+    assert_eq!(
+        slice_shape.java_ty,
+        JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Byte)))
+    );
+    assert_eq!(slice_shape.ownership, OwnershipShape::MutableBorrow);
+    assert_eq!(slice_shape.mutability, MutabilityShape::Mutable);
+    assert_eq!(slice_shape.view, ViewShape::Slice);
+}
+
+#[test]
+fn facade_slot_shape_mapping_uses_effective_representation_facts_for_owned_slots() {
+    let mut facts = FactSet::default();
+    facts.hierarchy_overrides.push(HierarchyOverride {
+        type_name: "Animal".to_string(),
+        strategy: HierarchyStrategy::DynTrait {
+            trait_name: "AnimalApi".to_string(),
+        },
+        provenance: FactProvenance::UserOverride,
+    });
+    let effective_facts = EffectiveFacts::new(&facts);
+    let shape = rust_slot_shape_from_facade_arg_slot(
+        &FacadeSlot::Owned,
+        JavaType::Named {
+            name: "Animal".to_string(),
+            args: Vec::new(),
+        },
+        &effective_facts,
+    );
+
+    assert_eq!(
+        shape.dispatch,
+        DispatchShape::BoxedDynTrait {
+            trait_name: "AnimalApi".to_string()
+        }
+    );
+    assert_eq!(shape.mutability, MutabilityShape::Mutable);
+}
+
+#[test]
 fn platform_mutable_external_argument_marks_local_binding_mutable() {
     let parsed = parse_java_source(
         r#"
@@ -14861,6 +15005,7 @@ fn call_plan_owns_trivial_accessor_call_selection_before_lowering() {
                 args: vec![Expr::Lambda {
                     params: vec![LambdaParam {
                         name: "name".to_string(),
+                        source_name: "name".to_string(),
                         ty: None,
                     }],
                     body: LambdaBody::Expr(Box::new(for_each_body)),
@@ -14891,10 +15036,12 @@ fn call_plan_owns_trivial_accessor_call_selection_before_lowering() {
                     params: vec![
                         LambdaParam {
                             name: "name".to_string(),
+                            source_name: "name".to_string(),
                             ty: None,
                         },
                         LambdaParam {
                             name: "item".to_string(),
+                            source_name: "item".to_string(),
                             ty: None,
                         },
                     ],
@@ -30824,7 +30971,7 @@ class EnvUse {
         args: vec![JavaType::String, JavaType::String],
     };
     assert_eq!(env.type_env().field_type("fields"), Some(&string_map_ty));
-    let constructor_env = shape_env_for_constructor(ty, constructor_signature, &signatures);
+    let constructor_env = shape_env_for_constructor(ty, ctor, constructor_signature, &signatures);
     assert_eq!(
         constructor_env.local_shape("field"),
         Some(&constructor_signature.params[0].shape)
@@ -33886,7 +34033,12 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     let call_source = include_str!("../src/call_lowering.rs");
     let call_plan_source = include_str!("../src/call_plan.rs");
     let conversion_source = include_str!("../src/conversion_plan.rs");
+    let semantic_source = include_str!("../src/semantic_analysis.rs");
+    let signature_source = include_str!("../src/signature.rs");
+    let usage_source = include_str!("../src/usage.rs");
+    let aliasing_source = include_str!("../src/aliasing.rs");
     let stream_source = include_str!("../src/stream_lowering.rs");
+    let stream_plan_source = include_str!("../src/stream.rs");
     let switch_source = include_str!("../src/switch_lowering.rs");
     let access_source = include_str!("../src/access_lowering.rs");
     let array_source = include_str!("../src/array_lowering.rs");
@@ -33900,12 +34052,386 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     let representation_source = include_str!("../src/representation.rs");
     let rust_ir_source = include_str!("../src/rust_ir.rs");
     let slot_render_source = include_str!("../src/slot_render.rs");
+    let expr_shape_source = include_str!("../src/expr_shape.rs");
     let types_source = include_str!("../src/types.rs");
     let stdlib_source = include_str!("../src/stdlib.rs");
     let main_source = include_str!("../src/main.rs");
     let external_packs_source = include_str!("../src/external_packs.rs");
+    let inherited_members_source = include_str!("../src/inherited_members.rs");
+    let member_access_plan_source = include_str!("../src/member_access_plan.rs");
+    let resolve_source = include_str!("../src/resolve.rs");
+    let facts_source = include_str!("../src/facts.rs");
     let java_naming_source = include_str!("../src/java_naming.rs");
+    let java_ir_source = include_str!("../src/java_ir.rs");
+    let parser_source = include_str!("../src/parser.rs");
     let string_concat_render_source = include_str!("../src/string_concat_render.rs");
+    assert!(
+        facts_source.contains("pub fn contains_shared_borrow(&self) -> bool")
+            && facts_source.contains("pub fn contains_mut_borrow(&self) -> bool")
+            && !main_source.contains("fn facade_slot_contains_shared_borrow")
+            && !main_source.contains("fn facade_slot_contains_mut_borrow")
+            && !call_plan_source.contains("fn external_return_slot_contains_shared_borrow")
+            && !call_plan_source.contains("fn facade_slot_contains_mut_borrow")
+            && !stdlib_source.contains("fn external_facade_abi_slot_contains_mut_borrow")
+            && !usage_source.contains("fn facade_slot_requires_mut_borrow")
+            && !signature_source.contains("fn facade_slot_requires_mutable_binding"),
+        "FacadeSlot borrow predicates should live on the enum, not as module-local recursions"
+    );
+    assert!(
+        coercion_source
+            .matches("rust_slot_shape_from_facade_arg_slot")
+            .count()
+            == 0
+            && lower_source
+                .matches("rust_slot_shape_from_facade_arg_slot")
+                .count()
+                == 0
+            && call_plan_source
+                .matches("fn rust_slot_shape_from_facade_arg_slot")
+                .count()
+                == 0
+            && stdlib_source
+                .matches("fn external_facade_argument_shape_from_abi_slot")
+                .count()
+                == 0
+            && call_plan_source.contains("rust_slot_shape_from_facade_arg_slot")
+            && stdlib_source.contains("rust_slot_shape_from_facade_arg_slot")
+            && include_str!("../src/shape_projection.rs")
+                .matches("pub fn rust_slot_shape_from_facade_arg_slot")
+                .count()
+                == 1,
+        "FacadeSlot to RustSlotShape mapping should be shared by call planning and facade stub rendering"
+    );
+    let builtin_external_library_pack_facts_source = external_packs_source
+        .split("pub fn builtin_external_library_pack_facts")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn builtin_external_library_packs").next())
+        .expect("borrowed builtin external pack aggregate should remain discoverable");
+    let builtin_external_library_packs_source = external_packs_source
+        .split("pub fn builtin_external_library_packs")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub fn builtin_external_api_argument_effect_facts")
+                .next()
+        })
+        .expect("owned builtin external pack aggregate compatibility wrapper should remain discoverable");
+    assert!(
+        builtin_external_library_pack_facts_source.contains("static FACTS: OnceLock<FactSet>")
+            && builtin_external_library_pack_facts_source
+                .contains("builtin_external_pack_fact_sets()")
+            && !builtin_external_library_pack_facts_source
+                .contains("java_platform_field_fact_set()")
+            && !builtin_external_library_pack_facts_source
+                .contains("facts.extend_from(htsjdk_variantcontext_pack_facts())"),
+        "builtin external library packs should fold the shared cached pack list once instead of rebuilding every pack fact set per lookup"
+    );
+    assert!(
+        builtin_external_library_packs_source
+            .contains("builtin_external_library_pack_facts().clone()")
+            && !stdlib_source.contains("builtin_external_library_packs()")
+            && !semantic_source.contains("builtin_external_library_packs()")
+            && !call_plan_source.contains("builtin_external_library_packs()")
+            && !member_access_plan_source.contains("builtin_external_library_packs()"),
+        "production code should borrow the cached builtin aggregate or narrower builtin fact iterators, not clone the aggregate FactSet"
+    );
+    assert!(
+        external_packs_source.contains("api_effect_arities:")
+            && external_packs_source.contains("constructor_arities:")
+            && external_packs_source.contains("pub fn external_api_arities_for_receiver")
+            && external_packs_source.contains("pub fn external_constructor_arities_for"),
+        "builtin external pack lookup should index arities without cloning the aggregate FactSet"
+    );
+    let builtin_api_argument_effects_source = external_packs_source
+        .split("pub fn builtin_external_api_argument_effect_facts")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn builtin_external_field_facts").next())
+        .expect("builtin external API argument-effect helper should remain discoverable");
+    assert!(
+        builtin_api_argument_effects_source.contains("builtin_external_pack_fact_sets()")
+            && !builtin_api_argument_effects_source.contains("builtin_external_library_packs"),
+        "builtin external API argument-effect lookup should borrow pack facts instead of cloning the aggregate FactSet"
+    );
+    let external_method_needs_arity_name_source = call_plan_source
+        .split("fn external_method_needs_arity_name")
+        .nth(1)
+        .and_then(|tail| tail.split("fn java_platform_method_arities_for").next())
+        .expect("external method arity-name helper should remain discoverable");
+    assert!(
+        external_method_needs_arity_name_source.contains("external_api_arities_for_receiver")
+            && !external_method_needs_arity_name_source.contains("builtin_external_library_packs"),
+        "external method arity naming should use the builtin pack arity index, not clone the aggregate FactSet"
+    );
+    let external_constructor_needs_arity_name_source = call_plan_source
+        .split("fn external_constructor_needs_arity_name")
+        .nth(1)
+        .and_then(|tail| tail.split("fn external_constructor_arities_for").next())
+        .expect("external constructor arity-name helper should remain discoverable");
+    assert!(
+        external_constructor_needs_arity_name_source.contains("external_constructor_arities_for")
+            && !external_constructor_needs_arity_name_source
+                .contains("builtin_external_library_packs"),
+        "external constructor arity naming should use the builtin pack arity index, not clone the aggregate FactSet"
+    );
+    assert!(
+        inherited_members_source.contains("builtin_external_field_facts")
+            && inherited_members_source.contains("builtin_external_api_effect_facts")
+            && inherited_members_source.contains("builtin_field_nullability_for")
+            && !inherited_members_source.contains("builtin_external_library_packs"),
+        "inherited-member lookup should borrow builtin pack facts directly instead of cloning the aggregate FactSet"
+    );
+    assert!(
+        external_packs_source.contains("pub fn builtin_external_pack_fact_sets_iter")
+            && semantic_source.contains("builtin_external_pack_fact_sets_iter")
+            && !semantic_source.contains("builtin_external_library_packs"),
+        "semantic-analysis builtin fact collection should borrow builtin pack fact sets instead of cloning the aggregate FactSet"
+    );
+    let add_external_field_surfaces_source = stdlib_source
+        .split("fn add_external_field_surfaces")
+        .nth(1)
+        .and_then(|tail| tail.split("fn add_external_field_surface_fact").next())
+        .expect("external field surface helper should remain discoverable");
+    let field_surface_support_facts_source = stdlib_source
+        .split("fn field_surface_support_facts")
+        .nth(1)
+        .and_then(|tail| tail.split("fn add_external_field_surface_fact").next())
+        .expect("external field surface support facts helper should remain discoverable");
+    assert!(
+        add_external_field_surfaces_source.contains("field_surface_support_facts(facts)")
+            && !add_external_field_surfaces_source.contains("builtin_external_library_packs")
+            && field_surface_support_facts_source.contains("builtin_external_pack_fact_sets_iter")
+            && !field_surface_support_facts_source.contains("builtin_external_library_packs"),
+        "external field support generation should borrow builtin pack fact sets instead of cloning the aggregate FactSet"
+    );
+    let external_constructor_fact_arity_count_source = stdlib_source
+        .split("fn external_constructor_fact_arity_count")
+        .nth(1)
+        .and_then(|tail| tail.split("fn external_constructor_type_matches").next())
+        .expect("external constructor arity-count helper should remain discoverable");
+    let unique_external_constructor_fact_arg_types_source = stdlib_source
+        .split("fn unique_external_constructor_fact_arg_types")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn push_unique_matching_external_constructor_arg_types")
+                .next()
+        })
+        .expect("external constructor argument-type helper should remain discoverable");
+    assert!(
+        external_packs_source.contains("pub fn builtin_external_constructor_facts")
+            && external_constructor_fact_arity_count_source
+                .contains("builtin_external_constructor_facts")
+            && unique_external_constructor_fact_arg_types_source
+                .contains("builtin_external_constructor_facts")
+            && !external_constructor_fact_arity_count_source
+                .contains("builtin_external_library_packs")
+            && !unique_external_constructor_fact_arg_types_source
+                .contains("builtin_external_library_packs"),
+        "stdlib constructor support helpers should borrow builtin constructor facts instead of cloning the aggregate FactSet"
+    );
+    let external_method_name_aliases_source = facts_source
+        .split("fn external_method_name_aliases")
+        .nth(1)
+        .and_then(|tail| tail.split("fn index_external_pack_member_type").next())
+        .expect("external method alias helper should remain discoverable");
+    assert!(
+        external_method_name_aliases_source.contains("thread_local!")
+            && external_method_name_aliases_source.contains("CACHE")
+            && external_method_name_aliases_source.contains("Rc<[String]>")
+            && !external_method_name_aliases_source.contains("HashMap<String, Vec<String>>")
+            && external_method_name_aliases_source
+                .contains("external_method_name_aliases_uncached(method_name)"),
+        "external method-name aliases should be memoized without cloning the alias Vec on cache hits"
+    );
+    let external_type_name_aliases_source = facts_source
+        .split("fn external_type_name_aliases")
+        .nth(1)
+        .and_then(|tail| tail.split("fn external_type_name_aliases_uncached").next())
+        .expect("external type alias helper should remain discoverable");
+    assert!(
+        external_type_name_aliases_source.contains("thread_local!")
+            && external_type_name_aliases_source.contains("CACHE")
+            && external_type_name_aliases_source.contains("Rc<[String]>")
+            && !external_type_name_aliases_source.contains("HashMap<String, Vec<String>>"),
+        "external type-name aliases should be memoized without cloning the alias Vec on cache hits"
+    );
+    assert!(
+        parser_source.contains("pub fn to_snake_case_unescaped")
+            && parser_source.contains("field_decl_name")
+            && parser_source.contains("to_snake_case_unescaped(name)")
+            && java_naming_source.contains("pub fn source_instance_field_rust_names")
+            && item_assembly_source.contains("source_instance_field_rust_names(ty)")
+            && lower_source.contains("fn source_instance_field_rust_name(")
+            && lower_source.contains("current_type_source_instance_field_rust_name")
+            && expr_shape_source.contains("instance_field_access_names")
+            && expr_shape_source.contains("source_instance_field_rust_names")
+            && access_source.contains("instance_field_access_name(name)")
+            && access_source.contains("bare_name_local_type(name, env)")
+            && java_naming_source.contains("pub fn source_static_field_rust_names")
+            && item_assembly_source.contains("source_static_field_rust_names(ty)")
+            && lower_source.contains("source_static_field_rust_name(ty, &field.name)")
+            && expr_shape_source.contains("static_storage_field_semantic_name")
+            && expr_shape_source.contains("static_storage_field_access_names"),
+        "source field keys should stay semantic while emitted Rust field names use centralized per-type allocators"
+    );
+    assert!(
+        java_ir_source.contains("pub source_name: String")
+            && java_ir_source.contains("source_name: String")
+            && java_ir_source.contains("source_var_name: String")
+            && parser_source.contains("source_name: to_snake_case_unescaped")
+            && parser_source.contains("source_var_name = raw_name")
+            && parser_source.contains(".map(to_snake_case_unescaped)")
+            && java_naming_source.contains("pub fn source_binding_rust_names")
+            && expr_shape_source.contains("binding_access_names")
+            && expr_shape_source.contains("insert_param_shape_with_access_name_and_java_type")
+            && expr_shape_source.contains("insert_local_shape_with_access_name_and_java_type")
+            && expr_shape_source.contains("insert_loop_variable_shape_with_access_name")
+            && access_source.contains("binding_access_name(name)")
+            && lower_source.contains("seed_block_binding_access_names")
+            && lower_source.contains("source_var_name")
+            && item_assembly_source.contains("source_binding_rust_names")
+            && stream_plan_source.contains("fn stream_lambda_binding_source_names")
+            && stream_plan_source.contains("source_binding_rust_names")
+            && stream_plan_source.contains("stream_lambda_binding_source_names(&[")
+            && stream_plan_source.contains("stream_lambda_binding_source_names(&param_sources")
+            && stream_source.contains("source_binding_rust_names")
+            && stream_source.contains("env.binding_access_name(name).is_some()"),
+        "callable binding declarations should preserve unescaped source names and params/locals/enhanced-for/lambdas should consume the shared emitted-name allocator"
+    );
+    let static_storage_accessors_source = lower_source
+        .split("fn static_storage_accessors_for_field")
+        .nth(1)
+        .and_then(|tail| tail.split("fn static_storage_initial_value_expr").next())
+        .expect("static storage accessor helper should remain discoverable");
+    assert!(
+        static_storage_accessors_source.contains("source_static_field_rust_name")
+            && !static_storage_accessors_source.contains("to_snake_case(&field.name)"),
+        "static storage accessor names should use allocated static field emitted names"
+    );
+    let stdlib_api_owner_key_source = stdlib_source
+        .split("pub(crate) fn external_api_receiver_owner_key")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn java_optional_receiver_method_uses_container_owner")
+                .next()
+        })
+        .expect("shared external API receiver owner-key helper should remain discoverable");
+    assert!(
+        stdlib_api_owner_key_source.contains("optional_element_type")
+            && stdlib_api_owner_key_source.contains("types.type_param_bound")
+            && stdlib_source.contains("pub(crate) fn external_api_method_receiver_owner_key")
+            && call_plan_source.contains("external_api_method_receiver_owner_key")
+            && signature_source.contains("external_api_method_receiver_owner_key")
+            && semantic_source.contains("external_api_method_receiver_owner_key")
+            && semantic_source.contains("external_api_receiver_owner_key"),
+        "external API receiver owner-key policy should be shared across call planning, signature solving and semantic analysis"
+    );
+    assert!(
+        stdlib_source.contains("fn external_known_builtin_receiver_owner_key")
+            && stdlib_source.contains("external_named_receiver_owner_key(receiver_type)")
+            && !stdlib_source.contains("fn external_receiver_type_key"),
+        "stdlib known-builtin receiver owner keys should have an explicit primitive-aware helper, not a generic duplicate owner-key function"
+    );
+    assert!(
+        usage_source.contains("usage_type_env")
+            && usage_source.contains("external_api_receiver_owner_key(receiver_type, type_env)")
+            && !usage_source.contains("fn external_receiver_type_key"),
+        "usage modeled-receiver boundaries should use the shared external API owner-key helper, including type-parameter bounds"
+    );
+    assert!(
+        aliasing_source.contains("aliasing_type_env")
+            && aliasing_source.contains("external_api_receiver_owner_key(receiver_ty, type_env)")
+            && !aliasing_source.contains("fn external_receiver_type_name"),
+        "observable-alias external mutator detection should use the shared external API owner-key helper, including type-parameter bounds and Array owner normalization"
+    );
+    assert!(
+        stdlib_source.contains("pub(crate) fn qualified_static_owner_java_name")
+            && call_plan_source.contains("qualified_static_owner_java_name(receiver)")
+            && !call_plan_source.contains("fn qualified_static_owner_java_key")
+            && !call_plan_source.contains("fn static_owner_java_name"),
+        "qualified static-owner Java expression classification should be shared between stdlib and call planning"
+    );
+    let source_context_static_method_fallback_source = lower_source
+        .split("fn source_context_static_method_fallback_signature")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn source_context_resolved_static_method_fallback_signature")
+                .next()
+        })
+        .expect("source-context static fallback helper should remain discoverable");
+    let fallback_receiver_type_name_candidates_source = lower_source
+        .split("fn fallback_receiver_type_name_candidates")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn nested_type_owner_candidates_for_receiver")
+                .next()
+        })
+        .expect("source-context fallback receiver owner helper should remain discoverable");
+    assert!(
+        lower_source.contains("struct SourceContextOwnerKey")
+            && fallback_receiver_type_name_candidates_source.contains("SourceContextOwnerKey")
+            && !source_context_static_method_fallback_source
+                .contains("owner_candidates: Vec<String>"),
+        "lower.rs source-context owner selection should use the private SourceContextOwnerKey wrapper, not a raw owner-candidate string list"
+    );
+    let imported_static_owner_call_collector_source = stdlib_source
+        .split("fn collect_expr_imported_static_owner_calls")
+        .nth(1)
+        .and_then(|tail| tail.split("fn external_static_call_owner_key").next())
+        .expect("imported static-owner call collector should remain discoverable");
+    assert!(
+        stdlib_source.contains("fn external_static_call_owner_key")
+            && imported_static_owner_call_collector_source
+                .contains("external_static_call_owner_key(receiver_name, name, args.len())")
+            && !stdlib_source.contains("fn external_pack_static_owner_for_call"),
+        "external static-call owner facts should use one canonical owner-key helper, not a separate external-pack static-owner classifier"
+    );
+    assert!(
+        stdlib_source.contains("pub fn native_collection_receiver_method_known")
+            && stdlib_source.contains("fn native_collection_receiver_method_role_for_name")
+            && !stdlib_source.contains("fn collection_api_method_role")
+            && !stdlib_source.contains("fn map_api_method_role")
+            && signature_source.contains("native_collection_receiver_method_known(field_ty, name)")
+            && !signature_source.contains("fn native_collection_receiver_method_name"),
+        "signature and external API roles should use the shared typed native-collection receiver query"
+    );
+    let static_surface_source = stdlib_source
+        .split("fn add_static_external_api_facts_for_surface_types")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn static_external_api_fact_arities_for_surface")
+                .next()
+        })
+        .expect("static external API surface helper should remain discoverable");
+    let dyn_trait_surface_source = stdlib_source
+        .split("fn add_external_dyn_trait_surfaces")
+        .nth(1)
+        .and_then(|tail| tail.split("fn add_external_conversion_surfaces").next())
+        .expect("external dyn-trait surface helper should remain discoverable");
+    let api_surface_support_source = stdlib_source
+        .split("fn external_api_surface_support_facts")
+        .nth(1)
+        .and_then(|tail| tail.split("fn add_external_field_surface_fact").next())
+        .expect("external API support-facts helper should remain discoverable");
+    assert!(
+        static_surface_source.contains("external_api_surface_support_facts(facts)")
+            && dyn_trait_surface_source.contains("external_api_surface_support_facts(facts)")
+            && !static_surface_source.contains("builtin_external_library_packs")
+            && !dyn_trait_surface_source.contains("builtin_external_library_packs")
+            && api_surface_support_source.contains("builtin_external_pack_fact_sets_iter")
+            && !api_surface_support_source.contains("builtin_external_library_packs"),
+        "external API surface support generation should merge builtin pack facts from cached pack fact sets, not rebuild aggregate builtin packs per call"
+    );
+    assert!(
+        call_plan_source.contains("external_named_receiver_owner_key(receiver_ty)")
+            && member_access_plan_source
+                .contains("external_named_receiver_owner_key(&receiver_ty)")
+            && semantic_source.contains("external_named_receiver_owner_key(receiver_ty)")
+            && resolve_source.contains("external_named_receiver_owner_key(receiver_ty)")
+            && !call_plan_source.contains("fn external_field_receiver_name")
+            && !member_access_plan_source.contains("fn external_field_receiver_name")
+            && !semantic_source.contains("fn external_field_receiver_name")
+            && !resolve_source.contains("fn external_receiver_type_name"),
+        "external field owner keys should use the shared named-receiver helper instead of module-local copies"
+    );
     assert!(
         !lower_source
             .split("#[cfg(test)]")
@@ -35774,14 +36300,16 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         new_java2rust::types::raw_rust_box_dyn_trait("std::boxed::Box<dyn Animal>"),
         Some("Animal")
     );
-    let facade_cli_slot_parser = main_source
-        .split("fn facade_slot_for_rust_type")
+    let facade_slot_parser = facts_source
+        .split("pub fn facade_slot_for_rust_type")
         .nth(1)
-        .and_then(|tail| tail.split("fn facade_slot_contains_shared_borrow").next())
-        .expect("CLI facade slot parser should be present");
-    assert!(facade_cli_slot_parser.contains("raw_rust_option_inner"));
-    assert!(!facade_cli_slot_parser.contains("strip_prefix(\"Option<\")"));
-    assert!(!facade_cli_slot_parser.contains("strip_prefix(\"std::option::Option<\")"));
+        .and_then(|tail| tail.split("#[derive(Debug, Clone, Copy").next())
+        .expect("shared facade slot parser should be present");
+    assert!(facade_slot_parser.contains("raw_rust_option_inner"));
+    assert!(!facade_slot_parser.contains("strip_prefix(\"Option<\")"));
+    assert!(!facade_slot_parser.contains("strip_prefix(\"std::option::Option<\")"));
+    assert!(!main_source.contains("fn facade_slot_for_rust_type"));
+    assert!(!external_packs_source.contains("fn facade_slot_for_manifest_rust_type"));
     let facade_cli_return_parser = main_source
         .split("fn rust_type_is_result")
         .nth(1)
@@ -35861,14 +36389,6 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         .expect("facade fluent method helper should be present");
     assert!(facade_fluent_method.contains("raw_rust_type_is_result"));
     assert!(!facade_fluent_method.contains("starts_with(\"Result<\")"));
-    let manifest_facade_slot_parser = external_packs_source
-        .split("fn facade_slot_for_manifest_rust_type")
-        .nth(1)
-        .and_then(|tail| tail.split("fn parse_external_api_metadata").next())
-        .expect("external pack facade slot parser should be present");
-    assert!(manifest_facade_slot_parser.contains("raw_rust_option_inner"));
-    assert!(!manifest_facade_slot_parser.contains("strip_prefix(\"Option<\")"));
-    assert!(!manifest_facade_slot_parser.contains("strip_prefix(\"std::option::Option<\")"));
     let opaque_final_return = stdlib_source
         .split("fn external_opaque_final_facade_return_type")
         .nth(1)
@@ -37816,14 +38336,16 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
             && coercion_source.contains("fn rendered_path_leaf_projection")
             && coercion_source.contains("fn borrowed_rendered_leaf_projection")
             && coercion_source.contains("fn borrowed_collect_clone_compat_projection")
-            && !coercion_source.contains("fn raw_borrowed_collect_clone_compat_projection")
+            && coercion_source.contains("fn raw_borrowed_collect_clone_compat_projection")
             && !borrowed_collect_clone_source.contains("RustExpr::Raw(format!")
             && !borrowed_vec_clone_adapter_source.contains("emit::emit_expr(&expr)")
             && !borrowed_set_clone_adapter_source.contains("emit::emit_expr(&expr)")
             && !borrowed_vec_clone_adapter_source.contains("cloned_collect_suffix")
             && !borrowed_set_clone_adapter_source.contains("cloned_collect_suffix")
-            && !borrowed_collect_clone_compat_source.contains("cloned_collect_suffix")
-            && !borrowed_collect_clone_compat_source.contains("strip_suffix")
+            && borrowed_collect_clone_compat_source
+                .contains("raw_borrowed_collect_clone_compat_projection")
+            && borrowed_collect_clone_compat_source.contains("cloned_collect_suffix")
+            && borrowed_collect_clone_compat_source.contains("strip_suffix")
             && borrowed_collect_clone_compat_source.contains("match expr.unshaped()")
             && borrowed_collect_clone_compat_source.contains("RustExpr::Raw(rendered)")
             && borrowed_collect_clone_compat_source
@@ -39942,10 +40464,11 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         .and_then(|tail| tail.split("fn render_stream_lambda_string_value").next())
         .expect("structured stream lambda receiver helper should remain discoverable");
     assert!(
-        stream_lambda_receiver_with_locals_expr_source.contains("RustExpr::Var(param.to_string())")
+        stream_lambda_receiver_with_locals_expr_source
+            .contains("RustExpr::Var(param_rust.to_string())")
             && !stream_lambda_receiver_with_locals_expr_source
                 .contains("rendered_projection_or_raw_leaf(match value"),
-        "stream lambda receiver lowering should keep direct lambda parameters as RustExpr::Var"
+        "stream lambda receiver lowering should keep direct lambda parameters as emitted-name RustExpr::Var"
     );
     assert!(
         !stream_source.contains("format!(\n                    \"{} {} {}\"")
@@ -42779,6 +43302,61 @@ fn stdlib_optional_signature_facts_drive_argument_shapes() {
 }
 
 #[test]
+fn facade_abi_argument_plan_prefers_abi_slot_over_argument_effect() {
+    let mut facts = FactSet::default();
+    facts.facade_abi_facts.push(FacadeAbiFact {
+        key: CallableKey::method_with_params(
+            "FacadeOwner",
+            "accept",
+            Staticness::Unknown,
+            vec![TypePattern::Exact(TypeKey {
+                type_name: "String".to_string(),
+            })],
+        ),
+        rust_path: "facade::FacadeOwner::accept".to_string(),
+        receiver: ReceiverAbi::BorrowedSelf,
+        args: vec![FacadeSlot::Owned],
+        return_slot: FacadeSlot::Owned,
+        result: ResultAbi::Plain,
+        borrow_source: None,
+        borrowed_return_recovery: None,
+        provenance: FactProvenance::UserOverride,
+    });
+    facts
+        .external_api_argument_effect_facts
+        .push(ExternalApiArgumentEffectFact {
+            method_name: "accept".to_string(),
+            receiver_type: Some("FacadeOwner".to_string()),
+            arg_count: Some(1),
+            parameter_index: 0,
+            parameter_type: Some(JavaType::String),
+            parameter_nullability: NullabilityState::DefinitelyNonNull,
+            argument_mutability: ReceiverMutabilityFact::ReadOnly,
+            alias_policy: ExternalArgumentAliasPolicy::Borrowed,
+            provenance: FactProvenance::UserOverride,
+        });
+    let args = vec![Expr::Var("value".to_string())];
+    let mut types = TypeEnv::new();
+    types.insert_local("value", JavaType::String);
+
+    let plan = facade_abi_argument_plan_for_rust_path(
+        "facade::FacadeOwner::accept",
+        1,
+        Some(&args),
+        &types,
+        &facts,
+    )
+    .expect("facade ABI should plan argument slots");
+    let ArgumentLoweringPlan::Shaped(shapes) = plan else {
+        panic!("owned facade argument should produce shaped plan");
+    };
+    assert_eq!(shapes.len(), 1);
+    assert_eq!(shapes[0].java_ty, JavaType::String);
+    assert_eq!(shapes[0].ownership, OwnershipShape::Owned);
+    assert_eq!(shapes[0].view, ViewShape::Native);
+}
+
+#[test]
 fn stdlib_signature_facts_include_jdk_collection_rust_abi_slots() {
     let facts = new_java2rust::stdlib::rust_stdlib_signature_facts();
     let list_get_key = CallableKey::method("ArrayList", "get", Staticness::Unknown, 1);
@@ -44531,6 +45109,8 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
         "method-reference facts path should not route through rendered compatibility operands"
     );
     assert!(lowering_source.contains("method_reference_receiver_owner_key"));
+    assert!(lowering_source.contains("external_api_method_receiver_owner_key"));
+    assert!(!lowering_source.contains("fn java_type_callable_owner_key"));
     assert!(lowering_source.contains("facade_receiver_method_call_projection"));
     assert!(lowering_source.contains("facade_abi_for_key"));
     assert!(shape_source.contains("method_reference_receiver_type_for_call_plan_with_facts"));

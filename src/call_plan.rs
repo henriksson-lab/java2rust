@@ -20,7 +20,9 @@ use crate::java_signature::{JavaCallableKey, JavaCallableKind, JavaCallableStati
 use crate::representation::RepresentationPlan;
 use crate::shape_projection::{
     apply_borrowed_sequence_content_projection, apply_borrowed_string_content_projection,
-    apply_required_dispatch, borrowed_sequence_element_shape, value_shape_for_java_type,
+    apply_required_dispatch, borrowed_sequence_element_shape, java_type_is_erased_object_storage,
+    rust_slot_shape_from_facade_arg_slot, storage_arg_shape_with_effective_facts,
+    value_shape_for_java_type,
 };
 use crate::signature::SignaturePlan;
 use crate::slot_shape::{DispatchShape, MutabilityShape, OwnershipShape, RustSlotShape, ViewShape};
@@ -862,12 +864,13 @@ pub fn external_receiver_overload_is_modeled(
     external_index
         .external_api_effect_for_receiver_with_arity(Some(receiver_key), name, Some(arg_count))
         .is_some()
-        || crate::external_packs::external_api_effect_for_receiver_with_arity(
-            Some(receiver_key),
-            name,
-            Some(arg_count),
-        )
-        .is_some()
+        || (!external_index.facts().disable_builtin_external_packs
+            && crate::external_packs::external_api_effect_for_receiver_with_arity(
+                Some(receiver_key),
+                name,
+                Some(arg_count),
+            )
+            .is_some())
 }
 
 pub fn external_constructor_is_modeled(facts: &FactSet, type_name: &str, arg_count: usize) -> bool {
@@ -875,7 +878,8 @@ pub fn external_constructor_is_modeled(facts: &FactSet, type_name: &str, arg_cou
     facts
         .external_constructor_for(type_name, &arg_types)
         .is_some()
-        || crate::external_packs::external_constructor_for(type_name, &arg_types).is_some()
+        || (!facts.disable_builtin_external_packs
+            && crate::external_packs::external_constructor_for(type_name, &arg_types).is_some())
 }
 
 pub fn external_call_lowered_type_with_external_index(
@@ -946,8 +950,8 @@ pub fn external_call_lowered_type_with_external_index(
         name,
         Some(arg_count),
     );
-    let rust_return_is_shared_borrow = rust_return_type
-        .is_some_and(|fact| external_return_slot_contains_shared_borrow(&fact.return_slot));
+    let rust_return_is_shared_borrow =
+        rust_return_type.is_some_and(|fact| fact.return_slot.contains_shared_borrow());
 
     if rust_return_is_shared_borrow
         && matches!(
@@ -1018,7 +1022,7 @@ pub fn external_call_lowered_type_with_external_index(
     if let Some(rust_return_type) = rust_return_type
         && let Some(java_ty) = lowered.java_ty()
     {
-        if external_return_slot_contains_shared_borrow(&rust_return_type.return_slot)
+        if rust_return_type.return_slot.contains_shared_borrow()
             && !matches!(java_ty, JavaType::Primitive(_) | JavaType::Void)
         {
             return Some(LoweredType::rust_borrowed_return(
@@ -1322,20 +1326,6 @@ fn lowered_type_for_facade_abi(abi: &FacadeAbiFact, return_ty: &JavaType) -> Opt
     }
 }
 
-fn external_return_slot_contains_shared_borrow(slot: &FacadeSlot) -> bool {
-    match slot {
-        FacadeSlot::Borrowed => true,
-        FacadeSlot::Optional(inner) | FacadeSlot::Slice(inner) => {
-            external_return_slot_contains_shared_borrow(inner)
-        }
-        FacadeSlot::Owned
-        | FacadeSlot::Index
-        | FacadeSlot::MutBorrowed
-        | FacadeSlot::DynTrait(_)
-        | FacadeSlot::CrateHandle(_) => false,
-    }
-}
-
 fn rust_return_type_is_unsigned_byte_array(rust_type_name: &str) -> bool {
     let compact = rust_type_name.replace(' ', "");
     compact == "Vec<u8>" || compact == "Option<Vec<u8>>"
@@ -1556,6 +1546,7 @@ pub enum CallStatementPlan<'a> {
     IterableForEach {
         receiver: &'a Expr,
         param_names: Vec<String>,
+        param_source_names: Vec<String>,
         body: &'a LambdaBody,
     },
     NativeArraysSort {
@@ -1992,6 +1983,7 @@ fn external_call_receiver_type_key_with_index(
             .or_else(|| {
                 external_receiver_expr_type_key_with_index(
                     receiver,
+                    name,
                     facts,
                     external_index,
                     types,
@@ -2004,6 +1996,7 @@ fn external_call_receiver_type_key_with_index(
 
 fn external_receiver_expr_type_key_with_index(
     receiver: &Expr,
+    method_name: &str,
     facts: &FactSet,
     external_index: &ExternalFactLookupIndex<'_>,
     types: &TypeEnv,
@@ -2025,16 +2018,23 @@ fn external_receiver_expr_type_key_with_index(
             current_type,
         )
         && let Some(java_ty) = lowered.java_ty()
-        && let Some(key) = external_receiver_type_key(java_ty, types)
+        && let Some(key) =
+            crate::stdlib::external_api_method_receiver_owner_key(java_ty, types, method_name)
     {
         return Some(key);
     }
     let inferred = infer_expr_type(receiver, types);
     if weak_unknown_field_access_receiver(receiver, &inferred) {
         return infer_external_field_access_type_with_index(receiver, facts, external_index, types)
-            .and_then(|external_field_ty| external_receiver_type_key(&external_field_ty, types));
+            .and_then(|external_field_ty| {
+                crate::stdlib::external_api_method_receiver_owner_key(
+                    &external_field_ty,
+                    types,
+                    method_name,
+                )
+            });
     }
-    external_receiver_type_key(&inferred, types)
+    crate::stdlib::external_api_method_receiver_owner_key(&inferred, types, method_name)
 }
 
 fn infer_external_field_access_type_with_index(
@@ -2057,27 +2057,19 @@ fn external_pack_or_fact_field_type_with_index(
     field: &str,
     external_index: &ExternalFactLookupIndex<'_>,
 ) -> Option<JavaType> {
-    let receiver_name = external_field_receiver_name(receiver_ty)?;
+    let receiver_name = crate::stdlib::external_named_receiver_owner_key(receiver_ty)?;
     if let Some(field_fact) = external_index.external_field_for(&receiver_name, field)
         && let Some(field_type) = &field_fact.field_type
     {
         return Some(field_type.clone());
     }
-    if let Some(field_fact) = crate::external_packs::external_field_for(&receiver_name, field)
+    if !external_index.facts().disable_builtin_external_packs
+        && let Some(field_fact) = crate::external_packs::external_field_for(&receiver_name, field)
         && let Some(field_type) = field_fact.field_type
     {
         return Some(field_type);
     }
     crate::stdlib::known_external_field_type_for_receiver(receiver_ty, field)
-}
-
-fn external_field_receiver_name(receiver_ty: &JavaType) -> Option<String> {
-    match receiver_ty {
-        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
-            Some(crate::stdlib::canonical_external_receiver_type_key(name))
-        }
-        _ => None,
-    }
 }
 
 fn weak_unknown_field_access_receiver(receiver: &Expr, inferred: &JavaType) -> bool {
@@ -2088,32 +2080,6 @@ fn weak_unknown_field_access_receiver(receiver: &Expr, inferred: &JavaType) -> b
         }
         _ => false,
     }
-}
-
-fn external_receiver_type_key(java_ty: &JavaType, types: &TypeEnv) -> Option<String> {
-    if let Some(element_ty) = crate::types::optional_element_type(java_ty) {
-        return external_receiver_type_key(&element_ty, types);
-    }
-    if let JavaType::Named { name, args } = java_ty
-        && args.is_empty()
-        && let Some(bound) = types.type_param_bound(name)
-    {
-        return external_receiver_type_key(bound, types);
-    }
-    match java_ty {
-        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
-            Some(crate::stdlib::canonical_external_receiver_type_key(
-                rust_path_simple_type_name(name).unwrap_or(name),
-            ))
-        }
-        JavaType::String => Some("String".to_string()),
-        JavaType::Array(_) => Some("Array".to_string()),
-        JavaType::Void | JavaType::Primitive(_) | JavaType::Wildcard(_) => None,
-    }
-}
-
-fn rust_path_simple_type_name(name: &str) -> Option<&str> {
-    name.rsplit_once("::").map(|(_, simple)| simple)
 }
 
 pub fn plan_call_statement<'a>(expr: &'a Expr, facts: &FactSet) -> Option<CallStatementPlan<'a>> {
@@ -2284,12 +2250,17 @@ fn plan_iterable_for_each_statement<'a>(
         .iter()
         .map(|param| param.name.clone())
         .collect::<Vec<_>>();
+    let param_source_names = params
+        .iter()
+        .map(|param| param.source_name.clone())
+        .collect::<Vec<_>>();
     if param_names.is_empty() {
         return None;
     }
     Some(CallStatementPlan::IterableForEach {
         receiver,
         param_names,
+        param_source_names,
         body,
     })
 }
@@ -2929,8 +2900,14 @@ fn plan_external_facade_receiver_call<'a>(
             return None;
         }
     }
-    let receiver_name =
-        external_receiver_expr_type_key_with_index(receiver, facts, external_index, types, None)?;
+    let receiver_name = external_receiver_expr_type_key_with_index(
+        receiver,
+        name,
+        facts,
+        external_index,
+        types,
+        None,
+    )?;
     let key = CallableKey::method(
         receiver_name.clone(),
         name.to_string(),
@@ -3888,8 +3865,14 @@ fn plan_external_crate_receiver_call<'a>(
     external_index: &ExternalFactLookupIndex<'_>,
     types: &TypeEnv,
 ) -> Option<CallTargetPlan<'a>> {
-    let receiver_name =
-        external_receiver_expr_type_key_with_index(receiver, facts, external_index, types, None)?;
+    let receiver_name = external_receiver_expr_type_key_with_index(
+        receiver,
+        name,
+        facts,
+        external_index,
+        types,
+        None,
+    )?;
     let effect = external_index
         .external_api_effect_for_receiver_with_arity(Some(&receiver_name), name, Some(arg_count))
         .cloned()
@@ -4162,8 +4145,14 @@ fn external_method_rust_name_for_receiver(
     external_index: &ExternalFactLookupIndex<'_>,
     types: &TypeEnv,
 ) -> Option<String> {
-    let receiver_type =
-        external_receiver_expr_type_key_with_index(receiver, facts, external_index, types, None)?;
+    let receiver_type = external_receiver_expr_type_key_with_index(
+        receiver,
+        method_name,
+        facts,
+        external_index,
+        types,
+        None,
+    )?;
     Some(external_method_rust_name(
         &receiver_type,
         method_name,
@@ -4178,12 +4167,13 @@ fn external_method_needs_arity_name(
     facts: &FactSet,
 ) -> bool {
     let mut arities = external_method_arities_for(facts, receiver_type, method_name);
-    arities.extend(external_method_arities_for(
-        &crate::external_packs::builtin_external_library_packs(),
-        receiver_type,
-        method_name,
-    ));
-    arities.extend(java_platform_method_arities_for(receiver_type, method_name));
+    if !facts.disable_builtin_external_packs {
+        arities.extend(crate::external_packs::external_api_arities_for_receiver(
+            receiver_type,
+            method_name,
+        ));
+        arities.extend(java_platform_method_arities_for(receiver_type, method_name));
+    }
     arities.len() > 1
 }
 
@@ -4247,10 +4237,11 @@ fn external_method_name_matches(fact_method_name: &str, query_method_name: &str)
 
 fn external_constructor_needs_arity_name(type_name: &str, facts: &FactSet) -> bool {
     let mut arities = external_constructor_arities_for(facts, type_name);
-    arities.extend(external_constructor_arities_for(
-        &crate::external_packs::builtin_external_library_packs(),
-        type_name,
-    ));
+    if !facts.disable_builtin_external_packs {
+        arities.extend(crate::external_packs::external_constructor_arities_for(
+            type_name,
+        ));
+    }
     arities.len() > 1
 }
 
@@ -4751,55 +4742,6 @@ fn collection_element_arg_shape_with_effective_facts(
     Some(storage_arg_shape_with_effective_facts(element_ty, facts))
 }
 
-fn storage_arg_shape_with_effective_facts(
-    java_ty: JavaType,
-    facts: &EffectiveFacts<'_>,
-) -> RustSlotShape {
-    let mut shape = RustSlotShape::for_storage(java_ty.clone());
-    if let Some(HierarchyStrategy::DynTrait { trait_name }) =
-        facts.object_representation_override_strategy_for(&java_ty)
-    {
-        apply_required_dispatch(
-            &mut shape,
-            DispatchShape::BoxedDynTrait {
-                trait_name: trait_name.clone(),
-            },
-        );
-        return shape;
-    }
-    if let JavaType::Named { name, args } = &java_ty
-        && args.is_empty()
-        && facts.object_safe_trait_fact_for_name(name) == Some(true)
-    {
-        apply_required_dispatch(
-            &mut shape,
-            DispatchShape::BoxedDynTrait {
-                trait_name: name.clone(),
-            },
-        );
-        return shape;
-    }
-    if java_type_is_erased_object_storage(&java_ty)
-        || matches!(
-            facts.object_representation_override_strategy_for(&java_ty),
-            Some(HierarchyStrategy::ErasedObject)
-        ) && !facts.is_final_type(&java_ty)
-            && !crate::javalibs::generic_facade_interface_erases_to_named_rust_type(&java_ty)
-    {
-        apply_required_dispatch(&mut shape, DispatchShape::ErasedObject);
-    }
-    shape
-}
-
-fn java_type_is_erased_object_storage(java_ty: &JavaType) -> bool {
-    matches!(
-        java_ty,
-        JavaType::Named { name, args }
-            if args.is_empty()
-                && crate::stdlib::canonical_external_receiver_type_key(name) == "Object"
-    )
-}
-
 pub fn plan_native_collection_extend_arg(
     receiver_ty: &JavaType,
     arg_shape: &RustSlotShape,
@@ -5057,8 +4999,14 @@ fn facade_abi_for_receiver_call<'a>(
     external_index: &ExternalFactLookupIndex<'_>,
     types: &TypeEnv,
 ) -> Option<&'a FacadeAbiFact> {
-    let receiver_name =
-        external_receiver_expr_type_key_with_index(receiver, facts, external_index, types, None)?;
+    let receiver_name = external_receiver_expr_type_key_with_index(
+        receiver,
+        name,
+        facts,
+        external_index,
+        types,
+        None,
+    )?;
     let key = CallableKey::method(
         receiver_name,
         name.to_string(),
@@ -5090,34 +5038,6 @@ fn facade_abi_argument_lowering_plan(
             .or_else(|| inferred_argument_java_type(args, index, types))
             .map(|java_ty| facade_abi_effective_argument_java_type(abi, index, java_ty))
             .unwrap_or_else(|| JavaType::Unknown("Object".to_string()));
-        if let Some(effect) = facts
-            .external_api_argument_effect_for_key(&abi.key, index)
-            .or_else(|| {
-                let owner_simple = abi
-                    .key
-                    .owner
-                    .type_name
-                    .rsplit("::")
-                    .next()
-                    .unwrap_or(&abi.key.owner.type_name);
-                facts.external_api_argument_effect_for_receiver_with_arity(
-                    Some(owner_simple),
-                    &abi.key.member.0,
-                    Some(abi.key.arity),
-                    index,
-                )
-            })
-        {
-            let receiver_ty = JavaType::Named {
-                name: abi.key.owner.type_name.clone(),
-                args: Vec::new(),
-            };
-            let shape =
-                argument_shape_from_external_effect(effect, Some(&receiver_ty), &effective_facts);
-            slots.push(argument_slot(shape.clone()));
-            shapes.push(shape);
-            continue;
-        }
         match slot {
             FacadeSlot::Index => {
                 has_explicit_slot = true;
@@ -5217,76 +5137,6 @@ fn inferred_argument_java_type(
 
 fn inferred_argument_java_types(args: &[Expr], types: &TypeEnv) -> Vec<JavaType> {
     args.iter().map(|arg| infer_expr_type(arg, types)).collect()
-}
-
-fn rust_slot_shape_from_facade_arg_slot(
-    slot: &FacadeSlot,
-    java_ty: JavaType,
-    facts: &EffectiveFacts<'_>,
-) -> RustSlotShape {
-    match slot {
-        FacadeSlot::Optional(inner) => {
-            if let Some(element_ty) = crate::types::optional_element_type(&java_ty) {
-                let mut shape = rust_slot_shape_from_facade_arg_slot(inner, element_ty, facts);
-                shape.java_ty = java_ty;
-                return shape;
-            }
-            let mut shape = rust_slot_shape_from_facade_arg_slot(
-                inner,
-                crate::types::optional_java_type(java_ty.clone()),
-                facts,
-            );
-            shape.java_ty = crate::types::optional_java_type(java_ty);
-            shape
-        }
-        FacadeSlot::Borrowed => {
-            let mut shape = RustSlotShape::conservative(java_ty.clone());
-            if java_ty == JavaType::String {
-                apply_borrowed_string_content_projection(&mut shape);
-            } else if matches!(java_ty, JavaType::Array(_)) {
-                apply_borrowed_sequence_content_projection(&mut shape);
-            } else if !matches!(java_ty, JavaType::Primitive(_) | JavaType::Void) {
-                shape.ownership = OwnershipShape::SharedBorrow;
-            }
-            shape
-        }
-        FacadeSlot::MutBorrowed => {
-            let mut shape = RustSlotShape::conservative(java_ty);
-            if !matches!(shape.java_ty, JavaType::Primitive(_) | JavaType::Void) {
-                shape.ownership = OwnershipShape::MutableBorrow;
-                shape.mutability = MutabilityShape::Mutable;
-            }
-            shape
-        }
-        FacadeSlot::Slice(inner) => {
-            let shape_ty = crate::types::optional_element_type(&java_ty).unwrap_or(java_ty);
-            let mut shape = RustSlotShape::conservative(shape_ty);
-            apply_borrowed_sequence_content_projection(&mut shape);
-            if facade_slot_contains_mut_borrow(inner) {
-                shape.ownership = OwnershipShape::MutableBorrow;
-                shape.mutability = MutabilityShape::Mutable;
-            }
-            shape
-        }
-        FacadeSlot::Owned
-        | FacadeSlot::Index
-        | FacadeSlot::DynTrait(_)
-        | FacadeSlot::CrateHandle(_) => storage_arg_shape_with_effective_facts(java_ty, facts),
-    }
-}
-
-fn facade_slot_contains_mut_borrow(slot: &FacadeSlot) -> bool {
-    match slot {
-        FacadeSlot::MutBorrowed => true,
-        FacadeSlot::Optional(inner) | FacadeSlot::Slice(inner) => {
-            facade_slot_contains_mut_borrow(inner)
-        }
-        FacadeSlot::Owned
-        | FacadeSlot::Index
-        | FacadeSlot::Borrowed
-        | FacadeSlot::DynTrait(_)
-        | FacadeSlot::CrateHandle(_) => false,
-    }
 }
 
 pub(crate) fn external_call_arg_shapes_for_resolved(
@@ -5571,7 +5421,7 @@ fn static_call_argument_owner_key(receiver: &Expr, types: &TypeEnv) -> Option<St
     if let Some(owner) = imported_static_owner_for_call(receiver, types) {
         return Some(crate::stdlib::canonical_external_receiver_type_key(owner));
     }
-    qualified_static_owner_java_key(receiver)
+    crate::stdlib::qualified_static_owner_java_name(receiver)
 }
 
 fn imported_static_owner_for_call<'a>(receiver: &Expr, types: &'a TypeEnv) -> Option<&'a str> {
@@ -5588,49 +5438,6 @@ fn static_member_import_owner_for_call<'a>(name: &str, types: &'a TypeEnv) -> Op
     types
         .static_member_import_owner(name)
         .or_else(|| types.static_member_import_owner(&crate::parser::to_snake_case(name)))
-}
-
-fn qualified_static_owner_java_key(receiver: &Expr) -> Option<String> {
-    let Expr::FieldAccess(_, _) = receiver else {
-        return None;
-    };
-    let root = static_owner_root_segment(receiver)?;
-    if !root
-        .chars()
-        .next()
-        .is_some_and(|ch| ch.is_ascii_lowercase())
-    {
-        return None;
-    }
-    let owner = static_owner_java_name(receiver)?;
-    let class_like_segments = owner
-        .split('.')
-        .filter(|segment| {
-            segment
-                .chars()
-                .next()
-                .is_some_and(|ch| ch.is_ascii_uppercase())
-        })
-        .count();
-    (class_like_segments == 1).then_some(owner)
-}
-
-fn static_owner_root_segment(expr: &Expr) -> Option<&str> {
-    match expr {
-        Expr::Var(name) => Some(name.as_str()),
-        Expr::FieldAccess(receiver, _) => static_owner_root_segment(receiver),
-        _ => None,
-    }
-}
-
-fn static_owner_java_name(expr: &Expr) -> Option<String> {
-    match expr {
-        Expr::Var(name) => Some(name.clone()),
-        Expr::FieldAccess(receiver, field) => {
-            Some(format!("{}.{}", static_owner_java_name(receiver)?, field))
-        }
-        _ => None,
-    }
 }
 
 fn conservative_external_mutator_arg_shapes(

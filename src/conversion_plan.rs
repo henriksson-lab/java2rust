@@ -1704,7 +1704,6 @@ pub(crate) fn optional_element_slot_shape_with_facts(
         element_shape.java_ty = projected.java_ty;
         element_shape.dispatch = projected.dispatch;
         element_shape.view = projected.view;
-        element_shape.type_identity = projected.type_identity;
     } else if let JavaType::Named { name, args } = &element_ty
         && args.is_empty()
         && facts.object_safe_trait_fact_for_name(name) == Some(true)
@@ -1713,8 +1712,6 @@ pub(crate) fn optional_element_slot_shape_with_facts(
         element_shape.java_ty = element_ty;
         element_shape.dispatch = DispatchShape::BoxedDynTrait { trait_name };
         element_shape.view = ViewShape::DynTraitView;
-        element_shape.type_identity =
-            crate::slot_shape::TypeIdentity::from_java_type(element_shape.java_ty.clone());
     } else if let Some(HierarchyStrategy::DynTrait { trait_name }) =
         EffectiveFacts::new(facts).object_representation_override_strategy_for(&element_ty)
     {
@@ -1723,8 +1720,6 @@ pub(crate) fn optional_element_slot_shape_with_facts(
             trait_name: trait_name.clone(),
         };
         element_shape.view = ViewShape::DynTraitView;
-        element_shape.type_identity =
-            crate::slot_shape::TypeIdentity::from_java_type(element_shape.java_ty.clone());
     } else {
         element_shape.java_ty = element_ty;
     }

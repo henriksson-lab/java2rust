@@ -1048,7 +1048,7 @@ fn field_decl_name(name: &str, modifiers: &[Modifier]) -> String {
     {
         name.to_string()
     } else {
-        to_snake_case(name)
+        to_snake_case_unescaped(name)
     }
 }
 
@@ -1138,6 +1138,7 @@ fn parse_params_node(node: tree_sitter::Node, source: &str) -> Vec<Param> {
                 .unwrap_or_else(|| JavaType::Unknown(name.clone()));
             Some(Param {
                 name: to_snake_case(&name),
+                source_name: to_snake_case_unescaped(&name),
                 ty,
                 is_varargs,
             })
@@ -1197,6 +1198,7 @@ fn parse_param_text_fallback(param_text: &str) -> Option<Param> {
     }
     Some(Param {
         name: to_snake_case(name),
+        source_name: to_snake_case_unescaped(name),
         ty,
         is_varargs,
     })
@@ -1454,12 +1456,14 @@ fn attach_label_to_stmt(label: String, stmt: Stmt) -> Stmt {
         Stmt::EnhancedFor {
             var_type,
             var_name,
+            source_var_name,
             iterable,
             body,
             ..
         } => Stmt::EnhancedFor {
             var_type,
             var_name,
+            source_var_name,
             iterable,
             body,
             label: Some(label),
@@ -1550,6 +1554,7 @@ fn parse_resource_declaration_text(src: &str) -> Option<Stmt> {
     Some(Stmt::VarDecl {
         ty: parse_type(ty.trim()),
         name: to_snake_case(name.trim()),
+        source_name: to_snake_case_unescaped(name.trim()),
         initializer: Some(parse_expr(right.trim())),
     })
 }
@@ -1714,6 +1719,7 @@ fn parse_local_var_decls(node: tree_sitter::Node, source: &str) -> Vec<Stmt> {
             Stmt::VarDecl {
                 ty: type_with_declarator_array_dimensions(&ty, declaration_text, &name),
                 name: to_snake_case(&name),
+                source_name: to_snake_case_unescaped(&name),
                 initializer,
             }
         })
@@ -1883,6 +1889,10 @@ fn parse_enhanced_for_node(
         .as_deref()
         .map(to_snake_case)
         .unwrap_or_else(|| "item".to_string());
+    let source_var_name = raw_name
+        .as_deref()
+        .map(to_snake_case_unescaped)
+        .unwrap_or_else(|| "item".to_string());
     let base_var_type = node
         .child_by_field_name("type")
         .map(|node| parse_type_node(node, source))
@@ -1894,6 +1904,7 @@ fn parse_enhanced_for_node(
     Stmt::EnhancedFor {
         var_type,
         var_name,
+        source_var_name,
         iterable: node
             .child_by_field_name("value")
             .map(|node| parse_expr_node(node, source))
@@ -1950,7 +1961,7 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
         "parenthesized_expression" => first_named_non_comment_child(node)
             .map(|child| parse_expr_node(child, source))
             .unwrap_or_else(|| unsupported_expr_node(node, "empty parenthesized expression")),
-        "identifier" => Expr::Var(to_snake_case(text(node, source))),
+        "identifier" => Expr::Var(to_snake_case_unescaped(text(node, source))),
         "this" => Expr::This,
         "super" => Expr::Super,
         "decimal_integer_literal"
@@ -1984,7 +1995,7 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
             if let Some(object) = object {
                 Expr::FieldAccess(Box::new(object), field)
             } else {
-                Expr::Var(to_snake_case(&field))
+                Expr::Var(to_snake_case_unescaped(&field))
             }
         }
         "array_access" => {
@@ -2399,6 +2410,7 @@ fn parse_lambda_params(node: tree_sitter::Node, source: &str) -> Vec<LambdaParam
     match node.kind() {
         "identifier" => vec![LambdaParam {
             name: to_snake_case(text(node, source)),
+            source_name: to_snake_case_unescaped(text(node, source)),
             ty: None,
         }],
         "inferred_parameters" => named_children(node)
@@ -2406,6 +2418,7 @@ fn parse_lambda_params(node: tree_sitter::Node, source: &str) -> Vec<LambdaParam
             .filter(|child| child.kind() == "identifier")
             .map(|id| LambdaParam {
                 name: to_snake_case(text(id, source)),
+                source_name: to_snake_case_unescaped(text(id, source)),
                 ty: None,
             })
             .collect(),
@@ -2413,6 +2426,7 @@ fn parse_lambda_params(node: tree_sitter::Node, source: &str) -> Vec<LambdaParam
             .into_iter()
             .map(|param| LambdaParam {
                 name: param.name,
+                source_name: param.source_name,
                 ty: Some(param.ty),
             })
             .collect(),
@@ -3393,6 +3407,15 @@ fn split_top_level_commas(src: &str) -> Vec<&str> {
 }
 
 pub fn to_snake_case(name: &str) -> String {
+    let out = to_snake_case_unescaped(name);
+    if crate::java_naming::rust_keyword_needs_rename(&out) {
+        crate::java_naming::rename_non_rawable_rust_keyword(&out)
+    } else {
+        out
+    }
+}
+
+pub fn to_snake_case_unescaped(name: &str) -> String {
     let name = name.trim().trim_start_matches("this.");
     let mut out = String::new();
     for (idx, ch) in name.chars().enumerate() {
@@ -3407,10 +3430,7 @@ pub fn to_snake_case(name: &str) -> String {
             out.push(ch);
         }
     }
-    match out.as_str() {
-        "type" | "match" | "loop" | "crate" | "self" => format!("{out}_"),
-        _ => out,
-    }
+    out
 }
 
 pub fn type_suffix(ty: &JavaType, is_varargs: bool) -> String {

@@ -112,19 +112,10 @@ fn external_instance_field_type(
     facts: &FactSet,
 ) -> Option<JavaType> {
     let receiver_ty = crate::types::infer_expr_type(receiver, env);
-    let receiver_name = external_field_receiver_name(&receiver_ty)?;
+    let receiver_name = crate::stdlib::external_named_receiver_owner_key(&receiver_ty)?;
     external_field_fact_for_owner(&receiver_name, member, facts)
         .filter(|fact| fact.field_kind == crate::facts::ExternalFieldKind::InstanceField)
         .and_then(|fact| fact.field_type)
-}
-
-fn external_field_receiver_name(receiver_ty: &JavaType) -> Option<String> {
-    match receiver_ty {
-        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
-            Some(crate::stdlib::canonical_external_receiver_type_key(name))
-        }
-        _ => None,
-    }
 }
 
 fn receiver_is_static_type_name(receiver: &Expr) -> bool {
@@ -240,10 +231,10 @@ fn external_static_constant_rust_owner(
     if let Some(owner) =
         external_field_fact_for_owner(&receiver_name, member, facts).and_then(|fact| {
             external_crate_mapped_type_owner(&fact.field.type_name, facts).or_else(|| {
-                external_crate_mapped_type_owner(
-                    &fact.field.type_name,
-                    &fact_set_for_builtin_pack_lookup(),
-                )
+                if facts.disable_builtin_external_packs {
+                    return None;
+                }
+                builtin_external_crate_mapped_type_owner(&fact.field.type_name)
             })
         })
     {
@@ -269,10 +260,11 @@ pub fn external_field_fact_for_owner(
     field: &str,
     facts: &FactSet,
 ) -> Option<ExternalFieldFact> {
-    facts
-        .external_field_for(owner, field)
-        .cloned()
-        .or_else(|| crate::external_packs::external_field_for(owner, field))
+    facts.external_field_for(owner, field).cloned().or_else(|| {
+        (!facts.disable_builtin_external_packs)
+            .then(|| crate::external_packs::external_field_for(owner, field))
+            .flatten()
+    })
 }
 
 pub fn external_field_type_for_owner(
@@ -292,20 +284,41 @@ pub fn external_field_type_for_owner(
 }
 
 fn external_crate_mapped_type_owner(type_name: &str, facts: &FactSet) -> Option<String> {
-    if !external_type_is_rust_crate_mapped(type_name, facts) {
-        return None;
-    }
-    match crate::slot_render::rust_type_for_java_type_with_facts(
-        &JavaType::Unknown(type_name.to_string()),
-        facts,
-    ) {
-        RustType::Raw(owner) | RustType::Named(owner) if owner.contains("::") => Some(owner),
-        _ => None,
-    }
+    let pack = facts.external_library_pack_for_type(type_name)?;
+    external_crate_mapped_type_owner_from_pack(
+        type_name,
+        facts.external_crate_rust_type_name_for(type_name),
+        pack.rust_target.as_deref(),
+        pack.mode,
+    )
 }
 
-fn fact_set_for_builtin_pack_lookup() -> FactSet {
-    crate::external_packs::builtin_external_library_packs()
+fn builtin_external_crate_mapped_type_owner(type_name: &str) -> Option<String> {
+    let pack = crate::external_packs::external_library_pack_for_type(type_name)?;
+    external_crate_mapped_type_owner_from_pack(
+        type_name,
+        None,
+        pack.rust_target.as_deref(),
+        pack.mode,
+    )
+}
+
+fn external_crate_mapped_type_owner_from_pack(
+    type_name: &str,
+    rust_type_name: Option<&str>,
+    rust_target: Option<&str>,
+    mode: ExternalLibraryMode,
+) -> Option<String> {
+    if mode != ExternalLibraryMode::RustCrateMapping {
+        return None;
+    }
+    let crate_name = rust_target?;
+    let rust_type_name = rust_type_name.map(str::to_string).unwrap_or_else(|| {
+        crate::slot_render::rust_name_for_java_named_type(
+            type_name.rsplit('.').next().unwrap_or(type_name),
+        )
+    });
+    Some(format!("{crate_name}::{rust_type_name}"))
 }
 
 fn external_type_is_rust_crate_mapped(type_name: &str, facts: &FactSet) -> bool {
@@ -315,8 +328,9 @@ fn external_type_is_rust_crate_mapped(type_name: &str, facts: &FactSet) -> bool 
     {
         return true;
     }
-    crate::external_packs::external_library_pack_for_type(type_name)
-        .is_some_and(|pack| pack.mode == ExternalLibraryMode::RustCrateMapping)
+    !facts.disable_builtin_external_packs
+        && crate::external_packs::external_library_pack_for_type(type_name)
+            .is_some_and(|pack| pack.mode == ExternalLibraryMode::RustCrateMapping)
 }
 
 fn java_type_is_rust_crate_mapped(java_ty: &JavaType, facts: &FactSet) -> bool {

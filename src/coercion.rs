@@ -13,6 +13,7 @@ use crate::conversion_plan::{
 use crate::emit;
 use crate::facts::FactSet;
 use crate::java_ir::{JavaType, Literal, PrimitiveType};
+use crate::java_naming::{RustKeywordEscape, rename_non_rawable_rust_keyword, rust_keyword_escape};
 use crate::rust_ir::{
     RustClosureBody, RustClosureParam, RustExpr, RustExprShape, RustMatchArm, RustStmt, RustType,
 };
@@ -2412,54 +2413,11 @@ fn rust_field_projection_ident(name: &str) -> String {
     if name.starts_with("r#") || name.contains("::") || name.is_empty() {
         return name.to_string();
     }
-    if rust_projection_ident_needs_raw(name) {
-        format!("r#{name}")
-    } else {
-        name.to_string()
+    match rust_keyword_escape(name) {
+        Some(RustKeywordEscape::Raw) => format!("r#{name}"),
+        Some(RustKeywordEscape::Rename) => rename_non_rawable_rust_keyword(name),
+        None => name.to_string(),
     }
-}
-
-fn rust_projection_ident_needs_raw(name: &str) -> bool {
-    matches!(
-        name,
-        "as" | "async"
-            | "await"
-            | "break"
-            | "const"
-            | "continue"
-            | "crate"
-            | "dyn"
-            | "else"
-            | "enum"
-            | "extern"
-            | "false"
-            | "fn"
-            | "for"
-            | "if"
-            | "impl"
-            | "in"
-            | "let"
-            | "loop"
-            | "match"
-            | "mod"
-            | "move"
-            | "mut"
-            | "pub"
-            | "ref"
-            | "return"
-            | "self"
-            | "Self"
-            | "static"
-            | "struct"
-            | "super"
-            | "trait"
-            | "true"
-            | "type"
-            | "unsafe"
-            | "use"
-            | "where"
-            | "while"
-    )
 }
 
 pub fn literal_slot_plan(literal: &Literal, slot: &Slot) -> Option<LiteralSlotPlan> {
@@ -9138,7 +9096,8 @@ fn apply_borrowed_element_slot_adapter(
 
 fn recover_borrowed_element_slot_adapter_input(expr: RustExpr) -> RustExpr {
     match expr {
-        RustExpr::Raw(rendered) => recover_parseable_rendered_operand_projection(&rendered),
+        RustExpr::Raw(rendered) => recover_rendered_method_receiver_expr(&rendered)
+            .unwrap_or_else(|| RustExpr::Raw(rendered)),
         other => other,
     }
 }
@@ -10386,6 +10345,11 @@ fn borrowed_collect_clone_compat_projection(
 ) -> Option<RustExpr> {
     let recovered = match expr.unshaped() {
         RustExpr::Raw(rendered) => {
+            if let Some(projected) =
+                raw_borrowed_collect_clone_compat_projection(rendered, collect_method, policy)
+            {
+                return Some(projected);
+            }
             let recovered = rendered_projection_or_raw_leaf(rendered);
             if matches!(recovered.unshaped(), RustExpr::Raw(_))
                 || emit::emit_expr(&recovered) != rendered.trim()
@@ -10403,13 +10367,45 @@ fn borrowed_collect_clone_compat_projection(
         .map(|iterator| borrowed_collect_clone_projection(iterator, collect_method, policy))
 }
 
+fn raw_borrowed_collect_clone_compat_projection(
+    rendered: &str,
+    collect_method: &str,
+    policy: &CloneRecoveryPolicy,
+) -> Option<RustExpr> {
+    let rendered = rendered.trim();
+    let cloned_collect_suffix = format!(".cloned().{collect_method}()");
+    if let Some(iterator_rendered) = rendered.strip_suffix(&cloned_collect_suffix) {
+        let iterator = rendered_projection_or_raw_leaf(iterator_rendered.trim());
+        return Some(RustExpr::shaped(
+            RustExprShape::OwnedRecovery,
+            zero_arg_method_projection(
+                zero_arg_method_projection(iterator, "cloned"),
+                collect_method,
+            ),
+        ));
+    }
+
+    let collect_suffix = format!(".{collect_method}()");
+    rendered
+        .strip_suffix(&collect_suffix)
+        .map(str::trim)
+        .filter(|iterator_rendered| !iterator_rendered.is_empty())
+        .map(|iterator_rendered| {
+            borrowed_collect_clone_projection(
+                rendered_projection_or_raw_leaf(iterator_rendered),
+                collect_method,
+                policy,
+            )
+        })
+}
+
 fn rust_expr_is_cloned_collect_call(expr: &RustExpr, collect_method: &str) -> bool {
     match expr.unshaped() {
         RustExpr::MethodCall {
             receiver,
             method,
             args,
-        } if method == collect_method && args.is_empty() => {
+        } if rust_method_matches_collect_method(method, collect_method) && args.is_empty() => {
             matches!(
                 receiver.unshaped(),
                 RustExpr::MethodCall { method, args, .. }
@@ -10426,9 +10422,15 @@ fn rust_expr_collect_call_receiver(expr: &RustExpr, collect_method: &str) -> Opt
             receiver,
             method,
             args,
-        } if method == collect_method && args.is_empty() => Some((**receiver).clone()),
+        } if rust_method_matches_collect_method(method, collect_method) && args.is_empty() => {
+            Some((**receiver).clone())
+        }
         _ => None,
     }
+}
+
+fn rust_method_matches_collect_method(method: &str, expected: &str) -> bool {
+    method == expected || method.split_whitespace().collect::<String>() == expected
 }
 
 impl BorrowedElementRecoveryPolicy {
@@ -12934,6 +12936,10 @@ mod tests {
                 "r#type".to_string(),
             )
         );
+        let self_field = constructor_self_field_projection("self");
+        assert_eq!(emit::emit_expr(&self_field), "__java_self.self__");
+        let crate_field = constructor_self_field_projection("crate");
+        assert_eq!(emit::emit_expr(&crate_field), "__java_self.crate__");
         assert!(rust_expr_mentions_constructor_self_temporary(
             &RustExpr::Field(
                 Box::new(RustExpr::Var("__java_self".to_string())),

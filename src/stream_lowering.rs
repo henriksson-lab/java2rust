@@ -175,6 +175,9 @@ impl<'a> StreamRenderContext<'a> {
             );
         }
         if locals.iter().any(|local| *local == name) {
+            if let Some(access_name) = self.env.and_then(|env| env.binding_access_name(name)) {
+                return RustExpr::Var(access_name.to_string());
+            }
             return RustExpr::Var(crate::parser::to_snake_case(name));
         }
         self.env
@@ -221,6 +224,7 @@ fn emit_stream_lambda_shared_native_call(
     args: &[Expr],
     resolved: Option<&crate::java_ir::ResolvedCall>,
     param: &str,
+    param_rust: &str,
     value: StreamLambdaValue,
     locals: &[&str],
     ctx: StreamRenderContext<'_>,
@@ -293,6 +297,7 @@ fn emit_stream_lambda_shared_native_call(
     let lowered_receiver = emit_stream_lambda_receiver_with_locals_expr(
         receiver,
         param,
+        param_rust,
         value,
         locals,
         ctx,
@@ -304,6 +309,7 @@ fn emit_stream_lambda_shared_native_call(
         args,
         resolved,
         param,
+        param_rust,
         value,
         locals,
         ctx,
@@ -356,6 +362,7 @@ pub fn emit_stream_lambda_body_expr(
     emit_stream_lambda_body_with_locals_prec(
         expr,
         param,
+        param,
         value,
         &[param],
         StreamRenderContext::empty(),
@@ -383,13 +390,24 @@ fn emit_stream_lambda_body_with_locals(
     ctx: StreamRenderContext<'_>,
     param_shape: Option<&RustSlotShape>,
 ) -> Option<String> {
-    emit_stream_lambda_body_with_locals_prec(expr, param, value, locals, ctx, param_shape, 0, false)
-        .map(|lowered| lowered.rendered())
+    emit_stream_lambda_body_with_locals_prec(
+        expr,
+        param,
+        param,
+        value,
+        locals,
+        ctx,
+        param_shape,
+        0,
+        false,
+    )
+    .map(|lowered| lowered.rendered())
 }
 
 fn emit_stream_lambda_body_with_locals_prec(
     expr: &Expr,
     param: &str,
+    param_rust: &str,
     value: StreamLambdaValue,
     locals: &[&str],
     ctx: StreamRenderContext<'_>,
@@ -401,7 +419,7 @@ fn emit_stream_lambda_body_with_locals_prec(
         Expr::Literal(lit) => stream_lambda_expr(RustExpr::Literal(literal_to_rust(lit)), 12),
         Expr::Raw(raw) => stream_lambda_expr(stream_raw_expr(raw), 12),
         Expr::Var(name) if name == param => {
-            stream_lambda_expr(stream_lambda_value_expr(value, param), 12)
+            stream_lambda_expr(stream_lambda_value_expr(value, param_rust), 12)
         }
         Expr::Var(name) => stream_lambda_expr(ctx.bare_name_expr(name, locals), 12),
         Expr::Binary {
@@ -415,6 +433,7 @@ fn emit_stream_lambda_body_with_locals_prec(
             let left = emit_stream_lambda_body_with_locals_prec(
                 left,
                 param,
+                param_rust,
                 value,
                 locals,
                 ctx,
@@ -425,6 +444,7 @@ fn emit_stream_lambda_body_with_locals_prec(
             let right = emit_stream_lambda_body_with_locals_prec(
                 right,
                 param,
+                param_rust,
                 value,
                 locals,
                 ctx,
@@ -439,6 +459,7 @@ fn emit_stream_lambda_body_with_locals_prec(
             let expr = emit_stream_lambda_body_with_locals_prec(
                 expr,
                 param,
+                param_rust,
                 value,
                 locals,
                 ctx,
@@ -453,6 +474,7 @@ fn emit_stream_lambda_body_with_locals_prec(
                 receiver,
                 field,
                 param,
+                param_rust,
                 value,
                 locals,
                 ctx,
@@ -469,6 +491,7 @@ fn emit_stream_lambda_body_with_locals_prec(
                 let receiver = emit_stream_lambda_receiver_with_locals_expr(
                     receiver,
                     param,
+                    param_rust,
                     value,
                     locals,
                     ctx,
@@ -495,6 +518,7 @@ fn emit_stream_lambda_body_with_locals_prec(
             let receiver = emit_stream_lambda_receiver_with_locals_expr(
                 receiver,
                 param,
+                param_rust,
                 value,
                 locals,
                 ctx,
@@ -509,6 +533,7 @@ fn emit_stream_lambda_body_with_locals_prec(
             let array = emit_stream_lambda_receiver_with_locals_expr(
                 array,
                 param,
+                param_rust,
                 value,
                 locals,
                 ctx,
@@ -517,6 +542,7 @@ fn emit_stream_lambda_body_with_locals_prec(
             let index = emit_stream_lambda_body_with_locals_prec(
                 index,
                 param,
+                param_rust,
                 value,
                 locals,
                 ctx,
@@ -546,6 +572,7 @@ fn emit_stream_lambda_body_with_locals_prec(
                 args,
                 resolved.as_ref(),
                 param,
+                param_rust,
                 value,
                 locals,
                 ctx,
@@ -567,6 +594,7 @@ fn emit_stream_lambda_body_with_locals_prec(
                     args,
                     Some(resolved),
                     param,
+                    param_rust,
                     value,
                     locals,
                     ctx,
@@ -596,6 +624,7 @@ fn emit_stream_lambda_body_with_locals_prec(
                     args,
                     None,
                     param,
+                    param_rust,
                     value,
                     locals,
                     ctx,
@@ -621,6 +650,7 @@ fn emit_stream_lambda_body_with_locals_prec(
                 args,
                 resolved.as_ref(),
                 param,
+                param_rust,
                 value,
                 locals,
                 ctx,
@@ -632,6 +662,7 @@ fn emit_stream_lambda_body_with_locals_prec(
             let receiver = emit_stream_lambda_receiver_with_locals_expr(
                 receiver,
                 param,
+                param_rust,
                 value,
                 locals,
                 ctx,
@@ -650,6 +681,7 @@ fn emit_stream_lambda_body_with_locals_prec(
                 args,
                 resolved.as_ref(),
                 param,
+                param_rust,
                 value,
                 locals,
                 ctx,
@@ -708,6 +740,7 @@ fn emit_stream_lambda_body_with_locals_prec(
             let lowered_args = emit_stream_lambda_args_with_locals_prec(
                 args,
                 param,
+                param_rust,
                 value,
                 locals,
                 ctx,
@@ -741,6 +774,7 @@ fn emit_stream_lambda_member_access_through_plan_expr(
     receiver: &Expr,
     field: &str,
     param: &str,
+    param_rust: &str,
     value: StreamLambdaValue,
     locals: &[&str],
     ctx: StreamRenderContext<'_>,
@@ -775,6 +809,7 @@ fn emit_stream_lambda_member_access_through_plan_expr(
     let lowered_receiver = emit_stream_lambda_receiver_with_locals_expr(
         receiver,
         param,
+        param_rust,
         value,
         locals,
         ctx,
@@ -890,7 +925,7 @@ fn apply_stream_ops_structured(
                 } else {
                     output_shape.clone()
                 };
-                let param = render_stream_lambda_param(&lambda.param_name, &param_shape, ctx);
+                let param = render_stream_lambda_param(&lambda.rust_param_name, &param_shape, ctx);
                 expr = stream_map_op_projection_with_param(
                     expr,
                     param,
@@ -908,12 +943,14 @@ fn apply_stream_ops_structured(
                 let (prefix_stmts, _, _) = emit_stream_lambda_prefix_stmts_and_locals(
                     plan.lambda.body,
                     &plan.lambda.param_name,
+                    &plan.lambda.rust_param_name,
                     ctx,
                     Some(&param_shape),
                 )?;
                 let source = emit_stream_lambda_receiver_expr(
                     plan.source,
                     &plan.lambda.param_name,
+                    &plan.lambda.rust_param_name,
                     StreamLambdaValue::BorrowedItem,
                     ctx,
                 )?;
@@ -923,11 +960,11 @@ fn apply_stream_ops_structured(
                     sequence_iteration_projection(plan.iteration),
                 );
                 expr = if prefix_stmts.is_empty() {
-                    stream_flat_map_op_projection(expr, &plan.lambda.param_name, iter_source)
+                    stream_flat_map_op_projection(expr, &plan.lambda.rust_param_name, iter_source)
                 } else {
                     stream_prefixed_flat_map_op_projection(
                         expr,
-                        &plan.lambda.param_name,
+                        &plan.lambda.rust_param_name,
                         prefix_stmts,
                         iter_source,
                     )
@@ -939,16 +976,17 @@ fn apply_stream_ops_structured(
                 let (prefix_stmts, _, _) = emit_stream_lambda_prefix_stmts_and_locals(
                     lambda.body,
                     &lambda.param_name,
+                    &lambda.rust_param_name,
                     ctx,
                     Some(&param_shape),
                 )?;
                 let nested = render_stream_sub_pipeline_expr(pipeline, lambda, ctx)?;
                 expr = if prefix_stmts.is_empty() {
-                    stream_flat_map_op_projection(expr, &lambda.param_name, nested)
+                    stream_flat_map_op_projection(expr, &lambda.rust_param_name, nested)
                 } else {
                     stream_prefixed_flat_map_op_projection(
                         expr,
-                        &lambda.param_name,
+                        &lambda.rust_param_name,
                         prefix_stmts,
                         nested,
                     )
@@ -973,6 +1011,7 @@ fn render_stream_terminal_expr(
             let identity = emit_stream_lambda_body_with_locals_prec(
                 reduce.identity,
                 "__java_unused_reduce_item",
+                "__java_unused_reduce_item",
                 StreamLambdaValue::OwnedItem,
                 &[],
                 ctx,
@@ -983,10 +1022,13 @@ fn render_stream_terminal_expr(
             .expr;
             let left = reduce.accumulator.left_param_name.as_str();
             let right = reduce.accumulator.right_param_name.as_str();
+            let left_rust = reduce.accumulator.left_rust_param_name.as_str();
+            let right_rust = reduce.accumulator.right_rust_param_name.as_str();
             let locals = [left, right];
             let body = emit_stream_lambda_body_with_locals_prec(
                 reduce.accumulator.body.return_expr()?,
                 left,
+                left_rust,
                 StreamLambdaValue::OwnedItem,
                 &locals,
                 ctx,
@@ -996,7 +1038,7 @@ fn render_stream_terminal_expr(
             )?
             .expr;
             Some(stream_reduce_terminal_projection(
-                receiver, identity, left, right, body,
+                receiver, identity, left_rust, right_rust, body,
             ))
         }
         StreamTerminal::CollectToMap { key, value } => {
@@ -1007,7 +1049,7 @@ fn render_stream_terminal_expr(
             };
             Some(stream_collect_to_map_projection(
                 receiver,
-                &key.param_name,
+                &key.rust_param_name,
                 emit_stream_collect_to_map_lambda_body_expr(
                     key,
                     plan,
@@ -1047,7 +1089,7 @@ fn render_stream_terminal_expr(
             Some(stream_match_terminal_projection(
                 receiver,
                 terminal_method,
-                &lambda.param_name,
+                &lambda.rust_param_name,
                 emit_stream_lambda_closure_body_expr(lambda, value, ctx, Some(item_shape))?,
             ))
         }
@@ -1123,6 +1165,7 @@ fn stream_source_range_projection(
     let from = emit_stream_lambda_body_with_locals_prec(
         from,
         "__java_unused_stream_bound",
+        "__java_unused_stream_bound",
         StreamLambdaValue::OwnedItem,
         &[],
         ctx,
@@ -1136,6 +1179,7 @@ fn stream_source_range_projection(
     });
     let to = emit_stream_lambda_body_with_locals_prec(
         to,
+        "__java_unused_stream_bound",
         "__java_unused_stream_bound",
         StreamLambdaValue::OwnedItem,
         &[],
@@ -1267,6 +1311,7 @@ fn render_stream_sub_pipeline_expr(
     let source = emit_stream_lambda_receiver_expr(
         pipeline.source.expr,
         &lambda.param_name,
+        &lambda.rust_param_name,
         StreamLambdaValue::BorrowedItem,
         ctx,
     )?;
@@ -1361,6 +1406,7 @@ fn stream_join_expr_delimiter_projection(
     let delimiter = emit_stream_lambda_body_with_locals_prec(
         expr,
         "__java_unused_stream_join_param",
+        "__java_unused_stream_join_param",
         StreamLambdaValue::OwnedItem,
         &["__java_unused_stream_join_param"],
         ctx,
@@ -1404,18 +1450,19 @@ fn emit_stream_collect_to_map_lambda_body_expr(
     let return_expr = lambda.body.return_expr()?;
     if matches!(return_expr, Expr::Var(name) if name == &lambda.param_name) {
         if matches!(value, StreamLambdaValue::OwnedItem) {
-            return Some(RustExpr::Var(lambda.param_name.to_string()));
+            return Some(RustExpr::Var(lambda.rust_param_name.to_string()));
         }
         return Some(stream_identity_value_projection(
-            &lambda.param_name,
+            &lambda.rust_param_name,
             &plan.source_element.shape,
         ));
     }
     emit_stream_lambda_body_with_locals_prec(
         return_expr,
         &lambda.param_name,
+        &lambda.rust_param_name,
         value,
-        &[&lambda.param_name],
+        &[lambda.param_name.as_str()],
         ctx,
         param_shape,
         0,
@@ -1442,6 +1489,7 @@ fn emit_stream_lambda_closure_body_expr(
     let (prefix_stmts, locals, scoped_env) = emit_stream_lambda_prefix_stmts_and_locals(
         lambda.body,
         &lambda.param_name,
+        &lambda.rust_param_name,
         ctx,
         param_shape,
     )?;
@@ -1452,6 +1500,7 @@ fn emit_stream_lambda_closure_body_expr(
     let body = emit_stream_lambda_body_with_locals_prec(
         return_expr,
         &lambda.param_name,
+        &lambda.rust_param_name,
         value,
         &locals,
         body_ctx,
@@ -1695,7 +1744,32 @@ fn emit_nullable_stream_lambda_closure_body_expr(
     let final_expr = lambda.body.return_expr()?;
     let mutated = stream_lambda_mutated_locals(block, ctx);
     let mut locals = vec![lambda.param_name.as_str()];
-    let mut scoped_env = stream_lambda_scoped_env(ctx, &lambda.param_name, param_shape);
+    let source_names = block
+        .statements
+        .iter()
+        .take(block.statements.len().saturating_sub(1))
+        .filter_map(|stmt| match stmt {
+            Stmt::VarDecl { source_name, .. } => Some(source_name.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let access_names = crate::java_naming::source_binding_rust_names(
+        std::iter::once(lambda.param_name.as_str()).chain(source_names.iter().copied()),
+    );
+    let mut scoped_env = stream_lambda_scoped_env(
+        ctx,
+        &lambda.param_name,
+        &lambda.rust_param_name,
+        param_shape,
+    );
+    if let Some(env) = scoped_env.as_mut() {
+        env.insert_binding_access_name(lambda.param_name.clone(), lambda.rust_param_name.clone());
+        for source_name in &source_names {
+            if let Some(access_name) = access_names.get(*source_name) {
+                env.insert_binding_access_name((*source_name).to_string(), access_name.clone());
+            }
+        }
+    }
     let mut before_guard = Vec::new();
     for stmt in &block.statements[..guard_index] {
         let stmt_ctx = scoped_env
@@ -1705,15 +1779,44 @@ fn emit_nullable_stream_lambda_closure_body_expr(
         before_guard.push(emit_stream_lambda_stmt_structured(
             stmt,
             &lambda.param_name,
+            &lambda.rust_param_name,
             &locals,
             stmt_ctx,
             &mutated,
             param_shape,
         )?);
-        if let Stmt::VarDecl { ty, name, .. } = stmt {
-            locals.push(name);
+        if let Stmt::VarDecl {
+            ty,
+            name,
+            source_name,
+            ..
+        } = stmt
+        {
+            locals.push(source_name);
+            let access_name = access_names
+                .get(source_name.as_str())
+                .cloned()
+                .unwrap_or_else(|| name.clone());
             if let Some(env) = scoped_env.as_mut() {
-                env.insert_local(name.clone(), ty.clone());
+                let shape = RustSlotShape::for_storage(ty.clone());
+                env.insert_local_shape_with_access_name_and_java_type(
+                    source_name.clone(),
+                    access_name.clone(),
+                    shape.clone(),
+                    ty.clone(),
+                );
+                if name != source_name {
+                    if env.binding_access_name(name).is_some() {
+                        env.insert_local_shape_with_java_type(name.clone(), shape, ty.clone());
+                    } else {
+                        env.insert_local_shape_with_access_name_and_java_type(
+                            name.clone(),
+                            access_name,
+                            shape,
+                            ty.clone(),
+                        );
+                    }
+                }
             }
         }
     }
@@ -1726,15 +1829,44 @@ fn emit_nullable_stream_lambda_closure_body_expr(
         else_body.push(emit_stream_lambda_stmt_structured(
             stmt,
             &lambda.param_name,
+            &lambda.rust_param_name,
             &locals,
             stmt_ctx,
             &mutated,
             param_shape,
         )?);
-        if let Stmt::VarDecl { ty, name, .. } = stmt {
-            locals.push(name);
+        if let Stmt::VarDecl {
+            ty,
+            name,
+            source_name,
+            ..
+        } = stmt
+        {
+            locals.push(source_name);
+            let access_name = access_names
+                .get(source_name.as_str())
+                .cloned()
+                .unwrap_or_else(|| name.clone());
             if let Some(env) = scoped_env.as_mut() {
-                env.insert_local(name.clone(), ty.clone());
+                let shape = RustSlotShape::for_storage(ty.clone());
+                env.insert_local_shape_with_access_name_and_java_type(
+                    source_name.clone(),
+                    access_name.clone(),
+                    shape.clone(),
+                    ty.clone(),
+                );
+                if name != source_name {
+                    if env.binding_access_name(name).is_some() {
+                        env.insert_local_shape_with_java_type(name.clone(), shape, ty.clone());
+                    } else {
+                        env.insert_local_shape_with_access_name_and_java_type(
+                            name.clone(),
+                            access_name,
+                            shape,
+                            ty.clone(),
+                        );
+                    }
+                }
             }
         }
     }
@@ -1745,6 +1877,7 @@ fn emit_nullable_stream_lambda_closure_body_expr(
     let condition = emit_stream_lambda_body_with_locals_prec(
         condition,
         &lambda.param_name,
+        &lambda.rust_param_name,
         value,
         &locals,
         body_ctx,
@@ -1756,6 +1889,7 @@ fn emit_nullable_stream_lambda_closure_body_expr(
     let final_expr = emit_stream_lambda_body_with_locals_prec(
         final_expr,
         &lambda.param_name,
+        &lambda.rust_param_name,
         value,
         &locals,
         body_ctx,
@@ -1800,11 +1934,19 @@ fn first_null_return_guard(block: &crate::java_ir::Block) -> Option<(usize, &Exp
 fn stream_lambda_scoped_env(
     ctx: StreamRenderContext<'_>,
     param: &str,
+    param_rust: &str,
     param_shape: Option<&RustSlotShape>,
 ) -> Option<ShapeEnv> {
     let mut env = ctx.env?.clone();
     if let Some(param_shape) = param_shape {
-        env.insert_local_shape(param.to_string(), param_shape.clone());
+        env.insert_param_shape_with_access_name_and_java_type(
+            param.to_string(),
+            param_rust.to_string(),
+            param_shape.clone(),
+            param_shape.java_ty.clone(),
+        );
+    } else {
+        env.insert_binding_access_name(param.to_string(), param_rust.to_string());
     }
     Some(env)
 }
@@ -1812,12 +1954,32 @@ fn stream_lambda_scoped_env(
 fn emit_stream_lambda_prefix_stmts_and_locals<'a>(
     body: StreamLambdaBody<'a>,
     param: &'a str,
+    param_rust: &str,
     ctx: StreamRenderContext<'_>,
     param_shape: Option<&RustSlotShape>,
 ) -> Option<(Vec<RustStmt>, Vec<&'a str>, Option<ShapeEnv>)> {
     let mut out = Vec::new();
     let mut locals = vec![param];
-    let mut scoped_env = stream_lambda_scoped_env(ctx, param, param_shape);
+    let mut scoped_env = stream_lambda_scoped_env(ctx, param, param_rust, param_shape);
+    let source_names = body
+        .prefix_statements()
+        .iter()
+        .filter_map(|stmt| match stmt {
+            Stmt::VarDecl { source_name, .. } => Some(source_name.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let access_names = crate::java_naming::source_binding_rust_names(
+        std::iter::once(param).chain(source_names.iter().copied()),
+    );
+    if let Some(env) = scoped_env.as_mut() {
+        env.insert_binding_access_name(param.to_string(), param_rust.to_string());
+        for source_name in &source_names {
+            if let Some(access_name) = access_names.get(*source_name) {
+                env.insert_binding_access_name((*source_name).to_string(), access_name.clone());
+            }
+        }
+    }
     let mutated = match body {
         StreamLambdaBody::Expr(_) => HashSet::new(),
         StreamLambdaBody::Block(block) => stream_lambda_mutated_locals(block, ctx),
@@ -1831,15 +1993,44 @@ fn emit_stream_lambda_prefix_stmts_and_locals<'a>(
         out.push(emit_stream_lambda_stmt_structured(
             stmt,
             param,
+            param_rust,
             &locals,
             stmt_ctx,
             &mutated,
             param_shape,
         )?);
-        if let Stmt::VarDecl { ty, name, .. } = stmt {
-            locals.push(name);
+        if let Stmt::VarDecl {
+            ty,
+            name,
+            source_name,
+            ..
+        } = stmt
+        {
+            locals.push(source_name);
+            let access_name = access_names
+                .get(source_name.as_str())
+                .cloned()
+                .unwrap_or_else(|| name.clone());
             if let Some(env) = scoped_env.as_mut() {
-                env.insert_local(name.clone(), ty.clone());
+                let shape = RustSlotShape::for_storage(ty.clone());
+                env.insert_local_shape_with_access_name_and_java_type(
+                    source_name.clone(),
+                    access_name.clone(),
+                    shape.clone(),
+                    ty.clone(),
+                );
+                if name != source_name {
+                    if env.binding_access_name(name).is_some() {
+                        env.insert_local_shape_with_java_type(name.clone(), shape, ty.clone());
+                    } else {
+                        env.insert_local_shape_with_access_name_and_java_type(
+                            name.clone(),
+                            access_name,
+                            shape,
+                            ty.clone(),
+                        );
+                    }
+                }
             }
         }
     }
@@ -1849,6 +2040,7 @@ fn emit_stream_lambda_prefix_stmts_and_locals<'a>(
 fn emit_stream_lambda_stmt_structured(
     stmt: &Stmt,
     param: &str,
+    param_rust: &str,
     locals: &[&str],
     ctx: StreamRenderContext<'_>,
     mutated: &HashSet<String>,
@@ -1858,12 +2050,20 @@ fn emit_stream_lambda_stmt_structured(
         Stmt::VarDecl {
             ty,
             name,
+            source_name,
             initializer,
+            ..
         } => {
-            let rust_name = crate::parser::to_snake_case(name);
+            let rust_name = ctx
+                .env
+                .and_then(|env| env.binding_access_name(source_name))
+                .map(str::to_string)
+                .unwrap_or_else(|| name.clone());
             Some(RustStmt::Let {
-                mutable: mutated.contains(name) || mutated.contains(&rust_name),
-                name: rust_name,
+                mutable: mutated.contains(name)
+                    || mutated.contains(source_name)
+                    || mutated.contains(&rust_name),
+                name: rust_name.clone(),
                 ty: None,
                 value: Some(
                     initializer
@@ -1873,6 +2073,7 @@ fn emit_stream_lambda_stmt_structured(
                                 ty,
                                 expr,
                                 param,
+                                param_rust,
                                 locals,
                                 ctx,
                                 param_shape,
@@ -1891,6 +2092,7 @@ fn emit_stream_lambda_stmt_structured(
             emit_stream_lambda_body_with_locals_prec(
                 expr,
                 param,
+                param_rust,
                 StreamLambdaValue::BorrowedItem,
                 locals,
                 ctx,
@@ -1904,6 +2106,7 @@ fn emit_stream_lambda_stmt_structured(
             target: emit_stream_lambda_body_with_locals_prec(
                 target,
                 param,
+                param_rust,
                 StreamLambdaValue::BorrowedItem,
                 locals,
                 ctx,
@@ -1915,6 +2118,7 @@ fn emit_stream_lambda_stmt_structured(
             value: emit_stream_lambda_body_with_locals_prec(
                 value,
                 param,
+                param_rust,
                 StreamLambdaValue::BorrowedItem,
                 locals,
                 ctx,
@@ -1932,6 +2136,7 @@ fn emit_stream_lambda_local_initializer_expr(
     ty: &JavaType,
     expr: &Expr,
     param: &str,
+    param_rust: &str,
     locals: &[&str],
     ctx: StreamRenderContext<'_>,
     param_shape: Option<&RustSlotShape>,
@@ -1939,6 +2144,7 @@ fn emit_stream_lambda_local_initializer_expr(
     let lowered = emit_stream_lambda_body_with_locals_prec(
         expr,
         param,
+        param_rust,
         StreamLambdaValue::BorrowedItem,
         locals,
         ctx,
@@ -2230,6 +2436,7 @@ fn collect_stream_assignment_target(
 fn emit_stream_lambda_args_with_locals_prec(
     args: &[Expr],
     param: &str,
+    param_rust: &str,
     value: StreamLambdaValue,
     locals: &[&str],
     ctx: StreamRenderContext<'_>,
@@ -2240,6 +2447,7 @@ fn emit_stream_lambda_args_with_locals_prec(
             emit_stream_lambda_body_with_locals_prec(
                 arg,
                 param,
+                param_rust,
                 value,
                 locals,
                 ctx,
@@ -2257,13 +2465,21 @@ fn emit_stream_lambda_call_args_for_receiver_exprs(
     args: &[Expr],
     resolved: Option<&crate::java_ir::ResolvedCall>,
     param: &str,
+    param_rust: &str,
     value: StreamLambdaValue,
     locals: &[&str],
     ctx: StreamRenderContext<'_>,
     param_shape: Option<&RustSlotShape>,
 ) -> Option<Vec<StreamLambdaRenderedExpr>> {
-    let default_args =
-        emit_stream_lambda_args_with_locals_prec(args, param, value, locals, ctx, param_shape)?;
+    let default_args = emit_stream_lambda_args_with_locals_prec(
+        args,
+        param,
+        param_rust,
+        value,
+        locals,
+        ctx,
+        param_shape,
+    )?;
     let Some(facts) = ctx.facts else {
         return Some(default_args);
     };
@@ -2373,13 +2589,21 @@ fn emit_stream_lambda_call_args_for_resolved_exprs(
     args: &[Expr],
     resolved: Option<&crate::java_ir::ResolvedCall>,
     param: &str,
+    param_rust: &str,
     value: StreamLambdaValue,
     locals: &[&str],
     ctx: StreamRenderContext<'_>,
     param_shape: Option<&RustSlotShape>,
 ) -> Option<Vec<StreamLambdaRenderedExpr>> {
-    let default_args =
-        emit_stream_lambda_args_with_locals_prec(args, param, value, locals, ctx, param_shape)?;
+    let default_args = emit_stream_lambda_args_with_locals_prec(
+        args,
+        param,
+        param_rust,
+        value,
+        locals,
+        ctx,
+        param_shape,
+    )?;
     let source_signature =
         stream_receiverless_call_signature(name, args.len(), args, param, param_shape, ctx);
     Some(
@@ -2899,15 +3123,25 @@ fn stream_lambda_type_name(ty: &JavaType) -> Option<String> {
 fn emit_stream_lambda_receiver_expr(
     expr: &Expr,
     param: &str,
+    param_rust: &str,
     value: StreamLambdaValue,
     ctx: StreamRenderContext<'_>,
 ) -> Option<RustExpr> {
-    emit_stream_lambda_receiver_with_locals_expr(expr, param, value, &[param], ctx, None)
+    emit_stream_lambda_receiver_with_locals_expr(
+        expr,
+        param,
+        param_rust,
+        value,
+        &[param],
+        ctx,
+        None,
+    )
 }
 
 fn emit_stream_lambda_receiver_with_locals_expr(
     expr: &Expr,
     param: &str,
+    param_rust: &str,
     value: StreamLambdaValue,
     locals: &[&str],
     ctx: StreamRenderContext<'_>,
@@ -2917,11 +3151,12 @@ fn emit_stream_lambda_receiver_with_locals_expr(
         Expr::Var(name) if name == param => Some(match value {
             StreamLambdaValue::FilterBorrowed
             | StreamLambdaValue::BorrowedItem
-            | StreamLambdaValue::OwnedItem => RustExpr::Var(param.to_string()),
+            | StreamLambdaValue::OwnedItem => RustExpr::Var(param_rust.to_string()),
         }),
         _ => emit_stream_lambda_body_with_locals_prec(
             expr,
             param,
+            param_rust,
             value,
             locals,
             ctx,

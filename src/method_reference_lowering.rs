@@ -6,7 +6,6 @@ use crate::coercion::{
     unbound_method_reference_projection,
 };
 use crate::facts::{CallableKey, FacadeSlot, FactSet, ReceiverAbi, ResultAbi, Staticness};
-use crate::java_ir::JavaType;
 use crate::method_reference_plan::{BoundMethodReferenceReceiver, MethodReferencePlan};
 use crate::method_reference_shape::method_reference_receiver_type_for_call_plan_with_facts;
 use crate::rust_ir::{RustClosureBody, RustClosureParam, RustExpr};
@@ -306,22 +305,15 @@ fn method_reference_receiver_owner_key(
     input_shape: &RustSlotShape,
     facts: &FactSet,
 ) -> Option<String> {
-    java_type_callable_owner_key(&method_reference_receiver_type_for_call_plan_with_facts(
+    let receiver_ty = method_reference_receiver_type_for_call_plan_with_facts(
         owner,
         method,
         Some(input_shape),
         facts,
-    )?)
-}
-
-fn java_type_callable_owner_key(ty: &JavaType) -> Option<String> {
-    match ty {
-        JavaType::String => Some("String".to_string()),
-        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
-            Some(crate::stdlib::canonical_external_receiver_type_key(name))
-        }
-        JavaType::Primitive(_) | JavaType::Void | JavaType::Array(_) | JavaType::Wildcard(_) => {
-            None
-        }
-    }
+    )?;
+    crate::stdlib::external_api_method_receiver_owner_key(
+        &receiver_ty,
+        &crate::types::TypeEnv::new(),
+        method,
+    )
 }

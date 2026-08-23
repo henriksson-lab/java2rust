@@ -1193,11 +1193,10 @@ mod equality_symmetry_tests {
     use super::*;
     use crate::facts::{FactProvenance, SourceEqualsOverrideFact};
     use crate::java_ir::JavaType;
-    use crate::slot_shape::{DispatchShape, MutabilityShape, TypeIdentity, ViewShape};
+    use crate::slot_shape::{DispatchShape, MutabilityShape, ViewShape};
 
     fn shape(java_ty: JavaType, ownership: OwnershipShape, view: ViewShape) -> RustSlotShape {
         RustSlotShape {
-            type_identity: TypeIdentity::from_java_type(java_ty.clone()),
             java_ty,
             ownership,
             view,
@@ -1495,7 +1494,6 @@ mod shared_handle_identity_tests {
             }
         };
         RustSlotShape {
-            type_identity: crate::slot_shape::TypeIdentity::from_java_type(java_ty.clone()),
             java_ty,
             ownership,
             view: ViewShape::Native,

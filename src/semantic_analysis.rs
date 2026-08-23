@@ -157,35 +157,36 @@ fn collect_builtin_external_representation_facts(facts: &mut FactSet, enabled: b
         return;
     }
 
-    let builtin = crate::external_packs::builtin_external_library_packs();
-    for fact in builtin.hierarchy_overrides {
-        if !facts.hierarchy_overrides.contains(&fact) {
-            facts.hierarchy_overrides.push(fact);
+    for builtin in crate::external_packs::builtin_external_pack_fact_sets_iter() {
+        for fact in &builtin.hierarchy_overrides {
+            if !facts.hierarchy_overrides.contains(fact) {
+                facts.hierarchy_overrides.push(fact.clone());
+            }
         }
-    }
-    for fact in builtin.closed_hierarchy_facts {
-        if !facts.closed_hierarchy_facts.contains(&fact) {
-            facts.closed_hierarchy_facts.push(fact);
+        for fact in &builtin.closed_hierarchy_facts {
+            if !facts.closed_hierarchy_facts.contains(fact) {
+                facts.closed_hierarchy_facts.push(fact.clone());
+            }
         }
-    }
-    for fact in builtin.object_safety_facts {
-        if !facts.object_safety_facts.contains(&fact) {
-            facts.object_safety_facts.push(fact);
+        for fact in &builtin.object_safety_facts {
+            if !facts.object_safety_facts.contains(fact) {
+                facts.object_safety_facts.push(fact.clone());
+            }
         }
-    }
-    for fact in builtin.type_capability_overrides {
-        if !facts.type_capability_overrides.contains(&fact) {
-            facts.type_capability_overrides.push(fact);
+        for fact in &builtin.type_capability_overrides {
+            if !facts.type_capability_overrides.contains(fact) {
+                facts.type_capability_overrides.push(fact.clone());
+            }
         }
-    }
-    for fact in builtin.owned_recovery_capability_facts {
-        if !facts.owned_recovery_capability_facts.contains(&fact) {
-            facts.owned_recovery_capability_facts.push(fact);
+        for fact in &builtin.owned_recovery_capability_facts {
+            if !facts.owned_recovery_capability_facts.contains(fact) {
+                facts.owned_recovery_capability_facts.push(fact.clone());
+            }
         }
-    }
-    for fact in builtin.external_conversion_adapter_facts {
-        if !facts.external_conversion_adapter_facts.contains(&fact) {
-            facts.external_conversion_adapter_facts.push(fact);
+        for fact in &builtin.external_conversion_adapter_facts {
+            if !facts.external_conversion_adapter_facts.contains(fact) {
+                facts.external_conversion_adapter_facts.push(fact.clone());
+            }
         }
     }
 }
@@ -382,7 +383,7 @@ fn collect_java_platform_api_argument_effect_facts(facts: &mut FactSet) {
                     && existing.provenance == fact.provenance
             });
         if !already_present {
-            facts.external_api_argument_effect_facts.push(fact);
+            facts.external_api_argument_effect_facts.push(fact.clone());
         }
     }
 }
@@ -403,12 +404,14 @@ fn collect_builtin_external_exception_facts(facts: &mut FactSet, enabled: bool) 
         return;
     }
 
-    for fact in crate::external_packs::builtin_external_library_packs().exception_facts {
-        let already_present = facts.exception_facts.iter().any(|existing| {
-            existing.type_name == fact.type_name && existing.provenance == fact.provenance
-        });
-        if !already_present {
-            facts.exception_facts.push(fact);
+    for builtin in crate::external_packs::builtin_external_pack_fact_sets_iter() {
+        for fact in &builtin.exception_facts {
+            let already_present = facts.exception_facts.iter().any(|existing| {
+                existing.type_name == fact.type_name && existing.provenance == fact.provenance
+            });
+            if !already_present {
+                facts.exception_facts.push(fact.clone());
+            }
         }
     }
 }
@@ -429,7 +432,7 @@ fn collect_builtin_external_api_argument_effect_facts(facts: &mut FactSet, enabl
                     && existing.provenance == fact.provenance
             });
         if !already_present {
-            facts.external_api_argument_effect_facts.push(fact);
+            facts.external_api_argument_effect_facts.push(fact.clone());
         }
     }
 }
@@ -1030,9 +1033,9 @@ fn unresolved_target_receiver_type_key(
         && args.is_empty()
         && let Some(bound) = unresolved_target_type_param_bound(program, fact, name)
     {
-        return external_api_receiver_type_key(&bound);
+        return crate::stdlib::external_api_receiver_owner_key(&bound, &TypeEnv::new());
     }
-    external_api_receiver_type_key(receiver_type)
+    crate::stdlib::external_api_receiver_owner_key(receiver_type, &TypeEnv::new())
 }
 
 fn unresolved_target_type_param_bound(
@@ -1569,7 +1572,7 @@ fn collect_external_api_effects_from_expr_with_env(
     walk_expr_outside_lambdas(expr, &mut |expr| {
         if let Expr::MethodReference { target, method } = expr {
             if !is_non_external_method_reference(target, method) {
-                let receiver = method_reference_receiver(target, env);
+                let receiver = method_reference_receiver(target, method, env);
                 let arg_count = usize::from(receiver.bound_receiver);
                 push_external_api_effect_guess(
                     facts,
@@ -1750,10 +1753,10 @@ struct MethodReferenceReceiver {
     bound_receiver: bool,
 }
 
-fn method_reference_receiver(target: &str, env: &TypeEnv) -> MethodReferenceReceiver {
+fn method_reference_receiver(target: &str, method: &str, env: &TypeEnv) -> MethodReferenceReceiver {
     if let Some(java_ty) = env.local_type(target).or_else(|| env.field_type(target)) {
         return MethodReferenceReceiver {
-            type_key: external_api_receiver_type_key_with_env(java_ty, env),
+            type_key: crate::stdlib::external_api_receiver_owner_key(java_ty, env),
             bound_receiver: true,
         };
     }
@@ -1764,13 +1767,12 @@ fn method_reference_receiver(target: &str, env: &TypeEnv) -> MethodReferenceRece
             .or_else(|| env.field_type(&normalized))
     {
         return MethodReferenceReceiver {
-            type_key: external_api_receiver_type_key_with_env(java_ty, env),
+            type_key: crate::stdlib::external_api_receiver_owner_key(java_ty, env),
             bound_receiver: true,
         };
     }
     let parsed = crate::parser::parse_type(target);
-    let type_key = java_type_name(&parsed)
-        .map(crate::stdlib::canonical_external_receiver_type_key)
+    let type_key = crate::stdlib::external_api_method_receiver_owner_key(&parsed, env, method)
         .or_else(|| Some(crate::stdlib::canonical_external_receiver_type_key(target)));
     MethodReferenceReceiver {
         type_key,
@@ -2130,22 +2132,13 @@ fn infer_external_field_access_type(expr: &Expr, env: &TypeEnv) -> Option<JavaTy
 }
 
 fn external_pack_or_stdlib_field_type(receiver_ty: &JavaType, field: &str) -> Option<JavaType> {
-    if let Some(receiver_name) = external_field_receiver_name(receiver_ty)
+    if let Some(receiver_name) = crate::stdlib::external_named_receiver_owner_key(receiver_ty)
         && let Some(field_fact) = crate::external_packs::external_field_for(&receiver_name, field)
         && let Some(field_type) = field_fact.field_type
     {
         return Some(field_type);
     }
     crate::stdlib::known_external_field_type_for_receiver(receiver_ty, field)
-}
-
-fn external_field_receiver_name(receiver_ty: &JavaType) -> Option<String> {
-    match receiver_ty {
-        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
-            Some(crate::stdlib::canonical_external_receiver_type_key(name))
-        }
-        _ => None,
-    }
 }
 
 fn weak_unknown_field_access_receiver(receiver: &Expr, inferred: &JavaType) -> bool {
@@ -2191,28 +2184,7 @@ fn insert_external_api_type_param_bounds(
 }
 
 fn external_api_receiver_type_key_with_env(java_ty: &JavaType, env: &TypeEnv) -> Option<String> {
-    if let Some(element_ty) = crate::types::optional_element_type(java_ty) {
-        return external_api_receiver_type_key_with_env(&element_ty, env);
-    }
-    if let JavaType::Named { name, args } = java_ty
-        && args.is_empty()
-        && let Some(bound) = env.type_param_bound(name)
-    {
-        return external_api_receiver_type_key(bound);
-    }
-    external_api_receiver_type_key(java_ty)
-}
-
-fn external_api_receiver_type_key(java_ty: &JavaType) -> Option<String> {
-    match java_ty {
-        JavaType::Named { name, .. } => {
-            Some(crate::stdlib::canonical_external_receiver_type_key(name))
-        }
-        JavaType::String => Some("String".to_string()),
-        JavaType::Array(_) => Some("Array".to_string()),
-        JavaType::Unknown(name) => Some(crate::stdlib::canonical_external_receiver_type_key(name)),
-        JavaType::Void | JavaType::Primitive(_) | JavaType::Wildcard(_) => None,
-    }
+    crate::stdlib::external_api_receiver_owner_key(java_ty, env)
 }
 
 fn collect_recursion_facts(program: &Program, facts: &mut FactSet) {

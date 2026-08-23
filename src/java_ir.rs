@@ -96,6 +96,7 @@ pub struct ConstructorDecl {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Param {
     pub name: String,
+    pub source_name: String,
     pub ty: JavaType,
     pub is_varargs: bool,
 }
@@ -150,6 +151,7 @@ pub enum Stmt {
     VarDecl {
         ty: JavaType,
         name: String,
+        source_name: String,
         initializer: Option<Expr>,
     },
     Assign {
@@ -183,6 +185,7 @@ pub enum Stmt {
     EnhancedFor {
         var_type: JavaType,
         var_name: String,
+        source_var_name: String,
         iterable: Expr,
         body: Block,
         label: Option<String>,
@@ -320,6 +323,7 @@ pub enum Expr {
 #[derive(Debug, Clone, PartialEq)]
 pub struct LambdaParam {
     pub name: String,
+    pub source_name: String,
     pub ty: Option<JavaType>,
 }
 

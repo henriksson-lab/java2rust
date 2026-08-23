@@ -231,12 +231,12 @@ pub(crate) fn delegated_constructor_trailing_stmts_for_lowering(
             Stmt::Assign { target, value } => match target {
                 Expr::FieldAccess(receiver, field) if matches!(receiver.as_ref(), Expr::This) => {
                     Some(DelegatedConstructorTrailingStmt::FieldAssignment {
-                        field_name: crate::parser::to_snake_case(field),
+                        field_name: crate::parser::to_snake_case_unescaped(field),
                         value,
                     })
                 }
                 Expr::Var(field) => Some(DelegatedConstructorTrailingStmt::FieldAssignment {
-                    field_name: crate::parser::to_snake_case(field),
+                    field_name: crate::parser::to_snake_case_unescaped(field),
                     value,
                 }),
                 _ => None,
@@ -412,9 +412,11 @@ fn constructor_field_assignments(body: Option<&Block>) -> Vec<(String, &Expr)> {
                     Expr::FieldAccess(receiver, field)
                         if matches!(receiver.as_ref(), Expr::This) =>
                     {
-                        Some((crate::parser::to_snake_case(field), value))
+                        Some((crate::parser::to_snake_case_unescaped(field), value))
                     }
-                    Expr::Var(field) => Some((crate::parser::to_snake_case(field), value)),
+                    Expr::Var(field) => {
+                        Some((crate::parser::to_snake_case_unescaped(field), value))
+                    }
                     _ => None,
                 },
                 _ => None,

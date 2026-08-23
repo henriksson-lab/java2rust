@@ -1092,6 +1092,7 @@ fn load_external_inputs(
     String,
 > {
     let mut facts = new_java2rust::facts::FactSet::default();
+    facts.disable_builtin_external_packs = !external_inputs.enable_builtin_external_packs;
     let mut diagnostics = new_java2rust::diagnostics::DiagnosticBag::default();
 
     for facts_path in &external_inputs.facts_paths {
@@ -1412,7 +1413,8 @@ fn append_facade_structured_method_abi_fact(
         return;
     };
     let return_slot = facade_return_slot_for_rust_type(return_type);
-    let borrow_source = facade_slot_contains_shared_borrow(&return_slot)
+    let borrow_source = return_slot
+        .contains_shared_borrow()
         .then_some(new_java2rust::facts::BorrowSource::Receiver);
     facts
         .facade_abi_facts
@@ -1423,7 +1425,7 @@ fn append_facade_structured_method_abi_fact(
             args: abi
                 .params
                 .iter()
-                .map(|param| facade_slot_for_rust_type(param))
+                .map(|param| new_java2rust::facts::facade_slot_for_rust_type(param))
                 .collect(),
             return_slot,
             result: facade_result_abi(return_type),
@@ -1453,65 +1455,7 @@ fn facade_result_abi(return_type: &str) -> new_java2rust::facts::ResultAbi {
 }
 
 fn facade_return_slot_for_rust_type(return_type: &str) -> new_java2rust::facts::FacadeSlot {
-    facade_slot_for_rust_type(&rust_return_payload_type(return_type))
-}
-
-fn facade_slot_for_rust_type(ty: &str) -> new_java2rust::facts::FacadeSlot {
-    let ty = ty.trim();
-    if ty == "usize" {
-        return new_java2rust::facts::FacadeSlot::Index;
-    }
-    if let Some(inner) = new_java2rust::types::raw_rust_option_inner(ty) {
-        return new_java2rust::facts::FacadeSlot::Optional(Box::new(facade_slot_for_rust_type(
-            inner,
-        )));
-    }
-    if let Some(inner) = ty.strip_prefix("&mut ") {
-        if let Some(slice) = inner.strip_prefix('[').and_then(|ty| ty.strip_suffix(']')) {
-            return new_java2rust::facts::FacadeSlot::Slice(Box::new(facade_slot_for_rust_type(
-                &format!("&mut {slice}"),
-            )));
-        }
-        return new_java2rust::facts::FacadeSlot::MutBorrowed;
-    }
-    if let Some(inner) = ty.strip_prefix('&') {
-        let inner = inner.trim();
-        if let Some(slice) = inner.strip_prefix('[').and_then(|ty| ty.strip_suffix(']')) {
-            return new_java2rust::facts::FacadeSlot::Slice(Box::new(facade_slot_for_rust_type(
-                slice,
-            )));
-        }
-        return new_java2rust::facts::FacadeSlot::Borrowed;
-    }
-    new_java2rust::facts::FacadeSlot::Owned
-}
-
-fn facade_slot_contains_shared_borrow(slot: &new_java2rust::facts::FacadeSlot) -> bool {
-    match slot {
-        new_java2rust::facts::FacadeSlot::Borrowed => true,
-        new_java2rust::facts::FacadeSlot::Optional(inner)
-        | new_java2rust::facts::FacadeSlot::Slice(inner) => {
-            facade_slot_contains_shared_borrow(inner)
-        }
-        new_java2rust::facts::FacadeSlot::Owned
-        | new_java2rust::facts::FacadeSlot::Index
-        | new_java2rust::facts::FacadeSlot::MutBorrowed
-        | new_java2rust::facts::FacadeSlot::DynTrait(_)
-        | new_java2rust::facts::FacadeSlot::CrateHandle(_) => false,
-    }
-}
-
-fn facade_slot_contains_mut_borrow(slot: &new_java2rust::facts::FacadeSlot) -> bool {
-    match slot {
-        new_java2rust::facts::FacadeSlot::MutBorrowed => true,
-        new_java2rust::facts::FacadeSlot::Optional(inner)
-        | new_java2rust::facts::FacadeSlot::Slice(inner) => facade_slot_contains_mut_borrow(inner),
-        new_java2rust::facts::FacadeSlot::Owned
-        | new_java2rust::facts::FacadeSlot::Index
-        | new_java2rust::facts::FacadeSlot::Borrowed
-        | new_java2rust::facts::FacadeSlot::DynTrait(_)
-        | new_java2rust::facts::FacadeSlot::CrateHandle(_) => false,
-    }
+    new_java2rust::facts::facade_slot_for_rust_type(&rust_return_payload_type(return_type))
 }
 
 fn append_facade_argument_abi_facts(
@@ -1587,9 +1531,9 @@ fn append_facade_constructor_argument_abi_facts(
                 } else {
                     new_java2rust::facts::NullabilityState::DefinitelyNonNull
                 },
-                argument_mutability: if facade_slot_contains_mut_borrow(&facade_slot_for_rust_type(
-                    param,
-                )) {
+                argument_mutability: if new_java2rust::facts::facade_slot_for_rust_type(param)
+                    .contains_mut_borrow()
+                {
                     new_java2rust::facts::ReceiverMutabilityFact::MutatesReceiver
                 } else {
                     new_java2rust::facts::ReceiverMutabilityFact::ReadOnly

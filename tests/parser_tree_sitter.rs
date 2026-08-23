@@ -85,6 +85,123 @@ fn parses_simple_class_members() {
 }
 
 #[test]
+fn callable_params_preserve_unescaped_source_names() {
+    let parsed = parse_java_source(
+        r#"
+class CallableNames {
+    int run(int self, int self__) { return self + self__; }
+}
+"#,
+    );
+    assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+    let method = parsed.program.types[0]
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "run" => Some(method),
+            _ => None,
+        })
+        .expect("run method should parse");
+
+    assert_eq!(method.params[0].name, "self__");
+    assert_eq!(method.params[0].source_name, "self");
+    assert_eq!(method.params[1].name, "self__");
+    assert_eq!(method.params[1].source_name, "self__");
+}
+
+#[test]
+fn callable_local_bindings_preserve_unescaped_source_names() {
+    let parsed = parse_java_source(
+        r#"
+class CallableNames {
+    int run() {
+        int self = 1;
+        int self__ = 2;
+        return self + self__;
+    }
+}
+"#,
+    );
+    assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+    let body = parsed.program.types[0]
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "run" => method.body.as_ref(),
+            _ => None,
+        })
+        .expect("run body should parse");
+
+    let Stmt::VarDecl {
+        name: first_name,
+        source_name: first_source_name,
+        ..
+    } = &body.statements[0]
+    else {
+        panic!("expected first local declaration");
+    };
+    let Stmt::VarDecl {
+        name: second_name,
+        source_name: second_source_name,
+        ..
+    } = &body.statements[1]
+    else {
+        panic!("expected second local declaration");
+    };
+
+    assert_eq!(first_name, "self__");
+    assert_eq!(first_source_name, "self");
+    assert_eq!(second_name, "self__");
+    assert_eq!(second_source_name, "self__");
+}
+
+#[test]
+fn callable_loop_and_lambda_bindings_preserve_unescaped_source_names() {
+    let parsed = parse_java_source(
+        r#"
+import java.util.List;
+class CallableNames {
+    void run(List<Integer> xs) {
+        for (int self : xs) {
+            xs.forEach(self__ -> self__ + self);
+        }
+    }
+}
+"#,
+    );
+    assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+    let body = parsed.program.types[0]
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "run" => method.body.as_ref(),
+            _ => None,
+        })
+        .expect("run body should parse");
+
+    let Stmt::EnhancedFor {
+        var_name,
+        source_var_name,
+        body,
+        ..
+    } = &body.statements[0]
+    else {
+        panic!("expected enhanced-for statement");
+    };
+    assert_eq!(var_name, "self__");
+    assert_eq!(source_var_name, "self");
+
+    let Stmt::Expr(Expr::Call { args, .. }) = &body.statements[0] else {
+        panic!("expected forEach call");
+    };
+    let Expr::Lambda { params, .. } = &args[0] else {
+        panic!("expected lambda argument");
+    };
+    assert_eq!(params[0].name, "self__");
+    assert_eq!(params[0].source_name, "self__");
+}
+
+#[test]
 fn parses_annotated_nested_class_members() {
     let parsed = parse_java_source(
         r#"
@@ -894,7 +1011,8 @@ fn parses_try_with_resources_declarations() {
         Stmt::VarDecl {
             ty: JavaType::Named { name, .. },
             name: resource_name,
-            initializer: Some(Expr::Call { name: method, .. })
+            initializer: Some(Expr::Call { name: method, .. }),
+            ..
         } if name == "BufferedReader" && resource_name == "reader" && method == "newBufferedReader"
     ));
     assert!(matches!(
@@ -902,7 +1020,8 @@ fn parses_try_with_resources_declarations() {
         Stmt::VarDecl {
             ty: JavaType::Named { name, .. },
             name: resource_name,
-            initializer: Some(Expr::Call { name: method, .. })
+            initializer: Some(Expr::Call { name: method, .. }),
+            ..
         } if name == "Closeable" && resource_name == "audit" && method == "open"
     ));
 }
@@ -1049,7 +1168,8 @@ class Holder {
         Stmt::VarDecl {
             ty: JavaType::Named { name, args },
             name: local_name,
-            initializer: Some(Expr::Call { name: method_name, .. })
+            initializer: Some(Expr::Call { name: method_name, .. }),
+            ..
         } if name == "Item" && args.is_empty() && local_name == "head" && method_name == "first"
     ));
     assert!(matches!(
@@ -1057,7 +1177,8 @@ class Holder {
         Stmt::VarDecl {
             ty: JavaType::Named { name, args },
             name: local_name,
-            initializer: Some(Expr::Call { name: method_name, .. })
+            initializer: Some(Expr::Call { name: method_name, .. }),
+            ..
         } if name == "Item" && args.is_empty() && local_name == "tail" && method_name == "last"
     ));
 }

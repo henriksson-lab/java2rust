@@ -5,8 +5,8 @@ use crate::effective_facts::EffectiveFacts;
 use crate::fact_saturation::{FiniteSaturationPolicy, SaturationStep};
 use crate::facts::{
     CaptureOrigin, CaptureSource, DispatchRequirementKind, ExternalApiArgumentEffectFact,
-    ExternalArgumentAliasPolicy, FacadeAbiFact, FacadeSlot, FactProvenance, FactSet,
-    HierarchyOverride, HierarchyStrategy, NullabilityState, OwnedRecoveryCapability, ReceiverAbi,
+    ExternalArgumentAliasPolicy, FacadeAbiFact, FactProvenance, FactSet, HierarchyOverride,
+    HierarchyStrategy, NullabilityState, OwnedRecoveryCapability, ReceiverAbi,
     ReceiverMutabilityFact, external_parameter_nullability_policy,
 };
 use crate::graph::strongly_connected_components;
@@ -35,7 +35,7 @@ use crate::slot_policy::{
 use crate::slot_shape::{
     DispatchShape, OwnershipShape, RustSlotShape, ViewShape, conservative_ownership,
 };
-use crate::types::{optional_element_type, optional_java_type};
+use crate::types::{TypeEnv, optional_element_type, optional_java_type};
 use crate::usage::{
     BindingUse, BindingUseFacts, CallArgumentBoundary, FieldUse, MethodUsageFacts,
     ReturnedCallResultUse, UsageConstructorKey, UsageFacts, UsageMethodKey,
@@ -6341,11 +6341,13 @@ pub fn method_param_shape_constraints(
         &signature_object_representation_fact_constraints(&param.ty, facts),
     );
     if let Some(binding) = binding {
+        let type_env = signature_type_param_env_for_method(ty, method);
         push_unique_signature_constraints(
             &mut constraints,
             &external_receiver_binding_constraints(
                 binding,
                 facts,
+                &type_env,
                 true,
                 boundary_kind != Some(SignatureBoundaryKind::PublicApi)
                     || public_readonly_receiver_read_product,
@@ -6508,6 +6510,40 @@ pub fn method_param_shape_constraints(
     }
     normalize_param_borrowed_slice_constraints(param, &mut constraints);
     constraints
+}
+
+fn signature_type_param_env_for_method(ty: &TypeDecl, method: &MethodDecl) -> TypeEnv {
+    let mut env = signature_type_param_env_for_type(ty);
+    for (name, bound) in method
+        .type_params
+        .iter()
+        .zip(method.type_param_bounds.iter())
+    {
+        if let Some(bound) = bound {
+            env.insert_type_param_bound(name.clone(), bound.clone());
+        }
+    }
+    env
+}
+
+fn signature_type_param_env_for_constructor(ty: &TypeDecl, ctor: &ConstructorDecl) -> TypeEnv {
+    let mut env = signature_type_param_env_for_type(ty);
+    for (name, bound) in ctor.type_params.iter().zip(ctor.type_param_bounds.iter()) {
+        if let Some(bound) = bound {
+            env.insert_type_param_bound(name.clone(), bound.clone());
+        }
+    }
+    env
+}
+
+fn signature_type_param_env_for_type(ty: &TypeDecl) -> TypeEnv {
+    let mut env = TypeEnv::new();
+    for (name, bound) in ty.type_params.iter().zip(ty.type_param_bounds.iter()) {
+        if let Some(bound) = bound {
+            env.insert_type_param_bound(name.clone(), bound.clone());
+        }
+    }
+    env
 }
 
 fn method_return_type_param_name(method: &MethodDecl) -> Option<&str> {
@@ -7373,9 +7409,10 @@ pub fn constructor_param_shape_constraints(
         &signature_object_representation_fact_constraints(&param.ty, facts),
     );
     if let Some(binding) = binding {
+        let type_env = signature_type_param_env_for_constructor(ty, ctor);
         push_unique_signature_constraints(
             &mut constraints,
-            &external_receiver_binding_constraints(binding, facts, true, true),
+            &external_receiver_binding_constraints(binding, facts, &type_env, true, true),
         );
         if boundary_kind != Some(SignatureBoundaryKind::UnknownApi)
             || unknown_boundary_fully_modeled_by_external_arguments
@@ -7867,7 +7904,6 @@ fn apply_required_storage_nullability(shape: &mut RustSlotShape, nullability: Nu
         return;
     }
     shape.java_ty = optional_java_type(shape.java_ty.clone());
-    shape.type_identity = crate::slot_shape::TypeIdentity::from_java_type(shape.java_ty.clone());
 }
 
 fn java_type_can_be_null(java_ty: &JavaType) -> bool {
@@ -8028,7 +8064,7 @@ fn native_collection_receiver_field_constraints(
     field: &FieldDecl,
 ) -> Vec<SignatureConstraint> {
     if crate::stdlib::java_collection_kind_for_type(&field.ty).is_none()
-        || !field_is_native_collection_receiver(ty, &field.name)
+        || !field_is_native_collection_receiver(ty, &field.name, &field.ty)
     {
         return Vec::new();
     }
@@ -8039,55 +8075,66 @@ fn native_collection_receiver_field_constraints(
     ]
 }
 
-fn field_is_native_collection_receiver(ty: &TypeDecl, field_name: &str) -> bool {
+fn field_is_native_collection_receiver(
+    ty: &TypeDecl,
+    field_name: &str,
+    field_ty: &JavaType,
+) -> bool {
     ty.members.iter().any(|member| match member {
-        crate::java_ir::Member::Method(method) => method
-            .body
-            .as_ref()
-            .is_some_and(|body| block_uses_field_as_native_collection_receiver(body, field_name)),
-        crate::java_ir::Member::Constructor(ctor) => ctor
-            .body
-            .as_ref()
-            .is_some_and(|body| block_uses_field_as_native_collection_receiver(body, field_name)),
+        crate::java_ir::Member::Method(method) => method.body.as_ref().is_some_and(|body| {
+            block_uses_field_as_native_collection_receiver(body, field_name, field_ty)
+        }),
+        crate::java_ir::Member::Constructor(ctor) => ctor.body.as_ref().is_some_and(|body| {
+            block_uses_field_as_native_collection_receiver(body, field_name, field_ty)
+        }),
         crate::java_ir::Member::Type(nested) => {
-            field_is_native_collection_receiver(nested, field_name)
+            field_is_native_collection_receiver(nested, field_name, field_ty)
         }
-        crate::java_ir::Member::Field(field) => field
-            .initializer
-            .as_ref()
-            .is_some_and(|expr| expr_uses_field_as_native_collection_receiver(expr, field_name)),
+        crate::java_ir::Member::Field(field) => field.initializer.as_ref().is_some_and(|expr| {
+            expr_uses_field_as_native_collection_receiver(expr, field_name, field_ty)
+        }),
         crate::java_ir::Member::Unsupported { .. } => false,
     })
 }
 
-fn block_uses_field_as_native_collection_receiver(block: &Block, field_name: &str) -> bool {
+fn block_uses_field_as_native_collection_receiver(
+    block: &Block,
+    field_name: &str,
+    field_ty: &JavaType,
+) -> bool {
     block
         .statements
         .iter()
-        .any(|stmt| stmt_uses_field_as_native_collection_receiver(stmt, field_name))
+        .any(|stmt| stmt_uses_field_as_native_collection_receiver(stmt, field_name, field_ty))
 }
 
-fn stmt_uses_field_as_native_collection_receiver(stmt: &Stmt, field_name: &str) -> bool {
+fn stmt_uses_field_as_native_collection_receiver(
+    stmt: &Stmt,
+    field_name: &str,
+    field_ty: &JavaType,
+) -> bool {
     match stmt {
-        Stmt::VarDecl { initializer, .. } | Stmt::Return(initializer) => initializer
-            .as_ref()
-            .is_some_and(|expr| expr_uses_field_as_native_collection_receiver(expr, field_name)),
+        Stmt::VarDecl { initializer, .. } | Stmt::Return(initializer) => {
+            initializer.as_ref().is_some_and(|expr| {
+                expr_uses_field_as_native_collection_receiver(expr, field_name, field_ty)
+            })
+        }
         Stmt::Expr(expr) | Stmt::Throw(expr) => {
-            expr_uses_field_as_native_collection_receiver(expr, field_name)
+            expr_uses_field_as_native_collection_receiver(expr, field_name, field_ty)
         }
         Stmt::Assign { target, value } => {
-            expr_uses_field_as_native_collection_receiver(target, field_name)
-                || expr_uses_field_as_native_collection_receiver(value, field_name)
+            expr_uses_field_as_native_collection_receiver(target, field_name, field_ty)
+                || expr_uses_field_as_native_collection_receiver(value, field_name, field_ty)
         }
         Stmt::If {
             condition,
             then_block,
             else_block,
         } => {
-            expr_uses_field_as_native_collection_receiver(condition, field_name)
-                || block_uses_field_as_native_collection_receiver(then_block, field_name)
+            expr_uses_field_as_native_collection_receiver(condition, field_name, field_ty)
+                || block_uses_field_as_native_collection_receiver(then_block, field_name, field_ty)
                 || else_block.as_ref().is_some_and(|block| {
-                    block_uses_field_as_native_collection_receiver(block, field_name)
+                    block_uses_field_as_native_collection_receiver(block, field_name, field_ty)
                 })
         }
         Stmt::While {
@@ -8096,8 +8143,8 @@ fn stmt_uses_field_as_native_collection_receiver(stmt: &Stmt, field_name: &str) 
         | Stmt::DoWhile {
             condition, body, ..
         } => {
-            expr_uses_field_as_native_collection_receiver(condition, field_name)
-                || block_uses_field_as_native_collection_receiver(body, field_name)
+            expr_uses_field_as_native_collection_receiver(condition, field_name, field_ty)
+                || block_uses_field_as_native_collection_receiver(body, field_name, field_ty)
         }
         Stmt::For {
             init,
@@ -8106,26 +8153,24 @@ fn stmt_uses_field_as_native_collection_receiver(stmt: &Stmt, field_name: &str) 
             body,
             ..
         } => {
-            init.iter()
-                .any(|stmt| stmt_uses_field_as_native_collection_receiver(stmt, field_name))
-                || condition.as_ref().is_some_and(|condition| {
-                    expr_uses_field_as_native_collection_receiver(condition, field_name)
-                })
-                || update
-                    .iter()
-                    .any(|expr| expr_uses_field_as_native_collection_receiver(expr, field_name))
-                || block_uses_field_as_native_collection_receiver(body, field_name)
+            init.iter().any(|stmt| {
+                stmt_uses_field_as_native_collection_receiver(stmt, field_name, field_ty)
+            }) || condition.as_ref().is_some_and(|condition| {
+                expr_uses_field_as_native_collection_receiver(condition, field_name, field_ty)
+            }) || update.iter().any(|expr| {
+                expr_uses_field_as_native_collection_receiver(expr, field_name, field_ty)
+            }) || block_uses_field_as_native_collection_receiver(body, field_name, field_ty)
         }
         Stmt::EnhancedFor { iterable, body, .. } => {
-            expr_uses_field_as_native_collection_receiver(iterable, field_name)
-                || block_uses_field_as_native_collection_receiver(body, field_name)
+            expr_uses_field_as_native_collection_receiver(iterable, field_name, field_ty)
+                || block_uses_field_as_native_collection_receiver(body, field_name, field_ty)
         }
         Stmt::Switch { selector, cases } => {
-            expr_uses_field_as_native_collection_receiver(selector, field_name)
+            expr_uses_field_as_native_collection_receiver(selector, field_name, field_ty)
                 || cases.iter().any(|case| {
-                    case.statements
-                        .iter()
-                        .any(|stmt| stmt_uses_field_as_native_collection_receiver(stmt, field_name))
+                    case.statements.iter().any(|stmt| {
+                        stmt_uses_field_as_native_collection_receiver(stmt, field_name, field_ty)
+                    })
                 })
         }
         Stmt::Try {
@@ -8134,29 +8179,38 @@ fn stmt_uses_field_as_native_collection_receiver(stmt: &Stmt, field_name: &str) 
             catches,
             finally_block,
         } => {
-            resources
-                .iter()
-                .any(|stmt| stmt_uses_field_as_native_collection_receiver(stmt, field_name))
-                || block_uses_field_as_native_collection_receiver(body, field_name)
+            resources.iter().any(|stmt| {
+                stmt_uses_field_as_native_collection_receiver(stmt, field_name, field_ty)
+            }) || block_uses_field_as_native_collection_receiver(body, field_name, field_ty)
                 || catches.iter().any(|catch| {
-                    block_uses_field_as_native_collection_receiver(&catch.body, field_name)
+                    block_uses_field_as_native_collection_receiver(
+                        &catch.body,
+                        field_name,
+                        field_ty,
+                    )
                 })
                 || finally_block.as_ref().is_some_and(|block| {
-                    block_uses_field_as_native_collection_receiver(block, field_name)
+                    block_uses_field_as_native_collection_receiver(block, field_name, field_ty)
                 })
         }
         Stmt::ConstructorInvocation { args, .. } => args
             .iter()
-            .any(|expr| expr_uses_field_as_native_collection_receiver(expr, field_name)),
-        Stmt::LocalType(nested) => field_is_native_collection_receiver(nested, field_name),
+            .any(|expr| expr_uses_field_as_native_collection_receiver(expr, field_name, field_ty)),
+        Stmt::LocalType(nested) => {
+            field_is_native_collection_receiver(nested, field_name, field_ty)
+        }
         Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
-            block_uses_field_as_native_collection_receiver(block, field_name)
+            block_uses_field_as_native_collection_receiver(block, field_name, field_ty)
         }
         Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => false,
     }
 }
 
-fn expr_uses_field_as_native_collection_receiver(expr: &Expr, field_name: &str) -> bool {
+fn expr_uses_field_as_native_collection_receiver(
+    expr: &Expr,
+    field_name: &str,
+    field_ty: &JavaType,
+) -> bool {
     match expr {
         Expr::Call {
             receiver: Some(receiver),
@@ -8164,105 +8218,109 @@ fn expr_uses_field_as_native_collection_receiver(expr: &Expr, field_name: &str) 
             args,
             ..
         } => {
-            (native_collection_receiver_method_name(name)
+            (crate::stdlib::native_collection_receiver_method_known(field_ty, name)
                 && expr_is_this_field(receiver, field_name))
-                || expr_uses_field_as_native_collection_receiver(receiver, field_name)
-                || args
-                    .iter()
-                    .any(|arg| expr_uses_field_as_native_collection_receiver(arg, field_name))
+                || expr_uses_field_as_native_collection_receiver(receiver, field_name, field_ty)
+                || args.iter().any(|arg| {
+                    expr_uses_field_as_native_collection_receiver(arg, field_name, field_ty)
+                })
         }
         Expr::Call { args, .. }
         | Expr::New {
             args, body: None, ..
         } => args
             .iter()
-            .any(|arg| expr_uses_field_as_native_collection_receiver(arg, field_name)),
+            .any(|arg| expr_uses_field_as_native_collection_receiver(arg, field_name, field_ty)),
         Expr::New {
             args,
             body: Some(body),
             ..
         } => {
             args.iter()
-                .any(|arg| expr_uses_field_as_native_collection_receiver(arg, field_name))
+                .any(|arg| expr_uses_field_as_native_collection_receiver(arg, field_name, field_ty))
                 || body.iter().any(|member| match member {
                     crate::java_ir::Member::Field(field) => {
                         field.initializer.as_ref().is_some_and(|expr| {
-                            expr_uses_field_as_native_collection_receiver(expr, field_name)
+                            expr_uses_field_as_native_collection_receiver(
+                                expr, field_name, field_ty,
+                            )
                         })
                     }
                     crate::java_ir::Member::Method(method) => {
                         method.body.as_ref().is_some_and(|body| {
-                            block_uses_field_as_native_collection_receiver(body, field_name)
+                            block_uses_field_as_native_collection_receiver(
+                                body, field_name, field_ty,
+                            )
                         })
                     }
                     crate::java_ir::Member::Constructor(ctor) => {
                         ctor.body.as_ref().is_some_and(|body| {
-                            block_uses_field_as_native_collection_receiver(body, field_name)
+                            block_uses_field_as_native_collection_receiver(
+                                body, field_name, field_ty,
+                            )
                         })
                     }
                     crate::java_ir::Member::Type(nested) => {
-                        field_is_native_collection_receiver(nested, field_name)
+                        field_is_native_collection_receiver(nested, field_name, field_ty)
                     }
                     crate::java_ir::Member::Unsupported { .. } => false,
                 })
         }
         Expr::FieldAccess(receiver, _) => {
-            expr_uses_field_as_native_collection_receiver(receiver, field_name)
+            expr_uses_field_as_native_collection_receiver(receiver, field_name, field_ty)
         }
         Expr::ArrayAccess(array, index) => {
-            expr_uses_field_as_native_collection_receiver(array, field_name)
-                || expr_uses_field_as_native_collection_receiver(index, field_name)
+            expr_uses_field_as_native_collection_receiver(array, field_name, field_ty)
+                || expr_uses_field_as_native_collection_receiver(index, field_name, field_ty)
         }
         Expr::ArrayCreation {
             dimensions,
             initializer,
             ..
         } => {
-            dimensions
-                .iter()
-                .any(|expr| expr_uses_field_as_native_collection_receiver(expr, field_name))
-                || initializer
-                    .iter()
-                    .flatten()
-                    .any(|expr| expr_uses_field_as_native_collection_receiver(expr, field_name))
+            dimensions.iter().any(|expr| {
+                expr_uses_field_as_native_collection_receiver(expr, field_name, field_ty)
+            }) || initializer.iter().flatten().any(|expr| {
+                expr_uses_field_as_native_collection_receiver(expr, field_name, field_ty)
+            })
         }
         Expr::ArrayInitializer(values) => values
             .iter()
-            .any(|expr| expr_uses_field_as_native_collection_receiver(expr, field_name)),
+            .any(|expr| expr_uses_field_as_native_collection_receiver(expr, field_name, field_ty)),
         Expr::Binary { left, right, .. } => {
-            expr_uses_field_as_native_collection_receiver(left, field_name)
-                || expr_uses_field_as_native_collection_receiver(right, field_name)
+            expr_uses_field_as_native_collection_receiver(left, field_name, field_ty)
+                || expr_uses_field_as_native_collection_receiver(right, field_name, field_ty)
         }
         Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::InstanceOf { expr, .. } => {
-            expr_uses_field_as_native_collection_receiver(expr, field_name)
+            expr_uses_field_as_native_collection_receiver(expr, field_name, field_ty)
         }
         Expr::Ternary {
             condition,
             then_expr,
             else_expr,
         } => {
-            expr_uses_field_as_native_collection_receiver(condition, field_name)
-                || expr_uses_field_as_native_collection_receiver(then_expr, field_name)
-                || expr_uses_field_as_native_collection_receiver(else_expr, field_name)
+            expr_uses_field_as_native_collection_receiver(condition, field_name, field_ty)
+                || expr_uses_field_as_native_collection_receiver(then_expr, field_name, field_ty)
+                || expr_uses_field_as_native_collection_receiver(else_expr, field_name, field_ty)
         }
         Expr::Switch { selector, cases } => {
-            expr_uses_field_as_native_collection_receiver(selector, field_name)
+            expr_uses_field_as_native_collection_receiver(selector, field_name, field_ty)
                 || cases.iter().any(|case| {
                     case.labels.iter().any(|label| {
-                        matches!(
-                            label,
-                            SwitchLabel::Expr(expr)
-                                if expr_uses_field_as_native_collection_receiver(expr, field_name)
-                        )
-                    }) || expr_uses_field_as_native_collection_receiver(&case.value, field_name)
+                matches!(
+                    label,
+                    SwitchLabel::Expr(expr)
+                        if expr_uses_field_as_native_collection_receiver(expr, field_name, field_ty)
+                )
+            }) || expr_uses_field_as_native_collection_receiver(&case.value, field_name, field_ty)
                 })
         }
         Expr::Lambda { body, .. } => match body {
             LambdaBody::Expr(expr) => {
-                expr_uses_field_as_native_collection_receiver(expr, field_name)
+                expr_uses_field_as_native_collection_receiver(expr, field_name, field_ty)
             }
             LambdaBody::Block(block) => {
-                block_uses_field_as_native_collection_receiver(block, field_name)
+                block_uses_field_as_native_collection_receiver(block, field_name, field_ty)
             }
         },
         Expr::MethodReference { .. }
@@ -8284,32 +8342,6 @@ fn expr_is_this_field(expr: &Expr, field_name: &str) -> bool {
         }
         _ => false,
     }
-}
-
-fn native_collection_receiver_method_name(name: &str) -> bool {
-    matches!(
-        name,
-        "add"
-            | "addAll"
-            | "add_all"
-            | "clear"
-            | "contains"
-            | "containsKey"
-            | "contains_key"
-            | "extend"
-            | "get"
-            | "insert"
-            | "put"
-            | "putAll"
-            | "put_all"
-            | "remove"
-            | "removeAll"
-            | "remove_all"
-            | "removeIf"
-            | "remove_if"
-            | "retain"
-            | "size"
-    )
 }
 
 fn constructor_decl_for_resolved_name<'a>(
@@ -8446,7 +8478,7 @@ fn push_external_call_return_field_constraints(
     field_ty: &JavaType,
     facts: &FactSet,
 ) {
-    let receiver_type = receiver_type.and_then(external_api_receiver_type_key);
+    let receiver_type = receiver_type.and_then(external_api_receiver_type_key_without_type_env);
     let Some(effect) = facts.external_api_effect_for_receiver(receiver_type.as_deref(), name)
     else {
         return;
@@ -9807,7 +9839,7 @@ fn initializer_receiver_key(
 ) -> Option<String> {
     if let Expr::Var(name) = receiver
         && let Some(java_ty) = local_types.get(name)
-        && let Some(type_key) = external_api_receiver_type_key(java_ty)
+        && let Some(type_key) = external_api_receiver_type_key_without_type_env(java_ty)
     {
         return Some(type_key);
     }
@@ -9965,6 +9997,7 @@ fn collect_local_constraint_sets_from_stmts(
                 ty,
                 name,
                 initializer,
+                ..
             } => {
                 let usage = if duplicate_names.contains(name) {
                     None
@@ -10225,6 +10258,7 @@ fn collect_local_plans_from_stmts(
                 ty,
                 name,
                 initializer,
+                ..
             } => {
                 locals.push(local_plan(
                     name,
@@ -10436,7 +10470,7 @@ fn local_shape_constraints_with_usage_and_effective_facts(
         );
         push_unique_signature_constraints(
             &mut constraints,
-            &external_receiver_binding_constraints(binding, facts, false, false),
+            &external_receiver_binding_constraints(binding, facts, &TypeEnv::new(), false, false),
         );
         push_unique_signature_constraints(
             &mut constraints,
@@ -10638,6 +10672,7 @@ fn constructor_assigned_local_storage_constraints(
 pub fn external_receiver_binding_constraints(
     binding: &BindingUseFacts,
     facts: &FactSet,
+    types: &TypeEnv,
     allow_mutable_receiver_borrow_shape: bool,
     allow_readonly_receiver_borrow_shape: bool,
 ) -> Vec<SignatureConstraint> {
@@ -10650,7 +10685,8 @@ pub fn external_receiver_binding_constraints(
         else {
             continue;
         };
-        let receiver_type = external_api_receiver_type_key(&binding.java_ty);
+        let receiver_type =
+            external_api_receiver_type_key_for_method_receiver(&binding.java_ty, types, name);
         if facts
             .external_ffi_receiver_handover_for_receiver(
                 receiver_type.as_deref(),
@@ -10711,7 +10747,9 @@ fn external_receiver_binding_should_keep_typed_erased_facade(
     binding: &BindingUseFacts,
     facts: &FactSet,
 ) -> bool {
-    let Some(receiver_type) = external_api_receiver_type_key(&binding.java_ty) else {
+    let Some(receiver_type) =
+        crate::stdlib::external_api_receiver_owner_key(&binding.java_ty, &TypeEnv::new())
+    else {
         return false;
     };
     if matches!(receiver_type.as_str(), "Object" | "java.lang.Object") {
@@ -10733,7 +10771,7 @@ fn binding_is_fully_modeled_by_readonly_external_receivers(
     facts: &FactSet,
 ) -> bool {
     let mut saw_receiver = false;
-    let receiver_type = external_api_receiver_type_key(&binding.java_ty);
+    let empty_types = TypeEnv::new();
     for usage in &binding.uses {
         match usage {
             BindingUse::ReceiverForCall {
@@ -10741,6 +10779,11 @@ fn binding_is_fully_modeled_by_readonly_external_receivers(
                 boundary: CallArgumentBoundary::Unknown,
             } => {
                 saw_receiver = true;
+                let receiver_type = crate::stdlib::external_api_method_receiver_owner_key(
+                    &binding.java_ty,
+                    &empty_types,
+                    name,
+                );
                 if !facts
                     .external_api_effect_for_receiver(receiver_type.as_deref(), name)
                     .is_some_and(|effect| {
@@ -10828,7 +10871,8 @@ fn internal_object_binding_is_shared_borrow_safe(
 }
 
 fn external_receiver_call_is_readonly(java_ty: &JavaType, name: &str, facts: &FactSet) -> bool {
-    let receiver_type = external_api_receiver_type_key(java_ty);
+    let receiver_type =
+        crate::stdlib::external_api_method_receiver_owner_key(java_ty, &TypeEnv::new(), name);
     facts
         .external_api_effect_for_receiver(receiver_type.as_deref(), name)
         .is_some_and(|effect| effect.receiver_mutability == ReceiverMutabilityFact::ReadOnly)
@@ -10859,7 +10903,7 @@ fn external_call_argument_is_readonly_borrow_safe(
             && effect.alias_policy != ExternalArgumentAliasPolicy::Escapes;
     }
     let has_readonly_effect = receiver_type
-        .and_then(external_api_receiver_type_key)
+        .and_then(external_api_receiver_type_key_without_type_env)
         .and_then(|receiver_type| {
             facts.external_api_effect_for_receiver(Some(&receiver_type), name)
         })
@@ -11082,7 +11126,7 @@ fn unknown_external_argument_default_non_null_applies(
     let Some(receiver_type) = receiver_type else {
         return true;
     };
-    let Some(receiver_key) = external_api_receiver_type_key(receiver_type) else {
+    let Some(receiver_key) = external_api_receiver_type_key_without_type_env(receiver_type) else {
         return false;
     };
     facts
@@ -11115,7 +11159,7 @@ fn facade_abi_argument_binding_constraints(
             let Some(slot) = abi.args.get(*arg_index) else {
                 continue;
             };
-            if facade_slot_requires_mutable_binding(slot) {
+            if slot.contains_mut_borrow() {
                 push_unique_signature_constraints(
                     &mut constraints,
                     &[
@@ -11140,7 +11184,7 @@ fn matching_facade_abi_argument_facts<'a>(
         .filter(|abi| abi.key.member.0 == name)
         .collect::<Vec<_>>();
     if let Some(receiver_type) = receiver_type
-        && let Some(receiver_key) = external_api_receiver_type_key(receiver_type)
+        && let Some(receiver_key) = external_api_receiver_type_key_without_type_env(receiver_type)
     {
         let matched = candidates
             .iter()
@@ -11158,20 +11202,6 @@ fn matching_facade_abi_argument_facts<'a>(
         candidates
     } else {
         Vec::new()
-    }
-}
-
-fn facade_slot_requires_mutable_binding(slot: &FacadeSlot) -> bool {
-    match slot {
-        FacadeSlot::MutBorrowed => true,
-        FacadeSlot::Optional(inner) | FacadeSlot::Slice(inner) => {
-            facade_slot_requires_mutable_binding(inner)
-        }
-        FacadeSlot::Owned
-        | FacadeSlot::Borrowed
-        | FacadeSlot::Index
-        | FacadeSlot::DynTrait(_)
-        | FacadeSlot::CrateHandle(_) => false,
     }
 }
 
@@ -11251,7 +11281,7 @@ fn external_constructor_argument_effect_for_call_arg(
     if name != "new" {
         return None;
     }
-    let receiver_type = receiver_type.and_then(external_api_receiver_type_key)?;
+    let receiver_type = receiver_type.and_then(external_api_receiver_type_key_without_type_env)?;
     facts
         .external_constructor_argument_effect_for(&receiver_type, arg_count, arg_index)
         .cloned()
@@ -11274,7 +11304,7 @@ fn external_constructor_argument_effect_for_actual_binding_type(
     if name != "new" {
         return None;
     }
-    let receiver_type = receiver_type.and_then(external_api_receiver_type_key)?;
+    let receiver_type = receiver_type.and_then(external_api_receiver_type_key_without_type_env)?;
     crate::external_packs::java_platform_constructor_argument_effect_for_actual_arg(
         &receiver_type,
         arg_count,
@@ -11357,7 +11387,7 @@ fn external_api_argument_effect_for_call_arg<'a>(
     facts: &'a FactSet,
 ) -> Option<&'a ExternalApiArgumentEffectFact> {
     receiver_type
-        .and_then(external_api_receiver_type_key)
+        .and_then(external_api_receiver_type_key_without_type_env)
         .and_then(|receiver_type| {
             facts.external_api_argument_effect_for_receiver(Some(&receiver_type), name, arg_index)
         })
@@ -11415,7 +11445,7 @@ fn external_ffi_handover_for_call_arg<'a>(
     facts: &'a FactSet,
 ) -> Option<&'a crate::facts::ExternalFfiHandoverFact> {
     receiver_type
-        .and_then(external_api_receiver_type_key)
+        .and_then(external_api_receiver_type_key_without_type_env)
         .and_then(|receiver_type| {
             facts.external_ffi_argument_handover_for_receiver(
                 Some(&receiver_type),
@@ -11514,7 +11544,7 @@ pub fn external_call_return_binding_constraints(
             &mut constraints,
             receiver_type
                 .as_ref()
-                .and_then(external_api_receiver_type_key),
+                .and_then(external_api_receiver_type_key_without_type_env),
             name,
             None,
             facts,
@@ -11582,19 +11612,20 @@ fn external_effect_return_nullability_is_signature_evidence(
         )
 }
 
-fn external_api_receiver_type_key(java_ty: &JavaType) -> Option<String> {
-    if let Some(element_ty) = crate::types::optional_element_type(java_ty) {
-        return external_api_receiver_type_key(&element_ty);
-    }
-    match java_ty {
-        JavaType::Named { name, .. } => {
-            Some(crate::stdlib::canonical_external_receiver_type_key(name))
-        }
-        JavaType::String => Some("String".to_string()),
-        JavaType::Array(_) => Some("Array".to_string()),
-        JavaType::Unknown(name) => Some(crate::stdlib::canonical_external_receiver_type_key(name)),
-        JavaType::Void | JavaType::Primitive(_) | JavaType::Wildcard(_) => None,
-    }
+fn external_api_receiver_type_key(java_ty: &JavaType, types: &TypeEnv) -> Option<String> {
+    crate::stdlib::external_api_receiver_owner_key(java_ty, types)
+}
+
+fn external_api_receiver_type_key_for_method_receiver(
+    java_ty: &JavaType,
+    types: &TypeEnv,
+    method_name: &str,
+) -> Option<String> {
+    crate::stdlib::external_api_method_receiver_owner_key(java_ty, types, method_name)
+}
+
+fn external_api_receiver_type_key_without_type_env(java_ty: &JavaType) -> Option<String> {
+    crate::stdlib::external_api_receiver_owner_key(java_ty, &TypeEnv::new())
 }
 
 fn java_types_have_same_signature_boundary_identity(left: &JavaType, right: &JavaType) -> bool {
@@ -11614,10 +11645,11 @@ fn java_types_have_same_signature_boundary_identity(left: &JavaType, right: &Jav
     {
         return left == right;
     }
-    let Some(left_key) = external_api_receiver_type_key(left) else {
+    let empty_types = TypeEnv::new();
+    let Some(left_key) = external_api_receiver_type_key(left, &empty_types) else {
         return false;
     };
-    let Some(right_key) = external_api_receiver_type_key(right) else {
+    let Some(right_key) = external_api_receiver_type_key(right, &empty_types) else {
         return false;
     };
     left_key == right_key
@@ -11799,6 +11831,7 @@ fn collect_facade_mut_borrow_argument_names_from_stmts(
                 initializer: Some(expr),
                 name,
                 ty,
+                ..
             } => {
                 collect_facade_mut_borrow_argument_names_from_expr(
                     expr,
@@ -11812,6 +11845,7 @@ fn collect_facade_mut_borrow_argument_names_from_stmts(
                 initializer: None,
                 name,
                 ty,
+                ..
             } => {
                 local_types.insert(name.clone(), ty.clone());
             }
@@ -12051,7 +12085,7 @@ fn collect_facade_mut_borrow_argument_names_from_expr(
                     mutated.insert(name.clone());
                 }
                 for (index, slot) in abi.args.iter().enumerate() {
-                    if !facade_slot_requires_mutable_binding(slot) {
+                    if !slot.contains_mut_borrow() {
                         continue;
                     }
                     if let Some(Expr::Var(name)) = args.get(index) {

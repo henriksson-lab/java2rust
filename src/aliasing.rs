@@ -30,6 +30,7 @@ use crate::diagnostics::{DiagnosticBag, Severity};
 use crate::facts::{FactSet, ReceiverMutabilityFact};
 use crate::java_ir::{Block, Expr, JavaType, Member, Program, Stmt, TypeDecl, UnaryOp};
 use crate::liveness::LivenessAnalysis;
+use crate::types::TypeEnv;
 use crate::usage::{MethodUsageFacts, UsageConstructorKey, UsageFacts, UsageMethodKey};
 
 /// A clone that Java would not have made, where the difference is observable.
@@ -131,11 +132,14 @@ fn collect_in_type(
         match member {
             Member::Method(method) => {
                 if let Some(body) = &method.body {
+                    let type_env =
+                        aliasing_type_env(ty, &method.type_params, &method.type_param_bounds);
                     collect_in_body(
                         body,
                         &format!("{}.{}", ty.name, method.name),
                         usage,
                         facts,
+                        &type_env,
                         usage.source_method_usage(ty, method),
                         found,
                     );
@@ -143,6 +147,11 @@ fn collect_in_type(
             }
             Member::Constructor(constructor) => {
                 if let Some(body) = &constructor.body {
+                    let type_env = aliasing_type_env(
+                        ty,
+                        &constructor.type_params,
+                        &constructor.type_param_bounds,
+                    );
                     let constructor_usage = usage.constructors.get(&UsageConstructorKey {
                         type_name: ty.name.clone(),
                         rust_name: constructor
@@ -155,6 +164,7 @@ fn collect_in_type(
                         &format!("{}.<init>", ty.name),
                         usage,
                         facts,
+                        &type_env,
                         constructor_usage,
                         found,
                     );
@@ -166,11 +176,35 @@ fn collect_in_type(
     }
 }
 
+fn aliasing_type_env(
+    ty: &TypeDecl,
+    member_type_params: &[String],
+    member_type_param_bounds: &[Option<JavaType>],
+) -> TypeEnv {
+    let mut env = TypeEnv::new();
+    insert_aliasing_type_param_bounds(&mut env, &ty.type_params, &ty.type_param_bounds);
+    insert_aliasing_type_param_bounds(&mut env, member_type_params, member_type_param_bounds);
+    env
+}
+
+fn insert_aliasing_type_param_bounds(
+    env: &mut TypeEnv,
+    type_params: &[String],
+    type_param_bounds: &[Option<JavaType>],
+) {
+    for (name, bound) in type_params.iter().zip(type_param_bounds.iter()) {
+        if let Some(bound) = bound {
+            env.insert_type_param_bound(name.clone(), bound.clone());
+        }
+    }
+}
+
 fn collect_in_body(
     body: &Block,
     callable: &str,
     usage: &UsageFacts,
     facts: &FactSet,
+    type_env: &TypeEnv,
     method_usage: Option<&MethodUsageFacts>,
     found: &mut Vec<ObservableAlias>,
 ) {
@@ -185,7 +219,7 @@ fn collect_in_body(
     if aliases.is_empty() {
         return;
     }
-    let mutations = mutation_sites(&statements, usage, facts, method_usage);
+    let mutations = mutation_sites(&statements, usage, facts, type_env, method_usage);
 
     for point in &aliases {
         // One report per alias point. A loop body that writes through the same
@@ -275,6 +309,7 @@ fn alias_points<'a>(statements: &[&'a Stmt], liveness: &LivenessAnalysis) -> Vec
                 ty,
                 name,
                 initializer,
+                ..
             } => {
                 if let Some(Expr::Var(source)) = initializer
                     && !java_type_is_value_like(ty)
@@ -383,13 +418,22 @@ fn mutation_sites<'a>(
     statements: &[&'a Stmt],
     usage: &UsageFacts,
     facts: &FactSet,
+    type_env: &TypeEnv,
     method_usage: Option<&MethodUsageFacts>,
 ) -> Vec<MutationSite<'a>> {
     let mut sites = Vec::new();
-    let stored_lambdas = stored_lambda_mutations(statements, usage, facts, method_usage);
+    let stored_lambdas = stored_lambda_mutations(statements, usage, facts, type_env, method_usage);
     for stmt in statements {
         let mut here = Vec::new();
-        collect_stmt_mutations(stmt, usage, facts, method_usage, &stored_lambdas, &mut here);
+        collect_stmt_mutations(
+            stmt,
+            usage,
+            facts,
+            type_env,
+            method_usage,
+            &stored_lambdas,
+            &mut here,
+        );
         for (handle, kind) in here {
             sites.push(MutationSite { stmt, handle, kind });
         }
@@ -401,6 +445,7 @@ fn stored_lambda_mutations(
     statements: &[&Stmt],
     usage: &UsageFacts,
     facts: &FactSet,
+    type_env: &TypeEnv,
     method_usage: Option<&MethodUsageFacts>,
 ) -> HashMap<String, Vec<(String, MutationKind)>> {
     let mut stored = HashMap::new();
@@ -412,7 +457,14 @@ fn stored_lambda_mutations(
         } = stmt
         {
             let mut mutations = Vec::new();
-            collect_lambda_body_mutations(body, usage, facts, method_usage, &mut mutations);
+            collect_lambda_body_mutations(
+                body,
+                usage,
+                facts,
+                type_env,
+                method_usage,
+                &mut mutations,
+            );
             if !mutations.is_empty() {
                 stored.insert(name.clone(), mutations);
             }
@@ -425,6 +477,7 @@ fn collect_stmt_mutations(
     stmt: &Stmt,
     usage: &UsageFacts,
     facts: &FactSet,
+    type_env: &TypeEnv,
     method_usage: Option<&MethodUsageFacts>,
     stored_lambdas: &HashMap<String, Vec<(String, MutationKind)>>,
     out: &mut Vec<(String, MutationKind)>,
@@ -433,7 +486,15 @@ fn collect_stmt_mutations(
         Stmt::Assign { target, value } => {
             push_write_target(target, out);
             if !matches!(value, Expr::Lambda { .. }) {
-                collect_expr_mutations(value, usage, facts, method_usage, stored_lambdas, out);
+                collect_expr_mutations(
+                    value,
+                    usage,
+                    facts,
+                    type_env,
+                    method_usage,
+                    stored_lambdas,
+                    out,
+                );
             }
         }
         Stmt::VarDecl {
@@ -441,7 +502,15 @@ fn collect_stmt_mutations(
             ..
         } => {}
         _ => visit_stmt_exprs(stmt, &mut |expr| {
-            collect_expr_mutations(expr, usage, facts, method_usage, stored_lambdas, out)
+            collect_expr_mutations(
+                expr,
+                usage,
+                facts,
+                type_env,
+                method_usage,
+                stored_lambdas,
+                out,
+            )
         }),
     }
 }
@@ -450,17 +519,30 @@ fn collect_lambda_body_mutations(
     body: &crate::java_ir::LambdaBody,
     usage: &UsageFacts,
     facts: &FactSet,
+    type_env: &TypeEnv,
     method_usage: Option<&MethodUsageFacts>,
     out: &mut Vec<(String, MutationKind)>,
 ) {
     let stored_lambdas = HashMap::new();
     match body {
-        crate::java_ir::LambdaBody::Expr(expr) => {
-            collect_expr_mutations(expr, usage, facts, method_usage, &stored_lambdas, out)
-        }
-        crate::java_ir::LambdaBody::Block(block) => {
-            collect_block_mutations(block, usage, facts, method_usage, &stored_lambdas, out)
-        }
+        crate::java_ir::LambdaBody::Expr(expr) => collect_expr_mutations(
+            expr,
+            usage,
+            facts,
+            type_env,
+            method_usage,
+            &stored_lambdas,
+            out,
+        ),
+        crate::java_ir::LambdaBody::Block(block) => collect_block_mutations(
+            block,
+            usage,
+            facts,
+            type_env,
+            method_usage,
+            &stored_lambdas,
+            out,
+        ),
     }
 }
 
@@ -468,6 +550,7 @@ fn collect_block_mutations(
     block: &Block,
     usage: &UsageFacts,
     facts: &FactSet,
+    type_env: &TypeEnv,
     method_usage: Option<&MethodUsageFacts>,
     stored_lambdas: &HashMap<String, Vec<(String, MutationKind)>>,
     out: &mut Vec<(String, MutationKind)>,
@@ -475,7 +558,15 @@ fn collect_block_mutations(
     let mut statements = Vec::new();
     collect_statements(block, &mut statements);
     for stmt in statements {
-        collect_stmt_mutations(stmt, usage, facts, method_usage, stored_lambdas, out);
+        collect_stmt_mutations(
+            stmt,
+            usage,
+            facts,
+            type_env,
+            method_usage,
+            stored_lambdas,
+            out,
+        );
     }
 }
 
@@ -483,6 +574,7 @@ fn collect_expr_mutations(
     expr: &Expr,
     usage: &UsageFacts,
     facts: &FactSet,
+    type_env: &TypeEnv,
     method_usage: Option<&MethodUsageFacts>,
     stored_lambdas: &HashMap<String, Vec<(String, MutationKind)>>,
     out: &mut Vec<(String, MutationKind)>,
@@ -494,14 +586,30 @@ fn collect_expr_mutations(
             right,
         } => {
             push_write_target(left, out);
-            collect_expr_mutations(right, usage, facts, method_usage, stored_lambdas, out);
+            collect_expr_mutations(
+                right,
+                usage,
+                facts,
+                type_env,
+                method_usage,
+                stored_lambdas,
+                out,
+            );
         }
         Expr::Unary {
             op: UnaryOp::PreInc | UnaryOp::PreDec | UnaryOp::PostInc | UnaryOp::PostDec,
             expr,
         } => {
             push_write_target(expr, out);
-            collect_expr_mutations(expr, usage, facts, method_usage, stored_lambdas, out);
+            collect_expr_mutations(
+                expr,
+                usage,
+                facts,
+                type_env,
+                method_usage,
+                stored_lambdas,
+                out,
+            );
         }
         Expr::Call {
             receiver: Some(receiver),
@@ -522,6 +630,7 @@ fn collect_expr_mutations(
                     receiver_java_type_for_handle(handle, method_usage).as_ref(),
                     usage,
                     facts,
+                    type_env,
                 ) {
                     out.push((
                         handle.clone(),
@@ -531,16 +640,40 @@ fn collect_expr_mutations(
                     ));
                 }
             }
-            collect_expr_mutations(receiver, usage, facts, method_usage, stored_lambdas, out);
+            collect_expr_mutations(
+                receiver,
+                usage,
+                facts,
+                type_env,
+                method_usage,
+                stored_lambdas,
+                out,
+            );
             for arg in args {
-                collect_expr_mutations(arg, usage, facts, method_usage, stored_lambdas, out);
+                collect_expr_mutations(
+                    arg,
+                    usage,
+                    facts,
+                    type_env,
+                    method_usage,
+                    stored_lambdas,
+                    out,
+                );
             }
         }
         Expr::Lambda { body, .. } => {
-            collect_lambda_body_mutations(body, usage, facts, method_usage, out)
+            collect_lambda_body_mutations(body, usage, facts, type_env, method_usage, out)
         }
         _ => visit_subexpressions(expr, &mut |inner| {
-            collect_expr_mutations(inner, usage, facts, method_usage, stored_lambdas, out)
+            collect_expr_mutations(
+                inner,
+                usage,
+                facts,
+                type_env,
+                method_usage,
+                stored_lambdas,
+                out,
+            )
         }),
     }
 }
@@ -583,6 +716,7 @@ fn call_writes_through_receiver(
     receiver_ty: Option<&JavaType>,
     usage: &UsageFacts,
     facts: &FactSet,
+    type_env: &TypeEnv,
 ) -> bool {
     if let Some(resolved) = resolved
         && usage
@@ -595,7 +729,9 @@ fn call_writes_through_receiver(
     {
         return true;
     }
-    let receiver_type = receiver_ty.and_then(external_receiver_type_name);
+    let receiver_type = receiver_ty.and_then(|receiver_ty| {
+        crate::stdlib::external_api_receiver_owner_key(receiver_ty, type_env)
+    });
     facts
         .external_api_effect_for_receiver_with_arity_or_rust_name(
             receiver_type.as_deref(),
@@ -612,17 +748,6 @@ fn receiver_java_type_for_handle(
     method_usage
         .and_then(|usage| usage.bindings.get(handle))
         .map(|binding| binding.java_ty.clone())
-}
-
-fn external_receiver_type_name(java_ty: &JavaType) -> Option<String> {
-    match java_ty {
-        JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(name.clone()),
-        JavaType::String => Some("String".to_string()),
-        JavaType::Array(element) => {
-            external_receiver_type_name(element).map(|element| format!("{element}[]"))
-        }
-        JavaType::Primitive(_) | JavaType::Void | JavaType::Wildcard(_) => None,
-    }
 }
 
 fn collect_statements<'a>(block: &'a Block, out: &mut Vec<&'a Stmt>) {
@@ -953,10 +1078,14 @@ mod tests {
     }
 
     fn external_record_set_flag_fact(mutability: ReceiverMutabilityFact) -> FactSet {
+        external_set_flag_fact("Record", mutability)
+    }
+
+    fn external_set_flag_fact(receiver_type: &str, mutability: ReceiverMutabilityFact) -> FactSet {
         let mut facts = FactSet::default();
         facts.external_api_effect_facts.push(ExternalApiEffectFact {
             method_name: "setFlag".to_string(),
-            receiver_type: Some("Record".to_string()),
+            receiver_type: Some(receiver_type.to_string()),
             arg_count: Some(1),
             parameter_patterns: None,
             role: ExternalApiRole::Setter,
@@ -1315,6 +1444,59 @@ mod tests {
             read_only.is_empty(),
             "read-only external facts must not report aliases: {read_only:?}"
         );
+    }
+
+    #[test]
+    fn external_receiver_mutability_fact_uses_type_param_bound_owner() {
+        let source = r#"
+            import dep.Record;
+            public class Shared<T extends Record> {
+                public int run(T a) {
+                    T b = a;
+                    a.setFlag(true);
+                    return b.hashCode();
+                }
+            }
+            "#;
+        let found = aliases_in_with_facts(
+            source,
+            &external_record_set_flag_fact(ReceiverMutabilityFact::MutatesReceiver),
+        );
+        assert_eq!(
+            found.len(),
+            1,
+            "external mutator should use the type-parameter bound owner: {found:?}"
+        );
+        assert_eq!(found[0].original, "a");
+        assert_eq!(found[0].alias, "b");
+        assert_eq!(found[0].mutated_through, "a");
+        assert_eq!(found[0].observed_through, "b");
+    }
+
+    #[test]
+    fn external_receiver_mutability_fact_uses_array_owner_key() {
+        let source = r#"
+            public class Shared {
+                public int run(String[] a) {
+                    String[] b = a;
+                    a.setFlag(true);
+                    return b.length;
+                }
+            }
+            "#;
+        let found = aliases_in_with_facts(
+            source,
+            &external_set_flag_fact("Array", ReceiverMutabilityFact::MutatesReceiver),
+        );
+        assert_eq!(
+            found.len(),
+            1,
+            "external mutator should use the shared Array owner key: {found:?}"
+        );
+        assert_eq!(found[0].original, "a");
+        assert_eq!(found[0].alias, "b");
+        assert_eq!(found[0].mutated_through, "a");
+        assert_eq!(found[0].observed_through, "b");
     }
 
     /// A block-bodied lambda is nested inside an expression statement, so the
