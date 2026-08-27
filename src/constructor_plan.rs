@@ -309,6 +309,22 @@ pub fn plan_constructor_field_values_with_inherited_context<'a>(
 ) -> Vec<ConstructorFieldValuePlan<'a>> {
     let inherited_fields =
         crate::inherited_members::inherited_instance_field_refs_for_type(ty, support_program);
+    plan_constructor_field_values_with_inherited_field_refs(
+        ty,
+        body,
+        signatures,
+        inherited_fields,
+        facts,
+    )
+}
+
+pub fn plan_constructor_field_values_with_inherited_field_refs<'a>(
+    ty: &'a TypeDecl,
+    body: Option<&'a Block>,
+    signatures: &SignaturePlan,
+    inherited_fields: Vec<crate::inherited_members::InheritedInstanceFieldRef<'a>>,
+    facts: &FactSet,
+) -> Vec<ConstructorFieldValuePlan<'a>> {
     let mut plans = plan_constructor_field_values_with_inherited_field_decls(
         ty,
         body,

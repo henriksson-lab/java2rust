@@ -1,15 +1,25 @@
 # 0023 — Non-static inner-class construction still lacks shared outer receivers
 
-Status: **open** (diagnosed; runtime panic fallback still emitted when no outer handle is available)
-Severity: high — ordinary `new Inner()` from an outer instance method still lowers to a runtime fallback
+Status: **open, narrowed to shared-receiver construction** (captured-inner
+callers that already carry `self.__outer` can now route through outer method
+`*_with_outer` companions; runtime panic fallback still emitted when no outer
+handle is available)
+Severity: high — ordinary `new Inner()` from an outer instance method still
+routes through the runtime fallback in the original method body. Non-panicking
+`_with_outer` companion bodies are emitted, and captured inner callers that
+already possess the outer handle now route to them; ordinary by-value outer
+receivers still cannot synthesize the required handle.
 Kind: blocked by unimplemented `SharedLocal`/shared receiver construction ([0002](0002-object-aliasing-has-no-representation.md))
 
 ## Symptom
 
 Non-static inner classes compile, and paths that already possess an outer handle
-now have non-panicking `_with_outer` companions. The remaining ordinary outer
-method path still has no shared receiver handle, so its original lowering calls
-the fallback constructor and aborts at runtime.
+now have non-panicking `_with_outer` constructor and method companions. The
+remaining ordinary outer method path still has no shared receiver handle, so the
+original method body calls the fallback constructor and aborts at runtime. A
+separate `method_with_outer` body exists when lowering can make the body
+non-panicking; the unresolved part is routing ordinary calls to that companion
+once receivers themselves are represented as shared handles.
 
 ```java
 public class InnerCapture {
@@ -70,7 +80,12 @@ would give Java's by-reference capture semantics — `base` mutated after
 construction would be visible, returning 21.
 
 Only the *construction* side for call sites without an existing outer handle is
-missing, and it is missing for a structural reason.
+missing, and it is missing for a structural reason. The bounded captured-inner
+method-call route is covered by
+`captured_inner_method_call_routes_outer_method_with_outer_companion`: a
+receiverless call from a captured inner method to an outer method now lowers as
+`self.__outer.borrow().make_with_outer(self.__outer.clone())` instead of
+recursing on the inner receiver.
 
 ## Root cause: this is 0002 with the consequence made visible
 
@@ -101,8 +116,10 @@ be planned and called as `Rc<RefCell<T>>`:
 
 1. Mark any class that is the outer type of a non-static inner class as
    requiring a shared representation.
-2. Route instance-method calls through the existing `_with_outer` method and
-   constructor companions, passing the enclosing handle.
+2. Complete the remaining instance-method routes that start from shared
+   receivers. The captured-inner route with an existing `self.__outer` handle is
+   implemented; ordinary outer methods still need a receiver representation that
+   can produce the enclosing handle.
 3. `outer.new Inner()` (qualified creation from outside) uses the same path.
 
 A narrower interim option, if 0002b is far off: restrict the shared
@@ -216,6 +233,11 @@ warnings through one post-lowering helper used by both single-file and batch
 translation. `tests/batch_translation.rs` adds a regression for the non-static
 inner-class case, and `scripts/gate.sh --all` is clean with the updated
 `batch_translation 10/1` baseline.
+
+`tests/differential/known-gaps/InnerCapture.java` now makes the runtime failure
+executable known-gap coverage as well: Java must print `21`, the current
+generated Rust must panic with the inner-construction message, and the
+translator must report `inner_class_construction_panics`.
 
 ### Codex follow-up 2026-08-11 — captured outer-field writes use the existing handle
 

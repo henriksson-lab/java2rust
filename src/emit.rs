@@ -2,6 +2,41 @@ use crate::rust_ir::*;
 
 use crate::java_naming::rust_keyword_is_rawable_identifier;
 
+fn string_value_of_call(function: &RustExpr, args: &[RustExpr]) -> bool {
+    if args.len() != 1 {
+        return false;
+    }
+    match function {
+        RustExpr::TypeAssociatedPath { ty, member } => {
+            member == "value_of"
+                && matches!(ty, RustType::Named(name) if rust_string_owner_name(name) == "String")
+        }
+        RustExpr::Path(path) => {
+            matches!(path.as_slice(), [owner, member] if rust_string_owner_name(owner) == "String" && member == "value_of")
+        }
+        _ => false,
+    }
+}
+
+fn rust_string_owner_name(owner: &str) -> &str {
+    owner.trim_start_matches('<').trim_end_matches('>')
+}
+
+fn boxed_any_custom_equals_arg(expr: &RustExpr) -> bool {
+    matches!(
+        expr,
+        RustExpr::Cast { expr, ty }
+            if ty == "Box<dyn std::any::Any>" && matches!(
+                expr.as_ref(),
+                RustExpr::Call { function, args }
+                    if args.len() == 1
+                        && matches!(function.as_ref(), RustExpr::Path(path)
+                            if matches!(path.as_slice(), [owner, member]
+                                if owner == "Box" && member == "new"))
+            )
+    )
+}
+
 pub fn emit_file(file: &RustFile) -> String {
     let mut out = String::new();
     for item in &file.items {
@@ -300,6 +335,16 @@ fn emit_expr_prec(
         RustExpr::TypeAssociatedPath { ty, member } => {
             format!("<{}>::{}", emit_type(ty), rust_ident(member))
         }
+        RustExpr::TraitAssociatedPath {
+            ty,
+            trait_name,
+            member,
+        } => format!(
+            "<{} as {}>::{}",
+            emit_type(ty),
+            trait_name,
+            rust_ident(member)
+        ),
         RustExpr::Field(receiver, field) => {
             format!(
                 "{}.{}",
@@ -312,6 +357,15 @@ fn emit_expr_prec(
                 "{}[{}]",
                 emit_expr_prec(array, 11, None, ExprChildSide::None),
                 emit_expr_prec(index, 0, None, ExprChildSide::None)
+            )
+        }
+        RustExpr::Binary { op, left, right }
+            if op == "==" && boxed_any_custom_equals_arg(right) =>
+        {
+            format!(
+                "{}.equals({})",
+                emit_expr_prec(left, 11, None, ExprChildSide::None),
+                emit_expr(right)
             )
         }
         RustExpr::Binary { op, left, right } => format!(
@@ -376,6 +430,9 @@ fn emit_expr_prec(
         RustExpr::VecRepeat { value, len } => {
             format!("vec![{}; {}]", emit_expr(value), emit_expr(len))
         }
+        RustExpr::Call { function, args } if string_value_of_call(function, args) => {
+            format!("({}).to_string()", emit_expr(&args[0]))
+        }
         RustExpr::Call { function, args } => format!(
             "{}({})",
             emit_expr_prec(function, 11, None, ExprChildSide::None),
@@ -390,12 +447,21 @@ fn emit_expr_prec(
             receiver,
             method,
             args,
-        } => format!(
-            "{}.{}({})",
-            emit_expr_prec(receiver, 11, None, ExprChildSide::None),
-            rust_ident(method),
-            args.iter().map(emit_expr).collect::<Vec<_>>().join(", ")
-        ),
+        } => {
+            if method == "as_str"
+                && args.is_empty()
+                && let Some(literal) = string_literal_to_string_receiver(receiver)
+            {
+                literal
+            } else {
+                format!(
+                    "{}.{}({})",
+                    emit_expr_prec(receiver, 11, None, ExprChildSide::None),
+                    rust_ident(method),
+                    args.iter().map(emit_expr).collect::<Vec<_>>().join(", ")
+                )
+            }
+        }
         RustExpr::Closure {
             is_move,
             params,
@@ -444,6 +510,35 @@ fn emit_expr_prec(
     } else {
         rendered
     }
+}
+
+fn string_literal_to_string_receiver(receiver: &RustExpr) -> Option<String> {
+    match receiver {
+        RustExpr::Shaped { expr, .. } => string_literal_to_string_receiver(expr),
+        RustExpr::MethodCall {
+            receiver,
+            method,
+            args,
+        } if method == "to_string" && args.is_empty() => match receiver.as_ref() {
+            RustExpr::Literal(literal) if is_complete_string_literal(literal) => {
+                Some(literal.clone())
+            }
+            _ => None,
+        },
+        RustExpr::Raw(rendered) => {
+            let literal = rendered.strip_suffix(".to_string()")?;
+            is_complete_string_literal(literal).then(|| literal.to_string())
+        }
+        RustExpr::Literal(rendered) => {
+            let literal = rendered.strip_suffix(".to_string()")?;
+            is_complete_string_literal(literal).then(|| literal.to_string())
+        }
+        _ => None,
+    }
+}
+
+fn is_complete_string_literal(rendered: &str) -> bool {
+    rendered.starts_with('"') && rendered.ends_with('"') && rendered.len() >= 2
 }
 
 fn emit_closure_expr(
@@ -711,11 +806,21 @@ fn expr_needs_parentheses(
 }
 
 fn normalize_raw_expr_for_context(raw: &str, parent_prec: u8) -> String {
-    if parent_prec == 0 {
+    if let Some(rendered) = normalize_raw_optional_string_literal_view(raw) {
+        rendered
+    } else if parent_prec == 0 {
         strip_redundant_outer_parentheses(raw).to_string()
     } else {
         raw.to_string()
     }
+}
+
+fn normalize_raw_optional_string_literal_view(raw: &str) -> Option<String> {
+    let inner = raw
+        .trim()
+        .strip_prefix("Some(")?
+        .strip_suffix(".to_string().as_str())")?;
+    is_complete_string_literal(inner).then(|| format!("Some({inner})"))
 }
 
 fn strip_redundant_outer_parentheses(raw: &str) -> &str {
@@ -783,7 +888,7 @@ fn is_unit_expr(expr: &RustExpr) -> bool {
     }
 }
 
-fn expr_precedence(expr: &RustExpr) -> u8 {
+pub(crate) fn expr_precedence(expr: &RustExpr) -> u8 {
     match expr {
         RustExpr::Shaped { expr, .. } => expr_precedence(expr),
         RustExpr::PostfixComment { expr, .. } => expr_precedence(expr),
@@ -805,6 +910,7 @@ fn expr_precedence(expr: &RustExpr) -> u8 {
         | RustExpr::Path(_)
         | RustExpr::GenericPath { .. }
         | RustExpr::TypeAssociatedPath { .. }
+        | RustExpr::TraitAssociatedPath { .. }
         | RustExpr::Pattern(_)
         | RustExpr::Tuple(_)
         | RustExpr::ArrayLiteral(_)
@@ -971,6 +1077,37 @@ mod tests {
             }),
             "start..=end"
         );
+    }
+
+    #[test]
+    fn string_literal_to_string_as_str_emits_static_literal_view() {
+        let structured = RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Literal("\"none\"".to_string())),
+                method: "to_string".to_string(),
+                args: Vec::new(),
+            }),
+            method: "as_str".to_string(),
+            args: Vec::new(),
+        };
+        assert_eq!(emit_expr(&structured), "\"none\"");
+
+        let raw_receiver = RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Raw("\"none\".to_string()".to_string())),
+            method: "as_str".to_string(),
+            args: Vec::new(),
+        };
+        assert_eq!(emit_expr(&raw_receiver), "\"none\"");
+
+        let literal_receiver = RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Literal("\"none\".to_string()".to_string())),
+            method: "as_str".to_string(),
+            args: Vec::new(),
+        };
+        assert_eq!(emit_expr(&literal_receiver), "\"none\"");
+
+        let raw_optional = RustExpr::Raw("Some(\"none\".to_string().as_str())".to_string());
+        assert_eq!(emit_expr(&raw_optional), "Some(\"none\")");
     }
 
     #[test]

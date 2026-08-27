@@ -1,7 +1,10 @@
+mod common;
+
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
+use common::{GeneratedCrateModule, cargo_check_generated_modules};
 use new_java2rust::facts::{
     ControlFlowFactKind, DispatchRequirementKind, ExceptionKind, ExternalApiArgumentEffectFact,
     ExternalApiCoverage, ExternalApiEffectFact, ExternalApiRole, ExternalArgumentAliasPolicy,
@@ -10,7 +13,7 @@ use new_java2rust::facts::{
     TrivialAccessorKind, TypeCapabilityOverride, UnresolvedTargetFact, UnresolvedTargetKind,
 };
 use new_java2rust::java_ir::{JavaType, PrimitiveType};
-use new_java2rust::object_model::plan_object_model;
+use new_java2rust::object_model::plan_object_model_with_effective_facts;
 use new_java2rust::parser::parse_java_source;
 use new_java2rust::resolve::resolve_program;
 use new_java2rust::rewrite::{
@@ -19,7 +22,8 @@ use new_java2rust::rewrite::{
 };
 use new_java2rust::slot_shape::{OwnershipShape, ViewShape};
 use new_java2rust::stdlib::{
-    canonical_external_receiver_type_key, external_api_method_policy, external_field_provenance,
+    canonical_external_receiver_type_key, external_api_method_policy_with_builtin_packs,
+    external_field_provenance,
 };
 use new_java2rust::types::optional_java_type;
 use new_java2rust::usage::{
@@ -29,6 +33,17 @@ use new_java2rust::{
     emit, exception_plan, external_facts, lower, parser, representation, resolve,
     semantic_analysis, signature, translate_source, translate_source_with_facts,
 };
+
+fn cargo_check_translation(crate_name: &str, rust: &str) {
+    cargo_check_generated_modules(
+        crate_name,
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: rust.to_string(),
+            tests: "",
+        }],
+    );
+}
 
 fn idiom_gap(path: &str) -> String {
     fs::read_to_string(Path::new("examples/idiom-gaps").join(path)).unwrap()
@@ -153,6 +168,13 @@ class Eq {
             .source_equals_override_for("RealKey")
             .is_some(),
         "equals(Object) must be recorded as the Object.equals override"
+    );
+    assert!(
+        semantic
+            .facts
+            .source_equals_override_for("EqRealKey")
+            .is_some(),
+        "nested equals(Object) override must be visible by emitted Rust type name"
     );
     assert!(
         semantic.facts.source_equals_override_for("Key").is_none(),
@@ -381,7 +403,8 @@ class Use {
         2
     );
 
-    let object_plan = plan_object_model(&resolved.program, &semantic.facts);
+    let effective_facts = new_java2rust::effective_facts::EffectiveFacts::new(&semantic.facts);
+    let object_plan = plan_object_model_with_effective_facts(&resolved.program, &effective_facts);
     let dog = object_plan.strategy_for("Dog").unwrap();
     assert_eq!(
         dog.requirements,
@@ -514,6 +537,10 @@ fn field_nullability_external_override_beats_constructor_proof() {
         translation.rust.contains("name: Option<String>"),
         "{}",
         translation.rust
+    );
+    cargo_check_translation(
+        "semantic_field_nullability_external_override",
+        &translation.rust,
     );
 }
 
@@ -675,6 +702,7 @@ fn nullable_field_storage_uses_option_shape_and_assignment_wrapping() {
         "{}",
         translation.rust
     );
+    cargo_check_translation("semantic_nullable_field_storage", &translation.rust);
 }
 
 #[test]
@@ -747,6 +775,7 @@ class FieldOptionalityCases {
             translation.rust
         );
     }
+    cargo_check_translation("semantic_field_optionality_cases", &translation.rust);
 }
 
 #[test]
@@ -784,6 +813,10 @@ class BareFieldAssignmentsAreFields {
         "{}",
         translation.rust
     );
+    cargo_check_translation(
+        "semantic_bare_constructor_field_assignments",
+        &translation.rust,
+    );
 }
 
 #[test]
@@ -810,6 +843,48 @@ class BareFieldAssignmentShadowedByParam {
         translation.rust.contains("name: Option<String>"),
         "{}",
         translation.rust
+    );
+    cargo_check_translation(
+        "semantic_bare_constructor_assignment_shadowing",
+        &translation.rust,
+    );
+}
+
+#[test]
+fn qualified_constructor_assignment_from_parameter_keeps_field_nullable() {
+    let source = r#"
+class QualifiedFieldAssignmentFromParameter {
+    String name;
+
+    QualifiedFieldAssignmentFromParameter(String name) {
+        this.name = name;
+    }
+
+    int hash() {
+        return name == null ? 0 : name.hashCode();
+    }
+}
+"#;
+    let semantic = analyze(source);
+    let translation = translate_source(source);
+
+    assert_eq!(
+        semantic
+            .facts
+            .field_nullability_for("QualifiedFieldAssignmentFromParameter", "name"),
+        Some(NullabilityState::MaybeNull)
+    );
+    assert!(
+        translation.rust.contains("name: Option<String>")
+            && translation
+                .rust
+                .contains("if self.name.is_none() { 0 } else { java_string_hash_code"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_translation(
+        "semantic_qualified_constructor_assignment_from_parameter",
+        &translation.rust,
     );
 }
 
@@ -844,7 +919,7 @@ class ConstructorInitializedSortedMapField {
     assert!(
         translation
             .rust
-            .contains("sample_name_to_path: std::collections::HashMap<String, URI>")
+            .contains("sample_name_to_path: std::collections::BTreeMap<String, URI>")
             && !translation.rust.contains("sample_name_to_path: Option<")
             && translation
                 .rust
@@ -852,6 +927,10 @@ class ConstructorInitializedSortedMapField {
             && !translation.rust.contains("sample_name_to_path.size()"),
         "{}",
         translation.rust
+    );
+    cargo_check_translation(
+        "semantic_constructor_initialized_sorted_map",
+        &translation.rust,
     );
 }
 
@@ -912,9 +991,13 @@ fn preserves_public_trivial_accessor_calls_when_api_wrappers_must_survive() {
         translation.rust
     );
     assert!(
-        translation.rust.contains("return self.get_value();"),
+        translation.rust.contains("return Ok(self.get_value());"),
         "{}",
         translation.rust
+    );
+    cargo_check_translation(
+        "semantic_public_trivial_accessor_wrappers",
+        &translation.rust,
     );
 }
 
@@ -952,6 +1035,10 @@ fn lowers_package_private_trivial_accessor_calls_as_field_access() {
             && !translation.rust.contains("self.set_value("),
         "{}",
         translation.rust
+    );
+    cargo_check_translation(
+        "semantic_package_private_trivial_accessor_inlining",
+        &translation.rust,
     );
 }
 
@@ -4501,7 +4588,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         (
             "HEADER_FIELDS",
             JavaType::Named {
-                name: "HEADER_FIELDS".to_string(),
+                name: "VCFHeader.HEADER_FIELDS".to_string(),
                 args: Vec::new(),
             },
         ),
@@ -4546,7 +4633,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         header_version_setter.receiver_mutability,
         ReceiverMutabilityFact::MutatesReceiver
     );
-    assert_eq!(header_version_setter.return_type, Some(JavaType::Void));
+    assert_eq!(header_version_setter.return_type, None);
 
     let at_least = vcf_facts
         .external_api_effect_for_receiver_with_arity(
@@ -4595,7 +4682,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
     assert_eq!(
         supported_header_line_type.field_type,
         Some(JavaType::Named {
-            name: "SupportedHeaderLineType".to_string(),
+            name: "VCFCompoundHeaderLine.SupportedHeaderLineType".to_string(),
             args: Vec::new(),
         })
     );
@@ -4613,7 +4700,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         assert_eq!(
             field.field_type,
             Some(JavaType::Named {
-                name: "SupportedHeaderLineType".to_string(),
+                name: "VCFCompoundHeaderLine.SupportedHeaderLineType".to_string(),
                 args: Vec::new(),
             })
         );
@@ -5782,7 +5869,8 @@ class JavaWideComparisonApiUse {
     );
     assert_eq!(compare_to.provenance, FactProvenance::BuiltinExternalModel);
 
-    let method_ref_policy = external_api_method_policy(None, "compareTo", 0);
+    let method_ref_policy =
+        external_api_method_policy_with_builtin_packs(None, "compareTo", 0, true);
     assert_eq!(method_ref_policy.role, ExternalApiRole::Getter);
     assert_eq!(
         method_ref_policy.return_nullability,
@@ -5856,7 +5944,8 @@ class FilePathAccessorUse {
         FactProvenance::BuiltinExternalModel
     );
 
-    let unresolved_receiver_policy = external_api_method_policy(None, "getCanonicalPath", 0);
+    let unresolved_receiver_policy =
+        external_api_method_policy_with_builtin_packs(None, "getCanonicalPath", 0, true);
     assert_eq!(unresolved_receiver_policy.role, ExternalApiRole::Getter);
     assert_eq!(
         unresolved_receiver_policy.return_nullability,
@@ -6689,6 +6778,69 @@ class OptionalPresenceUse {
 }
 
 #[test]
+fn string_buffer_delete_insert_are_throwing_fluent_mutators() {
+    let parsed = parser::parse_java_source(
+        r#"
+class StringBufferMutationEffects {
+    String run(StringBuilder builder, StringBuffer buffer) {
+        builder.delete(1, 2).insert(1, "x");
+        buffer.delete(1, 2).insert(1, "x");
+        builder.setLength(3);
+        buffer.setLength(3);
+        return builder.toString() + buffer.toString();
+    }
+}
+"#,
+    );
+    let resolved = resolve::resolve_program(&parsed.program, parsed.diagnostics);
+    let semantic = semantic_analysis::analyze_program(
+        &resolved.program,
+        &resolved.facts,
+        &new_java2rust::facts::FactSet::default(),
+    );
+    for receiver in ["StringBuilder", "StringBuffer", "java.lang.StringBuilder"] {
+        for method in ["delete", "insert"] {
+            let effect = semantic
+                .facts
+                .external_api_effect_for_receiver_with_arity(Some(receiver), method, Some(2))
+                .unwrap_or_else(|| panic!("{receiver}.{method} should have an effect fact"));
+            assert_eq!(effect.role, ExternalApiRole::FluentMutator);
+            assert_eq!(
+                effect.receiver_mutability,
+                ReceiverMutabilityFact::MutatesReceiver
+            );
+            assert_eq!(
+                effect.return_nullability,
+                NullabilityState::DefinitelyNonNull
+            );
+            assert!(
+                effect
+                    .thrown
+                    .iter()
+                    .any(|ty| matches!(ty, JavaType::Named { name, .. } if name == "StringIndexOutOfBoundsException")),
+                "{receiver}.{method} should throw StringIndexOutOfBoundsException"
+            );
+        }
+        let effect = semantic
+            .facts
+            .external_api_effect_for_receiver_with_arity(Some(receiver), "setLength", Some(1))
+            .unwrap_or_else(|| panic!("{receiver}.setLength should have an effect fact"));
+        assert_eq!(effect.role, ExternalApiRole::Mutator);
+        assert_eq!(
+            effect.receiver_mutability,
+            ReceiverMutabilityFact::MutatesReceiver
+        );
+        assert!(
+            effect
+                .thrown
+                .iter()
+                .any(|ty| matches!(ty, JavaType::Named { name, .. } if name == "StringIndexOutOfBoundsException")),
+            "{receiver}.setLength should throw StringIndexOutOfBoundsException"
+        );
+    }
+}
+
+#[test]
 fn external_api_effect_lookup_uses_shared_java_method_aliases() {
     let mut facts = FactSet::default();
     facts.external_api_effect_facts.push(ExternalApiEffectFact {
@@ -7151,7 +7303,8 @@ class StreamCollectFactUse {
 #[test]
 fn primitive_stream_mapper_and_sum_facts_are_read_only_non_null_builtin() {
     for (receiver, method, arg_count) in [("Stream", "mapToInt", 1), ("IntStream", "sum", 0)] {
-        let effect = external_api_method_policy(Some(receiver), method, arg_count);
+        let effect =
+            external_api_method_policy_with_builtin_packs(Some(receiver), method, arg_count, true);
         assert_eq!(effect.role, ExternalApiRole::Getter);
         assert_eq!(effect.receiver_mutability, ReceiverMutabilityFact::ReadOnly);
         assert_eq!(
@@ -7687,7 +7840,8 @@ class ReadOnlyExternalReceiverParam {
         &vec![
             BindingUse::ReceiverForCall {
                 name: "getName".to_string(),
-                boundary: CallArgumentBoundary::Unknown,
+                boundary: CallArgumentBoundary::KnownContentRead,
+                has_literal_null_arg: false,
             },
             BindingUse::ContentRead,
         ]
@@ -8392,6 +8546,10 @@ fn translation_no_longer_reports_pending_assignment_in_condition_diagnostics() {
             .rust
             .contains("assignment-in-condition normalization")
     );
+    cargo_check_translation(
+        "semantic_assignment_in_condition_translation",
+        &translation.rust,
+    );
 }
 
 #[test]
@@ -8411,6 +8569,10 @@ fn translation_no_longer_reports_pending_tail_recursive_rewrite_diagnostics() {
             .contains("tail-recursive loop normalization")
     );
     assert!(translation.rust.contains("loop {"), "{}", translation.rust);
+    cargo_check_translation(
+        "semantic_tail_recursive_rewrite_translation",
+        &translation.rust,
+    );
 }
 
 #[test]

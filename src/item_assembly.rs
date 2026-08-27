@@ -18,7 +18,7 @@ use crate::rust_ir::{
 };
 use crate::signature::{ReceiverPlan, SignaturePlan};
 use crate::slot_render::{
-    default_expr_for_slot, default_expr_for_slot_with_facts, rust_name_for_java_named_type,
+    default_expr_for_slot_with_facts, rust_name_for_java_named_type,
     rust_type_for_java_type_with_facts, rust_type_for_slot_with_facts,
     rust_type_for_slot_with_facts_and_representations,
 };
@@ -28,10 +28,6 @@ use crate::types::{
     raw_rust_option_inner, raw_rust_vec_inner, sequence_element_type,
     two_dimensional_array_element_type,
 };
-
-pub fn struct_item_for_type(ty: &TypeDecl, signatures: &SignaturePlan) -> RustItem {
-    struct_item_for_type_with_facts(ty, signatures, &FactSet::default())
-}
 
 pub fn struct_item_for_type_with_facts(
     ty: &TypeDecl,
@@ -301,6 +297,181 @@ pub fn callable_type_param_needs_clone_bound(
     typed_params
         .iter()
         .any(|name| counts.get(*name).copied().unwrap_or(0) > 1)
+        || callable_type_param_collection_get_needs_clone_bound(type_param, params, body)
+}
+
+fn callable_type_param_collection_get_needs_clone_bound(
+    type_param: &str,
+    params: &[crate::java_ir::Param],
+    body: &crate::java_ir::Block,
+) -> bool {
+    let mut locals = params
+        .iter()
+        .map(|param| (param.name.clone(), param.ty.clone()))
+        .collect::<std::collections::HashMap<_, _>>();
+    block_type_param_collection_get_needs_clone_bound(type_param, body, &mut locals)
+}
+
+fn block_type_param_collection_get_needs_clone_bound(
+    type_param: &str,
+    block: &crate::java_ir::Block,
+    locals: &mut std::collections::HashMap<String, JavaType>,
+) -> bool {
+    for stmt in &block.statements {
+        if stmt_type_param_collection_get_needs_clone_bound(type_param, stmt, locals) {
+            return true;
+        }
+    }
+    false
+}
+
+fn stmt_type_param_collection_get_needs_clone_bound(
+    type_param: &str,
+    stmt: &Stmt,
+    locals: &mut std::collections::HashMap<String, JavaType>,
+) -> bool {
+    match stmt {
+        Stmt::VarDecl {
+            ty,
+            name,
+            initializer,
+            ..
+        } => {
+            let needs_bound = initializer.as_ref().is_some_and(|initializer| {
+                java_type_contains_type_param(ty, type_param)
+                    && expr_is_type_param_sequence_get(type_param, initializer, locals)
+            });
+            locals.insert(name.clone(), ty.clone());
+            needs_bound
+        }
+        Stmt::Return(Some(expr)) => expr_is_type_param_sequence_get(type_param, expr, locals),
+        Stmt::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            let mut then_locals = locals.clone();
+            let mut else_locals = locals.clone();
+            block_type_param_collection_get_needs_clone_bound(
+                type_param,
+                then_block,
+                &mut then_locals,
+            ) || else_block.as_ref().is_some_and(|else_block| {
+                block_type_param_collection_get_needs_clone_bound(
+                    type_param,
+                    else_block,
+                    &mut else_locals,
+                )
+            })
+        }
+        Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::Block(body) => {
+            let mut scoped = locals.clone();
+            block_type_param_collection_get_needs_clone_bound(type_param, body, &mut scoped)
+        }
+        Stmt::For { init, body, .. } => {
+            let mut scoped = locals.clone();
+            for init_stmt in init {
+                if stmt_type_param_collection_get_needs_clone_bound(
+                    type_param,
+                    init_stmt,
+                    &mut scoped,
+                ) {
+                    return true;
+                }
+            }
+            block_type_param_collection_get_needs_clone_bound(type_param, body, &mut scoped)
+        }
+        Stmt::EnhancedFor {
+            var_type,
+            var_name,
+            body,
+            ..
+        } => {
+            let mut scoped = locals.clone();
+            scoped.insert(var_name.clone(), var_type.clone());
+            block_type_param_collection_get_needs_clone_bound(type_param, body, &mut scoped)
+        }
+        Stmt::Switch { cases, .. } => cases.iter().any(|case| {
+            let mut scoped = locals.clone();
+            case.statements.iter().any(|stmt| {
+                stmt_type_param_collection_get_needs_clone_bound(type_param, stmt, &mut scoped)
+            })
+        }),
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            let mut scoped = locals.clone();
+            for resource in resources {
+                if stmt_type_param_collection_get_needs_clone_bound(
+                    type_param,
+                    resource,
+                    &mut scoped,
+                ) {
+                    return true;
+                }
+            }
+            block_type_param_collection_get_needs_clone_bound(type_param, body, &mut scoped)
+                || catches.iter().any(|catch| {
+                    let mut catch_locals = locals.clone();
+                    block_type_param_collection_get_needs_clone_bound(
+                        type_param,
+                        &catch.body,
+                        &mut catch_locals,
+                    )
+                })
+                || finally_block.as_ref().is_some_and(|finally_block| {
+                    let mut finally_locals = locals.clone();
+                    block_type_param_collection_get_needs_clone_bound(
+                        type_param,
+                        finally_block,
+                        &mut finally_locals,
+                    )
+                })
+        }
+        Stmt::LabeledBlock { body, .. } => {
+            let mut scoped = locals.clone();
+            block_type_param_collection_get_needs_clone_bound(type_param, body, &mut scoped)
+        }
+        Stmt::Assign { .. }
+        | Stmt::Expr(_)
+        | Stmt::Return(None)
+        | Stmt::Throw(_)
+        | Stmt::LocalType(_)
+        | Stmt::ConstructorInvocation { .. }
+        | Stmt::Break(_)
+        | Stmt::Continue(_)
+        | Stmt::Unsupported(_) => false,
+    }
+}
+
+fn expr_is_type_param_sequence_get(
+    type_param: &str,
+    expr: &Expr,
+    locals: &std::collections::HashMap<String, JavaType>,
+) -> bool {
+    let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        ..
+    } = expr
+    else {
+        return false;
+    };
+    if name != "get" || args.len() != 1 {
+        return false;
+    }
+    let Expr::Var(receiver_name) = receiver.as_ref() else {
+        return false;
+    };
+    let Some(receiver_ty) = locals.get(receiver_name) else {
+        return false;
+    };
+    sequence_element_type(receiver_ty)
+        .is_some_and(|element_ty| java_type_contains_type_param(&element_ty, type_param))
 }
 
 fn source_type_param_needs_clone_bound(ty: &TypeDecl, type_param: &str) -> bool {
@@ -313,6 +484,10 @@ fn source_type_param_needs_clone_bound(ty: &TypeDecl, type_param: &str) -> bool 
                         .iter()
                         .any(|param| java_type_contains_type_param(&param.ty, type_param))
             }
+            Member::Constructor(constructor) => constructor
+                .params
+                .iter()
+                .any(|param| java_type_contains_type_param(&param.ty, type_param)),
             _ => false,
         })
 }
@@ -367,15 +542,6 @@ fn source_type_bound_is_class_like(bound: &str, support_programs: &[&Program]) -
 
 pub fn raw_item(item: String) -> RustItem {
     RustItem::Raw(item)
-}
-
-pub fn constructor_function_shell(
-    ty: &TypeDecl,
-    ctor: &ConstructorDecl,
-    signatures: &SignaturePlan,
-    body: Vec<RustStmt>,
-) -> RustFunction {
-    constructor_function_shell_with_facts(ty, ctor, signatures, body, &FactSet::default())
 }
 
 pub fn constructor_function_shell_with_facts(
@@ -631,6 +797,7 @@ fn rust_expr_reads_var(expr: &RustExpr, var_name: &str) -> bool {
         RustExpr::Path(_)
         | RustExpr::GenericPath { .. }
         | RustExpr::TypeAssociatedPath { .. }
+        | RustExpr::TraitAssociatedPath { .. }
         | RustExpr::Literal(_)
         | RustExpr::Pattern(_) => false,
     }
@@ -764,13 +931,6 @@ fn raw_rust_expr_mentions_identifier(text: &str, ident: &str) -> bool {
         .any(|token| token == ident)
 }
 
-pub fn constructor_default_field_value(
-    field_name: String,
-    shape: RustSlotShape,
-) -> (String, RustExpr) {
-    (field_name, default_expr_for_slot(&shape))
-}
-
 pub fn constructor_default_field_value_with_facts(
     field_name: String,
     shape: RustSlotShape,
@@ -788,15 +948,6 @@ pub fn delegating_constructor_return_body(rust_name: &str, args: Vec<RustExpr>) 
         self_associated_path_projection(rust_name),
         args,
     )))]
-}
-
-pub fn method_function_shell(
-    ty: &TypeDecl,
-    method: &MethodDecl,
-    signatures: &SignaturePlan,
-    body: Vec<RustStmt>,
-) -> RustFunction {
-    method_function_shell_with_facts(ty, method, signatures, body, &FactSet::default())
 }
 
 pub fn method_function_shell_with_facts(
@@ -922,14 +1073,6 @@ pub fn method_return_shape(
         .required_method_signature(ty, method)
         .return_shape
         .clone()
-}
-
-pub fn method_return_type(
-    ty: &TypeDecl,
-    method: &MethodDecl,
-    signatures: &SignaturePlan,
-) -> Option<RustType> {
-    method_return_type_with_facts(ty, method, signatures, &FactSet::default())
 }
 
 pub fn method_return_type_with_facts(
@@ -1776,16 +1919,6 @@ pub fn is_static_field(field: &FieldDecl) -> bool {
 
 pub fn is_static_final_field(field: &FieldDecl) -> bool {
     field.modifiers.contains(&Modifier::Static) && field.modifiers.contains(&Modifier::Final)
-}
-
-pub fn is_static_final_non_const_field(field: &FieldDecl) -> bool {
-    if !is_static_final_field(field) {
-        return false;
-    }
-    field
-        .initializer
-        .as_ref()
-        .is_none_or(|initializer| const_type_and_value(&field.ty, initializer, &[]).is_none())
 }
 
 fn associated_consts_for_type(ty: &TypeDecl) -> Vec<RustAssociatedConst> {

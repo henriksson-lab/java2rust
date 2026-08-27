@@ -20,6 +20,7 @@ fn param(name: &str, ty: JavaType) -> Param {
         source_name: name.to_string(),
         ty,
         is_varargs: false,
+        binding: None,
     }
 }
 
@@ -29,6 +30,7 @@ fn varargs_param(name: &str, element_ty: JavaType) -> Param {
         source_name: name.to_string(),
         ty: JavaType::Array(Box::new(element_ty)),
         is_varargs: true,
+        binding: None,
     }
 }
 

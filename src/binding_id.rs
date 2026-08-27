@@ -13,7 +13,6 @@ pub enum BindingKind {
     LoopVariable,
     Field,
     StaticField,
-    Unknown,
 }
 
 impl BindingId {

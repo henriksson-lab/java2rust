@@ -98,7 +98,6 @@ pub struct ExternalPackManifest {
     pub rust_target: Option<&'static str>,
     pub object_strategies: &'static [ExternalPackObjectStrategy],
     pub closed_hierarchy: &'static [ExternalPackClosedHierarchy],
-    pub object_safety: &'static [ExternalPackObjectSafety],
     pub type_capabilities: &'static [ExternalPackTypeCapability],
     pub field_nullability: &'static [ExternalPackFieldNullability],
     pub argument_effects: &'static [ExternalPackArgumentEffect],
@@ -120,38 +119,6 @@ pub struct ExternalPackObjectStrategy {
 pub struct ExternalPackClosedHierarchy {
     pub type_name: &'static str,
     pub closed: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ExternalPackObjectSafety {
-    pub type_name: &'static str,
-    pub violation: ExternalPackObjectSafetyViolation,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExternalPackObjectSafetyViolation {
-    StaticMethod {
-        method_name: &'static str,
-    },
-    SelfReferentialReturn {
-        method_name: &'static str,
-    },
-    NestedSelfReferentialReturn {
-        method_name: &'static str,
-    },
-    SelfReferentialParameter {
-        method_name: &'static str,
-        param_name: &'static str,
-    },
-    NestedSelfReferentialParameter {
-        method_name: &'static str,
-        param_name: &'static str,
-    },
-    FieldMember {
-        field_name: &'static str,
-    },
-    ConstructorMember,
-    UnsupportedMember,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -254,7 +221,6 @@ pub struct ExternalPackUnsupportedApi {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExternalTemplateMethodHook {
-    pub inherited_method: &'static str,
     pub arg_count: usize,
     pub hook_method: &'static str,
 }
@@ -356,9 +322,6 @@ impl ExternalPackManifest {
                 closed: closed.closed,
                 provenance: FactProvenance::ExternalLibraryPack,
             });
-        }
-        for object_safety in self.object_safety {
-            object_safety.push_facts(facts);
         }
         for capability in self.type_capabilities {
             facts
@@ -469,6 +432,7 @@ pub fn modeled_no_state_external_super_constructor(type_name: &str, arg_count: u
     let erased = erased_external_type_name(type_name);
     (external_type_name_matches(erased, "htsjdk.samtools.util.AbstractAsyncWriter")
         && arg_count == 1)
+        || (external_type_name_matches(erased, "ParentWriter") && arg_count == 2)
         || (external_type_name_matches(erased, "java.io.FileReader")
             || external_type_name_matches(erased, "FileReader"))
             && arg_count == 1
@@ -517,12 +481,10 @@ pub fn external_template_method_hook_for_super_method(
     }
     match (method_name, arg_count) {
         ("write", 1) => Some(ExternalTemplateMethodHook {
-            inherited_method: "write",
             arg_count,
             hook_method: "synchronously_write",
         }),
         ("close", 0) => Some(ExternalTemplateMethodHook {
-            inherited_method: "close",
             arg_count,
             hook_method: "synchronously_close",
         }),
@@ -686,9 +648,29 @@ pub fn audit_external_pack_manifest_coverage(
         })
     {
         let receiver_type = argument.receiver_type.as_deref().unwrap();
-        match manifest.modeled_api(receiver_type, &argument.method_name) {
-            Some(modeled) if modeled.coverage != ExternalApiCoverage::Unsupported => {}
-            Some(_) => diagnostics.warning(
+        let modeled_api = manifest.modeled_api(receiver_type, &argument.method_name);
+        let modeled_constructor = (argument.method_name == "new")
+            .then(|| {
+                manifest.modeled_constructors.iter().find(|constructor| {
+                    constructor.type_name == receiver_type
+                        && argument
+                            .arg_count
+                            .is_none_or(|arg_count| constructor.arg_count == arg_count)
+                        && argument.parameter_index < constructor.arg_count
+                })
+            })
+            .flatten();
+        let has_supported_coverage = modeled_api
+            .as_ref()
+            .is_some_and(|modeled| modeled.coverage != ExternalApiCoverage::Unsupported)
+            || modeled_constructor
+                .as_ref()
+                .is_some_and(|modeled| modeled.coverage != ExternalApiCoverage::Unsupported);
+        if has_supported_coverage {
+            continue;
+        }
+        if modeled_api.is_some() || modeled_constructor.is_some() {
+            diagnostics.warning(
                 "external_pack_manifest_unsupported_argument_effect_emitted",
                 format!(
                     "{}.{} argument {} in {} is marked unsupported but has an emitted argument-effect fact",
@@ -697,8 +679,9 @@ pub fn audit_external_pack_manifest_coverage(
                     argument.parameter_index,
                     manifest.pack_name
                 ),
-            ),
-            None => diagnostics.warning(
+            );
+        } else {
+            diagnostics.warning(
                 "external_pack_manifest_missing_argument_effect_coverage",
                 format!(
                     "{}.{} argument {} in {} has a pack-owned argument-effect fact but no manifest API coverage entry",
@@ -707,7 +690,7 @@ pub fn audit_external_pack_manifest_coverage(
                     argument.parameter_index,
                     manifest.pack_name
                 ),
-            ),
+            );
         }
     }
 
@@ -1045,53 +1028,6 @@ pub fn audit_external_pack_manifest_coverage(
                     closed.type_name, manifest.pack_name
                 ),
             ),
-        }
-    }
-
-    for object_safety in facts
-        .object_safety_facts
-        .iter()
-        .filter(|object_safety| object_safety.provenance == FactProvenance::ExternalLibraryPack)
-    {
-        let manifest_object_safety = manifest
-            .object_safety
-            .iter()
-            .filter(|modeled| modeled.type_name == object_safety.type_name)
-            .collect::<Vec<_>>();
-        if manifest_object_safety.is_empty() {
-            diagnostics.warning(
-                "external_pack_manifest_missing_object_safety_coverage",
-                format!(
-                    "{} in {} has a pack-owned object-safety fact but no manifest object-safety entry",
-                    object_safety.type_name, manifest.pack_name
-                ),
-            );
-        } else {
-            let manifest_violations = manifest_object_safety
-                .iter()
-                .map(|modeled| modeled.as_object_safety_violation())
-                .collect::<Vec<_>>();
-            if !object_safety.violations.iter().all(|violation| {
-                manifest_violations
-                    .iter()
-                    .any(|modeled| modeled == violation)
-            }) || !manifest_violations.iter().all(|modeled| {
-                object_safety
-                    .violations
-                    .iter()
-                    .any(|violation| violation == modeled)
-            }) {
-                diagnostics.warning(
-                    "external_pack_manifest_object_safety_mismatch",
-                    format!(
-                        "{} in {} has object-safety violations {:?} but manifest declares {:?}",
-                        object_safety.type_name,
-                        manifest.pack_name,
-                        object_safety.violations,
-                        manifest_violations
-                    ),
-                );
-            }
         }
     }
 
@@ -1682,61 +1618,6 @@ impl ExternalPackObjectStrategy {
             }
             ExternalPackObjectStrategyKind::ErasedObject => HierarchyStrategy::ErasedObject,
         }
-    }
-}
-
-impl ExternalPackObjectSafety {
-    fn as_object_safety_violation(&self) -> ObjectSafetyViolation {
-        match self.violation {
-            ExternalPackObjectSafetyViolation::StaticMethod { method_name } => {
-                ObjectSafetyViolation::StaticMethod {
-                    method_name: method_name.to_string(),
-                }
-            }
-            ExternalPackObjectSafetyViolation::SelfReferentialReturn { method_name } => {
-                ObjectSafetyViolation::SelfReferentialReturn {
-                    method_name: method_name.to_string(),
-                }
-            }
-            ExternalPackObjectSafetyViolation::NestedSelfReferentialReturn { method_name } => {
-                ObjectSafetyViolation::NestedSelfReferentialReturn {
-                    method_name: method_name.to_string(),
-                }
-            }
-            ExternalPackObjectSafetyViolation::SelfReferentialParameter {
-                method_name,
-                param_name,
-            } => ObjectSafetyViolation::SelfReferentialParameter {
-                method_name: method_name.to_string(),
-                param_name: param_name.to_string(),
-            },
-            ExternalPackObjectSafetyViolation::NestedSelfReferentialParameter {
-                method_name,
-                param_name,
-            } => ObjectSafetyViolation::NestedSelfReferentialParameter {
-                method_name: method_name.to_string(),
-                param_name: param_name.to_string(),
-            },
-            ExternalPackObjectSafetyViolation::FieldMember { field_name } => {
-                ObjectSafetyViolation::FieldMember {
-                    field_name: field_name.to_string(),
-                }
-            }
-            ExternalPackObjectSafetyViolation::ConstructorMember => {
-                ObjectSafetyViolation::ConstructorMember
-            }
-            ExternalPackObjectSafetyViolation::UnsupportedMember => {
-                ObjectSafetyViolation::UnsupportedMember
-            }
-        }
-    }
-
-    fn push_facts(&self, facts: &mut FactSet) {
-        push_external_pack_object_safety_violation(
-            facts,
-            self.type_name,
-            self.as_object_safety_violation(),
-        );
     }
 }
 
@@ -4138,9 +4019,12 @@ fn parse_external_api_metadata(
             }
             let mut patterns = Vec::new();
             for param in params.split(',').filter(|param| !param.is_empty()) {
-                patterns.push(crate::facts::type_pattern_for_external_java_type(
-                    &parse_type(param),
-                ));
+                let Some(pattern) =
+                    parse_external_api_parameter_pattern(diagnostics, line_index, param)
+                else {
+                    return None;
+                };
+                patterns.push(pattern);
             }
             if patterns.is_empty() {
                 push_external_pack_parse_error(
@@ -4247,6 +4131,27 @@ fn parse_external_api_metadata(
         }
     }
     Some(parsed)
+}
+
+fn parse_external_api_parameter_pattern(
+    diagnostics: &mut DiagnosticBag,
+    line_index: usize,
+    param: &str,
+) -> Option<TypePattern> {
+    if let Some(name) = param.strip_prefix("type-param:") {
+        if name.is_empty() {
+            push_external_pack_parse_error(
+                diagnostics,
+                line_index,
+                "external-pack-api params type-param metadata must name a type parameter",
+            );
+            return None;
+        }
+        return Some(TypePattern::TypeParam(name.to_string()));
+    }
+    Some(crate::facts::type_pattern_for_external_java_type(
+        &parse_type(param),
+    ))
 }
 
 fn parse_borrowed_return_recovery(value: &str) -> Option<BorrowedReturnRecovery> {
@@ -5237,7 +5142,6 @@ const fn dyn_trait_strategy(
 
 const NO_TYPE_CAPABILITIES: &[ExternalPackTypeCapability] = &[];
 const NO_CLOSED_HIERARCHY: &[ExternalPackClosedHierarchy] = &[];
-const NO_OBJECT_SAFETY: &[ExternalPackObjectSafety] = &[];
 
 const LOCATABLE_IMPL: &[&str] = &["Locatable"];
 const FEATURE_LOCATABLE_IMPL: &[&str] = &["Feature", "Locatable"];
@@ -6361,6 +6265,18 @@ const fn semantic_getter_effect(
         None,
         return_nullability,
         &[],
+    )
+}
+
+const fn semantic_to_string_effect(receiver_type: &'static str) -> ExternalPackApiEffect {
+    semantic_typed_effect_with_arity(
+        receiver_type,
+        "toString",
+        0,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "String",
+        NullabilityState::DefinitelyNonNull,
     )
 }
 
@@ -8775,6 +8691,22 @@ const SPARK_API_EFFECTS: &[ExternalPackApiEffect] = &[
         "JavaPairRDD",
         NullabilityState::DefinitelyNonNull,
     ),
+    semantic_typed_effect(
+        "org.apache.spark.api.java.JavaPairRDD",
+        "collectAsMap",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "Map<T0,T1>",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "JavaPairRDD",
+        "collectAsMap",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "Map<T0,T1>",
+        NullabilityState::DefinitelyNonNull,
+    ),
     semantic_typed_effect_with_arity(
         "org.apache.spark.api.java.JavaPairRDD",
         "combineByKey",
@@ -9054,6 +8986,8 @@ const SPARK_MODELED_APIS: &[ExternalPackModeledApi] = &[
     modeled_semantic("JavaPairRDD", "map"),
     modeled_semantic("org.apache.spark.api.java.JavaPairRDD", "reduceByKey"),
     modeled_semantic("JavaPairRDD", "reduceByKey"),
+    modeled_semantic("org.apache.spark.api.java.JavaPairRDD", "collectAsMap"),
+    modeled_semantic("JavaPairRDD", "collectAsMap"),
     modeled_semantic("org.apache.spark.api.java.JavaPairRDD", "combineByKey"),
     modeled_semantic("JavaPairRDD", "combineByKey"),
     modeled_semantic("org.apache.spark.api.java.JavaPairRDD", "partitionBy"),
@@ -11107,6 +11041,51 @@ const TRIBBLE_FEATURE_API_EFFECTS: &[ExternalPackApiEffect] = &[
 ];
 
 const VCF_API_EFFECTS: &[ExternalPackApiEffect] = &[
+    semantic_typed_effect_with_arity(
+        "htsjdk.variant.vcf.VCFUtils",
+        "smartMergeHeaders",
+        2,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "Set<VCFHeaderLine>",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "HtsjdkVariantVcfVCFUtils",
+        "smartMergeHeaders",
+        2,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "Set<VCFHeaderLine>",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "HtsjdkVariantVcfVCFUtils",
+        "smart_merge_headers",
+        2,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "Set<VCFHeaderLine>",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "VCFUtils",
+        "smartMergeHeaders",
+        2,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "Set<VCFHeaderLine>",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "VCFUtils",
+        "smart_merge_headers",
+        2,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "Set<VCFHeaderLine>",
+        NullabilityState::DefinitelyNonNull,
+    ),
     semantic_typed_effect(
         "htsjdk.variant.vcf.VCFFileReader",
         "getFileHeader",
@@ -11839,46 +11818,16 @@ const VCF_API_EFFECTS: &[ExternalPackApiEffect] = &[
         "getDescription",
         NullabilityState::DefinitelyNonNull,
     ),
-    semantic_getter_effect(
-        "htsjdk.variant.vcf.VCFHeaderLine",
-        "toString",
-        NullabilityState::DefinitelyNonNull,
-    ),
-    semantic_getter_effect(
-        "VCFHeaderLine",
-        "toString",
-        NullabilityState::DefinitelyNonNull,
-    ),
-    semantic_getter_effect(
-        "htsjdk.variant.vcf.VCFInfoHeaderLine",
-        "toString",
-        NullabilityState::DefinitelyNonNull,
-    ),
-    semantic_getter_effect(
-        "VCFInfoHeaderLine",
-        "toString",
-        NullabilityState::DefinitelyNonNull,
-    ),
-    semantic_getter_effect(
-        "htsjdk.variant.vcf.VCFFormatHeaderLine",
-        "toString",
-        NullabilityState::DefinitelyNonNull,
-    ),
-    semantic_getter_effect(
-        "VCFFormatHeaderLine",
-        "toString",
-        NullabilityState::DefinitelyNonNull,
-    ),
-    semantic_getter_effect(
-        "htsjdk.variant.vcf.VCFFilterHeaderLine",
-        "toString",
-        NullabilityState::DefinitelyNonNull,
-    ),
-    semantic_getter_effect(
-        "VCFFilterHeaderLine",
-        "toString",
-        NullabilityState::DefinitelyNonNull,
-    ),
+    semantic_to_string_effect("htsjdk.variant.vcf.VCFHeaderLine"),
+    semantic_to_string_effect("VCFHeaderLine"),
+    semantic_to_string_effect("htsjdk.variant.vcf.VCFHeader"),
+    semantic_to_string_effect("VCFHeader"),
+    semantic_to_string_effect("htsjdk.variant.vcf.VCFInfoHeaderLine"),
+    semantic_to_string_effect("VCFInfoHeaderLine"),
+    semantic_to_string_effect("htsjdk.variant.vcf.VCFFormatHeaderLine"),
+    semantic_to_string_effect("VCFFormatHeaderLine"),
+    semantic_to_string_effect("htsjdk.variant.vcf.VCFFilterHeaderLine"),
+    semantic_to_string_effect("VCFFilterHeaderLine"),
     semantic_getter_effect(
         "htsjdk.variant.vcf.VCFInfoHeaderLine",
         "getCount",
@@ -14749,12 +14698,8 @@ const SAMTOOLS_UTIL_API_EFFECTS: &[ExternalPackApiEffect] = &[
         "getInterval",
         NullabilityState::DefinitelyNonNull,
     ),
-    semantic_getter_effect(
-        "htsjdk.samtools.util.Interval",
-        "toString",
-        NullabilityState::DefinitelyNonNull,
-    ),
-    semantic_getter_effect("Interval", "toString", NullabilityState::DefinitelyNonNull),
+    semantic_to_string_effect("htsjdk.samtools.util.Interval"),
+    semantic_to_string_effect("Interval"),
     semantic_boolean_getter_effect(
         "htsjdk.samtools.util.Interval",
         "isNegativeStrand",
@@ -26789,6 +26734,8 @@ const VCF_MODELED_APIS: &[ExternalPackModeledApi] = &[
     modeled_semantic("VCFFilterHeaderLine", "getDescription"),
     modeled_semantic("htsjdk.variant.vcf.VCFHeaderLine", "toString"),
     modeled_semantic("VCFHeaderLine", "toString"),
+    modeled_semantic("htsjdk.variant.vcf.VCFHeader", "toString"),
+    modeled_semantic("VCFHeader", "toString"),
     modeled_semantic("htsjdk.variant.vcf.VCFInfoHeaderLine", "toString"),
     modeled_semantic("VCFInfoHeaderLine", "toString"),
     modeled_semantic("htsjdk.variant.vcf.VCFFormatHeaderLine", "toString"),
@@ -27757,7 +27704,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::htsjdk::variantcontext"),
             object_strategies: VARIANTCONTEXT_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: VARIANTCONTEXT_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: VARIANTCONTEXT_ARGUMENT_EFFECTS,
@@ -27776,7 +27722,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::htsjdk::vcf"),
             object_strategies: VCF_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: VCF_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -27795,7 +27740,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::htsjdk::bcf"),
             object_strategies: BCF_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: BCF_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -27814,7 +27758,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::htsjdk::sam_header"),
             object_strategies: SAM_HEADER_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: SAM_HEADER_TYPE_CAPABILITIES,
             field_nullability: SAM_HEADER_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -27833,7 +27776,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::htsjdk::sam_record"),
             object_strategies: SAM_RECORD_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: SAM_RECORD_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -27852,7 +27794,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::htsjdk::reference"),
             object_strategies: SAM_REFERENCE_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: SAM_REFERENCE_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -27871,7 +27812,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::htsjdk::sam_reader"),
             object_strategies: SAM_READER_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: SAM_READER_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: SAM_READER_ARGUMENT_EFFECTS,
@@ -27890,7 +27830,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::htsjdk::sam_writer"),
             object_strategies: SAM_WRITER_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: SAM_WRITER_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -27909,7 +27848,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::htsjdk::sam_bam"),
             object_strategies: SAM_BAM_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: SAM_BAM_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -27928,7 +27866,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::htsjdk::sam_cram"),
             object_strategies: SAM_CRAM_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: SAM_CRAM_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -27947,7 +27884,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::htsjdk::sam_metrics"),
             object_strategies: SAM_METRICS_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: SAM_METRICS_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -27966,7 +27902,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::htsjdk::nested_helper"),
             object_strategies: HTSJDK_NESTED_HELPER_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: HTSJDK_NESTED_HELPER_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -27985,7 +27920,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::htsjdk::tribble_feature"),
             object_strategies: TRIBBLE_FEATURE_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: TRIBBLE_FEATURE_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: TRIBBLE_FEATURE_ARGUMENT_EFFECTS,
@@ -28004,7 +27938,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::htsjdk::tribble_index"),
             object_strategies: TRIBBLE_INDEX_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: TRIBBLE_INDEX_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28023,7 +27956,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::htsjdk::samtools_util"),
             object_strategies: SAMTOOLS_UTIL_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: SAMTOOLS_UTIL_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: SAMTOOLS_UTIL_ARGUMENT_EFFECTS,
@@ -28042,7 +27974,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::apache_commons_math"),
             object_strategies: APACHE_COMMONS_MATH_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: APACHE_COMMONS_MATH_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28061,7 +27992,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::apache_commons_math::optim"),
             object_strategies: APACHE_COMMONS_MATH_OPTIM_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: APACHE_COMMONS_MATH_OPTIM_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28080,7 +28010,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::apache_commons_math::stats"),
             object_strategies: APACHE_COMMONS_MATH_STATS_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: APACHE_COMMONS_MATH_STATS_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28099,7 +28028,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::apache_commons::collections"),
             object_strategies: APACHE_COMMONS_COLLECTIONS_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: APACHE_COMMONS_COLLECTIONS_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28118,7 +28046,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::apache_commons::compress"),
             object_strategies: APACHE_COMMONS_COMPRESS_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: APACHE_COMMONS_COMPRESS_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28137,7 +28064,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::apache_commons::lang"),
             object_strategies: APACHE_COMMONS_LANG_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: APACHE_COMMONS_LANG_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28156,7 +28082,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::apache_commons::codec"),
             object_strategies: APACHE_COMMONS_CODEC_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: APACHE_COMMONS_CODEC_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28175,7 +28100,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::iharder_base64"),
             object_strategies: IHARDER_BASE64_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: IHARDER_BASE64_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28194,7 +28118,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::jama"),
             object_strategies: JAMA_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: JAMA_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28213,7 +28136,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::hipparchus::random"),
             object_strategies: HIPPARCHUS_DISTRIBUTION_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: HIPPARCHUS_DISTRIBUTION_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28232,7 +28154,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::apache_http"),
             object_strategies: APACHE_HTTP_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: APACHE_HTTP_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28251,7 +28172,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::google::bigquery"),
             object_strategies: GOOGLE_BIGQUERY_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: GOOGLE_BIGQUERY_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28270,7 +28190,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::google::bigquery_storage"),
             object_strategies: GOOGLE_BIGQUERY_STORAGE_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: GOOGLE_BIGQUERY_STORAGE_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28289,7 +28208,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::google::storage"),
             object_strategies: GOOGLE_STORAGE_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: GOOGLE_STORAGE_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28308,7 +28226,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::google::cloud_nio"),
             object_strategies: GOOGLE_CLOUD_NIO_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: GOOGLE_CLOUD_NIO_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28327,7 +28244,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::genomicsdb"),
             object_strategies: GENOMICSDB_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: GENOMICSDB_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: GENOMICSDB_ARGUMENT_EFFECTS,
@@ -28346,7 +28262,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::picard::programgroups"),
             object_strategies: PICARD_PROGRAMGROUPS_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: PICARD_PROGRAMGROUPS_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28365,7 +28280,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::picard::markduplicates"),
             object_strategies: PICARD_MARKDUPLICATES_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: PICARD_MARKDUPLICATES_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28384,7 +28298,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::picard::metrics"),
             object_strategies: PICARD_METRICS_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: PICARD_METRICS_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28403,7 +28316,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::avro"),
             object_strategies: AVRO_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: AVRO_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28422,7 +28334,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::barclay::help"),
             object_strategies: BARCLAY_HELP_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: BARCLAY_HELP_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28441,7 +28352,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::barclay::argparser"),
             object_strategies: BARCLAY_ARGPARSER_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: BARCLAY_ARGPARSER_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28460,7 +28370,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::barclay::utils"),
             object_strategies: BARCLAY_UTILS_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: BARCLAY_UTILS_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28479,7 +28388,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::scala::tuple"),
             object_strategies: SCALA_TUPLE_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: SCALA_TUPLE_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28498,7 +28406,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::kryo"),
             object_strategies: KRYO_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: KRYO_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28517,7 +28424,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::opencsv"),
             object_strategies: OPENCSV_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: OPENCSV_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28536,7 +28442,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::org_json"),
             object_strategies: ORG_JSON_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: ORG_JSON_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28555,7 +28460,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::reflections"),
             object_strategies: REFLECTIONS_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: REFLECTIONS_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28574,7 +28478,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::hadoop::conf"),
             object_strategies: HADOOP_CONF_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: HADOOP_CONF_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28593,7 +28496,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::apache_commons::configuration"),
             object_strategies: APACHE_COMMONS_CONFIG_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: APACHE_COMMONS_CONFIG_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28612,7 +28514,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::spark"),
             object_strategies: SPARK_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: SPARK_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28631,7 +28532,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::bwa"),
             object_strategies: BWA_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: BWA_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28650,7 +28550,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::jgrapht"),
             object_strategies: JGRAPHT_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: JGRAPHT_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28669,7 +28568,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::fastutil"),
             object_strategies: FASTUTIL_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: FASTUTIL_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28688,7 +28586,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::kryo_serializers"),
             object_strategies: KRYO_SERIALIZERS_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: KRYO_SERIALIZERS_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28707,7 +28604,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::disq"),
             object_strategies: DISQ_WRITE_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: DISQ_WRITE_TYPE_CAPABILITIES,
             field_nullability: DISQ_WRITE_FIELD_NULLABILITY,
             argument_effects: DISQ_WRITE_ARGUMENT_EFFECTS,
@@ -28726,7 +28622,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::intel_gkl"),
             object_strategies: INTEL_GKL_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: INTEL_GKL_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28745,7 +28640,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::guava::collect"),
             object_strategies: GUAVA_IMMUTABLE_COLLECT_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: GUAVA_IMMUTABLE_COLLECT_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28764,7 +28658,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::guava::concurrent"),
             object_strategies: GUAVA_CONCURRENT_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: GUAVA_CONCURRENT_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28783,7 +28676,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::broad::hellbender::utils"),
             object_strategies: &[],
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: BROAD_HELLBENDER_UTILS_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: BROAD_HELLBENDER_UTILS_ARGUMENT_EFFECTS,
@@ -28802,7 +28694,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::broad_http"),
             object_strategies: BROAD_HTTP_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: BROAD_HTTP_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28821,7 +28712,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::picard::vcf"),
             object_strategies: PICARD_VCF_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: PICARD_VCF_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28840,7 +28730,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::jackson::databind"),
             object_strategies: JACKSON_DATABIND_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: JACKSON_DATABIND_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28859,7 +28748,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("hdf5_pure_rust"),
             object_strategies: HDF5_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: HDF5_TYPE_CAPABILITIES,
             field_nullability: HDF5_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
@@ -28878,7 +28766,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("sqlite"),
             object_strategies: SQLITE_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: NO_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: SQLITE_ARGUMENT_EFFECTS,
@@ -28897,7 +28784,6 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             rust_target: Some("crate::external::java_sql"),
             object_strategies: JAVA_SQL_OBJECT_STRATEGIES,
             closed_hierarchy: NO_CLOSED_HIERARCHY,
-            object_safety: NO_OBJECT_SAFETY,
             type_capabilities: NO_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: JAVA_SQL_ARGUMENT_EFFECTS,
@@ -29704,35 +29590,20 @@ fn external_receiver_lookup_aliases(receiver_type: &str) -> Vec<String> {
     let canonical = crate::stdlib::canonical_external_receiver_type_key(receiver_type);
     let snake = crate::parser::to_snake_case(receiver_type);
     let mut aliases = vec![receiver_type.to_string(), canonical.clone(), snake];
-    if let Some(simple) = package_qualified_simple_alias(receiver_type) {
-        aliases.extend([
-            simple.to_string(),
-            crate::stdlib::canonical_external_receiver_type_key(simple),
-            crate::parser::to_snake_case(simple),
-        ]);
-    }
-    if let Some(simple) = package_qualified_simple_alias(&canonical) {
-        aliases.extend([
-            simple.to_string(),
-            crate::stdlib::canonical_external_receiver_type_key(simple),
-            crate::parser::to_snake_case(simple),
-        ]);
-    }
     aliases.sort();
     aliases.dedup();
     aliases
 }
 
-fn package_qualified_simple_alias(type_name: &str) -> Option<&str> {
-    let (prefix, simple) = type_name.rsplit_once('.')?;
-    if prefix
-        .split('.')
-        .any(|segment| segment.chars().next().is_some_and(char::is_lowercase))
-    {
-        Some(simple)
-    } else {
-        None
-    }
+fn external_receiver_lookup_aliases_match(fact_type_name: &str, query_type_name: &str) -> bool {
+    let fact_aliases = external_receiver_lookup_aliases(fact_type_name);
+    external_receiver_lookup_aliases(query_type_name)
+        .iter()
+        .any(|query_alias| {
+            fact_aliases
+                .iter()
+                .any(|fact_alias| fact_alias == query_alias)
+        })
 }
 
 fn external_field_type_lookup_aliases(type_name: &str) -> Vec<String> {
@@ -29941,7 +29812,7 @@ pub fn external_api_effect_for_call(
 }
 
 fn external_api_key_header_matches(fact: &CallableKey, query: &CallableKey) -> bool {
-    external_type_name_matches(&fact.owner.type_name, &query.owner.type_name)
+    external_receiver_lookup_aliases_match(&fact.owner.type_name, &query.owner.type_name)
         && fact.member == query.member
         && fact.kind == query.kind
         && (fact.staticness == query.staticness
@@ -30110,6 +29981,8 @@ fn java_platform_api_effects_for_method_arity(
         "Reader",
         "java.io.BufferedReader",
         "BufferedReader",
+        "java.io.Closeable",
+        "Closeable",
         "java.util.Enumeration",
         "Enumeration",
         "java.util.zip.ZipEntry",
@@ -30221,13 +30094,13 @@ pub fn java_platform_api_effect_for_receiver_with_arity(
         });
     }
     if matches!(simple_receiver, "StringBuilder" | "StringBuffer")
-        && method_name == "append"
-        && matches_arg_count(1)
+        && matches!(method_name, "append" | "delete" | "insert")
+        && matches_arg_count(if method_name == "append" { 1 } else { 2 })
     {
         return Some(ExternalApiEffectFact {
             method_name: method_name.to_string(),
             receiver_type: Some(receiver_type.to_string()),
-            arg_count: Some(1),
+            arg_count: Some(if method_name == "append" { 1 } else { 2 }),
             parameter_patterns: None,
             role: ExternalApiRole::FluentMutator,
             receiver_mutability: ReceiverMutabilityFact::MutatesReceiver,
@@ -30236,7 +30109,34 @@ pub fn java_platform_api_effect_for_receiver_with_arity(
                 args: Vec::new(),
             }),
             return_nullability: NullabilityState::DefinitelyNonNull,
-            thrown: Vec::new(),
+            thrown: if method_name == "append" {
+                Vec::new()
+            } else {
+                vec![JavaType::Named {
+                    name: "StringIndexOutOfBoundsException".to_string(),
+                    args: Vec::new(),
+                }]
+            },
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
+    if matches!(simple_receiver, "StringBuilder" | "StringBuffer")
+        && matches!(method_name, "setLength" | "set_length")
+        && matches_arg_count(1)
+    {
+        return Some(ExternalApiEffectFact {
+            method_name: method_name.to_string(),
+            receiver_type: Some(receiver_type.to_string()),
+            arg_count: Some(1),
+            parameter_patterns: None,
+            role: ExternalApiRole::Mutator,
+            receiver_mutability: ReceiverMutabilityFact::MutatesReceiver,
+            return_type: Some(JavaType::Void),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: vec![JavaType::Named {
+                name: "StringIndexOutOfBoundsException".to_string(),
+                args: Vec::new(),
+            }],
             provenance: FactProvenance::BuiltinExternalModel,
         });
     }
@@ -31015,7 +30915,7 @@ fn java_platform_io_api_effect(
         (receiver, "close")
             if (is_java_platform_input_stream_receiver(receiver)
                 || is_java_platform_output_stream_receiver(receiver)
-                || matches!(receiver, "Reader" | "BufferedReader"))
+                || matches!(receiver, "Reader" | "BufferedReader" | "Closeable"))
                 && matches_arg_count(0) =>
         {
             (0, ExternalApiRole::SideEffect, JavaType::Void)
@@ -31383,13 +31283,6 @@ fn is_java_platform_class_receiver(receiver_type: &str) -> bool {
     )
 }
 
-pub fn external_api_return_type_for_receiver(
-    receiver_type: Option<&str>,
-    method_name: &str,
-) -> Option<JavaType> {
-    external_api_effect_for_receiver(receiver_type, method_name).and_then(|fact| fact.return_type)
-}
-
 pub fn unsupported_external_api_for_receiver(
     receiver_type: Option<&str>,
     method_name: &str,
@@ -31482,10 +31375,7 @@ pub fn external_field_value_for(
 pub fn external_field_for_key(key: &CallableKey) -> Option<ExternalFieldFact> {
     if !matches!(
         key.kind,
-        CallableKind::StaticField
-            | CallableKind::InstanceField
-            | CallableKind::FieldGetter
-            | CallableKind::FieldSetter
+        CallableKind::StaticField | CallableKind::InstanceField
     ) {
         return None;
     }

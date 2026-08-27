@@ -1089,7 +1089,7 @@ pub struct ReadsFormatWriteOption;
 pub struct WriteOption;
 
 impl From<ReadsFormatWriteOption> for WriteOption {
-    fn from(_value: ReadsFormatWriteOption) -> Self { Default::default() }
+    fn from(_value: ReadsFormatWriteOption) -> Self { panic!("unsupported Java external upcast: ReadsFormatWriteOption -> WriteOption") }
 }
 
 pub struct UseA;
@@ -2833,7 +2833,7 @@ impl GraphicsFacade for Graphics {
 
 impl From<ZipOutputStream> for OutputStream {
     /// Unmodelled Java upcast: ZipOutputStream -> OutputStream.
-    fn from(_value: ZipOutputStream) -> Self { Default::default() }
+    fn from(_value: ZipOutputStream) -> Self { panic!("unsupported Java external upcast: ZipOutputStream -> OutputStream") }
 }
 
 pub const UNKNOWN_LIMIT: i32 = { compile_error!("external static constant SomeLib.UNKNOWN_LIMIT has no modeled value"); 0 };
@@ -2947,7 +2947,7 @@ fn idiom_sweep_includes_shared_support_file_signals() {
         r#"
 impl From<ZipOutputStream> for OutputStream {
     /// Unmodelled Java upcast: ZipOutputStream -> OutputStream.
-    fn from(_value: ZipOutputStream) -> Self { Default::default() }
+    fn from(_value: ZipOutputStream) -> Self { panic!("unsupported Java external upcast: ZipOutputStream -> OutputStream") }
 }
 "#,
     )

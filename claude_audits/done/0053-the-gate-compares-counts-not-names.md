@@ -26,7 +26,7 @@ measurement slice recorded failure-name baselines for every red target, made
 missing red-target name baselines a gate failure, and verified the full gate
 with `scripts/gate.sh --all`.
 
-Companion to [0052](../0052-the-example-corpora-are-asserted-on-but-never-compiled.md)
+Companion to [0052](0052-the-example-corpora-are-asserted-on-but-never-compiled.md)
 (what the suites cannot see) and to
 [0018](done/0018-the-compile-error-metric-cannot-see-silent-failures.md), whose
 second-pass conclusion was *"a metric whose detectors can silently stop matching
@@ -76,7 +76,7 @@ Obtained by running the prebuilt test binaries directly
 (`./target/release/deps/<target>-<hash>`), which needs no cargo and no build lock.
 
 **`fixtures` — 20 failures** (this is `examples/java`, see
-[0052](../0052-the-example-corpora-are-asserted-on-but-never-compiled.md)):
+[0052](0052-the-example-corpora-are-asserted-on-but-never-compiled.md)):
 
 | test | failure |
 |---|---|
@@ -114,6 +114,35 @@ baseline as a gate failure. `scripts/gate.sh --record` wrote baselines for
 `slot_shape_design` (77), and `--lib` (5). `scripts/gate.sh --all` then passed
 with matching counts and names across all 18 targets.
 
+Codex follow-up 2026-08-24: the `--lib` target is no longer red. The five
+recorded lib failures were borrow-projection idempotence/parenthesization
+regressions; `cargo test --lib -- --nocapture` now passes 327/0, so
+`tests/baselines/suite-results.tsv` records `--lib 327 0` and
+`tests/baselines/failure-names/--lib.txt` has no failure names.
+
+Follow-up: `parser_tree_sitter` is also no longer red. Method-invocation
+receivers now use the same identifier normalization as ordinary identifiers, so
+`Ints.toArray(values)` parses its receiver as `Expr::Var("ints")` and leaves
+static-owner interpretation to later resolver/lowering policy. `cargo test
+--test parser_tree_sitter -- --nocapture` passes 47/0, and the parser-tree
+failure-name baseline is empty.
+
+Follow-up: `external_packs` is also no longer red. Constructor argument-effect
+coverage now counts manifest constructor entries, and source receiver method
+calls no longer seed conservative external fallbacks for source-owned types
+without external superclasses. `cargo test --test external_packs -- --nocapture`
+passes 169/0, and the external-pack failure-name baseline is empty.
+
+Follow-up: `semantic_facts` is also no longer red. Package-private trivial
+getter calls on non-self receivers now lower to the backing field instead of
+falling back to the source accessor call, while public accessors still preserve
+the API wrapper. Borrowed string external argument facts keep their `&str` view
+through signature normalization, readonly external receiver usage accepts the
+more precise `KnownContentRead` boundary for borrow planning, and the VCF field
+expectations now match the qualified nested-type identities stored in the
+external pack. `cargo test --test semantic_facts -- --nocapture` passes 174/0,
+and the semantic failure-name baseline is empty.
+
 **`dependency_mode` — 16 failures:**
 `external_fact_closed_enum_override_cleans_multilevel_hierarchy_shape`,
 `external_fact_hierarchy_override_cleans_breakpoint_evidence_shape`,
@@ -144,18 +173,18 @@ with matching counts and names across all 18 targets.
 `resolver_uses_external_domain_constants_for_primitive_and_string_overloads`,
 `resolver_uses_implicit_no_arg_constructor_for_source_nested_class`
 
-**`semantic_facts` — 4 failures:**
-`external_argument_effects_shape_method_params_in_signature_solver`,
-`external_field_provenance_uses_builtin_model_for_known_field_types`,
-`lowers_package_private_trivial_accessor_calls_as_field_access`,
-`readonly_external_receiver_usage_can_borrow_public_helper_param`
+**`semantic_facts` — fixed:**
+formerly `external_argument_effects_shape_method_params_in_signature_solver`,
+`external_field_provenance_uses_builtin_model_for_known_field_types`, and
+`readonly_external_receiver_usage_can_borrow_public_helper_param`; now 174/0.
 
-**`external_packs` — 2 failures:**
-`builtin_pack_manifests_explicitly_classify_modeled_member_facts`,
-`java_sql_pack_does_not_claim_project_connection_or_reflection_class_names`
+**`external_packs` — fixed:**
+formerly `builtin_pack_manifests_explicitly_classify_modeled_member_facts` and
+`java_sql_pack_does_not_claim_project_connection_or_reflection_class_names`;
+now 169/0.
 
-**`parser_tree_sitter` — 1 failure:**
-`parses_static_utility_method_receiver_as_identifier`
+**`parser_tree_sitter` — fixed:**
+formerly `parses_static_utility_method_receiver_as_identifier`; now 47/0.
 
 `slot_shape_design`'s 73 are not enumerated here: that suite runs 104 nested
 `cargo` invocations and would contend with a concurrent build. It is the largest
@@ -356,5 +385,5 @@ restore.
   by 52 and made it impossible to tell which kind of problem any future change
   caused"* is precisely the property a count-based baseline lacks and a name-based
   one has for free.
-- [0052](../0052-the-example-corpora-are-asserted-on-but-never-compiled.md) — the
+- [0052](0052-the-example-corpora-are-asserted-on-but-never-compiled.md) — the
   20 named `fixtures` failures are that file's corpus, seen from the gate side.

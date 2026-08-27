@@ -7,7 +7,6 @@ use crate::types::{TypeEnv, infer_expr_type, optional_element_type, stream_eleme
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamSourceCapabilityPolicy {
-    pub source_ty: JavaType,
     pub capability_element: Option<JavaType>,
 }
 
@@ -24,13 +23,8 @@ pub fn stream_source_capability_policy_with_effective_facts(
     facts: &EffectiveFacts,
 ) -> StreamSourceCapabilityPolicy {
     StreamSourceCapabilityPolicy {
-        source_ty: source_ty.clone(),
         capability_element: facts.sequence_element_type_for(source_ty),
     }
-}
-
-pub fn infer_stream_lambda_body_shape(expr: &Expr, default: &RustSlotShape) -> RustSlotShape {
-    infer_stream_lambda_body_shape_with_facts(expr, default, &TypeEnv::new(), &FactSet::default())
 }
 
 pub fn infer_stream_lambda_body_shape_with_facts(
@@ -48,10 +42,6 @@ pub fn infer_stream_lambda_body_shape_with_facts(
 
 pub fn infer_stream_map_to_int_shape(_expr: &Expr) -> RustSlotShape {
     RustSlotShape::conservative(JavaType::Primitive(PrimitiveType::Int))
-}
-
-pub fn infer_stream_source_element_shape(source: &Expr, env: &TypeEnv) -> Option<RustSlotShape> {
-    infer_stream_source_element_shape_with_facts(source, env, &FactSet::default())
 }
 
 pub fn infer_stream_source_element_shape_with_facts(

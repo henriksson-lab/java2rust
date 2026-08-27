@@ -147,6 +147,14 @@ for the original hard cases. A future typed `ExternalOwnerKey` wrapper at the
 public lookup boundary would make future drift harder, but that is cleanup
 rather than a residual live fix for this audit.
 
+Codex follow-up 2026-08-27, duplicate lookup cleanup: a fresh parallel audit
+confirmed the original 0044 correctness complaint is no longer live. The
+remaining `FactSet` compatibility methods for API effects, external fields and
+external-library pack ownership now delegate to `ExternalFactLookupIndex`
+instead of carrying their own duplicate raw owner-key scans. The
+`rendered_string_heuristics_have_centralization_guardrails` source guard now
+rejects reintroducing those private `FactSet::find_*` copies.
+
 Severity: **high** — silently changes parameter mutability, receiver mutability
 and inferred return types, and does so *inconsistently within a single method*
 Kind: duplicated code path — one concept, twelve private near-duplicates

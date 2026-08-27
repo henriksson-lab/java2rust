@@ -3,7 +3,7 @@ use crate::diagnostics::Severity;
 use crate::facts::FactSet;
 use crate::java_ir::{
     BinaryOp, Block, CatchClause, Expr, JavaType, LambdaBody, Member, MethodDecl, Program, Stmt,
-    SwitchCase, TypeDecl,
+    SwitchCase, TypeDecl, TypeKind,
 };
 use crate::representation::RepresentationPlan;
 use crate::rewrite::{MethodControlFlowPlan, control_flow_rewrite_diagnostics};
@@ -103,6 +103,7 @@ fn collect_java_reference_identity_equality_diagnostics(
 #[derive(Debug, Default)]
 struct SourceIdentityFacts {
     declared: std::collections::BTreeSet<String>,
+    source_classes: std::collections::BTreeSet<String>,
     declares_equals: std::collections::BTreeSet<String>,
     extends: std::collections::BTreeMap<String, String>,
     implemented_reference_identity: std::collections::BTreeSet<String>,
@@ -120,6 +121,9 @@ impl SourceIdentityFacts {
     fn collect_type(&mut self, ty: &TypeDecl, storage_facts: &FactSet) {
         let simple = simple_type_name(&ty.name).to_string();
         self.declared.insert(simple.clone());
+        if matches!(ty.kind, TypeKind::Class | TypeKind::Record) {
+            self.source_classes.insert(simple.clone());
+        }
         let placement = storage_facts.storage_placement_for(&ty.name);
         if placement.shared && placement.is_implemented() {
             self.implemented_reference_identity.insert(ty.name.clone());
@@ -177,6 +181,14 @@ impl SourceIdentityFacts {
                 .contains(simple_type_name(name))
     }
 
+    fn source_class_has_subtype(&self, ty: &JavaType) -> bool {
+        let Some(name) = concrete_java_type_name(ty) else {
+            return false;
+        };
+        let simple = simple_type_name(name);
+        self.source_classes.contains(simple) && self.extends.values().any(|parent| parent == simple)
+    }
+
     fn reference_identity_equality_is_implemented(
         &self,
         left: &JavaType,
@@ -197,6 +209,14 @@ impl SourceIdentityFacts {
 
 fn simple_type_name(name: &str) -> &str {
     name.rsplit('.').next().unwrap_or(name)
+}
+
+fn concrete_java_type_name(java_ty: &JavaType) -> Option<&str> {
+    match java_ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(name),
+        JavaType::String => Some("String"),
+        _ => None,
+    }
 }
 
 fn method_overrides_object_equals(method: &MethodDecl) -> bool {
@@ -567,6 +587,20 @@ fn collect_expr_reference_identity_equality_diagnostics(
             });
         }
     }
+    if let Expr::InstanceOf {
+        expr: source, ty, ..
+    } = expr
+        && source_instanceof_to_supertype_requires_hierarchy_diagnostic(source, ty, env, identity)
+    {
+        diagnostics.push(LoweringDiagnosticPlan {
+            severity: Severity::Unsupported,
+            code: "unsupported_instanceof_source_hierarchy_runtime_carrier",
+            message: format!(
+                "unsupported Java instanceof check: target type {} has source subtypes and requires class hierarchy lowering",
+                concrete_java_type_name(ty).unwrap_or("unknown")
+            ),
+        });
+    }
     // `a.equals(b)` on a class that does not override `equals` is *identity* in
     // Java, not structural comparison. Same defect as `==`, and worse in effect:
     // it answers `true` where Java says `false`, so a `HashMap` or `contains`
@@ -750,6 +784,18 @@ fn collect_expr_reference_identity_equality_diagnostics(
         | Expr::Unsupported { .. }
         | Expr::Raw(_) => {}
     }
+}
+
+fn source_instanceof_to_supertype_requires_hierarchy_diagnostic(
+    source: &Expr,
+    target: &JavaType,
+    env: &TypeEnv,
+    identity: &SourceIdentityFacts,
+) -> bool {
+    matches!(
+        infer_expr_type(source, env),
+        JavaType::Named { name, .. } if simple_type_name(&name) == "Object"
+    ) && identity.source_class_has_subtype(target)
 }
 
 fn reference_identity_equality_diagnostic_code(

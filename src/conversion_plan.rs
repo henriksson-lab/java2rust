@@ -28,10 +28,6 @@ pub fn assignment_slot(shape: RustSlotShape) -> Slot {
     Slot::Assignment(shape)
 }
 
-pub fn storage_assignment_slot_for_java_type(java_ty: JavaType) -> Slot {
-    assignment_slot(storage_shape_for_java_type(java_ty))
-}
-
 pub fn storage_shape_for_java_type(java_ty: JavaType) -> RustSlotShape {
     RustSlotShape::for_storage(java_ty)
 }
@@ -136,7 +132,9 @@ pub enum SyntaxSlotCoercionPolicy {
     Identity,
     IndexToUsize,
     ToStringForConcat,
+    CollectionToJavaDisplayString,
     ErasedObjectToJavaDisplayString,
+    OptionalErasedObjectToJavaDisplayString,
     OptionalToJavaDisplayString,
     OptionalToJavaDisplayValue,
     OptionalBorrowedToJavaDisplayValue,
@@ -159,7 +157,6 @@ pub enum CloneRecoveryPolicy {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OwnershipCoercionFallbackPolicy {
-    CompileError,
     BorrowedToOwnedNonCloneable { java_ty: JavaType },
     BorrowedToFacadeOwnedExternalHandle { java_ty: JavaType },
     BorrowedToFfiOwnedHandle { java_ty: JavaType },
@@ -314,23 +311,6 @@ pub fn java_cast_type_conversion_plan(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CastAndInstanceOfPlanningBoundary {
-    pub casts_use_representation_shapes: bool,
-    pub instanceof_uses_representation_shapes: bool,
-    pub hierarchy_reasoning_before_lowering: bool,
-    pub rendering_uses_conversion_plans_only: bool,
-}
-
-pub fn cast_and_instanceof_planning_boundary() -> CastAndInstanceOfPlanningBoundary {
-    CastAndInstanceOfPlanningBoundary {
-        casts_use_representation_shapes: true,
-        instanceof_uses_representation_shapes: true,
-        hierarchy_reasoning_before_lowering: true,
-        rendering_uses_conversion_plans_only: true,
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstanceOfFallbackPolicy {
     CompileError,
     SourceHierarchyRuntimeCarrierRequired { actual: JavaType, target: JavaType },
@@ -354,201 +334,11 @@ pub enum InstanceOfTargetPolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ErasedObjectRuntimeContract {
-    pub rust_type: &'static str,
-    pub erase_operation: &'static str,
-    pub concrete_downcast_operation: &'static str,
-    pub concrete_instanceof_operation: &'static str,
-    pub dyn_trait_recovery: DispatchCoercionFallbackPolicy,
-    pub boxed_dyn_trait_recovery: DispatchCoercionFallbackPolicy,
-    pub dyn_trait_instanceof: InstanceOfFallbackPolicy,
-    pub boxed_dyn_trait_instanceof: InstanceOfFallbackPolicy,
-}
-
-pub fn erased_object_runtime_contract(trait_name: &str) -> ErasedObjectRuntimeContract {
-    ErasedObjectRuntimeContract {
-        rust_type: "Box<dyn std::any::Any>",
-        erase_operation: "Box::new(value) as Box<dyn std::any::Any>",
-        concrete_downcast_operation: "*value.downcast::<Target>().expect(\"invalid Java cast\")",
-        concrete_instanceof_operation: "value.is::<Target>()",
-        dyn_trait_recovery: DispatchCoercionFallbackPolicy::ErasedObjectToDynTrait {
-            trait_name: trait_name.to_string(),
-        },
-        boxed_dyn_trait_recovery: DispatchCoercionFallbackPolicy::ErasedObjectToBoxedDynTrait {
-            trait_name: trait_name.to_string(),
-        },
-        dyn_trait_instanceof: InstanceOfFallbackPolicy::ErasedObjectToDynTrait {
-            trait_name: trait_name.to_string(),
-        },
-        boxed_dyn_trait_instanceof: InstanceOfFallbackPolicy::ErasedObjectToBoxedDynTrait {
-            trait_name: trait_name.to_string(),
-        },
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DispatchCoercionFallbackPolicy {
     CompileError,
-    MissingRuntimeTarget {
-        java_ty: JavaType,
-    },
-    BorrowedDynToOwnedBoxedDyn {
-        trait_name: String,
-        recovery: BorrowedDynToOwnedBoxedDynRecoveryPolicy,
-    },
-    ErasedObjectToDynTrait {
-        trait_name: String,
-    },
-    ErasedObjectToBoxedDynTrait {
-        trait_name: String,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BorrowedDynToOwnedBoxedDynRecoveryPolicy {
-    NoOwnershipProof,
-    CloneBoxAdapterRequired { policy: CloneRecoveryPolicy },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DynCloneBoxAdapterRequirement {
-    ProvenAdapter {
-        trait_name: String,
-    },
-    RequiresGeneratedAdapter {
-        trait_name: String,
-        policy: CloneRecoveryPolicy,
-    },
-    UnsupportedNonCloneable {
-        trait_name: String,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DynCloneBoxAdapterAvailability {
-    Available,
-    Missing,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DynCloneBoxAdapterGenerationPolicy {
-    AlreadyAvailable {
-        trait_name: String,
-    },
-    GenerateAdapter {
-        trait_name: String,
-        policy: CloneRecoveryPolicy,
-    },
-    DeferredUnsupported {
-        trait_name: String,
-        reason: DynCloneBoxAdapterDeferralReason,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DynCloneBoxAdapterDeferralReason {
-    NoOwnershipProof,
-    GenerationNotImplemented { policy: CloneRecoveryPolicy },
-}
-
-pub fn dyn_clone_box_adapter_requirement(
-    trait_name: &str,
-    recovery: &BorrowedDynToOwnedBoxedDynRecoveryPolicy,
-) -> DynCloneBoxAdapterRequirement {
-    dyn_clone_box_adapter_requirement_with_availability(
-        trait_name,
-        recovery,
-        DynCloneBoxAdapterAvailability::Missing,
-    )
-}
-
-pub fn dyn_clone_box_adapter_requirement_with_availability(
-    trait_name: &str,
-    recovery: &BorrowedDynToOwnedBoxedDynRecoveryPolicy,
-    availability: DynCloneBoxAdapterAvailability,
-) -> DynCloneBoxAdapterRequirement {
-    if matches!(availability, DynCloneBoxAdapterAvailability::Available) {
-        return DynCloneBoxAdapterRequirement::ProvenAdapter {
-            trait_name: trait_name.to_string(),
-        };
-    }
-    match recovery {
-        BorrowedDynToOwnedBoxedDynRecoveryPolicy::NoOwnershipProof => {
-            DynCloneBoxAdapterRequirement::UnsupportedNonCloneable {
-                trait_name: trait_name.to_string(),
-            }
-        }
-        BorrowedDynToOwnedBoxedDynRecoveryPolicy::CloneBoxAdapterRequired { policy } => {
-            DynCloneBoxAdapterRequirement::RequiresGeneratedAdapter {
-                trait_name: trait_name.to_string(),
-                policy: policy.clone(),
-            }
-        }
-    }
-}
-
-pub fn dyn_clone_box_adapter_generation_policy(
-    requirement: &DynCloneBoxAdapterRequirement,
-) -> DynCloneBoxAdapterGenerationPolicy {
-    match requirement {
-        DynCloneBoxAdapterRequirement::ProvenAdapter { trait_name } => {
-            DynCloneBoxAdapterGenerationPolicy::AlreadyAvailable {
-                trait_name: trait_name.clone(),
-            }
-        }
-        DynCloneBoxAdapterRequirement::RequiresGeneratedAdapter { trait_name, policy } => {
-            DynCloneBoxAdapterGenerationPolicy::DeferredUnsupported {
-                trait_name: trait_name.clone(),
-                reason: DynCloneBoxAdapterDeferralReason::GenerationNotImplemented {
-                    policy: policy.clone(),
-                },
-            }
-        }
-        DynCloneBoxAdapterRequirement::UnsupportedNonCloneable { trait_name } => {
-            DynCloneBoxAdapterGenerationPolicy::DeferredUnsupported {
-                trait_name: trait_name.clone(),
-                reason: DynCloneBoxAdapterDeferralReason::NoOwnershipProof,
-            }
-        }
-    }
-}
-
-pub fn dyn_clone_box_adapter_generation_policy_with_availability(
-    trait_name: &str,
-    recovery: &BorrowedDynToOwnedBoxedDynRecoveryPolicy,
-    availability: DynCloneBoxAdapterAvailability,
-) -> DynCloneBoxAdapterGenerationPolicy {
-    dyn_clone_box_adapter_generation_policy(&dyn_clone_box_adapter_requirement_with_availability(
-        trait_name,
-        recovery,
-        availability,
-    ))
-}
-
-pub fn dyn_clone_box_adapter_deferral_message(
-    trait_name: &str,
-    reason: DynCloneBoxAdapterDeferralReason,
-) -> ConversionDiagnostic {
-    match reason {
-        DynCloneBoxAdapterDeferralReason::NoOwnershipProof => ConversionDiagnostic {
-            code: "unsupported_borrowed_dyn_to_owned_boxed_dyn",
-            message: format!(
-                "unsupported Java borrowed dyn trait to owned boxed dyn recovery for {trait_name}; no ownership proof is available"
-            ),
-        },
-        DynCloneBoxAdapterDeferralReason::GenerationNotImplemented { policy } => {
-            let proof = match policy {
-                CloneRecoveryPolicy::ProvenCloneCapability { .. } => "explicit clone proof exists",
-                CloneRecoveryPolicy::AuditRequired => "only conservative clone proof exists",
-            };
-            ConversionDiagnostic {
-                code: "unsupported_borrowed_dyn_to_owned_boxed_dyn_clone_box_adapter_deferred",
-                message: format!(
-                    "unsupported Java borrowed dyn trait to owned boxed dyn recovery for {trait_name}; {proof}, but dyn clone-box adapter generation is explicitly deferred"
-                ),
-            }
-        }
-    }
+    MissingRuntimeTarget { java_ty: JavaType },
+    ErasedObjectToDynTrait { trait_name: String },
+    ErasedObjectToBoxedDynTrait { trait_name: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -654,13 +444,6 @@ pub enum OptionalPresentConstructionSource {
 pub struct OptionalPresentConstructionPlan {
     pub construction: OptionalSlotConstructionPlan,
     pub element_lowering_slot: Slot,
-}
-
-pub fn optional_slot_construction_plan(
-    target: &RustSlotShape,
-    element_ty: JavaType,
-) -> OptionalSlotConstructionPlan {
-    optional_slot_construction_plan_with_facts(target, element_ty, &FactSet::default())
 }
 
 pub fn optional_slot_construction_plan_with_facts(
@@ -789,7 +572,6 @@ pub struct CoercionOwnedRecoveryCapabilityPolicy {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BorrowedElementRecoveryFallbackPolicy {
-    CompileError,
     NonCloneableElement { java_ty: JavaType },
 }
 
@@ -826,15 +608,9 @@ impl BorrowedElementRecoveryPolicy {
 
 fn borrowed_element_recovery_fallback_diagnostic(
     policy: &BorrowedElementRecoveryFallbackPolicy,
-    element_shape: &RustSlotShape,
+    _element_shape: &RustSlotShape,
 ) -> ConversionDiagnostic {
     match policy {
-        BorrowedElementRecoveryFallbackPolicy::CompileError => ConversionDiagnostic {
-            code: "unsupported_borrowed_element_recovery",
-            message: format!(
-                "unsupported borrowed Java element recovery for element shape {element_shape:?}"
-            ),
-        },
         BorrowedElementRecoveryFallbackPolicy::NonCloneableElement { java_ty } => {
             ConversionDiagnostic {
                 code: "unsupported_borrowed_element_non_cloneable",
@@ -848,25 +624,16 @@ fn borrowed_element_recovery_fallback_diagnostic(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OptionalElementTargetMatchPolicy {
-    pub target: RustSlotShape,
-    pub option_shape: RustSlotShape,
-    pub element_shape: RustSlotShape,
     pub matches: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VecElementTargetMatchPolicy {
-    pub target: RustSlotShape,
-    pub vec_shape: RustSlotShape,
-    pub element_shape: RustSlotShape,
     pub matches: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetElementTargetMatchPolicy {
-    pub target: RustSlotShape,
-    pub set_shape: RustSlotShape,
-    pub element_shape: RustSlotShape,
     pub matches: bool,
 }
 
@@ -1060,15 +827,11 @@ impl LoweredType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RustScalarSlotCastPolicy {
     pub rust_type_name: String,
-    pub java_semantic_shape: RustSlotShape,
-    pub target: RustSlotShape,
     pub target_primitive: PrimitiveType,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RustBorrowedFacadeReturnPolicy {
-    pub rust_type_name: String,
-    pub java_semantic_shape: RustSlotShape,
     pub target: RustSlotShape,
     pub recovery: RustBorrowedFacadeReturnRecovery,
 }
@@ -1090,8 +853,6 @@ impl From<BorrowedReturnRecovery> for RustBorrowedFacadeReturnRecovery {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RustUnsignedByteArrayReturnPolicy {
-    pub java_semantic_shape: RustSlotShape,
-    pub target: RustSlotShape,
     pub optional: bool,
 }
 
@@ -1118,15 +879,7 @@ pub enum RuntimeTypeTargetPolicy {
 pub struct PrimitiveWideningPolicy {
     pub from: PrimitiveType,
     pub to: PrimitiveType,
-    pub from_rank: u8,
-    pub to_rank: u8,
     pub widens: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PrimitiveRankPolicy {
-    pub primitive: PrimitiveType,
-    pub rank: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1208,41 +961,11 @@ pub fn primitive_widening_policy(
     let (JavaType::Primitive(from), JavaType::Primitive(to)) = (actual, target) else {
         return None;
     };
-    let from_rank = primitive_rank_policy(*from).rank;
-    let to_rank = primitive_rank_policy(*to).rank;
     Some(PrimitiveWideningPolicy {
         from: *from,
         to: *to,
-        from_rank,
-        to_rank,
-        // Legality is the JLS rule, not a rank comparison. The ranks below are
-        // kept because callers report them, but they placed `char` on the
-        // numeric chain and carried no `boolean` guard — so `byte`→`char` and
-        // `boolean`→numeric both reported `widens`, and the first emitted a
-        // conversion Java rejects.
         widens: crate::types::primitive_widens_to(*from, *to),
     })
-}
-
-pub fn primitive_rank_policy(primitive: PrimitiveType) -> PrimitiveRankPolicy {
-    let rank = match primitive {
-        PrimitiveType::Boolean => 0,
-        PrimitiveType::Byte => 1,
-        PrimitiveType::Short | PrimitiveType::Char => 2,
-        PrimitiveType::Int => 3,
-        PrimitiveType::Long => 4,
-        PrimitiveType::Float => 5,
-        PrimitiveType::Double => 6,
-    };
-    PrimitiveRankPolicy { primitive, rank }
-}
-
-pub fn java_cast_semantics_policy(
-    actual: &RustSlotShape,
-    target: &RustSlotShape,
-    coercion: &ShapeCoercionPlan,
-) -> JavaCastSemanticsPolicy {
-    java_cast_semantics_policy_with_facts(actual, target, coercion, &FactSet::default())
 }
 
 pub fn java_cast_semantics_policy_with_facts(
@@ -1330,14 +1053,6 @@ pub fn coercion_content_policy_with_effective_facts(
         java_ty: java_ty.clone(),
         string_content: facts.is_string_like_type(java_ty),
     }
-}
-
-pub fn coercion_shape_content_policy(
-    shape: &RustSlotShape,
-    facts: &FactSet,
-) -> CoercionShapeContentPolicy {
-    let effective_facts = EffectiveFacts::new(facts);
-    coercion_shape_content_policy_with_effective_facts(shape, &effective_facts)
 }
 
 pub fn coercion_shape_content_policy_with_effective_facts(
@@ -1434,14 +1149,6 @@ fn sequence_view_element_type(java_ty: &JavaType) -> Option<&JavaType> {
     }
 }
 
-pub fn coercion_owned_recovery_capability_policy(
-    java_ty: &JavaType,
-    facts: &FactSet,
-) -> CoercionOwnedRecoveryCapabilityPolicy {
-    let effective_facts = EffectiveFacts::new(facts);
-    coercion_owned_recovery_capability_policy_with_effective_facts(java_ty, &effective_facts)
-}
-
 pub fn coercion_owned_recovery_capability_policy_with_effective_facts(
     java_ty: &JavaType,
     facts: &EffectiveFacts,
@@ -1507,9 +1214,11 @@ pub fn ownership_coercion_policy_with_effective_facts(
     {
         let capability =
             coercion_owned_recovery_capability_policy_with_effective_facts(&actual.java_ty, facts);
-        return OwnershipCoercionPolicy::RecoverOwnedSequenceWithToVec {
-            policy: clone_recovery_policy_from_capability(capability.recovery),
-        };
+        let policy = clone_recovery_policy_from_capability(capability.recovery);
+        if crate::types::ndarray_array2_element_type(&actual.java_ty).is_some() {
+            return OwnershipCoercionPolicy::RecoverOwnedWithClone { policy };
+        }
+        return OwnershipCoercionPolicy::RecoverOwnedSequenceWithToVec { policy };
     }
     if actual.java_ty == target.java_ty
         && actual.dispatch == target.dispatch
@@ -1523,9 +1232,11 @@ pub fn ownership_coercion_policy_with_effective_facts(
         let capability =
             coercion_owned_recovery_capability_policy_with_effective_facts(&actual.java_ty, facts);
         if crate::types::sequence_element_type(&actual.java_ty).is_some() {
-            return OwnershipCoercionPolicy::RecoverOwnedSequenceWithToVec {
-                policy: clone_recovery_policy_from_capability(capability.recovery),
-            };
+            let policy = clone_recovery_policy_from_capability(capability.recovery);
+            if crate::types::ndarray_array2_element_type(&actual.java_ty).is_some() {
+                return OwnershipCoercionPolicy::RecoverOwnedWithClone { policy };
+            }
+            return OwnershipCoercionPolicy::RecoverOwnedSequenceWithToVec { policy };
         }
         ownership_recovery_policy_from_capability(capability.recovery, actual, target)
     } else if actual.dispatch == DispatchShape::Concrete
@@ -1623,13 +1334,6 @@ pub fn clone_recovery_policy_from_capability(
         | OwnedRecoveryCapability::FfiOwnedHandle { .. }
         | OwnedRecoveryCapability::NonCloneable => CloneRecoveryPolicy::AuditRequired,
     }
-}
-
-pub fn optional_shape_coercion_policy(
-    actual: &RustSlotShape,
-    target: &RustSlotShape,
-) -> OptionalShapeCoercionPolicy {
-    optional_shape_coercion_policy_with_facts(actual, target, &FactSet::default())
 }
 
 pub fn optional_shape_coercion_policy_with_facts(
@@ -1738,9 +1442,6 @@ pub fn optional_element_target_match_policy(
     element_shape: &RustSlotShape,
 ) -> OptionalElementTargetMatchPolicy {
     OptionalElementTargetMatchPolicy {
-        target: target.clone(),
-        option_shape: option_shape.clone(),
-        element_shape: element_shape.clone(),
         matches: target.java_ty == option_shape.java_ty && target.is_optional_of(element_shape),
     }
 }
@@ -1751,9 +1452,6 @@ pub fn vec_element_target_match_policy(
     element_shape: &RustSlotShape,
 ) -> VecElementTargetMatchPolicy {
     VecElementTargetMatchPolicy {
-        target: target.clone(),
-        vec_shape: vec_shape.clone(),
-        element_shape: element_shape.clone(),
         matches: target.java_ty == vec_shape.java_ty && target.is_sequence_of(element_shape),
     }
 }
@@ -1764,9 +1462,6 @@ pub fn set_element_target_match_policy(
     element_shape: &RustSlotShape,
 ) -> SetElementTargetMatchPolicy {
     SetElementTargetMatchPolicy {
-        target: target.clone(),
-        set_shape: set_shape.clone(),
-        element_shape: element_shape.clone(),
         matches: target.java_ty == set_shape.java_ty && target.is_sequence_of(element_shape),
     }
 }
@@ -1873,14 +1568,6 @@ impl BorrowedElementSlotAdapterPolicy {
             .map(BorrowedElementAdapterPolicy::unsupported_diagnostics)
             .unwrap_or_default()
     }
-}
-
-pub fn borrowed_element_adapter_policy(
-    carrier: BorrowedElementCarrier,
-    element_shape: &RustSlotShape,
-    facts: &FactSet,
-) -> BorrowedElementAdapterPolicy {
-    borrowed_element_adapter_policy_with_unwrap(carrier, element_shape, facts, false)
 }
 
 pub fn borrowed_element_adapter_policy_with_unwrap(
@@ -2030,13 +1717,6 @@ fn known_structural_element_matches_target(element_ty: &JavaType, target_ty: &Ja
     crate::stdlib::is_known_java_subtype(element, target)
 }
 
-pub fn dispatch_coercion_policy(
-    actual: &RustSlotShape,
-    target: &RustSlotShape,
-) -> DispatchCoercionPolicy {
-    dispatch_coercion_policy_with_facts(actual, target, &FactSet::default())
-}
-
 pub fn dispatch_coercion_policy_with_facts(
     actual: &RustSlotShape,
     target: &RustSlotShape,
@@ -2063,7 +1743,10 @@ pub fn dispatch_coercion_policy_with_facts(
     }
     match (&actual.dispatch, &target.dispatch) {
         (DispatchShape::Concrete, DispatchShape::Concrete) => {
-            if let Some(adapter) = external_conversion_adapter_policy(actual, target, facts) {
+            if let Some(adapter) = java_collection_conversion_policy(actual, target) {
+                adapter
+            } else if let Some(adapter) = external_conversion_adapter_policy(actual, target, facts)
+            {
                 adapter
             } else if actual.java_ty != target.java_ty
                 && target.ownership == OwnershipShape::SharedBorrow
@@ -2124,9 +1807,11 @@ pub fn dispatch_coercion_policy_with_facts(
             DispatchShape::DynTrait {
                 trait_name: target_trait,
             },
-        ) if actual_trait == target_trait => DispatchCoercionPolicy::BorrowBoxedDynTrait {
-            trait_name: target_trait.clone(),
-        },
+        ) if dyn_trait_names_match(actual_trait, target_trait) => {
+            DispatchCoercionPolicy::BorrowBoxedDynTrait {
+                trait_name: target_trait.clone(),
+            }
+        }
         (DispatchShape::Concrete, DispatchShape::BoxedDynTrait { trait_name }) => {
             if external_crate_mapped_dyn_trait_boundary(trait_name, facts) {
                 return DispatchCoercionPolicy::EraseObject;
@@ -2142,9 +1827,11 @@ pub fn dispatch_coercion_policy_with_facts(
             DispatchShape::BoxedDynTrait {
                 trait_name: target_trait,
             },
-        ) if actual_trait == target_trait => DispatchCoercionPolicy::CloneBoxDynTrait {
-            trait_name: target_trait.clone(),
-        },
+        ) if dyn_trait_names_match(actual_trait, target_trait) => {
+            DispatchCoercionPolicy::CloneBoxDynTrait {
+                trait_name: target_trait.clone(),
+            }
+        }
         (DispatchShape::Concrete, DispatchShape::ErasedObject) => {
             DispatchCoercionPolicy::EraseObject
         }
@@ -2302,6 +1989,18 @@ fn external_conversion_adapter_type_name(java_ty: &JavaType) -> Option<&str> {
     }
 }
 
+fn dyn_trait_names_match(actual: &str, target: &str) -> bool {
+    actual == target || rust_trait_name_for_match(actual) == rust_trait_name_for_match(target)
+}
+
+fn rust_trait_name_for_match(name: &str) -> String {
+    if name.contains('.') || name.contains('$') {
+        crate::slot_render::rust_name_for_java_named_type(name)
+    } else {
+        name.to_string()
+    }
+}
+
 fn unsupported_dispatch_coercion_policy(
     actual: &RustSlotShape,
     target: &RustSlotShape,
@@ -2311,6 +2010,34 @@ fn unsupported_dispatch_coercion_policy(
         target,
         DispatchCoercionFallbackPolicy::CompileError,
     )
+}
+
+fn java_collection_conversion_policy(
+    actual: &RustSlotShape,
+    target: &RustSlotShape,
+) -> Option<DispatchCoercionPolicy> {
+    let actual_kind = crate::stdlib::java_collection_kind_for_type(&actual.java_ty)?;
+    let target_kind = crate::stdlib::java_collection_kind_for_type(&target.java_ty)?;
+    if !matches!(
+        (actual_kind, target_kind),
+        (
+            crate::stdlib::JavaCollectionKind::InsertionOrderedMap,
+            crate::stdlib::JavaCollectionKind::Map
+        )
+    ) {
+        return None;
+    }
+
+    let (actual_key, actual_value) = crate::stdlib::java_map_type_args(&actual.java_ty)?;
+    let (target_key, target_value) = crate::stdlib::java_map_type_args(&target.java_ty)?;
+    if actual_key == target_key && actual_value == target_value {
+        Some(DispatchCoercionPolicy::ExternalInto {
+            from_type: actual.java_ty.clone(),
+            to_type: target.java_ty.clone(),
+        })
+    } else {
+        None
+    }
 }
 
 fn unsupported_dispatch_coercion_policy_with_fallback(
@@ -2334,10 +2061,6 @@ pub struct ShapeCoercionPlan {
     pub optional: OptionalShapeCoercionPolicy,
     pub ownership: OwnershipCoercionPolicy,
     pub primitive_widening: Option<PrimitiveWideningPolicy>,
-}
-
-pub fn shape_coercion_plan(actual: &RustSlotShape, target: &RustSlotShape) -> ShapeCoercionPlan {
-    shape_coercion_plan_with_facts(actual, target, &FactSet::default())
 }
 
 pub fn shape_coercion_plan_with_facts(
@@ -2386,16 +2109,10 @@ impl OwnershipCoercionPolicy {
 
 fn ownership_coercion_fallback_diagnostic(
     policy: &OwnershipCoercionFallbackPolicy,
-    actual_ownership: OwnershipShape,
-    target_ownership: OwnershipShape,
+    _actual_ownership: OwnershipShape,
+    _target_ownership: OwnershipShape,
 ) -> ConversionDiagnostic {
     match policy {
-        OwnershipCoercionFallbackPolicy::CompileError => ConversionDiagnostic {
-            code: "unsupported_ownership_coercion",
-            message: format!(
-                "unsupported Java ownership coercion: actual={actual_ownership:?}, target={target_ownership:?}"
-            ),
-        },
         OwnershipCoercionFallbackPolicy::BorrowedToOwnedNonCloneable { java_ty } => {
             ConversionDiagnostic {
                 code: "unsupported_borrowed_to_owned_non_cloneable",
@@ -2458,10 +2175,6 @@ fn dispatch_coercion_fallback_diagnostic(
                 "unsupported Java dispatch coercion: target type {java_ty:?} has no concrete runtime type"
             ),
         },
-        DispatchCoercionFallbackPolicy::BorrowedDynToOwnedBoxedDyn {
-            trait_name,
-            recovery,
-        } => borrowed_dyn_to_owned_boxed_dyn_diagnostic(trait_name, recovery),
         DispatchCoercionFallbackPolicy::ErasedObjectToDynTrait { trait_name } => {
             ConversionDiagnostic {
                 code: "unsupported_erased_object_to_dyn_trait",
@@ -2481,48 +2194,11 @@ fn dispatch_coercion_fallback_diagnostic(
     }
 }
 
-fn borrowed_dyn_to_owned_boxed_dyn_diagnostic(
-    trait_name: &str,
-    recovery: &BorrowedDynToOwnedBoxedDynRecoveryPolicy,
-) -> ConversionDiagnostic {
-    let requirement = dyn_clone_box_adapter_requirement(trait_name, recovery);
-    match dyn_clone_box_adapter_generation_policy(&requirement) {
-        DynCloneBoxAdapterGenerationPolicy::AlreadyAvailable { trait_name } => {
-            ConversionDiagnostic {
-                code: "borrowed_dyn_to_owned_boxed_dyn_clone_box_adapter_proven",
-                message: format!(
-                    "Java borrowed dyn trait to owned boxed dyn recovery for {trait_name} has a proven clone-box adapter"
-                ),
-            }
-        }
-        DynCloneBoxAdapterGenerationPolicy::GenerateAdapter { trait_name, policy } => {
-            let proof = match policy {
-                CloneRecoveryPolicy::ProvenCloneCapability { .. } => "explicit clone proof exists",
-                CloneRecoveryPolicy::AuditRequired => "only conservative clone proof exists",
-            };
-            ConversionDiagnostic {
-                code: "borrowed_dyn_to_owned_boxed_dyn_clone_box_adapter_required",
-                message: format!(
-                    "Java borrowed dyn trait to owned boxed dyn recovery for {trait_name}; {proof}, and dyn clone-box adapter generation is required"
-                ),
-            }
-        }
-        DynCloneBoxAdapterGenerationPolicy::DeferredUnsupported { trait_name, reason } => {
-            dyn_clone_box_adapter_deferral_message(&trait_name, reason)
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyntaxCoercionPlan {
     pub actual: JavaType,
     pub slot: Slot,
-    pub content: CoercionContentPolicy,
     pub policy: SyntaxSlotCoercionPolicy,
-}
-
-pub fn syntax_coercion_plan(actual: &JavaType, slot: &Slot) -> SyntaxCoercionPlan {
-    syntax_coercion_plan_with_facts(actual, slot, &FactSet::default())
 }
 
 pub fn syntax_coercion_plan_with_facts(
@@ -2535,18 +2211,8 @@ pub fn syntax_coercion_plan_with_facts(
     SyntaxCoercionPlan {
         actual: actual.clone(),
         slot: slot.clone(),
-        content,
         policy,
     }
-}
-
-pub fn syntax_slot_coercion_policy(
-    actual: &JavaType,
-    slot: &Slot,
-    facts: &FactSet,
-) -> SyntaxSlotCoercionPolicy {
-    let content = coercion_content_policy(actual, facts);
-    syntax_slot_coercion_policy_from_content(actual, slot, &content)
 }
 
 fn syntax_slot_coercion_policy_from_content(
@@ -2565,6 +2231,12 @@ fn syntax_slot_coercion_policy_from_content(
             if java_type_needs_java_object_display_fallback(actual, content) =>
         {
             SyntaxSlotCoercionPolicy::ErasedObjectToJavaDisplayString
+        }
+        Slot::StringConcatSegment | Slot::DisplaySegment
+            if crate::stdlib::java_collection_kind_for_type(actual)
+                == Some(crate::stdlib::JavaCollectionKind::List) =>
+        {
+            SyntaxSlotCoercionPolicy::CollectionToJavaDisplayString
         }
         // Java renders a concatenated `double`/`float` with a decimal point;
         // Rust's `Display` does not, so this needs its own conversion.
@@ -2682,10 +2354,6 @@ fn instanceof_fallback_diagnostic(
             }
         }
     }
-}
-
-pub fn plan_instanceof_check(actual: &RustSlotShape, target: &RustSlotShape) -> InstanceOfCheck {
-    plan_instanceof_check_with_facts(actual, target, &FactSet::default())
 }
 
 pub fn instanceof_target_policy(target: &RustSlotShape, facts: &FactSet) -> InstanceOfTargetPolicy {
@@ -2970,28 +2638,12 @@ pub enum SlotConversionPlan {
     RustBorrowedFacadeReturn(RustBorrowedFacadeReturnPolicy),
     OptionalRustBorrowedFacadeReturn(RustBorrowedFacadeReturnPolicy),
     RustUnsignedByteArrayReturn(RustUnsignedByteArrayReturnPolicy),
-    Identity {
-        actual: LoweredType,
-        slot: Slot,
-    },
-    /// A conversion that also crosses a shared-handle boundary.
-    ///
-    /// The crossing lives *inside* the plan rather than beside it because
-    /// `apply_slot_conversion_plan` has **four** callers and two of them take a
-    /// bare `&SlotConversionPlan` — so a sibling field is only seen by whichever
-    /// applier is taught about it. That is why teaching one did not move the
-    /// count
-    /// ([0002b](../claude_audits/0002b-shared-representation-design.md)).
-    Handled {
-        handle: HandleAdaptation,
-        inner: Box<SlotConversionPlan>,
-    },
+    Identity { actual: LoweredType, slot: Slot },
 }
 
 impl SlotConversionPlan {
     pub fn unsupported_diagnostics(&self) -> Vec<ConversionDiagnostic> {
         match self {
-            SlotConversionPlan::Handled { inner, .. } => inner.unsupported_diagnostics(),
             SlotConversionPlan::Shape(plan) => plan.unsupported_diagnostics(),
             SlotConversionPlan::OptionalConstruction(plan) => {
                 plan.element_plan.unsupported_diagnostics()
@@ -3039,19 +2691,6 @@ pub struct SlotExprConversionPlan {
     pub actual: RustSlotShape,
     pub slot: Slot,
     pub conversion: SlotConversionPlan,
-}
-
-/// Crossing the boundary of a shared handle.
-///
-/// A handle is transparent for reads (`Rc<T>` derefs to `T`) and for cloning
-/// (`.clone()` is the handle clone). It is opaque where a conversion constructs
-/// a fresh `T` for a slot that stores `Rc<T>`.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum HandleAdaptation {
-    #[default]
-    None,
-    /// The slot holds a handle and the value does not: construct one.
-    Wrap(crate::storage_strategy::StoragePlacement),
 }
 
 impl SlotExprConversionPlan {
@@ -3318,62 +2957,12 @@ pub fn plan_slot_conversion(
     }
 }
 
-/// Which way, if either, the value crosses a shared handle boundary.
-fn plan_handle_adaptation(
-    actual: &RustSlotShape,
-    slot: &Slot,
-    facts: &FactSet,
-) -> HandleAdaptation {
-    let placement_of = |shape: &RustSlotShape| match &shape.java_ty {
-        JavaType::Named { name, .. } => {
-            let placement = facts.storage_placement_for(name);
-            (placement.shared && placement.is_implemented()).then_some(placement)
-        }
-        _ => None,
-    };
-    let target = match slot {
-        Slot::Assignment(shape) | Slot::Return(shape) | Slot::Argument(shape) => Some(shape),
-        _ => None,
-    };
-    // Only *owned* positions hold the handle; a borrowed slot sees through it.
-    let target = target.filter(|shape| {
-        matches!(
-            shape.ownership,
-            OwnershipShape::Owned | OwnershipShape::CopyValue
-        )
-    });
-    // Inert for now. Handle wrapping currently lives in rendering decisions,
-    // not in `RustSlotShape`, so this planner cannot reliably distinguish "the
-    // value is already behind a handle" from "the slot will render behind a
-    // handle". Measured attempts that enabled this here either reached none of
-    // the needed sites or introduced new wrong wraps; see 0002b.
-    let _ = (placement_of(actual), target.and_then(placement_of));
-    HandleAdaptation::None
-}
-
-pub fn slot_conversion_plan(actual: &RustSlotShape, slot: &Slot) -> SlotConversionPlan {
-    slot_conversion_plan_with_facts(actual, slot, &FactSet::default())
-}
-
 pub fn slot_conversion_plan_with_facts(
     actual: &RustSlotShape,
     slot: &Slot,
     facts: &FactSet,
 ) -> SlotConversionPlan {
-    // The handle crossing is decided *here*, in the one function that turns
-    // `(actual, slot, facts)` into a plan, so every producer of a plan gets it.
-    // Deciding it one level up in `plan_slot_conversion` reached only the
-    // callers that go through that entry — and the erased-object downcast does
-    // not, which is why teaching the applier changed nothing
-    // ([0002b](../claude_audits/0002b-shared-representation-design.md)).
-    let inner = slot_conversion_plan_by_value(actual, slot, facts);
-    match plan_handle_adaptation(actual, slot, facts) {
-        HandleAdaptation::None => inner,
-        handle => SlotConversionPlan::Handled {
-            handle,
-            inner: Box::new(inner),
-        },
-    }
+    slot_conversion_plan_by_value(actual, slot, facts)
 }
 
 fn slot_conversion_plan_by_value(
@@ -3386,6 +2975,17 @@ fn slot_conversion_plan_by_value(
             SlotConversionPlan::Shape(shape_coercion_plan_with_facts(actual, target, facts))
         }
         Slot::StringConcatSegment | Slot::DisplaySegment
+            if actual
+                .optional_element_type()
+                .is_some_and(|element_ty| java_type_is_erased_object_display_like(&element_ty)) =>
+        {
+            SlotConversionPlan::Syntax(SyntaxCoercionPlan {
+                actual: actual.java_ty.clone(),
+                slot: slot.clone(),
+                policy: SyntaxSlotCoercionPolicy::OptionalErasedObjectToJavaDisplayString,
+            })
+        }
+        Slot::StringConcatSegment | Slot::DisplaySegment
             if actual.optional_element_type().is_some_and(|element_ty| {
                 coercion_content_policy(&element_ty, facts).string_content
             }) =>
@@ -3393,7 +2993,6 @@ fn slot_conversion_plan_by_value(
             SlotConversionPlan::Syntax(SyntaxCoercionPlan {
                 actual: actual.java_ty.clone(),
                 slot: slot.clone(),
-                content: coercion_content_policy(&actual.java_ty, facts),
                 policy: SyntaxSlotCoercionPolicy::OptionalToJavaDisplayString,
             })
         }
@@ -3405,7 +3004,6 @@ fn slot_conversion_plan_by_value(
             SlotConversionPlan::Syntax(SyntaxCoercionPlan {
                 actual: actual.java_ty.clone(),
                 slot: slot.clone(),
-                content: coercion_content_policy(&actual.java_ty, facts),
                 policy: SyntaxSlotCoercionPolicy::OptionalToJavaDisplayValue,
             })
         }
@@ -3546,10 +3144,6 @@ pub fn plan_lowered_slot_conversion(
     }
 }
 
-pub fn lowered_slot_conversion_plan(actual: &LoweredType, slot: &Slot) -> SlotConversionPlan {
-    lowered_slot_conversion_plan_with_facts(actual, slot, &FactSet::default())
-}
-
 pub fn lowered_slot_conversion_plan_with_facts(
     actual: &LoweredType,
     slot: &Slot,
@@ -3567,8 +3161,6 @@ pub fn lowered_slot_conversion_plan_with_facts(
             if let JavaType::Primitive(target_primitive) = target.java_ty {
                 SlotConversionPlan::RustScalarCast(RustScalarSlotCastPolicy {
                     rust_type_name: rust_type_name.clone(),
-                    java_semantic_shape: (**java_shape).clone(),
-                    target: target.clone(),
                     target_primitive,
                 })
             } else {
@@ -3584,8 +3176,6 @@ pub fn lowered_slot_conversion_plan_with_facts(
             Slot::Assignment(target) | Slot::Return(target) | Slot::Argument(target),
         ) if slot_or_optional_element_targets_erased_object(target) => {
             SlotConversionPlan::RustBorrowedFacadeReturn(RustBorrowedFacadeReturnPolicy {
-                rust_type_name: rust_type_name.clone(),
-                java_semantic_shape: (**java_shape).clone(),
                 target: target.clone(),
                 recovery: recovery.unwrap_or(RustBorrowedFacadeReturnRecovery::Clone),
             })
@@ -3602,8 +3192,6 @@ pub fn lowered_slot_conversion_plan_with_facts(
             Slot::Assignment(target) | Slot::Return(target) | Slot::Argument(target),
         ) if target_expects_java_byte_array_or_option(target) => {
             SlotConversionPlan::RustUnsignedByteArrayReturn(RustUnsignedByteArrayReturnPolicy {
-                java_semantic_shape: (**java_shape).clone(),
-                target: target.clone(),
                 optional: *optional,
             })
         }
@@ -3614,14 +3202,13 @@ pub fn lowered_slot_conversion_plan_with_facts(
         (
             LoweredType::OptionalElementBorrow {
                 option_shape,
-                element_shape,
+                element_shape: _,
                 ..
             },
             Slot::StringConcatSegment | Slot::DisplaySegment,
         ) => SlotConversionPlan::Syntax(SyntaxCoercionPlan {
             actual: option_shape.java_ty.clone(),
             slot: slot.clone(),
-            content: coercion_content_policy(&element_shape.java_ty, facts),
             policy: SyntaxSlotCoercionPolicy::OptionalBorrowedToJavaDisplayValue,
         }),
         (
@@ -3635,8 +3222,6 @@ pub fn lowered_slot_conversion_plan_with_facts(
             if slot_or_optional_element_targets_erased_object(target) {
                 SlotConversionPlan::OptionalRustBorrowedFacadeReturn(
                     RustBorrowedFacadeReturnPolicy {
-                        rust_type_name: rust_type_name_for_shape(element_shape),
-                        java_semantic_shape: (**element_shape).clone(),
                         target: target.clone(),
                         recovery: recovery.unwrap_or(RustBorrowedFacadeReturnRecovery::Clone),
                     },
@@ -3684,13 +3269,6 @@ pub fn lowered_slot_conversion_plan_with_facts(
     }
 }
 
-fn rust_type_name_for_shape(shape: &RustSlotShape) -> String {
-    match &shape.java_ty {
-        JavaType::Named { name, .. } | JavaType::Unknown(name) => name.clone(),
-        other => format!("{other:?}"),
-    }
-}
-
 fn target_expects_java_byte_array_or_option(target: &RustSlotShape) -> bool {
     java_type_is_byte_array(&target.java_ty)
         || target
@@ -3729,7 +3307,8 @@ fn java_type_needs_java_object_display_fallback(
         return false;
     }
     match java_ty {
-        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+        JavaType::Named { .. } => false,
+        JavaType::Unknown(name) => {
             let receiver_key = crate::stdlib::canonical_external_receiver_type_key(name);
             let receiver_simple = receiver_key.rsplit('.').next().unwrap_or(&receiver_key);
             !matches!(
@@ -3815,9 +3394,10 @@ mod tests {
         let optional_receiver_plan = LoweredSlotExprConversionPlan {
             actual: LoweredType::Slot(Box::new(borrowed_string.clone())),
             slot: argument_slot(borrowed_string.clone()),
-            conversion: SlotConversionPlan::Shape(shape_coercion_plan(
+            conversion: SlotConversionPlan::Shape(shape_coercion_plan_with_facts(
                 &borrowed_string,
                 &borrowed_string,
+                &FactSet::default(),
             )),
         };
         assert!(receiver_method_autoref_satisfies_optional_slot(
@@ -3827,5 +3407,46 @@ mod tests {
             ReceiverAbi::BorrowedSelf,
             &optional_receiver_plan
         ));
+    }
+
+    #[test]
+    fn list_string_concat_uses_java_collection_display_policy() {
+        let actual = RustSlotShape::for_storage(JavaType::Named {
+            name: "List".to_string(),
+            args: vec![JavaType::String],
+        });
+        let plan = plan_slot_conversion(actual, Slot::StringConcatSegment, &FactSet::default());
+
+        assert!(matches!(
+            plan.conversion,
+            SlotConversionPlan::Syntax(SyntaxCoercionPlan {
+                policy: SyntaxSlotCoercionPolicy::CollectionToJavaDisplayString,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn borrowed_ndarray_backed_array2_recovers_with_clone_not_to_vec() {
+        let java_ty = JavaType::Array(Box::new(JavaType::Array(Box::new(JavaType::Primitive(
+            PrimitiveType::Double,
+        )))));
+        let mut target = RustSlotShape::for_storage(java_ty);
+        target.ownership = OwnershipShape::Owned;
+        let mut actual = target.clone();
+        actual.ownership = OwnershipShape::SharedBorrow;
+
+        let facts = FactSet::default();
+        let effective_facts = EffectiveFacts::new(&facts);
+        let policy =
+            ownership_coercion_policy_with_effective_facts(&actual, &target, &effective_facts);
+
+        assert!(
+            matches!(
+                policy,
+                OwnershipCoercionPolicy::RecoverOwnedWithClone { .. }
+            ),
+            "shared borrowed Array2 recovered with {policy:?}"
+        );
     }
 }

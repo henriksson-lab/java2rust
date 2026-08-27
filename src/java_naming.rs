@@ -28,10 +28,23 @@ pub fn rust_name_for_java_named_type(name: &str) -> String {
     if !name.contains('.') {
         return name.to_string();
     }
-    name.split('.')
-        .filter(|part| !part.trim().is_empty())
-        .map(upper_camel_identifier_part)
-        .collect::<String>()
+    let mut out = String::new();
+    let mut previous_part_was_type = false;
+    for part in name.split('.').filter(|part| !part.trim().is_empty()) {
+        let part_was_type = java_name_part_looks_like_type(part);
+        if previous_part_was_type && part_was_type {
+            out.push('_');
+        }
+        out.push_str(&upper_camel_identifier_part(part));
+        previous_part_was_type = part_was_type;
+    }
+    out
+}
+
+fn java_name_part_looks_like_type(part: &str) -> bool {
+    part.chars()
+        .find(|ch| ch.is_ascii_alphanumeric())
+        .is_some_and(|ch| ch.is_ascii_uppercase())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -256,6 +269,16 @@ mod tests {
         assert_eq!(
             java_method_name_aliases("toString"),
             vec!["toString".to_string(), "to_string".to_string()]
+        );
+    }
+
+    #[test]
+    fn nested_type_name_mangling_preserves_type_path_boundaries() {
+        assert_eq!(rust_name_for_java_named_type("K.AB"), "K_AB");
+        assert_eq!(rust_name_for_java_named_type("K.A.B"), "K_A_B");
+        assert_eq!(
+            rust_name_for_java_named_type("java.io.InputStream"),
+            "JavaIoInputStream"
         );
     }
 

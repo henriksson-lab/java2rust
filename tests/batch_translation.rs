@@ -1,3 +1,6 @@
+mod common;
+
+use common::{GeneratedCrateModule, cargo_check_generated_modules};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -50,6 +53,13 @@ public class B {
 "#,
     )
     .unwrap();
+}
+
+fn generated_source_items_from_marker(rust: &str, marker: &str) -> String {
+    let start = rust
+        .find(marker)
+        .unwrap_or_else(|| panic!("missing generated source marker {marker:?}:\n{rust}"));
+    rust[start..].to_string()
 }
 
 #[test]
@@ -222,6 +232,468 @@ public class DuplicateOwner {
             .iter()
             .map(|translation| (&translation.path, &translation.rust))
             .collect::<Vec<_>>()
+    );
+    cargo_check_generated_modules(
+        "batch_duplicate_simple_type_names",
+        report
+            .translations
+            .iter()
+            .enumerate()
+            .map(|(index, translation)| GeneratedCrateModule {
+                name: if index == 0 { "a_owner" } else { "b_owner" },
+                rust: translation.rust.clone(),
+                tests: "",
+            })
+            .collect(),
+    );
+}
+
+#[test]
+fn explicit_import_aliases_survive_duplicate_context_simple_names() {
+    let primary_sources = vec![
+        new_java2rust::BatchSource {
+            path: "a/Cfg.java".to_string(),
+            source: r#"
+package a;
+
+public class Cfg {
+    public static final int N = 10;
+
+    public static int who() {
+        return 1;
+    }
+
+    public int id() {
+        return 100;
+    }
+}
+"#
+            .to_string(),
+        },
+        new_java2rust::BatchSource {
+            path: "b/Cfg.java".to_string(),
+            source: r#"
+package b;
+
+public class Cfg {
+    public static final int N = 20;
+
+    public static int who() {
+        return 2;
+    }
+
+    public int id() {
+        return 200;
+    }
+}
+"#
+            .to_string(),
+        },
+        new_java2rust::BatchSource {
+            path: "UseA.java".to_string(),
+            source: r#"
+import a.Cfg;
+
+public class UseA {
+    public static int run() {
+        Cfg c = new Cfg();
+        return Cfg.N + Cfg.who() + c.id();
+    }
+}
+"#
+            .to_string(),
+        },
+        new_java2rust::BatchSource {
+            path: "UseB.java".to_string(),
+            source: r#"
+import b.Cfg;
+
+public class UseB {
+    public static int run() {
+        Cfg c = new Cfg();
+        return Cfg.N + Cfg.who() + c.id();
+    }
+}
+"#
+            .to_string(),
+        },
+    ];
+
+    let report =
+        new_java2rust::translate_batch_sources_with_context_sources_summary_sources_and_options(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+            &new_java2rust::BatchTranslationOptions {
+                emission_jobs: 2,
+                ..Default::default()
+            },
+        );
+
+    let use_a = report
+        .translations
+        .iter()
+        .find(|translation| translation.path == "UseA.java")
+        .unwrap_or_else(|| panic!("{:#?}", report.translations));
+    let use_b = report
+        .translations
+        .iter()
+        .find(|translation| translation.path == "UseB.java")
+        .unwrap_or_else(|| panic!("{:#?}", report.translations));
+
+    assert!(
+        use_a.rust.contains("ACfg::N")
+            && use_a.rust.contains("ACfg::who()")
+            && !use_a.rust.contains("BCfg::N")
+            && !use_a.rust.contains("BCfg::who()"),
+        "{}",
+        use_a.rust
+    );
+    assert!(
+        use_b.rust.contains("BCfg::N")
+            && use_b.rust.contains("BCfg::who()")
+            && !use_b.rust.contains("ACfg::N")
+            && !use_b.rust.contains("ACfg::who()"),
+        "{}",
+        use_b.rust
+    );
+}
+
+#[test]
+fn package_qualified_source_type_references_keep_package_identity() {
+    let primary_sources = vec![
+        new_java2rust::BatchSource {
+            path: "a/Item.java".to_string(),
+            source: r#"
+package a;
+
+public class Item {
+    public static final int KIND = 1;
+
+    public int who() {
+        return 1;
+    }
+}
+"#
+            .to_string(),
+        },
+        new_java2rust::BatchSource {
+            path: "b/Item.java".to_string(),
+            source: r#"
+package b;
+
+public class Item {
+    public static final int KIND = 2;
+
+    public int who() {
+        return 2;
+    }
+}
+"#
+            .to_string(),
+        },
+        new_java2rust::BatchSource {
+            path: "Main.java".to_string(),
+            source: r#"
+public class Main {
+    public static int run() {
+        a.Item ai = new a.Item();
+        b.Item bi = new b.Item();
+        return ai.who() + bi.who() + a.Item.KIND + b.Item.KIND;
+    }
+}
+"#
+            .to_string(),
+        },
+    ];
+
+    let report =
+        new_java2rust::translate_batch_sources_with_context_sources_summary_sources_and_options(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+            &new_java2rust::BatchTranslationOptions {
+                emission_jobs: 2,
+                ..Default::default()
+            },
+        );
+
+    let main = report
+        .translations
+        .iter()
+        .find(|translation| translation.path == "Main.java")
+        .unwrap_or_else(|| panic!("{:#?}", report.translations));
+    let a_item = report
+        .translations
+        .iter()
+        .find(|translation| translation.path == "a/Item.java")
+        .unwrap_or_else(|| panic!("{:#?}", report.translations));
+    let b_item = report
+        .translations
+        .iter()
+        .find(|translation| translation.path == "b/Item.java")
+        .unwrap_or_else(|| panic!("{:#?}", report.translations));
+
+    assert!(main.rust.contains("AItem::new()"), "{}", main.rust);
+    assert!(main.rust.contains("BItem::new()"), "{}", main.rust);
+    assert!(main.rust.contains("AItem::KIND"), "{}", main.rust);
+    assert!(main.rust.contains("BItem::KIND"), "{}", main.rust);
+    assert!(!main.rust.contains("let ai: Item"), "{}", main.rust);
+    assert!(!main.rust.contains("let bi: Item"), "{}", main.rust);
+    assert!(!main.rust.contains("= Item::new()"), "{}", main.rust);
+    assert!(a_item.rust.contains("pub struct AItem"), "{}", a_item.rust);
+    assert!(b_item.rust.contains("pub struct BItem"), "{}", b_item.rust);
+    assert!(
+        !a_item.rust.contains("pub struct Item") && !b_item.rust.contains("pub struct Item"),
+        "declarations should not collapse to the simple name:\n{}\n{}",
+        a_item.rust,
+        b_item.rust
+    );
+
+    cargo_check_generated_modules(
+        "batch_same_simple_package_peers",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: format!(
+                "pub struct JavaClass<T> {{ name: &'static str, _marker: std::marker::PhantomData<T> }}\n\
+                 impl<T> JavaClass<T> {{ pub fn literal(name: &'static str) -> Self {{ Self {{ name, _marker: std::marker::PhantomData }} }} pub fn get_name(&self) -> String {{ self.name.to_string() }} }}\n\
+                 pub fn java_erased_object_to_string<T>(_value: &T) -> String {{ String::new() }}\n\
+                 {}\n{}\n{}",
+                generated_source_items_from_marker(&a_item.rust, "pub struct AItem"),
+                generated_source_items_from_marker(&b_item.rust, "pub struct BItem"),
+                generated_source_items_from_marker(&main.rust, "pub struct Main")
+            ),
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn imported_source_enum_value_of_keeps_package_owner_identity() {
+    let primary_sources = vec![
+        new_java2rust::BatchSource {
+            path: "a/Mode.java".to_string(),
+            source: r#"
+package a;
+
+public enum Mode {
+    FIRST,
+    SECOND
+}
+"#
+            .to_string(),
+        },
+        new_java2rust::BatchSource {
+            path: "b/Mode.java".to_string(),
+            source: r#"
+package b;
+
+public enum Mode {
+    OTHER
+}
+"#
+            .to_string(),
+        },
+        new_java2rust::BatchSource {
+            path: "Main.java".to_string(),
+            source: r#"
+import a.Mode;
+
+public class Main {
+    public static int run(String name) {
+        return Mode.valueOf(name).ordinal();
+    }
+}
+"#
+            .to_string(),
+        },
+    ];
+
+    let report =
+        new_java2rust::translate_batch_sources_with_context_sources_summary_sources_and_options(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+            &new_java2rust::BatchTranslationOptions {
+                emission_jobs: 2,
+                ..Default::default()
+            },
+        );
+
+    let main = report
+        .translations
+        .iter()
+        .find(|translation| translation.path == "Main.java")
+        .unwrap_or_else(|| panic!("{:#?}", report.translations));
+    let a_mode = report
+        .translations
+        .iter()
+        .find(|translation| translation.path == "a/Mode.java")
+        .unwrap_or_else(|| panic!("{:#?}", report.translations));
+    let b_mode = report
+        .translations
+        .iter()
+        .find(|translation| translation.path == "b/Mode.java")
+        .unwrap_or_else(|| panic!("{:#?}", report.translations));
+
+    assert!(
+        main.rust.contains("AMode::value_of(name.as_str())"),
+        "{}",
+        main.rust
+    );
+    assert!(
+        !main.rust.contains("return Mode::value_of("),
+        "{}",
+        main.rust
+    );
+    assert!(!main.rust.contains("BMode::value_of("), "{}", main.rust);
+
+    cargo_check_generated_modules(
+        "batch_imported_source_enum_value_of_package_owner",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: format!(
+                "pub struct JavaClass<T> {{ name: &'static str, _marker: std::marker::PhantomData<T> }}\n\
+                 impl<T> JavaClass<T> {{ pub fn literal(name: &'static str) -> Self {{ Self {{ name, _marker: std::marker::PhantomData }} }} pub fn get_name(&self) -> String {{ self.name.to_string() }} }}\n\
+                 pub fn java_erased_object_to_string<T>(_value: &T) -> String {{ String::new() }}\n\
+                 {}\n{}\n{}",
+                generated_source_items_from_marker(&a_mode.rust, "pub enum AMode"),
+                generated_source_items_from_marker(&b_mode.rust, "pub enum BMode"),
+                generated_source_items_from_marker(&main.rust, "pub struct Main")
+            ),
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn package_qualified_class_literals_keep_package_identity() {
+    let primary_sources = vec![
+        new_java2rust::BatchSource {
+            path: "a/Item.java".to_string(),
+            source: r#"
+package a;
+
+public class Item {}
+"#
+            .to_string(),
+        },
+        new_java2rust::BatchSource {
+            path: "b/Item.java".to_string(),
+            source: r#"
+package b;
+
+public class Item {}
+"#
+            .to_string(),
+        },
+        new_java2rust::BatchSource {
+            path: "Main.java".to_string(),
+            source: r#"
+public class Main {
+    public static String run() {
+        return a.Item.class.getName() + "," + b.Item.class.getName();
+    }
+}
+"#
+            .to_string(),
+        },
+    ];
+
+    let report =
+        new_java2rust::translate_batch_sources_with_context_sources_summary_sources_and_options(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+            &new_java2rust::BatchTranslationOptions {
+                emission_jobs: 2,
+                ..Default::default()
+            },
+        );
+
+    let main = report
+        .translations
+        .iter()
+        .find(|translation| translation.path == "Main.java")
+        .unwrap_or_else(|| panic!("{:#?}", report.translations));
+    let a_item = report
+        .translations
+        .iter()
+        .find(|translation| translation.path == "a/Item.java")
+        .unwrap_or_else(|| panic!("{:#?}", report.translations));
+    let b_item = report
+        .translations
+        .iter()
+        .find(|translation| translation.path == "b/Item.java")
+        .unwrap_or_else(|| panic!("{:#?}", report.translations));
+    let class_literal_lines = main
+        .rust
+        .lines()
+        .filter(|line| line.contains("JavaClass"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        main.rust
+            .contains("JavaClass::<AItem>::literal(\"a.Item\")"),
+        "missing a.Item class literal:\n{class_literal_lines}"
+    );
+    assert!(
+        main.rust
+            .contains("JavaClass::<BItem>::literal(\"b.Item\")"),
+        "missing b.Item class literal:\n{class_literal_lines}"
+    );
+    assert!(
+        !main.rust.contains("JavaClass::<Item>::literal(\"Item\")"),
+        "class literal collapsed to simple Item"
+    );
+    assert!(a_item.rust.contains("pub struct AItem"), "{}", a_item.rust);
+    assert!(b_item.rust.contains("pub struct BItem"), "{}", b_item.rust);
+}
+
+#[test]
+fn same_package_simple_class_literal_keeps_java_package_name() {
+    let translation = new_java2rust::translate_source(
+        r#"
+package a;
+
+public class Item {
+    public static String run() {
+        return Item.class.getName();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("JavaClass::<Item>::literal(\"a.Item\")"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("JavaClass::<Item>::literal(\"Item\")"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "same_package_simple_class_literal",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -469,6 +941,86 @@ fn translate_batch_cli_writes_phase_and_worker_events() {
             .any(|line| line.starts_with("emit_end\t") && line.contains("\t2\t")),
         "{worker_events}"
     );
+}
+
+#[test]
+fn translate_cli_exits_nonzero_on_java_syntax_errors() {
+    let dir = unique_temp_dir("translate_cli_syntax_error");
+    let source = dir.join("Broken.java");
+    fs::write(
+        &source,
+        r#"
+public class Broken {
+    int bad(int a, int b) {
+        return a + b ~;
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_new-java2rust"))
+        .arg(&source)
+        .output()
+        .expect("run translator");
+    assert!(
+        !output.status.success(),
+        "translator unexpectedly succeeded\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("java_syntax"),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn translate_batch_status_reports_error_diagnostics() {
+    let dir = unique_temp_dir("translate_batch_syntax_error_status");
+    let source_dir = dir.join("java");
+    let out_dir = dir.join("out");
+    let generated_dir = out_dir.join("generated");
+    fs::create_dir_all(&source_dir).unwrap();
+    fs::write(
+        source_dir.join("Broken.java"),
+        r#"
+public class Broken {
+    int bad(int a, int b) {
+        return a + b ~;
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_new-java2rust"))
+        .arg("translate-batch")
+        .arg("--primary")
+        .arg(&source_dir)
+        .arg("--out-dir")
+        .arg(&out_dir)
+        .arg("--generated-dir")
+        .arg(&generated_dir)
+        .output()
+        .expect("run translate-batch");
+    assert!(
+        output.status.success(),
+        "translate-batch failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let status = fs::read_to_string(out_dir.join("status.tsv")).unwrap();
+    let row = status
+        .lines()
+        .nth(1)
+        .unwrap_or_else(|| panic!("missing status row\n{status}"));
+    let fields = row.split('\t').collect::<Vec<_>>();
+    assert_eq!(fields.len(), 7, "{status}");
+    assert_eq!(fields[2], "errors", "{status}");
+    assert!(fields[3].parse::<usize>().unwrap_or(0) > 0, "{status}");
 }
 
 #[test]
@@ -1042,11 +1594,11 @@ public class ModeledPeer {
         "{generated}"
     );
     assert!(
-        generated.contains("pub enum ModeledPrimaryKind"),
+        generated.contains("pub enum ModeledPrimary_Kind"),
         "{generated}"
     );
     assert!(
-        generated.contains("ModeledPrimaryKind::values()"),
+        generated.contains("ModeledPrimary_Kind::values()"),
         "{generated}"
     );
     assert!(

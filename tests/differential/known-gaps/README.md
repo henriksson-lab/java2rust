@@ -1,40 +1,17 @@
 # Known-gap differential fixtures
 
-Fixtures here reproduce a confirmed defect. They are **not** run by
-`tests/differential.rs` (which only reads `*.java` in the parent directory), so
-the harness stays usable as a gate while the gap is open.
+Fixtures here reproduce a confirmed defect. They are **not** run by the main
+Java-vs-Rust output comparison in `tests/differential.rs` (which only reads
+`*.java` in the parent directory), so the harness stays usable as a gate while
+the gap is open.
+
+They are still checked by
+`known_gap_fixtures_are_valid_java_and_match_expected_failure_mode`: every
+checked-in `*.java` file here must have a Java oracle and an expected current
+failure mode.
 
 Move one back up a level as part of the change that fixes it — that is the
 regression test.
-
-## Generics.java
-
-Generic values render as the empty string in string concatenation.
-
-```
-java:        5,true,false,11
-translation: ,true,false,
-```
-
-The comparisons are right, so bounds projection and dispatch work. The values
-vanish because a type-parameter-shaped operand takes the erased-display path and
-`java_erased_object_to_string` is a no-op:
-
-```rust
-pub fn java_erased_object_to_string<T: ?Sized>(_value: &T) -> String {
-    Default::default()
-}
-```
-
-It has no `Display` bound, so it cannot format anything — the 0016 no-op-facade
-class, in the support library rather than a JDK facade.
-
-Fix direction: a type parameter used in a concatenation needs a display
-capability, exactly as one that gets cloned needs `Clone`
-(`callable_type_param_needs_clone_bound`). Infer a `ToString` bound for such a
-parameter and emit `.to_string()` instead of routing it through the erased
-helper. The erased helper should stay for genuinely erased values, and should
-be made loud rather than returning `""`.
 
 ## Aliasing.java
 
@@ -50,3 +27,79 @@ translator now *reports* all four cases as `observable_alias` warnings
 (`src/aliasing.rs`), so they are no longer silent — but reporting is not repair,
 and the output still computes the wrong answer. Closing this needs a shared
 representation in `ObjectRepresentation`.
+
+## InheritanceUpcast.java
+
+Java dispatch through a supertype-typed variable keeps the subtype object and
+override. The current translation refuses this with:
+
+```
+unsupported Java class upcast: Savings to Account requires class hierarchy lowering
+```
+
+The harness also requires `unsupported_inheritance`.
+
+Move this fixture to `tests/differential/` when class hierarchy lowering can
+preserve dynamic dispatch for source classes.
+
+## NestedInheritanceUpcast.java
+
+The same source-class upcast gap also exists for nested classes. Java keeps the
+dynamic nested subtype and dispatches to `Dog.speak()` through an
+`Animal`-typed slot:
+
+```
+java: woof,woofwoof
+translation: compile_error!("unsupported Java class upcast: NestedInheritanceUpcast.Dog to NestedInheritanceUpcast.Animal requires class hierarchy lowering")
+```
+
+The harness also requires `unsupported_inheritance`.
+
+Move this fixture to `tests/differential/` with `InheritanceUpcast.java` when
+class hierarchy lowering preserves dynamic dispatch for source classes.
+
+## InnerCapture.java
+
+Java non-static inner-class construction captures the enclosing instance by
+reference. The current translation emits the captured `__outer` field and
+non-panicking `_with_outer` companions, but ordinary `new Inner()` from an outer
+instance method still has no shared outer receiver handle and panics at runtime.
+
+```
+java: 21
+translation: panic containing "unsupported Java inner-class outer capture construction"
+diagnostic: inner_class_construction_panics
+```
+
+Move this fixture to `tests/differential/` when ordinary inner construction can
+route through the shared outer handle path.
+
+## InstanceofSupertype.java
+
+Java `instanceof` is a subtype test. The current exact erased-object runtime
+test cannot answer `new B() instanceof A`, so the translation refuses this with:
+
+```
+unsupported Java instanceof check: target type A has source subtypes and requires class hierarchy lowering
+```
+
+The harness also requires
+`unsupported_instanceof_source_hierarchy_runtime_carrier`.
+
+Move this fixture to `tests/differential/` when subtype-aware runtime tests are
+implemented.
+
+## StringEqualsVsEq.java
+
+Java `String ==` is reference equality. The current translation refuses this
+case with a loud `compile_error!` and reports `java_string_identity`, because
+strings do not yet have an identity-preserving representation.
+
+```
+java:        true,false,true,true,false
+translation: compile_error!("unsupported Java String reference identity comparison requires string identity representation")
+```
+
+Move this fixture to `tests/differential/` only if Java string identity gets a
+real representation. This is the documented policy boundary from 0028, not an
+exception-lowering gap.

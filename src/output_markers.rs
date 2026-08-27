@@ -125,11 +125,6 @@ pub fn invalid_java_cast_expect() -> String {
     format!(".expect({INVALID_JAVA_CAST_MESSAGE:?})")
 }
 
-/// `panic!("invalid Java cast")`, spelled once.
-pub fn invalid_java_cast_panic() -> String {
-    format!("panic!({INVALID_JAVA_CAST_MESSAGE:?})")
-}
-
 /// The diagnostic message for an external constant with no modelled value.
 pub fn unmodelled_static_constant_message(owner: &str, field: &str) -> String {
     format!("{UNMODELLED_STATIC_CONSTANT_PREFIX}{owner}.{field}{UNMODELLED_STATIC_CONSTANT_SUFFIX}")
@@ -784,7 +779,6 @@ mod tests {
     #[test]
     fn cast_helpers_spell_the_shared_message() {
         assert_eq!(invalid_java_cast_expect(), ".expect(\"invalid Java cast\")");
-        assert_eq!(invalid_java_cast_panic(), "panic!(\"invalid Java cast\")");
     }
 
     #[test]

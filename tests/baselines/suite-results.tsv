@@ -1,21 +1,22 @@
 # target	passed	failed
 # Recorded by scripts/gate.sh --record. Diff, do not eyeball.
-batch_translation	13	0
+batch_translation	16	0
 capture_facts	5	0
 corpus_compile	1	0
 dependency_mode	49	16
 differential	1	0
 effective_facts	6	0
-external_packs	166	2
+external_packs	169	0
 fixtures	28	17
-idiom_gaps	534	179
+idiom_gaps	535	179
 idiom_sweep_script	48	0
+layering	5	0
 object_model	28	0
 output_markers	23	0
 parser_gaps	33	0
-parser_tree_sitter	46	1
+parser_tree_sitter	47	0
 resolve_calls	279	11
-semantic_facts	170	4
-slot_shape_design	534	76
-type_coercion	126	0
---lib	316	5
+semantic_facts	174	0
+slot_shape_design	525	74
+type_coercion	125	0
+--lib	332	0

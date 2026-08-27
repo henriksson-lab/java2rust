@@ -1,13 +1,39 @@
+mod common;
+
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
+use common::{
+    GeneratedCrateModule, cargo_check_generated_modules, cargo_check_generated_modules_fails_with,
+    cargo_test_generated_modules, load_java_fixtures,
+};
 use new_java2rust::diagnostics::Severity;
-use new_java2rust::fixtures::load_java_fixtures;
 use new_java2rust::translate_source;
 
 fn fixture(path: &str) -> String {
     fs::read_to_string(Path::new("examples/java").join(path)).unwrap()
+}
+
+fn cargo_check_translation(crate_name: &str, rust: &str) {
+    cargo_check_generated_modules(
+        crate_name,
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: rust.to_string(),
+            tests: "",
+        }],
+    );
+}
+
+fn cargo_test_translation(crate_name: &str, rust: String, tests: &'static str) {
+    cargo_test_generated_modules(
+        crate_name,
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust,
+            tests,
+        }],
+    );
 }
 
 #[test]
@@ -30,7 +56,9 @@ fn translates_static_import_and_qualified_static_utility_owner() {
         translation.diagnostics
     );
     assert!(
-        translation.rust.contains("StaticUtility::read_value(path)"),
+        translation.rust.contains(
+            "unimplemented!(\"unresolved Java static call StaticUtility.read_value is not modelled\")"
+        ),
         "{}",
         translation.rust
     );
@@ -48,6 +76,7 @@ fn translates_static_import_and_qualified_static_utility_owner() {
     );
     assert!(!translation.rust.contains("return read_value(path)"));
     assert!(!translation.rust.contains("external.lib"));
+    cargo_check_translation("static_import_utility_owner", &translation.rust);
 }
 
 #[test]
@@ -62,6 +91,36 @@ fn null_overload_ambiguity_emits_loud_compile_error() {
         translation.rust
     );
     assert!(!translation.rust.contains("return pick(None);"));
+    cargo_check_generated_modules_fails_with(
+        "null_overload_ambiguity",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "ambiguous overload of pick for null argument",
+    );
+}
+
+#[test]
+fn local_class_capture_lowers_captured_parameters_and_locals() {
+    let translation = translate_source(&fixture("04-objects/LocalClassCapture.java"));
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(translation.rust.contains("pub struct Adder"));
+    assert!(translation.rust.contains("base: i32"));
+    assert!(translation.rust.contains("offset: i32"));
+    assert!(
+        translation
+            .rust
+            .contains("return Adder::new(base, offset).apply(value);"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_translation("local_class_capture", &translation.rust);
 }
 
 #[test]
@@ -75,7 +134,7 @@ fn translates_imported_static_utility_owner_without_module_receiver() {
     assert!(
         translation
             .rust
-            .contains("ExternalLibExternalUtility::read_value(path)"),
+            .contains("unimplemented!(\"unresolved Java static call ExternalLibExternalUtility.read_value is not modelled\")"),
         "{}",
         translation.rust
     );
@@ -97,29 +156,7 @@ fn translates_imported_static_utility_owner_without_module_receiver() {
         translation.rust
     );
     assert!(!translation.rust.contains("external_utility::read_value"));
-    let rust_path = std::env::temp_dir().join("new_java2rust_imported_static_utility_owner.rs");
-    let metadata_path =
-        std::env::temp_dir().join("new_java2rust_imported_static_utility_owner.rmeta");
-    fs::write(&rust_path, &translation.rust).unwrap();
-    let output = Command::new("rustc")
-        .arg("--edition")
-        .arg("2021")
-        .arg("--crate-type")
-        .arg("lib")
-        .arg("--crate-name")
-        .arg("imported_static_utility_owner")
-        .arg("--emit=metadata")
-        .arg("-o")
-        .arg(&metadata_path)
-        .arg(&rust_path)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "imported static utility owner generated Rust did not compile\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    cargo_check_translation("imported_static_utility_owner", &translation.rust);
 }
 
 #[test]
@@ -131,20 +168,19 @@ fn static_owner_shadowing_uses_source_owner_before_jdk_facade() {
         translation.diagnostics
     );
     assert!(
-        translation
+        translation.rust.contains(
+            "return StaticOwnerShadowing_Objects::equals(left.as_str(), right.as_str());"
+        ) && translation
             .rust
-            .contains("return StaticOwnerShadowingObjects::equals(&left, &right);")
+            .contains("return StaticOwnerShadowing_Collections::empty_list();")
             && translation
                 .rust
-                .contains("return StaticOwnerShadowingCollections::empty_list();")
-            && translation
-                .rust
-                .contains("return StaticOwnerShadowingInteger::max(left, right);"),
+                .contains("return StaticOwnerShadowing_Integer::max(left, right);"),
         "{}",
         translation.rust
     );
-    let test_source = format!(
-        "{}\n{}",
+    cargo_test_translation(
+        "static_owner_shadowing",
         translation.rust,
         r#"
 #[cfg(test)]
@@ -159,30 +195,7 @@ mod generated_tests {
         assert_eq!(subject.max(9, 4), 5);
     }
 }
-"#
-    );
-    let rust_path = std::env::temp_dir().join("new_java2rust_static_owner_shadowing_test.rs");
-    let bin_path = std::env::temp_dir().join("new_java2rust_static_owner_shadowing_test");
-    fs::write(&rust_path, test_source).unwrap();
-    let output = Command::new("rustc")
-        .arg("--test")
-        .arg(&rust_path)
-        .arg("-o")
-        .arg(&bin_path)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "static owner shadowing test did not compile\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let output = Command::new(&bin_path).output().unwrap();
-    assert!(
-        output.status.success(),
-        "static owner shadowing behavior test failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+"#,
     );
 }
 
@@ -217,6 +230,7 @@ class JsonFormatUse {
         "{}",
         translation.rust
     );
+    cargo_check_translation("imported_static_known_return", &translation.rust);
 }
 
 #[test]
@@ -245,6 +259,14 @@ class UtilsNonNullUse {
         "{}",
         translation.rust
     );
+    assert!(
+        translation
+            .rust
+            .contains("unimplemented!(\"unresolved Java static call OrgBroadinstituteHellbenderUtilsUtils.non_null is not modelled\")"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_translation("imported_static_non_null", &translation.rust);
 }
 
 #[test]
@@ -275,29 +297,7 @@ fn translates_external_string_constant_argument_without_downcast() {
         translation.rust
     );
     assert!(!translation.rust.contains("downcast::<String>()"));
-    let rust_path = std::env::temp_dir().join("new_java2rust_external_string_constant_argument.rs");
-    let metadata_path =
-        std::env::temp_dir().join("new_java2rust_external_string_constant_argument.rmeta");
-    fs::write(&rust_path, &translation.rust).unwrap();
-    let output = Command::new("rustc")
-        .arg("--edition")
-        .arg("2021")
-        .arg("--crate-type")
-        .arg("lib")
-        .arg("--crate-name")
-        .arg("external_string_constant_argument")
-        .arg("--emit=metadata")
-        .arg("-o")
-        .arg(&metadata_path)
-        .arg(&rust_path)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "external string constant argument generated Rust did not compile\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    cargo_check_translation("external_string_constant_argument", &translation.rust);
 }
 
 #[test]
@@ -319,8 +319,8 @@ fn enum_constants_with_fields_compile_with_single_payload_accessor() {
         "{}",
         translation.rust
     );
-    let test_source = format!(
-        "{}\n{}",
+    cargo_test_translation(
+        "enum_constants_with_fields",
         translation.rust,
         r#"
 #[cfg(test)]
@@ -330,34 +330,11 @@ mod generated_tests {
     #[test]
     fn enum_payload_ids_match_constructor_args() {
         let fixture = EnumConstantsWithFields {};
-        assert_eq!(fixture.id(Mode::FAST), 1);
-        assert_eq!(fixture.id(Mode::SLOW), 2);
+        assert_eq!(fixture.id(EnumConstantsWithFields_Mode::FAST).unwrap(), 1);
+        assert_eq!(fixture.id(EnumConstantsWithFields_Mode::SLOW).unwrap(), 2);
     }
 }
-"#
-    );
-    let rust_path = std::env::temp_dir().join("new_java2rust_enum_constants_with_fields_test.rs");
-    let bin_path = std::env::temp_dir().join("new_java2rust_enum_constants_with_fields_test");
-    fs::write(&rust_path, test_source).unwrap();
-    let output = Command::new("rustc")
-        .arg("--test")
-        .arg(&rust_path)
-        .arg("-o")
-        .arg(&bin_path)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "enum constants with fields test did not compile\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let output = Command::new(&bin_path).output().unwrap();
-    assert!(
-        output.status.success(),
-        "enum constants with fields behavior test failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+"#,
     );
 }
 
@@ -372,7 +349,7 @@ fn translates_stream_non_null_filter_method_reference() {
     assert!(
         translation
             .rust
-            .contains("values.iter().collect::<Vec<_>>()"),
+            .contains("values.iter().cloned().collect::<Vec<_>>()"),
         "{}",
         translation.rust
     );
@@ -382,6 +359,7 @@ fn translates_stream_non_null_filter_method_reference() {
             .rust
             .contains("unsupported Java expression: method reference")
     );
+    cargo_check_translation("stream_non_null_filter_method_reference", &translation.rust);
 }
 
 #[test]
@@ -395,7 +373,7 @@ fn translates_stream_nullable_map_then_non_null_filter() {
     assert!(
         translation
             .rust
-            .contains(".map(|value: &String| { if value.is_empty() { None } else { Some(value.to_lowercase()) } }).filter_map(|item| item).collect::<Vec<_>>()"),
+            .contains(".map(|value| { if value.is_empty() { None } else { Some(value.to_lowercase()) } }).filter_map(|item| item).collect::<Vec<_>>()"),
         "{}",
         translation.rust
     );
@@ -404,6 +382,10 @@ fn translates_stream_nullable_map_then_non_null_filter() {
         !translation
             .rust
             .contains("unsupported Java expression: lambda")
+    );
+    cargo_check_translation(
+        "stream_nullable_map_then_non_null_filter",
+        &translation.rust,
     );
 }
 
@@ -417,7 +399,7 @@ fn translates_stream_flat_map_block_pipeline() {
     );
     assert!(
         translation.rust.contains(
-            "groups.iter().flat_map(|group| { let names = group.names(); names.into_iter().filter(move |name| !name.is_empty()).map(|name: &String| name.trim()) }).collect::<Vec<_>>().into_iter().map(|v| v.to_string()).collect::<Vec<_>>()"
+            "groups.iter().flat_map(|group| { let names = group.names(); names.unwrap().into_iter().filter(move |name| !name.is_empty()).map(|name| name.trim().to_string()) }).collect::<Vec<_>>()"
         ),
         "{}",
         translation.rust
@@ -427,6 +409,114 @@ fn translates_stream_flat_map_block_pipeline() {
             .rust
             .contains("unsupported Java expression: lambda")
     );
+    cargo_check_translation("stream_flat_map_block_pipeline", &translation.rust);
+}
+
+#[test]
+fn try_catch_finally_catch_return_generated_rust_compiles() {
+    let translation = translate_source(&fixture("06-stdlib/TryCatchFinally.java"));
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("return Ok(Some(\"error\".to_string()));")
+            && translation
+                .rust
+                .contains("println!(\"{}\", \"done\".to_string());")
+            && !translation
+                .rust
+                .contains("return Some(\"error\".to_string());")
+            && !translation
+                .rust
+                .contains("unsupported Java statement: try/catch/finally"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_translation("try_catch_finally", &translation.rust);
+}
+
+#[test]
+fn try_with_resources_nullable_read_and_closeable_cleanup_compiles() {
+    let translation = translate_source(&fixture("06-stdlib/TryWithResources.java"));
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation.rust.contains("reader.read_line()?.unwrap()")
+            && !translation.rust.contains("reader.read_line()?.unwrap()?")
+            && translation.rust.contains("audit.close()?;")
+            && translation.rust.contains("impl Closeable")
+            && translation
+                .rust
+                .contains("pub fn close(&self) -> Result<(), JavaException>"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_translation("try_with_resources", &translation.rust);
+}
+
+#[test]
+fn try_with_resources_finally_order_fixture_lowers_without_placeholder() {
+    let translation = translate_source(include_str!("differential/TryWithResourcesFinally.java"));
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("unsupported Java statement: try/catch/finally"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("__java_twr_result")
+            && translation.rust.contains("resource.close")
+            && translation
+                .rust
+                .contains("__set_static_out(format!(\"{}f\""),
+        "{}",
+        translation.rust
+    );
+    cargo_check_translation("try_with_resources_finally_order", &translation.rust);
+}
+
+#[test]
+fn try_with_resources_catch_finally_order_fixture_lowers_without_placeholder() {
+    let translation = translate_source(include_str!(
+        "differential/TryWithResourcesCatchFinally.java"
+    ));
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("unsupported Java statement: try/catch/finally"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("__java_twr_result")
+            && translation.rust.contains("__java_try_result")
+            && translation.rust.contains("resource.close")
+            && translation.rust.contains("RuntimeException")
+            && translation
+                .rust
+                .contains("__set_static_out(format!(\"{}f\""),
+        "{}",
+        translation.rust
+    );
+    cargo_check_translation("try_with_resources_catch_finally_order", &translation.rust);
 }
 
 #[test]
@@ -443,6 +533,7 @@ fn translates_nullable_clear_assignment_as_option_take() {
         translation.rust
     );
     assert!(!translation.rust.contains("self.cached = None;"));
+    cargo_check_translation("nullable_clear_assignment", &translation.rust);
 }
 
 #[test]
@@ -468,6 +559,7 @@ fn translates_simple_class_shape() {
             .rust
             .contains("format!(\"{}:{}\", self.name, (self.count).to_string())")
     );
+    cargo_check_translation("simple_class_shape", &translation.rust);
 }
 
 #[test]
@@ -529,20 +621,34 @@ abstract class BraceStringConcat {
         "{}",
         translation.rust
     );
+    cargo_check_translation("multiline_string_concat_braces", &translation.rust);
 }
 
 #[test]
 fn translates_expression_precedence_shape() {
     let translation = translate_source(&fixture("01-expressions/ExpressionPrecedence.java"));
     assert!(!translation.diagnostics.has_errors());
-    assert!(translation.rust.contains("let x: i32 = a + b * c;"));
-    assert!(translation.rust.contains("let y: i32 = (a + b) * c;"));
-    assert!(translation.rust.contains("let z: i32 = x << 1;"));
     assert!(
         translation
             .rust
-            .contains("return if z > y { z - y } else { y - z };")
+            .contains("let x: i32 = (a).wrapping_add((b).wrapping_mul(c));")
     );
+    assert!(
+        translation
+            .rust
+            .contains("let y: i32 = ((a).wrapping_add(b)).wrapping_mul(c);")
+    );
+    assert!(
+        translation
+            .rust
+            .contains("let z: i32 = (x).wrapping_shl((1) as u32);")
+    );
+    assert!(
+        translation
+            .rust
+            .contains("return if z > y { (z).wrapping_sub(y) } else { (y).wrapping_sub(z) };")
+    );
+    cargo_check_translation("expression_precedence_shape", &translation.rust);
 }
 
 #[test]
@@ -562,8 +668,9 @@ fn translates_methods_with_overload_suffixes() {
     assert!(
         translation
             .rust
-            .contains("pub fn format_string(&self, value: String) -> String")
+            .contains("pub fn format_string(&self, value: &str) -> String")
     );
+    cargo_check_translation("methods_with_overload_suffixes", &translation.rust);
 }
 
 #[test]
@@ -594,34 +701,39 @@ class Child extends Base {
         translation.rust
     );
     assert!(
-        translation.rust.contains("pub fn f(&self, a: i32) -> i32"),
+        translation
+            .rust
+            .contains("pub fn f_int(&self, a: i32) -> i32"),
         "{}",
         translation.rust
     );
     assert!(
-        translation.rust.contains("return a * 10;"),
+        translation.rust.contains("return (a).wrapping_mul(10);"),
         "{}",
         translation.rust
     );
     assert!(
         translation
             .rust
-            .contains("pub fn f_int_int(&self, a: i32, b: i32) -> i32"),
-        "{}",
-        translation.rust
-    );
-    assert!(
-        translation.rust.contains("return (a + b) + 100;"),
+            .contains("pub fn f(&self, a: i32, b: i32) -> i32"),
         "{}",
         translation.rust
     );
     assert!(
         translation
             .rust
-            .contains("self.f(2) + self.f_int_int(2, 3)"),
+            .contains("return ((a).wrapping_add(b)).wrapping_add(100);"),
         "{}",
         translation.rust
     );
+    assert!(
+        translation
+            .rust
+            .contains("return (self.f_int(2)).wrapping_add(self.f(2, 3));"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_translation("inherited_overload_child_override", &translation.rust);
 }
 
 #[test]
@@ -657,6 +769,7 @@ fn translates_constructor_delegation_to_resolved_constructor_calls() {
             .rust
             .contains("return format!(\"{}:{}\", self.label, (self.count).to_string());")
     );
+    cargo_check_translation("constructor_delegation_resolved_calls", &translation.rust);
 }
 
 #[test]
@@ -672,13 +785,13 @@ fn translates_switch_fallthrough_without_compile_error() {
             .rust
             .contains("unsupported Java statement: switch")
     );
-    assert!(translation.rust.contains("'java_switch: loop"));
     assert!(
         translation
             .rust
-            .contains("let mut __java_switch_matched = false;")
+            .contains("value = match grade { \"A\" => (value).wrapping_add(4), \"B\" | \"C\" => (value).wrapping_add(2), _ => (value).wrapping_sub(1) };")
     );
-    assert!(translation.rust.contains("break 'java_switch;"));
+    assert!(!translation.rust.contains("'java_switch: loop"));
+    cargo_check_translation("switch_fallthrough_shape", &translation.rust);
 }
 
 #[test]
@@ -701,9 +814,10 @@ fn translates_throw_only_method_to_result() {
             .contains("pub fn require_positive(&self, value: i32) -> Result<i32, JavaException>")
     );
     assert!(translation.rust.contains(
-        "return Err(JavaException::new(\"IllegalArgumentException\", \"negative\".to_string()));"
+        "return Err(JavaException::new(\"IllegalArgumentException\", \"negative\".to_string().to_string()));"
     ));
     assert!(translation.rust.contains("return Ok(value);"));
+    cargo_check_translation("throw_only_result_shape", &translation.rust);
 }
 
 #[test]
@@ -714,8 +828,8 @@ fn throw_only_generated_rust_preserves_behavior() {
         "{:?}",
         translation.diagnostics
     );
-    let test_source = format!(
-        "{}\n{}",
+    cargo_test_translation(
+        "throw_only",
         translation.rust,
         r#"
 #[cfg(test)]
@@ -731,30 +845,7 @@ mod generated_tests {
         assert_eq!(err.message, "negative");
     }
 }
-"#
-    );
-    let rust_path = std::env::temp_dir().join("new_java2rust_throw_only_test.rs");
-    let bin_path = std::env::temp_dir().join("new_java2rust_throw_only_test");
-    fs::write(&rust_path, test_source).unwrap();
-    let output = Command::new("rustc")
-        .arg("--test")
-        .arg(&rust_path)
-        .arg("-o")
-        .arg(&bin_path)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "throw-only test did not compile\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let output = Command::new(&bin_path).output().unwrap();
-    assert!(
-        output.status.success(),
-        "throw-only behavior test failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+"#,
     );
 }
 
@@ -771,13 +862,14 @@ fn translates_simple_stream_sum_to_iterator_chain() {
     assert!(
         translation
             .rust
-            .contains("pub fn positive_sum(&self, values: &[i32]) -> i32")
+            .contains("pub fn positive_sum(&self, values: &[i32]) -> Result<i32, JavaException>")
     );
     assert!(
         translation
             .rust
             .contains("values.iter().filter(|v| **v > 0).map(|v| *v).sum::<i32>()")
     );
+    cargo_check_translation("simple_stream_sum_to_iterator_chain", &translation.rust);
 }
 
 #[test]
@@ -803,6 +895,7 @@ fn translates_map_get_null_ternary_with_borrowed_optional_carrier() {
         "{}",
         translation.rust
     );
+    cargo_check_translation("map_get_null_ternary_borrowed_optional", &translation.rust);
 }
 
 #[test]
@@ -829,12 +922,14 @@ class MapPutPreviousValue {
             .rust
             .contains("let old: Option<String> = values.insert(key, value);")
             && translation.rust.contains("if old.is_none()")
-            && translation.rust.contains("else { old }")
+            && translation.rust.contains("else { old.unwrap() }")
+            && translation.rust.contains("return Ok(Some(")
             && !translation.rust.contains("Some(values.insert")
             && !translation.rust.contains("Some(Some("),
         "{}",
         translation.rust
     );
+    cargo_check_translation("map_put_previous_optional", &translation.rust);
 }
 
 #[test]
@@ -845,8 +940,8 @@ fn simple_stream_sum_generated_rust_preserves_behavior() {
         "{:?}",
         translation.diagnostics
     );
-    let test_source = format!(
-        "{}\n{}",
+    cargo_test_translation(
+        "streams_use",
         translation.rust,
         r#"
 #[cfg(test)]
@@ -856,33 +951,10 @@ mod generated_tests {
     #[test]
     fn stream_sum_filters_positive_values() {
         let streams = StreamsUse {};
-        assert_eq!(streams.positive_sum(&vec![-2, 0, 3, 4]), 7);
+        assert_eq!(streams.positive_sum(&vec![-2, 0, 3, 4]).unwrap(), 7);
     }
 }
-"#
-    );
-    let rust_path = std::env::temp_dir().join("new_java2rust_streams_use_test.rs");
-    let bin_path = std::env::temp_dir().join("new_java2rust_streams_use_test");
-    fs::write(&rust_path, test_source).unwrap();
-    let output = Command::new("rustc")
-        .arg("--test")
-        .arg(&rust_path)
-        .arg("-o")
-        .arg(&bin_path)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "streams test did not compile\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let output = Command::new(&bin_path).output().unwrap();
-    assert!(
-        output.status.success(),
-        "streams behavior test failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+"#,
     );
 }
 
@@ -901,8 +973,8 @@ fn stream_capture_generated_rust_preserves_behavior() {
         "{}",
         translation.rust
     );
-    let test_source = format!(
-        "{}\n{}",
+    cargo_test_translation(
+        "stream_captures_local",
         translation.rust,
         r#"
 #[cfg(test)]
@@ -912,33 +984,10 @@ mod generated_tests {
     #[test]
     fn stream_sum_uses_captured_base() {
         let streams = StreamCapturesLocal {};
-        assert_eq!(streams.add_base(&vec![1, 2, 3], 10), 36);
+        assert_eq!(streams.add_base(&vec![1, 2, 3], 10).unwrap(), 36);
     }
 }
-"#
-    );
-    let rust_path = std::env::temp_dir().join("new_java2rust_stream_captures_local_test.rs");
-    let bin_path = std::env::temp_dir().join("new_java2rust_stream_captures_local_test");
-    fs::write(&rust_path, test_source).unwrap();
-    let output = Command::new("rustc")
-        .arg("--test")
-        .arg(&rust_path)
-        .arg("-o")
-        .arg(&bin_path)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "stream capture test did not compile\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let output = Command::new(&bin_path).output().unwrap();
-    assert!(
-        output.status.success(),
-        "stream capture behavior test failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+"#,
     );
 }
 
@@ -957,8 +1006,8 @@ fn stream_flat_map_lambda_generated_rust_preserves_behavior() {
         "{}",
         translation.rust
     );
-    let test_source = format!(
-        "{}\n{}",
+    cargo_test_translation(
+        "stream_flat_map_lambda",
         translation.rust,
         r#"
 #[cfg(test)]
@@ -973,35 +1022,12 @@ mod generated_tests {
             vec!["c".to_string()],
         ];
         assert_eq!(
-            streams.flatten(groups),
+            streams.flatten(groups).unwrap(),
             vec!["a".to_string(), "b".to_string(), "c".to_string()]
         );
     }
 }
-"#
-    );
-    let rust_path = std::env::temp_dir().join("new_java2rust_stream_flat_map_lambda_test.rs");
-    let bin_path = std::env::temp_dir().join("new_java2rust_stream_flat_map_lambda_test");
-    fs::write(&rust_path, test_source).unwrap();
-    let output = Command::new("rustc")
-        .arg("--test")
-        .arg(&rust_path)
-        .arg("-o")
-        .arg(&bin_path)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "stream flatMap lambda test did not compile\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let output = Command::new(&bin_path).output().unwrap();
-    assert!(
-        output.status.success(),
-        "stream flatMap lambda behavior test failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+"#,
     );
 }
 
@@ -1015,14 +1041,14 @@ fn stream_block_lambda_generated_rust_preserves_behavior() {
     );
     assert!(
         translation.rust.contains(
-            "values.iter().map(|value| { let trimmed = value.trim(); trimmed.to_lowercase() }).collect::<Vec<_>>()"
+            "values.iter().map(|value| { let trimmed = value.trim().to_string(); trimmed.to_lowercase() }).collect::<Vec<_>>()"
         ) && !translation.rust.contains("unsupported Java expression: lambda")
             && !translation.rust.contains(".cloned().collect::<Vec<_>>()"),
         "{}",
         translation.rust
     );
-    let test_source = format!(
-        "{}\n{}",
+    cargo_test_translation(
+        "stream_block_lambda",
         translation.rust,
         r#"
 #[cfg(test)]
@@ -1033,35 +1059,12 @@ mod generated_tests {
     fn stream_block_lambda_normalizes_values() {
         let streams = StreamBlockLambda {};
         assert_eq!(
-            streams.normalize(vec![" A ".to_string(), "Bc".to_string()]),
+            streams.normalize(vec![" A ".to_string(), "Bc".to_string()]).unwrap(),
             vec!["a".to_string(), "bc".to_string()]
         );
     }
 }
-"#
-    );
-    let rust_path = std::env::temp_dir().join("new_java2rust_stream_block_lambda_test.rs");
-    let bin_path = std::env::temp_dir().join("new_java2rust_stream_block_lambda_test");
-    fs::write(&rust_path, test_source).unwrap();
-    let output = Command::new("rustc")
-        .arg("--test")
-        .arg(&rust_path)
-        .arg("-o")
-        .arg(&bin_path)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "stream block lambda test did not compile\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let output = Command::new(&bin_path).output().unwrap();
-    assert!(
-        output.status.success(),
-        "stream block lambda behavior test failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+"#,
     );
 }
 
@@ -1080,8 +1083,8 @@ fn stream_flat_map_projection_generated_rust_preserves_behavior() {
         "{}",
         translation.rust
     );
-    let test_source = format!(
-        "{}\n{}",
+    cargo_test_translation(
+        "stream_flat_map_projection",
         translation.rust,
         r#"
 #[cfg(test)]
@@ -1096,35 +1099,12 @@ mod generated_tests {
             NameGroup::new(vec!["c".to_string()]),
         ];
         assert_eq!(
-            streams.flatten(&groups),
+            streams.flatten(&groups).unwrap(),
             vec!["a".to_string(), "b".to_string(), "c".to_string()]
         );
     }
 }
-"#
-    );
-    let rust_path = std::env::temp_dir().join("new_java2rust_stream_flat_map_projection_test.rs");
-    let bin_path = std::env::temp_dir().join("new_java2rust_stream_flat_map_projection_test");
-    fs::write(&rust_path, test_source).unwrap();
-    let output = Command::new("rustc")
-        .arg("--test")
-        .arg(&rust_path)
-        .arg("-o")
-        .arg(&bin_path)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "stream flatMap projection test did not compile\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let output = Command::new(&bin_path).output().unwrap();
-    assert!(
-        output.status.success(),
-        "stream flatMap projection behavior test failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+"#,
     );
 }
 
@@ -1136,14 +1116,16 @@ fn translates_stream_collect_to_list_to_iterator_chain() {
         "{:?}",
         translation.diagnostics
     );
-    assert!(
-        translation
-            .rust
-            .contains("pub fn clean(&self, values: Vec<String>) -> Vec<String>")
-    );
     assert!(translation.rust.contains(
-        "values.iter().filter(|v| !v.is_empty()).map(|v: &String| v.trim()).collect::<Vec<_>>().into_iter().map(|v| v.to_string()).collect::<Vec<_>>()"
+        "pub fn clean(&self, values: Vec<String>) -> Result<Vec<String>, JavaException>"
     ));
+    assert!(translation.rust.contains(
+        "values.iter().filter(|v| !v.is_empty()).map(|v| v.trim().to_string()).collect::<Vec<_>>()"
+    ));
+    cargo_check_translation(
+        "stream_collect_to_list_to_iterator_chain",
+        &translation.rust,
+    );
 }
 
 #[test]
@@ -1154,8 +1136,8 @@ fn stream_collect_generated_rust_preserves_behavior() {
         "{:?}",
         translation.diagnostics
     );
-    let test_source = format!(
-        "{}\n{}",
+    cargo_test_translation(
+        "streams_collect",
         translation.rust,
         r#"
 #[cfg(test)]
@@ -1166,33 +1148,13 @@ mod generated_tests {
     fn stream_collect_filters_and_trims() {
         let streams = StreamsCollect {};
         let values = vec![" one ".to_string(), "".to_string(), "two".to_string()];
-        assert_eq!(streams.clean(values), vec!["one".to_string(), "two".to_string()]);
+        assert_eq!(
+            streams.clean(values).unwrap(),
+            vec!["one".to_string(), "two".to_string()]
+        );
     }
 }
-"#
-    );
-    let rust_path = std::env::temp_dir().join("new_java2rust_streams_collect_test.rs");
-    let bin_path = std::env::temp_dir().join("new_java2rust_streams_collect_test");
-    fs::write(&rust_path, test_source).unwrap();
-    let output = Command::new("rustc")
-        .arg("--test")
-        .arg(&rust_path)
-        .arg("-o")
-        .arg(&bin_path)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "streams collect test did not compile\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let output = Command::new(&bin_path).output().unwrap();
-    assert!(
-        output.status.success(),
-        "streams collect behavior test failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+"#,
     );
 }
 
@@ -1207,18 +1169,18 @@ fn stream_static_method_references_use_call_target_plan() {
     assert!(
         translation
             .rust
-            .contains("value.as_str().parse::<i32>().unwrap()")
+            .contains("value.as_str().parse::<i32>().map_err")
             && translation
                 .rust
-                .contains("value.as_str().parse::<f64>().unwrap()")
+                .contains("value.as_str().parse::<f64>().map_err")
             && !translation.rust.contains("Integer::parse_int")
             && !translation.rust.contains("Double::parse_double")
             && !translation.rust.contains("*value.as_str().parse"),
         "{}",
         translation.rust
     );
-    let test_source = format!(
-        "{}\n{}",
+    cargo_test_translation(
+        "stream_static_method_refs",
         translation.rust,
         r#"
 #[cfg(test)]
@@ -1229,39 +1191,20 @@ mod generated_tests {
     fn stream_static_method_references_parse_values() {
         let streams = StreamStaticMethodReferences {};
         assert_eq!(
-            streams.parse_ints(vec!["1".to_string(), "2".to_string(), "3".to_string()]),
+            streams
+                .parse_ints(vec!["1".to_string(), "2".to_string(), "3".to_string()])
+                .unwrap(),
             vec![1, 2, 3]
         );
         assert_eq!(
-            streams.parse_doubles(vec!["1.5".to_string(), "2.25".to_string()]),
+            streams
+                .parse_doubles(vec!["1.5".to_string(), "2.25".to_string()])
+                .unwrap(),
             vec![1.5, 2.25]
         );
     }
 }
-"#
-    );
-    let rust_path = std::env::temp_dir().join("new_java2rust_stream_static_method_refs_test.rs");
-    let bin_path = std::env::temp_dir().join("new_java2rust_stream_static_method_refs_test");
-    fs::write(&rust_path, test_source).unwrap();
-    let output = Command::new("rustc")
-        .arg("--test")
-        .arg(&rust_path)
-        .arg("-o")
-        .arg(&bin_path)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "stream static method refs test did not compile\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let output = Command::new(&bin_path).output().unwrap();
-    assert!(
-        output.status.success(),
-        "stream static method refs behavior test failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+"#,
     );
 }
 
@@ -1278,19 +1221,21 @@ fn stream_string_method_references_use_call_target_plan() {
             .rust
             .contains("values.iter().map(|value| value.len() as i32).collect::<Vec<_>>()")
             && translation.rust.contains(
-                "values.iter().map(|value| value.trim()).collect::<Vec<_>>().into_iter().map(|v| v.to_string()).collect::<Vec<_>>()"
+                "values.iter().map(|value| value.trim().to_string()).collect::<Vec<_>>()"
             )
             && translation
                 .rust
                 .contains("values.iter().any(|value| value.is_empty())")
             && !translation.rust.contains("String::length")
             && !translation.rust.contains("String::trim")
-            && !translation.rust.contains(".into_iter().cloned().collect::<Vec<_>>()"),
+            && !translation
+                .rust
+                .contains(".into_iter().cloned().collect::<Vec<_>>()"),
         "{}",
         translation.rust
     );
-    let test_source = format!(
-        "{}\n{}",
+    cargo_test_translation(
+        "stream_string_method_refs",
         translation.rust,
         r#"
 #[cfg(test)]
@@ -1301,38 +1246,15 @@ mod generated_tests {
     fn stream_string_method_references_apply_native_string_calls() {
         let streams = StreamStringMethodReferences {};
         let values = vec![" a ".to_string(), "".to_string(), "bc".to_string()];
-        assert_eq!(streams.lengths(values.clone()), vec![3, 0, 2]);
+        assert_eq!(streams.lengths(values.clone()).unwrap(), vec![3, 0, 2]);
         assert_eq!(
-            streams.trimmed(values.clone()),
+            streams.trimmed(values.clone()).unwrap(),
             vec!["a".to_string(), "".to_string(), "bc".to_string()]
         );
-        assert!(streams.any_empty(&values));
+        assert!(streams.any_empty(&values).unwrap());
     }
 }
-"#
-    );
-    let rust_path = std::env::temp_dir().join("new_java2rust_stream_string_method_refs_test.rs");
-    let bin_path = std::env::temp_dir().join("new_java2rust_stream_string_method_refs_test");
-    fs::write(&rust_path, test_source).unwrap();
-    let output = Command::new("rustc")
-        .arg("--test")
-        .arg(&rust_path)
-        .arg("-o")
-        .arg(&bin_path)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "stream string method refs test did not compile\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let output = Command::new(&bin_path).output().unwrap();
-    assert!(
-        output.status.success(),
-        "stream string method refs behavior test failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+"#,
     );
 }
 
@@ -1344,11 +1266,9 @@ fn translates_stream_find_first_and_any_match_through_slot_coercion() {
         "{:?}",
         translation.diagnostics
     );
-    assert!(
-        translation
-            .rust
-            .contains("pub fn first_long(&self, values: &[String]) -> Option<String>")
-    );
+    assert!(translation.rust.contains(
+        "pub fn first_long(&self, values: &[String]) -> Result<Option<String>, JavaException>"
+    ));
     assert!(
         translation
             .rust
@@ -1359,6 +1279,7 @@ fn translates_stream_find_first_and_any_match_through_slot_coercion() {
             .rust
             .contains("values.iter().any(|v| v.is_empty())")
     );
+    cargo_check_translation("stream_find_first_and_any_match", &translation.rust);
 }
 
 #[test]
@@ -1369,8 +1290,8 @@ fn stream_find_match_generated_rust_preserves_behavior() {
         "{:?}",
         translation.diagnostics
     );
-    let test_source = format!(
-        "{}\n{}",
+    cargo_test_translation(
+        "streams_find_match",
         translation.rust,
         r#"
 #[cfg(test)]
@@ -1381,34 +1302,11 @@ mod generated_tests {
     fn stream_find_first_and_any_match() {
         let streams = StreamsFindMatch {};
         let values = vec!["one".to_string(), "three".to_string(), "".to_string()];
-        assert_eq!(streams.first_long(&values), Some("three".to_string()));
-        assert!(streams.has_empty(&values));
+        assert_eq!(streams.first_long(&values).unwrap(), Some("three".to_string()));
+        assert!(streams.has_empty(&values).unwrap());
     }
 }
-"#
-    );
-    let rust_path = std::env::temp_dir().join("new_java2rust_streams_find_match_test.rs");
-    let bin_path = std::env::temp_dir().join("new_java2rust_streams_find_match_test");
-    fs::write(&rust_path, test_source).unwrap();
-    let output = Command::new("rustc")
-        .arg("--test")
-        .arg(&rust_path)
-        .arg("-o")
-        .arg(&bin_path)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "streams find/match test did not compile\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let output = Command::new(&bin_path).output().unwrap();
-    assert!(
-        output.status.success(),
-        "streams find/match behavior test failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+"#,
     );
 }
 
@@ -1420,8 +1318,8 @@ fn switch_fallthrough_generated_rust_preserves_behavior() {
         "{:?}",
         translation.diagnostics
     );
-    let test_source = format!(
-        "{}\n{}",
+    cargo_test_translation(
+        "switch_fallthrough",
         translation.rust,
         r#"
 #[cfg(test)]
@@ -1431,36 +1329,13 @@ mod generated_tests {
     #[test]
     fn switch_scores_match_java_fallthrough() {
         let scorer = SwitchFallthrough {};
-        assert_eq!(scorer.score("A".to_string()), 4);
-        assert_eq!(scorer.score("B".to_string()), 2);
-        assert_eq!(scorer.score("C".to_string()), 2);
-        assert_eq!(scorer.score("D".to_string()), -1);
+        assert_eq!(scorer.score("A"), 4);
+        assert_eq!(scorer.score("B"), 2);
+        assert_eq!(scorer.score("C"), 2);
+        assert_eq!(scorer.score("D"), -1);
     }
 }
-"#
-    );
-    let rust_path = std::env::temp_dir().join("new_java2rust_switch_fallthrough_test.rs");
-    let bin_path = std::env::temp_dir().join("new_java2rust_switch_fallthrough_test");
-    fs::write(&rust_path, test_source).unwrap();
-    let output = Command::new("rustc")
-        .arg("--test")
-        .arg(&rust_path)
-        .arg("-o")
-        .arg(&bin_path)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "switch test did not compile\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let output = Command::new(&bin_path).output().unwrap();
-    assert!(
-        output.status.success(),
-        "switch behavior test failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+"#,
     );
 }
 
@@ -1485,15 +1360,12 @@ fn translates_same_arity_overload_call_sites() {
     assert!(
         translation
             .rust
-            .contains("pub fn choose_string(&self, value: String) -> String")
+            .contains("pub fn choose_string(&self, value: &str) -> String")
     );
     assert!(translation.rust.contains("self.choose_int(1)"));
     assert!(translation.rust.contains("self.choose_long(1i64)"));
-    assert!(
-        translation
-            .rust
-            .contains("self.choose_string(\"one\".to_string())")
-    );
+    assert!(translation.rust.contains("self.choose_string(\"one\")"));
+    cargo_check_translation("same_arity_overload_call_sites", &translation.rust);
 }
 
 #[test]
@@ -1504,13 +1376,12 @@ fn nested_static_builder_call_uses_resolved_type_owner() {
         "{:?}",
         translation.diagnostics
     );
-    assert!(
-        translation.rust.contains(
-            "let builder: NestedStaticBuilderCallBuilder = NestedStaticBuilderCallCoordinatesGenomicsDBColumn::new_builder();"
-        )
-    );
+    assert!(translation.rust.contains(
+        "let builder: NestedStaticBuilderCall_Builder = unimplemented!(\"unresolved Java static call GenomicsDBColumn.new_builder is not modelled\");"
+    ));
     assert!(!translation.rust.contains("coordinates.genomics_d_b_column"));
     assert!(!translation.rust.contains("Coordinates::GenomicsDBColumn"));
+    cargo_check_translation("nested_static_builder_resolved_owner", &translation.rust);
 }
 
 #[test]
@@ -1521,10 +1392,13 @@ fn stream_block_lambda_static_owner_uses_type_owner() {
         "{:?}",
         translation.diagnostics
     );
-    assert!(translation.rust.contains(
-        "let mut builder = GenomicsDBColumn::new_builder(); builder.set_name(value.clone());"
-    ));
+    assert!(
+        translation
+            .rust
+            .contains("let mut builder = GenomicsDBColumn::new_builder(); builder.set_name((*value).clone().clone());")
+    );
     assert!(!translation.rust.contains("coordinates.genomics_d_b_column"));
+    cargo_check_translation("stream_block_lambda_static_owner", &translation.rust);
 }
 
 #[test]
@@ -1541,8 +1415,8 @@ fn collection_capacity_constructor_uses_with_capacity() {
             .contains("Vec::with_capacity((self.names.as_ref().unwrap().len() as i32) as usize)")
     );
     assert!(!translation.rust.contains("self.names.size()"));
-    let test_source = format!(
-        "{}\n{}",
+    cargo_test_translation(
+        "collection_capacity_constructor",
         translation.rust,
         r#"
 #[cfg(test)]
@@ -1557,31 +1431,7 @@ mod generated_tests {
         assert_eq!(subject.copy_headers(), Vec::<String>::new());
     }
 }
-"#
-    );
-    let rust_path =
-        std::env::temp_dir().join("new_java2rust_collection_capacity_constructor_test.rs");
-    let bin_path = std::env::temp_dir().join("new_java2rust_collection_capacity_constructor_test");
-    fs::write(&rust_path, test_source).unwrap();
-    let output = Command::new("rustc")
-        .arg("--test")
-        .arg(&rust_path)
-        .arg("-o")
-        .arg(&bin_path)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "collection capacity constructor test did not compile\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let output = Command::new(&bin_path).output().unwrap();
-    assert!(
-        output.status.success(),
-        "collection capacity constructor behavior test failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+"#,
     );
 }
 
@@ -1596,7 +1446,7 @@ fn checked_propagation_string_length_after_fallible_optional_read_compiles() {
     assert!(
         translation
             .rust
-            .contains("reader.read_line()?.as_ref().unwrap().as_str().len() as i32"),
+            .contains("reader.read_line()?.as_ref().ok_or_else(|| JavaException::new(\"NullPointerException\", \"Java null receiver\".to_string()))?.as_str().len() as i32"),
         "{}",
         translation.rust
     );
@@ -1607,25 +1457,7 @@ fn checked_propagation_string_length_after_fallible_optional_read_compiles() {
         "{}",
         translation.rust
     );
-    let rust_path = std::env::temp_dir().join("new_java2rust_checked_propagation_test.rs");
-    fs::write(&rust_path, translation.rust).unwrap();
-    let output = Command::new("rustc")
-        .arg("--edition")
-        .arg("2021")
-        .arg("--crate-type")
-        .arg("lib")
-        .arg("--crate-name")
-        .arg("checked_propagation_fixture")
-        .arg("--emit=metadata")
-        .arg(&rust_path)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "checked propagation fixture did not compile\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    cargo_check_translation("checked_propagation", &translation.rust);
 }
 
 #[test]
@@ -1645,6 +1477,7 @@ fn collectors_to_map_lowers_to_hash_map_collect() {
             .rust
             .contains("unsupported Java expression: lambda")
     );
+    cargo_check_translation("collectors_to_map_lowers_to_hash_map", &translation.rust);
 }
 
 #[test]
@@ -1677,49 +1510,114 @@ fn guardrail_fixtures_emit_structured_unsupported_diagnostics() {
 }
 
 #[test]
+fn anonymous_interface_return_uses_boxed_dyn_trait_slot() {
+    let translation = translate_source(&fixture("04-objects/AnonymousInterface.java"));
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn positive(&self) -> Box<dyn AnonymousInterface_IntPredicate>")
+            && translation
+                .rust
+                .contains("return <dyn AnonymousInterface_IntPredicate>::anonymous();")
+            && !translation
+                .rust
+                .contains("pub fn positive(&self) -> AnonymousInterface_IntPredicate")
+            && !translation.rust.contains("return Default::default();"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "anonymous_interface_return",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn first_slice_generated_rust_compiles() {
     let cases = [
-        "01-expressions/ExpressionPrecedence.java",
-        "02-control-flow/LoopsAndBranches.java",
-        "02-control-flow/SwitchFallthrough.java",
-        "03-methods/MethodsAndOverloads.java",
-        "03-methods/ConstructorOverloads.java",
-        "03-methods/OverloadSameArity.java",
-        "04-objects/DynTraitMethodCompatibility.java",
-        "04-objects/SimpleClass.java",
-        "05-types/NullableLocalReturn.java",
-        "06-stdlib/ThrowOnly.java",
-        "06-stdlib/StreamsUse.java",
-        "06-stdlib/StreamsCollect.java",
+        (
+            "expression_precedence",
+            "01-expressions/ExpressionPrecedence.java",
+        ),
+        (
+            "loops_and_branches",
+            "02-control-flow/LoopsAndBranches.java",
+        ),
+        (
+            "switch_fallthrough",
+            "02-control-flow/SwitchFallthrough.java",
+        ),
+        (
+            "methods_and_overloads",
+            "03-methods/MethodsAndOverloads.java",
+        ),
+        (
+            "constructor_overloads",
+            "03-methods/ConstructorOverloads.java",
+        ),
+        ("overload_same_arity", "03-methods/OverloadSameArity.java"),
+        (
+            "dyn_trait_method_compatibility",
+            "04-objects/DynTraitMethodCompatibility.java",
+        ),
+        ("simple_class", "04-objects/SimpleClass.java"),
+        ("nullable_local_return", "05-types/NullableLocalReturn.java"),
+        ("throw_only", "06-stdlib/ThrowOnly.java"),
+        ("streams_use", "06-stdlib/StreamsUse.java"),
+        ("streams_collect", "06-stdlib/StreamsCollect.java"),
     ];
 
-    for path in cases {
+    let mut modules = Vec::new();
+    for (name, path) in cases {
         let translation = translate_source(&fixture(path));
         assert!(
             !translation.diagnostics.has_errors(),
             "{path} diagnostics: {:?}",
             translation.diagnostics
         );
-        let rust_path = std::env::temp_dir().join(format!(
-            "new_java2rust_{}.rs",
-            path.replace(['/', '.', '-'], "_")
-        ));
-        fs::write(&rust_path, translation.rust).unwrap();
-        let output = Command::new("rustc")
-            .arg("--crate-type")
-            .arg("lib")
-            .arg(&rust_path)
-            .arg("-o")
-            .arg(rust_path.with_extension("rlib"))
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{path} did not compile\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        modules.push(GeneratedCrateModule {
+            name,
+            rust: translation.rust,
+            tests: "",
+        });
     }
+    cargo_check_generated_modules("first_slice_generated_rust", modules);
+}
+
+#[test]
+fn dyn_trait_interface_parameters_use_trait_object_views() {
+    let translation = translate_source(&fixture("04-objects/DynTraitMethodCompatibility.java"));
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("fn merge(&mut self, other: &dyn Metric) -> Result<(), JavaException>;"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains(
+            "fn merge(&mut self, other: &dyn Metric) -> Result<(), JavaException> { CountMetric::merge(self, other) }"
+        ),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("other: Metric"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_translation("dyn_trait_interface_parameters", &translation.rust);
 }
 
 #[test]
@@ -1746,32 +1644,45 @@ fn raw_types_generated_rust_compiles_with_erased_list_elements() {
     );
     assert!(
         translation.rust.contains(
-            "Some(java_clone_erased_object_ref(&values.get(0 as usize).expect(\"Java index out of bounds\")))"
-        ),
+            "values.get(0 as usize).ok_or_else(|| JavaException::new(\"IndexOutOfBoundsException\""
+        ) && translation.rust.contains("uncaught Java exception")
+            && !translation
+                .rust
+                .contains(".expect(\"Java index out of bounds\")"),
         "{}",
         translation.rust
     );
 
-    let rust_path = std::env::temp_dir().join("new_java2rust_raw_types.rs");
-    let metadata_path = std::env::temp_dir().join("new_java2rust_raw_types.rmeta");
-    fs::write(&rust_path, translation.rust).unwrap();
-    let output = Command::new("rustc")
-        .arg("--edition")
-        .arg("2021")
-        .arg("--crate-type")
-        .arg("lib")
-        .arg("--crate-name")
-        .arg("raw_types")
-        .arg("--emit=metadata")
-        .arg("-o")
-        .arg(&metadata_path)
-        .arg(&rust_path)
-        .output()
-        .unwrap();
+    cargo_check_translation("raw_types_erased_list_elements", &translation.rust);
+}
+
+#[test]
+fn wildcard_bounds_use_read_upper_bound_and_write_erased_carrier() {
+    let translation = translate_source(&fixture("05-types/WildcardBounds.java"));
     assert!(
-        output.status.success(),
-        "raw types generated Rust did not compile\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
     );
+    assert!(
+        translation.rust.contains(
+            "pub fn read_extends(&self, values: &[Number]) -> Result<i32, JavaException>"
+        ),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("values.push(Box::new(3) as Box<dyn std::any::Any>);"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("}?.ok_or_else("),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_translation("wildcard_bounds", &translation.rust);
 }

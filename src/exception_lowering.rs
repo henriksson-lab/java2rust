@@ -23,10 +23,6 @@ pub struct ExternalExceptionConversion {
     pub rust_type: String,
 }
 
-pub fn java_exception_support_item() -> RustItem {
-    java_exception_support_item_with_facts(&FactSet::default())
-}
-
 pub fn java_exception_support_item_with_facts(facts: &FactSet) -> RustItem {
     let conversions = external_exception_conversions(facts);
     let mut item = r#"#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
@@ -36,7 +32,7 @@ pub struct InputStream;
 pub struct JavaException {
     pub class_name: &'static str,
     pub message: String,
-    pub cause: Option<Box<JavaException>>,
+    pub cause: Option<std::boxed::Box<JavaException>>,
 }
 
 impl JavaException {
@@ -49,7 +45,7 @@ impl JavaException {
         message: String,
         cause: JavaException,
     ) -> JavaException {
-        JavaException { class_name, message, cause: Some(Box::new(cause)) }
+        JavaException { class_name, message, cause: Some(std::boxed::Box::new(cause)) }
     }
 
     pub fn from_display(class_name: &'static str, err: impl std::fmt::Display) -> JavaException {
@@ -57,7 +53,9 @@ impl JavaException {
     }
 
     pub fn is_instance(&self, class_names: &[&str]) -> bool {
-        class_names.iter().any(|name| self.class_name == *name)
+        class_names
+            .iter()
+            .any(|name| self.class_name == *name || java_exception_is_subtype(self.class_name, name))
     }
 
     pub fn cause_or_self_if_instance(mut self, class_names: &[&str]) -> JavaException {
@@ -75,6 +73,45 @@ impl JavaException {
     pub fn get_localized_message(&self) -> Option<String> {
         self.get_message()
     }
+}
+
+fn java_exception_parent(class_name: &str) -> Option<&'static str> {
+    match class_name.rsplit('.').next().unwrap_or(class_name) {
+        "ArrayIndexOutOfBoundsException" => Some("IndexOutOfBoundsException"),
+        "ArrayStoreException" => Some("RuntimeException"),
+        "ArithmeticException" => Some("RuntimeException"),
+        "ClassCastException" => Some("RuntimeException"),
+        "ConcurrentModificationException" => Some("RuntimeException"),
+        "IllegalArgumentException" => Some("RuntimeException"),
+        "IllegalMonitorStateException" => Some("RuntimeException"),
+        "IllegalStateException" => Some("RuntimeException"),
+        "IndexOutOfBoundsException" => Some("RuntimeException"),
+        "InputMismatchException" => Some("NoSuchElementException"),
+        "NegativeArraySizeException" => Some("RuntimeException"),
+        "NoSuchElementException" => Some("RuntimeException"),
+        "NullPointerException" => Some("RuntimeException"),
+        "NumberFormatException" => Some("IllegalArgumentException"),
+        "StringIndexOutOfBoundsException" => Some("IndexOutOfBoundsException"),
+        "UncheckedIOException" => Some("RuntimeException"),
+        "UnsupportedOperationException" => Some("RuntimeException"),
+        "RuntimeException" => Some("Exception"),
+        _ => None,
+    }
+}
+
+fn java_exception_is_subtype(actual: &str, target: &str) -> bool {
+    let target = target.rsplit('.').next().unwrap_or(target);
+    let mut current = actual.rsplit('.').next().unwrap_or(actual);
+    for _ in 0..32 {
+        let Some(parent) = java_exception_parent(current) else {
+            return false;
+        };
+        if parent == target {
+            return true;
+        }
+        current = parent;
+    }
+    false
 }
 
 impl InputStream {
@@ -142,84 +179,6 @@ pub fn external_exception_conversions(facts: &FactSet) -> Vec<ExternalExceptionC
         });
     }
     conversions.into_iter().collect()
-}
-
-pub fn legacy_java_exception_support_item() -> RustItem {
-    RustItem::Raw(
-        r#"#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
-pub struct InputStream;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct JavaException {
-    pub class_name: &'static str,
-    pub message: String,
-    pub cause: Option<Box<JavaException>>,
-}
-
-impl JavaException {
-    pub fn new(class_name: &'static str, message: String) -> JavaException {
-        JavaException { class_name, message, cause: None }
-    }
-
-    pub fn with_cause(
-        class_name: &'static str,
-        message: String,
-        cause: JavaException,
-    ) -> JavaException {
-        JavaException { class_name, message, cause: Some(Box::new(cause)) }
-    }
-
-    pub fn is_instance(&self, class_names: &[&str]) -> bool {
-        class_names.iter().any(|name| self.class_name == *name)
-    }
-
-    pub fn cause_or_self_if_instance(mut self, class_names: &[&str]) -> JavaException {
-        if self.cause.as_ref().is_some_and(|cause| cause.is_instance(class_names)) {
-            *self.cause.take().expect("checked Java exception cause")
-        } else {
-            self
-        }
-    }
-
-    pub fn get_message(&self) -> Option<String> {
-        Some(self.message.clone())
-    }
-
-    pub fn get_localized_message(&self) -> Option<String> {
-        self.get_message()
-    }
-}
-
-impl InputStream {
-    pub fn read_0(&self) -> Result<i32, JavaException> {
-        Ok(0)
-    }
-
-    pub fn read<T0: ?Sized>(&self, _arg0: &T0) -> Result<i32, JavaException> {
-        Ok(0)
-    }
-
-    pub fn read_3<T0: ?Sized>(
-        &self,
-        _arg0: &T0,
-        _arg1: i32,
-        _arg2: i32,
-    ) -> Result<i32, JavaException> {
-        Ok(0)
-    }
-
-    pub fn close(&self) -> Result<(), JavaException> {
-        Ok(())
-    }
-}
-
-impl std::fmt::Display for JavaException {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.class_name, self.message)
-    }
-}"#
-        .to_string(),
-    )
 }
 
 pub fn exception_result_type(ok_type: RustType) -> RustType {
@@ -583,6 +542,46 @@ pub fn try_with_resources_scope_stmt(
     for cleanup_stmt in resource_cleanup_stmts.into_iter().rev() {
         scope_body.push(cleanup_stmt);
     }
+    if body_terminates_with_value {
+        if outer_returns_result {
+            scope_body.push(return_result_var_stmt("__java_twr_result"));
+        } else {
+            scope_body.push(return_result_or_panic_stmt("__java_twr_result"));
+        }
+    } else if outer_returns_result {
+        scope_body.push(propagate_result_stmt("__java_twr_result"));
+    } else {
+        scope_body.push(panic_if_result_err_stmt("__java_twr_result"));
+    }
+    RustStmt::Expr(RustExpr::Block {
+        stmts: scope_body,
+        tail: None,
+    })
+}
+
+pub fn try_with_resources_finally_scope_stmt(
+    ok_type: RustType,
+    resource_initializers: Vec<RustStmt>,
+    body: Vec<RustStmt>,
+    resource_cleanup_stmts: Vec<RustStmt>,
+    finally_body: Vec<RustStmt>,
+    body_terminates_with_value: bool,
+    outer_returns_result: bool,
+) -> RustStmt {
+    let mut scope_body = resource_initializers;
+    let mut body_with_ok = body;
+    if !body_terminates_with_value {
+        body_with_ok.push(return_stmt(None, true));
+    }
+    scope_body.push(result_scope_call_let_stmt(
+        "__java_twr_result",
+        ok_type,
+        body_with_ok,
+    ));
+    for cleanup_stmt in resource_cleanup_stmts.into_iter().rev() {
+        scope_body.push(cleanup_stmt);
+    }
+    scope_body.extend(finally_body);
     if body_terminates_with_value {
         if outer_returns_result {
             scope_body.push(return_result_var_stmt("__java_twr_result"));

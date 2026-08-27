@@ -2,23 +2,19 @@ use std::collections::{BTreeSet, HashMap};
 
 use crate::dependency_mode::DependencyMode;
 use crate::effective_facts::EffectiveFacts;
-use crate::facts::{
-    FactProvenance, FactSet, HierarchyEdgeFact, HierarchyOverride, HierarchyStrategy,
-};
+use crate::facts::{FactProvenance, FactSet, HierarchyOverride, HierarchyStrategy};
 use crate::java_ir::{
     Block, Expr, JavaType, LambdaBody, Member, Program, Stmt, SwitchLabel, TypeDecl,
 };
 pub use crate::object_model::{
-    BoxedDynObjectRepresentationInvariant, BoxedDynObjectRepresentationPolicy,
-    ClosedEnumFactPolicy, ClosedEnumInferencePolicy, ClosedEnumProof, ClosedEnumProofPolicy,
+    ClosedEnumInferencePolicy, ClosedEnumProof, ClosedEnumProofPolicy,
     HierarchyEdgeDiagnosticOutcome, HierarchyEdgeDiagnosticPolicy,
     HierarchyOverrideApplicationPolicy, HierarchyOverrideRepresentationPolicy,
     HierarchyOverrideValidationPolicy, ObjectHierarchyContext, ObjectHierarchyEdge,
     ObjectHierarchyEdgeDiagnosticInput, ObjectHierarchyEdgeKind, ObjectModelInput,
     ObjectRepresentation, ObjectRepresentationPolicy, ObjectRepresentationRequest,
     ObjectSafetyFactPolicy, ObjectSafetyPolicy, RepresentationDiagnostic,
-    RepresentationLookupFallback, RepresentationLookupPolicy,
-    boxed_dyn_object_representation_policy, closed_enum_fact_policy, closed_enum_inference_policy,
+    RepresentationLookupFallback, RepresentationLookupPolicy, closed_enum_inference_policy,
     closed_enum_proof_policy, hierarchy_override_application_policy,
     hierarchy_override_representation_policy, hierarchy_override_validation_policy,
     object_hierarchy_edge_diagnostic_policy, object_hierarchy_edge_representation_policy,
@@ -71,19 +67,6 @@ pub struct RepresentationDispatchPolicy {
 pub struct JavaEnumVariantPath {
     pub enum_name: String,
     pub variant_name: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RepresentationHierarchyFactPolicy {
-    pub java_ty: JavaType,
-    pub extends: Option<String>,
-    pub implements: Vec<String>,
-    pub edges: Vec<HierarchyEdgeFact>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AnonymousClassDiagnosticPolicy {
-    pub diagnostics: Vec<RepresentationDiagnostic>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -348,7 +331,7 @@ impl RepresentationPlan {
                     .into_iter()
                     .flat_map(|ty| self.diagnostics_for_type(ty)),
             )
-            .chain(anonymous_class_diagnostic_policy_with_plan(program, Some(self)).diagnostics)
+            .chain(anonymous_class_diagnostics_with_plan(program, Some(self)))
             .collect()
     }
 
@@ -449,10 +432,6 @@ pub fn hierarchy_edge_diagnostic_policy(
     plan: &RepresentationPlan,
 ) -> HierarchyEdgeDiagnosticPolicy {
     object_hierarchy_edge_diagnostic_policy(plan.hierarchy_edge_diagnostic_input(ty))
-}
-
-pub fn anonymous_class_diagnostic_policy(program: &Program) -> AnonymousClassDiagnosticPolicy {
-    anonymous_class_diagnostic_policy_with_plan(program, None)
 }
 
 pub fn extend_representation_facts_for_source_summary_superclass_boundaries<'a>(
@@ -563,15 +542,15 @@ fn push_unique_alias(aliases: &mut Vec<String>, alias: &str) {
     }
 }
 
-fn anonymous_class_diagnostic_policy_with_plan(
+fn anonymous_class_diagnostics_with_plan(
     program: &Program,
     plan: Option<&RepresentationPlan>,
-) -> AnonymousClassDiagnosticPolicy {
+) -> Vec<RepresentationDiagnostic> {
     let mut diagnostics = Vec::new();
     for ty in all_types(program) {
         collect_anonymous_class_diagnostics_for_type(ty, plan, &mut diagnostics);
     }
-    AnonymousClassDiagnosticPolicy { diagnostics }
+    diagnostics
 }
 
 fn collect_anonymous_class_diagnostics_for_type(
@@ -1152,35 +1131,6 @@ fn explicit_erased_object_fact_type_name<'a>(
     .then_some(name.as_str())
 }
 
-pub fn representation_hierarchy_fact_policy(
-    java_ty: &JavaType,
-    facts: &FactSet,
-) -> RepresentationHierarchyFactPolicy {
-    let effective_facts = EffectiveFacts::new(facts);
-    representation_hierarchy_fact_policy_with_effective_facts(java_ty, &effective_facts)
-}
-
-pub fn representation_hierarchy_fact_policy_with_effective_facts(
-    java_ty: &JavaType,
-    facts: &EffectiveFacts<'_>,
-) -> RepresentationHierarchyFactPolicy {
-    RepresentationHierarchyFactPolicy {
-        java_ty: java_ty.clone(),
-        extends: facts
-            .extends_type_for(java_ty)
-            .as_ref()
-            .and_then(java_type_name_for_representation)
-            .map(str::to_string),
-        implements: facts
-            .implemented_types_for(java_ty)
-            .iter()
-            .filter_map(java_type_name_for_representation)
-            .map(str::to_string)
-            .collect(),
-        edges: facts.hierarchy_edges_for_type(java_ty),
-    }
-}
-
 fn representation_provenance_for_fact(provenance: FactProvenance) -> RepresentationProvenance {
     match provenance {
         FactProvenance::ParsedSource => RepresentationProvenance::ParsedSource,
@@ -1200,14 +1150,6 @@ fn fact_provenance_for_representation(provenance: RepresentationProvenance) -> F
         RepresentationProvenance::CorpusAnalysis => FactProvenance::CorpusAnalysis,
         RepresentationProvenance::UserOverride => FactProvenance::UserOverride,
         RepresentationProvenance::ConservativeFallback => FactProvenance::ConservativeFallback,
-    }
-}
-
-fn java_type_name_for_representation(java_ty: &JavaType) -> Option<&str> {
-    match java_ty {
-        JavaType::String => Some("String"),
-        JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(name),
-        _ => None,
     }
 }
 

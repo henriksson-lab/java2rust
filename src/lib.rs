@@ -25,7 +25,6 @@ pub mod external_packs;
 pub mod fact_saturation;
 pub mod facts;
 pub mod fallibility_invariant;
-pub mod fixtures;
 pub mod graph;
 pub mod inherited_members;
 pub mod inner_class_capture;
@@ -80,7 +79,10 @@ pub mod usage;
 
 use diagnostics::DiagnosticBag;
 use facts::FactSet;
-use java_ir::Program;
+use java_ir::{
+    Block, Expr, JavaType, LambdaBody, Member, Program, Stmt, SwitchLabel, TypeDecl, WildcardBound,
+};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 use std::time::Instant;
@@ -178,7 +180,8 @@ pub fn translate_source(source: &str) -> Translation {
 }
 
 pub fn translate_source_with_facts(source: &str, external_facts: &FactSet) -> Translation {
-    let parsed = parser::parse_java_source(source);
+    let mut parsed = parser::parse_java_source(source);
+    qualify_same_package_class_literals(&mut parsed.program);
     let effective_external_facts = effective_external_facts_with_stdlib(external_facts, None);
     translate_parsed_source_with_context(
         parsed,
@@ -226,14 +229,28 @@ pub fn translate_source_with_context_sources_and_summary_sources(
     context_sources_are_emitted: bool,
     external_facts: &FactSet,
 ) -> Translation {
-    let parsed = parser::parse_java_source(source);
-    let mut source_program = parsed.program.clone();
+    let mut parsed = parser::parse_java_source(source);
+    qualify_same_package_class_literals(&mut parsed.program);
     let mut summary_program = Program::default();
     let mut summary_facts = FactSet::default();
     let mut context_diagnostics = DiagnosticBag::new();
+    let mut parsed_context = Vec::with_capacity(context_sources.len());
     for context_source in context_sources {
-        let context_parsed = parser::parse_java_source(context_source);
-        context_diagnostics.extend(context_parsed.diagnostics);
+        let mut context_parsed = parser::parse_java_source(context_source);
+        qualify_same_package_class_literals(&mut context_parsed.program);
+        context_diagnostics.extend(context_parsed.diagnostics.clone());
+        parsed_context.push(context_parsed);
+    }
+    {
+        let mut programs = Vec::with_capacity(1 + parsed_context.len());
+        programs.push(&mut parsed.program);
+        for context_parsed in &mut parsed_context {
+            programs.push(&mut context_parsed.program);
+        }
+        qualify_duplicate_program_type_names(&mut programs);
+    }
+    let mut source_program = parsed.program.clone();
+    for context_parsed in &parsed_context {
         merge_program_context(&mut source_program, context_parsed.program.clone());
     }
     // Pooled across files, because a constant may be defined in terms of one
@@ -245,6 +262,10 @@ pub fn translate_source_with_context_sources_and_summary_sources(
         context_diagnostics.extend(summary_parsed.diagnostics);
         summary_facts.extend_from(resolve::declaration_facts_from_program(
             &summary_parsed.program,
+        ));
+        summary_facts.extend_from(summary_field_nullability_facts_from_program(
+            &summary_parsed.program,
+            external_facts,
         ));
         summary_constant_declarations.extend(resolve::static_final_constant_declarations(
             &summary_parsed.program,
@@ -306,6 +327,7 @@ pub fn translate_batch_sources_with_context_sources_summary_sources_and_options(
     let event_sink = options.event_sink.as_deref();
     let mut timings = BatchTranslationTimings::default();
     let mut parsed_primary = Vec::with_capacity(primary_sources.len());
+    let mut parsed_context = Vec::with_capacity(context_sources.len());
     let mut source_program = Program::default();
     let mut context_diagnostics = DiagnosticBag::new();
 
@@ -318,9 +340,9 @@ pub fn translate_batch_sources_with_context_sources_summary_sources_and_options(
     );
     let primary_parse_start = Instant::now();
     for source in primary_sources {
-        let parsed = parser::parse_java_source(&source.source);
+        let mut parsed = parser::parse_java_source(&source.source);
+        qualify_same_package_class_literals(&mut parsed.program);
         context_diagnostics.extend(parsed.diagnostics.clone());
-        merge_program_context(&mut source_program, parsed.program.clone());
         parsed_primary.push((source.path.clone(), parsed));
     }
     timings.primary_parse_ms = primary_parse_start.elapsed().as_millis();
@@ -343,9 +365,26 @@ pub fn translate_batch_sources_with_context_sources_summary_sources_and_options(
     );
     let context_parse_start = Instant::now();
     for context_source in context_sources {
-        let context_parsed = parser::parse_java_source(context_source);
-        context_diagnostics.extend(context_parsed.diagnostics);
-        merge_program_context(&mut source_program, context_parsed.program.clone());
+        let mut context_parsed = parser::parse_java_source(context_source);
+        qualify_same_package_class_literals(&mut context_parsed.program);
+        context_diagnostics.extend(context_parsed.diagnostics.clone());
+        parsed_context.push(context_parsed);
+    }
+    {
+        let mut programs = Vec::with_capacity(parsed_primary.len() + parsed_context.len());
+        for (_, parsed) in &mut parsed_primary {
+            programs.push(&mut parsed.program);
+        }
+        for parsed in &mut parsed_context {
+            programs.push(&mut parsed.program);
+        }
+        qualify_duplicate_program_type_names(&mut programs);
+    }
+    for (_, parsed) in &parsed_primary {
+        merge_program_context(&mut source_program, parsed.program.clone());
+    }
+    for parsed in &parsed_context {
+        merge_program_context(&mut source_program, parsed.program.clone());
     }
     timings.context_parse_ms = context_parse_start.elapsed().as_millis();
     emit_batch_phase_progress(
@@ -372,6 +411,10 @@ pub fn translate_batch_sources_with_context_sources_summary_sources_and_options(
         context_diagnostics.extend(summary_parsed.diagnostics);
         summary_facts.extend_from(resolve::declaration_facts_from_program(
             &summary_parsed.program,
+        ));
+        summary_facts.extend_from(summary_field_nullability_facts_from_program(
+            &summary_parsed.program,
+            external_facts,
         ));
         summary_constant_declarations.extend(resolve::static_final_constant_declarations(
             &summary_parsed.program,
@@ -471,6 +514,22 @@ fn effective_external_facts_with_stdlib(
     effective
 }
 
+fn summary_field_nullability_facts_from_program(
+    program: &Program,
+    external_facts: &FactSet,
+) -> FactSet {
+    let resolved = resolve::resolve_program(program, DiagnosticBag::new());
+    let semantic = semantic_analysis::analyze_program_with_config(
+        &resolved.program,
+        &resolved.facts,
+        &FactSet::default(),
+        semantic_analysis_config_from_facts(external_facts),
+    );
+    let mut facts = FactSet::default();
+    facts.field_nullability_facts = semantic.facts.field_nullability_facts;
+    facts
+}
+
 struct BatchTranslationContext {
     source_symbols: resolve::SourceSymbols,
     support_program: Program,
@@ -537,14 +596,18 @@ fn build_batch_translation_context(
         "semantic_analysis::analyze_program",
     );
     let semantic_start = Instant::now();
+    let support_program = program_with_synthetic_local_capture_types(
+        resolved_context.program.clone(),
+        &resolved_context.facts,
+    );
     let mut semantic = semantic_analysis::analyze_program_with_config(
-        &resolved_context.program,
+        &support_program,
         &resolved_context.facts,
         external_facts,
         semantic_analysis_config_from_facts(external_facts),
     );
     semantic.facts.storage_strategies =
-        storage_strategy::plan_storage_strategies(&resolved_context.program, &semantic.usage);
+        storage_strategy::plan_storage_strategies(&support_program, &semantic.usage);
     timings.global_semantic_ms = semantic_start.elapsed().as_millis();
     emit_batch_phase_progress(
         event_sink,
@@ -562,8 +625,7 @@ fn build_batch_translation_context(
         "representation::plan_representations",
     );
     let representation_start = Instant::now();
-    let representations =
-        representation::plan_representations(&resolved_context.program, &semantic.facts);
+    let representations = representation::plan_representations(&support_program, &semantic.facts);
     timings.global_representation_ms = representation_start.elapsed().as_millis();
     emit_batch_phase_progress(
         event_sink,
@@ -592,11 +654,11 @@ fn build_batch_translation_context(
     };
     let profiled_signatures =
         signature::solve_signatures_with_facts_and_support_context_profiled_with_progress(
-            &resolved_context.program,
+            &support_program,
             &representations,
             &semantic.usage,
             &semantic.facts,
-            &resolved_context.program,
+            &support_program,
             event_sink.map(|_| &signature_progress as signature::SignatureSolverProgressSink<'_>),
         );
     timings.global_signature_ms = signature_start.elapsed().as_millis();
@@ -612,7 +674,7 @@ fn build_batch_translation_context(
     BatchTranslationContextBuild {
         context: BatchTranslationContext {
             source_symbols,
-            support_program: resolved_context.program,
+            support_program,
             summary_program,
             context_sources_are_emitted,
             external_facts: external_facts.clone(),
@@ -776,6 +838,7 @@ fn translate_parsed_source_with_batch_context(
         &context.signatures,
         &context.semantic.control_flow_plans,
         &context.support_program,
+        &resolved.program,
         &context.summary_program,
         context.context_sources_are_emitted,
     );
@@ -944,6 +1007,8 @@ fn translate_parsed_source_with_context(
     } else {
         resolved.program.clone()
     };
+    let semantic_program =
+        program_with_synthetic_local_capture_types(semantic_program, &resolved.facts);
     let mut semantic = semantic_analysis::analyze_program_with_config(
         &semantic_program,
         &resolved.facts,
@@ -957,7 +1022,19 @@ fn translate_parsed_source_with_context(
     semantic.facts.storage_strategies =
         storage_strategy::plan_storage_strategies(&semantic_program, &semantic.usage);
     let representations = representation::plan_representations(&semantic_program, &semantic.facts);
-    let support_program = support_program_context
+    let resolved_support_program =
+        support_program_context
+            .as_ref()
+            .map(|support_program_context| {
+                resolve::resolve_program_with_source_program_and_facts(
+                    support_program_context,
+                    DiagnosticBag::new(),
+                    source_program,
+                    external_facts,
+                )
+                .program
+            });
+    let support_program = resolved_support_program
         .as_ref()
         .unwrap_or(&semantic_program);
     let empty_summary_program = Program::default();
@@ -980,6 +1057,7 @@ fn translate_parsed_source_with_context(
         &signatures,
         &semantic.control_flow_plans,
         support_program,
+        &resolved.program,
         summary_program,
         context_sources_are_emitted,
     );
@@ -999,6 +1077,203 @@ fn translate_parsed_source_with_context(
         rust,
         diagnostics: lowered.diagnostics,
     }
+}
+
+fn program_with_synthetic_local_capture_types(mut program: Program, facts: &FactSet) -> Program {
+    let mut emitted = BTreeSet::new();
+    let mut local_types = Vec::new();
+    for ty in &program.types {
+        collect_synthetic_local_capture_types_from_type(ty, facts, &mut emitted, &mut local_types);
+    }
+    program.types.extend(local_types);
+    program
+}
+
+fn collect_synthetic_local_capture_types_from_type(
+    ty: &TypeDecl,
+    facts: &FactSet,
+    emitted: &mut BTreeSet<String>,
+    out: &mut Vec<TypeDecl>,
+) {
+    for member in &ty.members {
+        match member {
+            Member::Method(method) => {
+                if let Some(body) = &method.body {
+                    collect_synthetic_local_capture_types_from_block(body, facts, emitted, out);
+                }
+            }
+            Member::Constructor(constructor) => {
+                if let Some(body) = &constructor.body {
+                    collect_synthetic_local_capture_types_from_block(body, facts, emitted, out);
+                }
+            }
+            Member::Type(nested) => {
+                collect_synthetic_local_capture_types_from_type(nested, facts, emitted, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_synthetic_local_capture_types_from_block(
+    block: &Block,
+    facts: &FactSet,
+    emitted: &mut BTreeSet<String>,
+    out: &mut Vec<TypeDecl>,
+) {
+    for stmt in &block.statements {
+        collect_synthetic_local_capture_types_from_stmt(stmt, facts, emitted, out);
+    }
+}
+
+fn collect_synthetic_local_capture_types_from_stmt(
+    stmt: &Stmt,
+    facts: &FactSet,
+    emitted: &mut BTreeSet<String>,
+    out: &mut Vec<TypeDecl>,
+) {
+    match stmt {
+        Stmt::LocalType(local) => {
+            collect_synthetic_local_capture_types_from_type(local, facts, emitted, out);
+            if emitted.insert(local.name.clone())
+                && let Some(owner) = facts.captures.owners.iter().find(|owner| {
+                    owner.kind == facts::CaptureOwnerKind::LocalClass
+                        && owner.name.as_deref() == Some(local.name.as_str())
+                })
+                && let Some(local) = local_type_with_synthetic_capture_constructor(local, owner)
+            {
+                out.push(local);
+            }
+        }
+        Stmt::If {
+            condition: _,
+            then_block,
+            else_block,
+        } => {
+            collect_synthetic_local_capture_types_from_block(then_block, facts, emitted, out);
+            if let Some(else_block) = else_block {
+                collect_synthetic_local_capture_types_from_block(else_block, facts, emitted, out);
+            }
+        }
+        Stmt::While { body, .. }
+        | Stmt::DoWhile { body, .. }
+        | Stmt::EnhancedFor { body, .. }
+        | Stmt::Block(body)
+        | Stmt::LabeledBlock { body, .. } => {
+            collect_synthetic_local_capture_types_from_block(body, facts, emitted, out);
+        }
+        Stmt::For { init, body, .. } => {
+            for stmt in init {
+                collect_synthetic_local_capture_types_from_stmt(stmt, facts, emitted, out);
+            }
+            collect_synthetic_local_capture_types_from_block(body, facts, emitted, out);
+        }
+        Stmt::Switch { cases, .. } => {
+            for case in cases {
+                for stmt in &case.statements {
+                    collect_synthetic_local_capture_types_from_stmt(stmt, facts, emitted, out);
+                }
+            }
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            for resource in resources {
+                collect_synthetic_local_capture_types_from_stmt(resource, facts, emitted, out);
+            }
+            collect_synthetic_local_capture_types_from_block(body, facts, emitted, out);
+            for catch in catches {
+                collect_synthetic_local_capture_types_from_block(&catch.body, facts, emitted, out);
+            }
+            if let Some(finally_block) = finally_block {
+                collect_synthetic_local_capture_types_from_block(
+                    finally_block,
+                    facts,
+                    emitted,
+                    out,
+                );
+            }
+        }
+        Stmt::VarDecl { .. }
+        | Stmt::Assign { .. }
+        | Stmt::Expr(_)
+        | Stmt::Return(_)
+        | Stmt::Throw(_)
+        | Stmt::ConstructorInvocation { .. }
+        | Stmt::Break(_)
+        | Stmt::Continue(_)
+        | Stmt::Unsupported(_) => {}
+    }
+}
+
+fn local_type_with_synthetic_capture_constructor(
+    local: &TypeDecl,
+    owner: &facts::CaptureOwner,
+) -> Option<TypeDecl> {
+    if local
+        .members
+        .iter()
+        .any(|member| matches!(member, Member::Constructor(_)))
+        || owner.captures.iter().any(|capture| {
+            !matches!(
+                capture.source,
+                facts::CaptureSource::Local | facts::CaptureSource::Parameter
+            ) || !capture.effectively_final
+                || capture.mutable_after_capture
+        })
+    {
+        return None;
+    }
+    let mut local = local.clone();
+    let mut members = owner
+        .captures
+        .iter()
+        .map(|capture| {
+            Member::Field(java_ir::FieldDecl {
+                name: capture.name.clone(),
+                ty: capture.ty.clone(),
+                modifiers: vec![java_ir::Modifier::Private, java_ir::Modifier::Final],
+                initializer: None,
+                span: Default::default(),
+            })
+        })
+        .collect::<Vec<_>>();
+    members.push(Member::Constructor(java_ir::ConstructorDecl {
+        name: local.name.clone(),
+        rust_name: Some("new".to_string()),
+        type_params: Vec::new(),
+        type_param_bounds: Vec::new(),
+        params: owner
+            .captures
+            .iter()
+            .map(|capture| java_ir::Param {
+                name: capture.name.clone(),
+                source_name: capture.name.clone(),
+                ty: capture.ty.clone(),
+                is_varargs: false,
+                binding: None,
+            })
+            .collect(),
+        throws: Vec::new(),
+        modifiers: Vec::new(),
+        body: Some(Block {
+            statements: owner
+                .captures
+                .iter()
+                .map(|capture| Stmt::Assign {
+                    target: Expr::FieldAccess(Box::new(Expr::This), capture.name.clone()),
+                    value: Expr::Var(capture.name.clone()),
+                })
+                .collect(),
+        }),
+        span: Default::default(),
+    }));
+    members.extend(local.members);
+    local.members = members;
+    Some(local)
 }
 
 fn report_post_lowering_translation_diagnostics(
@@ -1060,11 +1335,799 @@ fn merge_program_context(target: &mut Program, source: Program) {
     }
 }
 
+fn qualify_duplicate_program_type_names(programs: &mut [&mut Program]) {
+    let mut packages_by_simple_name: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for program in programs.iter() {
+        let package = program.package.clone().unwrap_or_default();
+        for ty in &program.types {
+            if !ty.name.contains('.') {
+                packages_by_simple_name
+                    .entry(ty.name.clone())
+                    .or_default()
+                    .insert(package.clone());
+            }
+        }
+    }
+    let duplicate_names = packages_by_simple_name
+        .into_iter()
+        .filter_map(|(name, packages)| (packages.len() > 1).then_some(name))
+        .collect::<BTreeSet<_>>();
+    if duplicate_names.is_empty() {
+        return;
+    }
+
+    for program in programs.iter_mut() {
+        let Some(package) = program.package.as_deref() else {
+            continue;
+        };
+        if package.is_empty() {
+            continue;
+        }
+        for ty in &mut program.types {
+            if duplicate_names.contains(&ty.name)
+                && let Some(qualified) = qualified_merge_type_name(package, &ty.name)
+            {
+                let old_name = ty.name.clone();
+                ty.name = qualified;
+                qualify_type_references_in_type(ty, &old_name);
+            }
+        }
+    }
+}
+
+fn qualify_type_references_in_type(ty: &mut TypeDecl, old_name: &str) {
+    let new_name = ty.name.clone();
+    rewrite_type_name_in_string_option(&mut ty.extends, old_name, &new_name);
+    for implemented in &mut ty.implements {
+        rewrite_type_name_in_string(implemented, old_name, &new_name);
+    }
+    for bound in &mut ty.type_param_bounds {
+        rewrite_type_name_in_java_type_option(bound, old_name, &new_name);
+    }
+    for block in &mut ty.static_init_blocks {
+        rewrite_type_name_in_block(&mut block.block, old_name, &new_name);
+    }
+    for member in &mut ty.members {
+        rewrite_type_name_in_member(member, old_name, &new_name);
+    }
+}
+
+fn rewrite_type_name_in_member(member: &mut Member, old_name: &str, new_name: &str) {
+    match member {
+        Member::Field(field) => {
+            rewrite_type_name_in_java_type(&mut field.ty, old_name, new_name);
+            if let Some(initializer) = &mut field.initializer {
+                rewrite_type_name_in_expr(initializer, old_name, new_name);
+            }
+        }
+        Member::Method(method) => {
+            rewrite_type_name_in_java_type(&mut method.return_type, old_name, new_name);
+            for bound in &mut method.type_param_bounds {
+                rewrite_type_name_in_java_type_option(bound, old_name, new_name);
+            }
+            for param in &mut method.params {
+                rewrite_type_name_in_java_type(&mut param.ty, old_name, new_name);
+            }
+            if let Some(body) = &mut method.body {
+                rewrite_type_name_in_block(body, old_name, new_name);
+            }
+        }
+        Member::Constructor(constructor) => {
+            for bound in &mut constructor.type_param_bounds {
+                rewrite_type_name_in_java_type_option(bound, old_name, new_name);
+            }
+            for param in &mut constructor.params {
+                rewrite_type_name_in_java_type(&mut param.ty, old_name, new_name);
+            }
+            if let Some(body) = &mut constructor.body {
+                rewrite_type_name_in_block(body, old_name, new_name);
+            }
+        }
+        Member::Type(nested) => qualify_type_references_in_type(nested, old_name),
+        Member::Unsupported { .. } => {}
+    }
+}
+
+fn rewrite_type_name_in_block(block: &mut Block, old_name: &str, new_name: &str) {
+    for stmt in &mut block.statements {
+        rewrite_type_name_in_stmt(stmt, old_name, new_name);
+    }
+}
+
+fn rewrite_type_name_in_stmt(stmt: &mut Stmt, old_name: &str, new_name: &str) {
+    match stmt {
+        Stmt::VarDecl {
+            ty, initializer, ..
+        } => {
+            rewrite_type_name_in_java_type(ty, old_name, new_name);
+            if let Some(initializer) = initializer {
+                rewrite_type_name_in_expr(initializer, old_name, new_name);
+            }
+        }
+        Stmt::Assign { target, value } => {
+            rewrite_type_name_in_expr(target, old_name, new_name);
+            rewrite_type_name_in_expr(value, old_name, new_name);
+        }
+        Stmt::Expr(expr) | Stmt::Return(Some(expr)) | Stmt::Throw(expr) => {
+            rewrite_type_name_in_expr(expr, old_name, new_name);
+        }
+        Stmt::Return(None) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => {}
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            rewrite_type_name_in_expr(condition, old_name, new_name);
+            rewrite_type_name_in_block(then_block, old_name, new_name);
+            if let Some(else_block) = else_block {
+                rewrite_type_name_in_block(else_block, old_name, new_name);
+            }
+        }
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
+            rewrite_type_name_in_expr(condition, old_name, new_name);
+            rewrite_type_name_in_block(body, old_name, new_name);
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            for stmt in init {
+                rewrite_type_name_in_stmt(stmt, old_name, new_name);
+            }
+            if let Some(condition) = condition {
+                rewrite_type_name_in_expr(condition, old_name, new_name);
+            }
+            for expr in update {
+                rewrite_type_name_in_expr(expr, old_name, new_name);
+            }
+            rewrite_type_name_in_block(body, old_name, new_name);
+        }
+        Stmt::EnhancedFor {
+            var_type,
+            iterable,
+            body,
+            ..
+        } => {
+            rewrite_type_name_in_java_type(var_type, old_name, new_name);
+            rewrite_type_name_in_expr(iterable, old_name, new_name);
+            rewrite_type_name_in_block(body, old_name, new_name);
+        }
+        Stmt::Switch { selector, cases } => {
+            rewrite_type_name_in_expr(selector, old_name, new_name);
+            for case in cases {
+                for label in &mut case.labels {
+                    rewrite_type_name_in_switch_label(label, old_name, new_name);
+                }
+                for stmt in &mut case.statements {
+                    rewrite_type_name_in_stmt(stmt, old_name, new_name);
+                }
+            }
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            for resource in resources {
+                rewrite_type_name_in_stmt(resource, old_name, new_name);
+            }
+            rewrite_type_name_in_block(body, old_name, new_name);
+            for catch in catches {
+                for ty in &mut catch.types {
+                    rewrite_type_name_in_java_type(ty, old_name, new_name);
+                }
+                rewrite_type_name_in_block(&mut catch.body, old_name, new_name);
+            }
+            if let Some(finally_block) = finally_block {
+                rewrite_type_name_in_block(finally_block, old_name, new_name);
+            }
+        }
+        Stmt::LocalType(ty) => qualify_type_references_in_type(ty, old_name),
+        Stmt::ConstructorInvocation { args, resolved, .. } => {
+            for arg in args {
+                rewrite_type_name_in_expr(arg, old_name, new_name);
+            }
+            if let Some(resolved) = resolved {
+                rewrite_type_name_in_resolved_constructor(resolved, old_name, new_name);
+            }
+        }
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            rewrite_type_name_in_block(block, old_name, new_name);
+        }
+    }
+}
+
+fn rewrite_type_name_in_switch_label(label: &mut SwitchLabel, old_name: &str, new_name: &str) {
+    if let SwitchLabel::Expr(expr) = label {
+        rewrite_type_name_in_expr(expr, old_name, new_name);
+    }
+}
+
+fn rewrite_type_name_in_expr(expr: &mut Expr, old_name: &str, new_name: &str) {
+    match expr {
+        Expr::Literal(_) | Expr::This | Expr::Super | Expr::Raw(_) | Expr::Unsupported { .. } => {}
+        Expr::Var(name) => {
+            if name == old_name {
+                *name = new_name.to_string();
+            }
+        }
+        Expr::FieldAccess(receiver, _) => rewrite_type_name_in_expr(receiver, old_name, new_name),
+        Expr::ArrayAccess(array, index) => {
+            rewrite_type_name_in_expr(array, old_name, new_name);
+            rewrite_type_name_in_expr(index, old_name, new_name);
+        }
+        Expr::ArrayCreation {
+            element_type,
+            dimensions,
+            initializer,
+        } => {
+            rewrite_type_name_in_java_type(element_type, old_name, new_name);
+            for dimension in dimensions {
+                rewrite_type_name_in_expr(dimension, old_name, new_name);
+            }
+            if let Some(initializer) = initializer {
+                for expr in initializer {
+                    rewrite_type_name_in_expr(expr, old_name, new_name);
+                }
+            }
+        }
+        Expr::ArrayInitializer(items) => {
+            for item in items {
+                rewrite_type_name_in_expr(item, old_name, new_name);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            rewrite_type_name_in_expr(left, old_name, new_name);
+            rewrite_type_name_in_expr(right, old_name, new_name);
+        }
+        Expr::Unary { expr, .. } => rewrite_type_name_in_expr(expr, old_name, new_name),
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            rewrite_type_name_in_expr(condition, old_name, new_name);
+            rewrite_type_name_in_expr(then_expr, old_name, new_name);
+            rewrite_type_name_in_expr(else_expr, old_name, new_name);
+        }
+        Expr::Switch { selector, cases } => {
+            rewrite_type_name_in_expr(selector, old_name, new_name);
+            for case in cases {
+                for label in &mut case.labels {
+                    rewrite_type_name_in_switch_label(label, old_name, new_name);
+                }
+                rewrite_type_name_in_expr(&mut case.value, old_name, new_name);
+            }
+        }
+        Expr::Call {
+            receiver,
+            args,
+            resolved,
+            ..
+        } => {
+            if let Some(receiver) = receiver {
+                rewrite_type_name_in_expr(receiver, old_name, new_name);
+            }
+            for arg in args {
+                rewrite_type_name_in_expr(arg, old_name, new_name);
+            }
+            if let Some(resolved) = resolved {
+                rewrite_type_name_in_resolved_call(resolved, old_name, new_name);
+            }
+        }
+        Expr::New {
+            ty,
+            args,
+            body,
+            resolved,
+        } => {
+            rewrite_type_name_in_java_type(ty, old_name, new_name);
+            for arg in args {
+                rewrite_type_name_in_expr(arg, old_name, new_name);
+            }
+            if let Some(body) = body {
+                for member in body {
+                    rewrite_type_name_in_member(member, old_name, new_name);
+                }
+            }
+            if let Some(resolved) = resolved {
+                rewrite_type_name_in_resolved_constructor(resolved, old_name, new_name);
+            }
+        }
+        Expr::Cast { ty, expr } | Expr::InstanceOf { ty, expr, .. } => {
+            rewrite_type_name_in_java_type(ty, old_name, new_name);
+            rewrite_type_name_in_expr(expr, old_name, new_name);
+        }
+        Expr::Lambda { params, body } => {
+            for param in params {
+                if let Some(ty) = &mut param.ty {
+                    rewrite_type_name_in_java_type(ty, old_name, new_name);
+                }
+            }
+            match body {
+                LambdaBody::Expr(expr) => rewrite_type_name_in_expr(expr, old_name, new_name),
+                LambdaBody::Block(block) => rewrite_type_name_in_block(block, old_name, new_name),
+            }
+        }
+        Expr::MethodReference { target, .. } => {
+            if target == old_name {
+                *target = new_name.to_string();
+            }
+        }
+        Expr::ClassLiteral(ty) => rewrite_type_name_in_java_type(ty, old_name, new_name),
+    }
+}
+
+fn rewrite_type_name_in_resolved_call(
+    resolved: &mut java_ir::ResolvedCall,
+    old_name: &str,
+    new_name: &str,
+) {
+    if resolved.declaring_type == old_name {
+        resolved.declaring_type = new_name.to_string();
+    }
+    rewrite_type_name_in_java_type(&mut resolved.return_type, old_name, new_name);
+    for ty in &mut resolved.arg_target_types {
+        rewrite_type_name_in_java_type(ty, old_name, new_name);
+    }
+    for coercion in &mut resolved.arg_coercions {
+        rewrite_type_name_in_java_type(&mut coercion.actual, old_name, new_name);
+        rewrite_type_name_in_java_type(&mut coercion.target, old_name, new_name);
+    }
+}
+
+fn rewrite_type_name_in_resolved_constructor(
+    resolved: &mut java_ir::ResolvedConstructor,
+    old_name: &str,
+    new_name: &str,
+) {
+    if resolved.declaring_type == old_name {
+        resolved.declaring_type = new_name.to_string();
+    }
+    rewrite_type_name_in_java_type(&mut resolved.constructed_type, old_name, new_name);
+    for param in &mut resolved.params {
+        rewrite_type_name_in_java_type(&mut param.ty, old_name, new_name);
+    }
+    for coercion in &mut resolved.arg_coercions {
+        rewrite_type_name_in_java_type(&mut coercion.actual, old_name, new_name);
+        rewrite_type_name_in_java_type(&mut coercion.target, old_name, new_name);
+    }
+}
+
+fn rewrite_type_name_in_java_type_option(
+    ty: &mut Option<JavaType>,
+    old_name: &str,
+    new_name: &str,
+) {
+    if let Some(ty) = ty {
+        rewrite_type_name_in_java_type(ty, old_name, new_name);
+    }
+}
+
+fn rewrite_type_name_in_string_option(ty: &mut Option<String>, old_name: &str, new_name: &str) {
+    if let Some(ty) = ty {
+        rewrite_type_name_in_string(ty, old_name, new_name);
+    }
+}
+
+fn rewrite_type_name_in_string(ty: &mut String, old_name: &str, new_name: &str) {
+    if ty == old_name {
+        *ty = new_name.to_string();
+    }
+}
+
+fn rewrite_type_name_in_java_type(ty: &mut JavaType, old_name: &str, new_name: &str) {
+    match ty {
+        JavaType::Named { name, args } => {
+            if name == old_name {
+                *name = new_name.to_string();
+            }
+            for arg in args {
+                rewrite_type_name_in_java_type(arg, old_name, new_name);
+            }
+        }
+        JavaType::Array(inner) => rewrite_type_name_in_java_type(inner, old_name, new_name),
+        JavaType::Wildcard(Some(WildcardBound::Extends(bound)))
+        | JavaType::Wildcard(Some(WildcardBound::Super(bound))) => {
+            rewrite_type_name_in_java_type(bound, old_name, new_name);
+        }
+        JavaType::Void
+        | JavaType::Primitive(_)
+        | JavaType::String
+        | JavaType::Wildcard(None)
+        | JavaType::Unknown(_) => {}
+    }
+}
+
 fn qualified_merge_type_name(package: &str, type_name: &str) -> Option<String> {
     if package.is_empty() || type_name.contains('.') {
         return None;
     }
     Some(format!("{package}.{type_name}"))
+}
+
+fn qualify_same_package_class_literals(program: &mut Program) {
+    let Some(package) = program.package.as_deref() else {
+        return;
+    };
+    if package.is_empty() {
+        return;
+    }
+    let top_level_type_names = program
+        .types
+        .iter()
+        .map(|ty| ty.name.rsplit('.').next().unwrap_or(&ty.name).to_string())
+        .collect::<BTreeSet<_>>();
+    if top_level_type_names.is_empty() {
+        return;
+    }
+    for ty in &mut program.types {
+        qualify_same_package_class_literals_in_type(ty, package, &top_level_type_names);
+    }
+}
+
+fn qualify_same_package_class_literals_in_type(
+    ty: &mut TypeDecl,
+    package: &str,
+    top_level_type_names: &BTreeSet<String>,
+) {
+    for member in &mut ty.members {
+        qualify_same_package_class_literals_in_member(member, package, top_level_type_names);
+    }
+    for static_init in &mut ty.static_init_blocks {
+        qualify_same_package_class_literals_in_block(
+            &mut static_init.block,
+            package,
+            top_level_type_names,
+        );
+    }
+}
+
+fn qualify_same_package_class_literals_in_member(
+    member: &mut Member,
+    package: &str,
+    top_level_type_names: &BTreeSet<String>,
+) {
+    match member {
+        Member::Field(field) => {
+            if let Some(initializer) = &mut field.initializer {
+                qualify_same_package_class_literals_in_expr(
+                    initializer,
+                    package,
+                    top_level_type_names,
+                );
+            }
+        }
+        Member::Method(method) => {
+            if let Some(body) = &mut method.body {
+                qualify_same_package_class_literals_in_block(body, package, top_level_type_names);
+            }
+        }
+        Member::Constructor(ctor) => {
+            if let Some(body) = &mut ctor.body {
+                qualify_same_package_class_literals_in_block(body, package, top_level_type_names);
+            }
+        }
+        Member::Type(nested) => {
+            qualify_same_package_class_literals_in_type(nested, package, top_level_type_names);
+        }
+        Member::Unsupported { .. } => {}
+    }
+}
+
+fn qualify_same_package_class_literals_in_block(
+    block: &mut Block,
+    package: &str,
+    top_level_type_names: &BTreeSet<String>,
+) {
+    for stmt in &mut block.statements {
+        qualify_same_package_class_literals_in_stmt(stmt, package, top_level_type_names);
+    }
+}
+
+fn qualify_same_package_class_literals_in_stmt(
+    stmt: &mut Stmt,
+    package: &str,
+    top_level_type_names: &BTreeSet<String>,
+) {
+    match stmt {
+        Stmt::VarDecl { initializer, .. } => {
+            if let Some(initializer) = initializer {
+                qualify_same_package_class_literals_in_expr(
+                    initializer,
+                    package,
+                    top_level_type_names,
+                );
+            }
+        }
+        Stmt::Assign { target, value } => {
+            qualify_same_package_class_literals_in_expr(target, package, top_level_type_names);
+            qualify_same_package_class_literals_in_expr(value, package, top_level_type_names);
+        }
+        Stmt::Expr(expr) | Stmt::Throw(expr) => {
+            qualify_same_package_class_literals_in_expr(expr, package, top_level_type_names);
+        }
+        Stmt::Return(expr) => {
+            if let Some(expr) = expr {
+                qualify_same_package_class_literals_in_expr(expr, package, top_level_type_names);
+            }
+        }
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            qualify_same_package_class_literals_in_expr(condition, package, top_level_type_names);
+            qualify_same_package_class_literals_in_block(then_block, package, top_level_type_names);
+            if let Some(else_block) = else_block {
+                qualify_same_package_class_literals_in_block(
+                    else_block,
+                    package,
+                    top_level_type_names,
+                );
+            }
+        }
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
+            qualify_same_package_class_literals_in_expr(condition, package, top_level_type_names);
+            qualify_same_package_class_literals_in_block(body, package, top_level_type_names);
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            for init in init {
+                qualify_same_package_class_literals_in_stmt(init, package, top_level_type_names);
+            }
+            if let Some(condition) = condition {
+                qualify_same_package_class_literals_in_expr(
+                    condition,
+                    package,
+                    top_level_type_names,
+                );
+            }
+            for update in update {
+                qualify_same_package_class_literals_in_expr(update, package, top_level_type_names);
+            }
+            qualify_same_package_class_literals_in_block(body, package, top_level_type_names);
+        }
+        Stmt::EnhancedFor { iterable, body, .. } => {
+            qualify_same_package_class_literals_in_expr(iterable, package, top_level_type_names);
+            qualify_same_package_class_literals_in_block(body, package, top_level_type_names);
+        }
+        Stmt::Switch { selector, cases } => {
+            qualify_same_package_class_literals_in_expr(selector, package, top_level_type_names);
+            for case in cases {
+                for label in &mut case.labels {
+                    if let SwitchLabel::Expr(expr) = label {
+                        qualify_same_package_class_literals_in_expr(
+                            expr,
+                            package,
+                            top_level_type_names,
+                        );
+                    }
+                }
+                for stmt in &mut case.statements {
+                    qualify_same_package_class_literals_in_stmt(
+                        stmt,
+                        package,
+                        top_level_type_names,
+                    );
+                }
+            }
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            for resource in resources {
+                qualify_same_package_class_literals_in_stmt(
+                    resource,
+                    package,
+                    top_level_type_names,
+                );
+            }
+            qualify_same_package_class_literals_in_block(body, package, top_level_type_names);
+            for catch in catches {
+                qualify_same_package_class_literals_in_block(
+                    &mut catch.body,
+                    package,
+                    top_level_type_names,
+                );
+            }
+            if let Some(finally_block) = finally_block {
+                qualify_same_package_class_literals_in_block(
+                    finally_block,
+                    package,
+                    top_level_type_names,
+                );
+            }
+        }
+        Stmt::ConstructorInvocation { args, .. } => {
+            for arg in args {
+                qualify_same_package_class_literals_in_expr(arg, package, top_level_type_names);
+            }
+        }
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            qualify_same_package_class_literals_in_block(block, package, top_level_type_names);
+        }
+        Stmt::LocalType(nested) => {
+            qualify_same_package_class_literals_in_type(nested, package, top_level_type_names);
+        }
+        Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => {}
+    }
+}
+
+fn qualify_same_package_class_literals_in_expr(
+    expr: &mut Expr,
+    package: &str,
+    top_level_type_names: &BTreeSet<String>,
+) {
+    match expr {
+        Expr::FieldAccess(receiver, _) => {
+            qualify_same_package_class_literals_in_expr(receiver, package, top_level_type_names);
+        }
+        Expr::ArrayAccess(array, index) => {
+            qualify_same_package_class_literals_in_expr(array, package, top_level_type_names);
+            qualify_same_package_class_literals_in_expr(index, package, top_level_type_names);
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            for dimension in dimensions {
+                qualify_same_package_class_literals_in_expr(
+                    dimension,
+                    package,
+                    top_level_type_names,
+                );
+            }
+            if let Some(initializer) = initializer {
+                for element in initializer {
+                    qualify_same_package_class_literals_in_expr(
+                        element,
+                        package,
+                        top_level_type_names,
+                    );
+                }
+            }
+        }
+        Expr::ArrayInitializer(elements) => {
+            for element in elements {
+                qualify_same_package_class_literals_in_expr(element, package, top_level_type_names);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            qualify_same_package_class_literals_in_expr(left, package, top_level_type_names);
+            qualify_same_package_class_literals_in_expr(right, package, top_level_type_names);
+        }
+        Expr::Unary { expr, .. } => {
+            qualify_same_package_class_literals_in_expr(expr, package, top_level_type_names);
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            qualify_same_package_class_literals_in_expr(condition, package, top_level_type_names);
+            qualify_same_package_class_literals_in_expr(then_expr, package, top_level_type_names);
+            qualify_same_package_class_literals_in_expr(else_expr, package, top_level_type_names);
+        }
+        Expr::Switch { selector, cases } => {
+            qualify_same_package_class_literals_in_expr(selector, package, top_level_type_names);
+            for case in cases {
+                for label in &mut case.labels {
+                    if let SwitchLabel::Expr(expr) = label {
+                        qualify_same_package_class_literals_in_expr(
+                            expr,
+                            package,
+                            top_level_type_names,
+                        );
+                    }
+                }
+                qualify_same_package_class_literals_in_expr(
+                    &mut case.value,
+                    package,
+                    top_level_type_names,
+                );
+            }
+        }
+        Expr::Call { receiver, args, .. } => {
+            if let Some(receiver) = receiver {
+                qualify_same_package_class_literals_in_expr(
+                    receiver,
+                    package,
+                    top_level_type_names,
+                );
+            }
+            for arg in args {
+                qualify_same_package_class_literals_in_expr(arg, package, top_level_type_names);
+            }
+        }
+        Expr::New { args, body, .. } => {
+            for arg in args {
+                qualify_same_package_class_literals_in_expr(arg, package, top_level_type_names);
+            }
+            if let Some(body) = body {
+                for member in body {
+                    qualify_same_package_class_literals_in_member(
+                        member,
+                        package,
+                        top_level_type_names,
+                    );
+                }
+            }
+        }
+        Expr::Cast { expr, .. } | Expr::InstanceOf { expr, .. } => {
+            qualify_same_package_class_literals_in_expr(expr, package, top_level_type_names);
+        }
+        Expr::Lambda { body, .. } => match body {
+            LambdaBody::Expr(expr) => {
+                qualify_same_package_class_literals_in_expr(expr, package, top_level_type_names);
+            }
+            LambdaBody::Block(block) => {
+                qualify_same_package_class_literals_in_block(block, package, top_level_type_names);
+            }
+        },
+        Expr::ClassLiteral(ty) => {
+            qualify_same_package_class_literal_type(ty, package, top_level_type_names);
+        }
+        Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::MethodReference { .. }
+        | Expr::Unsupported { .. }
+        | Expr::Raw(_) => {}
+    }
+}
+
+fn qualify_same_package_class_literal_type(
+    ty: &mut JavaType,
+    package: &str,
+    top_level_type_names: &BTreeSet<String>,
+) {
+    match ty {
+        JavaType::Named { name, args } => {
+            if !name.contains('.') && top_level_type_names.contains(name) {
+                *name = format!("{package}.{name}");
+            }
+            for arg in args {
+                qualify_same_package_class_literal_type(arg, package, top_level_type_names);
+            }
+        }
+        JavaType::Array(inner) => {
+            qualify_same_package_class_literal_type(inner, package, top_level_type_names);
+        }
+        JavaType::Wildcard(Some(java_ir::WildcardBound::Extends(bound)))
+        | JavaType::Wildcard(Some(java_ir::WildcardBound::Super(bound))) => {
+            qualify_same_package_class_literal_type(bound, package, top_level_type_names);
+        }
+        JavaType::Void
+        | JavaType::String
+        | JavaType::Primitive(_)
+        | JavaType::Wildcard(None)
+        | JavaType::Unknown(_) => {}
+    }
 }
 
 fn declaration_only_program(mut program: Program) -> Program {
@@ -1087,5 +2150,103 @@ fn strip_summary_bodies_from_type(ty: &mut java_ir::TypeDecl) {
             java_ir::Member::Type(nested) => strip_summary_bodies_from_type(nested),
             java_ir::Member::Unsupported { .. } => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::java_ir::Member;
+    use crate::java_signature::JavaCallableKey;
+
+    #[test]
+    fn batch_analysis_keys_keep_same_simple_name_package_peers_distinct() {
+        let mut a = parser::parse_java_source(
+            r#"
+package a;
+
+public class Item {
+    public int who() { return 1; }
+}
+"#,
+        );
+        let mut b = parser::parse_java_source(
+            r#"
+package b;
+
+public class Item {
+    public int who() { return 2; }
+}
+"#,
+        );
+        qualify_duplicate_program_type_names(&mut [&mut a.program, &mut b.program]);
+
+        let mut source_program = Program::default();
+        merge_program_context(&mut source_program, a.program);
+        merge_program_context(&mut source_program, b.program);
+        let external_facts = effective_external_facts_with_stdlib(&FactSet::default(), None);
+        let context = build_batch_translation_context(
+            source_program,
+            Program::default(),
+            true,
+            &external_facts,
+            None,
+            Instant::now(),
+        )
+        .context;
+
+        let mut keys = context
+            .support_program
+            .types
+            .iter()
+            .filter_map(|ty| {
+                let method = ty.members.iter().find_map(|member| match member {
+                    Member::Method(method) if method.name == "who" => Some(method),
+                    _ => None,
+                })?;
+                Some(JavaCallableKey::source_method_for_type(ty, method))
+            })
+            .collect::<Vec<_>>();
+        keys.sort_by(|left, right| left.owner.cmp(&right.owner));
+
+        assert_eq!(
+            keys.iter()
+                .map(|key| key.owner.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a.Item", "b.Item"]
+        );
+        for key in &keys {
+            assert!(
+                context.semantic.usage.methods_by_java_key.contains_key(key),
+                "usage facts missing {key:?}"
+            );
+            assert!(
+                context
+                    .signatures
+                    .method_signature_by_java_key(key)
+                    .is_some(),
+                "signature plan missing {key:?}"
+            );
+        }
+        assert!(
+            !context
+                .semantic
+                .usage
+                .methods_by_java_key
+                .keys()
+                .any(|key| key.owner == "Item" && key.java_name == "who"),
+            "same-simple-name package peers must not collapse onto Item::who"
+        );
+        assert!(
+            !context
+                .semantic
+                .usage
+                .methods_by_java_key
+                .keys()
+                .any(
+                    |key| matches!(key.owner.as_str(), "AItem" | "BItem") && key.java_name == "who"
+                ),
+            "analysis identity should stay in Java owner space, not emitted Rust spelling"
+        );
     }
 }

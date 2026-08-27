@@ -108,6 +108,18 @@ pub fn needs_conversion_constructor_for_facade(name: &str) -> bool {
 
 pub fn is_static_facade_method(receiver_type: &str, method: &str, arg_count: usize) -> bool {
     let receiver = crate::stdlib::canonical_external_receiver_type_key(receiver_type);
+    if imported_static_method_returns_broad_utils_first_arg(&receiver, method, arg_count) {
+        return true;
+    }
+    if matches!(method, "valueOf" | "value_of") && arg_count == 1 {
+        let simple = receiver
+            .rsplit(['.', '$'])
+            .next()
+            .unwrap_or(receiver.as_str());
+        if simple != "String" && crate::stdlib::boxed_primitive_type(simple).is_none() {
+            return true;
+        }
+    }
     matches!(
         (receiver.as_str(), method, arg_count),
         ("IOUtils", "getPath", 1)
@@ -258,6 +270,12 @@ pub fn preferred_static_owner_alias(
             1,
         ) => Some("VariantContextVariantAdapter"),
         (
+            "org.broadinstitute.hellbender.utils.spark.SparkUtils"
+            | "OrgBroadinstituteHellbenderUtilsSparkSparkUtils",
+            "hadoop_path_exists" | "hadoopPathExists",
+            2,
+        ) => Some("SparkUtils"),
+        (
             "htsjdk.variant.variantcontext.GenotypeLikelihoods"
             | "HtsjdkVariantVariantcontextGenotypeLikelihoods",
             "from_g_l_field" | "fromGLField",
@@ -344,7 +362,9 @@ pub fn imported_static_method_returns_broad_utils_first_arg(
     name: &str,
     arg_count: usize,
 ) -> bool {
-    arg_count >= 1 && matches!(name, "non_null" | "nonNull") && is_broad_utils_type_name(owner_key)
+    arg_count >= 1
+        && ((matches!(name, "non_null" | "nonNull") && is_broad_utils_type_name(owner_key))
+            || (matches!(name, "flatten") && is_arg_utils_type_name(owner_key)))
 }
 
 pub fn is_broad_utils_type_name(name: &str) -> bool {
@@ -352,6 +372,10 @@ pub fn is_broad_utils_type_name(name: &str) -> bool {
         name,
         "Utils" | "utils" | "org.broadinstitute.hellbender.utils.Utils"
     )
+}
+
+fn is_arg_utils_type_name(name: &str) -> bool {
+    matches!(name, "ArgUtils" | "arg_utils")
 }
 
 fn is_broad_quality_utils_type_name(name: &str) -> bool {

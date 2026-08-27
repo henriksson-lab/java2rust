@@ -291,18 +291,41 @@ impl LivenessAnalysis {
 
     /// Resolve the names read by `expr` to bindings, using the scope at `stmt`.
     fn read_bindings(&self, stmt: &Stmt, expr: &Expr, out: &mut HashSet<Binding>) {
+        let scope = self.scope_at.get(&stmt_id(stmt));
+        self.read_bindings_in_scope(expr, scope, out);
+    }
+
+    fn read_bindings_in_scope(
+        &self,
+        expr: &Expr,
+        scope: Option<&ScopeMap>,
+        out: &mut HashSet<Binding>,
+    ) {
         let mut names = HashSet::new();
         match self.pass {
             Pass::Reads => read_names(expr, &mut names),
             Pass::Writes => written_names(expr, &mut names),
         }
-        let scope = self.scope_at.get(&stmt_id(stmt));
         for name in names {
             let decl = scope
                 .and_then(|scope| scope.get(&name).copied())
                 .unwrap_or(OUTER_DECL);
             out.insert(Binding::new(&name, decl));
         }
+    }
+
+    fn scope_after_for_init(&self, stmt: &Stmt, init: &[Stmt]) -> ScopeMap {
+        let mut scope = self
+            .scope_at
+            .get(&stmt_id(stmt))
+            .cloned()
+            .unwrap_or_default();
+        for init_stmt in init {
+            if let Some(name) = declared_binding_name(init_stmt) {
+                scope.insert(name.to_string(), stmt_id(init_stmt));
+            }
+        }
+        scope
     }
 
     fn block_live_in(
@@ -410,17 +433,21 @@ impl LivenessAnalysis {
             }
             Stmt::Assign { target, value } => {
                 let mut live = live_out.clone();
-                if self.pass == Pass::Writes
-                    && let Expr::Var(name) = target
-                {
-                    // A bare `x = …` target is the write itself; the expression
-                    // walker only reports nested writes such as `++` or `a = b`.
-                    let decl = self
-                        .scope_at
-                        .get(&stmt_id(stmt))
-                        .and_then(|scope| scope.get(name).copied())
-                        .unwrap_or(OUTER_DECL);
-                    live.insert(Binding::new(name, decl));
+                if self.pass == Pass::Writes {
+                    // The target expression is the write itself. Reads still
+                    // flow through the expression walker below.
+                    let mut names = HashSet::new();
+                    crate::lower::collect_assignment_target_assigned_names_for_liveness(
+                        target, &mut names,
+                    );
+                    for name in names {
+                        let decl = self
+                            .scope_at
+                            .get(&stmt_id(stmt))
+                            .and_then(|scope| scope.get(&name).copied())
+                            .unwrap_or(OUTER_DECL);
+                        live.insert(Binding::new(&name, decl));
+                    }
                 }
                 self.read_bindings(stmt, target, &mut live);
                 self.read_bindings(stmt, value, &mut live);
@@ -481,13 +508,14 @@ impl LivenessAnalysis {
                 body,
                 ..
             } => {
+                let loop_scope = self.scope_after_for_init(stmt, init);
                 let carried = self.loop_fixpoint(live_out, |analysis, carried| {
                     let mut header = analysis.block_live_in(body, carried, Some(carried));
                     for expr in update {
-                        analysis.read_bindings(stmt, expr, &mut header);
+                        analysis.read_bindings_in_scope(expr, Some(&loop_scope), &mut header);
                     }
                     if let Some(condition) = condition {
-                        analysis.read_bindings(stmt, condition, &mut header);
+                        analysis.read_bindings_in_scope(condition, Some(&loop_scope), &mut header);
                     }
                     header
                 });
@@ -626,11 +654,22 @@ mod tests {
             source_name: name.to_string(),
             ty: crate::java_ir::JavaType::String,
             initializer: Some(init),
+            binding: None,
         }
     }
 
     fn int(value: i32) -> Expr {
         Expr::Literal(crate::java_ir::Literal::Int(value))
+    }
+
+    fn int_decl(name: &str, init: i32) -> Stmt {
+        Stmt::VarDecl {
+            name: name.to_string(),
+            source_name: name.to_string(),
+            ty: crate::java_ir::JavaType::Primitive(crate::java_ir::PrimitiveType::Int),
+            initializer: Some(int(init)),
+            binding: None,
+        }
     }
 
     /// Two sibling scopes each declaring `x` are different variables. A live set
@@ -752,6 +791,57 @@ mod tests {
         assert!(
             mutated.contains("x"),
             "writes later in a lowered loop body should be visible: {mutated:?}"
+        );
+    }
+
+    #[test]
+    fn for_update_mutates_initializer_binding() {
+        let body = Block {
+            statements: vec![Stmt::For {
+                init: vec![int_decl("i", 0)],
+                condition: Some(Expr::Binary {
+                    op: crate::java_ir::BinaryOp::Lt,
+                    left: Box::new(var("i")),
+                    right: Box::new(int(10)),
+                }),
+                update: vec![Expr::Unary {
+                    op: crate::java_ir::UnaryOp::PostInc,
+                    expr: Box::new(var("i")),
+                }],
+                body: Block {
+                    statements: vec![Stmt::Expr(var("i"))],
+                },
+                label: None,
+            }],
+        };
+        let analysis = LivenessAnalysis::for_body(&body);
+        let Stmt::For { init, .. } = &body.statements[0] else {
+            panic!("expected for loop");
+        };
+        let init_stmt = &init[0];
+        assert_eq!(
+            analysis.binding_is_mutated_after(init_stmt, "i"),
+            Some(true),
+            "the update expression should resolve `i` to the for initializer binding"
+        );
+    }
+
+    #[test]
+    fn field_assignment_mutates_receiver_binding() {
+        let body = Block {
+            statements: vec![
+                decl("first", var("source")),
+                Stmt::Assign {
+                    target: Expr::FieldAccess(Box::new(var("first")), "value".to_string()),
+                    value: int(7),
+                },
+            ],
+        };
+        let analysis = LivenessAnalysis::for_body(&body);
+        assert_eq!(
+            analysis.binding_is_mutated_after(&body.statements[0], "first"),
+            Some(true),
+            "field assignment should mark the receiver binding mutable"
         );
     }
 }

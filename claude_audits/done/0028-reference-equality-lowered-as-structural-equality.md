@@ -89,18 +89,19 @@ pub fn made(&self, s: &str) -> bool { return s == "x".to_string().as_str(); }
 pub fn eq(&self, s: &str)   -> bool { return s == "x".to_string().as_str(); }
 ```
 
-**Identical output.** The two Java operators are indistinguishable in the
-generated Rust, so nothing downstream — and no human auditor — can recover which
-one the source used. That is precisely the case the decided warning is for:
+**Identical output.** The two Java operators used to be indistinguishable in the
+generated Rust, so nothing downstream could recover which one the source used.
+This is now refused loudly instead of emitted as runnable wrong code:
 
 ```rust
-// AUDIT(java-string-identity): Java `==` on String compared references;
-// lowered to value comparison. Verify this is intended.
-return s == "x";
+compile_error!("unsupported Java String reference identity comparison requires string identity representation")
 ```
 
-A marker that is greppable (`AUDIT(java-string-identity)`) lets the whole class
-be reviewed later in one pass. Also worth counting in `summary.tsv`.
+The `java_string_identity` diagnostic still marks this scope boundary and is
+worth counting in `summary.tsv`. `StringEqualsVsEq.java` now uses a
+known-gap expectation that checks both the loud `compile_error!` and the
+`java_string_identity` diagnostic, so future changes cannot preserve only one
+half of the policy.
 
 ## Regression tests worth adding
 

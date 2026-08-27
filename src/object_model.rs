@@ -121,12 +121,6 @@ pub struct ClosedEnumInferencePolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClosedEnumFactPolicy {
-    pub type_name: String,
-    pub variants: Option<Vec<String>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClosedEnumProofPolicy {
     pub type_name: String,
     pub proof: ClosedEnumProof,
@@ -183,31 +177,8 @@ pub enum ObjectRepresentationRequest {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BoxedDynObjectRepresentationInvariant {
-    SlotProjectionOnly,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BoxedDynObjectRepresentationPolicy {
-    pub invariant: BoxedDynObjectRepresentationInvariant,
-    pub object_representation_has_boxed_dyn_variant: bool,
-    pub representation_dispatch_maps_boxed_dyn: bool,
-    pub slot_projection_creates_owned_boxed_dyn_storage: bool,
-}
-
-pub fn boxed_dyn_object_representation_policy() -> BoxedDynObjectRepresentationPolicy {
-    BoxedDynObjectRepresentationPolicy {
-        invariant: BoxedDynObjectRepresentationInvariant::SlotProjectionOnly,
-        object_representation_has_boxed_dyn_variant: false,
-        representation_dispatch_maps_boxed_dyn: false,
-        slot_projection_creates_owned_boxed_dyn_storage: true,
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectRepresentationPolicy {
-    pub request: ObjectRepresentationRequest,
     pub object_safety: ObjectSafetyPolicy,
     pub representation: ObjectRepresentation,
     pub diagnostics: Vec<RepresentationDiagnostic>,
@@ -246,16 +217,6 @@ pub struct ObjectSafetyFactPolicy {
 pub struct RepresentationDiagnostic {
     pub code: &'static str,
     pub message: String,
-}
-
-pub fn plan_object_model(program: &Program, facts: &FactSet) -> ObjectModelPlan {
-    let effective_facts = EffectiveFacts::new(facts);
-    plan_object_model_from_input(ObjectModelInput {
-        program,
-        facts,
-        effective_facts: &effective_facts,
-        usage: None,
-    })
 }
 
 pub fn plan_object_model_with_effective_facts(
@@ -307,7 +268,7 @@ fn plan_object_model_from_effective_facts_and_usage(
 pub fn dispatch_requirements_from_usage(usage: &UsageFacts) -> UsageDispatchRequirements {
     let mut requirements = UsageDispatchRequirements::new();
     for method in usage.methods.values().chain(usage.constructors.values()) {
-        for binding in method.bindings.values() {
+        for binding in method.all_binding_facts() {
             let Some(type_name) = dispatch_requirement_type_name(&binding.java_ty) else {
                 continue;
             };
@@ -388,12 +349,10 @@ fn collection_call_stores_binding_value(
         {
             collection_type_arg_matches_binding(receiver_type, 0, binding_ty)
         }
-        Some(crate::stdlib::JavaCollectionKind::Set) if name == "add" && arg_index == 0 => {
+        Some(kind) if kind.is_set_like() && name == "add" && arg_index == 0 => {
             collection_type_arg_matches_binding(receiver_type, 0, binding_ty)
         }
-        Some(crate::stdlib::JavaCollectionKind::Map)
-            if name == "put" && matches!(arg_index, 0 | 1) =>
-        {
+        Some(kind) if kind.is_map_like() && name == "put" && matches!(arg_index, 0 | 1) => {
             collection_type_arg_matches_binding(receiver_type, arg_index, binding_ty)
         }
         _ => false,
@@ -505,22 +464,6 @@ impl ObjectStrategyPlan {
             self.provenance.push(provenance);
         }
     }
-}
-
-pub fn object_strategy_for_type(ty: &TypeDecl, facts: &FactSet) -> ObjectStrategyPlan {
-    let effective_facts = EffectiveFacts::new(facts);
-    object_strategy_for_type_with_effective_facts(ty, &effective_facts)
-}
-
-pub fn object_strategy_for_type_with_effective_facts(
-    ty: &TypeDecl,
-    facts: &EffectiveFacts<'_>,
-) -> ObjectStrategyPlan {
-    object_strategy_for_type_with_effective_facts_and_requirements(
-        ty,
-        facts,
-        facts.dispatch_requirements_for(&ty.name),
-    )
 }
 
 fn object_strategy_for_type_with_effective_facts_and_requirements(
@@ -1472,7 +1415,6 @@ pub fn object_representation_policy_with_effective_facts(
     if object_safety == ObjectSafetyPolicy::RejectedNonObjectSafe {
         return ObjectRepresentationPolicy {
             diagnostics: vec![non_object_safe_trait_fallback_diagnostic(&request, facts)],
-            request,
             object_safety,
             representation: ObjectRepresentation::ErasedObject,
         };
@@ -1493,7 +1435,6 @@ pub fn object_representation_policy_with_effective_facts(
         }
     };
     ObjectRepresentationPolicy {
-        request,
         object_safety,
         representation,
         diagnostics: Vec::new(),
@@ -1787,32 +1728,6 @@ pub(crate) fn closed_enum_variant_names_for_subtypes(subtypes: &[String]) -> Vec
         .collect()
 }
 
-pub fn closed_enum_fact_policy(
-    type_name: &str,
-    direct_subtypes: &[String],
-    facts: &FactSet,
-) -> ClosedEnumFactPolicy {
-    let effective_facts = EffectiveFacts::new(facts);
-    closed_enum_fact_policy_with_effective_facts(type_name, direct_subtypes, &effective_facts)
-}
-
-pub fn closed_enum_fact_policy_with_effective_facts(
-    type_name: &str,
-    direct_subtypes: &[String],
-    facts: &EffectiveFacts<'_>,
-) -> ClosedEnumFactPolicy {
-    let proof_policy =
-        closed_enum_proof_policy_with_effective_facts(type_name, direct_subtypes, facts);
-    let variants = match proof_policy.proof {
-        ClosedEnumProof::Proven { variants, .. } => Some(variants),
-        _ => None,
-    };
-    ClosedEnumFactPolicy {
-        type_name: type_name.to_string(),
-        variants,
-    }
-}
-
 pub fn closed_enum_proof_policy(
     type_name: &str,
     direct_subtypes: &[String],
@@ -2070,5 +1985,63 @@ fn object_safety_violation_message(violation: &ObjectSafetyViolation) -> String 
         }
         ObjectSafetyViolation::ConstructorMember => "interface constructor member".to_string(),
         ObjectSafetyViolation::UnsupportedMember => "unsupported interface member".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::binding_id::{BindingId, BindingKind};
+    use crate::usage::{MethodUsageFacts, UsageMethodKey};
+
+    #[test]
+    fn dispatch_requirements_include_shadowed_binding_id_facts() {
+        let hidden_binding = BindingId::new(BindingKind::Local, "value", 0);
+        let visible_binding = BindingId::new(BindingKind::Local, "value", 1);
+        let mut method = MethodUsageFacts::default();
+        method.bindings_by_id.insert(
+            hidden_binding.clone(),
+            BindingUseFacts {
+                name: "value".to_string(),
+                binding: Some(hidden_binding),
+                java_ty: JavaType::Named {
+                    name: "Hidden".to_string(),
+                    args: Vec::new(),
+                },
+                uses: vec![BindingUse::Returned],
+            },
+        );
+        let visible = BindingUseFacts {
+            name: "value".to_string(),
+            binding: Some(visible_binding.clone()),
+            java_ty: JavaType::Named {
+                name: "Visible".to_string(),
+                args: Vec::new(),
+            },
+            uses: Vec::new(),
+        };
+        method
+            .bindings_by_id
+            .insert(visible_binding, visible.clone());
+        method.bindings.insert("value".to_string(), visible);
+
+        let mut usage = UsageFacts::default();
+        usage.methods.insert(
+            UsageMethodKey {
+                type_name: "Owner".to_string(),
+                method_name: "run".to_string(),
+            },
+            method,
+        );
+
+        let requirements = dispatch_requirements_from_usage(&usage);
+        assert_eq!(
+            requirements.get("Hidden"),
+            Some(&vec![DispatchRequirementKind::NeedsOwnedPolymorphicStorage])
+        );
+        assert!(
+            !requirements.contains_key("Visible"),
+            "visible binding has no dispatch-relevant use"
+        );
     }
 }

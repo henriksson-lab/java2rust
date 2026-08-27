@@ -236,6 +236,17 @@ It shows up three ways, all reproduced:
    emitted `pub type Greeter = dyn OuterGreeter;` (`E0428`). The *lowering* of
    `Iface.super` is correct; only the shell is spurious.
 
+2026-08-25 follow-up: the lowering note above was too narrow. The regular
+expression path handled `Iface.super`, but slot-aware return lowering could
+still bypass it and fall through to the unresolved static-call placeholder. The
+parser also spells nested `Greeter.super` as a lowercased receiver in expression
+position. `lower_interface_super_default_call` now resolves that spelling
+against the current class's implemented interfaces, and the slot-aware call path
+uses the same helper before considering external/static fallbacks. The nested
+`InterfaceDefaults.E.greet()` fixture now emits
+`InterfaceDefaults_Greeter::__java_default_greet(self)` and matches the Java
+oracle.
+
 Diagnosed to `add_used_external_api_facts` (`src/stdlib.rs`), which skips a
 receiver only when `local_types` contains it. `local_types` comes from the
 **support-context** program, which is empty for a single-file translation, while

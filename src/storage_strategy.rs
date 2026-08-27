@@ -72,9 +72,7 @@ impl StorageStrategy {
 
 /// How a value of a type can become reachable from somewhere else.
 ///
-/// The domain mirrors `crate::lattice::EscapeLatticeValue`, which was defined
-/// for exactly this and never had a consumer. Ordered: a later variant subsumes
-/// an earlier one.
+/// Ordered: a later variant subsumes an earlier one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum Escape {
     #[default]
@@ -364,11 +362,6 @@ impl StoragePlacement {
         }
     }
 
-    pub fn construction_expr_is_wrapped(self, rendered: &str) -> bool {
-        self.handle_path()
-            .is_some_and(|handle| rendered.starts_with(&format!("{handle}::new(")))
-    }
-
     /// Whether lowering can emit this placement today.
     ///
     /// The cell rungs need the never-hold-a-borrow-across-a-call guarantee and
@@ -389,6 +382,10 @@ pub struct StoragePlan {
 impl StoragePlan {
     pub fn facts(&self, type_name: &str) -> Option<&TypeStorageFacts> {
         self.types.get(type_name)
+    }
+
+    pub fn type_names(&self) -> impl Iterator<Item = &str> {
+        self.types.keys().map(String::as_str)
     }
 
     pub fn insert(&mut self, type_name: String, facts: TypeStorageFacts) {
@@ -710,7 +707,7 @@ fn collect_static_reachability_edges(
     for member in &ty.members {
         match member {
             Member::Field(field) => {
-                let field_types = declared_storage_type_names(&field.ty, declared);
+                let field_types = declared_storage_type_names(&field.ty, &ty.name, declared);
                 if field_types.is_empty() {
                     continue;
                 }
@@ -786,14 +783,14 @@ fn collect_type_facts(
                 // array or generic field: `Cell[]` and `List<Cell>` both retain
                 // `Cell` values even though the field's top-level type is not a
                 // declared source class.
-                for name in declared_storage_type_names(&field.ty, declared) {
+                for name in declared_storage_type_names(&field.ty, &ty.name, declared) {
                     if let Some(facts) = into.get_mut(&name) {
                         facts.escape = facts.escape.max(Escape::Stored);
                     }
                 }
             }
             Member::Method(method) => {
-                if let Some(name) = declared_type_name(&method.return_type, declared)
+                if let Some(name) = declared_type_name(&method.return_type, &ty.name, declared)
                     && let Some(facts) = into.get_mut(&name)
                 {
                     facts.escape = facts.escape.max(Escape::Returned);
@@ -852,7 +849,7 @@ fn collect_unknown_boundary_escapes(
     declared: &BTreeSet<String>,
     into: &mut BTreeMap<String, TypeStorageFacts>,
 ) {
-    for binding in method_usage.bindings.values() {
+    for binding in method_usage.all_binding_facts() {
         let crosses_unknown_boundary = binding.uses.iter().any(|use_site| {
             matches!(
                 use_site,
@@ -863,7 +860,7 @@ fn collect_unknown_boundary_escapes(
             )
         });
         if crosses_unknown_boundary {
-            for name in declared_storage_type_names(&binding.java_ty, declared) {
+            for name in declared_storage_type_names(&binding.java_ty, &owner.name, declared) {
                 if let Some(facts) = into.get_mut(&name) {
                     facts.escape = facts.escape.max(Escape::UnknownBoundary);
                 }
@@ -923,7 +920,7 @@ fn collect_stmt_facts(
             // "two references exist" query.
             if let Some(initializer) = initializer
                 && expr_is_bare_handle(initializer)
-                && let Some(name) = declared_type_name(ty, declared)
+                && let Some(name) = declared_type_name(ty, &owner.name, declared)
                 && let Some(facts) = into.get_mut(&name)
             {
                 facts.locally_aliased = true;
@@ -1181,7 +1178,7 @@ fn handle_type_name(
         Expr::This => declared.contains(&owner.name).then(|| owner.name.clone()),
         Expr::Var(name) => locals
             .get(name)
-            .and_then(|ty| declared_type_name(ty, declared)),
+            .and_then(|ty| declared_type_name(ty, &owner.name, declared)),
         Expr::FieldAccess(receiver, field) if matches!(receiver.as_ref(), Expr::This) => {
             field_type_name(owner, field, declared)
         }
@@ -1198,7 +1195,9 @@ fn local_types_from_params(params: &[crate::java_ir::Param]) -> BTreeMap<String,
 
 fn field_type_name(owner: &TypeDecl, field: &str, declared: &BTreeSet<String>) -> Option<String> {
     owner.members.iter().find_map(|member| match member {
-        Member::Field(decl) if decl.name == field => declared_type_name(&decl.ty, declared),
+        Member::Field(decl) if decl.name == field => {
+            declared_type_name(&decl.ty, &owner.name, declared)
+        }
         _ => None,
     })
 }
@@ -1213,7 +1212,7 @@ fn field_storage_type_names(
         .iter()
         .find_map(|member| match member {
             Member::Field(decl) if decl.name == field => {
-                Some(declared_storage_type_names(&decl.ty, declared))
+                Some(declared_storage_type_names(&decl.ty, &owner.name, declared))
             }
             _ => None,
         })
@@ -1227,9 +1226,13 @@ fn field_storage_type_names(
 /// object graph, so `Cell[]` and `List<Cell>` both carry `Cell` even though most
 /// other storage facts deliberately ask for the single nominal type a slot
 /// names.
-fn declared_storage_type_names(ty: &JavaType, declared: &BTreeSet<String>) -> Vec<String> {
+fn declared_storage_type_names(
+    ty: &JavaType,
+    owner_name: &str,
+    declared: &BTreeSet<String>,
+) -> Vec<String> {
     let mut out = Vec::new();
-    collect_declared_storage_type_names(ty, declared, &mut out);
+    collect_declared_storage_type_names(ty, owner_name, declared, &mut out);
     out.sort();
     out.dedup();
     out
@@ -1237,29 +1240,36 @@ fn declared_storage_type_names(ty: &JavaType, declared: &BTreeSet<String>) -> Ve
 
 fn collect_declared_storage_type_names(
     ty: &JavaType,
+    owner_name: &str,
     declared: &BTreeSet<String>,
     into: &mut Vec<String>,
 ) {
     match ty {
-        JavaType::Array(inner) => collect_declared_storage_type_names(inner, declared, into),
+        JavaType::Array(inner) => {
+            collect_declared_storage_type_names(inner, owner_name, declared, into)
+        }
         JavaType::Named { args, .. } => {
-            if let Some(declared_name) = declared_type_name(ty, declared) {
+            if let Some(declared_name) = declared_type_name(ty, owner_name, declared) {
                 into.push(declared_name);
             }
             for arg in args {
-                collect_declared_storage_type_names(arg, declared, into);
+                collect_declared_storage_type_names(arg, owner_name, declared, into);
             }
         }
         JavaType::Wildcard(Some(WildcardBound::Extends(bound)))
         | JavaType::Wildcard(Some(WildcardBound::Super(bound))) => {
-            collect_declared_storage_type_names(bound, declared, into);
+            collect_declared_storage_type_names(bound, owner_name, declared, into);
         }
         _ => {}
     }
 }
 
 /// The declared source type a Java type names, ignoring anything external.
-fn declared_type_name(ty: &JavaType, declared: &BTreeSet<String>) -> Option<String> {
+fn declared_type_name(
+    ty: &JavaType,
+    owner_name: &str,
+    declared: &BTreeSet<String>,
+) -> Option<String> {
     let JavaType::Named { name, .. } = ty else {
         return None;
     };
@@ -1267,19 +1277,36 @@ fn declared_type_name(ty: &JavaType, declared: &BTreeSet<String>) -> Option<Stri
         return Some(name.clone());
     }
     let simple = simple_name(name);
-    declared
+    let owner_package = package_name(owner_name);
+    let same_package_matches = declared
         .iter()
-        .find(|declared| simple_name(declared) == simple)
-        .cloned()
+        .filter(|declared_name| {
+            simple_name(declared_name) == simple && package_name(declared_name) == owner_package
+        })
+        .collect::<Vec<_>>();
+    if same_package_matches.len() == 1 {
+        return Some((*same_package_matches[0]).clone());
+    }
+    let simple_matches = declared
+        .iter()
+        .filter(|declared_name| simple_name(declared_name) == simple)
+        .collect::<Vec<_>>();
+    (simple_matches.len() == 1).then(|| (*simple_matches[0]).clone())
 }
 
 fn simple_name(name: &str) -> &str {
     name.rsplit(['.', '$']).next().unwrap_or(name)
 }
 
+fn package_name(name: &str) -> Option<&str> {
+    name.rsplit_once('.').map(|(package, _)| package)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diagnostics::Span;
+    use crate::java_ir::FieldDecl;
 
     #[test]
     fn the_order_is_monotone_and_join_is_max() {
@@ -1436,6 +1463,70 @@ mod tests {
         assert_eq!(node.strategy(), StorageStrategy::SharedSync);
         assert_eq!(node.handle(), SharedHandle::Sync);
         assert_eq!(base.strategy("Leaf"), StorageStrategy::SharedImmutable);
+    }
+
+    #[test]
+    fn storage_strategy_simple_owner_uses_same_package_before_first_simple_match() {
+        let program = Program {
+            package: None,
+            imports: Vec::new(),
+            types: vec![
+                empty_class("a.Item"),
+                empty_class("b.Item"),
+                TypeDecl {
+                    kind: TypeKind::Class,
+                    name: "b.Holder".to_string(),
+                    type_params: Vec::new(),
+                    type_param_bounds: Vec::new(),
+                    modifiers: Vec::new(),
+                    extends: None,
+                    implements: Vec::new(),
+                    permits: Vec::new(),
+                    members: vec![Member::Field(FieldDecl {
+                        name: "held".to_string(),
+                        ty: JavaType::Named {
+                            name: "Item".to_string(),
+                            args: Vec::new(),
+                        },
+                        modifiers: vec![Modifier::Static],
+                        initializer: None,
+                        span: Span::default(),
+                    })],
+                    static_init_blocks: Vec::new(),
+                    span: Span::default(),
+                },
+            ],
+        };
+
+        let plan = plan_storage_strategies(&program, &UsageFacts::default());
+
+        assert!(
+            !plan
+                .facts("a.Item")
+                .expect("a.Item storage facts")
+                .static_reachable
+        );
+        assert!(
+            plan.facts("b.Item")
+                .expect("b.Item storage facts")
+                .static_reachable
+        );
+    }
+
+    fn empty_class(name: &str) -> TypeDecl {
+        TypeDecl {
+            kind: TypeKind::Class,
+            name: name.to_string(),
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            modifiers: Vec::new(),
+            extends: None,
+            implements: Vec::new(),
+            permits: Vec::new(),
+            members: Vec::new(),
+            static_init_blocks: Vec::new(),
+            span: Span::default(),
+        }
     }
 }
 
@@ -1958,19 +2049,6 @@ mod placement_law_tests {
             if !placement.shared {
                 assert_eq!(value, "v");
             }
-        }
-    }
-
-    #[test]
-    fn wrapped_construction_detection_follows_handle_axis() {
-        for placement in all_placements() {
-            let value = placement.wrap_construction("v".to_string());
-            assert_eq!(
-                placement.construction_expr_is_wrapped(&value),
-                placement.shared,
-                "{placement:?}: wrapped construction detection should match the handle axis"
-            );
-            assert!(!placement.construction_expr_is_wrapped("v"));
         }
     }
 

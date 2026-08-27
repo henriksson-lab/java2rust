@@ -1,4 +1,2 @@
 # external_packs known failures
 # Recorded by scripts/gate.sh --record. Diff names, not counts.
-builtin_pack_manifests_explicitly_classify_modeled_member_facts
-java_sql_pack_does_not_claim_project_connection_or_reflection_class_names

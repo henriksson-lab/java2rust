@@ -65,7 +65,6 @@ pub enum SlotValueRustTypePolicy {
     ErasedObject,
     DynTrait { trait_name: String },
     ConcreteDispatch { java_ty: JavaType },
-    NativeDispatch { java_ty: JavaType },
     DynTraitView { trait_name: String },
     BoxedDynTraitView { trait_name: String },
     StringView,
@@ -98,6 +97,8 @@ pub enum NativeJavaRustTypePolicy {
 pub enum NativeSequenceContainer {
     Vec,
     HashSet,
+    BTreeSet,
+    LinkedHashSet,
     HashFreeSet,
 }
 
@@ -109,7 +110,6 @@ pub struct NativeNamedJavaRustTypePolicy {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlotContentCapabilityPolicy {
-    pub java_ty: JavaType,
     pub string_content: bool,
     pub sequence_element: Option<JavaType>,
 }
@@ -232,11 +232,6 @@ fn shared_handle_slot_rust_type(
     storage_placement_type(placement, rendered)
 }
 
-pub fn slot_rust_type_policy(shape: &RustSlotShape, facts: &FactSet) -> SlotRustTypePolicy {
-    let effective_facts = EffectiveFacts::new(facts);
-    slot_rust_type_policy_with_effective_facts(shape, &effective_facts)
-}
-
 pub fn slot_rust_type_policy_with_effective_facts(
     shape: &RustSlotShape,
     facts: &EffectiveFacts<'_>,
@@ -253,14 +248,6 @@ pub fn slot_rust_type_policy_with_effective_facts(
         OwnershipShape::SharedBorrow => SlotRustTypePolicy::SharedBorrow { ty: viewed },
         OwnershipShape::MutableBorrow => SlotRustTypePolicy::MutableBorrow { ty: viewed },
     }
-}
-
-pub fn slot_value_rust_type_policy(
-    shape: &RustSlotShape,
-    facts: &FactSet,
-) -> SlotValueRustTypePolicy {
-    let effective_facts = EffectiveFacts::new(facts);
-    slot_value_rust_type_policy_with_effective_facts(shape, &effective_facts)
 }
 
 pub fn slot_value_rust_type_policy_with_effective_facts(
@@ -287,7 +274,9 @@ pub fn slot_value_rust_type_policy_with_effective_facts(
         }
         (ViewShape::Slice, _, _) => {
             if let Some(element_ty) = content.sequence_element {
-                SlotValueRustTypePolicy::SliceView { element_ty }
+                SlotValueRustTypePolicy::SliceView {
+                    element_ty: rust_storage_sequence_element_java_type(&shape.java_ty, element_ty),
+                }
             } else {
                 slot_dispatch_rust_type_policy(shape)
             }
@@ -337,14 +326,6 @@ fn slot_dispatch_rust_type_policy(shape: &RustSlotShape) -> SlotValueRustTypePol
     }
 }
 
-pub fn render_slot_value_rust_type_policy(
-    policy: &SlotValueRustTypePolicy,
-    facts: &FactSet,
-) -> RustType {
-    let effective_facts = EffectiveFacts::new(facts);
-    render_slot_value_rust_type_policy_with_effective_facts(policy, &effective_facts)
-}
-
 pub fn render_slot_value_rust_type_policy_with_effective_facts(
     policy: &SlotValueRustTypePolicy,
     facts: &EffectiveFacts<'_>,
@@ -387,12 +368,9 @@ pub fn render_slot_value_rust_type_policy_with_effective_facts(
                 rust_type_for_java_type_with_effective_facts(java_ty, facts)
             }
         }
-        SlotValueRustTypePolicy::NativeDispatch { java_ty } => {
-            rust_type_for_java_type_with_effective_facts(java_ty, facts)
-        }
         SlotValueRustTypePolicy::StringView => RustType::Raw("str".to_string()),
         SlotValueRustTypePolicy::SliceView { element_ty } => RustType::Slice(Box::new(
-            rust_type_for_java_type_with_effective_facts(element_ty, facts),
+            rust_type_for_java_generic_arg_with_effective_facts(element_ty, facts),
         )),
     }
 }
@@ -456,10 +434,6 @@ fn rust_trait_name_path(trait_name: &str) -> String {
     } else {
         rust_name_for_java_named_type(trait_name)
     }
-}
-
-pub fn default_expr_for_slot(shape: &RustSlotShape) -> RustExpr {
-    default_expr_for_slot_with_facts(shape, &FactSet::default())
 }
 
 pub fn default_expr_for_slot_with_facts(shape: &RustSlotShape, facts: &FactSet) -> RustExpr {
@@ -540,13 +514,18 @@ fn storage_placement_construction_expr_is_wrapped(
 }
 
 fn rust_path_expr_matches(expr: &RustExpr, base: &str, leaf: &str) -> bool {
-    let RustExpr::Path(segments) = expr.unshaped() else {
-        return false;
-    };
-    segments
-        .iter()
-        .map(String::as_str)
-        .eq(base.split("::").chain(std::iter::once(leaf)))
+    match expr.unshaped() {
+        RustExpr::Path(segments) => segments
+            .iter()
+            .map(String::as_str)
+            .eq(base.split("::").chain(std::iter::once(leaf))),
+        RustExpr::GenericPath {
+            base: segments,
+            member: Some(member),
+            ..
+        } if member == leaf => segments.iter().map(String::as_str).eq(base.split("::")),
+        _ => false,
+    }
 }
 
 pub fn storage_placement_type(placement: StoragePlacement, rendered: RustType) -> RustType {
@@ -567,11 +546,6 @@ fn storage_wrapper_new_call_expr(wrapper_path: &str, value: RustExpr) -> RustExp
         function: Box::new(RustExpr::path(segments)),
         args: vec![value],
     }
-}
-
-pub fn slot_default_policy(shape: &RustSlotShape, facts: &FactSet) -> SlotDefaultPolicy {
-    let effective_facts = EffectiveFacts::new(facts);
-    slot_default_policy_with_effective_facts(shape, &effective_facts)
 }
 
 pub fn slot_default_policy_with_effective_facts(
@@ -605,11 +579,6 @@ pub fn slot_default_policy_with_effective_facts(
     SlotDefaultPolicy::Value {
         policy: slot_default_value_policy_with_effective_facts(shape, facts),
     }
-}
-
-pub fn slot_default_value_policy(shape: &RustSlotShape, facts: &FactSet) -> SlotDefaultValuePolicy {
-    let effective_facts = EffectiveFacts::new(facts);
-    slot_default_value_policy_with_effective_facts(shape, &effective_facts)
 }
 
 pub fn slot_default_value_policy_with_effective_facts(
@@ -736,7 +705,7 @@ pub fn rust_type_for_java_type_with_facts_and_representations(
                     ),
                 ));
             }
-            crate::stdlib::JavaCollectionKind::Set => {
+            kind if kind.is_set_like() => {
                 let element_ty = args
                     .first()
                     .cloned()
@@ -753,9 +722,21 @@ pub fn rust_type_for_java_type_with_facts_and_representations(
                 ) {
                     return RustType::Vec(Box::new(element_rust));
                 }
-                return rust_generic_type("std::collections::HashSet", vec![element_rust]);
+                return rust_generic_type(
+                    match kind {
+                        crate::stdlib::JavaCollectionKind::SortedSet => {
+                            "std::collections::BTreeSet"
+                        }
+                        crate::stdlib::JavaCollectionKind::InsertionOrderedSet => {
+                            "JavaLinkedHashSet"
+                        }
+                        _ => "std::collections::HashSet",
+                    },
+                    vec![element_rust],
+                );
             }
-            crate::stdlib::JavaCollectionKind::Map => {}
+            kind if kind.is_map_like() => {}
+            _ => {}
         }
     }
 
@@ -776,11 +757,6 @@ pub fn rust_type_for_java_type_with_effective_facts(
     )
 }
 
-pub fn native_java_rust_type_policy(ty: &JavaType, facts: &FactSet) -> NativeJavaRustTypePolicy {
-    let effective_facts = EffectiveFacts::new(facts);
-    native_java_rust_type_policy_with_effective_facts(ty, &effective_facts)
-}
-
 pub fn native_java_rust_type_policy_with_effective_facts(
     ty: &JavaType,
     facts: &EffectiveFacts<'_>,
@@ -790,6 +766,13 @@ pub fn native_java_rust_type_policy_with_effective_facts(
             ty: RustType::Array2(Box::new(
                 rust_type_for_java_generic_arg_with_effective_facts(&element_ty, facts),
             )),
+        };
+    }
+    if erased_facade_concrete_dispatch_should_keep_named_type(ty, facts)
+        && let JavaType::Named { name, .. } = ty
+    {
+        return NativeJavaRustTypePolicy::Direct {
+            ty: RustType::Named(rust_name_for_java_named_type(name)),
         };
     }
     if matches!(
@@ -836,28 +819,51 @@ pub fn native_java_rust_type_policy_with_effective_facts(
                         .unwrap_or_else(erased_object_java_type),
                 };
             }
-            crate::stdlib::JavaCollectionKind::Set => {
+            kind if kind.is_set_like() => {
                 let element_ty = args
                     .first()
                     .cloned()
                     .unwrap_or_else(erased_object_java_type);
                 return NativeJavaRustTypePolicy::Sequence {
-                    container: if java_set_element_uses_hash_free_carrier(&element_ty, facts) {
-                        NativeSequenceContainer::HashFreeSet
-                    } else {
-                        NativeSequenceContainer::HashSet
+                    container: match kind {
+                        crate::stdlib::JavaCollectionKind::SortedSet => {
+                            NativeSequenceContainer::BTreeSet
+                        }
+                        crate::stdlib::JavaCollectionKind::InsertionOrderedSet => {
+                            NativeSequenceContainer::LinkedHashSet
+                        }
+                        _ if java_set_element_uses_hash_free_carrier(&element_ty, facts) => {
+                            NativeSequenceContainer::HashFreeSet
+                        }
+                        _ => NativeSequenceContainer::HashSet,
                     },
                     element_ty,
                 };
             }
-            crate::stdlib::JavaCollectionKind::Map if args.len() == 2 => {}
-            crate::stdlib::JavaCollectionKind::Map => {
+            kind if kind.is_map_like() && args.len() == 2 => {}
+            kind if kind.is_map_like() => {
                 return NativeJavaRustTypePolicy::Direct {
                     ty: rust_generic_type(
-                        "std::collections::HashMap",
+                        match kind {
+                            crate::stdlib::JavaCollectionKind::SortedMap => {
+                                "std::collections::BTreeMap"
+                            }
+                            crate::stdlib::JavaCollectionKind::InsertionOrderedMap => {
+                                "JavaLinkedHashMap"
+                            }
+                            _ => "std::collections::HashMap",
+                        },
                         vec![RustType::String, erased_object_rust_type()],
                     ),
                 };
+            }
+            crate::stdlib::JavaCollectionKind::Set
+            | crate::stdlib::JavaCollectionKind::SortedSet
+            | crate::stdlib::JavaCollectionKind::InsertionOrderedSet
+            | crate::stdlib::JavaCollectionKind::Map
+            | crate::stdlib::JavaCollectionKind::SortedMap
+            | crate::stdlib::JavaCollectionKind::InsertionOrderedMap => {
+                unreachable!("set/map collection kinds are handled by guarded arms")
             }
         }
     }
@@ -876,7 +882,7 @@ pub fn native_java_rust_type_policy_with_effective_facts(
     {
         return NativeJavaRustTypePolicy::Sequence {
             container: NativeSequenceContainer::Vec,
-            element_ty,
+            element_ty: rust_storage_sequence_element_java_type(ty, element_ty),
         };
     }
     if let Some(element_ty) = optional_element_type(ty) {
@@ -945,9 +951,18 @@ pub fn native_java_rust_type_policy_with_effective_facts(
         }
         JavaType::Named { .. } if crate::stdlib::java_map_type_args(ty).is_some() => {
             let (key, value) = crate::stdlib::java_map_type_args(ty).unwrap();
+            let kind = crate::stdlib::java_collection_kind_for_type(ty)
+                .unwrap_or(crate::stdlib::JavaCollectionKind::Map);
             NativeJavaRustTypePolicy::Direct {
                 ty: rust_generic_type(
-                    "std::collections::HashMap",
+                    if matches!(kind, crate::stdlib::JavaCollectionKind::SortedMap) {
+                        "std::collections::BTreeMap"
+                    } else if matches!(kind, crate::stdlib::JavaCollectionKind::InsertionOrderedMap)
+                    {
+                        "JavaLinkedHashMap"
+                    } else {
+                        "std::collections::HashMap"
+                    },
                     vec![
                         rust_type_for_java_generic_arg_with_effective_facts(key, facts),
                         rust_type_for_java_generic_arg_with_effective_facts(value, facts),
@@ -1022,20 +1037,11 @@ fn class_token_arg_rust_type(arg: &JavaType, facts: &EffectiveFacts<'_>) -> Rust
     }
 }
 
-pub fn slot_content_capability_policy(
-    java_ty: &JavaType,
-    facts: &FactSet,
-) -> SlotContentCapabilityPolicy {
-    let effective_facts = EffectiveFacts::new(facts);
-    slot_content_capability_policy_with_effective_facts(java_ty, &effective_facts)
-}
-
 pub fn slot_content_capability_policy_with_effective_facts(
     java_ty: &JavaType,
     facts: &EffectiveFacts<'_>,
 ) -> SlotContentCapabilityPolicy {
     SlotContentCapabilityPolicy {
-        java_ty: java_ty.clone(),
         string_content: facts.is_string_like_type(java_ty),
         sequence_element: facts.sequence_element_type_for(java_ty),
     }
@@ -1142,6 +1148,18 @@ fn erased_facade_concrete_dispatch_should_keep_named_type(
     ty: &JavaType,
     facts: &EffectiveFacts<'_>,
 ) -> bool {
+    let erased;
+    let ty = if let JavaType::Named { name, args } = ty
+        && !args.is_empty()
+    {
+        erased = JavaType::Named {
+            name: name.clone(),
+            args: Vec::new(),
+        };
+        &erased
+    } else {
+        ty
+    };
     matches!(
         facts.object_representation_override_strategy_for(ty),
         Some(HierarchyStrategy::ErasedObject)
@@ -1167,6 +1185,17 @@ fn rust_type_for_java_generic_arg_with_effective_facts(
 }
 
 fn rust_type_for_java_generic_arg_unwrapped(ty: &JavaType, facts: &EffectiveFacts<'_>) -> RustType {
+    if let JavaType::Wildcard(Some(WildcardBound::Extends(bound))) = ty {
+        return rust_type_for_java_generic_arg_unwrapped(bound, facts);
+    }
+    if let JavaType::Array(element_ty) = ty {
+        return RustType::Vec(Box::new(
+            rust_type_for_java_generic_arg_with_effective_facts(
+                &rust_storage_array_element_java_type(element_ty.as_ref().clone()),
+                facts,
+            ),
+        ));
+    }
     if let Some(enum_name) = closed_runtime_case_split_enum_name(ty, facts) {
         return RustType::Named(enum_name);
     }
@@ -1202,11 +1231,40 @@ fn rust_type_for_java_generic_arg_unwrapped(ty: &JavaType, facts: &EffectiveFact
     rust_type_for_java_type_with_effective_facts(ty, facts)
 }
 
+fn rust_storage_sequence_element_java_type(
+    container_ty: &JavaType,
+    element_ty: JavaType,
+) -> JavaType {
+    if matches!(container_ty, JavaType::Array(_)) {
+        rust_storage_array_element_java_type(element_ty)
+    } else {
+        element_ty
+    }
+}
+
+fn rust_storage_array_element_java_type(element_ty: JavaType) -> JavaType {
+    if reference_array_element_needs_nullable_carrier(&element_ty) {
+        crate::types::optional_java_type(element_ty)
+    } else {
+        element_ty
+    }
+}
+
+fn reference_array_element_needs_nullable_carrier(element_ty: &JavaType) -> bool {
+    !matches!(
+        element_ty,
+        JavaType::Primitive(_) | JavaType::Void | JavaType::Array(_)
+    ) && optional_element_type(element_ty).is_none()
+}
+
 fn rust_type_for_java_generic_arg_with_representations(
     ty: &JavaType,
     facts: &EffectiveFacts<'_>,
     representations: &RepresentationPlan,
 ) -> RustType {
+    if let JavaType::Wildcard(Some(WildcardBound::Extends(bound))) = ty {
+        return rust_type_for_java_generic_arg_with_representations(bound, facts, representations);
+    }
     if builtin_or_conservative_erased_external_representation(ty, representations)
         && let JavaType::Named { name, .. } | JavaType::Unknown(name) = ty
     {
@@ -1240,7 +1298,11 @@ fn rust_type_for_facade_aware_representation_dispatch(
     if builtin_or_conservative_erased_external_representation(ty, representations) {
         return None;
     }
-    rust_type_for_representation_dispatch(ty, representations)
+    let dispatch = representations.dispatch_for(ty);
+    match dispatch {
+        DispatchShape::DynTrait { trait_name } => Some(rust_boxed_dyn_trait_type(trait_name)),
+        _ => rust_type_for_representation_dispatch(ty, representations),
+    }
 }
 
 fn closed_runtime_case_split_enum_name(
@@ -1290,14 +1352,6 @@ pub fn rust_name_for_java_named_type(name: &str) -> String {
     crate::java_naming::rust_name_for_java_named_type(name)
 }
 
-pub fn render_native_java_rust_type_policy(
-    policy: &NativeJavaRustTypePolicy,
-    facts: &FactSet,
-) -> RustType {
-    let effective_facts = EffectiveFacts::new(facts);
-    render_native_java_rust_type_policy_with_effective_facts(policy, &effective_facts)
-}
-
 pub fn render_native_java_rust_type_policy_with_effective_facts(
     policy: &NativeJavaRustTypePolicy,
     facts: &EffectiveFacts<'_>,
@@ -1313,6 +1367,12 @@ pub fn render_native_java_rust_type_policy_with_effective_facts(
                 NativeSequenceContainer::HashFreeSet => RustType::Vec(Box::new(element_ty)),
                 NativeSequenceContainer::HashSet => {
                     rust_generic_type("std::collections::HashSet", vec![element_ty])
+                }
+                NativeSequenceContainer::BTreeSet => {
+                    rust_generic_type("std::collections::BTreeSet", vec![element_ty])
+                }
+                NativeSequenceContainer::LinkedHashSet => {
+                    rust_generic_type("JavaLinkedHashSet", vec![element_ty])
                 }
             }
         }
@@ -1355,15 +1415,15 @@ pub fn java_set_uses_hash_free_carrier_with_effective_facts(
     let JavaType::Named { args, .. } = ty else {
         return false;
     };
-    if crate::stdlib::java_collection_kind_for_type(ty)
-        != Some(crate::stdlib::JavaCollectionKind::Set)
-    {
+    if !matches!(
+        crate::stdlib::java_collection_kind_for_type(ty),
+        Some(crate::stdlib::JavaCollectionKind::Set)
+    ) {
         return false;
     }
-    let element_ty = args
-        .first()
-        .cloned()
-        .unwrap_or_else(erased_object_java_type);
+    let Some(element_ty) = args.first() else {
+        return false;
+    };
     java_set_element_uses_hash_free_carrier(&element_ty, facts)
 }
 
@@ -1371,16 +1431,13 @@ fn java_set_element_type_or_erased(ty: &JavaType) -> Option<JavaType> {
     let JavaType::Named { args, .. } = ty else {
         return None;
     };
-    if crate::stdlib::java_collection_kind_for_type(ty)
-        != Some(crate::stdlib::JavaCollectionKind::Set)
-    {
+    if !matches!(
+        crate::stdlib::java_collection_kind_for_type(ty),
+        Some(crate::stdlib::JavaCollectionKind::Set)
+    ) {
         return None;
     }
-    Some(
-        args.first()
-            .cloned()
-            .unwrap_or_else(erased_object_java_type),
-    )
+    args.first().cloned()
 }
 
 fn java_set_element_uses_hash_free_carrier(
@@ -1495,6 +1552,26 @@ mod tests {
                 function: Box::new(RustExpr::path(["std", "rc", "Rc", "new"])),
                 args: vec![RustExpr::Var("value".to_string())],
             }
+        );
+
+        let generic_already_wrapped = storage_placement_construction_expr(
+            StoragePlacement {
+                shared: true,
+                interior_mutable: false,
+                sync: false,
+            },
+            RustExpr::Call {
+                function: Box::new(RustExpr::GenericPath {
+                    base: vec!["std".to_string(), "rc".to_string(), "Rc".to_string()],
+                    args: vec![RustType::Named("Value".to_string())],
+                    member: Some("new".to_string()),
+                }),
+                args: vec![RustExpr::Var("value".to_string())],
+            },
+        );
+        assert_eq!(
+            crate::emit::emit_expr(&generic_already_wrapped),
+            "std::rc::Rc::<Value>::new(value)"
         );
 
         let opaque_raw_payload = storage_placement_construction_expr(

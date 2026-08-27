@@ -1,5 +1,5 @@
 use new_java2rust::java_ir::{
-    BinaryOp, Expr, JavaType, Literal, Member, PrimitiveType, Stmt, TypeKind, UnaryOp,
+    BinaryOp, Expr, JavaType, Literal, Member, PrimitiveType, Stmt, SwitchLabel, TypeKind, UnaryOp,
 };
 use new_java2rust::parser::parse_java_source;
 
@@ -40,6 +40,49 @@ fn parses_array_initializer_literals_without_raw_fallbacks() {
     assert_eq!(rows.len(), 2);
     assert!(matches!(&rows[0], Expr::ArrayInitializer(row) if row.len() == 3));
     assert!(matches!(&rows[1], Expr::ArrayInitializer(row) if row.len() == 3));
+}
+
+#[test]
+fn reports_tree_sitter_recovered_syntax_errors() {
+    let parsed = parse_java_source(
+        r#"
+class RecoveredSyntaxError {
+    int bad(int a, int b) {
+        return a + b ~;
+    }
+}
+"#,
+    );
+
+    assert!(parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+    assert!(
+        parsed.diagnostics.has_code("java_syntax_error")
+            || parsed.diagnostics.has_code("java_syntax_missing"),
+        "{:?}",
+        parsed.diagnostics
+    );
+}
+
+#[test]
+fn reports_missing_java_syntax_tokens() {
+    let parsed = parse_java_source(
+        r#"
+class MissingSyntaxToken {
+    int bad(int a, int b) {
+        int x = a ? b;
+        return x;
+    }
+}
+"#,
+    );
+
+    assert!(parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+    assert!(
+        parsed.diagnostics.has_code("java_syntax_missing")
+            || parsed.diagnostics.has_code("java_syntax_error"),
+        "{:?}",
+        parsed.diagnostics
+    );
 }
 
 #[test]
@@ -517,6 +560,40 @@ enum LocalizedFormats {
 }
 
 #[test]
+fn parses_enum_constant_class_body_as_initializer_body() {
+    let parsed = parse_java_source(
+        r#"
+enum Op {
+    ADD { int apply(int a, int b) { return a + b; } },
+    MUL { int apply(int a, int b) { return a * b; } };
+    abstract int apply(int a, int b);
+}
+"#,
+    );
+
+    assert!(!parsed.diagnostics.has_code("parse_no_class"));
+    let ty = &parsed.program.types[0];
+    let add = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Field(field) if field.name == "ADD" => Some(field),
+            _ => None,
+        })
+        .unwrap();
+    assert!(matches!(
+        add.initializer.as_ref(),
+        Some(Expr::New {
+            body: Some(members),
+            ..
+        }) if members.iter().any(|member| matches!(
+            member,
+            Member::Method(method) if method.name == "apply"
+        ))
+    ));
+}
+
+#[test]
 fn parses_gatk_top_level_annotation_without_no_class_error() {
     let parsed = parse_java_source(&parser_gap("GatkTopLevelAnnotation.java"));
 
@@ -701,6 +778,140 @@ class YieldSwitchExpressionSupported {
             initializer: Some(Expr::Switch { cases, .. }),
             ..
         } if cases.len() == 2
+    ));
+}
+
+#[test]
+fn parses_arrow_switch_statement_rules_as_cases() {
+    let parsed = parse_java_source(
+        r#"
+class ArrowSwitchStatementSupported {
+    int run(int value) {
+        int mapped = 0;
+        switch (value) {
+            case 1 -> mapped = 10;
+            default -> mapped = 20;
+        }
+        return mapped;
+    }
+}
+"#,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+
+    let body = method_body(&parsed.program.types[0], "run");
+    assert!(matches!(
+        &body.statements[1],
+        Stmt::Switch { cases, .. }
+            if cases.len() == 2
+                && cases.iter().all(|case| case.labels.len() == 1)
+                && cases.iter().all(|case| !case.statements.is_empty())
+    ));
+}
+
+#[test]
+fn parses_comma_switch_labels_as_multiple_labels() {
+    let parsed = parse_java_source(
+        r#"
+class CommaSwitchLabelsSupported {
+    int expression(int value) {
+        return switch (value) {
+            case 1, 2, 3 -> 10;
+            default -> 20;
+        };
+    }
+
+    int statement(int value) {
+        int mapped = 0;
+        switch (value) {
+            case 1, 2, 3: mapped = 10; break;
+            default: mapped = 20;
+        }
+        return mapped;
+    }
+}
+"#,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+
+    let expression_body = method_body(&parsed.program.types[0], "expression");
+    assert!(matches!(
+        &expression_body.statements[0],
+        Stmt::Return(Some(Expr::Switch { cases, .. }))
+            if cases.first().is_some_and(|case| case.labels.len() == 3)
+    ));
+
+    let statement_body = method_body(&parsed.program.types[0], "statement");
+    assert!(matches!(
+        &statement_body.statements[1],
+        Stmt::Switch { cases, .. }
+            if cases.first().is_some_and(|case| case.labels.len() == 3)
+    ));
+}
+
+#[test]
+fn parses_shared_yield_switch_expression_labels_together() {
+    let parsed = parse_java_source(
+        r#"
+class SharedYieldSwitchLabelsSupported {
+    int run(int value) {
+        return switch (value) {
+            case 1: case 2: yield 10;
+            default: yield 20;
+        };
+    }
+}
+"#,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+
+    let body = method_body(&parsed.program.types[0], "run");
+    assert!(matches!(
+        &body.statements[0],
+        Stmt::Return(Some(Expr::Switch { cases, .. }))
+            if cases.first().is_some_and(|case| case.labels.len() == 2)
+    ));
+}
+
+#[test]
+fn switch_expression_block_and_throw_groups_stay_loud() {
+    let parsed = parse_java_source(
+        r#"
+class UnsupportedSwitchExpressionGroups {
+    int blockArm(int value) {
+        return switch (value) {
+            case 1: { int temp = 4; yield temp * 2; }
+            default: yield 20;
+        };
+    }
+
+    int throwArm(int value) {
+        return switch (value) {
+            case 1: throw new RuntimeException();
+            default: yield 20;
+        };
+    }
+}
+"#,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+
+    let block_body = method_body(&parsed.program.types[0], "blockArm");
+    assert!(matches!(
+        &block_body.statements[0],
+        Stmt::Return(Some(Expr::Switch { cases, .. }))
+            if cases.len() == 2
+                && matches!(cases[0].value, Expr::Unsupported { .. })
+                && matches!(cases[0].labels.as_slice(), [SwitchLabel::Expr(_)])
+    ));
+
+    let throw_body = method_body(&parsed.program.types[0], "throwArm");
+    assert!(matches!(
+        &throw_body.statements[0],
+        Stmt::Return(Some(Expr::Switch { cases, .. }))
+            if cases.len() == 2
+                && matches!(cases[0].value, Expr::Unsupported { .. })
+                && matches!(cases[0].labels.as_slice(), [SwitchLabel::Expr(_)])
     ));
 }
 

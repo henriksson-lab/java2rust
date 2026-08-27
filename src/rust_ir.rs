@@ -181,6 +181,11 @@ pub enum RustExpr {
         ty: RustType,
         member: String,
     },
+    TraitAssociatedPath {
+        ty: RustType,
+        trait_name: String,
+        member: String,
+    },
     Field(Box<RustExpr>, String),
     Index(Box<RustExpr>, Box<RustExpr>),
     Binary {

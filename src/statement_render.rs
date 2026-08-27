@@ -7,10 +7,6 @@ use crate::slot_render::{
     rust_type_for_slot_with_facts, rust_type_for_slot_with_facts_and_representations,
 };
 
-pub fn local_let_stmt(local: &LocalPlan, value: Option<RustExpr>) -> RustStmt {
-    local_let_stmt_with_facts(local, value, &FactSet::default())
-}
-
 pub fn local_let_stmt_with_facts(
     local: &LocalPlan,
     value: Option<RustExpr>,
@@ -112,10 +108,6 @@ pub fn while_let_stmt(
 
 pub fn break_stmt(label: Option<String>) -> RustStmt {
     RustStmt::Break(label)
-}
-
-pub fn break_value_stmt(label: Option<String>, value: RustExpr) -> RustStmt {
-    RustStmt::BreakValue { label, value }
 }
 
 pub fn continue_stmt(label: Option<String>) -> RustStmt {

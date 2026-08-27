@@ -71,10 +71,48 @@ fn looks_like_accessor_method(method: &str) -> bool {
 }
 
 fn rust_owner_path(target: &str) -> String {
-    target
-        .split(['.', '$'])
-        .filter(|part| !part.is_empty())
-        .last()
-        .unwrap_or(target)
-        .to_string()
+    crate::java_naming::rust_name_for_java_named_type(&target.replace('$', "."))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MethodReferencePlan, plan_method_reference};
+
+    #[test]
+    fn method_reference_owner_preserves_package_and_nested_identity() {
+        assert_eq!(
+            plan_method_reference("a.Mapper", "tag"),
+            MethodReferencePlan::AssociatedFunction {
+                owner: "AMapper".to_string(),
+                method: "tag".to_string(),
+            }
+        );
+        assert_eq!(
+            plan_method_reference("b.Mapper", "tag"),
+            MethodReferencePlan::AssociatedFunction {
+                owner: "BMapper".to_string(),
+                method: "tag".to_string(),
+            }
+        );
+        assert_eq!(
+            plan_method_reference("K.AB", "tag"),
+            MethodReferencePlan::AssociatedFunction {
+                owner: "K_AB".to_string(),
+                method: "tag".to_string(),
+            }
+        );
+        assert_eq!(
+            plan_method_reference("K.A.B", "tag"),
+            MethodReferencePlan::AssociatedFunction {
+                owner: "K_A_B".to_string(),
+                method: "tag".to_string(),
+            }
+        );
+        assert_eq!(
+            plan_method_reference("a.Mapper", "new"),
+            MethodReferencePlan::Constructor {
+                type_name: "AMapper".to_string(),
+            }
+        );
+    }
 }

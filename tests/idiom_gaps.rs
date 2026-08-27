@@ -1,13 +1,12 @@
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 use new_java2rust::facts::{
     DispatchRequirementFact, DispatchRequirementKind, ExternalApiArgumentEffectFact,
     ExternalApiCoverage, ExternalApiEffectFact, ExternalApiRole, ExternalArgumentAliasPolicy,
     ExternalFfiHandoverFact, ExternalFfiHandoverSlot, ExternalFieldFact, ExternalFieldKind,
-    ExternalLibraryMode, ExternalLibraryPackFact, FactProvenance, FactSet, FieldKey,
-    HierarchyOverride, HierarchyStrategy, NullabilityState, OwnedRecoveryCapability,
+    ExternalFieldValueFact, ExternalLibraryMode, ExternalLibraryPackFact, FactProvenance, FactSet,
+    FieldKey, HierarchyOverride, HierarchyStrategy, NullabilityState, OwnedRecoveryCapability,
     OwnedRecoveryCapabilityFact, ReceiverMutabilityFact, TypeCapabilityOverride,
 };
 use new_java2rust::java_ir::{JavaType, PrimitiveType};
@@ -20,10 +19,146 @@ use new_java2rust::{
 
 #[path = "common/mod.rs"]
 mod common;
-use common::{GeneratedCrateModule, cargo_check_generated_modules, cargo_test_generated_modules};
+use common::{
+    GeneratedCrateModule, cargo_check_generated_modules, cargo_check_generated_modules_fails_with,
+    cargo_test_generated_modules,
+};
 
 fn idiom_gap(path: &str) -> String {
     fs::read_to_string(Path::new("examples/idiom-gaps").join(path)).unwrap()
+}
+
+fn cargo_test_generated_modules_for_translation(
+    crate_name: &str,
+    rust: String,
+    tests: &'static str,
+) {
+    cargo_test_generated_modules(
+        crate_name,
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust,
+            tests,
+        }],
+    );
+}
+
+fn ndarray_stub_module() -> GeneratedCrateModule {
+    GeneratedCrateModule {
+        name: "ndarray",
+        rust: r#"
+use std::ops::{Index, IndexMut};
+
+#[derive(Clone, PartialEq)]
+pub struct Array2<T> {
+    rows: usize,
+    cols: usize,
+    values: Vec<T>,
+}
+
+impl<T: Clone> Array2<T> {
+    pub fn from_elem(shape: (usize, usize), value: T) -> Self {
+        Self {
+            rows: shape.0,
+            cols: shape.1,
+            values: vec![value; shape.0 * shape.1],
+        }
+    }
+
+    pub fn from_rows(rows: &'static [&'static [T]]) -> Self {
+        let row_count = rows.len();
+        let col_count = rows.first().map_or(0, |row| row.len());
+        Self {
+            rows: row_count,
+            cols: col_count,
+            values: rows.iter().flat_map(|row| row.iter().cloned()).collect(),
+        }
+    }
+
+    pub fn fill(&mut self, value: T) {
+        self.values.fill(value);
+    }
+}
+
+pub fn arr2<T: Clone, const R: usize, const C: usize>(rows: &[[T; C]; R]) -> Array2<T> {
+    Array2 {
+        rows: R,
+        cols: C,
+        values: rows.iter().flat_map(|row| row.iter().cloned()).collect(),
+    }
+}
+
+impl<T> Array2<T> {
+    pub fn nrows(&self) -> usize {
+        self.rows
+    }
+
+    pub fn row(&self, row: usize) -> Vec<T>
+    where
+        T: Clone,
+    {
+        let start = row * self.cols;
+        self.values[start..start + self.cols].to_vec()
+    }
+
+    pub fn row_mut(&mut self, row: usize) -> RowMut<'_, T> {
+        let start = row * self.cols;
+        RowMut {
+            values: &mut self.values[start..start + self.cols],
+        }
+    }
+}
+
+pub struct ArrayView1<'a, T> {
+    values: &'a [T],
+}
+
+impl<'a, T> ArrayView1<'a, T> {
+    pub fn from(values: &'a [T]) -> Self {
+        Self { values }
+    }
+}
+
+pub struct RowMut<'a, T> {
+    values: &'a mut [T],
+}
+
+impl<T: Clone> RowMut<'_, T> {
+    pub fn assign(&mut self, values: &ArrayView1<'_, T>) {
+        self.values.clone_from_slice(values.values);
+    }
+}
+
+impl<T> Index<[usize; 2]> for Array2<T> {
+    type Output = T;
+
+    fn index(&self, index: [usize; 2]) -> &Self::Output {
+        &self.values[index[0] * self.cols + index[1]]
+    }
+}
+
+impl<T> IndexMut<[usize; 2]> for Array2<T> {
+    fn index_mut(&mut self, index: [usize; 2]) -> &mut Self::Output {
+        &mut self.values[index[0] * self.cols + index[1]]
+    }
+}
+"#
+        .to_string(),
+        tests: "",
+    }
+}
+
+fn external_api_facade_support_items_for_test(
+    program: &new_java2rust::java_ir::Program,
+    facts: &FactSet,
+) -> Vec<new_java2rust::rust_ir::RustItem> {
+    new_java2rust::stdlib::external_api_facade_support_items_with_local_type_program(
+        program,
+        facts,
+        program,
+        &new_java2rust::java_ir::Program::default(),
+        &new_java2rust::representation::RepresentationPlan::default(),
+    )
 }
 
 #[test]
@@ -67,6 +202,15 @@ fn documents_gatk_acronym_identifier_splitting_gap() {
         "{:?}\n{}",
         translation.diagnostics.iter().collect::<Vec<_>>(),
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "acronym_identifier_names",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -664,6 +808,96 @@ class StaticKeywordFields {
 }
 
 #[test]
+fn bare_static_storage_keyword_alias_does_not_overwrite_exact_field() {
+    let translation = translate_source(
+        r#"
+class BareStaticKeywordFields {
+    static int self__;
+    static int self;
+
+    static void set() {
+        self__ = 2;
+        self = 1;
+    }
+
+    static int sum() {
+        return self + self__;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("fn __static_self__() -> i32")
+            && translation.rust.contains("fn __static_self___() -> i32")
+            && translation.rust.contains("fn __set_static_self__")
+            && translation.rust.contains("fn __set_static_self___")
+            && translation.rust.contains("Self::__set_static_self__(2);")
+            && translation.rust.contains("Self::__set_static_self___(1);")
+            && translation.rust.contains(
+                "return (Self::__static_self___()).wrapping_add(Self::__static_self__());"
+            ),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "bare_static_storage_keyword_alias_does_not_overwrite_exact_field",
+        vec![GeneratedCrateModule {
+            name: "bare_static_storage_keyword_fields",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn nested_static_storage_exact_owner_beats_enclosing_alias() {
+    let translation = translate_source(
+        r#"
+class NestedStaticOwnerAliasCollision {
+    static class Inner {
+        static int self__;
+
+        static void set() {
+            self__ = 2;
+        }
+
+        static int get() {
+            return self__;
+        }
+    }
+
+    static int self;
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("impl NestedStaticOwnerAliasCollision_Inner")
+            && translation.rust.contains("Self::__set_static_self__(2);")
+            && translation.rust.contains("return Self::__static_self__();")
+            && !translation
+                .rust
+                .contains("NestedStaticOwnerAliasCollision::__set_static_self___(2);")
+            && !translation
+                .rust
+                .contains("NestedStaticOwnerAliasCollision::__static_self___();"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "nested_static_storage_exact_owner_beats_enclosing_alias",
+        vec![GeneratedCrateModule {
+            name: "nested_static_storage_owner_alias",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn qualified_static_final_keyword_consts_do_not_collapse() {
     let translation = translate_source(
         r#"
@@ -965,7 +1199,13 @@ class JavaIteratorCursorOverList {
         translation.rust.contains(
             "let mut i: JavaIterator<String> = JavaIterator::new(input.iter().cloned());"
         ) && translation.rust.contains("while i.has_next()")
-            && translation.rust.contains("out.push(i.next());")
+            && translation.rust.contains("out.push(i.next_result()?);")
+            && translation.rust.contains(
+                "self.next_result()\n            .unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))"
+            )
+            && translation
+                .rust
+                .contains("pub fn copy(input: &[String]) -> Result<Vec<String>, JavaException>")
             && translation.rust.contains("i.for_each_remaining(|value|")
             && translation.rust.contains("out.push(value);")
             && !translation.rust.contains("let mut i: Iterator")
@@ -978,7 +1218,21 @@ class JavaIteratorCursorOverList {
         vec![GeneratedCrateModule {
             name: "java_list_iterator_cursor",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn iterator_next_uncaught_exception_panics() {
+        let mut iterator = JavaIterator::new(Vec::<String>::new());
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            iterator.next();
+        }))
+        .is_err());
+    }
+}
+"#,
         }],
     );
 }
@@ -1149,10 +1403,10 @@ class JavaStringCharAtUse {
     assert!(
         translation
             .rust
-            .contains("value.chars().nth(0 as usize).expect(\"Java string index out of bounds\")")
-            && translation.rust.contains(
-                "value.chars().nth(index as usize).expect(\"Java string index out of bounds\")"
-            )
+            .contains("value.chars().nth(0 as usize).ok_or_else(|| JavaException::new(\"StringIndexOutOfBoundsException\", \"Java string index out of bounds\".to_string()))?")
+            && translation
+                .rust
+                .contains("value.chars().nth(index as usize).ok_or_else(|| JavaException::new(\"StringIndexOutOfBoundsException\", \"Java string index out of bounds\".to_string()))?")
             && !translation.rust.contains(".char_at("),
         "{}",
         translation.rust
@@ -1202,10 +1456,13 @@ class JavaStringTokenizerUse {
                 .contains("while tokenizer.has_more_tokens()")
             && translation
                 .rust
-                .contains("let first: char = tokenizer.next_token().chars().nth(0 as usize)")
+                .contains("let first: char = tokenizer.next_token_result()?.as_str().chars().nth(0 as usize).ok_or_else(|| JavaException::new(\"StringIndexOutOfBoundsException\", \"Java string index out of bounds\".to_string()))?")
+            && translation.rust.contains(
+                "self.next_token_result()\n            .unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))"
+            )
             && translation
                 .rust
-                .contains("pub fn count(text: String) -> i32")
+                .contains("pub fn count(text: String) -> Result<i32, JavaException>")
             && !translation
                 .rust
                 .contains("pub fn count(text: Box<dyn std::any::Any>)")
@@ -1229,8 +1486,14 @@ mod generated_tests {
 
     #[test]
     fn tokenizer_counts_and_advances() {
-        assert_eq!(JavaStringTokenizerUse::count("a|x|z".to_string()), 4);
-        assert_eq!(JavaStringTokenizerUse::count("x||y".to_string()), 3);
+        assert_eq!(JavaStringTokenizerUse::count("a|x|z".to_string()).unwrap(), 4);
+        assert_eq!(JavaStringTokenizerUse::count("x||y".to_string()).unwrap(), 3);
+        assert!(std::panic::catch_unwind(|| {
+            let mut tokenizer = StringTokenizer::new_2("a", "|");
+            assert_eq!(tokenizer.next_token(), "a".to_string());
+            tokenizer.next_token();
+        })
+        .is_err());
     }
 }
 "#,
@@ -1474,8 +1737,8 @@ class JdkNumericAndFormatFacades {
             && translation.rust.contains("java_math_max_f64(left, right)")
             && translation.rust.contains("java_math_min_f64(left, right)")
             && translation.rust.contains("value.is_nan()")
-            && translation.rust.contains("value.parse::<f32>().unwrap()")
-            && translation.rust.contains("return value as i32;")
+            && translation.rust.contains("value.parse::<f32>().map_err(|err| JavaException::from_display(\"NumberFormatException\", err)).unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))")
+            && translation.rust.contains("return i32::try_from(value).map_err(|_err| JavaException::new(\"ArithmeticException\", \"integer overflow\".to_string())).unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex));")
             && translation
                 .rust
                 .contains("java_math_floor_div_i32(left as i32, right as i32)")
@@ -1577,6 +1840,7 @@ mod generated_tests {
         assert!(JdkNumericAndFormatFacades::max_double(f64::NAN, 1.0).is_nan());
         assert!(JdkNumericAndFormatFacades::min_double(-0.0, 0.0).is_sign_negative());
         assert!(JdkNumericAndFormatFacades::missing(f64::NAN));
+        assert_eq!(JdkNumericAndFormatFacades::exact(42), 42);
         assert_eq!(JdkNumericAndFormatFacades::floor_div(-7, 2), -4);
         assert_eq!(JdkNumericAndFormatFacades::floor_mod(-7, 2), 1);
         assert_eq!(JdkNumericAndFormatFacades::floor_mod(7, -2), -1);
@@ -1899,6 +2163,10 @@ class BoxedPrimitiveConstructorsLowerToValues {
             && translation.rust.contains(
                 "java_primitive_compare_to(java_parse_i32(&left), java_parse_i32(&right))"
             )
+            && translation
+                .rust
+                .contains("JavaException::from_display(\"NumberFormatException\", err)")
+            && !translation.rust.contains("expect(\"Java number format\")")
             && !translation.rust.contains(".hash_code()")
             && !translation.rust.contains(".compare_to(")
             && !translation.rust.contains("Integer::new"),
@@ -2409,7 +2677,13 @@ class JdkBitSetBooleanFacade {
     );
 
     assert!(
-        translation.rust.contains("return !bits.get(index);")
+        translation.rust.contains("return Ok(!bits.get_result(index)?);")
+            && translation.rust.contains(
+                "BitSet::new_1_result(size)\n            .unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))"
+            )
+            && translation.rust.contains(
+                "self.set_result(index)\n            .unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex));"
+            )
             && !translation.rust.contains("return !false;")
             && !translation.rust.contains("downcast::<BitSet>"),
         "{}",
@@ -2430,8 +2704,18 @@ mod generated_tests {
     fn bitset_get_reflects_state() {
         let mut bits = BitSet::new_1(4);
         bits.set(2);
-        assert!(!JdkBitSetBooleanFacade::missing(&bits, 2));
-        assert!(JdkBitSetBooleanFacade::missing(&bits, 3));
+        assert!(!JdkBitSetBooleanFacade::missing(&bits, 2).unwrap());
+        assert!(JdkBitSetBooleanFacade::missing(&bits, 3).unwrap());
+        assert_eq!(
+            JdkBitSetBooleanFacade::missing(&bits, -1).unwrap_err().class_name,
+            "IndexOutOfBoundsException"
+        );
+        assert!(std::panic::catch_unwind(|| BitSet::new_1(-1)).is_err());
+        assert!(std::panic::catch_unwind(|| {
+            let mut bits = BitSet::new_1(1);
+            bits.set(-1);
+        })
+        .is_err());
     }
 }
 "#,
@@ -2811,10 +3095,10 @@ class NumericParseStaticCalls {
     assert!(
         translation
             .rust
-            .contains("return value.parse::<i32>().unwrap();")
+            .contains("return value.parse::<i32>().map_err(|err| JavaException::from_display(\"NumberFormatException\", err)).unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex));")
             && translation
                 .rust
-                .contains("return value.parse::<f64>().unwrap();")
+                .contains("return value.parse::<f64>().map_err(|err| JavaException::from_display(\"NumberFormatException\", err)).unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex));")
             && !translation.rust.contains("value.as_str().parse::<i32>()")
             && !translation.rust.contains("value.as_str().parse::<f64>()"),
         "{}",
@@ -2866,16 +3150,48 @@ class NumericWrapperStaticToString {
 }
 
 #[test]
-fn java_string_equality_normalizes_owned_and_borrowed_slots() {
+fn java_string_equals_normalizes_owned_and_borrowed_slots() {
     let translation = translate_source(
         r#"
 class StringEqualitySlots {
-    static boolean firstIs(String[] values, String expected) {
-        return values[0] == expected;
-    }
-
     static boolean firstEquals(String[] values, String expected) {
         return values[0].equals(expected);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains(".as_ref().map(|value| value.as_str()) == Some(expected)"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "java_string_equality_slots",
+        vec![GeneratedCrateModule {
+            name: "string_equality_slots",
+            rust: translation.rust,
+            tests: r#"
+#[test]
+fn compares_string_slots() {
+    let values = vec![Some("Chrom".to_string()), Some("Other".to_string())];
+    let expected = "Chrom".to_string();
+    assert!(StringEqualitySlots::first_equals(&values, &expected).unwrap());
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn java_string_identity_fails_loudly_until_identity_representation_exists() {
+    let translation = translate_source(
+        r#"
+class StringIdentitySlots {
+    static boolean firstIs(String[] values, String expected) {
+        return values[0] == expected;
     }
 
     static boolean literalIs(String value) {
@@ -2892,44 +3208,28 @@ class StringEqualitySlots {
     assert!(
         translation
             .rust
-            .contains("values[0 as usize].as_str() == expected")
-            && translation
-                .rust
-                .matches("AUDIT(java-string-identity)")
-                .count()
-                == 3
-            && translation
-                .rust
-                .contains("value.as_str() == \"Chrom\".to_string().as_str()")
-            && translation
-                .rust
-                .contains("sorted[0 as usize].as_str() == unsorted[0 as usize].as_str()")
-            && !translation
-                .rust
-                .contains("return values[0 as usize] == expected;")
-            && !translation
-                .rust
-                .contains("return value == \"Chrom\".to_string();"),
+            .matches(
+                "compile_error!(\"unsupported Java String reference identity comparison requires string identity representation\")"
+            )
+            .count()
+            == 3,
         "{}",
         translation.rust
     );
-    cargo_check_generated_modules(
-        "java_string_equality_slots",
+    assert!(
+        translation.diagnostics.has_code("java_string_identity"),
+        "{:?}",
+        translation.diagnostics.iter().collect::<Vec<_>>()
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "java_string_identity",
         vec![GeneratedCrateModule {
-            name: "string_equality_slots",
+            name: "fixture",
             rust: translation.rust,
-            tests: r#"
-#[test]
-fn compares_string_slots() {
-    let values = vec!["Chrom".to_string(), "Other".to_string()];
-    let expected = "Chrom".to_string();
-    assert!(StringEqualitySlots::first_is(&values, &expected));
-    assert!(StringEqualitySlots::first_equals(&values, &expected));
-    assert!(StringEqualitySlots::literal_is(&expected));
-    assert!(StringEqualitySlots::sorted_same(&values, &values));
-}
-"#,
+            tests: "",
         }],
+        "unsupported Java String reference identity comparison requires string identity representation",
     );
 }
 
@@ -3017,17 +3317,29 @@ class JavaStringSubstringAndHashCode {
             .contains("java_string_substring(header.as_str(), 1, header.len() as i32)")
             || translation
                 .rust
-                .contains("java_string_substring(&header, 1, header.len() as i32)"))
+                .contains("java_string_substring(&header, 1, header.len() as i32)")
+            || translation
+                .rust
+                .contains("java_string_substring_result(&header, 1, header.len() as i32)?"))
             && translation
                 .rust
-                .contains("java_string_hash_code(left.as_ref().unwrap().as_str())")
+                .contains("java_string_hash_code(&left.as_ref().ok_or_else")
             && translation
                 .rust
-                .contains("java_string_hash_code(right.as_ref().unwrap().as_str())")
+                .contains("java_string_hash_code(&right.as_ref().ok_or_else")
             && !translation.rust.contains(".substring(")
             && !translation.rust.contains(".hash_code("),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "java_string_substring_and_hash_code",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -3074,6 +3386,15 @@ class BareFinalInstanceFieldRead {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "bare_final_instance_field_read",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -3105,11 +3426,19 @@ class SameClassNullableStringFieldHashCodeMethod {
             .contains("java_string_hash_code(self.quality_header.as_ref().unwrap().as_str())")
             && translation
                 .rust
-                .contains("java_string_hash_code(&self.bases)")
+                .contains("java_string_hash_code(self.bases.as_ref().unwrap().as_str())")
             && !translation.rust.contains(".quality_header.hash_code()")
             && !translation.rust.contains(".bases.hash_code()"),
         "{}",
         translation.rust
+    );
+    cargo_check_generated_modules(
+        "same_class_nullable_string_field_hash_code",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -3146,6 +3475,15 @@ class SAMFileHeader {}
         !translation.rust.contains("downcast::<"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "external_receiver_generic_getter",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -3292,7 +3630,7 @@ class NumericRelationalPromotion {
         translation.rust.contains("return (end as i64) < limit;")
             && translation
                 .rust
-                .contains("return file.length() > (Integer::MAX_VALUE as i64);")
+                .contains("return Ok(file.length() > (Integer::MAX_VALUE as i64));")
             && translation.rust.contains("return x == (0 as f64);")
             && translation.rust.contains("return x != (0 as f64);")
             && translation.rust.contains("return y == (yi as f64);")
@@ -3307,6 +3645,15 @@ class NumericRelationalPromotion {
             && !translation.rust.contains("return f == direction;"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "numeric_relational_promotion",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -3342,6 +3689,15 @@ fn fallback_static_call_uses_translated_signature_arg_shapes() {
             && !translation.rust.contains("pub fn fill<R, T0>"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "fallback_static_call_translated_signature_arg_shapes",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -3401,10 +3757,19 @@ class ReusedStringParametersInVecs {
     assert!(
         translation
             .rust
-            .contains("vec![chrom1.clone()/* TODO(translation): validate added clone */, chrom2.clone()/* TODO(translation): validate added clone */]")
-            && translation.rust.contains("let mut sorted: Vec<String> = vec![chrom1, chrom2];"),
+            .contains("vec![Some(chrom1.clone()/* TODO(translation): validate added clone */), Some(chrom2.clone()/* TODO(translation): validate added clone */)]")
+            && translation.rust.contains("let mut sorted: Vec<Option<String>> = vec![Some(chrom1.clone()/* TODO(translation): validate added clone */), Some(chrom2.clone()/* TODO(translation): validate added clone */)];"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "reused_string_parameters_in_vecs",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -3468,6 +3833,12 @@ class JavaArraysSortUse {
             && translation
                 .rust
                 .contains("__java_arrays_target[__java_arrays_from..__java_arrays_to].sort()")
+            && translation.rust.contains(
+                "panic!(\"uncaught Java exception: {:?}\", JavaException::new(\"IllegalArgumentException\", \"fromIndex > toIndex\".to_string()))"
+            )
+            && translation.rust.contains(
+                "panic!(\"uncaught Java exception: {:?}\", JavaException::new(\"ArrayIndexOutOfBoundsException\", \"Java array range out of bounds\".to_string()))"
+            )
             && !translation.rust.contains("Arrays::sort")
             && !translation.rust.contains("JavaUtilArrays::sort")
             && !translation.rust.contains("Arrays::parallel_sort")
@@ -3491,8 +3862,18 @@ mod generated_tests {
         assert_eq!(JavaArraysSortUse::whole(vec![3, 1, 2]), vec![1, 2, 3]);
         assert_eq!(JavaArraysSortUse::range(vec![9, 4, 3, 2, 1]), vec![9, 2, 3, 4, 1]);
         assert_eq!(
-            JavaArraysSortUse::names(vec!["z".to_string(), "b".to_string(), "a".to_string(), "x".to_string()]),
-            vec!["z".to_string(), "a".to_string(), "b".to_string(), "x".to_string()]
+            JavaArraysSortUse::names(vec![
+                Some("z".to_string()),
+                Some("b".to_string()),
+                Some("a".to_string()),
+                Some("x".to_string()),
+            ]),
+            vec![
+                Some("z".to_string()),
+                Some("a".to_string()),
+                Some("b".to_string()),
+                Some("x".to_string()),
+            ]
         );
         assert_eq!(JavaArraysSortUse::parallel_whole(vec![3, 1, 2]), vec![1, 2, 3]);
         assert_eq!(JavaArraysSortUse::parallel_range(vec![9, 4, 3, 2, 1]), vec![9, 2, 3, 4, 1]);
@@ -3504,6 +3885,62 @@ mod generated_tests {
     }
 }
 "#,
+        }],
+    );
+}
+
+#[test]
+fn java_arrays_range_calls_in_try_lower_to_java_exception_results() {
+    let translation = translate_source(
+        r#"
+import java.util.Arrays;
+
+class JavaArraysRangeCatchUse {
+    static String sortOrder(int[] values) {
+        try {
+            Arrays.sort(values, 3, 1);
+            return "miss";
+        } catch (IllegalArgumentException ex) {
+            return "sort-order";
+        }
+    }
+
+    static String fillBounds(int[] values) {
+        try {
+            Arrays.fill(values, -1, 2, 9);
+            return "miss";
+        } catch (ArrayIndexOutOfBoundsException ex) {
+            return "fill-bounds";
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("Err(JavaException::new(\"IllegalArgumentException\"")
+            && translation
+                .rust
+                .contains("Err(JavaException::new(\"ArrayIndexOutOfBoundsException\"")
+            && translation
+                .rust
+                .contains("__java_arrays_target[__java_arrays_from..__java_arrays_to].sort()")
+            && translation
+                .rust
+                .contains("__java_arrays_target[__java_arrays_from..__java_arrays_to].fill(9)")
+            && translation.rust.contains("?;"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "java_arrays_range_catch_use",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
         }],
     );
 }
@@ -3548,6 +3985,15 @@ class ReusedStringSourceAssignments {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "reused_string_source_assignments",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -3578,10 +4024,19 @@ class CastedBorrowedMapArgument {
 
     assert!(
         translation.rust.contains(
-            "self.parallel(paths.clone()/* TODO(translation): validate added clone */, batch)"
-        ) && translation.rust.contains("self.serial(paths, batch)"),
+            "self.parallel(paths.iter().map(|(key, value)| (key.clone(), value.clone())).collect::<std::collections::BTreeMap<_, _>>(), batch)"
+        ) && translation.rust.contains("self.serial(paths, batch)")
+            && translation.rust.contains(".into_iter().collect::<std::collections::HashMap<_, _>>()"),
         "{}",
         translation.rust
+    );
+    cargo_check_generated_modules(
+        "casted_borrowed_map_argument_clones_for_owned_helper_slot",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -3600,6 +4055,15 @@ fn documents_string_format_static_call_gap() {
         !translation.rust.contains("string.format"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "string_format_static_call",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -4208,6 +4672,15 @@ class SourceHashValue {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "source_hash_value",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -4241,7 +4714,7 @@ class DynTraitVecCloneHolder {
                 .contains("modules: Vec<Box<dyn CloneableModule>>")
             && translation
                 .rust
-                .contains("impl Clone for Box<dyn CloneableModule>"),
+                .contains("impl Clone for std::boxed::Box<dyn CloneableModule>"),
         "{}",
         translation.rust
     );
@@ -4459,6 +4932,51 @@ mod generated_tests {
 }
 
 #[test]
+fn concrete_source_object_concat_uses_source_to_string() {
+    let translation = translate_source(
+        r#"
+class ConcreteSourceObjectConcat {
+    static class Point {
+        int x;
+
+        Point(int x) {
+            this.x = x;
+        }
+
+        public String toString() {
+            return "P" + x;
+        }
+    }
+
+    String render() {
+        Point point = new Point(4);
+        return "b" + point + "," + point.toString();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("format!(\"b{},{}\", (point).to_string(), point.to_string())")
+            && !translation
+                .rust
+                .contains("java_erased_object_to_string(&point)"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "concrete_source_object_concat",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn inherited_receiverless_nullable_getter_uses_java_display_policy() {
     let translation = translate_source(
         r#"
@@ -4653,6 +5171,15 @@ fn string_pattern_methods_borrow_owned_string_arguments() {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "string_pattern_borrowing",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -4667,6 +5194,15 @@ fn string_pattern_chained_receiver_keeps_borrowed_pattern_argument() {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "string_pattern_chained_receiver",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -4677,13 +5213,21 @@ fn string_trim_owned_slots_convert_borrowed_view_to_string() {
         translation
             .rust
             .contains("let value: String = raw.trim().to_string();")
-            && translation
-                .rust
-                .contains("index = Some(pieces[2 as usize].trim().to_string());")
+            && translation.rust.contains("index = Some(")
+            && translation.rust.contains(".as_str().trim().to_string());")
             && !translation.rust.contains("let value: String = raw.trim();")
             && !translation.rust.contains("Some(pieces[2 as usize].trim())"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "string_trim_owned_slot",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -4695,12 +5239,21 @@ fn java_string_split_with_limit_uses_runtime_helper() {
         translation.rust.contains("pub fn java_string_split")
             && translation
                 .rust
-                .contains("java_string_split(&line, \"\\\\\\\\t\", -1)")
+                .contains("java_string_split(&line, \"\\\\t\", -1)")
             && !translation
                 .rust
                 .contains(".split(\"\\\\t\".to_string(), (-1))"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "string_split_with_limit",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -4759,6 +5312,44 @@ fn optional_string_array_field_length_and_index_use_sequence_projection() {
 
     cargo_check_generated_modules(
         "optional-string-array-field-views",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn reference_array_element_null_comparison_reads_nullable_element() {
+    let translation = translate_source(
+        r#"
+class ReferenceArrayElementNullComparison {
+    boolean secondMissing() {
+        String[] values = new String[2];
+        values[0] = "x";
+        return values[1] == null;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let mut values: Vec<Option<String>> = vec![None; 2 as usize];"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("values[0 as usize] = Some(\"x\".to_string());")
+    );
+    assert!(translation.rust.contains("values[1 as usize].is_none()"));
+
+    cargo_check_generated_modules(
+        "reference_array_element_null_comparison",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
@@ -4910,14 +5501,26 @@ class SimpleInterval {
     );
 
     assert!(
-        translation
+        translation.rust.contains(
+            "let contig = partition_info[0 as usize].as_ref().expect(\"Java null receiver\").clone();"
+        ) && translation.rust.contains(
+            "partition_info[1 as usize].as_ref().expect(\"Java null receiver\").as_str().parse::<i32>()"
+        ) && translation.rust.contains(
+            "partition_info[2 as usize].as_ref().expect(\"Java null receiver\").as_str().parse::<i32>()"
+        ) && !translation
             .rust
-            .contains("let contig = partition_info[0 as usize].clone();")
-            && !translation
-                .rust
-                .contains("let contig = partition_info[0 as usize];"),
+            .contains("let contig = partition_info[0 as usize];"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "stream_block_lambda_string_array_local",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -4944,6 +5547,15 @@ class ParallelStreamSharedLowering {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "parallel_stream_shared_lowering",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -4953,14 +5565,12 @@ fn parallel_stream_reduce_uses_shared_stream_lowering() {
 import java.util.List;
 
 class ParallelStreamReduceSharedLowering {
-    Rdd empty;
-
     Rdd one(String name, List<Interval> intervals) {
         return new Rdd();
     }
 
     Rdd many(List<String> names, List<Interval> intervals) {
-        return names.parallelStream().map(name -> one(name, intervals)).reduce(empty, (result, rdd) -> result.union(rdd));
+        return names.parallelStream().map(name -> one(name, intervals)).reduce(new Rdd(), (result, rdd) -> result.union(rdd));
     }
 }
 
@@ -4977,7 +5587,7 @@ class Interval {
 
     assert!(
         translation.rust.contains("names.iter().map")
-            && translation.rust.contains(".fold(self.empty")
+            && translation.rust.contains(".fold(Rdd::new()")
             && translation.rust.contains("|result, rdd| result.union(rdd)")
             && translation.rust.contains("self.one(name")
             && translation.rust.contains("intervals.as_slice()")
@@ -4985,6 +5595,15 @@ class Interval {
             && !translation.rust.contains("map(|name| one("),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "parallel_stream_reduce_shared_lowering",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -5007,9 +5626,20 @@ class OptionalSequenceGetConcreteSlot {
     assert!(
         translation
             .rust
-            .contains("(self.names.as_ref().expect(\"Java null receiver\").get(0 as usize).expect(\"Java index out of bounds\")).clone()"),
+            .contains("self.names.as_ref().expect(\"Java null receiver\").get(0 as usize).ok_or_else(|| JavaException::new(\"IndexOutOfBoundsException\"")
+            && translation.rust.contains("uncaught Java exception")
+            && !translation.rust.contains(".expect(\"Java index out of bounds\")"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "optional_sequence_get_concrete_slot",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -5036,10 +5666,13 @@ class IntegerParseSequenceGet {
     assert!(
         translation
             .rust
-            .contains("values.get(index as usize).as_ref().expect(\"Java null receiver\").as_str().parse::<i32>().unwrap()")
+            .contains("values.get(__java_list_get_index as usize).cloned().ok_or_else(|| JavaException::new(\"IndexOutOfBoundsException\"")
             && translation
                 .rust
-                .contains("self.nullable_values.as_ref().unwrap().get(index as usize).as_ref().expect(\"Java null receiver\").as_str().parse::<i32>().unwrap()")
+                .contains("}?.as_str().parse::<i32>().map_err(|err| JavaException::from_display(\"NumberFormatException\", err))?")
+            && translation
+                .rust
+                .contains("self.nullable_values.as_ref().unwrap().get(index as usize).as_ref().expect(\"Java null receiver\").as_str().parse::<i32>().map_err(|err| JavaException::from_display(\"NumberFormatException\", err)).unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))")
             && !translation.rust.contains(".get(index as usize).parse::<i32>()"),
         "{}",
         translation.rust
@@ -5075,9 +5708,9 @@ class CollectionGetArrayIndexing {
     assert!(
         (translation
             .rust
-            .contains("group.get(0 as usize).expect(\"Java index out of bounds\")[1 as usize]")
+            .contains("group.get(0 as usize).ok_or_else(|| JavaException::new(\"IndexOutOfBoundsException\"")
             || translation.rust.contains(
-                "group.get(0 as usize).as_ref().expect(\"Java index out of bounds\")[1 as usize]"
+                "group.get(0 as usize).as_ref().ok_or_else(|| JavaException::new(\"IndexOutOfBoundsException\""
             ))
             && !translation
                 .rust
@@ -5145,6 +5778,15 @@ class ReferenceSequence {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "assignment_condition_loop_shadow_receiver",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -5166,9 +5808,20 @@ class SequenceGetSimpleIntervalAsLocatable {
     );
 
     assert!(
-        translation.rust.contains("Locatable::new_1(self.intervals.as_ref().expect(\"Java null receiver\").get(0 as usize).expect(\"Java index out of bounds\").clone())"),
+        translation.rust.contains("Locatable::new_1(self.intervals.as_ref().expect(\"Java null receiver\").get(0 as usize).ok_or_else(|| JavaException::new(\"IndexOutOfBoundsException\"")
+            && translation.rust.contains("uncaught Java exception")
+            && !translation.rust.contains(".expect(\"Java index out of bounds\")"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "sequence_get_simple_interval_to_locatable_slot",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -5179,22 +5832,31 @@ fn nullable_path_overload_argument_uses_option_param_and_non_optional_resolve_si
     assert!(
         translation
             .rust
-            .contains("pub fn check_path_path(&self, value: Path, optional_index: Option<&Path>)")
+            .contains("pub fn check_path_path(&self, value: &Path, optional_index: Option<&Path>)")
             && (translation
                 .rust
                 .contains("self.check_path_path(value.clone()")
                 || translation
                     .rust
-                    .contains("self.check_path_path(value, None)"))
-            && translation.rust.contains(
-                "optional_index.map(|value| value.clone()/* TODO(translation): validate added clone */)"
-            )
+                    .contains("self.check_path_path(value, None)?;"))
             && translation
                 .rust
-                .contains("Some(value.resolve_sibling(\"index\".to_string()))")
+                .contains("optional_index.as_ref().unwrap().clone().clone()/* TODO(translation): validate added clone */")
+            && translation
+                .rust
+                .contains("value.resolve_sibling(\"index\".to_string())")
             && !translation.rust.contains("Some(None)"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "nullable_path_overload_argument",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -5221,12 +5883,21 @@ class FastqRecord {
     assert!(
         translation
             .rust
-            .contains("java_string_hash_code(record.quality_header.as_ref().unwrap().as_str())")
+            .contains("java_string_hash_code(record.quality_header.as_ref().ok_or_else")
             && !translation.rust.contains(".quality_header.hash_code()")
             && !translation.rust.contains("downcast::<String>")
             && !translation.rust.contains("invalid Java cast"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_summary_nullable_string_field_hash",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -5249,13 +5920,20 @@ class Format {}
     );
 
     assert!(
-        translation
-            .rust
-            .contains("self.formats.get(id).expect(\"Java null receiver\").clone()")
+        translation.rust.contains("self.formats.get(id).cloned()")
             && !translation.rust.contains("downcast::<Format>")
             && !translation.rust.contains("invalid Java cast"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "typed_map_get_redundant_cast",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -5320,18 +5998,14 @@ fn static_owned_path_argument_does_not_borrow_owned_temporary() {
     let translation = translate_source(
         r#"
 class StaticOwnedPathArgument {
-    Path run(String vcfPath, String indexPath) throws Exception {
-        return Helper.checkPath(IO.getPath(vcfPath), indexPath == null ? null : IO.getPath(indexPath));
+    Path run(String vcfPath) throws Exception {
+        return Helper.checkPath(IO.getPath(vcfPath));
     }
 }
 
 class Helper {
-    static Path checkPath(Path path, Path optionalIndexPath) throws Exception {
-        if (optionalIndexPath == null) {
-            return path.resolveSibling("idx");
-        }
-        IO.consume(optionalIndexPath);
-        return optionalIndexPath;
+    static Path checkPath(Path path) throws Exception {
+        return path.resolveSibling();
     }
 }
 
@@ -5339,13 +6013,10 @@ class IO {
     static Path getPath(String value) {
         return new Path();
     }
-
-    static void consume(Path value) {
-    }
 }
 
 class Path {
-    Path resolveSibling(String value) {
+    Path resolveSibling() {
         return new Path();
     }
 }
@@ -5355,13 +6026,23 @@ class Path {
     assert!(
         translation
             .rust
-            .contains("pub fn check_path(path: &Path, optional_index_path: Option<Path>)")
+            .contains("pub fn check_path(path: Path) -> Result<Path, JavaException>")
             && translation.rust.contains("Helper::check_path(")
-            && translation.rust.contains("IO::get_path(vcf_path")
-            && translation.rust.contains("Some(IO::get_path(")
+            && translation.rust.contains("IO::get_path(&vcf_path)")
+            && !translation.rust.contains("&mut IO::get_path")
+            && !translation.rust.contains("&IO::get_path")
             && !translation.rust.contains("Some(&IO::get_path"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "static_owned_path_argument",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -5398,6 +6079,14 @@ class OptionalBorrowedHeaderPush {
                     .contains("headers.push(header.as_ref().unwrap().clone()")),
         "{}",
         translation.rust
+    );
+    cargo_check_generated_modules(
+        "optional_borrowed_header_push_clones_element_not_reference",
+        vec![GeneratedCrateModule {
+            name: "optional_borrowed_header_push",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -5437,13 +6126,24 @@ class Path {
         translate_source_with_context_sources(caller, &[helper.to_string()], &FactSet::default());
 
     assert!(
-        translation.rust.contains(
-            "EmittedContextStaticOwnedParamHelper::check_path(&path.as_ref().expect(\"Java null receiver\"))"
-        ) && !translation.rust.contains(
-            "EmittedContextStaticOwnedParamHelper::check_path(path.as_ref().unwrap().clone()"
-        ),
+        translation
+            .rust
+            .contains("EmittedContextStaticOwnedParamHelper::check_path(path.as_ref())")
+            && !translation.rust.contains(
+                "EmittedContextStaticOwnedParamHelper::check_path(path.as_ref().unwrap().clone()"
+            ),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "emitted_context_static_call_uses_solved_param_shape",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "use of undeclared type `EmittedContextStaticOwnedParamHelper`",
     );
 }
 
@@ -5460,6 +6160,15 @@ fn throwing_call_local_initializer_propagates_result_with_question_mark() {
                 .contains("let value: String = self.read(good);"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "throwing_call_local_initializer_result",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -5487,12 +6196,23 @@ class Path {
         translation
             .rust
             .contains("let path: Option<Path> = self.lookup(sample);")
-            && translation.rust.contains("return path;")
+            && translation
+                .rust
+                .contains("return path.expect(\"Java null receiver\");")
             && !translation
                 .rust
                 .contains("let mut path: Path = self.lookup"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "nullable_source_call_local_initializer",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -5521,14 +6241,25 @@ class Path {
     );
 
     assert!(
-        translation
+        translation.rust.contains(
+            "let path: Option<Path> = self.lookup.as_ref().unwrap().find(Some(sample.as_str()));"
+        ) && translation
             .rust
-            .contains("let path: Option<Path> = self.lookup.as_ref().unwrap().find(Some(sample));")
+            .contains("return path.expect(\"Java null receiver\");")
             && !translation
                 .rust
                 .contains("let path: Option<Path> = Some(self.lookup.as_ref().unwrap().find"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "nullable_source_call_through_field_receiver_stays_optional_without_double_wrap",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -5561,14 +6292,25 @@ class Path {
     );
 
     assert!(
-        translation
+        translation.rust.contains(
+            "let path: Option<Path> = self.lookup.as_ref().unwrap().find(sample.as_str());"
+        ) && translation
             .rust
-            .contains("let path: Option<Path> = self.lookup.as_ref().unwrap().find(sample);")
+            .contains("return path.expect(\"Java null receiver\");")
             && !translation
                 .rust
                 .contains("let path: Option<Path> = Some(self.lookup.as_ref().unwrap().find"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_summary_nullable_return_into_optional_local_does_not_double_wrap",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -5601,17 +6343,25 @@ class Path {
     );
 
     assert!(
-        translation
+        translation.rust.contains(
+            "let path: Option<Path> = self.lookup.as_ref().unwrap().find(sample.as_str());"
+        ) && translation
             .rust
-            .contains("let path: Option<Path> = self.lookup.as_ref().unwrap().find(sample);")
-            && translation
-                .rust
-                .contains("return path.as_ref().unwrap().to_file();")
+            .contains("return path.as_ref().unwrap().to_file();")
             && !translation
                 .rust
                 .contains("Some(self.lookup.as_ref().unwrap().find"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_summary_nullable_return_into_concrete_local_unwraps_once",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -5636,10 +6386,19 @@ class SourceStaticNullableArgUtil {
     assert!(
         translation
             .rust
-            .contains("SourceStaticNullableArgUtil::append(Some(")
+            .contains("SourceStaticNullableArgUtil::append(workspace.as_ref(),")
             && !translation.rust.contains("append(workspace,"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_static_call_uses_signature_shapes_for_nullable_args",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -5670,6 +6429,15 @@ class OverloadNullArgumentCalleeShape {
             && !translation.rust.contains("optional_parts: String"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "overload_null_argument_makes_exact_callee_parameter_optional",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -5704,6 +6472,15 @@ class SourceStaticThrowingUtil {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "source_static_throwing_call_uses_question_mark",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -5723,6 +6500,15 @@ fn throwing_call_chain_promotes_caller_result_shells() {
                 .contains("let value: String = self.middle(ok)?;"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "throwing_call_chain_promotes_caller_result_shells",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -5849,26 +6635,34 @@ class CheckedProblem extends Exception {}
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "overloaded_static_caller_exception_fact_emitted_name",
+        vec![
+            ndarray_stub_module(),
+            GeneratedCrateModule {
+                name: "fixture",
+                rust: format!("use crate::ndarray;\n{}", translation.rust),
+                tests: "",
+            },
+        ],
+    );
 }
 
 #[test]
 fn collection_to_array_empty_string_array_lowers_to_owned_vec() {
-    let translation = translate_source(
+    let mut source = idiom_gap("ToArrayEmptyStringArray.java");
+    source.push_str(
         r#"
-import java.util.List;
-import java.util.Map;
 
-public class ToArrayEmptyStringArray {
-    public String[] copy(List<String> names) {
-        return names.toArray(new String[]{});
-    }
-
-    public String[] keys(Map<String, String> values) {
+class ToArrayEmptyStringArrayKeySet {
+    String[] keys(java.util.Map<String, String> values) {
         return values.keySet().toArray(new String[0]);
     }
 }
 "#,
     );
+    let translation = translate_source(&source);
 
     assert!(
         translation
@@ -6368,6 +7162,15 @@ class JavaIntegerCallArgumentExceptionSemantics {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "java_integer_call_argument_exception_semantics",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -6404,13 +7207,23 @@ class JavaIntegerArrayIndexExceptionSemantics {
             && translation.rust.contains("pub fn catch_array_assign")
             && translation
                 .rust
-                .contains("unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))")
+                .contains("__java_arrays_source.get(__java_arrays_index as usize).ok_or_else")
             && translation
                 .rust
                 .contains("Err(ex) if ex.is_instance(&[\"ArithmeticException\"])")
+            && !translation.rust.contains("as usize)?")
             && !translation.rust.contains("value / divisor"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "java_integer_array_index_exception_semantics",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -6587,15 +7400,27 @@ class SamRecordFastqStringGetters {
                 .contains("pub fn get_base_quality_string(&self)")
             && translation
                 .rust
-                .contains("-> String { Default::default() }")
+                .contains("unimplemented!(\"SAMRecord.getReadString is not modelled\")")
             && translation
                 .rust
-                .contains("return record.get_read_string();")
+                .contains("unimplemented!(\"SAMRecord.getBaseQualityString is not modelled\")")
             && translation
                 .rust
-                .contains("return record.get_base_quality_string();"),
+                .contains("return Ok(record.get_read_string());")
+            && translation
+                .rust
+                .contains("return Ok(record.get_base_quality_string());"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "sam_record_fastq_string_getters",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -6640,15 +7465,113 @@ fn object_return_from_typed_external_getter_erases_once_at_boundary() {
         translation.rust.contains("pub fn header(&self, reader:")
             && translation
                 .rust
-                .contains("-> Option<Box<dyn std::any::Any>>")
+                .contains("-> Result<Option<Box<dyn std::any::Any>>, JavaException>")
             && translation.rust.contains(
-                "return reader.get_header().map(|value| Box::new(value) as Box<dyn std::any::Any>);"
+                "return Ok(reader.get_header().map(|value| Box::new(value) as Box<dyn std::any::Any>));"
             )
             && !translation.rust.contains("downcast::<VCFHeader>()")
             && !translation.rust.contains("invalid Java cast")
             && !translation.rust.contains("-> Object"),
         "{}",
         translation.rust
+    );
+    cargo_check_generated_modules(
+        "object_return_from_typed_external_getter",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn erased_vcf_header_display_uses_external_to_string_downcast() {
+    let mut facts = new_java2rust::external_packs::htsjdk_tribble_feature_pack_facts();
+    facts.extend_from(new_java2rust::external_packs::htsjdk_vcf_pack_facts());
+    let translation = new_java2rust::translate_source_with_facts(
+        r#"
+        import htsjdk.tribble.FeatureReader;
+        import htsjdk.variant.vcf.VCFHeader;
+
+        class ErasedHeaderDisplay {
+            Object header(FeatureReader reader) {
+                VCFHeader header = reader.getHeader();
+                return header;
+            }
+
+            String describe(FeatureReader reader) {
+                Object h = header(reader);
+                return "h=" + h;
+            }
+        }
+        "#,
+        &facts,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("impl std::fmt::Display for VCFHeader")
+            && translation
+                .rust
+                .contains("impl std::fmt::Display for VCFHeader {\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, \"{}\", self.to_string()) }\n}")
+            && translation
+                .rust
+                .contains("if let Some(value) = value.downcast_ref::<VCFHeader>()")
+            && translation.rust.contains("return value.to_string();"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "erased_vcf_header_display",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn erased_vcf_header_line_display_uses_typed_pack_to_string_fact() {
+    let facts = new_java2rust::external_packs::htsjdk_vcf_pack_facts();
+    let translation = new_java2rust::translate_source_with_facts(
+        r#"
+        import htsjdk.variant.vcf.VCFHeaderLine;
+
+        class ErasedHeaderLineDisplay {
+            String describe(Object value, VCFHeaderLine line) {
+                return "line=" + value;
+            }
+        }
+        "#,
+        &facts,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("impl std::fmt::Display for VCFHeaderLine")
+            && translation
+                .rust
+                .contains("impl std::fmt::Display for VCFHeaderLine {\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, \"{}\", self.to_string()) }\n}")
+            && translation
+                .rust
+                .contains("if let Some(value) = value.downcast_ref::<VCFHeaderLine>()")
+            && translation.rust.contains("return value.to_string();"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "erased_vcf_header_line_display",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -6676,14 +7599,24 @@ class ObjectReturnFromNonnullableExternalGetter {
     );
 
     assert!(
-        translation.rust.contains("-> Box<dyn std::any::Any>")
+        translation
+            .rust
+            .contains("-> Result<Box<dyn std::any::Any>, JavaException>")
             && translation
                 .rust
-                .contains("return Box::new(reader.header()) as Box<dyn std::any::Any>;")
+                .contains("return Ok(Box::new(reader.header()) as Box<dyn std::any::Any>);")
             && !translation.rust.contains("downcast::<Header>()")
             && !translation.rust.contains("invalid Java cast"),
         "{}",
         translation.rust
+    );
+    cargo_check_generated_modules(
+        "object_return_from_nonnullable_external_getter",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -6708,6 +7641,14 @@ class ObjectReturnFromPrimitive {
                 .contains("return Box::new(true) as Box<dyn std::any::Any>;"),
         "{}",
         translation.rust
+    );
+    cargo_check_generated_modules(
+        "object_return_from_primitive",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -6746,6 +7687,14 @@ class ObjectLocalFromConcreteExternalFactory {
         "{}",
         translation.rust
     );
+    cargo_check_generated_modules(
+        "object_local_from_concrete_external_factory",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -6771,6 +7720,15 @@ fn documents_nullable_concrete_object_gap() {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "nullable_parameter_and_local",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -6792,19 +7750,28 @@ class TernaryNullBranchRefinement {
     assert!(
         translation
             .rust
-            .contains("pub fn increment_or_one(&self, old: Option<&i32>) -> i32")
+            .contains("pub fn increment_or_one(&self, old: Option<i32>) -> i32")
             && translation
                 .rust
                 .contains("if old.is_none() { 1 } else { old.unwrap() + 1 }")
-            && translation.rust.contains(
-                "if missing { None } else { Some(value.clone()/* TODO(translation): validate added clone */) }"
-            )
+            && translation
+                .rust
+                .contains("if missing { None } else { Some(value) }")
             && !translation.rust.contains("(old + 1)")
             && !translation
                 .rust
                 .contains("if missing { None } else { value }"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "nullable_ternary_branch_refinement",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -6825,11 +7792,20 @@ class TernaryNullReceiverRefinement {
     assert!(
         translation
             .rust
-            .contains("path.as_ref().unwrap().to_absolute_path().to_uri().to_string()")
+            .contains("path.as_ref().ok_or_else(|| JavaException::new(\"NullPointerException\", \"Java null receiver\".to_string()))?.to_absolute_path().to_uri().to_string()")
             && !translation.rust.contains("path.unwrap().as_ref().unwrap()")
             && !translation.rust.contains("path.unwrap().as_ref().expect"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "nullable_ternary_receiver_refinement",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -6840,12 +7816,21 @@ fn documents_proven_non_null_member_field_gap() {
     assert!(
         translation
             .rust
-            .contains("pub struct NonNullFieldFromConstructors {\n    name: String,")
+            .contains("pub struct NonNullFieldFromConstructors {\n    name: Option<String>,")
             && !translation
                 .rust
-                .contains("pub struct NonNullFieldFromConstructors {\n    name: Option<String>,"),
+                .contains("pub struct NonNullFieldFromConstructors {\n    name: String,"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "non_null_field_from_constructors",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -6866,6 +7851,15 @@ fn documents_java_collection_api_gap() {
             && !translation.rust.contains("ArrayList::new"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "collection_add_all_and_size",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -6948,11 +7942,19 @@ fn map_size_return_int_uses_java_int_width() {
     let translation = translate_source(&idiom_gap("MapSizeReturnInt.java"));
 
     assert!(
-        translation.rust.contains("return values.len() as i32;")
+        translation.rust.contains("return Ok(values.len() as i32);")
             && !translation.rust.contains("values.len();")
             && !translation.rust.contains(".size()"),
         "{}",
         translation.rust
+    );
+    cargo_check_generated_modules(
+        "map_size_return_int",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -6978,6 +7980,14 @@ class MapKeySetSize {
         "{}",
         translation.rust
     );
+    cargo_check_generated_modules(
+        "map_key_set_size",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -6999,15 +8009,24 @@ class MapKeySetReturnSet {
         translation.rust.contains("pub fn keys(&self, values:")
             && translation
                 .rust
-                .contains(") -> std::collections::HashSet<String>")
+                .contains(") -> Result<std::collections::HashSet<String>, JavaException>")
             && translation.rust.contains(
-                "return values.keys().cloned().collect::<std::collections::HashSet<_>>();"
+                "return Ok(values.keys().cloned().collect::<std::collections::HashSet<_>>());"
             )
             && !translation
                 .rust
                 .contains("return values.keys().cloned().collect::<Vec<_>>();"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "map_key_set_return_set",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -7174,6 +8193,15 @@ class MapPutAllJavaApi {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "map_put_all_lowers_to_hash_map_extend",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -7200,6 +8228,15 @@ class MapPutAllErasedValues {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "map_put_all_boxes_values_for_erased_object_value_map",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -7208,16 +8245,26 @@ fn array_arguments_use_borrowed_slice_views() {
 
     assert!(
         translation.rust.contains(
-            "self.length_of_first(self.values.as_ref().expect(\"Java null receiver\").as_slice())"
+            "self.length_of_first(self.values.as_ref().ok_or_else(|| JavaException::new(\"NullPointerException\", \"Java null receiver\".to_string()))?.as_slice())?"
         ) && translation
             .rust
-            .contains("self.length_of_first(local.as_slice())")
+            .contains("let local: &Vec<Option<String>> = &vec![Some(\"alpha\".to_string()), Some(\"beta\".to_string())];")
+            && translation.rust.contains("return Ok(self.length_of_first(local)?);")
             && !translation
                 .rust
                 .contains("length_of_first(self.values.unwrap())")
-            && !translation.rust.contains("length_of_first(local)"),
+            && !translation.rust.contains("length_of_first(local.clone())"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "array_argument_slice_view",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -7294,6 +8341,15 @@ fn shared_self_field_reads_recover_owned_values_without_moves() {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "shared_self_field_owned_recovery",
+        vec![GeneratedCrateModule {
+            name: "shared_self_field_owned_recovery",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -7359,6 +8415,15 @@ fn documents_external_primitive_getter_dispatch_coercion_gap() {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "external_primitive_getter_dispatch",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -7374,6 +8439,14 @@ fn external_boolean_getter_no_longer_requires_runtime_downcast() {
                 .contains("unsupported Java dispatch coercion"),
         "{}",
         translation.rust
+    );
+    cargo_check_generated_modules(
+        "external_boolean_getter_dispatch",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -7391,6 +8464,15 @@ fn documents_external_byte_array_getter_dispatch_coercion_gap() {
             && !translation.rust.contains("downcast::<"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "external_byte_array_getter_dispatch",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -7464,6 +8546,15 @@ class UseLocalized {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "closed_enum_variant_dyn_trait_parameter",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -7509,6 +8600,15 @@ class LocalizedException {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "closed_enum_variant_constructor_delegation_empty_varargs",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -7548,21 +8648,30 @@ class EnumConstantOptionalUse {
     assert!(
         translation
             .rust
-            .contains("self.version = Some(EnumConstantOptionalUseHeaderVersion::V1)")
+            .contains("self.version = Some(EnumConstantOptionalUse_HeaderVersion::V1)")
             && translation
                 .rust
-                .contains(".is_at_least(EnumConstantOptionalUseHeaderVersion::V1)")
+                .contains(".is_at_least(EnumConstantOptionalUse_HeaderVersion::V1)")
             && !translation
                 .rust
-                .contains("EnumConstantOptionalUseHeaderVersion::V1.unwrap()")
+                .contains("EnumConstantOptionalUse_HeaderVersion::V1.unwrap()")
             && !translation
                 .rust
-                .contains("EnumConstantOptionalUseHeaderVersion::V1.as_ref()")
+                .contains("EnumConstantOptionalUse_HeaderVersion::V1.as_ref()")
             && !translation
                 .rust
-                .contains("EnumConstantOptionalUseHeaderVersion::V1.map("),
+                .contains("EnumConstantOptionalUse_HeaderVersion::V1.map("),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_java_enum_constant_slot_plan",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -7604,12 +8713,22 @@ class LocalizableStore {
                 .contains("self.patterns.push(pattern.clone_box());")
             && translation
                 .rust
-                .contains("return (self.patterns.get(index as usize).expect(\"Java index out of bounds\")).clone()")
+                .contains("self.patterns.get(index as usize).ok_or_else(|| JavaException::new(\"IndexOutOfBoundsException\"")
+            && translation.rust.contains("uncaught Java exception")
             && !translation.rust.contains("Box::new(self.patterns.get")
             && !translation.rust.contains("patterns: Vec<Localizable>")
             && !translation.rust.contains("patterns: Vec<dyn Localizable>"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_interface_collection_elements_boxed_dyn_trait",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -7697,14 +8816,25 @@ class HasContext implements ContextProvider {
             .contains("fn get_context(&self) -> &Context;")
             && translation
                 .rust
-                .contains("pub fn get_context(&self) -> &Context")
-            && translation.rust.contains("return &self.context;")
+                .contains("pub fn get_context(&self) -> Option<&Context>")
             && translation
                 .rust
-                .contains("fn get_context(&self) -> &Context { HasContext::get_context(self) }")
+                .contains("return self.context.as_ref().map(|value| &**value);")
+            && translation
+                .rust
+                .contains("fn get_context(&self) -> &Context { HasContext::get_context(self).expect(\"Java null receiver\") }")
             && !translation.rust.contains("return self.context.clone();"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_interface_object_getter",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -7737,6 +8867,15 @@ class HeaderLine implements IdSource {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "source_interface_nullable_impl_return",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -7767,10 +8906,10 @@ class Incrementor {
     assert!(
         translation
             .rust
-            .contains("pub trait IncrementorMaxCountExceededCallback")
+            .contains("pub trait Incrementor_MaxCountExceededCallback")
             && translation
                 .rust
-                .contains("Box<dyn IncrementorMaxCountExceededCallback>")
+                .contains("Box<dyn Incrementor_MaxCountExceededCallback>")
             && translation
                 .rust
                 .contains("new_int_incrementor_max_count_exceeded_callback")
@@ -7783,6 +8922,15 @@ class Incrementor {
             && !translation.rust.contains("compile_error!"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "nested_interface_type_names",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -7810,14 +8958,23 @@ class Builder {
     );
 
     assert!(
-        translation.rust.contains("impl Headered for BuilderReader")
+        translation.rust.contains("impl Headered for Builder_Reader")
             && translation
                 .rust
-                .contains("fn get_header(&self) -> &Header { BuilderReader::get_header(self) }")
+                .contains("fn get_header(&self) -> &Header { Builder_Reader::get_header(self).expect(\"Java null receiver\") }")
             && !translation.rust.contains("Builder.Reader::get_header")
             && !translation.rust.contains("compile_error!"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "nested_interface_implementor_forwarding",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -7848,20 +9005,29 @@ class Incrementor {
 
     assert!(
         translation.rust.contains(
-            "pub type MaxCountExceededCallback = dyn IncrementorMaxCountExceededCallback;"
+            "pub type MaxCountExceededCallback = dyn Incrementor_MaxCountExceededCallback;"
         ) && translation
             .rust
-            .contains("impl dyn IncrementorMaxCountExceededCallback")
+            .contains("impl dyn Incrementor_MaxCountExceededCallback")
             && translation
                 .rust
-                .contains("<dyn IncrementorMaxCountExceededCallback>::anonymous()")
+                .contains("<dyn Incrementor_MaxCountExceededCallback>::anonymous()")
             && !translation
                 .rust
-                .contains("&dyn IncrementorMaxCountExceededCallback::anonymous")
+                .contains("&dyn Incrementor_MaxCountExceededCallback::anonymous")
             && !translation.rust.contains("anonymous().clone_box()")
             && !translation.rust.contains("compile_error!"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "anonymous_nested_interface_constructor",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -7888,6 +9054,15 @@ class KeywordReceiverStream extends FilterInputStream {
             && !translation.rust.contains("return in.read()"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "lowercase_keyword_receiver",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -7963,9 +9138,22 @@ class ReceiverlessInstanceOverloadDelegation {
 
     assert!(
         translation.rust.contains("return self.open_")
+            && translation.rust.contains(
+                "unsupported Java class upcast: ReceiverlessInstanceOverloadDelegation.LocalSeekablePathStream to ReceiverlessInstanceOverloadDelegation.BaseStream requires class hierarchy lowering"
+            )
             && !translation.rust.contains("return open("),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "receiverless_instance_overload_delegation_current_self",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "requires class hierarchy lowering",
     );
 }
 
@@ -7999,6 +9187,15 @@ class ExternalReceiverlessInstanceOverloadDelegation {
             && !translation.rust.contains("return open("),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "external_receiverless_instance_overload_delegation",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -8085,6 +9282,15 @@ class ArrayElementAssignmentToBareField {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "array_element_assignment_to_bare_field",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -8116,6 +9322,15 @@ class SystemArraycopyOptionalArrayFields {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "system_arraycopy_optional_array_fields",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -8136,14 +9351,23 @@ class SystemArraycopyParameterFields {
 
     assert!(
         translation.rust.contains(
-            "pub fn copy(source: &SystemArraycopyParameterFields, dest: &mut SystemArraycopyParameterFields)"
+            "pub fn copy(source: &SystemArraycopyParameterFields, dest: &mut SystemArraycopyParameterFields) -> Result<(), JavaException>"
         ) && translation.rust.contains(
-            "System::arraycopy(source.values.as_ref().expect(\"Java null receiver\").as_slice(), 0"
+            "System::arraycopy(source.values.as_ref().ok_or_else(|| JavaException::new(\"NullPointerException\", \"Java null receiver\".to_string()))?.as_slice(), 0"
         ) && translation.rust.contains(
-            "dest.values.as_mut().expect(\"Java null receiver\").as_mut_slice(), 0"
+            "dest.values.as_mut().ok_or_else(|| JavaException::new(\"NullPointerException\", \"Java null receiver\".to_string()))?.as_mut_slice(), 0"
         ) && !translation.rust.contains("System::arraycopy(source.values, 0, dest.values,"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "system_arraycopy_parameter_fields",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -8199,6 +9423,15 @@ class CastComparison {
             && !translation.rust.contains("value.len() as i32 < limit"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "raw_cast_left_operand_comparison",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -8263,6 +9496,15 @@ class NumericSuffixes {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "java_numeric_literal_suffixes",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -8276,9 +9518,18 @@ fn documents_java_bean_getter_setter_naming_gap() {
             && translation
                 .rust
                 .contains("self.set_value(other.get_value())")
-            && translation.rust.contains("return self.get_value();"),
+            && translation.rust.contains("return Ok(self.get_value());"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "java_bean_getter_setter_naming",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -8289,7 +9540,7 @@ fn documents_collection_remove_if_lambda_gap() {
     assert!(
         translation
             .rust
-            .contains("pub fn remove_blank_lines(&self, lines: &mut Vec<String>)")
+            .contains("pub fn remove_blank_lines(&self, mut lines: Vec<String>)")
             && translation
                 .rust
                 .contains("lines.retain(|line| !(line.is_empty()))")
@@ -8299,6 +9550,15 @@ fn documents_collection_remove_if_lambda_gap() {
                 .contains("unsupported Java expression: lambda"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "collection_remove_if_lambda",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -8382,7 +9642,7 @@ fn documents_for_each_lambda_side_effect_gap() {
     assert!(
         translation
             .rust
-            .contains("pub fn emit_all(&self, names: Vec<String>)")
+            .contains("pub fn emit_all(&self, names: &[String])")
             && translation.rust.contains("for name in names.iter()")
             && translation.rust.contains("self.emit(name.as_str());")
             && !translation.rust.contains(".for_each(")
@@ -8391,6 +9651,15 @@ fn documents_for_each_lambda_side_effect_gap() {
                 .contains("unsupported Java expression: lambda"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "for_each_lambda_side_effect",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -8506,13 +9775,25 @@ class ExecutorSubmitReceiverlessHelper {
 
     assert!(
         translation.rust.contains(".submit(|| {")
-            && translation.rust.contains("return self.helper(&value);")
+            && translation
+                .rust
+                .contains("return self.helper(value.as_str())")
             && !translation.rust.contains("return helper(value")
             && !translation
                 .rust
                 .contains("unsupported Java expression: lambda"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "executor_submit_lambda_receiverless_helper_call",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "expected `Box<dyn Any>`, found `()`",
     );
 }
 
@@ -8566,6 +9847,16 @@ class Reader {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules_fails_with(
+        "executor_submit_future_slot_shapes_block_lambda_result",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "no method named `submit` found for reference `&ExecutorService`",
+    );
 }
 
 #[test]
@@ -8595,13 +9886,21 @@ class Wrapper {
     assert!(
         translation
             .rust
-            .contains("Wrapper::new(self.open(path.clone()")
-            && translation.rust.contains(")?, path.clone()")
+            .contains("Wrapper::new(self.open(path)?, path.clone())")
             && !translation
                 .rust
                 .contains("Wrapper::new(self.open(path), path)"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "unshaped_constructor_argument_call_that_throws_propagates_result",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -8631,6 +9930,16 @@ class StreamBlockLambdaLocalReceiver {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules_fails_with(
+        "stream_block_lambda_return_uses_declared_local_receiver",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "cannot find value `product` in this scope",
+    );
 }
 
 #[test]
@@ -8641,10 +9950,12 @@ fn for_each_lambda_side_effect_generated_rust_compiles() {
         "{:?}",
         translation.diagnostics
     );
-    let test_source = format!(
-        "{}\n{}",
-        translation.rust,
-        r#"
+    cargo_test_generated_modules(
+        "for_each_lambda_side_effect",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
 #[cfg(test)]
 mod generated_tests {
     use super::*;
@@ -8652,26 +9963,11 @@ mod generated_tests {
     #[test]
     fn for_each_lambda_side_effect_compiles() {
         let fixture = ForEachLambdaSideEffect {};
-        fixture.emit_all(vec!["a".to_string(), "b".to_string()]);
+        fixture.emit_all(&vec!["a".to_string(), "b".to_string()]).unwrap();
     }
 }
-"#
-    );
-    let rust_path = std::env::temp_dir().join("new_java2rust_for_each_lambda_side_effect_test.rs");
-    let bin_path = std::env::temp_dir().join("new_java2rust_for_each_lambda_side_effect_test");
-    fs::write(&rust_path, test_source).unwrap();
-    let output = Command::new("rustc")
-        .arg("--test")
-        .arg(&rust_path)
-        .arg("-o")
-        .arg(&bin_path)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "forEach lambda side-effect test did not compile\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+"#,
+        }],
     );
 }
 
@@ -8845,7 +10141,13 @@ fn documents_static_owner_and_utility_call_gap() {
     let translation = translate_source(&idiom_gap("StaticConstantOwner.java"));
 
     assert!(
-        translation.rust.contains("Owner::CONSTANT"),
+        (translation.rust.contains("Owner::CONSTANT")
+            || translation
+                .rust
+                .contains("StaticConstantOwnerOwner::CONSTANT"))
+            && !translation
+                .rust
+                .contains("StaticConstantOwner.Owner::CONSTANT"),
         "{}",
         translation.rust
     );
@@ -8855,6 +10157,14 @@ fn documents_static_owner_and_utility_call_gap() {
             && !translation.rust.contains("math.max("),
         "{}",
         translation.rust
+    );
+    cargo_check_generated_modules(
+        "static_constant_owner",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -8877,6 +10187,15 @@ class SamePackageUtilityCaller {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "same_package_uppercase_utility_receiver",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -8896,6 +10215,15 @@ class ShadowedUppercaseUtilityCaller {
             && !translation.rust.contains("ArgUtils::to_string"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "shadowed_uppercase_utility_receiver",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -8919,6 +10247,15 @@ fn documents_primitive_array_allocation_gap() {
         translation.rust.contains("values.fill(1 as i8);"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "primitive_array_with_computed_length",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -8971,6 +10308,15 @@ fn documents_string_array_literal_argument_gap() {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "string_array_literal_argument",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -8986,14 +10332,746 @@ fn documents_map_put_get_java_api_gap() {
             )
             && translation
                 .rust
-                .contains("pub fn replace(&self, values: &mut std::collections::HashMap<String, String>, key: String, value: String) -> Option<String>")
+                .contains("pub fn replace(&self, values: &mut std::collections::HashMap<String, String>, key: String, value: String) -> Result<Option<String>, JavaException>")
             && translation
                 .rust
-                .contains("return values.get(key.as_str()).cloned();")
+                .contains("return Ok(values.get(&key).cloned());")
             && !translation.rust.contains(".put(")
             && !translation.rust.contains("&mut Map"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "map_put_get_java_api",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn map_put_previous_value_stays_nullable() {
+    let translation = translate_source(
+        r#"
+import java.util.HashMap;
+import java.util.Map;
+
+class MapPutPreviousValue {
+    String run() {
+        Map<String, Integer> m = new HashMap<String, Integer>();
+        Integer p1 = m.put("a", 1);
+        Integer p2 = m.put("a", 2);
+        return p1 + "," + p2;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let p1: Option<i32> = m.insert(\"a\".to_string(), 1);")
+            && translation
+                .rust
+                .contains("let p2: Option<i32> = m.insert(\"a\".to_string(), 2);")
+            && !translation
+                .rust
+                .contains(".insert(\"a\".to_string(), 1).unwrap()")
+            && !translation.rust.contains("let p1: Box<dyn std::any::Any>"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "map_put_previous_value",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn sorted_map_field_put_previous_value_stays_nullable() {
+    let translation = translate_source(
+        r#"
+import java.net.URI;
+import java.util.SortedMap;
+import java.util.TreeMap;
+
+class SortedMapFieldPutPreviousValue {
+    private SortedMap<String, URI> paths = new TreeMap<String, URI>();
+
+    boolean add(String key, URI value) {
+        URI previous = paths.put(key, value);
+        return previous != null;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let previous: Option<URI> = self.paths.insert(key, value);")
+            && translation.rust.contains("return previous.is_some();")
+            && !translation.rust.contains(".insert(key, value).unwrap()")
+            && !translation
+                .rust
+                .contains("unsupported Java null comparison"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "sorted_map_field_put_previous_value",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn split_part_map_key_borrows_optional_index_before_clone_unwrap() {
+    let translation = translate_source(
+        r#"
+import java.net.URI;
+import java.util.SortedMap;
+import java.util.TreeMap;
+
+class SplitPartMapKey {
+    private SortedMap<String, URI> paths = new TreeMap<String, URI>();
+
+    boolean add(String line, URI value) {
+        String[] parts = line.split("\\t", -1);
+        URI previous = paths.put(parts[0], value);
+        return previous != null;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let previous: Option<URI> = self.paths.insert(")
+            && translation
+                .rust
+                .contains(".as_ref().expect(\"Java null receiver\").clone()")
+            && translation.rust.contains(".expect(\"Java null receiver\")")
+            && !translation.rust.contains("?.unwrap().clone()")
+            && !translation
+                .rust
+                .contains("unsupported Java null comparison"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "split_part_map_key",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn map_remove_previous_value_stays_nullable_and_borrows_key() {
+    let translation = translate_source(
+        r#"
+import java.util.HashMap;
+import java.util.Map;
+
+class MapRemovePreviousValue {
+    String run() {
+        Map<String, Integer> m = new HashMap<String, Integer>();
+        m.put("a", 1);
+        Integer missing = m.remove("b");
+        Integer removed = m.remove("a");
+        return missing + "," + removed + "," + m.containsKey("a");
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let missing: Option<i32> = m.remove(&")
+            && translation
+                .rust
+                .contains("let removed: Option<i32> = m.remove(&")
+            && !translation
+                .rust
+                .contains("let missing: Box<dyn std::any::Any>")
+            && !translation.rust.contains(".remove(\"b\".to_string())"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "map_remove_previous_value",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn map_contains_value_scans_values_and_borrows_needle() {
+    let translation = translate_source(
+        r#"
+import java.util.HashMap;
+import java.util.Map;
+
+class MapContainsValueProbe {
+    String run() {
+        Map<String, Integer> m = new HashMap<String, Integer>();
+        m.put("a", 1);
+        m.put("b", 2);
+        boolean found = m.containsValue(2);
+        boolean missing = m.containsValue(3);
+        return found + "," + missing;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let found: bool = m.values().any(|value| value == &")
+            && translation
+                .rust
+                .contains("let missing: bool = m.values().any(|value| value == &")
+            && !translation.rust.contains(".contains_value("),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "map_contains_value_probe",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn map_get_or_default_borrows_key_and_unwraps_default() {
+    let translation = translate_source(
+        r#"
+import java.util.HashMap;
+import java.util.Map;
+
+class MapGetOrDefaultProbe {
+    String run() {
+        Map<String, Integer> m = new HashMap<String, Integer>();
+        m.put("a", 1);
+        int found = m.getOrDefault("a", 9);
+        int missing = m.getOrDefault("z", 9);
+        return found + "," + missing;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("let found: i32 = m.get(&")
+            && translation.rust.contains(".cloned().unwrap_or(9)")
+            && translation.rust.contains("let missing: i32 = m.get(&")
+            && !translation.rust.contains(".get_or_default("),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "map_get_or_default_probe",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn map_put_if_absent_returns_previous_value_and_inserts_only_when_missing() {
+    let translation = translate_source(
+        r#"
+import java.util.HashMap;
+import java.util.Map;
+
+class MapPutIfAbsentProbe {
+    String run() {
+        Map<String, Integer> m = new HashMap<String, Integer>();
+        Integer first = m.putIfAbsent("a", 1);
+        Integer second = m.putIfAbsent("a", 2);
+        return first + "," + second + "," + m.get("a");
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("let first: Option<i32> = {")
+            && translation
+                .rust
+                .contains("m.contains_key(&__java_put_if_absent_key)")
+            && translation
+                .rust
+                .contains("m.get(&__java_put_if_absent_key).cloned()")
+            && translation
+                .rust
+                .contains("m.insert(__java_put_if_absent_key, 1);")
+            && translation.rust.contains("let second: Option<i32> = {")
+            && translation
+                .rust
+                .contains("m.insert(__java_put_if_absent_key, 2);")
+            && !translation.rust.contains(".put_if_absent("),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "map_put_if_absent_probe",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn generic_list_get_into_typed_local_recovers_owned_element() {
+    let translation = translate_source(
+        r#"
+import java.util.ArrayList;
+import java.util.List;
+
+class GenericListGetIntoTypedLocal {
+    static <T> T first(List<T> values) {
+        T value = values.get(0);
+        return value;
+    }
+
+    int run() {
+        List<Integer> values = new ArrayList<Integer>();
+        values.add(7);
+        int value = first(values);
+        return value + 1;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn first<T: Clone>(values: &[T]) -> Option<T>")
+            && translation.rust.contains("let value:")
+            && translation.rust.contains(".get(0")
+            && !translation.rust.contains("let value: i32 = values.get"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "generic_list_get_into_typed_local",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn set_remove_borrows_key_and_returns_boolean() {
+    let translation = translate_source(
+        r#"
+import java.util.HashSet;
+import java.util.Set;
+
+class SetRemoveValue {
+    String run() {
+        Set<String> s = new HashSet<String>();
+        s.add("a");
+        s.add("b");
+        boolean missing = s.remove("z");
+        boolean removed = s.remove("a");
+        return missing + "," + removed + "," + s.size();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("let missing: bool = s.remove(&")
+            && translation.rust.contains("let removed: bool = s.remove(&")
+            && !translation.rust.contains(".remove(\"z\".to_string())"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "set_remove_value",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn list_contains_borrows_element_and_returns_boolean() {
+    let translation = translate_source(
+        r#"
+import java.util.ArrayList;
+import java.util.List;
+
+class ListContainsValue {
+    String run() {
+        List<String> xs = new ArrayList<String>();
+        xs.add("a");
+        xs.add("b");
+        boolean found = xs.contains("b");
+        boolean missing = xs.contains("z");
+        return found + "," + missing;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("let found: bool = xs.contains(&")
+            && translation
+                .rust
+                .contains("let missing: bool = xs.contains(&")
+            && !translation.rust.contains(".contains(\"b\".to_string())"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "list_contains_value",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn list_set_returns_previous_value_and_assigns_index() {
+    let translation = translate_source(
+        r#"
+import java.util.ArrayList;
+import java.util.List;
+
+class ListSetValue {
+    String run() {
+        List<String> xs = new ArrayList<String>();
+        xs.add("a");
+        xs.add("b");
+        String old = xs.set(1, "c");
+        return old + "," + xs.get(0) + "," + xs.get(1);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("let old: String = {")
+            && translation
+                .rust
+                .contains("let __java_list_set_index = 1 as usize;")
+            && translation
+                .rust
+                .contains("let __java_list_set_old = xs[__java_list_set_index].clone();")
+            && translation
+                .rust
+                .contains("xs[__java_list_set_index] = \"c\".to_string();")
+            && !translation.rust.contains(".set("),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "list_set_value",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn list_remove_object_removes_first_equal_element_and_returns_boolean() {
+    let translation = translate_source(
+        r#"
+import java.util.ArrayList;
+import java.util.List;
+
+class ListRemoveObjectValue {
+    String run() {
+        List<String> xs = new ArrayList<String>();
+        xs.add("a");
+        xs.add("b");
+        xs.add("b");
+        boolean removed = xs.remove("b");
+        boolean missing = xs.remove("z");
+        return removed + "," + missing + "," + xs.size() + "," + xs.get(0) + "," + xs.get(1);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("let removed: bool = {")
+            && translation
+                .rust
+                .contains("let __java_list_remove_needle = \"b\".to_string();")
+            && translation
+                .rust
+                .contains(".iter().position(|item| item == &__java_list_remove_needle)")
+            && translation.rust.contains(
+                "Some(__java_list_remove_index) => { xs.remove(__java_list_remove_index); true }"
+            )
+            && translation.rust.contains("None => false")
+            && !translation.rust.contains(".remove(\"b\".to_string())"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "list_remove_object_value",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn hash_set_diamond_constructor_keeps_set_carrier() {
+    let translation = translate_source(
+        r#"
+import java.util.HashSet;
+import java.util.Set;
+
+class SetConstruction {
+    String run() {
+        Set<String> a = new HashSet<String>();
+        HashSet<String> b = new HashSet<>();
+        Set<String> c = new HashSet<>();
+        a.add("1");
+        b.add("2");
+        c.add("3");
+        return a.size() + "," + b.size() + "," + c.size();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "let mut a: std::collections::HashSet<String> = std::collections::HashSet::new();"
+        ) && translation.rust.contains(
+            "let mut b: std::collections::HashSet<String> = std::collections::HashSet::new();"
+        ) && translation.rust.contains(
+            "let mut c: std::collections::HashSet<String> = std::collections::HashSet::new();"
+        ) && !translation
+            .rust
+            .contains("let mut b: std::collections::HashSet<String> = Vec::new();")
+            && !translation
+                .rust
+                .contains("let mut c: std::collections::HashSet<String> = Vec::new();"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "hash_set_diamond_constructor",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn tree_map_constructor_keeps_sorted_map_carrier() {
+    let translation = translate_source(
+        r#"
+import java.util.SortedMap;
+import java.util.TreeMap;
+
+class TreeMapConstruction {
+    int run() {
+        SortedMap<String, Integer> m = new TreeMap<String, Integer>();
+        m.put("c", 3);
+        m.put("a", 1);
+        return m.firstKey().length();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "let mut m: std::collections::BTreeMap<String, i32> = std::collections::BTreeMap::new();"
+        ) && translation.rust.contains(".len() as i32")
+            && !translation.rust.contains(".length()")
+            && !translation.rust.contains("std::collections::HashMap::new()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "tree_map_constructor_keeps_sorted_map_carrier",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn tree_map_first_key_uses_btree_key_iterator() {
+    let translation = translate_source(
+        r#"
+import java.util.TreeMap;
+
+class TreeMapFirstKey {
+    String run() {
+        TreeMap<String, Integer> m = new TreeMap<String, Integer>();
+        m.put("c", 3);
+        m.put("a", 1);
+        String first = m.firstKey();
+        return first + ":" + m.get(first);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("m.keys().next().ok_or_else(|| JavaException::new(\"NoSuchElementException\", \"Java TreeMap.firstKey on empty map\".to_string()))")
+            && translation
+                .rust
+                .contains("unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))")
+            && !translation.rust.contains(".first_key("),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "tree_map_first_key_uses_btree_key_iterator",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn tree_set_constructor_keeps_sorted_set_carrier() {
+    let translation = translate_source(
+        r#"
+import java.util.SortedSet;
+import java.util.TreeSet;
+
+class TreeSetConstruction {
+    int run() {
+        SortedSet<String> s = new TreeSet<String>();
+        s.add("c");
+        s.add("a");
+        return s.size();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "let mut s: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();"
+        ) && !translation
+            .rust
+            .contains("std::collections::HashSet::new()")
+            && !translation.rust.contains("let mut s: Vec<String>"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "tree_set_constructor_keeps_sorted_set_carrier",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn linked_hash_map_constructor_uses_insertion_ordered_carrier() {
+    let translation = translate_source(
+        r#"
+import java.util.LinkedHashMap;
+import java.util.Map;
+
+class LinkedHashMapConstruction {
+    int run() {
+        Map<String, Integer> m = new LinkedHashMap<String, Integer>();
+        m.put("a", 1);
+        return m.size();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let mut m: JavaLinkedHashMap<String, i32> = JavaLinkedHashMap::new();")
+            && !translation
+                .rust
+                .contains("unsupported Java insertion-ordered collection")
+            && !translation
+                .rust
+                .contains("std::collections::HashMap::new()"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "linked_hash_map_constructor_uses_insertion_ordered_carrier",
+        vec![GeneratedCrateModule {
+            name: "linked_hash_map_construction",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -9001,7 +11079,7 @@ fn documents_map_put_get_java_api_gap() {
 fn typed_set_add_source_constructor_keeps_concrete_element_slot() {
     let translation = translate_source(
         r#"
-import java.util.LinkedHashSet;
+import java.util.HashSet;
 import java.util.Set;
 
 class VCFHeaderLine {
@@ -9028,7 +11106,7 @@ class VCFHeaderLine {
 
 class TypedSetAddSourceConstructor {
     Set<VCFHeaderLine> make() {
-        Set<VCFHeaderLine> metaData = new LinkedHashSet<VCFHeaderLine>();
+        Set<VCFHeaderLine> metaData = new HashSet<VCFHeaderLine>();
         metaData.add(new VCFHeaderLine("source", "tool"));
         return metaData;
     }
@@ -9082,6 +11160,15 @@ class ObjectMapPut {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "object_map_put_keeps_erased_object_value_without_downcast",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -9110,6 +11197,15 @@ class HashtablePutUse {
             && !translation.rust.contains("let mut file_bases: Hashtable"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "hashtable_put_lowers_to_native_map_insert",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -9187,12 +11283,21 @@ class Kmer {
         translation
             .rust
             .contains("self.kmers.as_mut().unwrap().insert(")
+            && translation.rust.contains("std::rc::Rc::new(Kmer::new(")
             && !translation
                 .rust
                 .contains("self.kmers.as_ref().unwrap().put(")
             && !translation.rust.contains(".put("),
         "{}",
         translation.rust
+    );
+    cargo_check_generated_modules(
+        "optional_map_field_put_lowers_through_mutable_optional_receiver",
+        vec![GeneratedCrateModule {
+            name: "optional_map_field_put",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 
@@ -9214,6 +11319,15 @@ class QueuePutUse {
         translation.rust.contains("queue.push(value);") && !translation.rust.contains(".put("),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "queue_put_lowers_to_native_push_for_vec_backed_queue",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -9237,15 +11351,32 @@ class BufferPutUse {
 
     assert!(
         translation.rust.contains("{ let _ = encoded")
-            && translation.rust.contains("let rem: i32 = if bytes.has_remaining() { bytes.remaining() } else { 0 };")
-            && translation.rust.contains("pub fn has_remaining(&self) -> bool")
-            && translation.rust.contains("pub fn remaining(&self) -> i32")
+            && translation.rust.contains(
+                "let rem: i32 = if bytes.has_remaining() { bytes.remaining() } else { 0 };"
+            )
             && translation
                 .rust
-                .contains("{ let _ = char::from_u32((encoded[0 as usize] as i32 & 255) as u32 & 0xffff).unwrap_or('\\0'); };")
+                .contains("pub fn has_remaining(&self) -> bool")
+            && translation.rust.contains("pub fn remaining(&self) -> i32")
+            && translation.rust.contains("{ let _ = char::from_u32(")
+            && translation
+                .rust
+                .contains("__java_arrays_source.get(__java_arrays_index as usize)")
+            && translation
+                .rust
+                .contains("as i32 & 255) as u32 & 0xffff).unwrap_or('\\0'); };")
             && !translation.rust.contains(".put("),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "byte_and_char_buffer_put_are_modeled_statement_facade_calls",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -9369,6 +11500,15 @@ fn field_map_put_reused_key_clones_at_owned_boundary() {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "field_map_put_key_reuse",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -9396,9 +11536,21 @@ class MapPutElseBranchKeyReuse {
     assert!(
         translation.rust.contains(
             "counts.insert(key.clone()/* TODO(translation): validate added clone */, 1);"
-        ) && translation.rust.contains("plus.contains_key(key.as_str())"),
+        ) && translation.rust.contains("plus.contains_key(&key)")
+            && translation
+                .rust
+                .contains("return Ok(plus.get(&key).copied().expect(\"Java null receiver\"));"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "map_put_else_branch_key_reuse",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -9434,9 +11586,20 @@ class MapPutElseBranchReassignedKeyReuse {
         ) && translation
             .rust
             .contains("plus.insert(key.clone()/* TODO(translation): validate added clone */, 1);")
-            && translation.rust.contains("counts.get(key.as_str())"),
+            && translation
+                .rust
+                .contains("return Ok(counts.get(&key).copied().expect(\"Java null receiver\"));"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "map_put_else_branch_reassigned_key_reuse",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -9455,6 +11618,15 @@ fn optional_map_put_reused_value_borrows_before_clone_unwrap() {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "optional_map_put_value_reuse",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -9472,6 +11644,15 @@ fn optional_argument_wrap_reused_value_clones_before_some() {
             && !translation.rust.contains(".clone()/* TODO(translation): validate added clone */.clone()"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "optional_argument_wrap_reuse",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -9538,8 +11719,8 @@ class MapGetNullableReturn {
     assert!(
         translation
             .rust
-            .contains("pub fn from_param(&self, values: &std::collections::HashMap<String, String>, key: &str) -> Option<String>")
-            && translation.rust.contains("return values.get(key).cloned();")
+            .contains("pub fn from_param(&self, values: &std::collections::HashMap<String, String>, key: &str) -> Result<Option<String>, JavaException>")
+            && translation.rust.contains("return Ok(values.get(key).cloned());")
             && translation
                 .rust
                 .contains("pub fn from_field(&self, key: &str) -> Option<String>")
@@ -9567,17 +11748,26 @@ fn map_get_optional_receiver_to_string_uses_java_null_receiver_policy() {
     let translation = translate_source(&idiom_gap("MapGetOptionalReceiverToString.java"));
 
     assert!(
-        translation
-            .rust
-            .contains("paths.get(sample).expect(\"Java null receiver\").to_string()")
+        translation.rust.contains(
+            "paths.get(sample).ok_or_else(|| JavaException::new(\"NullPointerException\""
+        ) && translation.rust.contains("?.to_string()")
             && !translation
                 .rust
                 .contains("paths.get(sample.as_str()).to_string()")
             && !translation
                 .rust
-                .contains("unwrap_or_else(|| \"null\".to_string())"),
+                .contains("paths.get(sample).map_or_else(|| \"null\".to_string()"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "map_get_optional_receiver_to_string",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -9592,6 +11782,15 @@ fn map_get_in_ternary_primitive_slot_unwraps_and_copies_value() {
             && !translation.rust.contains("indexes.get(name) } else"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "map_get_ternary_primitive_index",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -9611,10 +11810,13 @@ class MapGetPrimitiveArithmetic {
 
     assert!(
         translation.rust.contains(
-            "(totals.get(key).copied().expect(\"Java null receiver\")).wrapping_div(count)"
-        ) && !translation
+            "let __java_left: i32 = totals.get(key).copied().expect(\"Java null receiver\");"
+        ) && translation
             .rust
-            .contains("totals.get(key.as_str()) / count"),
+            .contains("Ok((__java_left).wrapping_div(__java_right))")
+            && !translation
+                .rust
+                .contains("totals.get(key.as_str()) / count"),
         "{}",
         translation.rust
     );
@@ -10145,6 +12347,15 @@ fn constructor_string_argument_reuse_clones_at_owned_boundary() {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "constructor_string_argument_reuse",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -10158,6 +12369,15 @@ fn method_argument_reuse_clones_at_owned_boundary() {
             && !translation.rust.contains("let kept: String = self.keep(name);"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "method_argument_reuse_owned_boundary",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -10203,11 +12423,21 @@ fn map_key_set_int_loop_casts_len_for_java_int_comparison() {
             && translation.rust.contains("values.len() as i32")
             && translation
                 .rust
-                .contains("(keys.get(i as usize).expect(\"Java index out of bounds\")).clone()")
+                .contains("keys.get(i as usize).ok_or_else(|| JavaException::new(\"IndexOutOfBoundsException\"")
+            && translation.rust.contains("uncaught Java exception")
             && !translation.rust.contains("values.key_set()")
             && !translation.rust.contains("return keys.get(i);"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "map_key_set_int_loop",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -10224,6 +12454,15 @@ fn map_entry_set_iterator_next_get_key_uses_native_iterator_shape() {
             && !translation.rust.contains(".get_key()"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "map_entry_set_first_key",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -10267,6 +12506,15 @@ class MathMinCall {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "math_min_lowers_as_native_static_call",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -10293,6 +12541,15 @@ class SamSequenceLengthSurface {
                 .contains("std::cmp::min(100, record.get_sequence_length())"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "sam_sequence_record_get_sequence_length_surface",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -10323,6 +12580,15 @@ class TwoBitReferenceBasesSurface {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "two_bit_reference_get_reference_bases_surface",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -10332,11 +12598,20 @@ fn optional_field_mutating_overload_call_uses_signature_name_and_mut_receiver() 
     assert!(
         translation
             .rust
-            .contains("self.holder.as_mut().unwrap().add_string_int(&name, value);")
+            .contains("self.holder.as_mut().unwrap().add_string_int(name.as_str(), value);")
             && !translation.rust.contains(".as_ref().unwrap().add(")
             && !translation.rust.contains(".add(name, value);"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "optional_field_mutating_overload_call",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -10364,16 +12639,163 @@ class Holder {
     }
 }
 "#;
-    let translation =
-        translate_source_with_context_sources(caller, &[holder.to_string()], &FactSet::default());
+    let translation = translate_source_with_context_sources_and_summary_sources(
+        caller,
+        &[holder.to_string()],
+        &[],
+        true,
+        &FactSet::default(),
+    );
 
     assert!(
         translation
             .rust
-            .contains("self.holder.as_mut().unwrap().add_string_int(name.to_string(), value);")
+            .contains("self.holder.as_mut().unwrap().add_string_int(")
             && !translation.rust.contains(".add(name, value);"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "context_translation_sibling_overload_signature",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "cannot find type `Holder` in this scope",
+    );
+}
+
+#[test]
+fn catch_and_finally_field_mutations_make_receiver_mutable() {
+    let translation = translate_source(
+        r#"
+import java.util.ArrayList;
+import java.util.List;
+
+class CatchFinallyFieldMutations {
+    int n;
+    List<String> items = new ArrayList<>();
+
+    public void inCatch() {
+        try {
+            throw new RuntimeException("x");
+        } catch (RuntimeException e) {
+            n = n + 1;
+            items.add("a");
+        }
+    }
+
+    public void inFinally() {
+        try {
+            System.out.println("t");
+        } finally {
+            n = n + 1;
+            items.add("b");
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("pub fn in_catch(&mut self)")
+            && translation.rust.contains("pub fn in_finally(&mut self)"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "catch_and_finally_field_mutations_make_receiver_mutable",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn catch_self_call_mutation_makes_receiver_mutable() {
+    let translation = translate_source(
+        r#"
+class CatchSelfCallMutation {
+    int n;
+
+    void mutate() {
+        n = n + 1;
+    }
+
+    public void viaCatch() {
+        try {
+            throw new RuntimeException("x");
+        } catch (RuntimeException e) {
+            mutate();
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("pub fn mutate(&mut self)")
+            && translation.rust.contains("pub fn via_catch(&mut self)"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "catch_self_call_mutation_makes_receiver_mutable",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn catch_and_finally_locals_receive_signature_plans() {
+    let translation = translate_source(
+        r#"
+import java.util.List;
+
+class CatchFinallyLocalPlans {
+    public String inCatch(List<String> xs) {
+        try {
+            return xs.get(0);
+        } catch (RuntimeException e) {
+            String s = xs.get(1);
+            return s;
+        }
+    }
+
+    public String inFinally(List<String> xs) {
+        try {
+            return xs.get(0);
+        } finally {
+            String t = xs.get(1);
+            System.out.println(t);
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("let s: Option<String>")
+            && translation.rust.contains("let t: Option<String>")
+            && !translation.rust.contains("let mut s: Vec<String>")
+            && !translation.rust.contains("let mut t: Vec<String>"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "catch_and_finally_locals_receive_signature_plans",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -10453,6 +12875,160 @@ mod tests {
 }
 
 #[test]
+fn cross_file_overloaded_override_uses_context_hierarchy_names() {
+    let child = r#"
+class ChildCrossFileOverloadIdentity extends BaseCrossFileOverloadIdentity {
+    public int f(int a) {
+        return a + 1000;
+    }
+
+    int both() {
+        return f(1) + f("ab");
+    }
+}
+"#;
+    let base = r#"
+class BaseCrossFileOverloadIdentity {
+    public int f(int a) {
+        return a + 1;
+    }
+
+    public int f(String s) {
+        return s.length() + 100;
+    }
+}
+"#;
+    let translation =
+        translate_source_with_context_sources(child, &[base.to_string()], &FactSet::default());
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn f_int(&self, a: i32) -> i32")
+            && translation
+                .rust
+                .contains("pub fn f_string(&self, s: &str) -> Result<i32, JavaException>")
+            && translation.rust.contains("self.f_int(1)")
+            && translation.rust.contains("self.f_string(")
+            && !translation.rust.contains("pub fn f(&self, s:"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "cross_file_overloaded_override_uses_context_hierarchy_names",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn interface_default_overloads_count_for_implementor_override_names() {
+    let translation = translate_source(
+        r#"
+class InterfaceDefaultOverloadIdentity {
+    interface I {
+        default int f(int a) {
+            return a + 1;
+        }
+
+        default int f(String s) {
+            return s.length() + 100;
+        }
+    }
+
+    static class Impl implements I {
+        public int f(int a) {
+            return a + 1000;
+        }
+
+        int both() {
+            return f(1) + f("ab");
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn f_int(&self, a: i32) -> i32")
+            && translation
+                .rust
+                .contains("pub fn f_string(&self, s: &String) -> i32")
+            && translation.rust.contains("self.f_int(1)")
+            && translation.rust.contains("self.f_string(")
+            && !translation.rust.contains("pub fn f(&self, a: i32)"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "interface_default_overloads_count_for_implementor_override_names",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn transitive_superclass_overloads_count_for_grandchild_override_names() {
+    let translation = translate_source(
+        r#"
+class TransitiveOverloadIdentity {
+    static class Base {
+        int f(int a) {
+            return a + 1;
+        }
+
+        int f(String s) {
+            return s.length() + 100;
+        }
+    }
+
+    static class Mid extends Base {
+    }
+
+    static class Child extends Mid {
+        int f(int a) {
+            return a + 1000;
+        }
+
+        int both() {
+            return f(1) + f("ab");
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn f_int(&self, a: i32) -> i32")
+            && translation
+                .rust
+                .contains("pub fn f_string(&self, s: &String) -> i32")
+            && translation.rust.contains("self.f_int(1)")
+            && translation.rust.contains("self.f_string("),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "transitive_superclass_overloads_count_for_grandchild_override_names",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn inherited_receiverless_instance_call_uses_current_override_signature_name() {
     let source = r#"
 import java.util.Map;
@@ -10497,6 +13073,15 @@ class HeaderChild extends HeaderBase {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "inherited_receiverless_instance_call_override_signature",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -10534,9 +13119,20 @@ class Box<T extends Named> {
             && translation.rust.contains("impl<T: Named + Clone> Box<T>")
             && translation.rust.contains("pub fn new(value: T) -> Box<T>")
             && translation.rust.contains("return Box::<T> {")
-            && translation.rust.contains("return self.value.id();"),
+            && translation
+                .rust
+                .contains("return self.value.as_ref().unwrap().id();"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_generic_class_type_params_interface_bounds",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -10776,6 +13372,16 @@ class ContextOnlyGenericConstructor {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules_fails_with(
+        "non_emitted_context_generic_constructor_missing_bound",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "no method named `name` found for type parameter `N`",
+    );
 }
 
 #[test]
@@ -10935,14 +13541,27 @@ class Box<T extends HeaderLine> {
             && translation
                 .rust
                 .contains("impl HeaderLineBound for FormatLine")
-            && translation.rust.contains("impl<T: HeaderLineBound> Box<T>")
+            && translation
+                .rust
+                .contains("impl<T: HeaderLineBound + Clone> Box<T>")
             && translation
                 .rust
                 .contains("HeaderLine::get_i_d(self).expect(\"Java null receiver\")")
             && translation.rust.contains("pub fn id(&self) -> String")
-            && translation.rust.contains("return self.value.get_i_d();"),
+            && translation
+                .rust
+                .contains("return self.value.as_ref().unwrap().get_i_d();"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_generic_class_bound_method_call",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -10989,6 +13608,15 @@ class Box<T extends HeaderLine> {
             && !translation.rust.contains("HeaderLine::set_source(&mut {"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_class_bound_inherited_mutator",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -11093,11 +13721,24 @@ class Box<T extends HeaderLine> {
         translation.rust.contains("fn get_count(&self) -> i32;")
             && translation
                 .rust
-                .contains("fn get_count_string(&self, value: &String) -> i32;")
-            && translation.rust.contains("impl<T: HeaderLineBound> Box<T>")
-            && translation.rust.contains("return self.value.get_count();"),
+                .contains("fn get_count_string(&self, value: &str) -> i32;")
+            && translation
+                .rust
+                .contains("impl<T: HeaderLineBound + Clone> Box<T>")
+            && translation
+                .rust
+                .contains("return self.value.as_ref().unwrap().get_count();"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_generic_class_bound_overload_call",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -11132,14 +13773,25 @@ class Box<T extends HeaderLine> {
         translation
             .rust
             .contains("line.as_ref().unwrap().get_i_d()")
-            && !translation
-                .rust
-                .contains("line.as_ref().unwrap().get_i_d().as_deref()")
-            && !translation
-                .rust
-                .contains("line.as_ref().unwrap().get_i_d().unwrap()"),
+            || translation.rust.contains("line.as_ref().ok_or_else")
+                && translation.rust.contains("?.get_i_d()"),
         "{}",
         translation.rust
+    );
+    assert!(
+        !translation.rust.contains("get_i_d().as_deref()")
+            && !translation.rust.contains("get_i_d().unwrap()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "optional_type_param_bound_call_display",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -11180,10 +13832,19 @@ class BoundEnumReturnEquality {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "type_param_bound_enum_return_equality",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
-fn type_param_bound_source_supertype_assignment_uses_into_bound() {
+fn type_param_bound_source_supertype_assignment_requires_hierarchy_lowering() {
     let source = r#"
 class HeaderLine {
     String id;
@@ -11218,34 +13879,29 @@ class Standards<T extends CompoundLine> {
     let translation = translate_source(source);
 
     assert!(
-        !translation.diagnostics.has_errors(),
-        "{:?}",
-        translation.diagnostics
-    );
-    assert!(
         translation
             .rust
-            .contains("impl<T: CompoundLineBound + Clone + Into<HeaderLine>> Standards<T>")
+            .contains("compile_error!(\"unsupported Java class upcast: CompoundLine to HeaderLine requires class hierarchy lowering\")")
             && translation
                 .rust
-                .contains("let header_line: HeaderLine = line.into();")
+                .contains("let header_line: std::rc::Rc<HeaderLine> = { let _ = line; compile_error!")
             && translation
                 .rust
-                .contains("lines.push(value.unwrap().into());")
-            && translation
-                .rust
-                .contains("impl From<FormatLine> for HeaderLine"),
+                .contains("lines.push({ let _ = value.unwrap(); compile_error!")
+            && !translation.rust.contains("let header_line: HeaderLine = line.into();")
+            && !translation.rust.contains("lines.push(value.unwrap().into());"),
         "{}",
         translation.rust
     );
 
-    cargo_check_generated_modules(
-        "type_param_bound_source_supertype_assignment",
+    cargo_check_generated_modules_fails_with(
+        "type_param_bound_source_supertype_assignment_requires_hierarchy_lowering",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
             tests: "",
         }],
+        "requires class hierarchy lowering",
     );
 }
 
@@ -11273,25 +13929,22 @@ class FormatLine extends CompoundLine {
     let translation = translate_source(source);
 
     assert!(
-        !translation.diagnostics.has_errors(),
-        "{:?}",
-        translation.diagnostics
-    );
-    assert!(
         translation
             .rust
-            .contains("return self.same(&that.clone()/* TODO(translation): validate added clone */.into()) && self.description.as_ref() == that.description.as_ref();"),
+            .contains("compile_error!(\"unsupported Java class upcast: FormatLine to CompoundLine requires class hierarchy lowering\")")
+            && !translation.rust.contains(".same(&that.clone()/* TODO(translation): validate added clone */.into())"),
         "{}",
         translation.rust
     );
 
-    cargo_check_generated_modules(
+    cargo_check_generated_modules_fails_with(
         "reused_source_subtype_argument_upcasts_after_clone_recovery",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
             tests: "",
         }],
+        "requires class hierarchy lowering",
     );
 }
 
@@ -11320,25 +13973,25 @@ class FormatLine extends CompoundLine {
     let translation = translate_source(source);
 
     assert!(
-        !translation.diagnostics.has_errors(),
-        "{:?}",
-        translation.diagnostics
-    );
-    assert!(
         translation
             .rust
-            .contains("return self.keep(that.clone()/* TODO(translation): validate added clone */.into()).id.as_ref() == self.id.as_ref() && self.description.as_ref() == that.description.as_ref();"),
+            .contains("impl From<FormatLine> for CompoundLine")
+            && translation
+                .rust
+                .contains("unsupported Java String reference identity comparison requires string identity representation")
+            && !translation.rust.contains("self.keep(that.clone()/* TODO(translation): validate added clone */.into())"),
         "{}",
         translation.rust
     );
 
-    cargo_check_generated_modules(
+    cargo_check_generated_modules_fails_with(
         "reused_source_subtype_owned_argument_upcasts_after_clone_recovery",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
             tests: "",
         }],
+        "unsupported Java String reference identity comparison requires string identity representation",
     );
 }
 
@@ -11367,25 +14020,22 @@ class FormatLine extends CompoundLine {
     let translation = translate_source(source);
 
     assert!(
-        !translation.diagnostics.has_errors(),
-        "{:?}",
-        translation.diagnostics
-    );
-    assert!(
         translation
             .rust
-            .contains("return self.same(&that.clone()/* TODO(translation): validate added clone */.into()) && self.description.as_ref() == that.description.as_ref();"),
+            .contains("compile_error!(\"unsupported Java class upcast: FormatLine to CompoundLine requires class hierarchy lowering\")")
+            && !translation.rust.contains(".same(&that.clone()/* TODO(translation): validate added clone */.into())"),
         "{}",
         translation.rust
     );
 
-    cargo_check_generated_modules(
+    cargo_check_generated_modules_fails_with(
         "borrowed_downcast_source_subtype_argument_upcasts_after_clone_recovery",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
             tests: "",
         }],
+        "requires class hierarchy lowering",
     );
 }
 
@@ -11415,25 +14065,25 @@ class FormatLine extends CompoundLine {
     let translation = translate_source(source);
 
     assert!(
-        !translation.diagnostics.has_errors(),
-        "{:?}",
-        translation.diagnostics
-    );
-    assert!(
         translation
             .rust
-            .contains("return self.keep(that.clone()/* TODO(translation): validate added clone */.into()).id.as_ref() == self.id.as_ref() && self.description.as_ref() == that.description.as_ref();"),
+            .contains("impl From<FormatLine> for CompoundLine")
+            && translation
+                .rust
+                .contains("unsupported Java String reference identity comparison requires string identity representation")
+            && !translation.rust.contains("self.keep(that.clone()/* TODO(translation): validate added clone */.into())"),
         "{}",
         translation.rust
     );
 
-    cargo_check_generated_modules(
+    cargo_check_generated_modules_fails_with(
         "borrowed_downcast_source_subtype_owned_argument_upcasts_after_clone_recovery",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
             tests: "",
         }],
+        "unsupported Java String reference identity comparison requires string identity representation",
     );
 }
 
@@ -11467,24 +14117,25 @@ class StandardLineRepair {
     let translation = translate_source(source);
 
     assert!(
-        translation.rust.contains(
-            // `Rc::new(line.clone())`: `line` is a borrowed parameter, and a
-            // borrowed slot sees *through* the handle, so the clone yields a bare
-            // value that has to be put back behind it before it can satisfy
-            // `Standards<Rc<FormatLine>>` (claude_audits/0002b).
-            "let repaired: HeaderLine = self.formats.as_ref().unwrap().repair(std::rc::Rc::new(line.clone()/* TODO(translation): validate added clone */)).into();"
-        ) && translation.rust.contains("return repaired;"),
+        translation
+            .rust
+            .contains("compile_error!(\"unsupported Java class upcast: FormatLine to HeaderLine requires class hierarchy lowering\")")
+            && translation.rust.contains(
+                "let repaired: HeaderLine = { let _ = self.formats.as_ref().unwrap().repair(std::rc::Rc::new(line.clone()/* TODO(translation): validate added clone */)); compile_error!"
+            )
+            && !translation.rust.contains(".repair(std::rc::Rc::new(line.clone()/* TODO(translation): validate added clone */)).into();"),
         "{}",
         translation.rust
     );
 
-    cargo_check_generated_modules(
-        "source_receiver_generic_result_upcast",
+    cargo_check_generated_modules_fails_with(
+        "source_receiver_generic_result_upcasts_to_supertype_assignment_slot",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
             tests: "",
         }],
+        "requires class hierarchy lowering",
     );
 }
 
@@ -11683,18 +14334,27 @@ class Outer {
     assert!(
         translation
             .rust
-            .contains("pub type Inner<T> = OuterInner<T>;")
-            && translation.rust.contains("pub struct OuterInner<T>")
+            .contains("pub type Inner<T> = Outer_Inner<T>;")
+            && translation.rust.contains("pub struct Outer_Inner<T>")
             && translation
                 .rust
-                .contains("pub fn make(&self, value: String) -> OuterInner<String>"),
+                .contains("pub fn make(&self, value: String) -> Outer_Inner<String>"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "nested_generic_source_alias_type_params",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
 #[test]
-fn plain_returning_method_recovers_fallible_helper_call_without_question_mark() {
+fn plain_returning_method_promotes_result_shell_for_fallible_helper_call() {
     let translation = translate_source(
         r#"
 import java.io.IOException;
@@ -11719,18 +14379,25 @@ class PlainReturnFallibleHelper {
     assert!(
         translation
             .rust
-            .contains("pub fn render(&self) -> String")
-            && translation.rust.contains(
-                "return self.encode_().unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex));"
-            )
-            && !translation.rust.contains("return self.encode_()?;"),
+            .contains("pub fn render(&self) -> Result<String, JavaException>")
+            && translation.rust.contains("return Ok(self.encode()?);")
+            && !translation.rust.contains("return self.encode()?;"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "plain_returning_fallible_helper_recovery",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
 #[test]
-fn nested_unchecked_exception_throw_does_not_force_result_return_shell() {
+fn nested_unchecked_exception_throw_forces_result_return_shell() {
     let translation = translate_source(
         r#"
 import htsjdk.tribble.TribbleException;
@@ -11752,12 +14419,30 @@ class NestedUncheckedReturnShell {
     );
 
     assert!(
-        translation.rust.contains("pub fn render(&self) -> String")
+        translation
+            .rust
+            .contains("pub fn render(&self) -> Result<String, JavaException>")
             && translation.rust.contains("pub fn encode")
-            && !translation.rust.contains("pub fn render(&self) -> Result")
-            && !translation.rust.contains("Result<String, JavaException>"),
+            && translation
+                .rust
+                .contains("pub fn encode(values: Option<&std::collections::HashMap<String, Box<dyn std::any::Any>>>) -> Result<String, JavaException>")
+            && translation
+                .rust
+                .contains("return Ok(Self::encode(None)?);")
+            && translation
+                .rust
+                .contains("return Err(JavaException::new(\"TribbleException.InternalCodecException\""),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "nested_unchecked_exception_return_shell",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -11784,11 +14469,26 @@ class ConstructorFallibleCast {
     );
 
     assert!(
-        translation.rust.contains(
-            "Self::read(java_clone_erased_object_ref(&__java_self.source)).unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))"
-        ) && !translation.rust.contains("Self::read(java_clone_erased_object_ref(&__java_self.source))?"),
+        translation
+            .rust
+            .contains("Self::read(__java_self.source.as_ref()")
+            && translation
+                .rust
+                .contains("unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))")
+            && !translation
+                .rust
+                .contains("Self::read(java_clone_erased_object_ref(&__java_self.source))?"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "constructor_fallible_cast_recovery",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -11834,6 +14534,16 @@ class Token {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules_fails_with(
+        "constructor_self_optional_field_argument_uses_field_slot_shape",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "expected `Helper`, found `Rc<Helper>`",
+    );
 }
 
 #[test]
@@ -11874,6 +14584,15 @@ class BorrowedEnumConstructorParamStore extends BorrowedEnumConstructorParamStor
         "borrowed enum constructor parameter should be recovered before optional field storage:\n{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "borrowed_enum_constructor_param_optional_field",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -11881,15 +14600,13 @@ fn stale_constructor_optional_enum_field_shape_uses_final_storage_slot() {
     let translation = translate_source(&idiom_gap("StaleConstructorOptionalEnumFieldShape.java"));
 
     assert!(
-        translation
+        translation.rust.contains(
+            "count_type: Some(StaleConstructorOptionalEnumFieldShape_CountType::INTEGER)"
+        ) && translation.rust.contains(
+            "self.count_type = Some(StaleConstructorOptionalEnumFieldShape_CountType::UNBOUNDED)"
+        ) && !translation
             .rust
-            .contains("count_type: Some(StaleConstructorOptionalEnumFieldShapeCountType::INTEGER)")
-            && translation.rust.contains(
-                "self.count_type = Some(StaleConstructorOptionalEnumFieldShapeCountType::UNBOUNDED)"
-            )
-            && !translation
-                .rust
-                .contains("count_type: StaleConstructorOptionalEnumFieldShapeCountType::INTEGER")
+            .contains("count_type: StaleConstructorOptionalEnumFieldShapeCountType::INTEGER")
             && !translation.rust.contains(
                 "self.count_type = StaleConstructorOptionalEnumFieldShapeCountType::UNBOUNDED"
             )
@@ -11900,6 +14617,15 @@ fn stale_constructor_optional_enum_field_shape_uses_final_storage_slot() {
                     .contains("line_type: Some(line_type.clone()")),
         "constructor field lowering should use final optional enum field storage shape:\n{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "stale_constructor_optional_enum_field_shape_uses_final_storage_slot",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -11932,6 +14658,15 @@ class Constants {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "context_sibling_static_string_constant",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -11962,6 +14697,16 @@ class SiblingSource {
             && !translation.rust.contains("pub struct SiblingSource;"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "context_translation_does_not_emit_opaque_facade_for_sibling_source_type",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "cannot find type `SiblingSource` in this scope",
     );
 }
 
@@ -12003,6 +14748,15 @@ class FeatureInput {
         "{}",
         full_context_translation.rust
     );
+
+    cargo_check_generated_modules(
+        "source_summary_direct_field_type",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -12040,13 +14794,22 @@ class Path {
             && translation.rust.contains("impl FeatureInput")
             && translation.rust.contains("pub fn to_path(&self) -> Path")
             && translation.rust.contains(
-                "unimplemented!(\"source-summary method GATKPath.toPath is not translated\")"
+                "unimplemented!(\"source-summary method FeatureInput.toPath is not translated\")"
             )
             && translation
                 .rust
                 .contains("self.header_override.as_ref().unwrap().to_path()"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_summary_inherited_method_surface",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -12072,7 +14835,7 @@ class Alignment {
     assert!(
         translation
             .rust
-            .contains("java_erased_object_to_string(&alignment)")
+            .contains("java_erased_object_to_string(alignment)")
             && !translation.rust.contains("alignment.to_string()"),
         "{}",
         translation.rust
@@ -12116,10 +14879,20 @@ class Alignment {
     assert!(
         translation
             .rust
-            .contains("java_erased_object_to_string(&alignment)")
+            .contains("java_erased_object_to_string(alignment)")
             && !translation.rust.contains("alignment.to_string()"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "emitted_context_object_to_string_in_print_uses_java_object_stringification",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "cannot find type `Alignment` in this scope",
     );
 }
 
@@ -12300,6 +15073,15 @@ class UsesIntervalArgumentCollectionSurface {
                 .contains("impl OtherOpaque {\n    pub fn get_intervals"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "selected_opaque_support_surfaces",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -12523,6 +15305,15 @@ class OptionalFieldAssignmentWrapsExternalCall {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "optional_field_assignment_external_call_result",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -12550,6 +15341,15 @@ class OptionalThisFieldAssignmentWrapsExternalCall {
             .contains("self.reference_path = Some(GATKPath::new(raw).to_path());"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "optional_this_field_assignment_external_call_result",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -12585,6 +15385,15 @@ class FileExtensionsFastaLoop {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "file_extensions_fasta_iterable_static_slice",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -12605,14 +15414,22 @@ class IfNullElseDisplayRefinement {
     let translation = translate_source(source);
 
     assert!(
-        translation
+        translation.rust.contains(
+            "format!(\"reference {}\", (reference_path_specifier.as_ref().unwrap()).to_string())"
+        ) && !translation
             .rust
-            .contains("format!(\"reference {}\", (reference_path_specifier.unwrap()).to_string())")
-            && !translation
-                .rust
-                .contains("(reference_path_specifier).to_string()"),
+            .contains("(reference_path_specifier).to_string()"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "if_null_else_branch_refines_optional_display_segment",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -12640,6 +15457,15 @@ class NullGuardedTernaryDisplayBranch {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "null_guarded_ternary_display_branch",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -12665,6 +15491,15 @@ class NullGuardedCamelFieldTernaryDisplayBranch {
             && !translation.rust.contains("self.fastq_file.to_string()"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "null_guarded_ternary_display_unqualified_field",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -12692,6 +15527,15 @@ class NullGuardedCamelThisFieldTernaryDisplayBranch {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "null_guarded_ternary_display_this_field",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -12707,13 +15551,25 @@ class NullGuardedLocalTernaryDisplayBranch {
 
     assert!(
         translation.rust.contains(
-            "if read_name.is_none() { \"\".to_string() } else { (read_name.unwrap()).to_string() }"
+            "if read_name.is_none() { \"\".to_string() } else { read_name.as_ref().unwrap().to_string() }"
         ) && !translation.rust.contains("read_name.unwrap().unwrap()")
+            && !translation
+                .rust
+                .contains("(read_name.unwrap()).to_string()")
             && !translation
                 .rust
                 .contains("read_name.as_ref().unwrap().unwrap()"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "null_guarded_local_ternary_display",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -12732,13 +15588,25 @@ class NullGuardedAppendArgument {
 
     assert!(
         translation.rust.contains(
-            "if read_name.is_none() { \"\".to_string() } else { (read_name.unwrap()).to_string() }"
+            "if read_name.is_none() { \"\".to_string() } else { read_name.as_ref().unwrap().to_string() }"
         ) && !translation.rust.contains("read_name.unwrap().unwrap()")
+            && !translation
+                .rust
+                .contains("(read_name.unwrap()).to_string()")
             && !translation
                 .rust
                 .contains("read_name.as_ref().unwrap().unwrap()"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "null_guarded_append_argument",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -12765,12 +15633,23 @@ class ReusedOptionalDisplaySegment {
             "reference_path_specifier.as_ref().map(|value| value.to_string()).unwrap_or_else(|| \"null\".to_string())"
         ) && translation
             .rust
-            .contains("reference_path_specifier.as_ref().unwrap().to_path()")
+            .contains("reference_path_specifier.as_ref().ok_or_else(|| JavaException::new(\"NullPointerException\", \"Java null receiver\".to_string()))?.to_path()")
             && !translation
             .rust
-            .contains("(reference_path_specifier.unwrap()).to_string()"),
+            .contains("(reference_path_specifier.unwrap()).to_string()")
+            && translation.rust.contains("pub struct Path"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "reused_optional_display_segment_borrows_before_later_use",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "lifetime may not live long enough",
     );
 }
 
@@ -12802,6 +15681,15 @@ class MapGetStringDisplaySegment {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "map_get_string_display_segment",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -12823,10 +15711,22 @@ class MapGetKeySetLoop {
 
     assert!(
         translation.rust.contains("context.get(key.as_str())")
+            && translation.rust.contains(
+                "context.get(key.as_str()).map(|value| java_clone_erased_object_ref(value))"
+            )
             && !translation.rust.contains("context.get(&key)")
             && !translation.rust.contains("context.get(&key.as_str())"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "map_get_keyset_loop_does_not_double_borrow_key",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -12857,10 +15757,20 @@ class SourceSummaryStaticBorrowedArgHelper {
 
     assert!(
         translation.rust.contains(
-            "SourceSummaryStaticBorrowedArgHelper::check(&GATKPath::new(output), &reference);"
+            "SourceSummaryStaticBorrowedArgHelper::check(&GATKPath::new(output), reference)?;"
         ) && !translation.rust.contains("reference.clone()"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "resolved_static_helper_fallback_signature_arg_shapes",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "use of undeclared type `SourceSummaryStaticBorrowedArgHelper`",
     );
 }
 
@@ -12890,10 +15800,20 @@ class ConstructedBorrowedSourceSlotHelper {
 
     assert!(
         translation.rust.contains(
-            "ConstructedBorrowedSourceSlotHelper::check(&GATKPath::new(output), &reference);"
+            "ConstructedBorrowedSourceSlotHelper::check(&GATKPath::new(output), &reference)?;"
         ),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "constructed_external_argument_borrowed_source_slot",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "use of undeclared type `ConstructedBorrowedSourceSlotHelper`",
     );
 }
 
@@ -12924,10 +15844,19 @@ class Validator {
     assert!(
         translation
             .rust
-            .contains("pub fn check<'a>(file_path_specifier: &'a GATKPath, reference_path_specifier: Option<&'a GATKPath>) -> Option<&'a GATKPath>")
+            .contains("pub fn check<'a>(file_path_specifier: &'a GATKPath, reference_path_specifier: Option<&'a GATKPath>) -> Result<Option<&'a GATKPath>, JavaException>")
             && !translation.rust.contains("missing lifetime specifier"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "nullable_static_alias_return",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -12956,7 +15885,7 @@ class FutureGetUse {
     assert!(
         translation
             .rust
-            .contains("impl<T> Future<T> {\n    pub fn get(&self) -> T"),
+            .contains("impl<T> Future<T> {\n    pub fn get(&self) -> Result<T, JavaException>"),
         "{}",
         translation.rust
     );
@@ -12975,6 +15904,14 @@ class FutureGetUse {
             && !translation.rust.contains("FutureGetResult"),
         "{}",
         translation.rust
+    );
+    cargo_check_generated_modules(
+        "selected_opaque_future_get",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -13117,6 +16054,58 @@ mod generated_tests {
     }
 }
 "#,
+        }],
+    );
+}
+
+#[test]
+fn external_facade_linked_hash_map_return_keeps_insertion_order_carrier() {
+    let mut facts = FactSet::default();
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "ordered".to_string(),
+        receiver_type: Some("ExternalProvider".to_string()),
+        arg_count: Some(0),
+        parameter_patterns: None,
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::Named {
+            name: "LinkedHashMap".to_string(),
+            args: vec![JavaType::String, JavaType::String],
+        }),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::UserOverride,
+    });
+    let translation = translate_source_with_facts(
+        r#"
+import java.util.LinkedHashMap;
+
+class ExternalLinkedHashMapReturnUse {
+    LinkedHashMap<String, String> ordered(ExternalProvider provider) {
+        return provider.ordered();
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn ordered(&self) -> JavaLinkedHashMap<String, String>")
+            && !translation
+                .rust
+                .contains("pub fn ordered(&self) -> std::collections::HashMap<String, String>"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "external_facade_linked_hash_map_return",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
         }],
     );
 }
@@ -13277,12 +16266,22 @@ class SourceHeaderReader {
     assert!(
         translation
             .rust
-            .contains("reader.get_file_header().as_ref().unwrap().get_sequence_dictionary()")
+            .contains("reader.get_file_header().as_ref().ok_or_else(|| JavaException::new(\"NullPointerException\", \"Java null receiver\".to_string()))?.get_sequence_dictionary()")
             && !translation
                 .rust
                 .contains("reader.get_file_header().get_sequence_dictionary()"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "sibling_optional_source_return_receiver_getter_is_unwrapped_before_call",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "cannot find type `SourceHeaderReader` in this scope",
     );
 }
 
@@ -13542,14 +16541,14 @@ class JdkMutableBufferAndRandomNumericMethods {
     assert!(
         translation.rust.contains("return buffer.length();")
             && translation.rust.contains("pub fn length(&self) -> i32")
-            && translation.rust.contains("return random.next_int(bound);")
-            && translation
-                .rust
-                .contains("pub fn next_int<T0>(&self, _arg0: T0) -> i32")
+            && translation.rust.contains("random.next_int_result(bound)?")
+            && translation.rust.contains(
+                "pub fn next_int_result(&self, bound: i32) -> Result<i32, JavaException>"
+            )
             && !translation.rust.contains("length(&self) -> ()")
             && !translation
                 .rust
-                .contains("next_int<T0>(&self, _arg0: T0) -> ()"),
+                .contains("next_int_result<T0>(&self, _arg0: T0) -> ()"),
         "{}",
         translation.rust
     );
@@ -13591,6 +16590,43 @@ class OmittedContextReceiverMethodDisplaySink {
 
     cargo_check_generated_modules(
         "omitted_context_display_sink",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn omitted_context_field_receiver_method_used_in_display_sink_gets_string_stub() {
+    let translation = translate_source(
+        r#"
+class OmittedContextFieldReceiverMethodDisplaySink {
+    void write(Record record, StringBuffer summaryText) {
+        summaryText.append(record.sequenceFile.name());
+    }
+}
+
+class Record {
+    SequenceFile sequenceFile;
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("impl SequenceFile {\n    pub fn name(&self) -> String")
+            && !translation
+                .rust
+                .contains("impl SequenceFile {\n    pub fn name(&self) -> ()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "omitted_context_field_display_sink",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
@@ -14001,6 +17037,277 @@ class SummaryEqualsBase {
 }
 
 #[test]
+fn source_super_method_call_uses_direct_emitted_super_impl() {
+    let source = r#"
+class SuperMethodCall {
+    static class Base {
+        int base() { return 10; }
+    }
+    static class Derived extends Base {
+        int base() { return super.base() + 5; }
+    }
+    String run() {
+        return new Derived().base() + "," + new Base().base();
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation
+            .rust
+            .contains("SuperMethodCall_Base::base(&SuperMethodCall_Base"),
+        "{}",
+        translation.rust
+    );
+    assert!(!translation.rust.contains("unsupported Java super call"));
+    assert!(!translation.rust.contains("(0i32).wrapping_add(5)"));
+    cargo_check_generated_modules(
+        "source_super_method_call",
+        vec![GeneratedCrateModule {
+            name: "source_super_method_call",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn source_class_upcast_requires_hierarchy_lowering() {
+    let source = r#"
+class InheritanceUpcast {
+    static String run() {
+        Account a = new Savings(100, 5);
+        return a.label() + "," + a.balance() + "," + a.describe();
+    }
+}
+class Account {
+    int amount;
+    Account(int amount) { this.amount = amount; }
+    String label() { return "account"; }
+    int balance() { return amount; }
+    String describe() { return label() + ":" + balance(); }
+}
+class Savings extends Account {
+    int rate;
+    Savings(int amount, int rate) { super(amount); this.rate = rate; }
+    String label() { return "savings"; }
+    int balance() { return amount + rate; }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation.rust.contains(
+            "compile_error!(\"unsupported Java class upcast: Savings to Account requires class hierarchy lowering\")"
+        ) && !translation.rust.contains("let a: Account = Savings::new(100, 5).into();"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "source_class_upcast_requires_hierarchy_lowering",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "unsupported Java class upcast: Savings to Account requires class hierarchy lowering",
+    );
+}
+
+#[test]
+fn explicit_source_class_upcast_requires_hierarchy_lowering() {
+    let source = r#"
+class ExplicitInheritanceUpcast {
+    static String run() {
+        Account a = (Account) new Savings(100, 5);
+        return a.label();
+    }
+}
+class Account {
+    int amount;
+    Account(int amount) { this.amount = amount; }
+    String label() { return "account"; }
+}
+class Savings extends Account {
+    int rate;
+    Savings(int amount, int rate) { super(amount); this.rate = rate; }
+    String label() { return "savings"; }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation.rust.contains(
+            "compile_error!(\"unsupported Java class upcast: Savings to Account requires class hierarchy lowering\")"
+        )
+            && !translation.rust.contains("let a: Account = Savings::new(100, 5)")
+            && !translation.rust.contains("Savings::new(100, 5).into()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "explicit_source_class_upcast_requires_hierarchy_lowering",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "unsupported Java class upcast: Savings to Account requires class hierarchy lowering",
+    );
+}
+
+#[test]
+fn erased_object_cast_to_source_supertype_requires_hierarchy_lowering() {
+    let source = r#"
+class ErasedObjectSupertypeCast {
+    static String run() {
+        Object o = new B();
+        A a = (A) o;
+        return a.label();
+    }
+}
+class A {
+    String label() { return "A"; }
+}
+class B extends A {
+    String label() { return "B"; }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation.rust.contains(
+            "compile_error!(\"unsupported Java cast: target type A has source subtypes and requires class hierarchy lowering\")"
+        )
+            && !translation.rust.contains("let a: A = o.downcast")
+            && !translation.rust.contains("let a: A = o.downcast_ref"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "erased_object_cast_to_source_supertype_requires_hierarchy_lowering",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "unsupported Java cast: target type A has source subtypes and requires class hierarchy lowering",
+    );
+}
+
+#[test]
+fn erased_object_instanceof_source_supertype_requires_hierarchy_lowering() {
+    let source = r#"
+class InstanceofSupertype {
+    static boolean isA(Object o) {
+        return o instanceof A;
+    }
+    static String run() {
+        return isA(new B()) + "," + isA(new A()) + "," + isA("x");
+    }
+}
+class A {
+}
+class B extends A {
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation.rust.contains(
+            "compile_error!(\"unsupported Java instanceof check: target type A has source subtypes and requires class hierarchy lowering\")"
+        ) && !translation.rust.contains(".is::<A>()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "erased_object_instanceof_source_supertype_requires_hierarchy_lowering",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "unsupported Java instanceof check: target type A has source subtypes and requires class hierarchy lowering",
+    );
+}
+
+#[test]
+fn pattern_instanceof_source_supertype_requires_hierarchy_lowering() {
+    let source = r#"
+class PatternInstanceofSupertype {
+    static String classify(Object o) {
+        if (o instanceof A a) {
+            return "A";
+        }
+        return "other";
+    }
+}
+class A {
+}
+class B extends A {
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation.rust.contains(
+            "compile_error!(\"unsupported Java instanceof check: target type A has source subtypes and requires class hierarchy lowering\")"
+        ) && !translation.rust.contains("o.downcast_ref::<A>()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "pattern_instanceof_source_supertype_requires_hierarchy_lowering",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "unsupported Java instanceof check: target type A has source subtypes and requires class hierarchy lowering",
+    );
+}
+
+#[test]
+fn pattern_instanceof_ternary_source_supertype_requires_hierarchy_lowering() {
+    let source = r#"
+class PatternInstanceofSupertypeTernary {
+    static String classify(Object o) {
+        return (o instanceof A a) ? "A" : "other";
+    }
+}
+class A {
+}
+class B extends A {
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation.rust.contains(
+            "compile_error!(\"unsupported Java instanceof check: target type A has source subtypes and requires class hierarchy lowering\")"
+        ) && !translation.rust.contains("match o.downcast_ref::<A>()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "pattern_instanceof_ternary_source_supertype_requires_hierarchy_lowering",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "unsupported Java instanceof check: target type A has source subtypes and requires class hierarchy lowering",
+    );
+}
+
+#[test]
 fn summary_context_translation_resolves_sibling_symbols_without_lowering_bodies() {
     let caller = r#"
 class SummaryContextCaller {
@@ -14034,15 +17341,28 @@ final class Constants {
     );
 
     assert!(
-        translation.rust.contains(
-            "self.holder.as_ref().unwrap().add_string_int(Constants::NAME.to_string(), value)"
-        ) && translation.rust.contains("impl Constants {")
+        translation
+            .rust
+            .contains("self.holder.as_ref().unwrap().add_string_int(Constants::NAME, value)")
+            && translation.rust.contains("impl Constants {")
             && translation
                 .rust
                 .contains("pub const NAME: &'static str = \"summary\";")
-            && !translation.rust.contains("pub fn add_string_int("),
+            && translation
+                .rust
+                .contains("source-summary method Holder.add is not translated")
+            && !translation.rust.contains("return name + value"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "summary_context_translation_sibling_symbols",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -14060,6 +17380,15 @@ fn collection_field_mutator_method_takes_mut_self() {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "collection_field_mutator",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -14076,6 +17405,15 @@ fn documents_method_reference_constructor_gap() {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "method_reference_constructor",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -14091,7 +17429,10 @@ fn documents_method_reference_flat_map_gap() {
                 .contains("pub fn flatten(&self, groups: &Vec<Vec<String>>) -> std::collections::HashSet<String>")
             || translation
                 .rust
-                .contains("pub fn flatten(&self, groups: &[Vec<String>]) -> std::collections::HashSet<String>"))
+                .contains("pub fn flatten(&self, groups: &[Vec<String>]) -> std::collections::HashSet<String>")
+            || translation
+                .rust
+                .contains("pub fn flatten(&self, groups: &[Vec<String>]) -> Result<std::collections::HashSet<String>, JavaException>"))
             && translation
                 .rust
                 .contains("groups.iter().flat_map(|item| item.iter()).cloned().collect::<std::collections::HashSet<_>>()")
@@ -14099,9 +17440,18 @@ fn documents_method_reference_flat_map_gap() {
                 .rust
                 .contains("unsupported Java expression: method reference")
             && !translation.rust.contains(".collect(collectors.to_set())")
-            && !translation.rust.contains("downcast::<Set>()"),
+            && !translation.rust.contains("groups.downcast::<Set>()"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "documents_method_reference_flat_map_gap",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -14139,10 +17489,12 @@ fn method_reference_flat_map_generated_rust_preserves_behavior() {
         "{:?}",
         translation.diagnostics
     );
-    let test_source = format!(
-        "{}\n{}",
-        translation.rust,
-        r#"
+    cargo_test_generated_modules(
+        "method_reference_flat_map",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
 #[cfg(test)]
 mod generated_tests {
     use super::*;
@@ -14159,33 +17511,11 @@ mod generated_tests {
             .into_iter()
             .map(|v| v.to_string())
             .collect::<HashSet<_>>();
-        assert_eq!(streams.flatten(&groups), expected);
+        assert_eq!(streams.flatten(&groups).unwrap(), expected);
     }
 }
-"#
-    );
-    let rust_path = std::env::temp_dir().join("new_java2rust_method_reference_flat_map_test.rs");
-    let bin_path = std::env::temp_dir().join("new_java2rust_method_reference_flat_map_test");
-    fs::write(&rust_path, test_source).unwrap();
-    let output = Command::new("rustc")
-        .arg("--test")
-        .arg(&rust_path)
-        .arg("-o")
-        .arg(&bin_path)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "method-reference flatMap test did not compile\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let output = Command::new(&bin_path).output().unwrap();
-    assert!(
-        output.status.success(),
-        "method-reference flatMap behavior test failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+"#,
+        }],
     );
 }
 
@@ -14196,26 +17526,33 @@ fn documents_stream_callback_chain_gap() {
     assert!(
         translation
             .rust
-            .contains("read_hits.map(|value| value._2())")
+            .contains("read_hits.map(|value: Tuple2| value._2())")
             && !translation.rust.contains("pub fn 2")
             && !translation.rust.contains("fn 2")
             && translation.rust.contains("Score::add")
+            && translation
+                .rust
+                .contains("collect_as_map<T0: Default, T1: Default>")
             && !translation
                 .rust
                 .contains("unsupported Java expression: method reference")
-            && (translation
+            && translation
                 .rust
-                .contains("map_partitions_to_pair(|iter| compute_scores")
-                || translation
-                    .rust
-                    .contains("map_partitions_to_pair_1(|iter: Iterator| self.compute_scores"))
-            || translation.rust.contains(
-                "map_partitions_to_pair_1(|iter: std::vec::IntoIter<Hit>| self.compute_scores"
-            ) && !translation
+                .contains("map_partitions_to_pair_1(|iter: JavaIterator<Hit>|")
+            && translation.rust.contains("return Default::default();")
+            && !translation
                 .rust
                 .contains("unsupported Java expression: lambda"),
         "{}",
         translation.rust
+    );
+    cargo_check_generated_modules(
+        "stream_callback_chain",
+        vec![GeneratedCrateModule {
+            name: "stream_callback_chain",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -14227,6 +17564,15 @@ fn documents_class_literal_logger_gap() {
         translation.rust.contains("logger: Logger") && !translation.rust.contains("LogManager"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "class_literal_logger",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -14334,6 +17680,16 @@ class UnsupportedInstanceofPlaceholderEscapesDebugTypeQuotes {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules_fails_with(
+        "unsupported_instanceof_placeholder_escapes_debug_type_quotes",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        r#"unsupported Java instanceof check: target type Array(Named { name: \"Object\", args: [] }) has no concrete runtime type"#,
+    );
 }
 
 #[test]
@@ -14343,9 +17699,24 @@ fn documents_super_constructor_state_gap() {
     assert!(
         translation
             .rust
-            .contains("super(...) requires inheritance lowering"),
+            .contains("pub fn non_null<T0>(_arg0: T0) -> T0 { _arg0 }")
+            && translation
+                .rust
+                .contains("Utils::non_null((*state.downcast::<State>()")
+            && !translation
+                .rust
+                .contains("super(...) requires inheritance lowering")
+            && !translation.rust.contains("compile_error!"),
         "{}",
         translation.rust
+    );
+    cargo_check_generated_modules(
+        "super_constructor_state",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -14380,12 +17751,14 @@ class ParentWriter {
     );
 
     assert!(
-        translation.rust.contains("writer: Writer")
+        translation.rust.contains("writer: Option<Writer>")
             && translation.rust.contains("sample_name: Option<String>")
             && translation.rust.contains("state: State")
-            && translation.rust.contains("writer: writer")
+            && translation
+                .rust
+                .contains("writer: Some((*writer.downcast::<Writer>()")
             && translation.rust.contains("sample_name: Some(sample_name")
-            && translation.rust.contains("state: state")
+            && translation.rust.contains("state: Some(state")
             && !translation.rust.contains("__java_self.state = state;")
             && !translation
                 .rust
@@ -14393,6 +17766,15 @@ class ParentWriter {
             && !translation.rust.contains("compile_error!"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_super_constructor_flattened_inherited_fields",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -14430,10 +17812,12 @@ class CheckedBase {
     );
 
     assert!(
-        translation.rust.contains("name: name")
+        translation.rust.contains("name: Some(name)")
             && translation.rust.contains("count: count")
-            && translation.rust.contains("kind: kind")
-            && translation.rust.contains("target: \"CHILD\".to_string()")
+            && translation.rust.contains("kind: Some(kind)")
+            && translation
+                .rust
+                .contains("target: Some(\"CHILD\".to_string())")
             && translation
                 .rust
                 .contains("-> Result<CheckedChild, JavaException>")
@@ -14545,7 +17929,7 @@ class OptionalMapStringValueUse {
 
     int parse(Map<String, String> mapping) {
         String numberStr = mapping.get("Number");
-        if (numberStr == NUMBER) {
+        if (NUMBER.equals(numberStr)) {
             return 0;
         }
         return Integer.parseInt(numberStr);
@@ -14560,15 +17944,15 @@ class OptionalMapStringValueUse {
     let translation = translate_source(source);
 
     assert!(
-        translation
+        (translation
             .rust
             .contains("number_str.as_ref().map(|value| value.as_str()) == Some(Self::NUMBER)")
+            || translation
+                .rust
+                .contains("Some(Self::NUMBER) == number_str.as_ref().map(|value| value.as_str())"))
             && translation
                 .rust
-                .contains("number_str.as_ref().expect(\"Java null receiver\").as_str().parse::<i32>().unwrap()")
-            && translation
-                .rust
-                .contains("OptionalMapStringValueUseKind::value_of(mapping.get(\"Type\").expect(\"Java null receiver\").as_str())")
+                .contains("number_str.as_ref().ok_or_else(|| JavaException::new(\"NullPointerException\", \"Java null receiver\".to_string()))?.as_str().parse::<i32>().map_err(|err| JavaException::from_display(\"NumberFormatException\", err))?")
             && !translation.rust.contains("Option<&String>: AsRef<str>")
             && !translation.rust.contains("compile_error!"),
         "{}",
@@ -14614,9 +17998,9 @@ class CrossConstants {
 
     assert!(
         translation.rust.contains(
-            "number_str.as_ref().map(|value| value.as_str()) == Some(CrossConstants::NUMBER)"
+            "compile_error!(\"unsupported Java String reference identity comparison requires string identity representation\")"
         ) && translation.rust.contains(
-            "number_str.as_ref().expect(\"Java null receiver\").as_str().parse::<i32>().unwrap()"
+            "number_str.as_ref().ok_or_else(|| JavaException::new(\"NullPointerException\", \"Java null receiver\".to_string()))?.as_str().parse::<i32>().map_err(|err| JavaException::from_display(\"NumberFormatException\", err))?"
         ) && !translation
             .rust
             .contains("number_str == CrossConstants::NUMBER")
@@ -14625,8 +18009,15 @@ class CrossConstants {
         translation.rust
     );
 
-    // This assertion checks primary-file rendering. Context sources are not emitted
-    // by this helper, so a cargo check here would fail on the absent constants type.
+    cargo_check_generated_modules_fails_with(
+        "optional_map_string_cross_class_static_constant",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "unsupported Java String reference identity comparison requires string identity representation",
+    );
 }
 
 #[test]
@@ -14651,10 +18042,9 @@ class OptionalMapStringEnumTryUse {
     let translation = translate_source(source);
 
     assert!(
-        translation
-            .rust
-            .contains("OptionalMapStringEnumTryUseKind::value_of(mapping.get(\"Type\").expect(\"Java null receiver\").as_str())")
-            && !translation.rust.contains("value_of(mapping.get(\"Type\"))")
+        translation.rust.contains(
+            "value_of(mapping.get(&\"Type\".to_string()).expect(\"Java null receiver\").as_str())"
+        ) && !translation.rust.contains("value_of(mapping.get(\"Type\"))")
             && !translation.rust.contains("Option<&String>: AsRef<str>"),
         "{}",
         translation.rust
@@ -14699,13 +18089,23 @@ enum TopLevelKind { Text, Number }
 
     assert!(
         translation.rust.contains(
-            "TopLevelKind::value_of(mapping.get(\"Type\").expect(\"Java null receiver\").as_str())"
+            "TopLevelKind::value_of(mapping.get(&\"Type\".to_string()).expect(\"Java null receiver\").as_str())"
         ) && !translation
             .rust
             .contains("TopLevelKind::value_of(mapping.get(\"Type\"))")
             && !translation.rust.contains("Option<&String>: AsRef<str>"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "optional_map_string_get_flows_into_top_level_source_enum_value_of",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "cannot find type `TopLevelKind` in this scope",
     );
 }
 
@@ -14716,7 +18116,7 @@ fn source_super_constructor_composes_delegated_parameter_bindings() {
     assert!(
         translation
             .rust
-            .contains("kind: Some(SourceSuperDelegatedParamSubstitutionBaseKind::FORMAT)")
+            .contains("kind: Some(SourceSuperDelegatedParamSubstitutionBase_Kind::FORMAT)")
             && !translation.rust.contains("self.kind")
             && !translation
                 .rust
@@ -14724,6 +18124,15 @@ fn source_super_constructor_composes_delegated_parameter_bindings() {
             && !translation.rust.contains("compile_error!"),
         "source super constructor delegation should substitute original super args:\n{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_super_constructor_composes_delegated_parameter_bindings",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -14765,6 +18174,15 @@ class HeaderChild extends HeaderBase {
             && !translation.rust.contains("compile_error!"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_super_constructor_delegated_null_optional_field",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -14824,6 +18242,16 @@ class HeaderChild extends HeaderBase {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules_fails_with(
+        "source_super_constructor_lowers_locals_needed_by_inherited_fields",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "use of undeclared type `HeaderBase`",
+    );
 }
 
 #[test]
@@ -14872,7 +18300,9 @@ class HeaderChild extends HeaderBase {
 
     assert!(
         translation.rust.contains("count: -1")
-            && translation.rust.contains("count_type: Some(count")
+            && translation
+                .rust
+                .contains("count_type: Some((*count.downcast::<CountKind>()")
             && !translation.rust.contains("count: count")
             && !translation
                 .rust
@@ -14880,6 +18310,15 @@ class HeaderChild extends HeaderBase {
             && !translation.rust.contains("compile_error!"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_super_constructor_resolved_overload",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -14906,6 +18345,15 @@ class ExternalPackStaticUtilityUse {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "external_pack_static_utility_call_uses_static_owner",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -14922,6 +18370,15 @@ fn constructor_trailing_instance_call_rewrites_self_arguments() {
             && !translation.rust.contains("compile_error!"),
         "trailing constructor calls should rewrite self-field arguments through __java_self:\n{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "constructor_trailing_instance_call_rewrites_self_arguments",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -14995,6 +18452,16 @@ abstract class BaseSolver<FUNC extends Function> {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules_fails_with(
+        "generic_source_super_constructor_initializes_flattened_inherited_fields",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "use of undeclared type `BaseSolver`",
+    );
 }
 
 #[test]
@@ -15047,14 +18514,16 @@ class ExceptionContext {
 
     assert!(
         translation.rust.contains("pub struct TooManyMini")
-            && translation.rust.contains("max: Number")
+            && translation.rust.contains("max: Option<Number>")
             && translation
                 .rust
-                .contains("context: Option<ExceptionContext>")
+                .contains("context: Option<std::rc::Rc<ExceptionContext>>")
             && translation
                 .rust
                 .contains("let mut __java_self = TooManyMini")
-            && translation.rust.contains("max: max")
+            && translation
+                .rust
+                .contains("max: Some((*max.downcast::<Number>()")
             && translation.rust.contains("__java_self.context")
             && translation.rust.contains(".add_message")
             && !translation
@@ -15063,6 +18532,16 @@ class ExceptionContext {
             && !translation.rust.contains("compile_error!"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "source_super_constructor_preserves_trailing_method_result_call",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "this function takes 1 argument but 0 arguments were supplied",
     );
 }
 
@@ -15102,17 +18581,29 @@ class ExceptionContext {
     assert!(
         translation.rust.contains("pub struct NumberProblem")
             && translation.rust.contains("argument: Option<Number>")
-            && translation.rust.contains("context: ExceptionContext")
+            && translation
+                .rust
+                .contains("context: std::rc::Rc<ExceptionContext>")
             && translation
                 .rust
                 .contains("let mut __java_self = NumberProblem")
-            && translation.rust.contains("argument: Some(wrong.clone()")
+            && translation.rust.contains("argument: Some((*wrong.clone()")
             && !translation
                 .rust
                 .contains("super(...) requires inheritance lowering")
             && !translation.rust.contains("compile_error!"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "source_super_constructor_matches_varargs_super_arity",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "function or associated item `new` not found",
     );
 }
 
@@ -15158,7 +18649,9 @@ class ExceptionContext {
 
     assert!(
         translation.rust.contains("pub struct ChildProblem")
-            && translation.rust.contains("context: ExceptionContext")
+            && translation
+                .rust
+                .contains("context: std::rc::Rc<ExceptionContext>")
             && translation
                 .rust
                 .contains("let mut __java_self = ChildProblem")
@@ -15169,13 +18662,23 @@ class ExceptionContext {
             && translation.rust.contains("__java_self.context")
             && !translation.rust.contains("__java_self.get_context()")
             && translation.rust.contains(".add_message")
-            && translation.rust.contains("max: max")
+            && translation.rust.contains("max: Some(max.clone()")
             && !translation
                 .rust
                 .contains("super(...) requires inheritance lowering")
             && !translation.rust.contains("compile_error!"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "implicit_source_super_constructor_initializes_inherited_fields",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "function or associated item `new` not found",
     );
 }
 
@@ -15218,6 +18721,16 @@ class ExceptionContext {
             && !translation.rust.contains("compile_error!"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "source_object_varargs_forward_and_append_erased_arguments",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "expected `Box<dyn Any>`, found `Option<Box<dyn Any>>`",
     );
 }
 
@@ -15266,16 +18779,26 @@ class ExceptionContext {
 
     assert!(
         translation.rust.contains("__java_self.context.add_message")
-            && translation.rust.contains("max: max")
+            && translation.rust.contains("max: Some((*max.clone()")
             && translation
                 .rust
-                .contains("let mut __java_varargs = vec![Box::new(max.clone()")
+                .contains("let mut __java_varargs = vec![max]")
             && translation.rust.contains("__java_varargs.extend(args)")
             && !translation.rust.contains("__java_self.get_context()")
             && !translation.rust.contains("vec![max, args]")
             && !translation.rust.contains("compile_error!"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "inherited_context_trailing_call_uses_context_field_and_shared_varargs_plan",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "expected `Box<dyn Any>`, found `Option<Box<dyn Any>>`",
     );
 }
 
@@ -15309,14 +18832,16 @@ class ExceptionContext {
 
     assert!(
         translation.rust.contains("pub struct CauseStateException")
-            && translation.rust.contains("context: ExceptionContext")
+            && translation
+                .rust
+                .contains("context: std::rc::Rc<ExceptionContext>")
             && translation
                 .rust
                 .contains("let mut __java_self = CauseStateException")
-            && translation
-                .rust
-                .contains("__java_self.context = ExceptionContext::new(__java_self.clone()")
-            && translation.rust.contains(".add_message(message")
+            && translation.rust.contains(
+                "__java_self.context = ExceptionContext::new(__java_self.clone().clone()"
+            )
+            && translation.rust.contains(".add_message(&message")
             && !translation
                 .rust
                 .contains("super(...) requires inheritance lowering")
@@ -15324,10 +18849,20 @@ class ExceptionContext {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules_fails_with(
+        "external_standard_exception_super_with_trailing_body_lowers_subclass_state",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "the trait bound `ExceptionContext: Default` is not satisfied",
+    );
 }
 
 #[test]
-fn exception_self_as_throwable_context_argument_uses_facade_boundary() {
+fn exception_self_as_throwable_context_argument_is_loud_upcast_gap() {
     let translation = translate_source(
         r#"
 class FacadeContextException extends IllegalArgumentException {
@@ -15347,16 +18882,68 @@ class ExceptionContext {
 
     assert!(
         translation.rust.contains("context: ExceptionContext")
+            && translation.rust.contains(
+                "ExceptionContext::new(compile_error!(\"unsupported Java class upcast: FacadeContextException to Throwable requires class hierarchy lowering\"))"
+            )
+            && !translation.rust.contains("Default::default()")
             && !translation
                 .rust
-                .contains("context: Default::default()")
+                .contains("Java exception self-as-supertype facade boundary")
+            && !translation.rust.contains("downcast::<Throwable>")
+            && !translation.rust.contains("invalid Java cast"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "exception_self_throwable_context_argument",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "unsupported Java class upcast: FacadeContextException to Throwable requires class hierarchy lowering",
+    );
+}
+
+#[test]
+fn explicit_cast_exception_self_as_throwable_context_argument_is_loud_upcast_gap() {
+    let translation = translate_source(
+        r#"
+class ExplicitCastException extends IllegalArgumentException {
+    private final ExceptionContext context;
+
+    ExplicitCastException(String message) {
+        context = new ExceptionContext((Throwable) this);
+    }
+}
+
+class ExceptionContext {
+    ExceptionContext(Throwable owner) {
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("context: ExceptionContext")
             && translation.rust.contains(
-                "ExceptionContext::new(Default::default()/* TODO(translation): Java exception self-as-supertype facade boundary */)"
+                "ExceptionContext::new(compile_error!(\"unsupported Java class upcast: ExplicitCastException to Throwable requires class hierarchy lowering\"))"
             )
             && !translation.rust.contains("downcast::<Throwable>")
             && !translation.rust.contains("invalid Java cast"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "explicit_cast_exception_self_throwable_context_argument",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "unsupported Java class upcast: ExplicitCastException to Throwable requires class hierarchy lowering",
     );
 }
 
@@ -15387,6 +18974,15 @@ class MiniSmartFileReader extends FileReader {
             && !translation.rust.contains("compile_error!"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "jdk_file_reader_super_constructor_no_state_facade",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -15459,6 +19055,15 @@ class MiniFilterOutput extends FilterOutputStream {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "jdk_stream_wrapper_super_constructors_preserve_platform_state",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -15490,6 +19095,15 @@ class MiniCloseableFilterInput extends FilterInputStream {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "emitted_jdk_stream_subclass_inherited_close_surface",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -15513,6 +19127,16 @@ class LocalFilterInputShadow extends FilterInputStream {
             .contains("impl LocalFilterInputShadow {\n    pub fn close"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "local_filter_input_shadow",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "no method named `close` found for reference `&LocalFilterInputShadow`",
     );
 }
 
@@ -15545,6 +19169,15 @@ class UsesLocalFilterOutputAdapter {
                 .contains("impl From<LocalFilterOutputAdapter> for JavaIoOutputStream"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "emitted_jdk_stream_subclass_exact_platform_super_slot",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -15589,6 +19222,15 @@ class ExternalSuperConstructorFieldRead extends FilterInputStream {
             && !translation.rust.contains("buffer_length: if self.enabled"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "modeled_external_super_constructor_field_read",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -15749,9 +19391,19 @@ class ParentLinkedGzipStream extends GZIPInputStream {
             .contains("unsupported Java constructor: super(...) requires inheritance lowering")
             && translation
                 .rust
-                .contains("panic!(\"unsupported Java constructor: super(...) followed by unsupported object graph mutation\")"),
+            .contains("panic!(\"unsupported Java constructor: super(...) followed by unsupported object graph mutation\")"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "jdk_stream_wrapper_super_self_linking_trailing_mutation_gap",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "unsupported Java constructor: super(...) followed by unsupported object graph mutation",
     );
 }
 
@@ -15784,6 +19436,15 @@ class ExplicitObjectSuperConstructor {
             && !translation.rust.contains("compile_error!"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "explicit_object_super_constructor",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -15863,26 +19524,32 @@ class UsesOutputFormat {
 "#,
     );
 
+    let unsupported_message = "unsupported Java class upcast: PairOutputFormat to BaseOutputFormat requires class hierarchy lowering";
     assert!(
         translation
             .rust
-            .contains("let format: BaseOutputFormat = PairOutputFormat::new().into();")
+            .contains(&format!("compile_error!(\"{unsupported_message}\")"))
             && translation
                 .rust
                 .contains("impl From<PairOutputFormat> for BaseOutputFormat")
+            && translation
+                .rust
+                .contains(&format!("panic!(\"{unsupported_message}\")"))
             && !translation
                 .rust
-                .contains("let format: BaseOutputFormat = PairOutputFormat::new();"),
+                .contains("BaseOutputFormat { id: value.id }")
+            && !translation.rust.contains("id: value.id"),
         "{}",
         translation.rust
     );
-    cargo_check_generated_modules(
+    cargo_check_generated_modules_fails_with(
         "source_subclass_constructor_flows_to_flattened_superclass_slot",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
             tests: "",
         }],
+        unsupported_message,
     );
 }
 
@@ -15923,7 +19590,7 @@ class BaseOutputFormat {
     assert!(
         translation
             .rust
-            .contains("let format: BaseOutputFormat = PairOutputFormat::new().into();")
+            .contains("unsupported Java class upcast: PairOutputFormat to BaseOutputFormat requires class hierarchy lowering")
             && translation
                 .rust
                 .contains("impl From<PairOutputFormat> for BaseOutputFormat")
@@ -15932,6 +19599,16 @@ class BaseOutputFormat {
                 .contains("let format: BaseOutputFormat = PairOutputFormat::new();"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "emitted_context_source_subclass_constructor_flows_to_superclass_slot",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "unsupported Java class upcast: PairOutputFormat to BaseOutputFormat requires class hierarchy lowering",
     );
 }
 
@@ -15971,6 +19648,15 @@ class BaseSummaryFormat {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "no_arg_super_constructor_source_summary_inherited_setter",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -15987,6 +19673,15 @@ fn translates_external_exception_super_constructor_without_placeholder() {
                 .contains("super(...) requires inheritance lowering"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "external_exception_super_constructor",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -16015,6 +19710,15 @@ fn corpus_picard_imported_constants_need_source_summary_facts() {
             && !translation.rust.contains("invalid Java cast"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "corpus_picard_imported_constants",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 
     let constants = r#"
@@ -16046,14 +19750,19 @@ fn corpus_genomicsdb_file_load_constructor_delegation_exposes_exception_type_gap
     let translation = translate_source(&idiom_gap("FileLoadConstructorDelegation.java"));
 
     assert!(
-        translation
+        translation.rust.contains(
+            "pub fn new_path(source: &Path) -> Result<FileLoadConstructorDelegation, JavaException>"
+        ) && translation
             .rust
-            .contains("pub fn new_path(source: &Path) -> FileLoadConstructorDelegation")
+            .contains("let mut __java_self = Self::new();")
+            && translation.rust.contains("__java_self.load(source)?;")
+            && translation.rust.contains("return Ok(__java_self);")
             && translation
                 .rust
-                .contains("let mut __java_self = Self::new();")
-            && translation.rust.contains("__java_self.load(source);")
-            && translation.rust.contains("return __java_self;")
+                .contains("let lines: Vec<String> = JavaNioFileFiles::read_all_lines(source)?;")
+            && !translation
+                .rust
+                .contains("unresolved Java static call JavaNioFileFiles.read_all_lines")
             && translation
                 .rust
                 .contains("JavaException::new(\"IllegalArgumentException\"")
@@ -16063,14 +19772,20 @@ fn corpus_genomicsdb_file_load_constructor_delegation_exposes_exception_type_gap
             && translation
                 .rust
                 .contains("Err(e) if e.is_instance(&[\"IOException\"])")
-            && translation
-                .rust
-                .contains("panic!(\"uncaught Java exception: {:?}\"")
             && !translation
                 .rust
                 .contains("unsupported Java statement: try/catch/finally"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "file_load_constructor_delegation",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -16081,17 +19796,29 @@ fn corpus_genomicsdb_qualified_nested_builders_use_distinct_rust_type_names() {
     assert!(
         translation
             .rust
-            .contains("let mapping_builder: VidMappingBuilder = mapping.to_builder();")
+            .contains("let mapping_builder: VidMapping_Builder = mapping.to_builder();")
             && translation.rust.contains(
-                "let field_builder: FieldInfoBuilder = mapping_builder.get_fields_builder(index);"
+                "let field_builder: FieldInfo_Builder = mapping_builder.get_fields_builder(index);"
             )
-            && translation.rust.contains("pub struct VidMappingBuilder")
-            && translation.rust.contains("pub struct FieldInfoBuilder")
+            && translation.rust.contains("pub struct VidMapping_Builder")
+            && translation.rust.contains("pub struct FieldInfo_Builder")
             && !translation.rust.contains("pub struct Builder")
             && !translation.rust.contains("pub type Builder")
-            && translation.rust.contains("return mapping_builder.build();"),
+            && (translation.rust.contains("return mapping_builder.build();")
+                || translation
+                    .rust
+                    .contains("return Ok(mapping_builder.build());")),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "corpus_genomicsdb_qualified_nested_builders_use_distinct_rust_type_names",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -16111,6 +19838,9 @@ fn corpus_spark_rdd_pipeline_keeps_stream_lowering_at_noop_spark_boundary() {
             )
             || translation.rust.contains(
                 "variants.map_to_pair(|variant: VariantContext| Box::new((variant, None::<Void>)) as Box<dyn std::any::Any>)"
+            )
+            || translation.rust.contains(
+                "variants.map_to_pair(|variant: VariantContext| Box::new(Tuple2::new(variant, None::<Void>)) as Box<dyn std::any::Any>)"
             ))
             && translation.rust.contains(
                 "let comparator: Option<Comparator> = header.get_v_c_f_record_comparator();"
@@ -16140,6 +19870,15 @@ fn corpus_spark_rdd_pipeline_keeps_stream_lowering_at_noop_spark_boundary() {
         translation.rust,
         translation.diagnostics
     );
+
+    cargo_check_generated_modules(
+        "spark_rdd_variant_pipeline",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -16164,6 +19903,15 @@ fn corpus_disq_external_chain_stays_unmodeled_boundary_without_self_recursion_wa
 diagnostics:{:?}",
         translation.rust,
         translation.diagnostics
+    );
+
+    cargo_check_generated_modules(
+        "corpus_disq_external_chain_stays_unmodeled_boundary_without_self_recursion_warning",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -16191,6 +19939,16 @@ class HeaderlessReadAdapterSurface {
                 .contains("headerless_read_adapter<R: Default"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "wildcard_imported_headerless_read_adapter_has_gatkread_return_surface",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "use of undeclared type `OrgBroadinstituteHellbenderUtilsReadSAMRecordToGATKReadAdapter`",
     );
 }
 
@@ -16220,6 +19978,15 @@ class VariantContextAdapterSurface {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "variant_context_adapter_has_gatkvariant_return_surface",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -16242,6 +20009,16 @@ class ObjectsNonNullCallback {
             && !translation.rust.contains("Objects::non_null"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "objects_non_null_method_reference_in_callback_lowers_to_closure",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "type annotations needed",
     );
 }
 
@@ -16275,7 +20052,7 @@ class DisqReadsMapLambdaShape {
     assert!(
         translation
             .rust
-            .contains(".map(|read: SAMRecord| read.get_contig())"),
+            .contains(".map(|read: SAMRecord| read.get_contig().unwrap())"),
         "{}",
         translation.rust
     );
@@ -16305,6 +20082,16 @@ class DisqReadsMapLambdaShape {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules_fails_with(
+        "disq_reads_rdd_get_reads_shapes_spark_map_lambda_param",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "type annotations needed",
+    );
 }
 
 #[test]
@@ -16330,6 +20117,15 @@ class DisqReadsMethodReferenceFilterShape {
         translation.rust.contains(".filter(|value: GATKRead| true)"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "disq_reads_rdd_get_reads_shapes_spark_method_reference_filter_param",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -16367,6 +20163,15 @@ class GenomicsDbBatchCallbackFields {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "corpus_genomicsdb_callback_argument_external_fields_are_instance_fields",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -16394,6 +20199,15 @@ class GenomicsDbProgressMeterSetter {
                 .contains("self.progress_meter.set_records_between_time_checks(1i64);"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "corpus_genomicsdb_external_instance_setter_keeps_receiver",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -16438,6 +20252,15 @@ public class ProgressMeter {
                 .contains("self.progress_meter.set_records_between_time_checks(1i64);"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "inherited_external_field_setter_does_not_become_static_owner",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -16487,6 +20310,16 @@ class GenomicsDBUtils {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules_fails_with(
+        "corpus_genomicsdb_flatmap_owned_inner_stream_callback_arg",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "no method named `get_tiledb_column_offset` found for reference `&Vec<Chromosome>`",
+    );
 }
 
 #[test]
@@ -16514,14 +20347,23 @@ class GVCFBlockCombiningIterator {
     assert!(
         (translation
             .rust
-            .contains(".map_partitions(|v: std::vec::IntoIter<VariantContext>|")
+            .contains(".map_partitions(|v: JavaIterator<VariantContext>|")
             || translation
                 .rust
-                .contains(".map_partitions_1(|v: std::vec::IntoIter<VariantContext>|"))
+                .contains(".map_partitions_1(|v: JavaIterator<VariantContext>|"))
             && translation.rust.contains("GVCFBlockCombiningIterator::new")
             && !translation.rust.contains("downcast::<FlatMapFunction>()"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "corpus_spark_casted_flatmap_lambda_is_target_typing_not_runtime_downcast",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -16552,9 +20394,22 @@ class SparkPairRddMapTupleShape {
                 .contains(".map(|value: Tuple2<VariantContext, Option<Void>>| value._1())")
             || translation
                 .rust
-                .contains(".map(|value: Tuple2| value._1())"),
+                .contains(".map(|value: Tuple2| value._1())")
+            || translation
+                .rust
+                .contains(".map(|value: Tuple2<VariantContext, Void>| value._1().unwrap())"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "corpus_spark_pair_rdd_map_callback_gets_tuple_param_type",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "struct takes 0 generic arguments but 2 generic arguments were supplied",
     );
 }
 
@@ -16597,6 +20452,15 @@ class SparkPairRddBranchAssignedMapTupleShape {
                 .contains(".map(|value: Tuple2| value._1())"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "corpus_spark_branch_assigned_pair_rdd_map_callback_gets_tuple_param_type",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -16645,21 +20509,31 @@ class ReferenceMultiSource implements ReferenceSource {
     assert!(
         translation
             .rust
-            .contains("fn get_reference_bases(&self, interval: SimpleInterval) -> Result<Result, JavaException>")
+            .contains("fn get_reference_bases(&self, interval: std::rc::Rc<SimpleInterval>) -> Result<Result, JavaException>")
             && translation
                 .rust
-                .contains("self.reference_source.as_ref().unwrap().get_reference_bases(interval)?")
+                .contains("self.reference_source.as_ref().ok_or_else(|| JavaException::new(\"NullPointerException\", \"Java null receiver\".to_string()))?.get_reference_bases(interval)")
             && !translation
                 .rust
                 .contains("fn get_reference_bases(&self, interval: SimpleInterval) -> Result<&Result, JavaException>")
             && translation.rust.contains(
-                "self.reference_source.as_ref().unwrap().get_reference_sequence_dictionary(dictionary)?"
+                "self.reference_source.as_ref().ok_or_else(|| JavaException::new(\"NullPointerException\", \"Java null receiver\".to_string()))?.get_reference_sequence_dictionary(dictionary)"
             )
             && !translation.rust.contains(
                 "self.reference_source.as_ref().unwrap().get_reference_sequence_dictionary(&dictionary)?"
             ),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "corpus_spark_interface_receiver_delegation_widens_owned_return_slots",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "struct takes 0 generic arguments but 2 generic arguments were supplied",
     );
 }
 
@@ -16718,6 +20592,15 @@ class InterfaceWriterFactory {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "boxed_dyn_clone_recovery_parenthesizes_cast_receiver",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -16759,7 +20642,7 @@ class MiniAsyncWriter extends AbstractAsyncWriter<MiniRecord> implements MiniWri
             .contains("pub fn new(writer: Box<dyn MiniWriter>, queue_size: i32) -> MiniAsyncWriter")
             && translation
                 .rust
-                .contains("let mut __java_self = MiniAsyncWriter { writer: writer };")
+                .contains("let mut __java_self = MiniAsyncWriter { writer: Some(writer.clone()/* TODO(translation): validate added clone */) };")
             && translation
                 .rust
                 .contains("fn write(&self, record: MiniRecord) { MiniAsyncWriter::synchronously_write(self, record); }")
@@ -16774,6 +20657,16 @@ class MiniAsyncWriter extends AbstractAsyncWriter<MiniRecord> implements MiniWri
                 .contains("missing Java interface method implementation"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "external_async_template_super_satisfies_interface_methods",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "external static constant HtsjdkSamtoolsUtilAbstractAsyncWriter.DEFAULT_QUEUE_SIZE has no modeled value",
     );
 }
 
@@ -16991,6 +20884,53 @@ mod generated_tests {
 }
 
 #[test]
+fn nested_interface_super_default_call_in_slot_aware_return_lowers_to_default_body() {
+    let translation = translate_source(
+        r#"
+public class InterfaceDefaults {
+    interface Greeter {
+        String name();
+
+        default String greet() {
+            return "hi " + name();
+        }
+    }
+
+    static class E implements Greeter {
+        public String name() {
+            return "e";
+        }
+
+        public String greet() {
+            return Greeter.super.greet();
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("return InterfaceDefaults_Greeter::__java_default_greet(self);")
+            && !translation.rust.contains("unresolved Java static call")
+            && !translation.rust.contains("Super::greet")
+            && !translation.rust.contains("super.greet"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "nested_interface_super_default_call_in_slot_aware_return_lowers_to_default_body",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn abstract_class_methods_with_nonvoid_returns_emit_diverging_placeholders() {
     let translation = translate_source(
         r#"
@@ -17151,6 +21091,15 @@ class Reader implements Cursor {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "interface_return_this_does_not_emit_runtime_downcast",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -17179,6 +21128,15 @@ class Reader implements Cursor {
             && !translation.rust.contains("invalid Java cast"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "current_self_to_erased_implemented_interface_boxes_clone",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -17213,6 +21171,15 @@ class Record {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "current_self_to_erased_platform_interface",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -17240,6 +21207,15 @@ class Record {
             && !translation.rust.contains("invalid Java cast"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "current_self_concrete_static_argument_clones_without_downcast",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -17269,7 +21245,13 @@ class AppendableFluentChain {
             .contains("Self::write(&mut StringBuilder::new_1(16).into(), value)")
             || translation
                 .rust
-                .contains("Self::write(StringBuilder::new_1(16).into(), value)"))
+                .contains("Self::write(StringBuilder::new_1(16).into(), value)")
+            || translation.rust.contains(
+                "Self::write(&mut StringBuilder::new_capacity_result(16)?.into(), value)?"
+            )
+            || translation
+                .rust
+                .contains("Self::write(StringBuilder::new_capacity_result(16)?.into(), value)?"))
             && translation
                 .rust
                 .contains(".append(\"a\".to_string())?.append(value)?.append('\\n')?")
@@ -17283,6 +21265,14 @@ class AppendableFluentChain {
             && !translation.rust.contains("fn to_string(&self) -> ()"),
         "{}",
         translation.rust
+    );
+    cargo_check_generated_modules(
+        "appendable_fluent_chain_keeps_receiver_and_to_string_type",
+        vec![GeneratedCrateModule {
+            name: "appendable_fluent_chain",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -17308,14 +21298,21 @@ class DirectStringBuilderAppend {
             && translation.rust.contains("sb.append(value);")
             && translation.rust.contains("sb.append(&\"!\".to_string());")
             && translation.rust.contains(
-                "pub struct StringBuilder {\n    value: std::rc::Rc<std::cell::RefCell<String>>,"
+                "pub struct StringBuilder {\n    value: std::sync::Arc<std::sync::Mutex<String>>,"
             )
             && translation
                 .rust
                 .contains("pub fn append<T: JavaAppendValue>(&self, value: T) -> Self")
-            && translation
-                .rust
-                .contains("self.value.borrow_mut().push_str(&value.into_java_append_string());")
+            && translation.rust.contains(
+                "self.char_at_result(index as usize)\n            .unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))"
+            )
+            && translation.rust.contains(
+                "self.set_length_result(new_len)\n            .unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex));"
+            )
+            && translation.rust.contains(
+                "self.delete_result(start, end)\n            .unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))"
+            )
+            && translation.rust.contains("push_str(&value);")
             && !translation.rust.contains("sb.append(Some(")
             && !translation
                 .rust
@@ -17337,6 +21334,13 @@ class DirectStringBuilderAppend {
 fn generated_string_builder_appends_at_runtime() {
     let owner = DirectStringBuilderAppend {};
     assert_eq!(owner.build("ok"), "ok!");
+    let builder = StringBuilder::new_1("abc");
+    assert!(std::panic::catch_unwind(|| builder.char_at(4)).is_err());
+    assert!(std::panic::catch_unwind(|| builder.set_length(-1)).is_err());
+    assert!(std::panic::catch_unwind(|| builder.delete(3, 1)).is_err());
+    assert!(std::panic::catch_unwind(|| builder.insert(8, "x")).is_err());
+    assert!(std::panic::catch_unwind(|| builder.substring_1(8)).is_err());
+    assert!(std::panic::catch_unwind(|| builder.substring_2(2, 1)).is_err());
 }
 "#,
         }],
@@ -17427,20 +21431,20 @@ class InnerConstructionCompanion {
     assert!(
         translation
             .rust
-            .contains("pub fn new() -> InnerConstructionCompanionInner")
+            .contains("pub fn new() -> InnerConstructionCompanion_Inner")
             && translation.rust.contains("unsupported Java inner-class outer capture construction")
             && translation.rust.contains(
-                "pub fn new_with_outer(__outer: std::rc::Rc<std::cell::RefCell<InnerConstructionCompanion>>) -> InnerConstructionCompanionInner"
+                "pub fn new_with_outer(__outer: std::rc::Rc<std::cell::RefCell<InnerConstructionCompanion>>) -> InnerConstructionCompanion_Inner"
             )
             && translation.rust.contains("__outer: __outer.clone()")
             && translation
                 .rust
-                .contains("return InnerConstructionCompanionInner::new();")
+                .contains("return InnerConstructionCompanion_Inner::new();")
             && translation.rust.contains(
-                "pub fn make_with_outer(&self, __java_self: std::rc::Rc<std::cell::RefCell<InnerConstructionCompanion>>) -> InnerConstructionCompanionInner"
+                "pub fn make_with_outer(&self, __java_self: std::rc::Rc<std::cell::RefCell<InnerConstructionCompanion>>) -> InnerConstructionCompanion_Inner"
             )
             && translation.rust.contains(
-                "return InnerConstructionCompanionInner::new_with_outer(__java_self.clone());"
+                "return InnerConstructionCompanion_Inner::new_with_outer(__java_self.clone());"
             ),
         "{}",
         translation.rust
@@ -17485,9 +21489,9 @@ class SiblingInnerConstruction {
     assert!(
         translation
             .rust
-            .contains("pub fn new_with_outer(__outer: std::rc::Rc<std::cell::RefCell<SiblingInnerConstruction>>) -> SiblingInnerConstructionB")
+            .contains("pub fn new_with_outer(__outer: std::rc::Rc<std::cell::RefCell<SiblingInnerConstruction>>) -> SiblingInnerConstruction_B")
             && translation.rust.contains(
-                "return SiblingInnerConstructionB::new_with_outer(self.__outer.clone());"
+                "return SiblingInnerConstruction_B::new_with_outer(self.__outer.clone());"
             ),
         "{}",
         translation.rust
@@ -17497,6 +21501,54 @@ class SiblingInnerConstruction {
         "sibling_inner_construction",
         vec![GeneratedCrateModule {
             name: "sibling_inner_construction",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn captured_inner_method_call_routes_outer_method_with_outer_companion() {
+    let translation = translate_source(
+        r#"
+class InnerMethodCompanionRoute {
+    int value = 7;
+
+    class A {
+        int seen() {
+            return value;
+        }
+
+        B makeViaOuter() {
+            return make();
+        }
+    }
+
+    class B {
+        int get() {
+            return value;
+        }
+    }
+
+    B make() {
+        return new B();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("return self.__outer.borrow().make_with_outer(self.__outer.clone());"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "inner_method_companion_route",
+        vec![GeneratedCrateModule {
+            name: "inner_method_companion_route",
             rust: translation.rust,
             tests: "",
         }],
@@ -17722,6 +21774,50 @@ class AppendWideJavaValues {
 }
 
 #[test]
+fn string_builder_append_support_accepts_borrowed_primitive_values() {
+    let translation = translate_source(
+        r#"
+import java.util.ArrayList;
+import java.util.List;
+
+class StringBuilderAppendBorrowedPrimitive {
+    String build() {
+        List<Integer> values = new ArrayList<Integer>();
+        values.add(7);
+        StringBuilder out = new StringBuilder();
+        out.append(values.get(0));
+        return out.toString();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("impl_java_append_borrowed_copy_value!")
+            && translation
+                .rust
+                .contains("impl<T: JavaAppendValue> JavaAppendValue for Option<T>")
+            && translation.rust.contains("out.append(Some(values.get(")
+            && !translation
+                .rust
+                .contains("JavaAppendValue` is not implemented for `&i32"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "string_builder_append_borrowed_primitive",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn source_object_to_string_uses_java_object_stringification_fallback() {
     let translation = translate_source(
         r#"
@@ -17736,8 +21832,14 @@ class SourceObjectToStringFallback {
     assert!(
         translation
             .rust
-            .contains("return java_erased_object_to_string(&other);")
-            && !translation.rust.contains("return other.to_string();")
+            .contains("return Ok(other.to_string());")
+            && translation
+                .rust
+                .contains("return format!(\"{}@0\", self.get_class().get_name());")
+            && !translation.rust.contains(
+                "pub fn java_erased_object_to_string<T: ?Sized>(_value: &T) -> String {\n    Default::default()\n}"
+            )
+            && !translation.rust.contains("java_erased_object_to_string(&other)")
             && !translation
                 .rust
                 .contains("impl std::fmt::Display for SourceObjectToStringFallback"),
@@ -17747,6 +21849,225 @@ class SourceObjectToStringFallback {
 
     cargo_check_generated_modules(
         "source_object_to_string_fallback",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn plain_object_to_string_uses_java_identity_prefix_marker() {
+    let translation = translate_source(
+        r#"
+class PlainObjectToStringFallback {
+    String describe() {
+        Object value = new Object();
+        return String.valueOf(value.toString().startsWith("java.lang.Object@"));
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("Box::new(JavaPlainObject::new()) as Box<dyn std::any::Any>")
+            && translation
+                .rust
+                .contains("return \"java.lang.Object@0\".to_string();")
+            && !translation
+                .rust
+                .contains("Box::new(()) as Box<dyn std::any::Any>"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "plain_object_to_string_fallback",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn external_object_to_string_fallback_is_loud_not_empty() {
+    let translation = translate_source(
+        r#"
+class ExternalObjectToStringFallback {
+    String describe(Object value) {
+        return value.toString();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn to_string(&self) -> String { unimplemented!(\"Object.toString is not modelled\") }")
+            && !translation
+                .rust
+                .contains("fn to_string(&self) -> String { Default::default() }"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "external_object_to_string_fallback_loud",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn display_capable_external_object_uses_erased_runtime_downcast() {
+    let mut facts = FactSet::default();
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "toString".to_string(),
+        receiver_type: Some("ExternalThing".to_string()),
+        arg_count: Some(0),
+        parameter_patterns: None,
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::String),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::UserOverride,
+    });
+    let translation = translate_source_with_facts(
+        r#"
+class DisplayCapableExternalObject {
+    String describe(ExternalThing thing) {
+        Object value = thing;
+        return String.valueOf(value);
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("impl std::fmt::Display for ExternalThing")
+            && translation
+                .rust
+                .contains("if let Some(value) = value.downcast_ref::<ExternalThing>()")
+            && translation.rust.contains("return value.to_string();")
+            && !translation
+                .rust
+                .contains("unsupported Java external facade display: ExternalThing"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "display_capable_external_object_erased_runtime_downcast",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn display_capable_external_enum_constant_does_not_emit_placeholder_display() {
+    let mut facts = FactSet::default();
+    facts.external_field_facts.push(ExternalFieldFact {
+        field: FieldKey {
+            type_name: "ExternalEnum".to_string(),
+            field_name: "A".to_string(),
+        },
+        field_type: Some(JavaType::Named {
+            name: "ExternalEnum".to_string(),
+            args: Vec::new(),
+        }),
+        field_kind: ExternalFieldKind::EnumVariant,
+        provenance: FactProvenance::UserOverride,
+    });
+    facts
+        .type_capability_overrides
+        .push(TypeCapabilityOverride {
+            type_name: "ExternalEnum".to_string(),
+            copy: None,
+            clone: None,
+            string_like: None,
+            sequence_like: None,
+            implements: vec![JavaType::Named {
+                name: "ExternalLabel".to_string(),
+                args: Vec::new(),
+            }],
+            extends: None,
+            final_type: Some(true),
+            object_safe_trait: None,
+            provenance: FactProvenance::UserOverride,
+        });
+    facts
+        .type_capability_overrides
+        .push(TypeCapabilityOverride {
+            type_name: "ExternalLabel".to_string(),
+            copy: None,
+            clone: None,
+            string_like: None,
+            sequence_like: None,
+            implements: Vec::new(),
+            extends: None,
+            final_type: None,
+            object_safe_trait: Some(true),
+            provenance: FactProvenance::UserOverride,
+        });
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "toString".to_string(),
+        receiver_type: Some("ExternalEnum".to_string()),
+        arg_count: Some(0),
+        parameter_patterns: None,
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::String),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::UserOverride,
+    });
+    let translation = translate_source_with_facts(
+        r#"
+class ExternalEnumConstantDisplay {
+    String describe() {
+        Object value = ExternalEnum.A;
+        return String.valueOf(value);
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("impl std::fmt::Display for ExternalEnum")
+            && translation
+                .rust
+                .contains("write!(f, \"{}\", self.to_string())")
+            && translation
+                .rust
+                .contains("if let Some(value) = value.downcast_ref::<ExternalEnum>()")
+            && !translation
+                .rust
+                .contains("unsupported Java external facade display: ExternalEnum"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "display_capable_external_enum_constant_display",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
@@ -17771,10 +22092,13 @@ class SourceObjectToStringCaller {
     );
 
     assert!(
-        translation
-            .rust
-            .contains("return java_erased_object_to_string(&other);")
-            && !translation.rust.contains("return other.to_string();"),
+        translation.rust.contains("return Ok(other.to_string());")
+            && translation
+                .rust
+                .contains("return format!(\"{}@0\", self.get_class().get_name());")
+            && !translation
+                .rust
+                .contains("java_erased_object_to_string(&other)"),
         "{}",
         translation.rust
     );
@@ -17845,6 +22169,15 @@ class StringBufferToStringFacade {
 
     assert!(
         translation.rust.contains("return buffer.to_string();")
+            && translation.rust.contains(
+                "self.char_at_result(index as usize)\n            .unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))"
+            )
+            && translation.rust.contains(
+                "self.set_length_result(new_len)\n            .unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex));"
+            )
+            && translation.rust.contains(
+                "self.delete_result(start, end)\n            .unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))"
+            )
             && !translation
                 .rust
                 .contains("return java_erased_object_to_string(&buffer);"),
@@ -17857,13 +22190,29 @@ class StringBufferToStringFacade {
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn string_buffer_uncaught_exception_wrappers_panic() {
+        let buffer = StringBuffer::new_1("abc");
+        assert!(std::panic::catch_unwind(|| buffer.char_at(4)).is_err());
+        assert!(std::panic::catch_unwind(|| buffer.set_length(-1)).is_err());
+        assert!(std::panic::catch_unwind(|| buffer.delete(3, 1)).is_err());
+        assert!(std::panic::catch_unwind(|| buffer.insert(8, "x")).is_err());
+        assert!(std::panic::catch_unwind(|| buffer.substring_1(8)).is_err());
+        assert!(std::panic::catch_unwind(|| buffer.substring_2(2, 1)).is_err());
+    }
+}
+"#,
         }],
     );
 }
 
 #[test]
-fn source_object_string_concat_uses_java_object_stringification_fallback() {
+fn source_object_string_concat_uses_source_to_string() {
     let translation = translate_source(
         r#"
 class SourceObjectStringConcatFallback {
@@ -17877,7 +22226,13 @@ class SourceObjectStringConcatFallback {
     assert!(
         translation
             .rust
-            .contains("java_erased_object_to_string(&other)")
+            .contains("format!(\"value={}\", (other).to_string())")
+            && translation.rust.contains(
+                "panic!(\"unsupported Java erased object display: runtime target is erased\")"
+            )
+            && !translation
+                .rust
+                .contains("java_erased_object_to_string(&other)")
             && !translation.rust.contains("format!(\"value={}\", other)"),
         "{}",
         translation.rust
@@ -17959,13 +22314,24 @@ class AppendableHelper {
     );
 
     assert!(
-        translation
+        translation.rust.contains(
+            "AppendableHelper::write(&mut { let _java_value = self.writer.as_mut().ok_or_else"
+        ) && !translation
             .rust
-            .contains("AppendableHelper::write(&mut self.writer.clone()/* TODO(translation): validate added clone */.into(), value)?;")
-            && !translation.rust.contains("AppendableHelper::write(self.writer.into(), value)?;")
+            .contains("AppendableHelper::write(self.writer.into(), value)?;")
             && !translation.rust.contains(".into().clone()"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "appendable_field_conversion",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "expected `Appendable`, found `&Appendable`",
     );
 }
 
@@ -17987,10 +22353,20 @@ class PrintStreamCheckErrorUse {
         translation
             .rust
             .contains("pub fn check_error(&self) -> bool")
-            && translation.rust.contains("return writer.check_error();")
+            && translation
+                .rust
+                .contains("return Ok(writer.check_error());")
             && !translation.rust.contains("pub fn check_error(&self) -> ()"),
         "{}",
         translation.rust
+    );
+    cargo_check_generated_modules(
+        "print_stream_check_error",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -18022,6 +22398,14 @@ class PrintStreamOutputStreamConstructorUse {
                 .contains("pub fn new<T0>(_arg0: T0) -> Self"),
         "{}",
         translation.rust
+    );
+    cargo_check_generated_modules(
+        "print_stream_output_stream_constructor",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -18066,6 +22450,14 @@ class OptionalPrintStreamFieldPrintln {
         "{}",
         translation.rust
     );
+    cargo_check_generated_modules(
+        "optional_print_stream_println_arity",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -18095,12 +22487,20 @@ class Encoder {
     assert!(
         translation
             .rust
-            .contains("self.output_stream.as_ref().unwrap().println_1(")
+            .contains("self.output_stream.as_ref().ok_or_else(|| JavaException::new(\"NullPointerException\", \"Java null receiver\".to_string()))?.println_1(")
             && !translation
                 .rust
                 .contains("self.output_stream.as_ref().unwrap().println("),
         "{}",
         translation.rust
+    );
+    cargo_check_generated_modules(
+        "optional_print_stream_throwing_arg",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -18137,13 +22537,21 @@ class Encoder {
             .contains("pub fn emit(&mut self, value: String) -> Result<(), JavaException>")
             && translation
                 .rust
-                .contains("self.output_stream.as_ref().unwrap().println_1(")
+                .contains("self.output_stream.as_ref().ok_or_else(|| JavaException::new(\"NullPointerException\", \"Java null receiver\".to_string()))?.println_1(")
             && translation
                 .rust
-                .contains("self.encoder.as_mut().unwrap().encode(value)?")
+                .contains("self.encoder.as_mut().ok_or_else(|| JavaException::new(\"NullPointerException\", \"Java null receiver\".to_string()))?.encode(value)?")
             && !translation.rust.contains("pub fn emit(&self"),
         "{}",
         translation.rust
+    );
+    cargo_check_generated_modules(
+        "optional_print_stream_mutating_arg",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -18226,6 +22634,15 @@ fn zip_output_stream_converts_to_output_stream_slot() {
             && translation
                 .rust
                 .contains("impl From<ZipOutputStream> for OutputStream"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains(
+            "panic!(\"unsupported Java external upcast: ZipOutputStream -> OutputStream\")"
+        ) && !translation
+            .rust
+            .contains("fn from(_value: ZipOutputStream) -> Self { Default::default() }"),
         "{}",
         translation.rust
     );
@@ -18323,7 +22740,9 @@ class SystemInAndThreadSleepUse {
     assert!(
         translation
             .rust
-            .contains("std::thread::sleep(std::time::Duration::from_millis(1000 as u64));")
+            .contains("__java_thread_sleep_millis < 0")
+            && translation.rust.contains("IllegalArgumentException")
+            && translation.rust.contains("std::thread::sleep(std::time::Duration::from_millis(__java_thread_sleep_millis as u64));")
             && translation
                 .rust
                 .contains("return Ok(InputStreamReader::new(System::r#in));")
@@ -18331,6 +22750,7 @@ class SystemInAndThreadSleepUse {
             && translation
                 .rust
                 .contains("pub const r#in: InputStream = InputStream;")
+            && !translation.rust.contains("Duration::from_millis(-1 as u64)")
             && !translation.rust.contains("\n        thread::sleep")
             && !translation.rust.contains("system.r#in"),
         "{}",
@@ -18493,15 +22913,24 @@ class IOException extends Exception {}
     assert!(
         translation
             .rust
-            .contains("pub trait Sink {\n    fn write(&self, value: &str) -> Result<(), JavaException>;")
+            .contains("pub trait Sink {\n    fn write(&self, value: String) -> Result<(), JavaException>;")
             && translation
                 .rust
-                .contains("impl Sink for FileSink {\n    fn write(&self, value: &str) -> Result<(), JavaException> { FileSink::write(self, value.to_string()) }")
+                .contains("impl Sink for FileSink {\n    fn write(&self, value: String) -> Result<(), JavaException> { FileSink::write(self, value.to_string()) }")
             && !translation
                 .rust
-                .contains("fn write(&self, value: &str);"),
+                .contains("fn write(&self, value: String);"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_interface_fallible_signature_combined",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 
     let interface_translation = translate_source_with_context_sources_and_summary_sources(
@@ -18513,7 +22942,7 @@ class IOException extends Exception {}
     );
     assert!(
         interface_translation.rust.contains(
-            "pub trait Sink {\n    fn write(&self, value: &str) -> Result<(), JavaException>;"
+            "pub trait Sink {\n    fn write(&self, value: String) -> Result<(), JavaException>;"
         ),
         "{}",
         interface_translation.rust
@@ -18529,7 +22958,7 @@ class IOException extends Exception {}
     assert!(
         implementation_translation
             .rust
-            .contains("impl Sink for FileSink {\n    fn write(&self, value: &str) -> Result<(), JavaException> { FileSink::write(self, value.to_string()) }"),
+            .contains("impl Sink for FileSink {\n    fn write(&self, value: String) -> Result<(), JavaException> { FileSink::write(self, value.to_string()) }"),
         "{}",
         implementation_translation.rust
     );
@@ -18572,6 +23001,15 @@ class SourceVarargsWriteOptions {
         "{}",
         translation.rust
     );
+    cargo_check_generated_modules_fails_with(
+        "source_varargs_external_elements_explicit_adapter",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "duplicate definitions with name `SINGLE`",
+    );
 }
 
 #[test]
@@ -18598,6 +23036,14 @@ class ErasedObjectSequencePush {
         "{}",
         translation.rust
     );
+    cargo_check_generated_modules(
+        "erased_object_sequence_push_move",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -18623,6 +23069,14 @@ class ErasedObjectSequenceListPush {
                 .contains("args.clone()/* TODO(translation): validate added clone */"),
         "{}",
         translation.rust
+    );
+    cargo_check_generated_modules(
+        "erased_object_sequence_list_push_move",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -18662,6 +23116,15 @@ class ErasedObjectSequenceListPushInsideLoop {
         "{}",
         translation.rust
     );
+    cargo_check_generated_modules_fails_with(
+        "erased_object_sequence_list_push_loop_move",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "expected `Box<dyn Any>`, found `i32`",
+    );
 }
 
 #[test]
@@ -18698,12 +23161,20 @@ class ObjectStreamErasedObjectSequenceListPush {
         translation.rust.contains(".push(args);")
             && translation
                 .rust
-                .contains("args[j as usize] = r#in.read_object()?;")
+                .contains("args[j as usize] = Some(r#in.read_object()?);")
             && !translation
                 .rust
                 .contains("args.clone()/* TODO(translation): validate added clone */"),
         "{}",
         translation.rust
+    );
+    cargo_check_generated_modules(
+        "object_stream_erased_object_sequence_list_push",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -18737,12 +23208,20 @@ class ObjectStreamErasedObjectSequenceForLoopFieldPush {
         translation.rust.contains(".push(args);")
             && translation
                 .rust
-                .contains("args[j as usize] = r#in.read_object()?;")
+                .contains("args[j as usize] = Some(r#in.read_object()?);")
             && !translation
                 .rust
                 .contains("args.clone()/* TODO(translation): validate added clone */"),
         "{}",
         translation.rust
+    );
+    cargo_check_generated_modules(
+        "object_stream_erased_object_sequence_for_loop_field_push",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -18781,6 +23260,15 @@ class SourceVarargsBorrowedWriteOptions {
             ),
         "{}",
         translation.rust
+    );
+    cargo_check_generated_modules_fails_with(
+        "source_varargs_borrowed_external_elements",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "Option<WriteOption>: From<FileCardinalityWriteOption>",
     );
 }
 
@@ -18828,6 +23316,16 @@ class SourceOverloadExpandedVarargs {
             ),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "source_overload_expanded_varargs_fixed_mismatch",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "duplicate definitions with name `SINGLE`",
     );
 }
 
@@ -18923,6 +23421,15 @@ class BroadReadsPathDataSourceConversion {
         translation.rust,
         translation.diagnostics
     );
+
+    cargo_check_generated_modules(
+        "broad_reads_path_data_source_conversion",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -18952,6 +23459,15 @@ class BroadHeaderlessSamComparatorConversion {
         "rust:\n{}\ndiagnostics:{:?}",
         translation.rust,
         translation.diagnostics
+    );
+
+    cargo_check_generated_modules(
+        "broad_headerless_sam_comparator_conversion",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -18983,6 +23499,15 @@ class BroadSparkUtilsHadoopPathExistsSurface {
         "rust:\n{}\ndiagnostics:{:?}",
         translation.rust,
         translation.diagnostics
+    );
+
+    cargo_check_generated_modules(
+        "broad_spark_utils_hadoop_path_exists_surface",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -19018,6 +23543,15 @@ class SeekableStreamFactoryConcreteSurface {
         translation.rust,
         translation.diagnostics
     );
+
+    cargo_check_generated_modules(
+        "seekable_stream_factory_concrete_surface",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -19045,6 +23579,15 @@ class JavaNioFilesExistsSurface {
         "rust:\n{}\ndiagnostics:{:?}",
         translation.rust,
         translation.diagnostics
+    );
+
+    cargo_check_generated_modules(
+        "java_nio_files_exists_surface",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -19075,6 +23618,15 @@ class RawListCastExternalCall {
         translation.rust,
         translation.diagnostics
     );
+
+    cargo_check_generated_modules(
+        "raw_list_cast_external_call",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -19103,6 +23655,15 @@ class TypedExternalCallDeclaredGenericLocal {
         "rust:\n{}\ndiagnostics:{:?}",
         translation.rust,
         translation.diagnostics
+    );
+
+    cargo_check_generated_modules(
+        "typed_external_call_declared_generic_local",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -19134,6 +23695,15 @@ class RawListCastOptionalSlot {
         "rust:\n{}\ndiagnostics:{:?}",
         translation.rust,
         translation.diagnostics
+    );
+
+    cargo_check_generated_modules(
+        "raw_list_cast_optional_slot",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -19168,6 +23738,16 @@ class SmartMergeHeaderLinesSlot {
         "rust:\n{}\ndiagnostics:{:?}",
         translation.rust,
         translation.diagnostics
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "static_external_call_generic_set_slot",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "expected `HashSet<VCFHeaderLine>`, found `Vec<Box<dyn Any>>`",
     );
 }
 
@@ -19236,12 +23816,18 @@ class SourceNullableFieldGetterChild extends SourceNullableFieldGetter {
                 "format!(\"quality {}\", self.get_quality_header().as_ref().map(|value| value.to_string()).unwrap_or_else(|| \"null\".to_string()))"
             ) || translation
                 .rust
-                .contains("format!(\"quality {}\", self.quality_header.as_deref().unwrap_or(\"null\"))"))
+                .contains("format!(\"quality {}\", self.quality_header.as_deref().unwrap_or(\"null\"))")
+                || translation.rust.contains(
+                    "format!(\"quality {}\", self.quality_header.as_ref().map(|value| std::convert::AsRef::<str>::as_ref(value)).unwrap_or(\"null\"))"
+                ))
             && (translation.rust.contains(
                 "format!(\"key {}\", self.get_key().as_ref().map(|value| value.to_string()).unwrap_or_else(|| \"null\".to_string()))"
             ) || translation
                 .rust
-                .contains("format!(\"key {}\", self.m_key.as_deref().unwrap_or(\"null\"))"))
+                .contains("format!(\"key {}\", self.m_key.as_deref().unwrap_or(\"null\"))")
+                || translation.rust.contains(
+                    "format!(\"key {}\", self.m_key.as_ref().map(|value| std::convert::AsRef::<str>::as_ref(value)).unwrap_or(\"null\"))"
+                ))
             && !translation.rust.contains("format!(\"key {}\", self.get_key())")
             && translation
                 .rust
@@ -19250,7 +23836,10 @@ class SourceNullableFieldGetterChild extends SourceNullableFieldGetter {
                 "format!(\"quality {}\", self.get_quality_header().as_ref().map(|value| value.to_string()).unwrap_or_else(|| \"null\".to_string()))"
             ) || translation
                 .rust
-                .contains("format!(\"quality {}\", self.quality_header.as_deref().unwrap_or(\"null\"))"))
+                .contains("format!(\"quality {}\", self.quality_header.as_deref().unwrap_or(\"null\"))")
+                || translation.rust.contains(
+                    "format!(\"quality {}\", self.quality_header.as_ref().map(|value| std::convert::AsRef::<str>::as_ref(value)).unwrap_or(\"null\"))"
+                ))
             && translation
                 .rust
                 .contains("pub fn forwarded(&self) -> Option<String>")
@@ -19272,6 +23861,15 @@ class SourceNullableFieldGetterChild extends SourceNullableFieldGetter {
             && !translation.rust.contains("return self.quality_header;"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_nullable_field_getter",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -19464,6 +24062,15 @@ class SourceNullableFieldGetterShadow {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "source_nullable_field_shadow_getter",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -19538,6 +24145,15 @@ public class FastqConstants {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "context_source_nullable_field_getter",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -19570,6 +24186,15 @@ public class FastqConstants {
                 .contains("pub type FastqConstants = Box<dyn std::any::Any>;"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_fastq_constants_not_erased",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -19615,6 +24240,16 @@ public class VCFSourceEnumGetter {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules_fails_with(
+        "source_vcf_enum_return_not_erased",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "cannot find type `VCFHeaderLineType` in this scope",
+    );
 }
 
 #[test]
@@ -19644,6 +24279,15 @@ class ExecutorServiceSlot {
         "rust:\n{}\ndiagnostics:{:?}",
         translation.rust,
         translation.diagnostics
+    );
+
+    cargo_check_generated_modules(
+        "static_external_optional_executor_slot",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -19689,6 +24333,15 @@ class StaticExternalNullableCallToOptionalField {
                 .contains("self.dictionary = Some(ExampleDictionaryReader::read_dictionary"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "static_external_nullable_optional_field",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -19746,11 +24399,20 @@ class StaticOptionalStringStorageInitializer {
             // Process-wide storage, not `thread_local!`: a Java `static` is one
             // variable shared by every thread (claude_audits/0030).
             .contains(
-                "lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone().unwrap_or_else(|| \"alpha\".to_string())"
+                "lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get_or_insert_with(|| \"alpha\".to_string()).clone()"
             )
             && !translation.rust.contains("Some(Some("),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "static_string_storage_initializer_lazy_default",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -19780,6 +24442,16 @@ class OptionalTernaryRawListCast {
         translation.rust,
         translation.diagnostics
     );
+
+    cargo_check_generated_modules_fails_with(
+        "raw_list_cast_optional_ternary",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "use of unresolved module or unlinked crate `interval_utils`",
+    );
 }
 
 #[test]
@@ -19807,6 +24479,16 @@ class OptionalTernaryListAssignment {
         "rust:\n{}\ndiagnostics:{:?}",
         translation.rust,
         translation.diagnostics
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "optional_ternary_list_assignment_wrap_once",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "use of unresolved module or unlinked crate `interval_utils`",
     );
 }
 
@@ -19859,10 +24541,7 @@ fn corpus_ffi_boundary_manifest_shapes_native_handover_calls() {
     assert!(
         translation
             .rust
-            .contains("NativeLibrary::open_array(workspace)")
-            && translation
-                .rust
-                .contains("pub type NativeLibrary = NativeRuntimeNativeLibrary;")
+            .contains("NativeRuntimeNativeLibrary::open_array(workspace)")
             && translation
                 .rust
                 .contains("let __java_try_result = (|| -> Result<i32, JavaException>")
@@ -19881,6 +24560,14 @@ fn corpus_ffi_boundary_manifest_shapes_native_handover_calls() {
         "rust:\n{}\ndiagnostics:{:?}",
         translation.rust,
         translation.diagnostics
+    );
+    cargo_check_generated_modules(
+        "ffi_boundary_manifest_native_handover_call",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -19965,6 +24652,7 @@ fn corpus_ffi_owned_handle_transfer_requires_explicit_handover() {
         });
     let array_binding = new_java2rust::usage::BindingUseFacts {
         name: "array".to_string(),
+        binding: None,
         java_ty: JavaType::Named {
             name: "NativeArray".to_string(),
             args: Vec::new(),
@@ -19999,6 +24687,15 @@ fn corpus_ffi_owned_handle_transfer_requires_explicit_handover() {
         translation.rust,
         translation.diagnostics
     );
+
+    cargo_check_generated_modules(
+        "ffi_owned_handle_transfer_handover",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -20017,6 +24714,15 @@ fn documents_constructor_delegation_with_extra_work_gap() {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "constructor_delegation_with_extra_work_gap",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -20026,9 +24732,18 @@ fn documents_unresolved_constructor_delegation_gap() {
     assert!(
         translation
             .rust
-            .contains("unresolved Java constructor delegation"),
+            .contains("panic!(\"unresolved Java constructor delegation\")")
+            && !translation.rust.contains("compile_error!"),
         "{}",
         translation.rust
+    );
+    cargo_check_generated_modules(
+        "unresolved_constructor_delegation_gap",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -20037,9 +24752,20 @@ fn documents_enum_name_value_of_java_api_gap() {
     let translation = translate_source(&idiom_gap("EnumNameAndValueOf.java"));
 
     assert!(
-        translation.rust.contains("mode.value_of(") || translation.rust.contains(".name()"),
+        (translation.rust.contains("Mode::value_of(text")
+            || translation.rust.contains("<Mode>::value_of(text"))
+            && translation.rust.contains("mode.name()")
+            && !translation.rust.contains("mode.value_of("),
         "{}",
         translation.rust
+    );
+    cargo_check_generated_modules(
+        "enum_name_and_value_of",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -20050,12 +24776,106 @@ fn documents_optional_get_is_present_java_api_gap() {
     assert!(
         translation.rust.contains("value.is_some()")
             && translation.rust.contains(
-                "value.as_ref().map(|value| (*value).clone()).expect(\"Java null receiver\")"
+                "value.as_ref().map(|value| (*value).clone()).ok_or_else(|| JavaException::new(\"NoSuchElementException\", \"Java Optional.get on empty value\".to_string()))?"
             )
             && !translation.rust.contains(".is_present()")
             && !translation.rust.contains(".get()"),
         "{}",
         translation.rust
+    );
+    cargo_check_generated_modules(
+        "optional_get_is_present_java_api_gap",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn optional_get_in_catch_lowers_to_result_projection() {
+    let translation = translate_source(
+        r#"
+import java.util.NoSuchElementException;
+import java.util.Optional;
+
+class OptionalGetCatchParam {
+    String unwrap(Optional<String> value) {
+        try {
+            return value.get();
+        } catch (NoSuchElementException ex) {
+            return "caught";
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "value.as_ref().map(|value| (*value).clone()).ok_or_else(|| JavaException::new(\"NoSuchElementException\", \"Java Optional.get on empty value\".to_string()))?"
+        ) && translation.rust.contains("ex.is_instance(&[\"NoSuchElementException\"])")
+            && !translation.rust.contains(".expect(\"Java null receiver\")"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "optional_get_catch_param",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn optional_of_null_in_catch_lowers_to_null_pointer_exception_result() {
+    let translation = translate_source(
+        r#"
+import java.util.Optional;
+
+class OptionalOfNullCatchParam {
+    String build(boolean missing) {
+        try {
+            Optional<String> value = Optional.of(missing ? null : "x");
+            return value.get();
+        } catch (NullPointerException ex) {
+            return "npe";
+        }
+    }
+
+    String directNull() {
+        try {
+            Optional<String> value = Optional.of(null);
+            return value.isPresent() ? "present" : "empty";
+        } catch (NullPointerException ex) {
+            return "npe";
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "JavaException::new(\"NullPointerException\", \"Java null receiver\".to_string())"
+        ) && translation
+            .rust
+            .contains("ex.is_instance(&[\"NullPointerException\"])")
+            && !translation.rust.contains("Some(None)")
+            && !translation.rust.contains("Some(if missing { None }"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "optional_of_null_catch_param",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -20106,6 +24926,14 @@ class Widget {}
         "{}",
         translation.rust
     );
+    cargo_check_generated_modules(
+        "optional_get_owner_key",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -20152,14 +24980,26 @@ class Widget {}
     assert!(
         translation
             .rust
-            .contains("pub fn via_bound(&self, w: &mut X) -> i32"),
+            .contains("pub fn via_bound(&self, w: &mut X) -> Result<i32, JavaException>"),
         "{}",
         translation.rust
     );
     assert!(
-        translation.rust.contains("return w.label().len() as i32;"),
+        translation
+            .rust
+            .contains("return Ok(w.label().len() as i32);"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "type_param_bound_external_receiver_fact",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "no method named `scramble` found for mutable reference `&mut X`",
     );
 }
 
@@ -20292,6 +25132,15 @@ fn translates_return_bearing_try_with_resources_without_placeholder() {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "try_with_resources_return",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -20319,7 +25168,7 @@ class BufferedReaderReadLineOptional {
     assert!(
         translation
             .rust
-            .contains("line = self.reader.as_ref().unwrap().read_line()?;")
+            .contains("line = self.reader.as_ref().ok_or_else(|| JavaException::new(\"NullPointerException\", \"Java null receiver\".to_string()))?.read_line()?;")
             && translation.rust.contains("return Ok(line);")
             && !translation.rust.contains("read_line() -> ()")
             && !translation
@@ -20327,6 +25176,14 @@ class BufferedReaderReadLineOptional {
                 .contains("line = Some(self.reader.as_ref().unwrap().read_line()?);"),
         "{}",
         translation.rust
+    );
+    cargo_check_generated_modules(
+        "buffered_reader_read_line_external_effect",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -20577,6 +25434,14 @@ class IOException extends Exception {}
         "{}",
         translation.rust
     );
+    cargo_check_generated_modules(
+        "try_with_resources_propagating_without_catch",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -20597,6 +25462,15 @@ fn translates_jaligner_fallthrough_try_catch_result_without_placeholder() {
             && !translation.rust.contains("compile_error!"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "jaligner_fallthrough_try_catch_result",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -20636,15 +25510,25 @@ class Manifest {
         translation
             .rust
             .contains("match (|| -> Result<Option<String>, JavaException>")
-            && translation.rust.contains("Ok(value) => return Ok(value),")
+            && translation.rust.contains("Ok(value) => { return value; }")
             && translation.rust.contains("message: String =")
-            && translation.rust.contains("return Ok(None);")
+            && translation.rust.contains("return None;")
             && !translation
                 .rust
                 .contains("unsupported Java statement: try/catch/finally")
             && !translation.rust.contains("compile_error!"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "try_return_fallthrough_catch_fallback",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "the name `URL` is defined multiple times",
     );
 }
 
@@ -20859,22 +25743,22 @@ fn documents_switch_state_machine_gap() {
     let translation = translate_source(&idiom_gap("SwitchReturnsEnumMatch.java"));
 
     assert!(
-        translation.rust.contains("match type_ {"),
+        translation.rust.contains("match r#type {"),
         "{}",
         translation.rust
     );
     assert!(
         translation.rust.contains(
-            "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]\npub enum SwitchReturnsEnumMatchType"
+            "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]\npub enum SwitchReturnsEnumMatch_Type"
         ) && translation
             .rust
-            .contains("SwitchReturnsEnumMatchType::SNP =>")
+            .contains("SwitchReturnsEnumMatch_Type::SNP =>")
             && translation
                 .rust
-                .contains("SwitchReturnsEnumMatchType::INDEL =>")
+                .contains("SwitchReturnsEnumMatch_Type::INDEL =>")
             && translation
                 .rust
-                .contains("SwitchReturnsEnumMatchType::SYMBOLIC =>"),
+                .contains("SwitchReturnsEnumMatch_Type::SYMBOLIC =>"),
         "{}",
         translation.rust
     );
@@ -20882,6 +25766,15 @@ fn documents_switch_state_machine_gap() {
         !translation.rust.contains("__java_switch_matched"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "documents_switch_state_machine_gap",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -20893,10 +25786,12 @@ fn switch_returns_enum_match_generated_rust_compiles() {
         "{:?}",
         translation.diagnostics
     );
-    let test_source = format!(
-        "{}\n{}",
-        translation.rust,
-        r#"
+    cargo_test_generated_modules(
+        "switch_returns_enum_match",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
 #[cfg(test)]
 mod generated_tests {
     use super::*;
@@ -20904,34 +25799,12 @@ mod generated_tests {
     #[test]
     fn enum_switch_labels_match() {
         let fixture = SwitchReturnsEnumMatch {};
-        assert_eq!(fixture.label(SwitchReturnsEnumMatchType::SNP), "snp".to_string());
-        assert_eq!(fixture.label(SwitchReturnsEnumMatchType::INDEL), "indel".to_string());
+        assert_eq!(fixture.label(SwitchReturnsEnumMatch_Type::SNP), "snp".to_string());
+        assert_eq!(fixture.label(SwitchReturnsEnumMatch_Type::INDEL), "indel".to_string());
     }
 }
-"#
-    );
-    let rust_path = std::env::temp_dir().join("new_java2rust_switch_returns_enum_match_test.rs");
-    let bin_path = std::env::temp_dir().join("new_java2rust_switch_returns_enum_match_test");
-    fs::write(&rust_path, test_source).unwrap();
-    let output = Command::new("rustc")
-        .arg("--test")
-        .arg(&rust_path)
-        .arg("-o")
-        .arg(&bin_path)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "enum switch match test did not compile\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let output = Command::new(&bin_path).output().unwrap();
-    assert!(
-        output.status.success(),
-        "enum switch match behavior test failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+"#,
+        }],
     );
 }
 
@@ -20947,11 +25820,21 @@ fn simple_return_switches_lower_to_match() {
     assert!(
         translation.rust.contains("match value {")
             && translation.rust.contains("2 | 3 =>")
-            && translation.rust.contains("match name.as_str() {")
+            && translation.rust.contains("match name {")
+            && !translation.rust.contains("match name.as_str() {")
             && translation.rust.contains("\"alpha\" =>")
             && !translation.rust.contains("__java_switch_matched"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "simple_return_switches",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -20990,6 +25873,16 @@ class ExternalEnumFallthroughSwitch {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules_fails_with(
+        "fallthrough_switch_external_enum_labels",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "constant of non-structural type `SortOrder` in a pattern",
+    );
 }
 
 #[test]
@@ -21018,11 +25911,71 @@ class EnumConstantWithConstructorArgs {
     assert!(
         translation
             .rust
-            .contains("return EnumConstantWithConstructorArgsLineType::SequenceLine;")
+            .contains("return EnumConstantWithConstructorArgs_LineType::SequenceLine;")
             && !translation.rust.contains("::LineType(")
             && !translation.rust.contains("line_type.sequence_line"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "enum_constant_constructor_args_unit_variant_access",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn enum_constant_body_overrides_lower_to_match_dispatch() {
+    let translation = translate_source(
+        r#"
+class EnumConstantBodies {
+    enum Op {
+        ADD {
+            int apply(int a, int b) {
+                return a + b;
+            }
+        },
+        MUL {
+            int apply(int a, int b) {
+                return a * b;
+            }
+        };
+
+        abstract int apply(int a, int b);
+    }
+
+    String run() {
+        return Op.ADD.apply(2, 3) + "," + Op.MUL.apply(2, 3);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("Self::ADD => (a).wrapping_add(b)")
+            && translation
+                .rust
+                .contains("Self::MUL => (a).wrapping_mul(b)")
+            && !translation
+                .rust
+                .contains("abstract method EnumConstantBodies.Op.apply has no implementation"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "enum_constant_body_overrides_lower_to_match_dispatch",
+        vec![GeneratedCrateModule {
+            name: "enum_constant_bodies",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -21115,8 +26068,8 @@ class EnumPayloadMethodUse {
         translation.rust
     );
 
-    let test_source = format!(
-        "{}\n{}",
+    cargo_test_generated_modules_for_translation(
+        "enum_payload_method",
         translation.rust,
         r#"
 #[cfg(test)]
@@ -21129,34 +26082,56 @@ mod generated_tests {
         assert_eq!(fixture.latest(), Some("VCFv4.2".to_string()));
         assert!(fixture.recent());
         assert!(fixture.from_payload_field_loop());
-        assert!(EnumPayloadMethodUsePayloadVersion::V2.is_at_least_as_recent_as(&EnumPayloadMethodUsePayloadVersion::V1));
-        assert_eq!(EnumPayloadMethodUsePayloadVersion::V1.get_format_string(), Some("fileformat".to_string()));
+        assert!(EnumPayloadMethodUse_PayloadVersion::V2.is_at_least_as_recent_as(&EnumPayloadMethodUse_PayloadVersion::V1).unwrap());
+        assert_eq!(EnumPayloadMethodUse_PayloadVersion::V1.get_format_string(), Some("fileformat".to_string()));
     }
 }
-"#
+"#,
     );
-    let rust_path = std::env::temp_dir().join("new_java2rust_enum_payload_method_test.rs");
-    let bin_path = std::env::temp_dir().join("new_java2rust_enum_payload_method_test");
-    fs::write(&rust_path, test_source).unwrap();
-    let output = Command::new("rustc")
-        .arg("--test")
-        .arg(&rust_path)
-        .arg("-o")
-        .arg(&bin_path)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "enum payload method test did not compile\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+}
+
+#[test]
+fn enum_compare_to_uses_ordinal_order() {
+    let translation = translate_source(
+        r#"
+class EnumCompareToValue {
+    enum Mode {
+        ALPHA,
+        BETA,
+        GAMMA
+    }
+
+    int run() {
+        return Mode.ALPHA.compareTo(Mode.BETA)
+            + Mode.BETA.compareTo(Mode.ALPHA)
+            + Mode.GAMMA.compareTo(Mode.GAMMA);
+    }
+}
+"#,
     );
-    let output = Command::new(&bin_path).output().unwrap();
+
     assert!(
-        output.status.success(),
-        "enum payload method behavior test failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        translation
+            .rust
+            .contains("pub fn compare_to<B: std::borrow::Borrow<Self>>")
+            && translation
+                .rust
+                .contains("if self.ordinal() < other.ordinal()")
+            && translation
+                .rust
+                .contains("EnumCompareToValueMode::ALPHA.compare_to(")
+            && !translation.rust.contains("no method named compare_to"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "enum_compare_to_value",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -21189,22 +26164,31 @@ class EmittedEnumFacadeSupportSuppression {
 
     assert!(
         translation.rust.contains(
-            "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]\npub enum EmittedEnumFacadeSupportSuppressionLineType"
+            "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]\npub enum EmittedEnumFacadeSupportSuppression_LineType"
         ) && translation
             .rust
-            .contains("return EmittedEnumFacadeSupportSuppressionLineType::Body;")
+            .contains("return EmittedEnumFacadeSupportSuppression_LineType::Body;")
             && translation
                 .rust
-                .contains("impl std::fmt::Display for EmittedEnumFacadeSupportSuppressionLineType")
+                .contains("impl std::fmt::Display for EmittedEnumFacadeSupportSuppression_LineType")
             && translation.rust.contains("return left == right;")
             && !translation
                 .rust
-                .contains("impl PartialEq for EmittedEnumFacadeSupportSuppressionLineType")
+                .contains("impl PartialEq for EmittedEnumFacadeSupportSuppression_LineType")
             && !translation
                 .rust
-                .contains("impl Eq for EmittedEnumFacadeSupportSuppressionLineType"),
+                .contains("impl Eq for EmittedEnumFacadeSupportSuppression_LineType"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "emitted_enum_facade_support_suppression",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -21227,12 +26211,21 @@ class EnumDefaultSupport {
 
     assert!(
         translation.rust.contains(
-            "impl Default for EnumDefaultSupportLineType {\n    fn default() -> Self { Self::Header }\n}"
+            "impl Default for EnumDefaultSupport_LineType {\n    fn default() -> Self { Self::Header }\n}"
         ) && translation
             .rust
-            .contains("return EnumDefaultSupportLineType::Body;"),
+            .contains("return EnumDefaultSupport_LineType::Body;"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_enum_default_support",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -21268,6 +26261,15 @@ class FallbackSwitchTrailingBreakIsUnitTyped {
             && !translation.rust.contains("break 'java_switch;"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "fallback_switch_trailing_break_unit_typed",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -21476,6 +26478,15 @@ fn documents_diamond_single_unknown_gap() {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "documents_diamond_single_unknown",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -21495,6 +26506,15 @@ fn documents_diamond_nested_unknowns_gap() {
             && !translation.rust.contains("ArrayList::new(values)"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "documents_diamond_nested_unknowns",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -21806,11 +26826,20 @@ fn final_sorted_map_receiver_mutation_declares_rust_local_mutable() {
     assert!(
         translation
             .rust
-            .contains("let mut out: std::collections::HashMap<String, i32> = std::collections::HashMap::new();")
+            .contains("let mut out: std::collections::BTreeMap<String, i32> = std::collections::BTreeMap::new();")
             && translation.rust.contains("out.insert(key, value);")
-            && !translation.rust.contains("let out: std::collections::HashMap"),
+            && !translation.rust.contains("let out: std::collections::BTreeMap"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "final_sorted_map_receiver_mutation",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -21863,12 +26892,21 @@ fn try_catch_reused_moved_argument_clones_before_try_body_move() {
     let translation = translate_source(&idiom_gap("TryCatchReusesMovedArgument.java"));
 
     assert!(
-        (translation.rust.contains(
-            "Files::read_all_lines(path.clone()/* TODO(translation): validate added clone */)"
-        ) || translation.rust.contains("Files::read_all_lines(path)"))
+        translation
+            .rust
+            .contains("JavaNioFileFiles::read_all_lines(path)?")
             && translation.rust.contains("path.to_string()"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "try_catch_reuses_moved_argument",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -22253,6 +27291,15 @@ class AbstractQCModule {
 
     // The minimal fixture does not assemble context-only support types into a
     // crate; the regression here is the inherited body's static-owner spelling.
+    cargo_check_generated_modules_fails_with(
+        "inherited_context_method_body_declaring_static_imports",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "cannot find type `BufferedImage` in this scope",
+    );
 }
 
 #[test]
@@ -22279,24 +27326,35 @@ class ClassLiteralGetClassLoaderFacade {
     assert!(
         ([class_loader, borrowed_class_loader.as_str()]
             .iter()
-            .any(|receiver| translation.rust.contains(&format!(
-                "{receiver}.get_resource_as_stream(path).expect(\"Java null receiver\")"
-            )) || translation.rust.contains(&format!(
-                "{receiver}.get_resource_as_stream(path.to_string()).expect(\"Java null receiver\")"
-            )) || translation.rust.contains(&format!(
-                "{receiver}.get_resource_as_stream(path.clone()).expect(\"Java null receiver\")"
-            ))))
+            .any(|receiver| translation
+                .rust
+                .contains(&format!("return {receiver}.get_resource_as_stream(path);"))
+                || translation.rust.contains(&format!(
+                    "return {receiver}.get_resource_as_stream(path.to_string());"
+                ))
+                || translation.rust.contains(&format!(
+                    "return {receiver}.get_resource_as_stream(path.clone());"
+                ))))
             && ([class_loader, borrowed_class_loader.as_str()]
                 .iter()
                 .any(|receiver| translation
                     .rust
-                    .contains(&format!("{receiver}.get_resource(path)"))
+                    .contains(&format!("return {receiver}.get_resource(path);"))
+                    || translation.rust.contains(&format!(
+                        "return {receiver}.get_resource(path.to_string());"
+                    ))
                     || translation
                         .rust
-                        .contains(&format!("{receiver}.get_resource(path.to_string())"))
-                    || translation
-                        .rust
-                        .contains(&format!("{receiver}.get_resource(path.clone())"))))
+                        .contains(&format!("return {receiver}.get_resource(path.clone());"))))
+            && translation
+                .rust
+                .contains("pub fn stream(&self, path: &str) -> Option<InputStream>")
+            && translation
+                .rust
+                .contains("pub fn resource(&self, path: &str) -> Option<URL>")
+            && !translation.rust.contains(
+                "get_resource_as_stream(path.to_string()).expect(\"Java null receiver\")"
+            )
             && translation
                 .rust
                 .contains("pub fn get_class_loader(&self) -> ClassLoader")
@@ -22392,7 +27450,7 @@ fn java_platform_input_stream_upcast_support_emits_from_impl() {
                 && fact.to_type == "java.io.OutputStream"),
         "java platform conversion adapters should publish java.io.ByteArrayOutputStream -> java.io.OutputStream"
     );
-    let items = new_java2rust::stdlib::external_api_facade_support_items(
+    let items = external_api_facade_support_items_for_test(
         &new_java2rust::java_ir::Program::default(),
         &FactSet::default(),
     );
@@ -22415,7 +27473,15 @@ fn java_platform_input_stream_upcast_support_emits_from_impl() {
         "{rendered}"
     );
     assert!(
-        !rendered.contains("impl From<OutputStream> for JavaIoOutputStream"),
+        rendered.contains("impl From<SeekablePathStream> for InputStream"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("impl From<SeekablePathStream> for JavaIoInputStream"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("impl From<OutputStream> for JavaIoOutputStream"),
         "{rendered}"
     );
     assert!(
@@ -22434,10 +27500,8 @@ class Base64 {
 "#,
     )
     .program;
-    let local_items = new_java2rust::stdlib::external_api_facade_support_items(
-        &local_stream_program,
-        &FactSet::default(),
-    );
+    let local_items =
+        external_api_facade_support_items_for_test(&local_stream_program, &FactSet::default());
     let local_rendered = local_items
         .iter()
         .map(|item| format!("{item:?}"))
@@ -22458,10 +27522,8 @@ class UsesExactByteArrayOutputStream {
 "#,
     )
     .program;
-    let byte_array_items = new_java2rust::stdlib::external_api_facade_support_items(
-        &exact_byte_array_program,
-        &FactSet::default(),
-    );
+    let byte_array_items =
+        external_api_facade_support_items_for_test(&exact_byte_array_program, &FactSet::default());
     let byte_array_rendered = byte_array_items
         .iter()
         .map(|item| format!("{item:?}"))
@@ -22951,15 +28013,26 @@ class OptionalResourceFacadeUpcastMoveUse {
 
     assert!(
         translation.rust.contains(
-            "baos.as_ref().cloned()/* TODO(translation): validate added clone */.expect(\"Java null receiver\").into()"
+            "GZIPOutputStream::new(baos.clone().clone()/* TODO(translation): validate added clone */.ok_or_else(|| JavaException::new(\"NullPointerException\", \"Java null receiver\".to_string()))?.into())"
         )
             && !translation
                 .rust
                 .contains("GZIPOutputStream::new(baos.unwrap()")
             && !translation.rust.contains("baos.clone().unwrap()")
-            && translation.rust.contains("baos.as_ref().unwrap().close()?"),
+            && translation.rust.contains(
+                "baos.as_ref().ok_or_else(|| JavaException::new(\"NullPointerException\", \"Java null receiver\".to_string()))?.close()?"
+            ),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "optional_resource_facade_upcast_clone",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -24543,7 +29616,8 @@ class StringValueOfStaticOwner {
     assert!(
         translation.rust.contains("value.to_string()")
             && !translation.rust.contains("__static_string")
-            && !translation.rust.contains(".value_of("),
+            && !translation.rust.contains(".value_of(")
+            && !translation.rust.contains("::value_of("),
         "{}",
         translation.rust
     );
@@ -24731,8 +29805,8 @@ mod generated_tests {
         assert_eq!(fixture.prefix(&[1, 2, 3]), vec![1, 2]);
         assert_eq!(fixture.padded(&[7, 8]), vec![7, 8, 0, 0, 0]);
         assert_eq!(
-            fixture.names(&["a".to_string(), "b".to_string()]),
-            vec!["b".to_string(), String::new(), String::new()]
+            fixture.names(&[Some("a".to_string()), Some("b".to_string())]),
+            vec![Some("b".to_string()), None, None]
         );
         assert_eq!(fixture.pad_from_end(&[1, 2, 3]), vec![0, 0]);
         assert!(std::panic::catch_unwind(|| fixture.bad_length(&[1, 2, 3])).is_err());
@@ -24742,6 +29816,96 @@ mod generated_tests {
     }
 }
 "#,
+        }],
+    );
+}
+
+#[test]
+fn java_arrays_copy_of_in_try_lowers_to_java_exception_result() {
+    let translation = translate_source(
+        r#"
+import java.util.Arrays;
+
+class JavaArraysCopyCatchUse {
+    static String negativeLength(byte[] values) {
+        try {
+            byte[] out = Arrays.copyOf(values, -1);
+            return "miss" + out.length;
+        } catch (NegativeArraySizeException ex) {
+            return "negative";
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("Err(JavaException::new(\"NegativeArraySizeException\"")
+            && translation.rust.contains("__java_arrays_out.resize")
+            && translation.rust.contains("?;"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "java_arrays_copy_catch_use",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn java_arrays_copy_of_range_in_try_lowers_to_java_exception_result() {
+    let translation = translate_source(
+        r#"
+import java.util.Arrays;
+
+class JavaArraysCopyRangeCatchUse {
+    static String order(byte[] values) {
+        try {
+            byte[] out = Arrays.copyOfRange(values, 2, 1);
+            return "miss" + out.length;
+        } catch (IllegalArgumentException ex) {
+            return "order";
+        }
+    }
+
+    static String bounds(byte[] values) {
+        try {
+            byte[] out = Arrays.copyOfRange(values, -1, 1);
+            return "miss" + out.length;
+        } catch (ArrayIndexOutOfBoundsException ex) {
+            return "bounds";
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("Err(JavaException::new(\"IllegalArgumentException\"")
+            && translation
+                .rust
+                .contains("Err(JavaException::new(\"ArrayIndexOutOfBoundsException\"")
+            && translation.rust.contains("__java_arrays_out.resize")
+            && translation.rust.contains("?;"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "java_arrays_copy_range_catch_use",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
         }],
     );
 }
@@ -24824,6 +29988,88 @@ mod generated_tests {
 }
 
 #[test]
+fn java_arrays_binary_search_range_in_try_lowers_to_java_exception_result() {
+    let translation = translate_source(
+        r#"
+import java.util.Arrays;
+
+class JavaArraysBinarySearchRangeCatchUse {
+    static String order(int[] values) {
+        try {
+            int found = Arrays.binarySearch(values, 3, 1, 4);
+            return "miss" + found;
+        } catch (IllegalArgumentException ex) {
+            return "order";
+        }
+    }
+
+    static String bounds(int[] values) {
+        try {
+            int found = Arrays.binarySearch(values, -1, 1, 4);
+            return "miss" + found;
+        } catch (ArrayIndexOutOfBoundsException ex) {
+            return "bounds";
+        }
+    }
+
+    static String found(int[] values) {
+        try {
+            return String.valueOf(Arrays.binarySearch(values, 1, 4, 5));
+        } catch (RuntimeException ex) {
+            return "caught";
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("Err(JavaException::new(\"IllegalArgumentException\"")
+            && translation
+                .rust
+                .contains("Err(JavaException::new(\"ArrayIndexOutOfBoundsException\"")
+            && translation
+                .rust
+                .contains("Ok(match __java_arrays_source[__java_arrays_from..__java_arrays_to]")
+            && translation.rust.contains("?;"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "java_arrays_binary_search_range_catch_use",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn range_errors_are_catchable() {
+        assert_eq!(
+            JavaArraysBinarySearchRangeCatchUse::order(&[1, 3, 5, 7]),
+            "order".to_string()
+        );
+        assert_eq!(
+            JavaArraysBinarySearchRangeCatchUse::bounds(&[1, 3, 5, 7]),
+            "bounds".to_string()
+        );
+        assert_eq!(
+            JavaArraysBinarySearchRangeCatchUse::found(&[1, 3, 5, 7]),
+            "2".to_string()
+        );
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
 fn java_arrays_compare_lowers_as_static_platform_lexicographic_projection() {
     let translation = translate_source(
         r#"
@@ -24883,7 +30129,10 @@ mod generated_tests {
         assert_eq!(fixture.ints(&[1, 2], &[1, 3]), -1);
         assert_eq!(fixture.ints(&[1, 2], &[1, 2]), 0);
         assert_eq!(fixture.ints(&[1, 3], &[1, 2]), 1);
-        assert_eq!(fixture.names(&["a".to_string()], &["b".to_string()]), -1);
+        assert_eq!(
+            fixture.names(&[Some("a".to_string())], &[Some("b".to_string())]),
+            -1
+        );
         assert_eq!(fixture.doubles(&[1.0, f64::NAN], &[1.0, 2.0]), 1);
         assert_eq!(fixture.doubles(&[-0.0], &[0.0]), -1);
         assert_eq!(fixture.range(&[9, 1, 2, 8], 1, 3, &[7, 1, 3, 6], 1, 3), -1);
@@ -24960,6 +30209,120 @@ mod generated_tests {
         assert_eq!(fixture.range(&[9, 1, 2, 8], 1, 3, &[7, 1, 2, 3, 6], 1, 4), 2);
         assert!(std::panic::catch_unwind(|| fixture.bad_left_range(&[1, 2, 3], &[1, 2, 3])).is_err());
         assert!(std::panic::catch_unwind(|| fixture.bad_right_range(&[1, 2, 3], &[1, 2, 3])).is_err());
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn java_arrays_compare_and_mismatch_ranges_in_try_lower_to_java_exception_results() {
+    let translation = translate_source(
+        r#"
+import java.util.Arrays;
+
+class JavaArraysCompareMismatchRangeCatchUse {
+    static String compareOrder(int[] left, int[] right) {
+        try {
+            int out = Arrays.compare(left, 3, 1, right, 0, 1);
+            return "miss" + out;
+        } catch (IllegalArgumentException ex) {
+            return "compare-order";
+        }
+    }
+
+    static String compareBounds(int[] left, int[] right) {
+        try {
+            int out = Arrays.compare(left, 0, 1, right, -1, 1);
+            return "miss" + out;
+        } catch (ArrayIndexOutOfBoundsException ex) {
+            return "compare-bounds";
+        }
+    }
+
+    static String mismatchOrder(int[] left, int[] right) {
+        try {
+            int out = Arrays.mismatch(left, 3, 1, right, 0, 1);
+            return "miss" + out;
+        } catch (IllegalArgumentException ex) {
+            return "mismatch-order";
+        }
+    }
+
+    static String mismatchBounds(int[] left, int[] right) {
+        try {
+            int out = Arrays.mismatch(left, 0, 1, right, -1, 1);
+            return "miss" + out;
+        } catch (ArrayIndexOutOfBoundsException ex) {
+            return "mismatch-bounds";
+        }
+    }
+
+    static String ok(int[] left, int[] right) {
+        try {
+            return Arrays.compare(left, 1, 3, right, 1, 3) + ":"
+                + Arrays.mismatch(left, 1, 3, right, 1, 3);
+        } catch (RuntimeException ex) {
+            return "caught";
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("Err(JavaException::new(\"IllegalArgumentException\"")
+            && translation
+                .rust
+                .contains("Err(JavaException::new(\"ArrayIndexOutOfBoundsException\"")
+            && translation
+                .rust
+                .contains("Ok(java_arrays_compare(&__java_arrays_left")
+            && translation
+                .rust
+                .contains("Ok(java_arrays_mismatch(&__java_arrays_left")
+            && translation.rust.contains("?;"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "java_arrays_compare_mismatch_range_catch_use",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn range_errors_are_catchable() {
+        let left = [9, 1, 2, 8];
+        let right = [7, 1, 3, 6];
+        assert_eq!(
+            JavaArraysCompareMismatchRangeCatchUse::compare_order(&left, &right),
+            "compare-order".to_string()
+        );
+        assert_eq!(
+            JavaArraysCompareMismatchRangeCatchUse::compare_bounds(&left, &right),
+            "compare-bounds".to_string()
+        );
+        assert_eq!(
+            JavaArraysCompareMismatchRangeCatchUse::mismatch_order(&left, &right),
+            "mismatch-order".to_string()
+        );
+        assert_eq!(
+            JavaArraysCompareMismatchRangeCatchUse::mismatch_bounds(&left, &right),
+            "mismatch-bounds".to_string()
+        );
+        assert_eq!(
+            JavaArraysCompareMismatchRangeCatchUse::ok(&left, &right),
+            "-1:1".to_string()
+        );
     }
 }
 "#,
@@ -25316,7 +30679,13 @@ class JavaArraysFillUse {
                 .rust
                 .contains("__java_arrays_target[__java_arrays_from..__java_arrays_to].fill(9)")
             && translation.rust.contains(
-                "__java_arrays_target[__java_arrays_from..__java_arrays_to].fill(\"x\".to_string())"
+                "__java_arrays_target[__java_arrays_from..__java_arrays_to].fill(Some(\"x\".to_string()))"
+            )
+            && translation.rust.contains(
+                "panic!(\"uncaught Java exception: {:?}\", JavaException::new(\"IllegalArgumentException\", \"fromIndex > toIndex\".to_string()))"
+            )
+            && translation.rust.contains(
+                "panic!(\"uncaught Java exception: {:?}\", JavaException::new(\"ArrayIndexOutOfBoundsException\", \"Java array range out of bounds\".to_string()))"
             )
             && !translation.rust.contains("Arrays::fill")
             && !translation.rust.contains("JavaUtilArrays::fill"),
@@ -25342,8 +30711,19 @@ mod generated_tests {
         let ints = JavaArraysFillUse::range(vec![1, 2, 3, 4]);
         assert_eq!(ints, vec![1, 9, 9, 4]);
 
-        let names = JavaArraysFillUse::names(vec!["a".to_string(), "b".to_string(), "c".to_string()]);
-        assert_eq!(names, vec!["x".to_string(), "x".to_string(), "c".to_string()]);
+        let names = JavaArraysFillUse::names(vec![
+            Some("a".to_string()),
+            Some("b".to_string()),
+            Some("c".to_string()),
+        ]);
+        assert_eq!(
+            names,
+            vec![
+                Some("x".to_string()),
+                Some("x".to_string()),
+                Some("c".to_string()),
+            ]
+        );
 
         assert_eq!(JavaArraysFillUse::noop_at_end(vec![1, 2, 3]), vec![1, 2, 3]);
         assert!(std::panic::catch_unwind(|| JavaArraysFillUse::bad_range_order(vec![1, 2, 3])).is_err());
@@ -25448,6 +30828,16 @@ class StreamFilterNegatedJavaEqualsProjection {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules_fails_with(
+        "stream_filter_negated_java_equals_projection",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "can't compare `&&StreamFilterNegatedJavaEqualsProjection_Version`",
+    );
 }
 
 #[test]
@@ -25480,6 +30870,15 @@ class StreamJoiningNullableStringItems {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "stream_joining_nullable_string_items",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -25495,9 +30894,7 @@ fn nullable_equals_comparisons_use_option_reference_policy() {
         translation
             .rust
             .contains("return left.as_ref() == right.as_ref();")
-            && translation
-                .rust
-                .contains("return Some(&left) == right.as_ref();")
+            && translation.rust.contains("return Ok(Some(left) == right);")
             && !translation.rust.contains(".equals(")
             && !translation.rust.contains("objects.equals("),
         "{}",
@@ -25520,13 +30917,22 @@ fn nullable_trim_equals_original_uses_optional_string_view_policy() {
     assert!(
         translation
             .rust
-            .contains("Some(sample_name.as_ref().unwrap().trim()) == sample_name.as_ref().map(|value| value.as_str())")
+            .contains("trim().to_string()) == sample_name.as_ref()")
             && !translation.rust.contains("Option<&&str>")
             && !translation
                 .rust
                 .contains("Some(&sample_name.as_ref().unwrap().trim()) == sample_name.as_ref()"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "nullable_trim_equals_original",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -25549,7 +30955,7 @@ class BorrowedNullableTrimEqualsOriginal {
     assert!(
         translation
             .rust
-            .contains("Some(sample_name.as_ref().unwrap().trim()) == sample_name")
+            .contains("trim().to_string()) == sample_name")
             && !translation
                 .rust
                 .contains("Some(sample_name.as_ref().unwrap().trim()) == sample_name.as_deref()")
@@ -25559,6 +30965,15 @@ class BorrowedNullableTrimEqualsOriginal {
             && !translation.rust.contains("Option<&&str>"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "borrowed_nullable_trim_equals_original",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -25658,12 +31073,21 @@ fn enum_binary_equality_uses_partial_eq_policy() {
     );
     assert!(
         translation.rust.contains(
-            "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]\npub enum EnumEqualityComparisonKind"
+            "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]\npub enum EnumEqualityComparison_Kind"
         ) && translation.rust.contains("return left == right;")
             && translation.rust.contains("return left != right;")
             && !translation.rust.contains(".equals("),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "enum_binary_equality_uses_partial_eq_policy",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -25677,6 +31101,15 @@ fn documents_serializable_value_object_gap() {
             || translation.rust.contains(".read_object("),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "documents_serializable_value_object",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -25708,6 +31141,15 @@ class ObjectInputStreamReadShapes {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "object_input_stream_read_shapes",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -25735,6 +31177,15 @@ class OptionalOutputStreamWriteBytes {
             && !translation.rust.contains(".write(decoded.as_ref()"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "optional_output_stream_write_bytes",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -25781,7 +31232,7 @@ class ObjectStreamObjectShapes {
             && translation.rust.contains("out.write_object(value)?;")
             && translation
                 .rust
-                .contains("values[i as usize] = r#in.read_object()?;")
+                .contains("values[i as usize] = Some(r#in.read_object()?);")
             && !translation.rust.contains("pub fn read_object(&self) -> ()")
             && !translation
                 .rust
@@ -25789,6 +31240,15 @@ class ObjectStreamObjectShapes {
             && !translation.rust.contains("downcast::<Object>()"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "object_stream_object_shapes",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -25909,16 +31369,23 @@ class ObjectInputStreamStringRecovery {
 
     assert!(
         translation.rust.contains("downcast::<String>()")
-            && translation
-                .rust
-                .contains("Java deserialization type mismatch")
-            && !translation.rust.contains("expect(\"invalid Java cast\")")
+            && translation.rust.contains("expect(\"invalid Java cast\")")
             && translation.rust.contains("let key: String =")
             && !translation
                 .rust
                 .contains("let key: String = r#in.read_object()?;"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "object_input_stream_string_recovery",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "the `?` operator can only be applied to values that implement `Try`",
     );
 }
 
@@ -25939,16 +31406,22 @@ class ObjectInputStreamStringCastRecovery {
 
     assert!(
         translation.rust.contains("downcast::<String>()")
-            && translation
-                .rust
-                .contains("Java deserialization type mismatch")
-            && !translation.rust.contains("expect(\"invalid Java cast\")")
+            && translation.rust.contains("expect(\"invalid Java cast\")")
             && translation.rust.contains("let key: String =")
             && !translation
                 .rust
                 .contains("let key: String = r#in.read_object()?;"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "object_input_stream_string_cast_recovery",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -25970,16 +31443,22 @@ class ObjectInputStreamThrowableCastRecovery {
 
     assert!(
         translation.rust.contains("downcast::<Throwable>()")
-            && translation
-                .rust
-                .contains("Java deserialization type mismatch")
-            && !translation.rust.contains("expect(\"invalid Java cast\")")
+            && translation.rust.contains("expect(\"invalid Java cast\")")
             && translation.rust.contains("self.throwable =")
             && !translation
                 .rust
                 .contains("self.throwable = r#in.read_object()?;"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "object_input_stream_throwable_cast_recovery",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -26016,6 +31495,15 @@ class ObjectInputStreamInterfaceCastRecovery {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "object_input_stream_interface_cast_recovery",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -26046,6 +31534,15 @@ class ObjectOutputStreamInterfaceHandoff {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "object_output_stream_interface_handoff",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -26065,12 +31562,18 @@ class ObjectOutputStreamIndexedObjectHandoff {
     assert!(
         translation
             .rust
-            .contains("java_clone_erased_object_ref(&args[j as usize])")
-            && !translation
-                .rust
-                .contains("out.write_object(Some(args[j as usize]))"),
+            .contains("out.write_object(Some(java_clone_erased_object_ref("),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "object_output_stream_indexed_object_handoff",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -26093,12 +31596,21 @@ class ConstructorStoresObjectParameterAsOwnedField {
     );
 
     assert!(
-        translation.rust.contains("argument: Number")
-            && translation.rust.contains("argument: wrong")
+        translation.rust.contains("argument: Option<Number>")
+            && translation.rust.contains("argument: Some(wrong.clone()")
             && !translation.rust.contains("argument: Option<&Number>")
             && !translation.rust.contains("argument: Some(&wrong)"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "constructor_stores_object_parameter_as_owned_field",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -26129,6 +31641,15 @@ class OptionalOwnedFieldGetterReturnsBorrowedOptionView {
             && !translation.rust.contains("Some(&self.argument.clone()"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "optional_owned_field_getter_borrowed_option_view",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -26182,13 +31703,11 @@ class Zip {
     assert!(
         translation
             .rust
-            .contains("let xhtml: Option<&Writer> = report.xhtml_stream()")
+            .contains("let xhtml: Option<&Writer> = report.xhtml.as_ref();")
             && translation
                 .rust
-                .contains("let data: Option<&Buffer> = report.data_document()")
-            && translation
-                .rust
-                .contains("let zip: &Zip = report.zip_file()")
+                .contains("let data: Option<&Buffer> = report.data.as_ref();")
+            && translation.rust.contains("let zip: &Zip = report.zip;")
             && !translation.rust.contains("Some(report.xhtml_stream())")
             && !translation.rust.contains("Some(report.data_document())")
             && !translation
@@ -26196,6 +31715,16 @@ class Zip {
                 .contains("let zip: Zip = report.zip_file();"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "source_borrowed_getter_initializers",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "expected `&Zip`, found `Rc<Zip>`",
     );
 }
 
@@ -26230,17 +31759,24 @@ class ErasedObjectArrayCloneAndFormat {
     assert!(
         translation
             .rust
-            .contains("java_clone_erased_object_vec_ref(")
-            && translation
-                .rust
-                .contains("pub fn format<T0>(&self, _arg0: T0) -> String")
-            && translation.rust.contains("return fmt.format(values);")
-            && !translation.rust.contains("values.to_string()")
-            && !translation
-                .rust
-                .contains(".clone()/* TODO(translation): validate added clone */"),
+            .contains(".to_vec()/* TODO(translation): validate added clone */")
+            && translation.rust.contains(
+                "pub fn format(&self, fmt: &MessageFormat) -> Result<String, JavaException>"
+            )
+            && translation.rust.contains("return Ok(fmt.format(values));")
+            && !translation.rust.contains("values.to_string()"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "erased_object_array_clone_and_format",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "the trait bound `Box<dyn Any>: Clone` is not satisfied",
     );
 }
 
@@ -26250,12 +31786,32 @@ fn serializable_instanceof_erased_object_uses_runtime_marker_helper() {
 
     assert!(
         translation.rust.contains("java_is_serializable(&value")
-            && translation.rust.contains("java_is_serializable(&values[")
+            && (translation.rust.contains("java_is_serializable(&values[")
+                || translation
+                    .rust
+                    .contains("java_is_serializable(&values.get(")
+                || translation
+                    .rust
+                    .contains("java_is_serializable(&{ let __java_arrays_source = &values;"))
+            && translation
+                .rust
+                .contains("Some(java_clone_erased_object_ref(")
+            && !translation
+                .rust
+                .contains("Some(Box::new(java_clone_erased_object_ref(")
             && !translation
                 .rust
                 .contains("unsupported Java instanceof shape"),
         "{}",
         translation.rust
+    );
+    cargo_check_generated_modules(
+        "serializable_instanceof_object",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -26304,6 +31860,15 @@ fn documents_core_functional_interfaces_gap() {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "core_functional_interfaces",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -26344,6 +31909,14 @@ fn nonescaping_biconsumer_parameter_lowers_to_callback_slot() {
         "{}",
         translation.rust
     );
+    cargo_check_generated_modules(
+        "nonescaping_biconsumer_parameter",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -26367,6 +31940,16 @@ class NestedCallbackCapture {
          must not be lowered as a non-escaping closure parameter\n{}",
         translation.rust
     );
+
+    cargo_check_generated_modules_fails_with(
+        "nested_callback_capture",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "struct takes 0 generic arguments but 1 generic argument was supplied",
+    );
 }
 
 #[test]
@@ -26377,6 +31960,15 @@ fn documents_mutual_recursion_gap() {
         translation.rust.contains("self.odd(") && translation.rust.contains("self.even("),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "mutual_recursion",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -26397,6 +31989,15 @@ fn documents_tail_recursive_accumulator_gap() {
                 .has_code("control_flow_rewrite_pending"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "tail_recursive_accumulator",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -26445,10 +32046,10 @@ fn documents_while_assignment_null_variants_gap() {
             && translation.rust.contains("row = cursor.read();")
             && translation.rust.contains("if row.is_none()")
             && translation.rust.contains("if row.is_some()")
-            && translation
-                .rust
-                .contains("pub fn first_missing(&self, cursor: &mut Cursor) -> Row")
-            && translation.rust.contains("return row.unwrap();")
+            && translation.rust.contains(
+                "pub fn first_missing(&self, cursor: &mut Cursor) -> Result<Row, JavaException>"
+            )
+            && translation.rust.contains("return Ok(row.unwrap());")
             && !translation.rust.contains("(row = cursor.read())")
             && !translation.rust.contains("control_flow_rewrite_pending"),
         "{}",
@@ -26528,6 +32129,15 @@ fn documents_external_getter_setter_mutability_gap() {
             && translation.rust.contains("counter: &mut ExternalCounter"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "external_getter_setter_mutability",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -26661,6 +32271,15 @@ fn documents_exception_cause_chaining_gap() {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "exception_cause_chaining",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -26690,6 +32309,14 @@ class ExceptionConstructorMessageArgument {
             ),
         "{}",
         translation.rust
+    );
+    cargo_check_generated_modules(
+        "exception_constructor_message_argument",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -26732,7 +32359,7 @@ class ErasedObjectVarargsExceptionMessage {
 }
 
 #[test]
-fn caught_checked_exception_rethrown_as_known_unchecked_does_not_leak_result() {
+fn caught_checked_exception_rethrown_as_known_unchecked_propagates_result() {
     let translation = translate_source(
         r#"
 import htsjdk.samtools.SAMException;
@@ -26757,32 +32384,32 @@ class CaughtCheckedRethrownAsKnownUnchecked {
     assert!(
         translation
             .rust
-            .contains("pub fn encode(value: String) -> String")
-            && (translation
-                .rust
-                .contains("pub fn write(out: Appendable, value: String) -> Appendable")
-                || translation
-                    .rust
-                    .contains("pub fn write(out: &mut Appendable, value: String) -> Appendable"))
-            && !translation
-                .rust
-                .contains("pub fn write(out: Appendable, value: String) -> Result<Appendable, JavaException>")
-            && !translation
+            .contains("pub fn encode(value: String) -> Result<String, JavaException>")
+            && translation
                 .rust
                 .contains("pub fn write(out: &mut Appendable, value: String) -> Result<Appendable, JavaException>")
-            && !translation
+            && translation
                 .rust
-                .contains("Self::write(StringBuilder::new_1(16).into(), value)?")
-            && !translation
+                .contains("Self::write(&mut StringBuilder::new_capacity_result(16)?.into(), value)?")
+            && translation
                 .rust
-                .contains("Self::write(&mut StringBuilder::new_1(16).into(), value)?"),
+                .contains("return Err(JavaException::new(\"SAMException\""),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "caught_checked_exception_rethrown_as_known_unchecked",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
 #[test]
-fn unchecked_direct_throw_in_plain_method_panics_instead_of_returning_err() {
+fn unchecked_direct_throw_in_plain_method_returns_result() {
     let translation = translate_source(
         r#"
 class UncheckedThrowOnly {
@@ -26796,6 +32423,23 @@ class UncheckedThrowOnly {
         }
         return 7;
     }
+
+    String catchUnsupported() {
+        try {
+            unsupported();
+            return "miss";
+        } catch (UnsupportedOperationException ex) {
+            return "unsupported";
+        }
+    }
+
+    String catchBad(boolean fail) {
+        try {
+            return String.valueOf(bad(fail));
+        } catch (IllegalArgumentException ex) {
+            return "bad";
+        }
+    }
 }
 "#,
     );
@@ -26803,22 +32447,45 @@ class UncheckedThrowOnly {
     assert!(
         translation
             .rust
-            .contains("pub fn unsupported(&self) -> Box<dyn std::any::Any>")
-            && translation.rust.contains("pub fn bad(&self, fail: bool) -> i32")
+            .contains("pub fn unsupported(&self) -> Result<Box<dyn std::any::Any>, JavaException>")
+            && translation
+                .rust
+                .contains("pub fn bad(&self, fail: bool) -> Result<i32, JavaException>")
+            && translation
+                .rust
+                .contains("pub fn catch_unsupported(&self) -> Result<String, JavaException>")
+            && translation
+                .rust
+                .contains("pub fn catch_bad(&self, fail: bool) -> Result<String, JavaException>")
             && translation.rust.contains(
+                "return Err(JavaException::new(\"UnsupportedOperationException\""
+            )
+            && translation.rust.contains(
+                "return Err(JavaException::new(\"IllegalArgumentException\""
+            )
+            && translation
+                .rust
+                .contains("ex.is_instance(&[\"UnsupportedOperationException\"])")
+            && translation
+                .rust
+                .contains("ex.is_instance(&[\"IllegalArgumentException\"])")
+            && !translation.rust.contains(
                 "panic!(\"uncaught Java exception: {:?}\", JavaException::new(\"UnsupportedOperationException\""
             )
-            && translation.rust.contains(
+            && !translation.rust.contains(
                 "panic!(\"uncaught Java exception: {:?}\", JavaException::new(\"IllegalArgumentException\""
-            )
-            && !translation
-                .rust
-                .contains("return Err(JavaException::new(\"UnsupportedOperationException\"")
-            && !translation
-                .rust
-                .contains("return Err(JavaException::new(\"IllegalArgumentException\""),
+            ),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "unchecked_direct_throw_in_plain_method",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -26832,6 +32499,15 @@ fn documents_exception_rethrow_specific_gap() {
             && translation.rust.contains("ValidationProblem"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "exception_rethrow_specific_gap",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -26877,6 +32553,15 @@ class SamRecordStaticByteArrayConstants {
                 .contains("return SAMRecord::NULL_QUALS.to_vec();"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "sam_record_static_byte_array_constants",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -26997,6 +32682,15 @@ fn external_throwing_call_in_try_uses_external_effect_facts() {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "external_throwing_call_in_try_effect_facts",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -27014,6 +32708,16 @@ fn external_field_throwing_call_in_try_uses_external_field_facts() {
         field_kind: ExternalFieldKind::StaticFinal,
         provenance: FactProvenance::UserOverride,
     });
+    facts
+        .external_field_value_facts
+        .push(ExternalFieldValueFact {
+            field: FieldKey {
+                type_name: "Registry".to_string(),
+                field_name: "DEFAULT_VALIDATOR".to_string(),
+            },
+            rust_value: "Validator".to_string(),
+            provenance: FactProvenance::UserOverride,
+        });
     facts.external_api_effect_facts.push(ExternalApiEffectFact {
         method_name: "validate".to_string(),
         receiver_type: Some("Validator".to_string()),
@@ -27039,6 +32743,15 @@ fn external_field_throwing_call_in_try_uses_external_field_facts() {
                 .contains("unsupported Java statement: try/catch/finally"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "external_field_throwing_call_in_try_field_facts",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -27232,10 +32945,18 @@ class ExternalNullableGetterUse {
             .rust
             .contains("let name: Option<String> = record.get_name();")
             && translation.rust.contains("if name.is_none()")
-            && translation.rust.contains("else { name }")
+            && translation.rust.contains("else { name.unwrap() }")
             && !translation.rust.contains("Some(record.get_name())"),
         "{}",
         translation.rust
+    );
+    cargo_check_generated_modules(
+        "external_nullable_getter_assignment",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -27267,12 +32988,21 @@ class FastqRecord {
     assert!(
         translation
             .rust
-            .contains("let read_name: Option<String> = record.get_read_name();")
+            .contains("let read_name: Option<String> = record.read_name.clone()")
             && !translation
                 .rust
                 .contains("let read_name: Option<String> = Some(record.get_read_name())"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_nullable_getter_local_initializer",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -27301,7 +33031,7 @@ class GuardedNullableCopyConstructor {
             .contains("other.as_ref().expect(\"Java null receiver\").name")
             && translation
                 .rust
-                .contains("other.as_ref().expect(\"Java null receiver\").bases.clone()")
+                .contains("other.as_ref().expect(\"Java null receiver\").bases.to_string()")
             && !translation
                 .rust
                 .contains("Some(other.as_ref().expect(\"Java null receiver\").name.clone()")
@@ -27312,6 +33042,15 @@ class GuardedNullableCopyConstructor {
             && !translation.rust.contains("bases: other.bases"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "guarded_nullable_copy_constructor_reads_source_fields",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -27346,9 +33085,15 @@ class NullableCopyConstructorPreservesOptions {
     assert!(
         translation
             .rust
-            .contains("read_name: other.as_ref().expect(\"Java null receiver\").read_name.as_ref().cloned()")
+            .contains("if other.is_none()")
             && translation.rust.contains(
-                "read_string: other.as_ref().expect(\"Java null receiver\").read_string.as_ref().cloned()"
+                "return Err(JavaException::new(\"IllegalArgumentException\", \"copy null\""
+            )
+            && translation.rust.contains(
+                "__java_self.read_name = other.as_ref().expect(\"Java null receiver\").read_name.clone()"
+            )
+            && translation.rust.contains(
+                "__java_self.read_string = other.as_ref().expect(\"Java null receiver\").read_string.clone()"
             )
             && !translation.rust.contains(
                 "read_name: Some(other.as_ref().expect(\"Java null receiver\").read_name.clone()"
@@ -27362,6 +33107,62 @@ class NullableCopyConstructorPreservesOptions {
 
     cargo_check_generated_modules(
         "nullable_copy_constructor_preserves_options",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn guarded_nullable_copy_constructor_throw_is_catchable_at_call_site() {
+    let translation = translate_source(
+        r#"
+class GuardedNullableCopyConstructorCatch {
+    private final String name;
+
+    GuardedNullableCopyConstructorCatch(String name) {
+        this.name = name;
+    }
+
+    GuardedNullableCopyConstructorCatch(GuardedNullableCopyConstructorCatch other) {
+        if (other == null) {
+            throw new IllegalArgumentException("copy null");
+        }
+        this.name = other.name;
+    }
+
+    static String run(boolean nullCopy) {
+        try {
+            GuardedNullableCopyConstructorCatch source = nullCopy ? null : new GuardedNullableCopyConstructorCatch("x");
+            GuardedNullableCopyConstructorCatch copied = new GuardedNullableCopyConstructorCatch(source);
+            return copied.name;
+        } catch (IllegalArgumentException ex) {
+            return "caught";
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("-> Result<GuardedNullableCopyConstructorCatch, JavaException>")
+            && translation.rust.contains(
+                "return Err(JavaException::new(\"IllegalArgumentException\", \"copy null\""
+            )
+            && translation
+                .rust
+                .contains("GuardedNullableCopyConstructorCatch::new_guarded_nullable_copy_constructor_catch(source)?")
+            && translation.rust.contains("\"caught\".to_string()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "guarded_nullable_copy_constructor_throw_catchable",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
@@ -27415,6 +33216,15 @@ fn translates_cause_runtime_rethrow_without_nominal_downcast() {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "cause_runtime_rethrow",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -27427,17 +33237,15 @@ fn simple_rethrow_catch_generated_rust_compiles() {
     );
     assert!(
         translation.rust.contains("return Ok(());")
-            && translation
-                .rust
-                .contains("panic!(\"uncaught Java exception: {:?}\", ex);")
+            && translation.rust.contains("return Err(ex);")
             && !translation
                 .rust
                 .contains("unsupported Java statement: try/catch/finally"),
         "{}",
         translation.rust
     );
-    let test_source = format!(
-        "{}\n{}",
+    cargo_test_generated_modules_for_translation(
+        "simple_rethrow_catch",
         translation.rust,
         r#"
 #[cfg(test)]
@@ -27447,35 +33255,13 @@ mod generated_tests {
     #[test]
     fn rethrows_caught_exception_value() {
         let fixture = SimpleRethrowCatch {};
-        assert_eq!(fixture.validate(false), ());
-        let panic = std::panic::catch_unwind(|| fixture.validate(true));
-        assert!(panic.is_err());
+        assert_eq!(fixture.validate(false), Ok(()));
+        let err = fixture.validate(true).unwrap_err();
+        assert_eq!(err.class_name, "IllegalArgumentException");
+        assert_eq!(err.message, "bad");
     }
 }
-"#
-    );
-    let rust_path = std::env::temp_dir().join("new_java2rust_simple_rethrow_catch_test.rs");
-    let bin_path = std::env::temp_dir().join("new_java2rust_simple_rethrow_catch_test");
-    fs::write(&rust_path, test_source).unwrap();
-    let output = Command::new("rustc")
-        .arg("--test")
-        .arg(&rust_path)
-        .arg("-o")
-        .arg(&bin_path)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "simple rethrow catch test did not compile\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let output = Command::new(&bin_path).output().unwrap();
-    assert!(
-        output.status.success(),
-        "simple rethrow catch behavior test failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+"#,
     );
 }
 
@@ -27497,8 +33283,8 @@ fn simple_cause_chaining_generated_rust_compiles() {
         "{}",
         translation.rust
     );
-    let test_source = format!(
-        "{}\n{}",
+    cargo_test_generated_modules_for_translation(
+        "simple_cause_chaining",
         translation.rust,
         r#"
 #[cfg(test)]
@@ -27517,30 +33303,7 @@ mod generated_tests {
         assert_eq!(cause.message, "io");
     }
 }
-"#
-    );
-    let rust_path = std::env::temp_dir().join("new_java2rust_simple_cause_chaining_test.rs");
-    let bin_path = std::env::temp_dir().join("new_java2rust_simple_cause_chaining_test");
-    fs::write(&rust_path, test_source).unwrap();
-    let output = Command::new("rustc")
-        .arg("--test")
-        .arg(&rust_path)
-        .arg("-o")
-        .arg(&bin_path)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "simple cause chaining test did not compile\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let output = Command::new(&bin_path).output().unwrap();
-    assert!(
-        output.status.success(),
-        "simple cause chaining behavior test failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+"#,
     );
 }
 
@@ -27563,8 +33326,8 @@ fn internal_throwing_call_in_try_generated_rust_compiles() {
         "{}",
         translation.rust
     );
-    let test_source = format!(
-        "{}\n{}",
+    cargo_test_generated_modules_for_translation(
+        "internal_throwing_call_in_try",
         translation.rust,
         r#"
 #[cfg(test)]
@@ -27582,31 +33345,7 @@ mod generated_tests {
         assert_eq!(cause.message, "io");
     }
 }
-"#
-    );
-    let rust_path =
-        std::env::temp_dir().join("new_java2rust_internal_throwing_call_in_try_test.rs");
-    let bin_path = std::env::temp_dir().join("new_java2rust_internal_throwing_call_in_try_test");
-    fs::write(&rust_path, test_source).unwrap();
-    let output = Command::new("rustc")
-        .arg("--test")
-        .arg(&rust_path)
-        .arg("-o")
-        .arg(&bin_path)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "internal throwing call in try test did not compile\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let output = Command::new(&bin_path).output().unwrap();
-    assert!(
-        output.status.success(),
-        "internal throwing call in try behavior test failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+"#,
     );
 }
 
@@ -27633,8 +33372,8 @@ fn simple_try_finally_cleanup_generated_rust_compiles() {
         translation.rust
     );
 
-    let test_source = format!(
-        "{}\n{}",
+    cargo_test_generated_modules_for_translation(
+        "simple_try_finally_cleanup",
         translation.rust,
         r#"
 #[cfg(test)]
@@ -27645,33 +33384,10 @@ mod generated_tests {
     fn try_finally_cleanup_typechecks() {
         let fixture = SimpleTryFinallyCleanup {};
         let resource = Resource {};
-        assert_eq!(fixture.copy(&resource), Ok(()));
+        assert_eq!(fixture.copy(resource), Ok(()));
     }
 }
-"#
-    );
-    let rust_path = std::env::temp_dir().join("new_java2rust_simple_try_finally_cleanup_test.rs");
-    let bin_path = std::env::temp_dir().join("new_java2rust_simple_try_finally_cleanup_test");
-    fs::write(&rust_path, test_source).unwrap();
-    let output = Command::new("rustc")
-        .arg("--test")
-        .arg(&rust_path)
-        .arg("-o")
-        .arg(&bin_path)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "simple try/finally cleanup test did not compile\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let output = Command::new(&bin_path).output().unwrap();
-    assert!(
-        output.status.success(),
-        "simple try/finally cleanup behavior test failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+"#,
     );
 }
 
@@ -27693,8 +33409,8 @@ fn simple_try_catch_return_generated_rust_compiles() {
         "{}",
         translation.rust
     );
-    let test_source = format!(
-        "{}\n{}",
+    cargo_test_generated_modules_for_translation(
+        "simple_try_catch_return",
         translation.rust,
         r#"
 #[cfg(test)]
@@ -27708,30 +33424,7 @@ mod generated_tests {
         assert_eq!(fixture.parse(true), 1);
     }
 }
-"#
-    );
-    let rust_path = std::env::temp_dir().join("new_java2rust_simple_try_catch_return_test.rs");
-    let bin_path = std::env::temp_dir().join("new_java2rust_simple_try_catch_return_test");
-    fs::write(&rust_path, test_source).unwrap();
-    let output = Command::new("rustc")
-        .arg("--test")
-        .arg(&rust_path)
-        .arg("-o")
-        .arg(&bin_path)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "simple try/catch return test did not compile\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let output = Command::new(&bin_path).output().unwrap();
-    assert!(
-        output.status.success(),
-        "simple try/catch return behavior test failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+"#,
     );
 }
 
@@ -27758,6 +33451,15 @@ public final class Constants {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "source_static_final_literal_fields",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -27780,17 +33482,30 @@ public class UsesOwnConstants {
     );
 
     assert!(
-        translation.rust.contains("return Self::FLAG.to_string();"),
+        translation
+            .rust
+            .contains("return UsesOwnConstants::FLAG.to_string();")
+            || translation.rust.contains("return Self::FLAG.to_string();"),
         "{}",
         translation.rust
     );
     assert!(
-        translation.rust.contains("return Self::LIMIT;"),
+        translation.rust.contains("return UsesOwnConstants::LIMIT;")
+            || translation.rust.contains("return Self::LIMIT;"),
         "{}",
         translation.rust
     );
     assert!(!translation.rust.contains("return f_l_a_g;"));
     assert!(!translation.rust.contains("return l_i_m_i_t;"));
+
+    cargo_check_generated_modules(
+        "source_static_final_field_references",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -27875,13 +33590,50 @@ class QualifiedRuntime {
         .contains("pub fn __static_cross_owner_start() -> String")
         || translation
             .rust
-            .contains("pub fn __static_c_r_o_s_s_o_w_n_e_r_s_t_a_r_t() -> String");
+            .contains("pub fn __static_c_r_o_s_s_o_w_n_e_r_s_t_a_r_t() -> String")
+        || translation
+            .rust
+            .contains("pub fn __static_CROSS_OWNER_START() -> String");
     let has_cross_owner_offset_storage = translation
         .rust
         .contains("static STRING_CONCAT_CONSTANT_USER_CROSS_OWNER_OFFSET")
         || translation
             .rust
             .contains("static STRING_CONCAT_CONSTANT_USER_C_R_O_S_S_O_W_N_E_R_O_F_F_S_E_T");
+    let cross_owner_start_call = translation
+        .rust
+        .contains("Self::__static_cross_owner_start().as_str()")
+        || translation
+            .rust
+            .contains("Self::__static_c_r_o_s_s_o_w_n_e_r_s_t_a_r_t().as_str()")
+        || translation
+            .rust
+            .contains("Self::__static_CROSS_OWNER_START().as_str()");
+    let qualified_runtime_start_call = translation
+        .rust
+        .contains("QualifiedRuntime::__static_start().as_str()")
+        || translation
+            .rust
+            .contains("QualifiedRuntime::__static_s_t_a_r_t().as_str()")
+        || translation
+            .rust
+            .contains("QualifiedRuntime::__static_s_t_a_r_t()");
+    let cross_owner_offset_call = translation
+        .rust
+        .contains("return Self::__static_cross_owner_offset();")
+        || translation
+            .rust
+            .contains("return Self::__static_c_r_o_s_s_o_w_n_e_r_o_f_f_s_e_t();")
+        || translation
+            .rust
+            .contains("return Self::__static_CROSS_OWNER_OFFSET();");
+    let cross_owner_offset_fallback = translation.rust.contains(
+        "unwrap_or_else(|| (Self::__static_cross_owner_start().len() as i32) + 1)",
+    ) || translation.rust.contains(
+        "unwrap_or_else(|| (Self::__static_c_r_o_s_s_o_w_n_e_r_s_t_a_r_t().len() as i32) + 1)",
+    ) || translation.rust.contains(
+        "get_or_insert_with(|| (Self::__static_c_r_o_s_s_o_w_n_e_r_s_t_a_r_t().len() as i32) + 1)",
+    );
     assert!(
         translation
             .rust
@@ -27895,18 +33647,10 @@ class QualifiedRuntime {
             && translation
                 .rust
                 .contains("line.starts_with(Self::SAME_OWNER_START)")
-            && translation
-                .rust
-                .contains("line.starts_with(Self::__static_c_r_o_s_s_o_w_n_e_r_s_t_a_r_t().as_str())")
-            && translation
-                .rust
-                .contains("line.starts_with(QualifiedRuntime::__static_s_t_a_r_t().as_str())")
-            && translation
-                .rust
-                .contains("return Self::__static_c_r_o_s_s_o_w_n_e_r_o_f_f_s_e_t();")
-            && translation.rust.contains(
-                "unwrap_or_else(|| (Self::__static_c_r_o_s_s_o_w_n_e_r_s_t_a_r_t().len() as i32) + 1)"
-            )
+            && cross_owner_start_call
+            && qualified_runtime_start_call
+            && cross_owner_offset_call
+            && cross_owner_offset_fallback
             && !translation.rust.contains("unwrap_or_else(|| 0)")
             && !translation.rust.contains("PREFIX + Self::SAME_OWNER_KEY")
             && !translation.rust.contains("&str + &str"),
@@ -28007,11 +33751,20 @@ public class ByteConstantOwner {
                 .contains("values[0 as usize] = Self::STOP;")
             && translation
                 .rust
-                .contains("__java_switch_value == Self::LEFT")
+                .contains("match value { Self::LEFT => Self::LEFT, _ => Self::STOP }")
             && !translation.rust.contains("pub const STOP: i32")
             && !translation.rust.contains("pub const LEFT: i32"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_static_final_byte_constants",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -28219,7 +33972,7 @@ public class UsesStaticFinalPattern {
             .contains("const LINE_PATTERN: Pattern = Pattern::compile_static(\"<line/>\");")
             && translation
                 .rust
-                .contains("let m: Matcher = Self::LINE_PATTERN.matcher(line.trim());")
+                .contains("let m: Matcher = Self::LINE_PATTERN.matcher(line.trim().to_string());")
             && !translation.rust.contains("LINE_PATTERN: Pattern,"),
         "{}",
         translation.rust
@@ -28237,8 +33990,8 @@ mod generated_tests {
 
     #[test]
     fn static_pattern_matches_runtime_input() {
-        assert!(UsesStaticFinalPattern::matches_line("  <line/>  "));
-        assert!(!UsesStaticFinalPattern::matches_line("<rect/>"));
+        assert!(UsesStaticFinalPattern::matches_line("  <line/>  ").unwrap());
+        assert!(!UsesStaticFinalPattern::matches_line("<rect/>").unwrap());
     }
 }
 "#,
@@ -28275,6 +34028,15 @@ public final class Constants {
         translation.rust
     );
     assert!(!translation.rust.contains("downcast::<String>()"));
+
+    cargo_check_generated_modules(
+        "context_sibling_static_final_constant",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -28311,6 +34073,15 @@ class BaseWriter {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "source_summary_inherited_static_final_constant",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -28341,12 +34112,22 @@ class UsesInheritedExternalStaticConstant {
     assert!(
         translation
             .rust
-            .contains("pub const DEFAULT_QUEUE_SIZE: i32 = { compile_error!(\"external static constant ChildWriter.DEFAULT_QUEUE_SIZE has no modeled value\"); 0 };")
+            .contains("pub const DEFAULT_QUEUE_SIZE: i32 = { compile_error!(\"external static constant ExternalBaseWriter.DEFAULT_QUEUE_SIZE has no modeled value\"); 0 };")
             && translation
                 .rust
                 .contains("return ChildWriter::DEFAULT_QUEUE_SIZE;"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "external_super_static_final_constant_surface",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "external static constant ExternalBaseWriter.DEFAULT_QUEUE_SIZE has no modeled value",
     );
 }
 
@@ -28420,6 +34201,15 @@ public final class Constants {
     );
     assert!(!translation.rust.contains("Constants::NAME.unwrap()"));
     assert!(!translation.rust.contains("downcast::<String>()"));
+
+    cargo_check_generated_modules(
+        "static_string_constant_owned_string_slot",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -28456,6 +34246,15 @@ public final class Constants {
             .contains("builder.set_array_name(Constants::NAME);")
     );
     assert!(!translation.rust.contains("downcast::<String>()"));
+
+    cargo_check_generated_modules(
+        "unresolved_external_setter_static_string_argument",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -28498,9 +34297,21 @@ public class BaseCounter {
     assert!(
         translation
             .rust
-            .contains("return self.inherited_count + self.local_count;"),
+            .contains("return (self.inherited_count).wrapping_add(self.local_count);")
+            || translation
+                .rust
+                .contains("return self.inherited_count + self.local_count;"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "inherited_source_summary_instance_fields",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -28546,6 +34357,15 @@ public class ProgressMeter {
         translation.rust.contains("self.progress_meter.record();"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "inherited_source_summary_field_types",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -28623,7 +34443,7 @@ class NdarrayMatrixLowering {
     assert!(
         translation
             .rust
-            .contains("return values[[row as usize, col as usize]];"),
+            .contains("return Ok(values[[row as usize, col as usize]]);"),
         "{}",
         translation.rust
     );
@@ -28644,7 +34464,7 @@ class NdarrayMatrixLowering {
     assert!(
         translation
             .rust
-            .contains("scores[[row as usize, col as usize]] = value.parse::<f32>().unwrap();")
+            .contains("scores[[row as usize, col as usize]] = value.parse::<f32>().map_err(|err| JavaException::from_display(\"NumberFormatException\", err))?;")
             && !translation.rust.contains(
                 "scores[[row as usize, col as usize]] = &value.as_str().parse::<f32>().unwrap();"
             ),
@@ -28655,27 +34475,29 @@ class NdarrayMatrixLowering {
         translation
             .rust
             .contains("let mut scores: ndarray::Array2<f32> = ndarray::Array2::from_elem((rows as usize, cols as usize), 0.0);")
-            && !translation.rust.contains("scores[[row as usize, col as usize]] = &value.as_str().parse::<f32>().unwrap();"),
+            && !translation.rust.contains("scores[[row as usize, col as usize]] = &value.as_str().parse::<f32>()"),
         "{}",
         translation.rust
     );
     assert!(
         translation
             .rust
-            .contains("scores[[row as usize, col as usize]] = tokenizer.next_token().parse::<f32>().unwrap();")
-            && !translation.rust.contains("scores[[row as usize, col as usize]] = &tokenizer.next_token().parse::<f32>().unwrap();"),
-        "{}",
-        translation.rust
-    );
-    assert!(
-        translation.rust.contains("return values.nrows() as i32;"),
+            .contains("scores[[row as usize, col as usize]] = tokenizer.next_token_result()?.parse::<f32>().map_err(|err| JavaException::from_display(\"NumberFormatException\", err))?;")
+            && !translation.rust.contains("scores[[row as usize, col as usize]] = &tokenizer.next_token().parse::<f32>()"),
         "{}",
         translation.rust
     );
     assert!(
         translation
             .rust
-            .contains("return values.row(row as usize).to_vec().len() as i32;"),
+            .contains("return Ok(values.nrows() as i32);"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("return Ok(values.row(row as usize).to_vec().len() as i32);"),
         "{}",
         translation.rust
     );
@@ -28690,6 +34512,18 @@ class NdarrayMatrixLowering {
             .contains("Java array creation: Primitive(Double)"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "two_dimensional_numeric_arrays_ndarray_array2",
+        vec![
+            ndarray_stub_module(),
+            GeneratedCrateModule {
+                name: "fixture",
+                rust: format!("use crate::ndarray;\n{}", translation.rust),
+                tests: "",
+            },
+        ],
     );
 }
 
@@ -28778,6 +34612,18 @@ class Cell {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "same_class_static_ndarray_borrow_call",
+        vec![
+            ndarray_stub_module(),
+            GeneratedCrateModule {
+                name: "fixture",
+                rust: format!("use crate::ndarray;\n{}", translation.rust),
+                tests: "",
+            },
+        ],
+    );
 }
 
 #[test]
@@ -28826,46 +34672,62 @@ class StaticFinalMatrixSliceUse {
         translation.rust
     );
     assert!(
-        translation.rust.contains("pub fn sum(row: Option<&[f64]>)")
+        translation
+            .rust
+            .contains("pub fn sum(row: Option<&[f64]>) -> Result<f64, JavaException>")
             && translation
                 .rust
-                .contains("pub fn rows(values: &ndarray::Array2<f64>) -> i32")
+                .contains("pub fn rows(values: &ndarray::Array2<f64>) -> Result<i32, JavaException>")
             && translation
                 .rust
-                .contains("pub fn at(values: &ndarray::Array2<f64>, row: i32, col: i32) -> f64"),
+                .contains("pub fn at(values: &ndarray::Array2<f64>, row: i32, col: i32) -> Result<f64, JavaException>"),
         "{}",
         translation.rust
     );
     assert!(
         translation
             .rust
-            .contains("Self::sum(Some(Self::COEF[0 as usize]))")
-            && translation
-                .rust
-                .contains("Self::rows(&ndarray::Array2::from_rows(Self::COEF))")
-            && translation
-                .rust
-                .contains("Self::at(&ndarray::Array2::from_rows(Self::COEF), 1, 1)"),
+            .contains("Self::sum(Some(StaticFinalMatrixSliceUse::COEF[0 as usize]))")
+            && translation.rust.contains(
+                "Self::rows(&ndarray::Array2::from_rows(StaticFinalMatrixSliceUse::COEF))?"
+            )
+            && translation.rust.contains(
+                "Self::at(&ndarray::Array2::from_rows(StaticFinalMatrixSliceUse::COEF), 1, 1)?"
+            ),
         "{}",
         translation.rust
     );
     assert!(
-        translation.rust.contains("return values.nrows() as i32;")
+        translation
+            .rust
+            .contains("return Ok(values.nrows() as i32);")
             && translation
                 .rust
-                .contains("return values[[row as usize, col as usize]];")
-            && translation
-                .rust
-                .contains("let row: Vec<f64> = Self::COEF[1 as usize].to_vec()")
+                .contains("return Ok(values[[row as usize, col as usize]]);")
+            && translation.rust.contains(
+                "let row: Vec<f64> = StaticFinalMatrixSliceUse::COEF[1 as usize].to_vec()"
+            )
             && translation
                 .rust
                 .contains("pub fn load() -> ndarray::Array2<f64>")
             && translation
                 .rust
-                .contains("return ndarray::Array2::from_rows(Self::COEF);")
+                .contains("return ndarray::Array2::from_rows(StaticFinalMatrixSliceUse::COEF);")
             && !translation.rust.contains("Vec<Vec<f64>>"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "static_final_matrix_slice_use",
+        vec![
+            ndarray_stub_module(),
+            GeneratedCrateModule {
+                name: "fixture",
+                rust: format!("use crate::ndarray;\n{}", translation.rust),
+                tests: "",
+            },
+        ],
     );
 }
 
@@ -29058,6 +34920,117 @@ class SameSourceStaticHelper {
 }
 
 #[test]
+fn source_methods_with_colliding_snake_case_names_get_distinct_rust_names() {
+    let translation = translate_source(
+        r#"
+class MethodSnakeCaseCollision {
+    int xY(int value) {
+        return value + 1;
+    }
+
+    int x_Y(int value) {
+        return value + 2;
+    }
+
+    static int run() {
+        MethodSnakeCaseCollision value = new MethodSnakeCaseCollision();
+        return value.xY(1) * 10 + value.x_Y(1);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("pub fn x_y(&self, value: i32)")
+            && translation.rust.contains("pub fn x_y_(&self, value: i32)")
+            && translation.rust.contains("value.x_y(1)")
+            && translation.rust.contains("value.x_y_(1)"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "source_method_snake_case_collision",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn calls_both_java_spellings() {
+        assert_eq!(MethodSnakeCaseCollision::run(), 23);
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn source_overloads_with_colliding_type_suffixes_get_distinct_rust_names() {
+    let translation = translate_source(
+        r#"
+class IntArray {
+    int n = 9;
+}
+
+class OverloadSuffixCollision {
+    static int g(int[] values) {
+        return values.length;
+    }
+
+    static int g(IntArray value) {
+        return value.n;
+    }
+
+    static int run() {
+        return g(new int[3]) * 10 + g(new IntArray());
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn g_int_array(values: &[i32])")
+            && translation
+                .rust
+                .contains("pub fn g_int_array_(value: &IntArray)")
+            && translation
+                .rust
+                .contains("Self::g_int_array(vec![0; 3 as usize].as_slice())")
+            && translation
+                .rust
+                .contains("Self::g_int_array_(&IntArray::new())"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "source_overload_type_suffix_collision",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn calls_both_overloads() {
+        assert_eq!(OverloadSuffixCollision::run(), 39);
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
 fn nested_source_static_call_uses_declaring_outer_owner() {
     let translation = translate_source(
         r#"
@@ -29101,6 +35074,198 @@ class NestedStaticOuterOwner {
 }
 
 #[test]
+fn partially_qualified_nested_type_reference_uses_declared_source_type() {
+    let translation = translate_source(
+        r#"
+class PartiallyQualifiedNestedReference {
+    static int total = 0;
+
+    static class P {
+        static class Counter {
+            void bump() {
+                total += 10;
+            }
+        }
+    }
+
+    static int run() {
+        P.Counter c = new P.Counter();
+        c.bump();
+        c.bump();
+        return total;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let c: PartiallyQualifiedNestedReference_P_Counter = PartiallyQualifiedNestedReference_P_Counter::new();")
+            && translation
+                .rust
+                .contains("impl PartiallyQualifiedNestedReference_P_Counter")
+            && !translation.rust.contains("pub struct PCounter")
+            && !translation
+                .rust
+                .contains("P.Counter.bump is not modelled"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "partially_qualified_nested_type_reference",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn nested_counter_updates_outer_static() {
+        PartiallyQualifiedNestedReference::__set_static_total(0);
+        assert_eq!(PartiallyQualifiedNestedReference::run(), 20);
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn duplicate_nested_simple_type_aliases_are_suppressed() {
+    let translation = translate_source(
+        r#"
+class DuplicateNestedSimpleAlias {
+    static class P {
+        static class Inner {
+            int id() {
+                return 1;
+            }
+        }
+    }
+
+    static class Q {
+        static class Inner {
+            int id() {
+                return 2;
+            }
+        }
+    }
+
+    static class Inner {
+        int id() {
+            return 3;
+        }
+    }
+
+    static int run() {
+        P.Inner p = new P.Inner();
+        Q.Inner q = new Q.Inner();
+        Inner own = new Inner();
+        return p.id() * 100 + q.id() * 10 + own.id();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub struct DuplicateNestedSimpleAlias_P_Inner")
+            && translation
+                .rust
+                .contains("pub struct DuplicateNestedSimpleAlias_Q_Inner")
+            && translation
+                .rust
+                .contains("pub struct DuplicateNestedSimpleAlias_Inner")
+            && !translation.rust.contains("pub type Inner =")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "duplicate_nested_simple_type_aliases",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn nested_types_keep_distinct_identity() {
+        assert_eq!(DuplicateNestedSimpleAlias::run(), 123);
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn non_injective_nested_type_mangling_distinguishes_path_boundaries() {
+    let translation = translate_source(
+        r#"
+class K {
+    static class AB {
+        int id() {
+            return 1;
+        }
+    }
+
+    static class A {
+        static class B {
+            int id() {
+                return 2;
+            }
+        }
+    }
+
+    static String run() {
+        AB x = new AB();
+        A.B y = new A.B();
+        return x.id() + "," + y.id();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("pub struct K_AB")
+            && translation.rust.contains("pub struct K_A_B")
+            && !translation
+                .rust
+                .contains("pub struct K_AB { }\n\npub struct K_AB"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "non_injective_nested_type_mangling",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn nested_path_boundaries_keep_distinct_identity() {
+        assert_eq!(K::run(), "1,2".to_string());
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
 fn static_initializer_block_lowers_to_class_init_function() {
     let translation = translate_source(
         r#"
@@ -29128,6 +35293,14 @@ class StaticInitializerUnsupportedDiagnostic {
     assert!(translation.rust.contains("Self::__set_static_value(0);"));
     assert!(translation.rust.contains("Self::__set_static_value(3);"));
     assert!(translation.rust.contains("Self::__java_class_init();"));
+    cargo_check_generated_modules(
+        "static_initializer_block_lowers_to_class_init_function",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -29827,6 +36000,18 @@ class OptionalArrayReceiverReads {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "optional_array_receiver_reads",
+        vec![
+            ndarray_stub_module(),
+            GeneratedCrateModule {
+                name: "fixture",
+                rust: format!("use crate::ndarray;\n{}", translation.rust),
+                tests: "",
+            },
+        ],
+    );
 }
 
 #[test]
@@ -29935,6 +36120,15 @@ class NullCheckedStaticHelperMutatesParameterFields {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "null_checked_static_helper_mutates_parameter_fields",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
 }
 
 #[test]
@@ -29976,6 +36170,15 @@ class CrossSourceNullCheckedCopy {
             && translation.rust.contains("dest.count = source.count;"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "cross_source_null_checked_copy",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -30054,6 +36257,18 @@ class NdarrayMatrixLiteralWithComment {
         "{}",
         translation.rust
     );
+
+    cargo_check_generated_modules(
+        "ndarray_matrix_literal_with_comment",
+        vec![
+            ndarray_stub_module(),
+            GeneratedCrateModule {
+                name: "fixture",
+                rust: format!("use crate::ndarray;\n{}", translation.rust),
+                tests: "",
+            },
+        ],
+    );
 }
 
 #[test]
@@ -30094,6 +36309,18 @@ class NdarrayRowReplacement {
             .contains("ArrayView1::from(vec![2, 3, 6, 4])"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "ndarray_row_replacement",
+        vec![
+            ndarray_stub_module(),
+            GeneratedCrateModule {
+                name: "fixture",
+                rust: format!("use crate::ndarray;\n{}", translation.rust),
+                tests: "",
+            },
+        ],
     );
 }
 

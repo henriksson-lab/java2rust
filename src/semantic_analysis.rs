@@ -42,8 +42,6 @@ pub struct SemanticDiagnostic {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SemanticAnalysisIterations {
     pub field_nullability: usize,
-    pub external_api_effects: usize,
-    pub control_flow: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,8 +151,6 @@ pub fn analyze_program_with_config(
         diagnostics,
         iterations: SemanticAnalysisIterations {
             field_nullability: field_nullability_iterations,
-            external_api_effects: usize::from(config.enable_external_api_guesses),
-            control_flow: usize::from(config.enable_control_flow_facts),
         },
     }
 }
@@ -348,9 +344,13 @@ fn collect_external_api_effect_facts(
     let mut seen = HashSet::new();
     let mut budget_exhausted = false;
     let mut guessed_count = 0usize;
+    let source_types = program_type_names(program);
+    let external_superclasses = external_superclasses_by_source_type(program, &source_types);
     for ty in &program.types {
         collect_type_external_api_effect_facts(
             ty,
+            &source_types,
+            &external_superclasses,
             facts,
             &mut seen,
             config.max_external_guess_iterations,
@@ -949,6 +949,8 @@ fn collect_expr_type_names(expr: &Expr, names: &mut HashSet<String>) {
 
 fn collect_type_external_api_effect_facts(
     ty: &TypeDecl,
+    source_types: &HashSet<String>,
+    external_superclasses: &HashMap<String, String>,
     facts: &mut FactSet,
     seen: &mut HashSet<String>,
     budget: Option<usize>,
@@ -963,6 +965,8 @@ fn collect_type_external_api_effect_facts(
                 if let Some(body) = &method.body {
                     collect_external_api_effects_from_block(
                         ty,
+                        source_types,
+                        external_superclasses,
                         &method.type_params,
                         &method.type_param_bounds,
                         &method.params,
@@ -982,6 +986,8 @@ fn collect_type_external_api_effect_facts(
                 if let Some(body) = &ctor.body {
                     collect_external_api_effects_from_block(
                         ty,
+                        source_types,
+                        external_superclasses,
                         &ctor.type_params,
                         &ctor.type_param_bounds,
                         &ctor.params,
@@ -999,6 +1005,8 @@ fn collect_type_external_api_effect_facts(
             }
             Member::Type(nested) => collect_type_external_api_effect_facts(
                 nested,
+                source_types,
+                external_superclasses,
                 facts,
                 seen,
                 budget,
@@ -1022,6 +1030,8 @@ fn collect_external_api_effect_facts_from_unresolved_targets(
     budget_exhausted: &mut bool,
     diagnostics: &mut Vec<SemanticDiagnostic>,
 ) {
+    let source_types = program_type_names(program);
+    let external_superclasses = external_superclasses_by_source_type(program, &source_types);
     let unresolved_targets = facts.unresolved_target_facts.clone();
     for fact in unresolved_targets {
         if fact.kind != UnresolvedTargetKind::MethodCall {
@@ -1037,6 +1047,17 @@ fn collect_external_api_effect_facts_from_unresolved_targets(
                 &fact.target_name,
                 fact.arg_types.len(),
             )
+        {
+            continue;
+        }
+        if let Some(receiver_type) = receiver_type_key.as_deref()
+            && source_declares_method(
+                program,
+                receiver_type,
+                &fact.target_name,
+                fact.arg_types.len(),
+            )
+            && !external_superclasses.contains_key(receiver_type)
         {
             continue;
         }
@@ -1140,8 +1161,32 @@ fn find_type_decl_in_type<'a>(ty: &'a TypeDecl, type_name: &str) -> Option<&'a T
     })
 }
 
+fn source_declares_method(
+    program: &Program,
+    type_name: &str,
+    method_name: &str,
+    arg_count: usize,
+) -> bool {
+    find_type_decl(program, type_name).is_some_and(|ty| {
+        ty.members.iter().any(|member| {
+            matches!(
+                member,
+                Member::Method(method)
+                    if source_method_name_matches(&method.name, method_name)
+                        && method.params.len() == arg_count
+            )
+        })
+    })
+}
+
+fn source_method_name_matches(declared: &str, query: &str) -> bool {
+    declared == query || declared == crate::parser::to_snake_case(query)
+}
+
 fn collect_external_api_effects_from_block(
     ty: &TypeDecl,
+    source_types: &HashSet<String>,
+    external_superclasses: &HashMap<String, String>,
     member_type_params: &[String],
     member_type_param_bounds: &[Option<JavaType>],
     params: &[crate::java_ir::Param],
@@ -1159,6 +1204,8 @@ fn collect_external_api_effects_from_block(
         collect_external_api_type_env(ty, member_type_params, member_type_param_bounds, params);
     collect_external_api_effects_from_block_with_env(
         body,
+        source_types,
+        external_superclasses,
         expected_return_type,
         facts,
         seen,
@@ -1174,6 +1221,8 @@ fn collect_external_api_effects_from_block(
 
 fn collect_external_api_effects_from_block_with_env(
     body: &Block,
+    source_types: &HashSet<String>,
+    external_superclasses: &HashMap<String, String>,
     expected_return_type: Option<&JavaType>,
     facts: &mut FactSet,
     seen: &mut HashSet<String>,
@@ -1188,6 +1237,8 @@ fn collect_external_api_effects_from_block_with_env(
     for stmt in &body.statements {
         collect_external_api_effects_from_stmt_with_env(
             stmt,
+            source_types,
+            external_superclasses,
             expected_return_type,
             facts,
             seen,
@@ -1205,6 +1256,8 @@ fn collect_external_api_effects_from_block_with_env(
 
 fn collect_external_api_effects_from_stmt_with_env(
     stmt: &Stmt,
+    source_types: &HashSet<String>,
+    external_superclasses: &HashMap<String, String>,
     expected_return_type: Option<&JavaType>,
     facts: &mut FactSet,
     seen: &mut HashSet<String>,
@@ -1236,6 +1289,8 @@ fn collect_external_api_effects_from_stmt_with_env(
                 );
                 collect_external_api_effects_from_expr_with_env(
                     expr,
+                    source_types,
+                    external_superclasses,
                     facts,
                     seen,
                     budget,
@@ -1265,6 +1320,8 @@ fn collect_external_api_effects_from_stmt_with_env(
             );
             collect_external_api_effects_from_expr_with_env(
                 target,
+                source_types,
+                external_superclasses,
                 facts,
                 seen,
                 budget,
@@ -1277,6 +1334,8 @@ fn collect_external_api_effects_from_stmt_with_env(
             );
             collect_external_api_effects_from_expr_with_env(
                 value,
+                source_types,
+                external_superclasses,
                 facts,
                 seen,
                 budget,
@@ -1290,6 +1349,8 @@ fn collect_external_api_effects_from_stmt_with_env(
         }
         Stmt::Expr(expr) | Stmt::Throw(expr) => collect_external_api_effects_from_expr_with_env(
             expr,
+            source_types,
+            external_superclasses,
             facts,
             seen,
             budget,
@@ -1330,6 +1391,8 @@ fn collect_external_api_effects_from_stmt_with_env(
             }
             collect_external_api_effects_from_expr_with_env(
                 expr,
+                source_types,
+                external_superclasses,
                 facts,
                 seen,
                 budget,
@@ -1353,6 +1416,8 @@ fn collect_external_api_effects_from_stmt_with_env(
         } => {
             collect_external_api_effects_from_expr_with_env(
                 condition,
+                source_types,
+                external_superclasses,
                 facts,
                 seen,
                 budget,
@@ -1365,6 +1430,8 @@ fn collect_external_api_effects_from_stmt_with_env(
             );
             collect_external_api_effects_from_block_with_env(
                 then_block,
+                source_types,
+                external_superclasses,
                 expected_return_type,
                 facts,
                 seen,
@@ -1379,6 +1446,8 @@ fn collect_external_api_effects_from_stmt_with_env(
             if let Some(else_block) = else_block {
                 collect_external_api_effects_from_block_with_env(
                     else_block,
+                    source_types,
+                    external_superclasses,
                     expected_return_type,
                     facts,
                     seen,
@@ -1400,6 +1469,8 @@ fn collect_external_api_effects_from_stmt_with_env(
         } => {
             collect_external_api_effects_from_expr_with_env(
                 condition,
+                source_types,
+                external_superclasses,
                 facts,
                 seen,
                 budget,
@@ -1412,6 +1483,8 @@ fn collect_external_api_effects_from_stmt_with_env(
             );
             collect_external_api_effects_from_block_with_env(
                 body,
+                source_types,
+                external_superclasses,
                 expected_return_type,
                 facts,
                 seen,
@@ -1435,6 +1508,8 @@ fn collect_external_api_effects_from_stmt_with_env(
             for stmt in init {
                 collect_external_api_effects_from_stmt_with_env(
                     stmt,
+                    source_types,
+                    external_superclasses,
                     expected_return_type,
                     facts,
                     seen,
@@ -1451,6 +1526,8 @@ fn collect_external_api_effects_from_stmt_with_env(
             if let Some(condition) = condition {
                 collect_external_api_effects_from_expr_with_env(
                     condition,
+                    source_types,
+                    external_superclasses,
                     facts,
                     seen,
                     budget,
@@ -1465,6 +1542,8 @@ fn collect_external_api_effects_from_stmt_with_env(
             for expr in update {
                 collect_external_api_effects_from_expr_with_env(
                     expr,
+                    source_types,
+                    external_superclasses,
                     facts,
                     seen,
                     budget,
@@ -1478,6 +1557,8 @@ fn collect_external_api_effects_from_stmt_with_env(
             }
             collect_external_api_effects_from_block_with_env(
                 body,
+                source_types,
+                external_superclasses,
                 expected_return_type,
                 facts,
                 seen,
@@ -1499,6 +1580,8 @@ fn collect_external_api_effects_from_stmt_with_env(
         } => {
             collect_external_api_effects_from_expr_with_env(
                 iterable,
+                source_types,
+                external_superclasses,
                 facts,
                 seen,
                 budget,
@@ -1513,6 +1596,8 @@ fn collect_external_api_effects_from_stmt_with_env(
             body_env.insert_local(var_name.clone(), var_type.clone());
             collect_external_api_effects_from_block_with_env(
                 body,
+                source_types,
+                external_superclasses,
                 expected_return_type,
                 facts,
                 seen,
@@ -1528,6 +1613,8 @@ fn collect_external_api_effects_from_stmt_with_env(
         Stmt::Switch { selector, cases } => {
             collect_external_api_effects_from_expr_with_env(
                 selector,
+                source_types,
+                external_superclasses,
                 facts,
                 seen,
                 budget,
@@ -1543,6 +1630,8 @@ fn collect_external_api_effects_from_stmt_with_env(
                 for stmt in &case.statements {
                     collect_external_api_effects_from_stmt_with_env(
                         stmt,
+                        source_types,
+                        external_superclasses,
                         expected_return_type,
                         facts,
                         seen,
@@ -1568,6 +1657,8 @@ fn collect_external_api_effects_from_stmt_with_env(
             for resource in resources {
                 collect_external_api_effects_from_stmt_with_env(
                     resource,
+                    source_types,
+                    external_superclasses,
                     expected_return_type,
                     facts,
                     seen,
@@ -1583,6 +1674,8 @@ fn collect_external_api_effects_from_stmt_with_env(
             }
             collect_external_api_effects_from_block_with_env(
                 body,
+                source_types,
+                external_superclasses,
                 expected_return_type,
                 facts,
                 seen,
@@ -1601,6 +1694,8 @@ fn collect_external_api_effects_from_stmt_with_env(
                 }
                 collect_external_api_effects_from_block_with_env(
                     &catch.body,
+                    source_types,
+                    external_superclasses,
                     expected_return_type,
                     facts,
                     seen,
@@ -1616,6 +1711,8 @@ fn collect_external_api_effects_from_stmt_with_env(
             if let Some(finally_block) = finally_block {
                 collect_external_api_effects_from_block_with_env(
                     finally_block,
+                    source_types,
+                    external_superclasses,
                     expected_return_type,
                     facts,
                     seen,
@@ -1633,6 +1730,8 @@ fn collect_external_api_effects_from_stmt_with_env(
             for arg in args {
                 collect_external_api_effects_from_expr_with_env(
                     arg,
+                    source_types,
+                    external_superclasses,
                     facts,
                     seen,
                     budget,
@@ -1648,6 +1747,8 @@ fn collect_external_api_effects_from_stmt_with_env(
         Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
             collect_external_api_effects_from_block_with_env(
                 block,
+                source_types,
+                external_superclasses,
                 expected_return_type,
                 facts,
                 seen,
@@ -1665,6 +1766,8 @@ fn collect_external_api_effects_from_stmt_with_env(
 
 fn collect_external_api_effects_from_expr_with_env(
     expr: &Expr,
+    source_types: &HashSet<String>,
+    external_superclasses: &HashMap<String, String>,
     facts: &mut FactSet,
     seen: &mut HashSet<String>,
     budget: Option<usize>,
@@ -1765,6 +1868,14 @@ fn collect_external_api_effects_from_expr_with_env(
             if receiver_type_key.is_none()
                 && !crate::stdlib::is_known_receiverless_static_utility_method(name, args.len())
                 && !crate::stdlib::has_receiver_agnostic_external_return_type(name, args.len())
+            {
+                return;
+            }
+            if receiver.is_some()
+                && !is_modeled_external_api
+                && let Some(receiver_type) = receiver_type_key.as_deref()
+                && program_contains_type_named(source_types, receiver_type)
+                && !external_superclasses.contains_key(receiver_type)
             {
                 return;
             }
@@ -3011,17 +3122,29 @@ fn collect_type_source_equals_override_facts(ty: &TypeDecl, facts: &mut FactSet)
     for member in &ty.members {
         match member {
             Member::Method(method) if method_overrides_object_equals(method) => {
-                facts
-                    .source_equals_override_facts
-                    .push(crate::facts::SourceEqualsOverrideFact {
-                        type_name: simple_type_name(&ty.name).to_string(),
-                        provenance: FactProvenance::ParsedSource,
-                    });
+                for type_name in source_equals_override_type_aliases(&ty.name) {
+                    facts.source_equals_override_facts.push(
+                        crate::facts::SourceEqualsOverrideFact {
+                            type_name,
+                            provenance: FactProvenance::ParsedSource,
+                        },
+                    );
+                }
             }
             Member::Type(nested) => collect_type_source_equals_override_facts(nested, facts),
             _ => {}
         }
     }
+}
+
+fn source_equals_override_type_aliases(type_name: &str) -> Vec<String> {
+    let mut aliases = vec![
+        simple_type_name(type_name).to_string(),
+        type_name.to_string(),
+        crate::slot_render::rust_name_for_java_named_type(type_name),
+    ];
+    aliases.dedup();
+    aliases
 }
 
 fn method_overrides_object_equals(method: &MethodDecl) -> bool {
@@ -4762,7 +4885,7 @@ fn expr_has_receiver_recursive_call(
     else {
         return false;
     };
-    if name != method_name || matches!(receiver.as_ref(), Expr::This) {
+    if name != method_name || matches!(receiver.as_ref(), Expr::This | Expr::Super) {
         return false;
     }
     !receiver_call_is_external_pack_boundary(receiver, name, args.len(), facts, env, current_type)
@@ -5518,7 +5641,7 @@ fn collect_field_assignments_from_stmts(
                 local_shadows.insert(name.clone());
             }
             Stmt::Assign { target, value } if assignment_targets_field(target, field_name) => {
-                assignments.push(expr_assignment_nullability(value));
+                assignments.push(bare_field_assignment_nullability(value, local_shadows));
             }
             Stmt::Assign { target, value }
                 if bare_assignment_targets_unshadowed_field(target, field_name, local_shadows) =>
@@ -5737,7 +5860,7 @@ fn collect_field_assignments_from_expr(
                 && field.field_name == field_name
                 && let Some(arg) = args.first()
             {
-                assignments.push(expr_assignment_nullability(arg));
+                assignments.push(bare_field_assignment_nullability(arg, local_shadows));
             }
             if let Some(helper) = helper_assignments.get(name)
                 && let Some(assignment) = helper.get(field_name)

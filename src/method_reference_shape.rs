@@ -4,20 +4,6 @@ use crate::method_reference_plan::{MethodReferencePlan, plan_method_reference};
 use crate::slot_shape::RustSlotShape;
 use crate::types::TypeEnv;
 
-pub fn infer_single_input_method_reference_output_shape(
-    target: &str,
-    method: &str,
-    input_shape: &RustSlotShape,
-) -> Option<RustSlotShape> {
-    infer_single_input_method_reference_output_shape_with_context(
-        target,
-        method,
-        input_shape,
-        &TypeEnv::new(),
-        &FactSet::default(),
-    )
-}
-
 pub fn infer_single_input_method_reference_output_shape_with_context(
     target: &str,
     method: &str,

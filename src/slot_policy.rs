@@ -26,7 +26,6 @@ pub enum BorrowedContentPolicy {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BorrowedContentCapabilityPolicy {
-    pub java_ty: JavaType,
     pub string_content: bool,
     pub sequence_element: Option<JavaType>,
 }
@@ -51,32 +50,14 @@ impl BorrowedContentPolicy {
     }
 }
 
-pub fn borrowed_content_capability_policy(
-    java_ty: &JavaType,
-    facts: &FactSet,
-) -> BorrowedContentCapabilityPolicy {
-    let effective_facts = EffectiveFacts::new(facts);
-    borrowed_content_capability_policy_with_effective_facts(java_ty, &effective_facts)
-}
-
 pub fn borrowed_content_capability_policy_with_effective_facts(
     java_ty: &JavaType,
     facts: &EffectiveFacts<'_>,
 ) -> BorrowedContentCapabilityPolicy {
     BorrowedContentCapabilityPolicy {
-        java_ty: java_ty.clone(),
         string_content: facts.is_string_like_type(java_ty),
         sequence_element: facts.sequence_element_type_for(java_ty),
     }
-}
-
-pub fn method_param_borrowed_content_policy(
-    ty: &TypeDecl,
-    method: &MethodDecl,
-    param: &Param,
-    usage: &UsageFacts,
-) -> Option<BorrowedContentPolicy> {
-    method_param_borrowed_content_policy_with_facts(ty, method, param, usage, &FactSet::default())
 }
 
 pub fn method_param_borrowed_content_policy_with_facts(
@@ -111,21 +92,6 @@ pub fn method_param_borrowed_content_policy_with_effective_facts(
     } else {
         None
     }
-}
-
-pub fn constructor_param_borrowed_content_policy(
-    ty: &TypeDecl,
-    ctor: &ConstructorDecl,
-    param: &Param,
-    usage: &UsageFacts,
-) -> Option<BorrowedContentPolicy> {
-    constructor_param_borrowed_content_policy_with_facts(
-        ty,
-        ctor,
-        param,
-        usage,
-        &FactSet::default(),
-    )
 }
 
 pub fn constructor_param_borrowed_content_policy_with_facts(
@@ -164,7 +130,7 @@ pub fn constructor_param_borrowed_content_policy_with_effective_facts(
         type_name: ty.name.clone(),
         rust_name,
     })?;
-    if usage_allows_borrowed_content(ctor_usage, &param.name) {
+    if usage_allows_borrowed_content(ctor_usage, param) {
         borrowed_content_type_policy_with_effective_facts(&param.ty, facts).policy
     } else {
         None
@@ -184,29 +150,6 @@ pub fn apply_borrowed_content_policy(shape: &mut RustSlotShape, policy: Borrowed
             apply_borrowed_sequence_content_projection(shape);
         }
     }
-}
-
-pub fn borrowed_return_shape_from_param(
-    ty: &TypeDecl,
-    method: &MethodDecl,
-    representations: &RepresentationPlan,
-    usage: &UsageFacts,
-) -> Option<RustSlotShape> {
-    borrowed_return_shape_from_param_with_facts(
-        ty,
-        method,
-        representations,
-        usage,
-        &FactSet::default(),
-    )
-}
-
-pub fn borrowed_return_content_policy_from_param(
-    ty: &TypeDecl,
-    method: &MethodDecl,
-    usage: &UsageFacts,
-) -> Option<BorrowedContentPolicy> {
-    borrowed_return_content_policy_from_param_with_facts(ty, method, usage, &FactSet::default())
 }
 
 pub fn borrowed_return_content_policy_from_param_with_facts(
@@ -295,7 +238,7 @@ pub fn borrowed_content_type_policy_with_effective_facts(
         None
     };
     BorrowedContentTypePolicy {
-        java_ty: capability.java_ty,
+        java_ty: java_ty.clone(),
         policy,
     }
 }
@@ -319,7 +262,7 @@ fn method_param_allows_borrowed_content(
     }) else {
         return false;
     };
-    usage_allows_borrowed_content(method_usage, &param.name)
+    usage_allows_borrowed_content(method_usage, param)
 }
 
 fn method_return_allows_borrowed_param_content(
@@ -346,13 +289,14 @@ fn method_return_allows_borrowed_param_content(
     }) else {
         return false;
     };
-    let Some(binding) = method_usage.bindings.get(&param.name) else {
+    let Some(binding) = method_usage.binding_for_declaration(param.binding.as_ref(), &param.name)
+    else {
         return false;
     };
     if !method_exactly_returns_param(method, &param.name) {
         return false;
     }
-    if method_assigns_to_binding(method, &param.name) {
+    if param.binding.is_none() && method_assigns_to_binding(method, &param.name) {
         return false;
     }
     !binding.uses.is_empty()
@@ -502,8 +446,8 @@ fn collect_exact_returned_var_names_from_stmts<'a>(
     }
 }
 
-fn usage_allows_borrowed_content(usage: &MethodUsageFacts, param_name: &str) -> bool {
-    let Some(binding) = usage.bindings.get(param_name) else {
+fn usage_allows_borrowed_content(usage: &MethodUsageFacts, param: &Param) -> bool {
+    let Some(binding) = usage.binding_for_declaration(param.binding.as_ref(), &param.name) else {
         return false;
     };
     !binding.uses.is_empty()
@@ -517,4 +461,130 @@ fn usage_allows_borrowed_content(usage: &MethodUsageFacts, param_name: &str) -> 
                     }
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::binding_id::{BindingId, BindingKind};
+    use crate::diagnostics::Span;
+    use crate::java_ir::{Block, Expr, Literal, TypeKind};
+    use crate::usage::{BindingUseFacts, UsageMethodKey};
+
+    fn owner_type() -> TypeDecl {
+        TypeDecl {
+            kind: TypeKind::Class,
+            name: "Owner".to_string(),
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            modifiers: Vec::new(),
+            extends: None,
+            implements: Vec::new(),
+            permits: Vec::new(),
+            members: Vec::new(),
+            static_init_blocks: Vec::new(),
+            span: Span::default(),
+        }
+    }
+
+    fn string_param(binding: BindingId) -> Param {
+        Param {
+            name: "value".to_string(),
+            source_name: "value".to_string(),
+            ty: JavaType::String,
+            is_varargs: false,
+            binding: Some(binding),
+        }
+    }
+
+    fn private_static_returning_param_method(param: Param) -> MethodDecl {
+        MethodDecl {
+            name: "borrow".to_string(),
+            rust_name: None,
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            return_type: JavaType::String,
+            throws: Vec::new(),
+            params: vec![param],
+            modifiers: vec![Modifier::Static],
+            body: Some(Block {
+                statements: vec![
+                    Stmt::Block(Block {
+                        statements: vec![
+                            Stmt::VarDecl {
+                                ty: JavaType::String,
+                                name: "value".to_string(),
+                                source_name: "value".to_string(),
+                                initializer: None,
+                                binding: Some(BindingId::new(BindingKind::Local, "value", 0)),
+                            },
+                            Stmt::Assign {
+                                target: Expr::Var("value".to_string()),
+                                value: Expr::Literal(Literal::String("shadow".to_string())),
+                            },
+                        ],
+                    }),
+                    Stmt::Return(Some(Expr::Var("value".to_string()))),
+                ],
+            }),
+            span: Span::default(),
+        }
+    }
+
+    fn usage_with_param_facts(binding: BindingId, uses: Vec<BindingUse>) -> UsageFacts {
+        let mut usage = UsageFacts::default();
+        let mut method_usage = MethodUsageFacts::default();
+        method_usage.bindings_by_id.insert(
+            binding.clone(),
+            BindingUseFacts {
+                name: "value".to_string(),
+                binding: Some(binding),
+                java_ty: JavaType::String,
+                uses,
+            },
+        );
+        usage.methods.insert(
+            UsageMethodKey {
+                type_name: "Owner".to_string(),
+                method_name: "borrow".to_string(),
+            },
+            method_usage,
+        );
+        usage
+    }
+
+    #[test]
+    fn borrowed_return_param_policy_uses_binding_facts_not_name_assignment_scan() {
+        let binding = BindingId::new(BindingKind::Param, "value", 0);
+        let param = string_param(binding.clone());
+        let method = private_static_returning_param_method(param.clone());
+        let ty = owner_type();
+        let facts = FactSet::default();
+        let effective_facts = EffectiveFacts::new(&facts);
+
+        let returned_only = usage_with_param_facts(binding.clone(), vec![BindingUse::Returned]);
+        assert!(
+            method_return_allows_borrowed_param_content(
+                &ty,
+                &method,
+                &param,
+                &returned_only,
+                &effective_facts
+            ),
+            "a stale same-name assignment scan must not override the resolver-bound parameter facts"
+        );
+
+        let mutated_exact =
+            usage_with_param_facts(binding, vec![BindingUse::Returned, BindingUse::Mutated]);
+        assert!(
+            !method_return_allows_borrowed_param_content(
+                &ty,
+                &method,
+                &param,
+                &mutated_exact,
+                &effective_facts
+            ),
+            "mutation of the exact parameter binding still rejects borrowed return policy"
+        );
+    }
 }

@@ -9,8 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use common::run_with_watchdog;
-use new_java2rust::fixtures::load_java_fixtures;
+use common::{load_java_fixtures, run_with_watchdog};
 use new_java2rust::translate_source;
 
 const EXPECTED_FAILURES: &str = include_str!("baselines/corpus-compile-failures.txt");
@@ -101,7 +100,7 @@ fn compile_corpus_fixture(fixture: &CorpusFixture, temp_dir: &Path) -> (String, 
     let translation = translate_source(&fixture.source);
     let rust_path = temp_dir.join(format!("{}.rs", sanitize_path(&fixture.display_path)));
     let meta_path = rust_path.with_extension("rmeta");
-    fs::write(&rust_path, translation.rust).unwrap();
+    fs::write(&rust_path, corpus_rust_source(&translation.rust)).unwrap();
 
     let mut command = Command::new("rustc");
     command
@@ -131,6 +130,171 @@ fn compile_corpus_fixture(fixture: &CorpusFixture, temp_dir: &Path) -> (String, 
             )
         });
     (fixture.display_path.clone(), error)
+}
+
+fn corpus_rust_source(rust: &str) -> String {
+    if rust.contains("ndarray::") {
+        format!("{}\n{rust}", corpus_ndarray_shim())
+    } else {
+        rust.to_string()
+    }
+}
+
+fn corpus_ndarray_shim() -> &'static str {
+    r#"
+mod ndarray {
+    use std::ops::{Index, IndexMut};
+
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct Array2<T> {
+        rows: usize,
+        cols: usize,
+        data: Vec<T>,
+    }
+
+    impl<T: Clone> Array2<T> {
+        pub fn from_elem(shape: (usize, usize), value: T) -> Self {
+            let (rows, cols) = shape;
+            Self {
+                rows,
+                cols,
+                data: vec![value; rows * cols],
+            }
+        }
+
+        pub fn from_rows(rows: &[&[T]]) -> Self {
+            let row_count = rows.len();
+            let cols = rows.first().map_or(0, |row| row.len());
+            let mut data = Vec::with_capacity(row_count * cols);
+            for row in rows {
+                data.extend_from_slice(row);
+            }
+            Self {
+                rows: row_count,
+                cols,
+                data,
+            }
+        }
+    }
+
+    impl<T> Array2<T> {
+        pub fn nrows(&self) -> usize {
+            self.rows
+        }
+
+        pub fn ncols(&self) -> usize {
+            self.cols
+        }
+
+        pub fn row(&self, row: usize) -> ArrayView1<'_, T> {
+            let start = row * self.cols;
+            ArrayView1 {
+                data: &self.data[start..start + self.cols],
+            }
+        }
+
+        pub fn row_mut(&mut self, row: usize) -> RowMut<'_, T> {
+            let start = row * self.cols;
+            RowMut {
+                data: &mut self.data[start..start + self.cols],
+            }
+        }
+
+        pub fn iter(&self) -> Rows<'_, T> {
+            Rows {
+                matrix: self,
+                row: 0,
+            }
+        }
+    }
+
+    impl<T> Index<[usize; 2]> for Array2<T> {
+        type Output = T;
+
+        fn index(&self, index: [usize; 2]) -> &Self::Output {
+            &self.data[index[0] * self.cols + index[1]]
+        }
+    }
+
+    impl<T> IndexMut<[usize; 2]> for Array2<T> {
+        fn index_mut(&mut self, index: [usize; 2]) -> &mut Self::Output {
+            &mut self.data[index[0] * self.cols + index[1]]
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    pub struct ArrayView1<'a, T> {
+        data: &'a [T],
+    }
+
+    impl<'a, T> ArrayView1<'a, T> {
+        pub fn from(data: &'a [T]) -> Self {
+            Self { data }
+        }
+
+        pub fn to_vec(&self) -> Vec<T>
+        where
+            T: Clone,
+        {
+            self.data.to_vec()
+        }
+    }
+
+    impl<'a, T> From<&'a Vec<T>> for ArrayView1<'a, T> {
+        fn from(data: &'a Vec<T>) -> Self {
+            Self {
+                data: data.as_slice(),
+            }
+        }
+    }
+
+    impl<'a, T> From<&'a [T]> for ArrayView1<'a, T> {
+        fn from(data: &'a [T]) -> Self {
+            Self { data }
+        }
+    }
+
+    pub struct RowMut<'a, T> {
+        data: &'a mut [T],
+    }
+
+    impl<'a, T: Clone> RowMut<'a, T> {
+        pub fn assign(&mut self, source: &ArrayView1<'_, T>) {
+            self.data.clone_from_slice(source.data);
+        }
+    }
+
+    pub struct Rows<'a, T> {
+        matrix: &'a Array2<T>,
+        row: usize,
+    }
+
+    impl<'a, T> Iterator for Rows<'a, T> {
+        type Item = &'a [T];
+
+        fn next(&mut self) -> Option<Self::Item> {
+            if self.row >= self.matrix.rows {
+                return None;
+            }
+            let start = self.row * self.matrix.cols;
+            self.row += 1;
+            Some(&self.matrix.data[start..start + self.matrix.cols])
+        }
+    }
+
+    pub fn arr2<T: Clone, const R: usize, const C: usize>(rows: &[[T; C]; R]) -> Array2<T> {
+        let mut data = Vec::with_capacity(R * C);
+        for row in rows {
+            data.extend_from_slice(row);
+        }
+        Array2 {
+            rows: R,
+            cols: C,
+            data,
+        }
+    }
+}
+"#
 }
 
 fn corpus_compile_jobs() -> usize {

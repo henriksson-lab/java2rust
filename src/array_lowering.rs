@@ -5,7 +5,7 @@ use crate::coercion::{
     recover_parseable_raw_operand_projection,
 };
 use crate::java_ir::{JavaType, PrimitiveType};
-use crate::rust_ir::{RustExpr, RustStmt};
+use crate::rust_ir::{RustClosureBody, RustExpr, RustStmt};
 use crate::slot_shape::{OwnershipShape, RustSlotShape};
 
 pub fn array_expr(plan: &ArrayExprPlan<'_>, children: Vec<RustExpr>) -> RustExpr {
@@ -18,9 +18,8 @@ pub fn array_expr(plan: &ArrayExprPlan<'_>, children: Vec<RustExpr>) -> RustExpr
 /// the translation used to emit `Vec::new()` — the right *type* and the wrong
 /// *length*, so every index panicked
 /// ([0034](../claude_audits/0034-object-array-allocation-produces-an-empty-vec.md)).
-/// `element_has_default` says whether `T` derives `Default`, which lowering
-/// decides from the same capability check that adds the derive, so the two
-/// cannot disagree.
+/// Reference-typed arrays use `Option<T>` elements, so their Java default
+/// element is `None`, not `T::default()`.
 pub fn array_expr_with_object_default(
     plan: &ArrayExprPlan<'_>,
     children: Vec<RustExpr>,
@@ -52,12 +51,17 @@ pub fn array_expr_with_object_default(
                     children[0].clone(),
                     children[1].clone(),
                     default,
+                    nullable_array_default_needs_repeat_with(element_type),
                 );
             }
             if children.len() == 1
                 && let Some(default) = default
             {
-                return array_from_elem_projection(children[0].clone(), default);
+                return array_from_elem_projection_for_element_type(
+                    children[0].clone(),
+                    default,
+                    nullable_array_default_needs_repeat_with(element_type),
+                );
             }
             java_array_creation_fallback_projection(element_type, &children)
         }
@@ -97,21 +101,59 @@ pub fn nested_array2_from_elem_projection(
     rows: RustExpr,
     cols: RustExpr,
     default: RustExpr,
+    repeat_with_default: bool,
 ) -> RustExpr {
-    RustExpr::VecRepeat {
-        value: Box::new(RustExpr::VecRepeat {
-            value: Box::new(default),
-            len: Box::new(array_dimension_len_projection(cols)),
-        }),
-        len: Box::new(array_dimension_len_projection(rows)),
+    let row = array_from_elem_projection_for_element_type(cols, default, repeat_with_default);
+    if repeat_with_default {
+        repeat_with_projection(row, rows)
+    } else {
+        RustExpr::VecRepeat {
+            value: Box::new(row),
+            len: Box::new(array_dimension_len_projection(rows)),
+        }
     }
 }
 
 pub fn array_from_elem_projection(len: RustExpr, default: RustExpr) -> RustExpr {
+    array_from_elem_projection_for_element_type(len, default, false)
+}
+
+fn array_from_elem_projection_for_element_type(
+    len: RustExpr,
+    default: RustExpr,
+    repeat_with_default: bool,
+) -> RustExpr {
+    if repeat_with_default {
+        return repeat_with_projection(default, len);
+    }
     RustExpr::VecRepeat {
         value: Box::new(default),
         len: Box::new(array_dimension_len_projection(len)),
     }
+}
+
+fn repeat_with_projection(default: RustExpr, len: RustExpr) -> RustExpr {
+    let repeated = function_call_projection(
+        RustExpr::path(["std", "iter", "repeat_with"]),
+        vec![RustExpr::Closure {
+            is_move: false,
+            params: Vec::new(),
+            return_type: None,
+            body: RustClosureBody::Expr(Box::new(default)),
+        }],
+    );
+    let taken = receiver_method_call_projection_exact(
+        repeated,
+        "take",
+        vec![array_dimension_len_projection(len)],
+    );
+    receiver_method_call_projection_exact(taken, "collect::<Vec<_>>", Vec::new())
+}
+
+fn nullable_array_default_needs_repeat_with(element_type: &JavaType) -> bool {
+    default_array_element_expr(element_type)
+        .as_ref()
+        .is_some_and(|default| matches!(default, RustExpr::Var(name) if name == "None"))
 }
 
 pub fn java_array_creation_fallback_projection(
@@ -326,10 +368,7 @@ pub fn default_array_element_expr(element_type: &JavaType) -> Option<RustExpr> {
             Some(RustExpr::Literal("0.0".to_string()))
         }
         JavaType::Primitive(PrimitiveType::Char) => Some(RustExpr::Literal("'\\0'".to_string())),
-        JavaType::String => Some(function_call_projection(
-            RustExpr::path(["String", "new"]),
-            Vec::new(),
-        )),
+        ty if reference_array_element_is_nullable(ty) => Some(RustExpr::Var("None".to_string())),
         _ => None,
     }
 }
@@ -348,6 +387,13 @@ pub fn default_array_element_expr(element_type: &JavaType) -> Option<RustExpr> {
 /// allocation of the wrong length.
 fn object_element_default_expr() -> RustExpr {
     function_call_projection(RustExpr::path(["Default", "default"]), Vec::new())
+}
+
+fn reference_array_element_is_nullable(element_type: &JavaType) -> bool {
+    !matches!(
+        element_type,
+        JavaType::Primitive(_) | JavaType::Void | JavaType::Array(_)
+    ) && crate::types::optional_element_type(element_type).is_none()
 }
 
 #[cfg(test)]
@@ -445,6 +491,7 @@ mod tests {
                 function: Box::new(RustExpr::path(["String", "new"])),
                 args: Vec::new(),
             },
+            false,
         );
         assert_eq!(
             emit_expr(&structured_nested_repeat),
@@ -458,8 +505,17 @@ mod tests {
                     function: Box::new(RustExpr::path(["String", "new"])),
                     args: Vec::new(),
                 },
+                false,
             )),
             "vec![vec![String::new(); (cols + extra) as usize]; (rows + extra) as usize]"
+        );
+        assert_eq!(
+            emit_expr(&array_from_elem_projection_for_element_type(
+                RustExpr::Var("len".to_string()),
+                RustExpr::Var("None".to_string()),
+                true,
+            )),
+            "std::iter::repeat_with(|| None).take(len as usize).collect::<Vec<_>>()"
         );
         let RustExpr::VecRepeat { value, .. } = structured_nested_repeat else {
             panic!("nested array default should be an outer VecRepeat");

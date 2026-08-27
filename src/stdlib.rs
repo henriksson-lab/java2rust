@@ -9,7 +9,7 @@ use crate::facts::{
     ReceiverMutabilityFact, ResultAbi, Staticness, TypeCapabilityOverride, TypeKey, TypePattern,
 };
 use crate::java_ir::{
-    BinaryOp, Block, Expr, FieldDecl, JavaType, Literal, Member, MethodDecl, Modifier,
+    BinaryOp, Block, Expr, FieldDecl, JavaType, LambdaBody, Literal, Member, MethodDecl, Modifier,
     PrimitiveType, Program, Stmt, SwitchLabel, TypeDecl, TypeKind, WildcardBound,
 };
 use crate::java_naming::rust_keyword_is_rawable_identifier;
@@ -28,10 +28,6 @@ use crate::types::{
     TypeEnv, raw_generic_type_head, raw_rust_option_inner, raw_rust_result_args,
     raw_rust_type_is_option, raw_rust_type_is_result,
 };
-
-pub fn is_known_jdk_shadow_sensitive_owner(name: &str) -> bool {
-    matches!(name, "Objects" | "Collections" | "Integer" | "Paths")
-}
 
 pub fn is_content_read_method(name: &str) -> bool {
     matches!(
@@ -623,13 +619,55 @@ fn is_known_map_type(name: &str) -> bool {
 pub enum JavaCollectionKind {
     List,
     Set,
+    SortedSet,
+    InsertionOrderedSet,
     Map,
+    SortedMap,
+    InsertionOrderedMap,
+}
+
+impl JavaCollectionKind {
+    pub fn is_set_like(self) -> bool {
+        matches!(
+            self,
+            JavaCollectionKind::Set
+                | JavaCollectionKind::SortedSet
+                | JavaCollectionKind::InsertionOrderedSet
+        )
+    }
+
+    pub fn is_map_like(self) -> bool {
+        matches!(
+            self,
+            JavaCollectionKind::Map
+                | JavaCollectionKind::SortedMap
+                | JavaCollectionKind::InsertionOrderedMap
+        )
+    }
+
+    pub fn supports_capacity_constructor(self) -> bool {
+        matches!(
+            self,
+            JavaCollectionKind::List | JavaCollectionKind::Set | JavaCollectionKind::Map
+        )
+    }
 }
 
 pub fn java_collection_kind_for_name(name: &str) -> Option<JavaCollectionKind> {
     let name = canonical_external_receiver_type_key(name);
     let name = name.rsplit('.').next().unwrap_or(&name);
-    if is_known_map_type(name) {
+    if matches!(
+        name,
+        "TreeMap" | "SortedMap" | "NavigableMap" | "ImmutableSortedMap"
+    ) {
+        Some(JavaCollectionKind::SortedMap)
+    } else if matches!(name, "LinkedHashMap") {
+        Some(JavaCollectionKind::InsertionOrderedMap)
+    } else if matches!(name, "TreeSet" | "SortedSet" | "NavigableSet") {
+        Some(JavaCollectionKind::SortedSet)
+    } else if matches!(name, "LinkedHashSet") {
+        Some(JavaCollectionKind::InsertionOrderedSet)
+    } else if is_known_map_type(name) {
         Some(JavaCollectionKind::Map)
     } else if is_known_set_type(name) {
         Some(JavaCollectionKind::Set)
@@ -873,11 +911,67 @@ pub fn rust_stdlib_signature_facts() -> FactSet {
             FacadeSlot::Owned,
         ),
         rust_stdlib_static_abi(
+            "Byte",
+            "parseByte",
+            1,
+            "str::parse::<i8>",
+            vec![FacadeSlot::Borrowed],
+            FacadeSlot::Owned,
+        ),
+        rust_stdlib_static_abi(
+            "Byte",
+            "parseByte",
+            2,
+            "i8::from_str_radix",
+            vec![FacadeSlot::Borrowed, FacadeSlot::Owned],
+            FacadeSlot::Owned,
+        ),
+        rust_stdlib_static_abi(
+            "Short",
+            "parseShort",
+            1,
+            "str::parse::<i16>",
+            vec![FacadeSlot::Borrowed],
+            FacadeSlot::Owned,
+        ),
+        rust_stdlib_static_abi(
+            "Short",
+            "parseShort",
+            2,
+            "i16::from_str_radix",
+            vec![FacadeSlot::Borrowed, FacadeSlot::Owned],
+            FacadeSlot::Owned,
+        ),
+        rust_stdlib_static_abi(
             "Integer",
             "parseInt",
             1,
             "str::parse::<i32>",
             vec![FacadeSlot::Borrowed],
+            FacadeSlot::Owned,
+        ),
+        rust_stdlib_static_abi(
+            "Integer",
+            "parseInt",
+            2,
+            "i32::from_str_radix",
+            vec![FacadeSlot::Borrowed, FacadeSlot::Owned],
+            FacadeSlot::Owned,
+        ),
+        rust_stdlib_static_abi(
+            "Long",
+            "parseLong",
+            1,
+            "str::parse::<i64>",
+            vec![FacadeSlot::Borrowed],
+            FacadeSlot::Owned,
+        ),
+        rust_stdlib_static_abi(
+            "Long",
+            "parseLong",
+            2,
+            "i64::from_str_radix",
+            vec![FacadeSlot::Borrowed, FacadeSlot::Owned],
             FacadeSlot::Owned,
         ),
         rust_stdlib_static_abi(
@@ -960,7 +1054,7 @@ pub fn rust_stdlib_signature_facts() -> FactSet {
                 vec![FacadeSlot::Owned],
                 FacadeSlot::Owned,
             ),
-            rust_stdlib_static_abi(
+            jdk_result_static_abi(
                 owner,
                 "toIntExact",
                 1,
@@ -1053,6 +1147,23 @@ fn jdk_boxed_primitive_type_capability_facts() -> Vec<TypeCapabilityOverride> {
 
 fn add_jdk_iterator_abi_facts(facts: &mut FactSet) {
     for owner in ["Iterator", "java.util.Iterator", "JavaIterator"] {
+        for method in ["next", "next_element"] {
+            let mut effect = jdk_instance_api_fact(
+                owner,
+                method,
+                0,
+                JavaType::Named {
+                    name: "T".to_string(),
+                    args: Vec::new(),
+                },
+            );
+            effect.receiver_mutability = ReceiverMutabilityFact::MutatesReceiver;
+            effect.thrown = vec![JavaType::Named {
+                name: "NoSuchElementException".to_string(),
+                args: Vec::new(),
+            }];
+            facts.external_api_effect_facts.push(effect);
+        }
         facts.facade_abi_facts.push(rust_stdlib_method_abi(
             owner,
             "hasNext",
@@ -1070,11 +1181,11 @@ fn add_jdk_iterator_abi_facts(facts: &mut FactSet) {
             FacadeSlot::Owned,
         ));
         for method in ["next", "next_element"] {
-            let mut abi = rust_stdlib_method_abi(
+            let mut abi = jdk_result_method_abi(
                 owner,
                 method,
                 0,
-                "JavaIterator::next",
+                "JavaIterator::next_result",
                 Vec::new(),
                 FacadeSlot::Owned,
             );
@@ -1123,19 +1234,28 @@ fn add_jdk_string_tokenizer_abi_facts(facts: &mut FactSet) {
                 0,
                 JavaType::Primitive(PrimitiveType::Boolean),
             ),
+            jdk_instance_api_fact(
+                owner,
+                "hasMoreElements",
+                0,
+                JavaType::Primitive(PrimitiveType::Boolean),
+            ),
+            jdk_instance_api_fact(
+                owner,
+                "has_more_elements",
+                0,
+                JavaType::Primitive(PrimitiveType::Boolean),
+            ),
         ]);
-        facts.external_api_effect_facts.push(jdk_instance_api_fact(
-            owner,
-            "nextToken",
-            0,
-            JavaType::String,
-        ));
-        facts.external_api_effect_facts.push(jdk_instance_api_fact(
-            owner,
-            "next_token",
-            0,
-            JavaType::String,
-        ));
+        for method in ["nextToken", "next_token", "nextElement", "next_element"] {
+            let mut effect = jdk_instance_api_fact(owner, method, 0, JavaType::String);
+            effect.receiver_mutability = ReceiverMutabilityFact::MutatesReceiver;
+            effect.thrown = vec![JavaType::Named {
+                name: "NoSuchElementException".to_string(),
+                args: Vec::new(),
+            }];
+            facts.external_api_effect_facts.push(effect);
+        }
         for method in ["countTokens", "count_tokens"] {
             facts.facade_abi_facts.push(rust_stdlib_method_abi(
                 owner,
@@ -1146,7 +1266,12 @@ fn add_jdk_string_tokenizer_abi_facts(facts: &mut FactSet) {
                 FacadeSlot::Owned,
             ));
         }
-        for method in ["hasMoreTokens", "has_more_tokens"] {
+        for method in [
+            "hasMoreTokens",
+            "has_more_tokens",
+            "hasMoreElements",
+            "has_more_elements",
+        ] {
             facts.facade_abi_facts.push(rust_stdlib_method_abi(
                 owner,
                 method,
@@ -1157,11 +1282,23 @@ fn add_jdk_string_tokenizer_abi_facts(facts: &mut FactSet) {
             ));
         }
         for method in ["nextToken", "next_token"] {
-            let mut abi = rust_stdlib_method_abi(
+            let mut abi = jdk_result_method_abi(
                 owner,
                 method,
                 0,
-                "StringTokenizer::next_token",
+                "StringTokenizer::next_token_result",
+                Vec::new(),
+                FacadeSlot::Owned,
+            );
+            abi.receiver = ReceiverAbi::MutBorrowedSelf;
+            facts.facade_abi_facts.push(abi);
+        }
+        for method in ["nextElement", "next_element"] {
+            let mut abi = jdk_result_method_abi(
+                owner,
+                method,
+                0,
+                "StringTokenizer::next_element_result",
                 Vec::new(),
                 FacadeSlot::Owned,
             );
@@ -1207,36 +1344,77 @@ fn add_jdk_objects_abi_facts(facts: &mut FactSet) {
 
 fn add_jdk_optional_abi_facts(facts: &mut FactSet) {
     for owner in ["Optional", "java.util.Optional"] {
-        facts.facade_abi_facts.extend([
-            rust_stdlib_method_abi(
-                owner,
-                "isPresent",
-                0,
-                "Option::is_some",
-                Vec::new(),
-                FacadeSlot::Owned,
-            ),
-            rust_stdlib_method_abi(
-                owner,
-                "get",
-                0,
-                "Option::as_ref",
-                Vec::new(),
-                FacadeSlot::Borrowed,
-            ),
-            rust_stdlib_method_abi(
-                owner,
-                "orElse",
-                1,
-                "Option::unwrap_or",
-                vec![FacadeSlot::Owned],
-                FacadeSlot::Owned,
-            ),
-        ]);
+        let mut get_effect = jdk_instance_api_fact(
+            owner,
+            "get",
+            0,
+            JavaType::Named {
+                name: "T".to_string(),
+                args: Vec::new(),
+            },
+        );
+        get_effect.thrown = vec![JavaType::Named {
+            name: "NoSuchElementException".to_string(),
+            args: Vec::new(),
+        }];
+        facts.external_api_effect_facts.push(get_effect);
+        facts.facade_abi_facts.push(rust_stdlib_method_abi(
+            owner,
+            "isPresent",
+            0,
+            "Option::is_some",
+            Vec::new(),
+            FacadeSlot::Owned,
+        ));
+        facts.facade_abi_facts.push(jdk_result_method_abi(
+            owner,
+            "get",
+            0,
+            "Option::as_ref",
+            Vec::new(),
+            FacadeSlot::Borrowed,
+        ));
+        facts.facade_abi_facts.push(rust_stdlib_method_abi(
+            owner,
+            "orElse",
+            1,
+            "Option::unwrap_or",
+            vec![FacadeSlot::Owned],
+            FacadeSlot::Owned,
+        ));
     }
 }
 
 fn add_jdk_collection_abi_facts(facts: &mut FactSet) {
+    for owner in ["BitSet", "java.util.BitSet"] {
+        let mut effect =
+            jdk_instance_api_fact(owner, "get", 1, JavaType::Primitive(PrimitiveType::Boolean));
+        effect.thrown = vec![JavaType::Named {
+            name: "IndexOutOfBoundsException".to_string(),
+            args: Vec::new(),
+        }];
+        facts.external_api_effect_facts.push(effect);
+
+        let mut effect = jdk_instance_api_fact(owner, "set", 1, JavaType::Void);
+        effect.receiver_mutability = ReceiverMutabilityFact::MutatesReceiver;
+        effect.thrown = vec![JavaType::Named {
+            name: "IndexOutOfBoundsException".to_string(),
+            args: Vec::new(),
+        }];
+        facts.external_api_effect_facts.push(effect);
+
+        let mut abi = jdk_result_method_abi(
+            owner,
+            "set",
+            1,
+            "BitSet::set_result",
+            vec![FacadeSlot::Owned],
+            FacadeSlot::Owned,
+        );
+        abi.receiver = ReceiverAbi::MutBorrowedSelf;
+        facts.facade_abi_facts.push(abi);
+    }
+
     for owner in [
         "List",
         "java.util.List",
@@ -1701,7 +1879,59 @@ fn add_jdk_platform_io_abi_facts(facts: &mut FactSet) {
         "StringBuilder",
         "java.lang.StringBuffer",
         "java.lang.StringBuilder",
+        "JavaLangStringBuffer",
+        "JavaLangStringBuilder",
     ] {
+        for method in ["charAt", "char_at"] {
+            let mut effect =
+                jdk_instance_api_fact(owner, method, 1, JavaType::Primitive(PrimitiveType::Char));
+            effect.thrown = vec![JavaType::Named {
+                name: "StringIndexOutOfBoundsException".to_string(),
+                args: Vec::new(),
+            }];
+            facts.external_api_effect_facts.push(effect);
+        }
+        for method in ["delete", "insert"] {
+            let mut effect = jdk_instance_api_fact(
+                owner,
+                method,
+                2,
+                JavaType::Named {
+                    name: owner.rsplit('.').next().unwrap_or(owner).to_string(),
+                    args: Vec::new(),
+                },
+            );
+            effect.role = ExternalApiRole::FluentMutator;
+            effect.receiver_mutability = ReceiverMutabilityFact::MutatesReceiver;
+            effect.thrown = vec![JavaType::Named {
+                name: "StringIndexOutOfBoundsException".to_string(),
+                args: Vec::new(),
+            }];
+            facts.external_api_effect_facts.push(effect);
+        }
+        for method in ["setLength", "set_length"] {
+            let mut effect = jdk_instance_api_fact(owner, method, 1, JavaType::Void);
+            effect.role = ExternalApiRole::Mutator;
+            effect.receiver_mutability = ReceiverMutabilityFact::MutatesReceiver;
+            effect.thrown = vec![JavaType::Named {
+                name: "StringIndexOutOfBoundsException".to_string(),
+                args: Vec::new(),
+            }];
+            facts.external_api_effect_facts.push(effect);
+        }
+        for (method, arg_count) in [
+            ("substring", 1),
+            ("substring_1", 1),
+            ("substring", 2),
+            ("substring_2", 2),
+        ] {
+            let mut effect = jdk_instance_api_fact(owner, method, arg_count, JavaType::String);
+            effect.thrown = vec![JavaType::Named {
+                name: "StringIndexOutOfBoundsException".to_string(),
+                args: Vec::new(),
+            }];
+            facts.external_api_effect_facts.push(effect);
+        }
         facts.facade_abi_facts.push(rust_stdlib_method_abi(
             owner,
             "length",
@@ -1710,24 +1940,93 @@ fn add_jdk_platform_io_abi_facts(facts: &mut FactSet) {
             Vec::new(),
             FacadeSlot::Owned,
         ));
+        for method in ["charAt", "char_at"] {
+            facts.facade_abi_facts.push(jdk_result_method_abi(
+                owner,
+                method,
+                1,
+                "StringBuffer::char_at_result",
+                vec![FacadeSlot::Index],
+                FacadeSlot::Owned,
+            ));
+        }
+        facts.facade_abi_facts.push(jdk_result_method_abi(
+            owner,
+            "delete",
+            2,
+            "StringBuffer::delete_result",
+            vec![FacadeSlot::Owned, FacadeSlot::Owned],
+            FacadeSlot::Owned,
+        ));
+        facts.facade_abi_facts.push(jdk_result_method_abi(
+            owner,
+            "insert",
+            2,
+            "StringBuffer::insert_result",
+            vec![FacadeSlot::Owned, FacadeSlot::Owned],
+            FacadeSlot::Owned,
+        ));
+        for method in ["setLength", "set_length"] {
+            facts.facade_abi_facts.push(jdk_result_method_abi(
+                owner,
+                method,
+                1,
+                "StringBuffer::set_length_result",
+                vec![FacadeSlot::Owned],
+                FacadeSlot::Owned,
+            ));
+        }
+        for method in ["substring", "substring_1"] {
+            facts.facade_abi_facts.push(jdk_result_method_abi(
+                owner,
+                method,
+                1,
+                "StringBuffer::substring_1_result",
+                vec![FacadeSlot::Owned],
+                FacadeSlot::Owned,
+            ));
+        }
+        for method in ["substring", "substring_2"] {
+            facts.facade_abi_facts.push(jdk_result_method_abi(
+                owner,
+                method,
+                2,
+                "StringBuffer::substring_2_result",
+                vec![FacadeSlot::Owned, FacadeSlot::Owned],
+                FacadeSlot::Owned,
+            ));
+        }
     }
     for owner in ["Random", "java.util.Random"] {
-        facts.facade_abi_facts.push(rust_stdlib_method_abi(
-            owner,
-            "nextInt",
-            1,
-            "Random::next_int",
-            vec![FacadeSlot::Owned],
-            FacadeSlot::Owned,
-        ));
-        facts.facade_abi_facts.push(rust_stdlib_method_abi(
-            owner,
-            "next_int",
-            1,
-            "Random::next_int",
-            vec![FacadeSlot::Owned],
-            FacadeSlot::Owned,
-        ));
+        for method in ["nextInt", "next_int"] {
+            let mut effect =
+                jdk_instance_api_fact(owner, method, 1, JavaType::Primitive(PrimitiveType::Int));
+            effect.thrown = vec![JavaType::Named {
+                name: "IllegalArgumentException".to_string(),
+                args: Vec::new(),
+            }];
+            facts.external_api_effect_facts.push(effect);
+            facts.facade_abi_facts.push(jdk_result_method_abi(
+                owner,
+                method,
+                1,
+                "Random::next_int_result",
+                vec![FacadeSlot::Owned],
+                FacadeSlot::Owned,
+            ));
+            facts
+                .facade_abi_facts
+                .push(jdk_result_method_abi_with_params(
+                    owner,
+                    method,
+                    "Random::next_int_result",
+                    vec![TypePattern::Exact(TypeKey {
+                        type_name: "int".to_string(),
+                    })],
+                    vec![FacadeSlot::Owned],
+                    FacadeSlot::Owned,
+                ));
+        }
     }
     for (owner, rust_owner) in [
         ("ByteBuffer", "ByteBuffer"),
@@ -2241,17 +2540,28 @@ fn native_collection_receiver_method_role_for_kind(
         return ExternalApiRole::Mutator;
     }
     match kind {
-        JavaCollectionKind::List | JavaCollectionKind::Set => match method_name {
+        JavaCollectionKind::List
+        | JavaCollectionKind::Set
+        | JavaCollectionKind::SortedSet
+        | JavaCollectionKind::InsertionOrderedSet => match method_name {
             "get" => ExternalApiRole::IndexedGetter,
             "size" | "isEmpty" | "is_empty" | "contains" | "containsAll" | "contains_all"
             | "iterator" | "stream" | "filter" | "distinct" | "sorted" | "collect" | "toArray"
             | "to_array" => ExternalApiRole::Getter,
             _ => ExternalApiRole::Unknown,
         },
-        JavaCollectionKind::Map => match method_name {
+        JavaCollectionKind::Map | JavaCollectionKind::InsertionOrderedMap => match method_name {
             "get" | "getOrDefault" | "get_or_default" | "containsKey" | "contains_key"
             | "containsValue" | "contains_value" | "keySet" | "key_set" | "values" | "entrySet"
             | "entry_set" | "size" | "isEmpty" | "is_empty" => ExternalApiRole::Getter,
+            _ => ExternalApiRole::Unknown,
+        },
+        JavaCollectionKind::SortedMap => match method_name {
+            "get" | "getOrDefault" | "get_or_default" | "containsKey" | "contains_key"
+            | "containsValue" | "contains_value" | "keySet" | "key_set" | "values" | "entrySet"
+            | "entry_set" | "size" | "isEmpty" | "is_empty" | "firstKey" | "first_key"
+            | "lastKey" | "last_key" | "lowerKey" | "lower_key" | "floorKey" | "floor_key"
+            | "ceilingKey" | "ceiling_key" | "higherKey" | "higher_key" => ExternalApiRole::Getter,
             _ => ExternalApiRole::Unknown,
         },
     }
@@ -2259,11 +2569,15 @@ fn native_collection_receiver_method_role_for_kind(
 
 fn native_collection_kind_receiver_mutates(kind: JavaCollectionKind, method_name: &str) -> bool {
     match kind {
-        JavaCollectionKind::List | JavaCollectionKind::Set => matches!(
+        JavaCollectionKind::List
+        | JavaCollectionKind::Set
+        | JavaCollectionKind::SortedSet
+        | JavaCollectionKind::InsertionOrderedSet => matches!(
             method_name,
             "add"
                 | "addAll"
                 | "add_all"
+                | "set"
                 | "remove"
                 | "removeAll"
                 | "remove_all"
@@ -2275,9 +2589,13 @@ fn native_collection_kind_receiver_mutates(kind: JavaCollectionKind, method_name
                 | "push"
                 | "retain"
         ),
-        JavaCollectionKind::Map => matches!(
+        JavaCollectionKind::Map
+        | JavaCollectionKind::SortedMap
+        | JavaCollectionKind::InsertionOrderedMap => matches!(
             method_name,
             "put"
+                | "putIfAbsent"
+                | "put_if_absent"
                 | "putAll"
                 | "put_all"
                 | "remove"
@@ -2291,9 +2609,17 @@ fn native_collection_kind_receiver_mutates(kind: JavaCollectionKind, method_name
 }
 
 pub fn native_collection_method_name_mutates_receiver(method_name: &str) -> bool {
+    if matches!(
+        method_name,
+        "next" | "next_element" | "forEachRemaining" | "for_each_remaining"
+    ) {
+        return true;
+    }
     native_collection_kind_receiver_mutates(JavaCollectionKind::List, method_name)
         || native_collection_kind_receiver_mutates(JavaCollectionKind::Set, method_name)
+        || native_collection_kind_receiver_mutates(JavaCollectionKind::SortedSet, method_name)
         || native_collection_kind_receiver_mutates(JavaCollectionKind::Map, method_name)
+        || native_collection_kind_receiver_mutates(JavaCollectionKind::SortedMap, method_name)
 }
 
 pub fn static_collection_argument_mutates(
@@ -3062,7 +3388,10 @@ pub fn known_external_method_return_type(
                 args: Vec::new(),
             })
         }
+        (Some("Byte"), "parseByte", 1 | 2) => Some(JavaType::Primitive(PrimitiveType::Byte)),
+        (Some("Short"), "parseShort", 1 | 2) => Some(JavaType::Primitive(PrimitiveType::Short)),
         (Some("Integer"), "parseInt", 1 | 2) => Some(JavaType::Primitive(PrimitiveType::Int)),
+        (Some("Long"), "parseLong", 1 | 2) => Some(JavaType::Primitive(PrimitiveType::Long)),
         (_, "getReadGroup", 0) => Some(JavaType::Named {
             name: "SAMReadGroupRecord".to_string(),
             args: Vec::new(),
@@ -3597,6 +3926,25 @@ fn known_argument_sensitive_external_method_return_type(
                 }
             })
             .or_else(|| Some(generic_read_type(fallback))),
+        (Some(owner), "empty", []) if is_optional_like_receiver(owner) => Some(JavaType::Named {
+            name: "Optional".to_string(),
+            args: Vec::new(),
+        }),
+        (Some(owner), "of", [value]) if is_optional_like_receiver(owner) => Some(JavaType::Named {
+            name: "Optional".to_string(),
+            args: vec![generic_read_type(value)],
+        }),
+        (Some(owner), "ofNullable" | "of_nullable", [value])
+            if is_optional_like_receiver(owner) =>
+        {
+            Some(JavaType::Named {
+                name: "Optional".to_string(),
+                args: vec![
+                    crate::types::optional_element_type(value)
+                        .unwrap_or_else(|| generic_read_type(value)),
+                ],
+            })
+        }
         (Some("Option"), "apply", [value]) => Some(JavaType::Named {
             name: "Option".to_string(),
             args: vec![generic_read_type(value)],
@@ -3629,6 +3977,10 @@ fn known_argument_sensitive_external_method_return_type(
         (Some("Collections"), "singletonMap", [key, value]) => Some(JavaType::Named {
             name: "Map".to_string(),
             args: vec![key.clone(), value.clone()],
+        }),
+        (Some("Collections"), "nCopies" | "n_copies", [_, element]) => Some(JavaType::Named {
+            name: "List".to_string(),
+            args: vec![generic_read_type(element)],
         }),
         (Some("ImmutableMap"), "of", args) => immutable_map_factory_return_type("Map", args),
         (Some("ImmutableSortedMap"), "of", args) => {
@@ -4804,6 +5156,7 @@ pub fn canonical_external_receiver_type_key(name: &str) -> String {
         "access_mode" => "AccessMode",
         "posix_file_permission" => "PosixFilePermission",
         "arrays" | "java.util.Arrays" | "JavaUtilArrays" | "java_util_arrays" => "Arrays",
+        "optional" | "java.util.Optional" | "JavaUtilOptional" | "java_util_optional" => "Optional",
         "bit_set" | "java.util.BitSet" | "JavaUtilBitSet" | "java_util_bit_set" => "BitSet",
         "string_tokenizer"
         | "java.util.StringTokenizer"
@@ -4998,7 +5351,8 @@ pub struct ClassLiteralTokenPlan {
 }
 
 pub fn class_literal_token_plan(ty: &JavaType, facts: &FactSet) -> ClassLiteralTokenPlan {
-    let shape = RustSlotShape::conservative(ty.clone());
+    let rust_token_ty = class_literal_rust_token_type(ty, facts).unwrap_or_else(|| ty.clone());
+    let shape = RustSlotShape::conservative(rust_token_ty.clone());
     let rust_type = match ty {
         JavaType::Unknown(_) => RustType::Unit,
         JavaType::Named { name, args }
@@ -5014,8 +5368,52 @@ pub fn class_literal_token_plan(ty: &JavaType, facts: &FactSet) -> ClassLiteralT
     }
 }
 
+fn class_literal_rust_token_type<'a>(ty: &'a JavaType, facts: &FactSet) -> Option<JavaType> {
+    let JavaType::Named { name, args } = ty else {
+        return None;
+    };
+    if !args.is_empty() || !name.contains('.') || facts.storage_strategies.facts(name).is_some() {
+        return None;
+    }
+    let simple = name.rsplit('.').next()?;
+    facts
+        .storage_strategies
+        .facts(simple)
+        .is_some()
+        .then(|| JavaType::Named {
+            name: simple.to_string(),
+            args: Vec::new(),
+        })
+}
+
 fn class_literal_names_source_type(name: &str, facts: &FactSet) -> bool {
     facts.storage_strategies.facts(name).is_some()
+        || facts
+            .storage_strategies
+            .facts(&rust_name_for_java_named_type(name))
+            .is_some()
+        || (class_literal_can_match_simple_source_alias(name)
+            && facts
+                .storage_strategies
+                .type_names()
+                .any(|stored| crate::facts::external_type_name_matches(stored, name)))
+}
+
+fn class_literal_can_match_simple_source_alias(name: &str) -> bool {
+    let mut parts = name.split('.');
+    let Some(first) = parts.next() else {
+        return false;
+    };
+    !matches!(first, "java" | "javax")
+        && first
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_lowercase())
+        && parts.any(|part| {
+            part.chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_uppercase())
+        })
 }
 
 pub fn class_literal_java_name(ty: &JavaType) -> String {
@@ -5083,8 +5481,8 @@ impl ClassLoader {
         URL::new(path)
     }
 
-    pub fn get_resource<S: Into<String>>(&self, path: S) -> URL {
-        URL::new(path)
+    pub fn get_resource<S: Into<String>>(&self, path: S) -> Option<URL> {
+        Some(URL::new(path))
     }
 
     pub fn get_resource_as_stream<S: Into<String>>(&self, _path: S) -> Option<InputStream> {
@@ -5176,31 +5574,6 @@ pub fn java_float_to_string(value: f32) -> String {
 }"#
         .to_string(),
     )
-}
-
-/// Whether the program mentions a `float` or `double` anywhere.
-pub fn program_uses_floating_point(program: &crate::java_ir::Program) -> bool {
-    use crate::java_ir::{JavaType, Member, PrimitiveType, TypeDecl};
-    fn is_fp(ty: &JavaType) -> bool {
-        match ty {
-            JavaType::Primitive(PrimitiveType::Float | PrimitiveType::Double) => true,
-            JavaType::Array(inner) => is_fp(inner),
-            JavaType::Named { args, .. } => args.iter().any(is_fp),
-            _ => false,
-        }
-    }
-    fn walk(ty: &TypeDecl) -> bool {
-        ty.members.iter().any(|member| match member {
-            Member::Field(field) => is_fp(&field.ty),
-            Member::Method(method) => {
-                is_fp(&method.return_type) || method.params.iter().any(|param| is_fp(&param.ty))
-            }
-            Member::Constructor(ctor) => ctor.params.iter().any(|param| is_fp(&param.ty)),
-            Member::Type(nested) => walk(nested),
-            Member::Unsupported { .. } => false,
-        })
-    }
-    program.types.iter().any(walk)
 }
 
 pub fn java_comparable_support_item() -> crate::rust_ir::RustItem {
@@ -5305,6 +5678,35 @@ impl JavaAppendValue for f64 {
     fn into_java_append_string(self) -> String { java_double_to_string(self) }
 }
 
+macro_rules! impl_java_append_borrowed_copy_value {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl JavaAppendValue for &$ty {
+                fn into_java_append_string(self) -> String {
+                    (*self).into_java_append_string()
+                }
+            }
+        )*
+    };
+}
+
+impl_java_append_borrowed_copy_value!(
+    bool, char, i8, i16, i32, i64, isize, u8, u16, u32, u64, usize, f32, f64
+);
+
+impl<T: JavaAppendValue> JavaAppendValue for Option<T> {
+    fn into_java_append_string(self) -> String {
+        self.map(JavaAppendValue::into_java_append_string)
+            .unwrap_or_else(|| "null".to_string())
+    }
+}
+
+impl<T: JavaAppendValue + Clone> JavaAppendValue for &Option<T> {
+    fn into_java_append_string(self) -> String {
+        self.clone().into_java_append_string()
+    }
+}
+
 impl JavaAppendValue for String {
     fn into_java_append_string(self) -> String { self }
 }
@@ -5335,9 +5737,9 @@ impl JavaAppendValue for &[char] {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct StringBuilder {
-    value: std::rc::Rc<std::cell::RefCell<String>>,
+    value: std::sync::Arc<std::sync::Mutex<String>>,
 }
 
 impl StringBuilder {
@@ -5350,68 +5752,188 @@ impl StringBuilder {
     }
 
     pub fn new_1<T: JavaStringBufferInitialValue>(value: T) -> StringBuilder {
-        StringBuilder { value: std::rc::Rc::new(std::cell::RefCell::new(value.into_java_string_buffer_initial_value())) }
+        StringBuilder {
+            value: std::sync::Arc::new(std::sync::Mutex::new(
+                value.into_java_string_buffer_initial_value(),
+            )),
+        }
+    }
+
+    pub fn new_capacity_result(capacity: i32) -> Result<StringBuilder, JavaException> {
+        Ok(StringBuilder {
+            value: std::sync::Arc::new(std::sync::Mutex::new(
+                java_string_buffer_capacity_initial_value_result(capacity)?,
+            )),
+        })
     }
 
     pub fn append<T: JavaAppendValue>(&self, value: T) -> Self {
-        self.value.borrow_mut().push_str(&value.into_java_append_string());
+        let value = value.into_java_append_string();
+        self.value
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push_str(&value);
         self.clone()
     }
 
     pub fn to_string(&self) -> String {
-        self.value.borrow().clone()
+        self.value
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     pub fn length(&self) -> i32 {
-        self.value.borrow().chars().count() as i32
+        self.value
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .chars()
+            .count() as i32
     }
 
     pub fn char_at(&self, index: i32) -> char {
-        self.value.borrow().chars().nth(index as usize).expect("StringBuilder index out of bounds")
+        self.char_at_result(index as usize)
+            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
+    }
+
+    pub fn char_at_result(&self, index: usize) -> Result<char, JavaException> {
+        self.value
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .chars()
+            .nth(index)
+            .ok_or_else(|| {
+                JavaException::new(
+                    "StringIndexOutOfBoundsException",
+                    "Java string buffer index out of bounds".to_string(),
+                )
+            })
     }
 
     pub fn set_length(&self, new_len: i32) {
-        java_string_buffer_set_length(&mut self.value.borrow_mut(), new_len);
+        self.set_length_result(new_len)
+            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex));
+    }
+
+    pub fn set_length_result(&self, new_len: i32) -> Result<(), JavaException> {
+        java_string_buffer_set_length_result(
+            &mut self
+                .value
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            new_len,
+        )
     }
 
     pub fn delete<T0: Into<i32>, T1: Into<i32>>(&self, start: T0, end: T1) -> Self {
-        java_string_buffer_delete(&mut self.value.borrow_mut(), start.into(), end.into());
-        self.clone()
+        self.delete_result(start, end)
+            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
+    }
+
+    pub fn delete_result<T0: Into<i32>, T1: Into<i32>>(
+        &self,
+        start: T0,
+        end: T1,
+    ) -> Result<Self, JavaException> {
+        java_string_buffer_delete_result(
+            &mut self
+                .value
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            start.into(),
+            end.into(),
+        )?;
+        Ok(self.clone())
     }
 
     pub fn insert<T0: Into<i32>, T1: JavaAppendValue>(&self, offset: T0, value: T1) -> Self {
-        java_string_buffer_insert(&mut self.value.borrow_mut(), offset.into(), value.into_java_append_string());
-        self.clone()
+        self.insert_result(offset, value)
+            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
+    }
+
+    pub fn insert_result<T0: Into<i32>, T1: JavaAppendValue>(
+        &self,
+        offset: T0,
+        value: T1,
+    ) -> Result<Self, JavaException> {
+        let value = value.into_java_append_string();
+        java_string_buffer_insert_result(
+            &mut self
+                .value
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            offset.into(),
+            value,
+        )?;
+        Ok(self.clone())
+    }
+
+    pub fn substring_1<T0: Into<i32>>(&self, begin: T0) -> String {
+        self.substring_1_result(begin)
+            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
+    }
+
+    pub fn substring_1_result<T0: Into<i32>>(&self, begin: T0) -> Result<String, JavaException> {
+        let value = self
+            .value
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        java_string_substring_result(value.as_str(), begin.into(), value.chars().count() as i32)
+    }
+
+    pub fn substring_2<T0: Into<i32>, T1: Into<i32>>(&self, begin: T0, end: T1) -> String {
+        self.substring_2_result(begin, end)
+            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
+    }
+
+    pub fn substring_2_result<T0: Into<i32>, T1: Into<i32>>(
+        &self,
+        begin: T0,
+        end: T1,
+    ) -> Result<String, JavaException> {
+        let value = self
+            .value
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        java_string_substring_result(value.as_str(), begin.into(), end.into())
     }
 }
 
+impl PartialEq for StringBuilder {
+    fn eq(&self, other: &Self) -> bool {
+        self.to_string() == other.to_string()
+    }
+}
+
+impl Eq for StringBuilder {}
+
 impl std::fmt::Display for StringBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.value.borrow())
+        write!(f, "{}", self.to_string())
     }
 }
 
 impl std::hash::Hash for StringBuilder {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        std::hash::Hash::hash(&*self.value.borrow(), state);
+        std::hash::Hash::hash(&self.to_string(), state);
     }
 }
 
 impl JavaAppendValue for StringBuilder {
     fn into_java_append_string(self) -> String {
-        self.value.borrow().clone()
+        self.to_string()
     }
 }
 
 impl JavaAppendValue for &StringBuilder {
     fn into_java_append_string(self) -> String {
-        self.value.borrow().clone()
+        self.to_string()
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct StringBuffer {
-    value: std::rc::Rc<std::cell::RefCell<String>>,
+    value: std::sync::Arc<std::sync::Mutex<String>>,
 }
 
 impl StringBuffer {
@@ -5424,62 +5946,182 @@ impl StringBuffer {
     }
 
     pub fn new_1<T: JavaStringBufferInitialValue>(value: T) -> StringBuffer {
-        StringBuffer { value: std::rc::Rc::new(std::cell::RefCell::new(value.into_java_string_buffer_initial_value())) }
+        StringBuffer {
+            value: std::sync::Arc::new(std::sync::Mutex::new(
+                value.into_java_string_buffer_initial_value(),
+            )),
+        }
+    }
+
+    pub fn new_capacity_result(capacity: i32) -> Result<StringBuffer, JavaException> {
+        Ok(StringBuffer {
+            value: std::sync::Arc::new(std::sync::Mutex::new(
+                java_string_buffer_capacity_initial_value_result(capacity)?,
+            )),
+        })
     }
 
     pub fn append<T: JavaAppendValue>(&self, value: T) -> Self {
-        self.value.borrow_mut().push_str(&value.into_java_append_string());
+        let value = value.into_java_append_string();
+        self.value
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push_str(&value);
         self.clone()
     }
 
     pub fn to_string(&self) -> String {
-        self.value.borrow().clone()
+        self.value
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     pub fn length(&self) -> i32 {
-        self.value.borrow().chars().count() as i32
+        self.value
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .chars()
+            .count() as i32
     }
 
     pub fn char_at(&self, index: i32) -> char {
-        self.value.borrow().chars().nth(index as usize).expect("StringBuffer index out of bounds")
+        self.char_at_result(index as usize)
+            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
+    }
+
+    pub fn char_at_result(&self, index: usize) -> Result<char, JavaException> {
+        self.value
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .chars()
+            .nth(index)
+            .ok_or_else(|| {
+                JavaException::new(
+                    "StringIndexOutOfBoundsException",
+                    "Java string buffer index out of bounds".to_string(),
+                )
+            })
     }
 
     pub fn set_length(&self, new_len: i32) {
-        java_string_buffer_set_length(&mut self.value.borrow_mut(), new_len);
+        self.set_length_result(new_len)
+            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex));
+    }
+
+    pub fn set_length_result(&self, new_len: i32) -> Result<(), JavaException> {
+        java_string_buffer_set_length_result(
+            &mut self
+                .value
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            new_len,
+        )
     }
 
     pub fn delete<T0: Into<i32>, T1: Into<i32>>(&self, start: T0, end: T1) -> Self {
-        java_string_buffer_delete(&mut self.value.borrow_mut(), start.into(), end.into());
-        self.clone()
+        self.delete_result(start, end)
+            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
+    }
+
+    pub fn delete_result<T0: Into<i32>, T1: Into<i32>>(
+        &self,
+        start: T0,
+        end: T1,
+    ) -> Result<Self, JavaException> {
+        java_string_buffer_delete_result(
+            &mut self
+                .value
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            start.into(),
+            end.into(),
+        )?;
+        Ok(self.clone())
     }
 
     pub fn insert<T0: Into<i32>, T1: JavaAppendValue>(&self, offset: T0, value: T1) -> Self {
-        java_string_buffer_insert(&mut self.value.borrow_mut(), offset.into(), value.into_java_append_string());
-        self.clone()
+        self.insert_result(offset, value)
+            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
+    }
+
+    pub fn insert_result<T0: Into<i32>, T1: JavaAppendValue>(
+        &self,
+        offset: T0,
+        value: T1,
+    ) -> Result<Self, JavaException> {
+        let value = value.into_java_append_string();
+        java_string_buffer_insert_result(
+            &mut self
+                .value
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            offset.into(),
+            value,
+        )?;
+        Ok(self.clone())
+    }
+
+    pub fn substring_1<T0: Into<i32>>(&self, begin: T0) -> String {
+        self.substring_1_result(begin)
+            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
+    }
+
+    pub fn substring_1_result<T0: Into<i32>>(&self, begin: T0) -> Result<String, JavaException> {
+        let value = self
+            .value
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        java_string_substring_result(value.as_str(), begin.into(), value.chars().count() as i32)
+    }
+
+    pub fn substring_2<T0: Into<i32>, T1: Into<i32>>(&self, begin: T0, end: T1) -> String {
+        self.substring_2_result(begin, end)
+            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
+    }
+
+    pub fn substring_2_result<T0: Into<i32>, T1: Into<i32>>(
+        &self,
+        begin: T0,
+        end: T1,
+    ) -> Result<String, JavaException> {
+        let value = self
+            .value
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        java_string_substring_result(value.as_str(), begin.into(), end.into())
     }
 }
 
+impl PartialEq for StringBuffer {
+    fn eq(&self, other: &Self) -> bool {
+        self.to_string() == other.to_string()
+    }
+}
+
+impl Eq for StringBuffer {}
+
 impl std::fmt::Display for StringBuffer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.value.borrow())
+        write!(f, "{}", self.to_string())
     }
 }
 
 impl std::hash::Hash for StringBuffer {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        std::hash::Hash::hash(&*self.value.borrow(), state);
+        std::hash::Hash::hash(&self.to_string(), state);
     }
 }
 
 impl JavaAppendValue for StringBuffer {
     fn into_java_append_string(self) -> String {
-        self.value.borrow().clone()
+        self.to_string()
     }
 }
 
 impl JavaAppendValue for &StringBuffer {
     fn into_java_append_string(self) -> String {
-        self.value.borrow().clone()
+        self.to_string()
     }
 }
 
@@ -5507,25 +6149,25 @@ impl JavaStringBufferInitialValue for &str {
 
 impl JavaStringBufferInitialValue for StringBuilder {
     fn into_java_string_buffer_initial_value(self) -> String {
-        self.value.borrow().clone()
+        self.to_string()
     }
 }
 
 impl JavaStringBufferInitialValue for &StringBuilder {
     fn into_java_string_buffer_initial_value(self) -> String {
-        self.value.borrow().clone()
+        self.to_string()
     }
 }
 
 impl JavaStringBufferInitialValue for StringBuffer {
     fn into_java_string_buffer_initial_value(self) -> String {
-        self.value.borrow().clone()
+        self.to_string()
     }
 }
 
 impl JavaStringBufferInitialValue for &StringBuffer {
     fn into_java_string_buffer_initial_value(self) -> String {
-        self.value.borrow().clone()
+        self.to_string()
     }
 }
 
@@ -5534,7 +6176,8 @@ macro_rules! impl_java_string_buffer_capacity_initial_value {
         $(
             impl JavaStringBufferInitialValue for $ty {
                 fn into_java_string_buffer_initial_value(self) -> String {
-                    String::with_capacity(self.max(0) as usize)
+                    java_string_buffer_capacity_initial_value_result(self as i32)
+                        .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
                 }
             }
         )*
@@ -5557,6 +6200,16 @@ macro_rules! impl_java_string_buffer_unsigned_capacity_initial_value {
 
 impl_java_string_buffer_unsigned_capacity_initial_value!(u8, u16, u32, u64, usize);
 
+fn java_string_buffer_capacity_initial_value_result(capacity: i32) -> Result<String, JavaException> {
+    if capacity < 0 {
+        return Err(JavaException::new(
+            "NegativeArraySizeException",
+            "Java string buffer capacity is negative".to_string(),
+        ));
+    }
+    Ok(String::with_capacity(capacity as usize))
+}
+
 fn java_string_buffer_byte_index(value: &str, char_index: i32) -> usize {
     if char_index <= 0 {
         return 0;
@@ -5568,8 +6221,17 @@ fn java_string_buffer_byte_index(value: &str, char_index: i32) -> usize {
         .unwrap_or(value.len())
 }
 
-fn java_string_buffer_set_length(value: &mut String, new_len: i32) {
-    let new_len = new_len.max(0) as usize;
+fn java_string_buffer_set_length_result(
+    value: &mut String,
+    new_len: i32,
+) -> Result<(), JavaException> {
+    if new_len < 0 {
+        return Err(JavaException::new(
+            "StringIndexOutOfBoundsException",
+            "Java string buffer length out of bounds".to_string(),
+        ));
+    }
+    let new_len = new_len as usize;
     let current_len = value.chars().count();
     if new_len < current_len {
         let byte_index = java_string_buffer_byte_index(value, new_len as i32);
@@ -5577,19 +6239,44 @@ fn java_string_buffer_set_length(value: &mut String, new_len: i32) {
     } else {
         value.extend(std::iter::repeat('\0').take(new_len - current_len));
     }
+    Ok(())
 }
 
-fn java_string_buffer_delete(value: &mut String, start: i32, end: i32) {
-    let start = java_string_buffer_byte_index(value, start.max(0));
-    let end = java_string_buffer_byte_index(value, end.max(0));
+fn java_string_buffer_delete_result(
+    value: &mut String,
+    start: i32,
+    end: i32,
+) -> Result<(), JavaException> {
+    let len = value.chars().count() as i32;
+    if start < 0 || start > len || start > end {
+        return Err(JavaException::new(
+            "StringIndexOutOfBoundsException",
+            "Java string buffer delete index out of bounds".to_string(),
+        ));
+    }
+    let start = java_string_buffer_byte_index(value, start);
+    let end = java_string_buffer_byte_index(value, end.min(len));
     if start < end {
         value.replace_range(start..end, "");
     }
+    Ok(())
 }
 
-fn java_string_buffer_insert(value: &mut String, offset: i32, inserted: String) {
-    let offset = java_string_buffer_byte_index(value, offset.max(0));
+fn java_string_buffer_insert_result(
+    value: &mut String,
+    offset: i32,
+    inserted: String,
+) -> Result<(), JavaException> {
+    let len = value.chars().count() as i32;
+    if offset < 0 || offset > len {
+        return Err(JavaException::new(
+            "StringIndexOutOfBoundsException",
+            "Java string buffer insert index out of bounds".to_string(),
+        ));
+    }
+    let offset = java_string_buffer_byte_index(value, offset);
     value.insert_str(offset, &inserted);
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -5842,6 +6529,225 @@ pub struct JavaIterator<T> {
     index: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct JavaLinkedHashSet<T> {
+    entries: Vec<T>,
+}
+
+impl<T: PartialEq> JavaLinkedHashSet<T> {
+    pub fn new() -> JavaLinkedHashSet<T> {
+        JavaLinkedHashSet {
+            entries: Vec::new(),
+        }
+    }
+
+    pub fn with_capacity(capacity: usize) -> JavaLinkedHashSet<T> {
+        JavaLinkedHashSet {
+            entries: Vec::with_capacity(capacity),
+        }
+    }
+
+    pub fn insert(&mut self, value: T) -> bool {
+        if self.entries.iter().any(|entry| entry == &value) {
+            false
+        } else {
+            self.entries.push(value);
+            true
+        }
+    }
+
+    pub fn remove(&mut self, value: &T) -> bool {
+        if let Some(index) = self.entries.iter().position(|entry| entry == value) {
+            self.entries.remove(index);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn contains(&self, value: &T) -> bool {
+        self.entries.iter().any(|entry| entry == value)
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, T> {
+        self.entries.iter()
+    }
+
+    pub fn extend<I: IntoIterator<Item = T>>(&mut self, values: I) {
+        for value in values {
+            self.insert(value);
+        }
+    }
+}
+
+impl<T: PartialEq> std::iter::FromIterator<T> for JavaLinkedHashSet<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        let mut set = JavaLinkedHashSet::new();
+        set.extend(iter);
+        set
+    }
+}
+
+impl<T: PartialEq + JavaArraysDeepToStringElement> std::fmt::Display for JavaLinkedHashSet<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&java_collection_to_string(&self.entries))
+    }
+}
+
+impl<T: PartialEq + JavaArraysDeepToStringElement> JavaArraysDeepToStringElement
+    for JavaLinkedHashSet<T>
+{
+    fn java_arrays_deep_to_string(&self) -> String {
+        self.to_string()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct JavaLinkedHashMap<K, V> {
+    entries: Vec<(K, V)>,
+}
+
+impl<K: PartialEq, V> JavaLinkedHashMap<K, V> {
+    pub fn new() -> JavaLinkedHashMap<K, V> {
+        JavaLinkedHashMap {
+            entries: Vec::new(),
+        }
+    }
+
+    pub fn with_capacity(capacity: usize) -> JavaLinkedHashMap<K, V> {
+        JavaLinkedHashMap {
+            entries: Vec::with_capacity(capacity),
+        }
+    }
+
+    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
+        if let Some((_, existing)) = self.entries.iter_mut().find(|(entry_key, _)| entry_key == &key)
+        {
+            Some(std::mem::replace(existing, value))
+        } else {
+            self.entries.push((key, value));
+            None
+        }
+    }
+
+    pub fn get<Q>(&self, key: &Q) -> Option<&V>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: PartialEq + ?Sized,
+    {
+        self.entries
+            .iter()
+            .find(|(entry_key, _)| entry_key.borrow() == key)
+            .map(|(_, value)| value)
+    }
+
+    pub fn remove<Q>(&mut self, key: &Q) -> Option<V>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: PartialEq + ?Sized,
+    {
+        let index = self
+            .entries
+            .iter()
+            .position(|(entry_key, _)| entry_key.borrow() == key)?;
+        Some(self.entries.remove(index).1)
+    }
+
+    pub fn contains_key<Q>(&self, key: &Q) -> bool
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: PartialEq + ?Sized,
+    {
+        self.get(key).is_some()
+    }
+
+    pub fn contains_value(&self, value: &V) -> bool
+    where
+        V: PartialEq,
+    {
+        self.entries
+            .iter()
+            .any(|(_, entry_value)| entry_value == value)
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &K> {
+        self.entries.iter().map(|(key, _)| key)
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &V> {
+        self.entries.iter().map(|(_, value)| value)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
+        self.entries.iter().map(|(key, value)| (key, value))
+    }
+
+    pub fn extend<I: IntoIterator<Item = (K, V)>>(&mut self, values: I) {
+        for (key, value) in values {
+            self.insert(key, value);
+        }
+    }
+}
+
+impl<K: PartialEq, V> std::iter::FromIterator<(K, V)> for JavaLinkedHashMap<K, V> {
+    fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
+        let mut map = JavaLinkedHashMap::new();
+        map.extend(iter);
+        map
+    }
+}
+
+impl<K, V> std::fmt::Display for JavaLinkedHashMap<K, V>
+where
+    K: PartialEq + JavaArraysDeepToStringElement,
+    V: JavaArraysDeepToStringElement,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("{")?;
+        for (index, (key, value)) in self.entries.iter().enumerate() {
+            if index > 0 {
+                f.write_str(", ")?;
+            }
+            f.write_str(&key.java_arrays_deep_to_string())?;
+            f.write_str("=")?;
+            f.write_str(&value.java_arrays_deep_to_string())?;
+        }
+        f.write_str("}")
+    }
+}
+
+impl<K, V> JavaArraysDeepToStringElement for JavaLinkedHashMap<K, V>
+where
+    K: PartialEq + JavaArraysDeepToStringElement,
+    V: JavaArraysDeepToStringElement,
+{
+    fn java_arrays_deep_to_string(&self) -> String {
+        self.to_string()
+    }
+}
+
+impl<K: Eq + std::hash::Hash, V> From<JavaLinkedHashMap<K, V>> for std::collections::HashMap<K, V> {
+    fn from(value: JavaLinkedHashMap<K, V>) -> Self {
+        value.entries.into_iter().collect()
+    }
+}
+
 impl<T: Clone> JavaIterator<T> {
     pub fn new<I: IntoIterator<Item = T>>(items: I) -> JavaIterator<T> {
         JavaIterator { items: items.into_iter().collect(), index: 0 }
@@ -5852,9 +6758,19 @@ impl<T: Clone> JavaIterator<T> {
     }
 
     pub fn next(&mut self) -> T {
-        let value = self.items.get(self.index).expect("Java iterator exhausted").clone();
+        self.next_result()
+            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
+    }
+
+    pub fn next_result(&mut self) -> Result<T, JavaException> {
+        let value = self.items.get(self.index).cloned().ok_or_else(|| {
+            JavaException::new(
+                "NoSuchElementException",
+                "Java iterator has no more elements".to_string(),
+            )
+        })?;
         self.index += 1;
-        value
+        Ok(value)
     }
 
     pub fn for_each_remaining<F>(&mut self, mut f: F)
@@ -5929,29 +6845,53 @@ impl BitSet {
     }
 
     pub fn new_1(size: i32) -> BitSet {
-        BitSet {
-            bits: vec![false; size.max(0) as usize],
+        BitSet::new_1_result(size)
+            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
+    }
+
+    pub fn new_1_result(size: i32) -> Result<BitSet, JavaException> {
+        if size < 0 {
+            return Err(JavaException::new(
+                "NegativeArraySizeException",
+                "BitSet size is negative".to_string(),
+            ));
         }
+        Ok(BitSet { bits: vec![false; size as usize] })
     }
 
     pub fn get(&self, index: i32) -> bool {
-        index >= 0
-            && self
-                .bits
-                .get(index as usize)
-                .copied()
-                .unwrap_or(false)
+        self.get_result(index)
+            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
+    }
+
+    pub fn get_result(&self, index: i32) -> Result<bool, JavaException> {
+        if index < 0 {
+            return Err(JavaException::new(
+                "IndexOutOfBoundsException",
+                "BitSet index out of bounds".to_string(),
+            ));
+        }
+        Ok(self.bits.get(index as usize).copied().unwrap_or(false))
     }
 
     pub fn set(&mut self, index: i32) {
+        self.set_result(index)
+            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex));
+    }
+
+    pub fn set_result(&mut self, index: i32) -> Result<(), JavaException> {
         if index < 0 {
-            panic!("Java IndexOutOfBoundsException");
+            return Err(JavaException::new(
+                "IndexOutOfBoundsException",
+                "BitSet index out of bounds".to_string(),
+            ));
         }
         let index = index as usize;
         if index >= self.bits.len() {
             self.bits.resize(index + 1, false);
         }
         self.bits[index] = true;
+        Ok(())
     }
 }
 
@@ -6005,14 +6945,32 @@ impl StringTokenizer {
         self.index < self.tokens.len()
     }
 
+    pub fn has_more_elements(&self) -> bool {
+        self.has_more_tokens()
+    }
+
     pub fn next_token(&mut self) -> String {
-        let token = self
-            .tokens
-            .get(self.index)
-            .expect("Java NoSuchElementException")
-            .clone();
+        self.next_token_result()
+            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
+    }
+
+    pub fn next_element(&mut self) -> String {
+        self.next_token()
+    }
+
+    pub fn next_token_result(&mut self) -> Result<String, JavaException> {
+        let token = self.tokens.get(self.index).cloned().ok_or_else(|| {
+            JavaException::new(
+                "NoSuchElementException",
+                "Java tokenizer has no more tokens".to_string(),
+            )
+        })?;
         self.index += 1;
-        token
+        Ok(token)
+    }
+
+    pub fn next_element_result(&mut self) -> Result<String, JavaException> {
+        self.next_token_result()
     }
 }
 
@@ -6024,8 +6982,8 @@ impl ClassLoader {
         URL::new(path)
     }
 
-    pub fn get_resource<S: Into<String>>(&self, path: S) -> URL {
-        URL::new(path)
+    pub fn get_resource<S: Into<String>>(&self, path: S) -> Option<URL> {
+        Some(URL::new(path))
     }
 
     pub fn get_resource_as_stream<S: Into<String>>(&self, _path: S) -> Option<InputStream> {
@@ -6621,39 +7579,582 @@ pub mod logger {
 }
 
 pub fn java_erased_object_runtime_support_item() -> crate::rust_ir::RustItem {
-    crate::rust_ir::RustItem::Raw(
-        r#"pub fn java_is_serializable<T: ?Sized>(_value: &T) -> bool {
-    true
+    java_erased_object_runtime_support_item_with_programs_and_facts(&[], &FactSet::default())
 }
 
-pub fn java_clone_erased_object_ref(_value: &Box<dyn std::any::Any>) -> Box<dyn std::any::Any> {
-    Box::new(())
+pub fn java_erased_object_runtime_support_item_with_programs(
+    programs: &[&Program],
+) -> crate::rust_ir::RustItem {
+    java_erased_object_runtime_support_item_with_programs_and_facts(programs, &FactSet::default())
 }
+
+pub fn java_erased_object_runtime_support_item_with_programs_and_facts(
+    programs: &[&Program],
+    facts: &FactSet,
+) -> crate::rust_ir::RustItem {
+    java_erased_object_runtime_support_item_with_source_programs_and_facts(
+        programs, programs, facts,
+    )
+}
+
+pub fn java_erased_object_runtime_support_item_with_source_programs_and_facts(
+    programs: &[&Program],
+    source_downcast_programs: &[&Program],
+    facts: &FactSet,
+) -> crate::rust_ir::RustItem {
+    let source_to_string_downcasts =
+        source_erased_object_to_string_downcasts(source_downcast_programs);
+    let platform_to_string_downcasts = platform_erased_object_to_string_downcasts(programs);
+    let external_to_string_downcasts = external_erased_object_to_string_downcasts(programs, facts);
+    crate::rust_ir::RustItem::Raw(format!(
+        r#"pub fn java_is_serializable<T: ?Sized>(_value: &T) -> bool {{
+    true
+}}
+
+pub fn java_clone_erased_object_ref<T: ?Sized>(_value: &T) -> std::boxed::Box<dyn std::any::Any> {{
+    std::boxed::Box::new(())
+}}
 
 pub fn java_clone_erased_object_vec_ref(
-    _value: &Vec<Box<dyn std::any::Any>>,
-) -> Vec<Box<dyn std::any::Any>> {
+    _value: &Vec<std::boxed::Box<dyn std::any::Any>>,
+) -> Vec<std::boxed::Box<dyn std::any::Any>> {{
     Vec::new()
+}}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct JavaPlainObject;
+
+impl JavaPlainObject {{
+    pub fn new() -> JavaPlainObject {{
+        JavaPlainObject
+    }}
+}}
+
+pub fn java_erased_object_to_string<T: std::any::Any>(value: &T) -> String {{
+    java_erased_any_to_string(value)
+}}
+
+pub fn java_erased_any_to_string(value: &dyn std::any::Any) -> String {{
+    if let Some(value) = value.downcast_ref::<std::boxed::Box<dyn std::any::Any>>() {{
+        return java_erased_any_to_string(value.as_ref());
+    }}
+    if let Some(value) = value.downcast_ref::<String>() {{
+        return value.clone();
+    }}
+{platform_to_string_downcasts}
+{external_to_string_downcasts}
+    if let Some(value) = value.downcast_ref::<bool>() {{
+        return value.to_string();
+    }}
+    if let Some(value) = value.downcast_ref::<char>() {{
+        return value.to_string();
+    }}
+    if let Some(value) = value.downcast_ref::<i8>() {{
+        return value.to_string();
+    }}
+    if let Some(value) = value.downcast_ref::<i16>() {{
+        return value.to_string();
+    }}
+    if let Some(value) = value.downcast_ref::<i32>() {{
+        return value.to_string();
+    }}
+    if let Some(value) = value.downcast_ref::<i64>() {{
+        return value.to_string();
+    }}
+    if let Some(value) = value.downcast_ref::<f32>() {{
+        return value.to_string();
+    }}
+    if let Some(value) = value.downcast_ref::<f64>() {{
+        return value.to_string();
+    }}
+    if value.is::<JavaPlainObject>() {{
+        return "java.lang.Object@0".to_string();
+    }}
+{source_to_string_downcasts}
+    panic!("unsupported Java erased object display: runtime target is erased")
+}}"#
+    ))
 }
 
-pub fn java_erased_object_to_string<T: ?Sized>(_value: &T) -> String {
-    Default::default()
-}"#
-        .to_string(),
-    )
+fn platform_erased_object_to_string_downcasts(programs: &[&Program]) -> String {
+    let mut arms = BTreeSet::new();
+    for platform_type in ["File", "StringBuilder", "StringBuffer", "URI"] {
+        if programs
+            .iter()
+            .any(|program| program_mentions_java_type(program, platform_type))
+        {
+            arms.insert(format!(
+                "    if let Some(value) = value.downcast_ref::<{platform_type}>() {{\n        return value.to_string();\n    }}\n    if let Some(value) = value.downcast_ref::<std::rc::Rc<{platform_type}>>() {{\n        return value.to_string();\n    }}\n    if let Some(value) = value.downcast_ref::<std::sync::Arc<{platform_type}>>() {{\n        return value.to_string();\n    }}"
+            ));
+        }
+    }
+    arms.into_iter().collect::<Vec<_>>().join("\n")
+}
+
+fn external_erased_object_to_string_downcasts(programs: &[&Program], facts: &FactSet) -> String {
+    let mut arms = BTreeSet::new();
+    for external_type in display_capable_external_facade_types(facts) {
+        if external_type.contains('.') {
+            continue;
+        }
+        let simple_name = external_type.rsplit('.').next().unwrap_or(&external_type);
+        if !programs
+            .iter()
+            .any(|program| program_mentions_java_type(program, simple_name))
+        {
+            continue;
+        }
+        let rust_name = rust_name_for_java_named_type(&external_type);
+        arms.insert(format!(
+            "    if let Some(value) = value.downcast_ref::<{rust_name}>() {{\n        return value.to_string();\n    }}\n    if let Some(value) = value.downcast_ref::<&{rust_name}>() {{\n        return (*value).to_string();\n    }}\n    if let Some(value) = value.downcast_ref::<std::rc::Rc<{rust_name}>>() {{\n        return value.to_string();\n    }}\n    if let Some(value) = value.downcast_ref::<std::sync::Arc<{rust_name}>>() {{\n        return value.to_string();\n    }}"
+        ));
+    }
+    arms.into_iter().collect::<Vec<_>>().join("\n")
+}
+
+fn program_mentions_java_type(program: &Program, target_simple_name: &str) -> bool {
+    program
+        .types
+        .iter()
+        .any(|ty| type_decl_mentions_java_type(ty, target_simple_name))
+}
+
+fn type_decl_mentions_java_type(ty: &TypeDecl, target_simple_name: &str) -> bool {
+    ty.type_param_bounds
+        .iter()
+        .flatten()
+        .any(|bound| java_type_mentions_simple_name(bound, target_simple_name))
+        || ty
+            .members
+            .iter()
+            .any(|member| member_mentions_java_type(member, target_simple_name))
+        || ty
+            .static_init_blocks
+            .iter()
+            .any(|block| block_mentions_java_type(&block.block, target_simple_name))
+}
+
+fn member_mentions_java_type(member: &Member, target_simple_name: &str) -> bool {
+    match member {
+        Member::Field(field) => {
+            java_type_mentions_simple_name(&field.ty, target_simple_name)
+                || field
+                    .initializer
+                    .as_ref()
+                    .is_some_and(|expr| expr_mentions_java_type(expr, target_simple_name))
+        }
+        Member::Method(method) => {
+            method
+                .type_param_bounds
+                .iter()
+                .flatten()
+                .any(|bound| java_type_mentions_simple_name(bound, target_simple_name))
+                || java_type_mentions_simple_name(&method.return_type, target_simple_name)
+                || method
+                    .throws
+                    .iter()
+                    .any(|ty| java_type_mentions_simple_name(ty, target_simple_name))
+                || method
+                    .params
+                    .iter()
+                    .any(|param| java_type_mentions_simple_name(&param.ty, target_simple_name))
+                || method
+                    .body
+                    .as_ref()
+                    .is_some_and(|body| block_mentions_java_type(body, target_simple_name))
+        }
+        Member::Constructor(constructor) => {
+            constructor
+                .type_param_bounds
+                .iter()
+                .flatten()
+                .any(|bound| java_type_mentions_simple_name(bound, target_simple_name))
+                || constructor
+                    .throws
+                    .iter()
+                    .any(|ty| java_type_mentions_simple_name(ty, target_simple_name))
+                || constructor
+                    .params
+                    .iter()
+                    .any(|param| java_type_mentions_simple_name(&param.ty, target_simple_name))
+                || constructor
+                    .body
+                    .as_ref()
+                    .is_some_and(|body| block_mentions_java_type(body, target_simple_name))
+        }
+        Member::Type(nested) => type_decl_mentions_java_type(nested, target_simple_name),
+        Member::Unsupported { .. } => false,
+    }
+}
+
+fn block_mentions_java_type(block: &Block, target_simple_name: &str) -> bool {
+    block
+        .statements
+        .iter()
+        .any(|stmt| stmt_mentions_java_type(stmt, target_simple_name))
+}
+
+fn stmt_mentions_java_type(stmt: &Stmt, target_simple_name: &str) -> bool {
+    match stmt {
+        Stmt::VarDecl {
+            ty, initializer, ..
+        } => {
+            java_type_mentions_simple_name(ty, target_simple_name)
+                || initializer
+                    .as_ref()
+                    .is_some_and(|expr| expr_mentions_java_type(expr, target_simple_name))
+        }
+        Stmt::Assign { target, value } => {
+            expr_mentions_java_type(target, target_simple_name)
+                || expr_mentions_java_type(value, target_simple_name)
+        }
+        Stmt::Expr(expr) | Stmt::Throw(expr) => expr_mentions_java_type(expr, target_simple_name),
+        Stmt::Return(expr) => expr
+            .as_ref()
+            .is_some_and(|expr| expr_mentions_java_type(expr, target_simple_name)),
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            expr_mentions_java_type(condition, target_simple_name)
+                || block_mentions_java_type(then_block, target_simple_name)
+                || else_block
+                    .as_ref()
+                    .is_some_and(|block| block_mentions_java_type(block, target_simple_name))
+        }
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
+            expr_mentions_java_type(condition, target_simple_name)
+                || block_mentions_java_type(body, target_simple_name)
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            init.iter()
+                .any(|stmt| stmt_mentions_java_type(stmt, target_simple_name))
+                || condition
+                    .as_ref()
+                    .is_some_and(|expr| expr_mentions_java_type(expr, target_simple_name))
+                || update
+                    .iter()
+                    .any(|expr| expr_mentions_java_type(expr, target_simple_name))
+                || block_mentions_java_type(body, target_simple_name)
+        }
+        Stmt::EnhancedFor {
+            var_type,
+            iterable,
+            body,
+            ..
+        } => {
+            java_type_mentions_simple_name(var_type, target_simple_name)
+                || expr_mentions_java_type(iterable, target_simple_name)
+                || block_mentions_java_type(body, target_simple_name)
+        }
+        Stmt::Switch { selector, cases } => {
+            expr_mentions_java_type(selector, target_simple_name)
+                || cases.iter().any(|case| {
+                    case.labels.iter().any(|label| match label {
+                        SwitchLabel::Expr(expr) => {
+                            expr_mentions_java_type(expr, target_simple_name)
+                        }
+                        SwitchLabel::Default => false,
+                    }) || case
+                        .statements
+                        .iter()
+                        .any(|stmt| stmt_mentions_java_type(stmt, target_simple_name))
+                })
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            resources
+                .iter()
+                .any(|stmt| stmt_mentions_java_type(stmt, target_simple_name))
+                || block_mentions_java_type(body, target_simple_name)
+                || catches.iter().any(|catch| {
+                    catch
+                        .types
+                        .iter()
+                        .any(|ty| java_type_mentions_simple_name(ty, target_simple_name))
+                        || block_mentions_java_type(&catch.body, target_simple_name)
+                })
+                || finally_block
+                    .as_ref()
+                    .is_some_and(|block| block_mentions_java_type(block, target_simple_name))
+        }
+        Stmt::LocalType(ty) => type_decl_mentions_java_type(ty, target_simple_name),
+        Stmt::ConstructorInvocation { args, resolved, .. } => {
+            args.iter()
+                .any(|expr| expr_mentions_java_type(expr, target_simple_name))
+                || resolved.as_ref().is_some_and(|resolved| {
+                    java_type_mentions_simple_name(&resolved.constructed_type, target_simple_name)
+                        || resolved.params.iter().any(|param| {
+                            java_type_mentions_simple_name(&param.ty, target_simple_name)
+                        })
+                        || resolved.arg_coercions.iter().any(|coercion| {
+                            java_type_mentions_simple_name(&coercion.actual, target_simple_name)
+                                || java_type_mentions_simple_name(
+                                    &coercion.target,
+                                    target_simple_name,
+                                )
+                        })
+                })
+        }
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            block_mentions_java_type(block, target_simple_name)
+        }
+        Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => false,
+    }
+}
+
+fn expr_mentions_java_type(expr: &Expr, target_simple_name: &str) -> bool {
+    match expr {
+        Expr::Literal(_) | Expr::Var(_) | Expr::This | Expr::Super | Expr::Raw(_) => false,
+        Expr::FieldAccess(receiver, _) => {
+            if let Expr::Var(receiver_name) = receiver.as_ref()
+                && external_receiver_name_matches_simple(receiver_name, target_simple_name)
+            {
+                return true;
+            }
+            expr_mentions_java_type(receiver, target_simple_name)
+        }
+        Expr::ArrayAccess(array, index) => {
+            expr_mentions_java_type(array, target_simple_name)
+                || expr_mentions_java_type(index, target_simple_name)
+        }
+        Expr::ArrayCreation {
+            element_type,
+            dimensions,
+            initializer,
+        } => {
+            java_type_mentions_simple_name(element_type, target_simple_name)
+                || dimensions
+                    .iter()
+                    .any(|expr| expr_mentions_java_type(expr, target_simple_name))
+                || initializer.as_ref().is_some_and(|values| {
+                    values
+                        .iter()
+                        .any(|expr| expr_mentions_java_type(expr, target_simple_name))
+                })
+        }
+        Expr::ArrayInitializer(values) => values
+            .iter()
+            .any(|expr| expr_mentions_java_type(expr, target_simple_name)),
+        Expr::Binary { left, right, .. } => {
+            expr_mentions_java_type(left, target_simple_name)
+                || expr_mentions_java_type(right, target_simple_name)
+        }
+        Expr::Unary { expr, .. } => expr_mentions_java_type(expr, target_simple_name),
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            expr_mentions_java_type(condition, target_simple_name)
+                || expr_mentions_java_type(then_expr, target_simple_name)
+                || expr_mentions_java_type(else_expr, target_simple_name)
+        }
+        Expr::Switch { selector, cases } => {
+            expr_mentions_java_type(selector, target_simple_name)
+                || cases.iter().any(|case| {
+                    case.labels.iter().any(|label| match label {
+                        SwitchLabel::Expr(expr) => {
+                            expr_mentions_java_type(expr, target_simple_name)
+                        }
+                        SwitchLabel::Default => false,
+                    }) || expr_mentions_java_type(&case.value, target_simple_name)
+                })
+        }
+        Expr::Call {
+            receiver,
+            args,
+            resolved,
+            ..
+        } => {
+            receiver
+                .as_ref()
+                .is_some_and(|expr| expr_mentions_java_type(expr, target_simple_name))
+                || args
+                    .iter()
+                    .any(|expr| expr_mentions_java_type(expr, target_simple_name))
+                || resolved.as_ref().is_some_and(|resolved| {
+                    java_type_mentions_simple_name(&resolved.return_type, target_simple_name)
+                        || resolved
+                            .arg_target_types
+                            .iter()
+                            .any(|ty| java_type_mentions_simple_name(ty, target_simple_name))
+                        || resolved.arg_coercions.iter().any(|coercion| {
+                            java_type_mentions_simple_name(&coercion.actual, target_simple_name)
+                                || java_type_mentions_simple_name(
+                                    &coercion.target,
+                                    target_simple_name,
+                                )
+                        })
+                })
+        }
+        Expr::New {
+            ty,
+            args,
+            body,
+            resolved,
+        } => {
+            java_type_mentions_simple_name(ty, target_simple_name)
+                || args
+                    .iter()
+                    .any(|expr| expr_mentions_java_type(expr, target_simple_name))
+                || body.as_ref().is_some_and(|members| {
+                    members
+                        .iter()
+                        .any(|member| member_mentions_java_type(member, target_simple_name))
+                })
+                || resolved.as_ref().is_some_and(|resolved| {
+                    java_type_mentions_simple_name(&resolved.constructed_type, target_simple_name)
+                        || resolved.params.iter().any(|param| {
+                            java_type_mentions_simple_name(&param.ty, target_simple_name)
+                        })
+                        || resolved.arg_coercions.iter().any(|coercion| {
+                            java_type_mentions_simple_name(&coercion.actual, target_simple_name)
+                                || java_type_mentions_simple_name(
+                                    &coercion.target,
+                                    target_simple_name,
+                                )
+                        })
+                })
+        }
+        Expr::Cast { ty, expr } | Expr::InstanceOf { ty, expr, .. } => {
+            java_type_mentions_simple_name(ty, target_simple_name)
+                || expr_mentions_java_type(expr, target_simple_name)
+        }
+        Expr::Lambda { params, body } => {
+            params.iter().any(|param| {
+                param
+                    .ty
+                    .as_ref()
+                    .is_some_and(|ty| java_type_mentions_simple_name(ty, target_simple_name))
+            }) || match body {
+                LambdaBody::Expr(expr) => expr_mentions_java_type(expr, target_simple_name),
+                LambdaBody::Block(block) => block_mentions_java_type(block, target_simple_name),
+            }
+        }
+        Expr::MethodReference { target, .. } => {
+            external_receiver_name_matches_simple(target, target_simple_name)
+        }
+        Expr::ClassLiteral(ty) => java_type_mentions_simple_name(ty, target_simple_name),
+        Expr::Unsupported { .. } => false,
+    }
+}
+
+fn java_type_mentions_simple_name(java_ty: &JavaType, target_simple_name: &str) -> bool {
+    match java_ty {
+        JavaType::Named { name, args } => {
+            external_receiver_name_matches_simple(name, target_simple_name)
+                || args
+                    .iter()
+                    .any(|arg| java_type_mentions_simple_name(arg, target_simple_name))
+        }
+        JavaType::Unknown(name) => external_receiver_name_matches_simple(name, target_simple_name),
+        JavaType::Array(element) => java_type_mentions_simple_name(element, target_simple_name),
+        JavaType::Wildcard(Some(WildcardBound::Extends(bound)))
+        | JavaType::Wildcard(Some(WildcardBound::Super(bound))) => {
+            java_type_mentions_simple_name(bound, target_simple_name)
+        }
+        JavaType::Void | JavaType::Primitive(_) | JavaType::String | JavaType::Wildcard(None) => {
+            false
+        }
+    }
+}
+
+fn external_receiver_name_matches_simple(name: &str, target_simple_name: &str) -> bool {
+    let canonical = canonical_external_receiver_type_key(name);
+    canonical.rsplit('.').next().unwrap_or(&canonical) == target_simple_name
+}
+
+fn source_erased_object_to_string_downcasts(programs: &[&Program]) -> String {
+    let mut arms = BTreeSet::new();
+    for program in programs {
+        for ty in &program.types {
+            collect_source_erased_object_to_string_downcasts(ty, program, &mut arms);
+        }
+    }
+    arms.into_iter().collect::<Vec<_>>().join("\n")
+}
+
+fn collect_source_erased_object_to_string_downcasts(
+    ty: &TypeDecl,
+    program: &Program,
+    arms: &mut BTreeSet<String>,
+) {
+    if ty.type_params.is_empty() && source_type_has_java_object_stringification(ty, program) {
+        let rust_name = rust_name_for_java_named_type(&ty.name);
+        arms.insert(format!(
+            "    if let Some(value) = value.downcast_ref::<{rust_name}>() {{\n        return value.to_string();\n    }}\n    if let Some(value) = value.downcast_ref::<&{rust_name}>() {{\n        return (*value).to_string();\n    }}\n    if let Some(value) = value.downcast_ref::<std::rc::Rc<{rust_name}>>() {{\n        return value.to_string();\n    }}\n    if let Some(value) = value.downcast_ref::<std::sync::Arc<{rust_name}>>() {{\n        return value.to_string();\n    }}"
+        ));
+    }
+    for member in &ty.members {
+        if let Member::Type(nested) = member {
+            collect_source_erased_object_to_string_downcasts(nested, program, arms);
+        }
+    }
+}
+
+fn source_type_has_java_object_stringification(ty: &TypeDecl, program: &Program) -> bool {
+    matches!(ty.kind, TypeKind::Class | TypeKind::Record)
+        || source_type_has_effective_java_to_string(ty, program)
+}
+
+fn source_type_has_effective_java_to_string(ty: &TypeDecl, program: &Program) -> bool {
+    source_type_declares_java_to_string(ty)
+        || crate::inherited_members::inherited_instance_method_refs_for_type(ty, program)
+            .iter()
+            .any(|inherited| source_method_is_java_to_string(inherited.method))
+}
+
+fn source_type_declares_java_to_string(ty: &TypeDecl) -> bool {
+    ty.members.iter().any(|member| match member {
+        Member::Method(method) => source_method_is_java_to_string(method),
+        _ => false,
+    })
+}
+
+fn source_method_is_java_to_string(method: &crate::java_ir::MethodDecl) -> bool {
+    method.params.is_empty()
+        && matches!(method.name.as_str(), "toString" | "to_string")
+        && matches!(method.return_type, JavaType::String)
 }
 
 pub fn java_string_split_support_item() -> crate::rust_ir::RustItem {
     crate::rust_ir::RustItem::Raw(
         r#"pub fn java_string_substring<V: AsRef<str>>(value: V, begin: i32, end: i32) -> String {
+    java_string_substring_result(value, begin, end)
+        .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
+}
+
+pub fn java_string_substring_result<V: AsRef<str>>(value: V, begin: i32, end: i32) -> Result<String, JavaException> {
     let value = value.as_ref();
-    let begin = begin.max(0) as usize;
-    let end = end.max(begin as i32) as usize;
-    value
+    let char_count = value.chars().count() as i32;
+    if begin < 0 || end < begin || end > char_count {
+        return Err(JavaException::new(
+            "StringIndexOutOfBoundsException",
+            "Java string index out of bounds".to_string(),
+        ));
+    }
+    Ok(value
         .chars()
-        .skip(begin)
-        .take(end.saturating_sub(begin))
-        .collect()
+        .skip(begin as usize)
+        .take((end - begin) as usize)
+        .collect())
 }
 
 pub fn java_string_hash_code(value: &str) -> i32 {
@@ -6687,6 +8188,12 @@ pub fn java_arrays_deep_to_string<T: JavaArraysDeepToStringElement, V: AsRef<[T]
         .collect::<Vec<_>>()
         .join(", ");
     format!("[{body}]")
+}
+
+pub fn java_collection_to_string<T: JavaArraysDeepToStringElement, V: AsRef<[T]>>(
+    values: V,
+) -> String {
+    java_arrays_deep_to_string(values)
 }
 
 macro_rules! impl_java_arrays_deep_to_string_display {
@@ -7135,37 +8642,73 @@ pub fn java_primitive_compare_to<T: PartialOrd>(left: T, right: T) -> i32 {
 }
 
 pub fn java_parse_i8<V: AsRef<str>>(value: V) -> i8 {
-    value.as_ref().parse::<i8>().expect("Java number format")
+    value
+        .as_ref()
+        .parse::<i8>()
+        .map_err(|err| JavaException::from_display("NumberFormatException", err))
+        .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
 }
 
 pub fn java_parse_i16<V: AsRef<str>>(value: V) -> i16 {
-    value.as_ref().parse::<i16>().expect("Java number format")
+    value
+        .as_ref()
+        .parse::<i16>()
+        .map_err(|err| JavaException::from_display("NumberFormatException", err))
+        .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
 }
 
 pub fn java_parse_i32<V: AsRef<str>>(value: V) -> i32 {
-    value.as_ref().parse::<i32>().expect("Java number format")
+    value
+        .as_ref()
+        .parse::<i32>()
+        .map_err(|err| JavaException::from_display("NumberFormatException", err))
+        .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
 }
 
 pub fn java_parse_i64<V: AsRef<str>>(value: V) -> i64 {
-    value.as_ref().parse::<i64>().expect("Java number format")
+    value
+        .as_ref()
+        .parse::<i64>()
+        .map_err(|err| JavaException::from_display("NumberFormatException", err))
+        .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
 }
 
 pub fn java_parse_f32<V: AsRef<str>>(value: V) -> f32 {
-    value.as_ref().parse::<f32>().expect("Java number format")
+    value
+        .as_ref()
+        .parse::<f32>()
+        .map_err(|err| JavaException::from_display("NumberFormatException", err))
+        .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
 }
 
 pub fn java_parse_f64<V: AsRef<str>>(value: V) -> f64 {
-    value.as_ref().parse::<f64>().expect("Java number format")
+    value
+        .as_ref()
+        .parse::<f64>()
+        .map_err(|err| JavaException::from_display("NumberFormatException", err))
+        .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
 }
 
 pub fn java_string_from_byte_range(bytes: &[i8], offset: i32, len: i32) -> String {
-    let start = offset.max(0) as usize;
-    let end = start.saturating_add(len.max(0) as usize).min(bytes.len());
+    java_string_from_byte_range_result(bytes, offset, len)
+        .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
+}
+
+pub fn java_string_from_byte_range_result(bytes: &[i8], offset: i32, len: i32) -> Result<String, JavaException> {
+    let end = offset as i64 + len as i64;
+    if offset < 0 || len < 0 || end > bytes.len() as i64 {
+        return Err(JavaException::new(
+            "IndexOutOfBoundsException",
+            "Java string byte range out of bounds".to_string(),
+        ));
+    }
+    let start = offset as usize;
+    let end = end as usize;
     let bytes = bytes[start..end]
         .iter()
         .map(|byte| *byte as u8)
         .collect::<Vec<_>>();
-    String::from_utf8_lossy(&bytes).into_owned()
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 pub fn java_string_from_bytes(bytes: &[i8]) -> String {
@@ -7173,7 +8716,7 @@ pub fn java_string_from_bytes(bytes: &[i8]) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-pub fn java_string_split<R: AsRef<str>>(value: &str, regex: R, limit: i32) -> Vec<String> {
+pub fn java_string_split<R: AsRef<str>>(value: &str, regex: R, limit: i32) -> Vec<Option<String>> {
     let regex = regex.as_ref();
     let split_whitespace = regex == "\\s+";
     let delimiter = match regex {
@@ -7184,18 +8727,32 @@ pub fn java_string_split<R: AsRef<str>>(value: &str, regex: R, limit: i32) -> Ve
         other => other,
     };
     let mut parts = if split_whitespace {
-        value.split_whitespace().map(|part| part.to_string()).collect::<Vec<_>>()
+        value
+            .split_whitespace()
+            .map(|part| Some(part.to_string()))
+            .collect::<Vec<_>>()
     } else {
-        value.split(delimiter).map(|part| part.to_string()).collect::<Vec<_>>()
+        value
+            .split(delimiter)
+            .map(|part| Some(part.to_string()))
+            .collect::<Vec<_>>()
     };
     if limit == 0 {
-        while parts.last().is_some_and(|part| part.is_empty()) {
+        while parts
+            .last()
+            .is_some_and(|part| part.as_ref().is_some_and(|part| part.is_empty()))
+        {
             parts.pop();
         }
     } else if limit > 0 && parts.len() > limit as usize {
         let keep = limit as usize - 1;
-        let tail = parts.split_off(keep).join(delimiter);
-        parts.push(tail);
+        let tail = parts
+            .split_off(keep)
+            .into_iter()
+            .map(|part| part.unwrap_or_else(|| "null".to_string()))
+            .collect::<Vec<_>>()
+            .join(delimiter);
+        parts.push(Some(tail));
     }
     parts
 }
@@ -7291,19 +8848,6 @@ pub fn java_string_format_support_item() -> crate::rust_ir::RustItem {
     )
 }
 
-pub fn external_api_facade_support_items(
-    program: &Program,
-    facts: &FactSet,
-) -> Vec<crate::rust_ir::RustItem> {
-    external_api_facade_support_items_with_local_type_program(
-        program,
-        facts,
-        program,
-        &Program::default(),
-        &RepresentationPlan::default(),
-    )
-}
-
 pub fn external_api_facade_support_items_with_local_type_program(
     program: &Program,
     facts: &FactSet,
@@ -7323,9 +8867,19 @@ pub fn external_api_facade_support_items_with_local_type_program(
     let display_return_hints = collect_program_display_return_hints(program);
     let imported_static_owner_calls = collect_imported_static_owner_calls(program);
 
-    let mut support = ExternalApiFacadeSupport::default();
+    let mut support = ExternalApiFacadeSupport {
+        declared_external_type_exclusions: declared_external_type_exclusions.clone(),
+        uses_java_string_runtime_helpers: program_uses_java_string_runtime_helpers(program),
+        uses_java_string_buffer_runtime_surfaces: program_uses_java_string_buffer_runtime_surfaces(
+            program,
+        ),
+        ..ExternalApiFacadeSupport::default()
+    };
     support.add_erased_source_alias_owners(representations, &declared_external_type_exclusions);
-    support.add_emitted_source_method_signatures(local_type_program);
+    support.add_emitted_source_method_signatures_excluding_types(
+        local_type_program,
+        &source_summary_types,
+    );
     if !std::ptr::eq(program, local_type_program) {
         support.add_emitted_source_method_signatures(program);
     }
@@ -7428,7 +8982,7 @@ pub fn external_api_facade_support_items_with_local_type_program(
     support.add_external_conversion_surfaces(facts, &local_types);
     support.suppress_rust_crate_mapped_external_types(facts);
     support.suppress_emitted_java_enum_types(program);
-    support.into_items()
+    support.into_items(facts)
 }
 
 fn local_type_keys_for_program(program: &Program) -> BTreeSet<String> {
@@ -7466,9 +9020,233 @@ fn collect_local_type_keys(
         }
     }
     for member in &ty.members {
-        if let Member::Type(nested) = member {
-            collect_local_type_keys(nested, Some(&qualified), types);
+        match member {
+            Member::Type(nested) => collect_local_type_keys(nested, Some(&qualified), types),
+            Member::Method(method) => {
+                if let Some(body) = &method.body {
+                    collect_local_type_keys_from_block(body, Some(&qualified), types);
+                }
+            }
+            Member::Constructor(constructor) => {
+                if let Some(body) = &constructor.body {
+                    collect_local_type_keys_from_block(body, Some(&qualified), types);
+                }
+            }
+            _ => {}
         }
+    }
+}
+
+fn collect_local_type_keys_from_block(
+    block: &Block,
+    enclosing: Option<&str>,
+    types: &mut BTreeSet<String>,
+) {
+    for stmt in &block.statements {
+        collect_local_type_keys_from_stmt(stmt, enclosing, types);
+    }
+}
+
+fn collect_local_type_keys_from_stmt(
+    stmt: &Stmt,
+    enclosing: Option<&str>,
+    types: &mut BTreeSet<String>,
+) {
+    match stmt {
+        Stmt::LocalType(local) => collect_local_type_keys(local, enclosing, types),
+        Stmt::VarDecl {
+            initializer: Some(initializer),
+            ..
+        } => collect_local_type_keys_from_expr(initializer, enclosing, types),
+        Stmt::Assign { target, value } => {
+            collect_local_type_keys_from_expr(target, enclosing, types);
+            collect_local_type_keys_from_expr(value, enclosing, types);
+        }
+        Stmt::Expr(expr) | Stmt::Throw(expr) => {
+            collect_local_type_keys_from_expr(expr, enclosing, types);
+        }
+        Stmt::Return(Some(expr)) => collect_local_type_keys_from_expr(expr, enclosing, types),
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            collect_local_type_keys_from_expr(condition, enclosing, types);
+            collect_local_type_keys_from_block(then_block, enclosing, types);
+            if let Some(else_block) = else_block {
+                collect_local_type_keys_from_block(else_block, enclosing, types);
+            }
+        }
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
+            collect_local_type_keys_from_expr(condition, enclosing, types);
+            collect_local_type_keys_from_block(body, enclosing, types);
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            for stmt in init {
+                collect_local_type_keys_from_stmt(stmt, enclosing, types);
+            }
+            if let Some(condition) = condition {
+                collect_local_type_keys_from_expr(condition, enclosing, types);
+            }
+            for expr in update {
+                collect_local_type_keys_from_expr(expr, enclosing, types);
+            }
+            collect_local_type_keys_from_block(body, enclosing, types);
+        }
+        Stmt::EnhancedFor { iterable, body, .. } => {
+            collect_local_type_keys_from_expr(iterable, enclosing, types);
+            collect_local_type_keys_from_block(body, enclosing, types);
+        }
+        Stmt::Switch { selector, cases } => {
+            collect_local_type_keys_from_expr(selector, enclosing, types);
+            for case in cases {
+                for label in &case.labels {
+                    if let SwitchLabel::Expr(expr) = label {
+                        collect_local_type_keys_from_expr(expr, enclosing, types);
+                    }
+                }
+                for stmt in &case.statements {
+                    collect_local_type_keys_from_stmt(stmt, enclosing, types);
+                }
+            }
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            for resource in resources {
+                collect_local_type_keys_from_stmt(resource, enclosing, types);
+            }
+            collect_local_type_keys_from_block(body, enclosing, types);
+            for catch in catches {
+                collect_local_type_keys_from_block(&catch.body, enclosing, types);
+            }
+            if let Some(finally_block) = finally_block {
+                collect_local_type_keys_from_block(finally_block, enclosing, types);
+            }
+        }
+        Stmt::ConstructorInvocation { args, .. } => {
+            for arg in args {
+                collect_local_type_keys_from_expr(arg, enclosing, types);
+            }
+        }
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            collect_local_type_keys_from_block(block, enclosing, types);
+        }
+        Stmt::VarDecl {
+            initializer: None, ..
+        }
+        | Stmt::Return(None)
+        | Stmt::Break(_)
+        | Stmt::Continue(_)
+        | Stmt::Unsupported(_) => {}
+    }
+}
+
+fn collect_local_type_keys_from_expr(
+    expr: &Expr,
+    enclosing: Option<&str>,
+    types: &mut BTreeSet<String>,
+) {
+    match expr {
+        Expr::New { args, body, .. } => {
+            for arg in args {
+                collect_local_type_keys_from_expr(arg, enclosing, types);
+            }
+            if let Some(members) = body {
+                for member in members {
+                    if let Member::Type(local) = member {
+                        collect_local_type_keys(local, enclosing, types);
+                    }
+                }
+            }
+        }
+        Expr::FieldAccess(receiver, _) | Expr::Unary { expr: receiver, .. } => {
+            collect_local_type_keys_from_expr(receiver, enclosing, types);
+        }
+        Expr::ArrayAccess(array, index) => {
+            collect_local_type_keys_from_expr(array, enclosing, types);
+            collect_local_type_keys_from_expr(index, enclosing, types);
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            for dimension in dimensions {
+                collect_local_type_keys_from_expr(dimension, enclosing, types);
+            }
+            if let Some(values) = initializer {
+                for value in values {
+                    collect_local_type_keys_from_expr(value, enclosing, types);
+                }
+            }
+        }
+        Expr::ArrayInitializer(values) => {
+            for value in values {
+                collect_local_type_keys_from_expr(value, enclosing, types);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_local_type_keys_from_expr(left, enclosing, types);
+            collect_local_type_keys_from_expr(right, enclosing, types);
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_local_type_keys_from_expr(condition, enclosing, types);
+            collect_local_type_keys_from_expr(then_expr, enclosing, types);
+            collect_local_type_keys_from_expr(else_expr, enclosing, types);
+        }
+        Expr::Switch { selector, cases } => {
+            collect_local_type_keys_from_expr(selector, enclosing, types);
+            for case in cases {
+                for label in &case.labels {
+                    if let SwitchLabel::Expr(expr) = label {
+                        collect_local_type_keys_from_expr(expr, enclosing, types);
+                    }
+                }
+                collect_local_type_keys_from_expr(&case.value, enclosing, types);
+            }
+        }
+        Expr::Call { receiver, args, .. } => {
+            if let Some(receiver) = receiver {
+                collect_local_type_keys_from_expr(receiver, enclosing, types);
+            }
+            for arg in args {
+                collect_local_type_keys_from_expr(arg, enclosing, types);
+            }
+        }
+        Expr::Cast { expr, .. } | Expr::InstanceOf { expr, .. } => {
+            collect_local_type_keys_from_expr(expr, enclosing, types);
+        }
+        Expr::Lambda { body, .. } => match body {
+            LambdaBody::Expr(expr) => collect_local_type_keys_from_expr(expr, enclosing, types),
+            LambdaBody::Block(block) => collect_local_type_keys_from_block(block, enclosing, types),
+        },
+        Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::MethodReference { .. }
+        | Expr::ClassLiteral(_)
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => {}
     }
 }
 
@@ -7891,6 +9669,7 @@ fn source_static_final_field_names(ty: &TypeDecl) -> BTreeSet<String> {
 #[derive(Default)]
 struct ExternalApiFacadeSupport {
     opaque_types: BTreeSet<String>,
+    declared_external_type_exclusions: BTreeSet<String>,
     trait_type_names: BTreeSet<String>,
     traits: BTreeMap<String, ExternalFacadeTrait>,
     trait_impls: BTreeMap<String, BTreeSet<String>>,
@@ -7902,6 +9681,8 @@ struct ExternalApiFacadeSupport {
     erased_object_method_conflicts: BTreeSet<(String, usize)>,
     emitted_source_methods: BTreeSet<(String, String, usize)>,
     erased_source_alias_owners: BTreeSet<String>,
+    uses_java_string_runtime_helpers: bool,
+    uses_java_string_buffer_runtime_surfaces: bool,
     /// Set when the source-summary surface fixpoint hit its budget. Surfaced as
     /// a `compile_error!` by `into_items` rather than being dropped silently.
     diverged_source_summary_surface_fixpoint: bool,
@@ -8014,8 +9795,21 @@ impl ExternalApiFacadeSupport {
     }
 
     fn add_emitted_source_method_signatures(&mut self, program: &Program) {
+        self.add_emitted_source_method_signatures_excluding_types(program, &BTreeSet::new());
+    }
+
+    fn add_emitted_source_method_signatures_excluding_types(
+        &mut self,
+        program: &Program,
+        excluded_type_keys: &BTreeSet<String>,
+    ) {
         for ty in &program.types {
-            self.add_emitted_source_method_signatures_from_type(program, ty, None);
+            self.add_emitted_source_method_signatures_from_type(
+                program,
+                ty,
+                None,
+                excluded_type_keys,
+            );
         }
     }
 
@@ -8024,6 +9818,7 @@ impl ExternalApiFacadeSupport {
         program: &Program,
         ty: &crate::java_ir::TypeDecl,
         enclosing: Option<&str>,
+        excluded_type_keys: &BTreeSet<String>,
     ) {
         let qualified = enclosing
             .map(|outer| format!("{outer}.{}", ty.name))
@@ -8034,9 +9829,12 @@ impl ExternalApiFacadeSupport {
             canonical_external_receiver_type_key(&ty.name),
             canonical_external_receiver_type_key(&qualified),
         ];
+        let type_is_excluded = owners
+            .iter()
+            .any(|owner| excluded_type_keys.contains(owner));
         for member in &ty.members {
             match member {
-                Member::Method(method) => {
+                Member::Method(method) if !type_is_excluded => {
                     let rust_method = crate::java_signature::source_method_rust_name(method);
                     for owner in &owners {
                         let rust_owner = rust_name_for_java_named_type(owner);
@@ -8054,12 +9852,16 @@ impl ExternalApiFacadeSupport {
                         program,
                         nested,
                         Some(&qualified),
+                        excluded_type_keys,
                     );
                 }
-                Member::Field(_) | Member::Constructor(_) | Member::Unsupported { .. } => {}
+                Member::Method(_)
+                | Member::Field(_)
+                | Member::Constructor(_)
+                | Member::Unsupported { .. } => {}
             }
         }
-        if let Some(super_name) = ty.extends.as_deref() {
+        if !type_is_excluded && let Some(super_name) = ty.extends.as_deref() {
             let mut inherited = BTreeSet::new();
             collect_source_method_signatures_for_type_name(
                 program,
@@ -8342,6 +10144,7 @@ impl ExternalApiFacadeSupport {
                     .unwrap_or(&method.return_type);
                 let effective_nullability = effect
                     .map(|effect| effect.return_nullability)
+                    .filter(|state| *state != NullabilityState::Unknown)
                     .unwrap_or_else(|| {
                         source_summary_method_effective_return_nullability(facts, type_key, method)
                     });
@@ -9087,6 +10890,8 @@ impl ExternalApiFacadeSupport {
         source_summary_types: &BTreeSet<String>,
         source_summary_program: &Program,
     ) {
+        let unique_simple_owners =
+            Self::unique_external_constructor_simple_owners(used_constructors);
         for (type_name, arities) in used_constructors {
             let java_type = JavaType::Named {
                 name: type_name.clone(),
@@ -9109,7 +10914,10 @@ impl ExternalApiFacadeSupport {
             }
             self.add_opaque_type(owner.clone());
             let simple_owner = rust_name_for_java_named_type(type_simple);
-            if simple_owner != owner && !self.opaque_types.contains(&simple_owner) {
+            if unique_simple_owners.contains(&simple_owner)
+                && simple_owner != owner
+                && !self.opaque_types.contains(&simple_owner)
+            {
                 self.add_type_alias(simple_owner, owner.clone());
             }
             let overload_by_arity =
@@ -9166,6 +10974,22 @@ impl ExternalApiFacadeSupport {
         }
     }
 
+    fn unique_external_constructor_simple_owners(
+        used_constructors: &BTreeMap<String, BTreeSet<usize>>,
+    ) -> BTreeSet<String> {
+        let mut counts = BTreeMap::<String, usize>::new();
+        for type_name in used_constructors.keys() {
+            let type_key = canonical_external_receiver_type_key(type_name);
+            let type_simple = type_key.rsplit('.').next().unwrap_or(type_key.as_str());
+            let simple_owner = rust_name_for_java_named_type(type_simple);
+            *counts.entry(simple_owner).or_default() += 1;
+        }
+        counts
+            .into_iter()
+            .filter_map(|(owner, count)| (count == 1).then_some(owner))
+            .collect()
+    }
+
     fn add_used_external_api_facts(
         &mut self,
         facts: &FactSet,
@@ -9212,6 +11036,9 @@ impl ExternalApiFacadeSupport {
             }
             let receiver_rust = rust_name_for_java_named_type(&receiver_key);
             if !valid_rust_type_ident(&receiver_rust) {
+                continue;
+            }
+            if is_builtin_external_facade_type(&receiver_rust) {
                 continue;
             }
             if matches!(
@@ -9277,11 +11104,16 @@ impl ExternalApiFacadeSupport {
             } else if receiver_rust.ends_with("Builder") {
                 continue;
             } else {
-                let rust_method = crate::call_plan::external_method_rust_name(
+                let mut rust_method = crate::call_plan::external_method_rust_name(
                     &receiver_key,
                     &fact.method_name,
                     arg_count,
                     facts,
+                );
+                rust_method = self.external_facade_non_overloaded_method_name(
+                    &receiver_rust,
+                    &rust_method,
+                    arg_count,
                 );
                 if !valid_rust_method_ident(&rust_method) {
                     continue;
@@ -9312,6 +11144,28 @@ impl ExternalApiFacadeSupport {
                 }
                 if unmodelled_value_return {
                     self.add_opaque_type(return_rust.clone());
+                }
+                if is_static_facade_method
+                    && imported_static_method_returns_first_arg(
+                        &receiver_key,
+                        &fact.method_name,
+                        arg_count,
+                    )
+                {
+                    let method_body =
+                        external_facade_imported_static_first_arg_method(&rust_method, arg_count);
+                    if self.has_method_signature(&receiver_rust, &rust_method, arg_count)
+                        && !self.replace_weak_method_return(
+                            &receiver_rust,
+                            &rust_method,
+                            arg_count,
+                            &method_body,
+                        )
+                    {
+                        continue;
+                    }
+                    self.add_method(receiver_rust, method_body);
+                    continue;
                 }
                 if fact.provenance != FactProvenance::ConservativeFallback
                     && !external_facade_method_is_self_returning_fluent(
@@ -9440,6 +11294,11 @@ impl ExternalApiFacadeSupport {
                             arg_count
                         );
                     }
+                    rust_method = self.external_facade_non_overloaded_method_name(
+                        &receiver_rust,
+                        &rust_method,
+                        *arg_count,
+                    );
                     if !valid_rust_method_ident(&rust_method) {
                         continue;
                     }
@@ -9686,6 +11545,9 @@ impl ExternalApiFacadeSupport {
         if let Some(arg_count) = fact.arg_count {
             return vec![arg_count];
         }
+        if imported_static_method_returns_first_arg(receiver_key, &fact.method_name, 1) {
+            return vec![1];
+        }
         let mut arities = Vec::new();
         for arg_count in 0..16 {
             if crate::javalibs::is_static_facade_method(receiver_key, &fact.method_name, arg_count)
@@ -9882,20 +11744,21 @@ impl ExternalApiFacadeSupport {
                         facts,
                     );
                     let arity_rust_method = format!("{planned_rust_method}_{arg_count}");
-                    let support_rust_method = if Self::has_facade_abi_for_rust_method(
-                        facts,
-                        &owner,
-                        &rust_lookup_method,
-                        *arg_count,
-                    ) {
-                        rust_lookup_method.clone()
-                    } else if Self::has_facade_abi_for_rust_method(
+                    let support_rust_method = if let Some(abi_rust_method) =
+                        Self::facade_abi_rust_method_for_support(
+                            facts,
+                            &owner,
+                            &rust_lookup_method,
+                            *arg_count,
+                        ) {
+                        abi_rust_method
+                    } else if let Some(abi_rust_method) = Self::facade_abi_rust_method_for_support(
                         facts,
                         &owner,
                         &arity_rust_method,
                         *arg_count,
                     ) {
-                        arity_rust_method
+                        abi_rust_method
                     } else if matches!(java_method.as_str(), "read" | "write") && *arg_count > 1 {
                         arity_rust_method
                     } else {
@@ -10191,18 +12054,28 @@ impl ExternalApiFacadeSupport {
             })
     }
 
-    fn has_facade_abi_for_rust_method(
+    fn facade_abi_rust_method_for_support(
         facts: &FactSet,
         owner: &str,
         rust_method: &str,
         arg_count: usize,
-    ) -> bool {
-        facts.facade_abi_facts.iter().any(|abi| {
-            canonical_external_receiver_type_key(&abi.key.owner.type_name)
-                == canonical_external_receiver_type_key(owner)
-                && abi.key.member.0 == rust_method
-                && abi.args.len() == arg_count
-        })
+    ) -> Option<String> {
+        facts
+            .facade_abi_facts
+            .iter()
+            .find(|abi| {
+                canonical_external_receiver_type_key(&abi.key.owner.type_name)
+                    == canonical_external_receiver_type_key(owner)
+                    && abi.key.member.0 == rust_method
+                    && abi.args.len() == arg_count
+            })
+            .map(|abi| {
+                abi.rust_path
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or(&abi.rust_path)
+                    .to_string()
+            })
     }
 
     fn add_known_object_inherited_surfaces_from_used_calls(
@@ -10334,7 +12207,7 @@ impl ExternalApiFacadeSupport {
                     .to_string(),
             );
         }
-        for owner in ["Double", "Float"] {
+        for owner in ["Double", "Float", "Integer"] {
             if used_calls
                 .get("compare")
                 .is_some_and(|arities| arities.contains(&2))
@@ -10522,6 +12395,24 @@ impl ExternalApiFacadeSupport {
             self.add_method(
                 "System".to_string(),
                 "    pub fn arraycopy<T0, T1, T2, T3, T4>(_src: T0, _src_pos: T1, _dest: T2, _dest_pos: T3, _length: T4) {}".to_string(),
+            );
+        }
+        if used_calls
+            .get("close")
+            .is_some_and(|arities| arities.contains(&0))
+            || used_calls
+                .get("open")
+                .is_some_and(|arities| arities.contains(&1))
+        {
+            self.add_opaque_type("Closeable".to_string());
+            self.add_method(
+                "Closeable".to_string(),
+                "    pub fn close(&self) -> Result<(), JavaException> { unimplemented!(\"Closeable.close is not modelled\") }"
+                    .to_string(),
+            );
+            self.add_method(
+                "Closeable".to_string(),
+                "    pub fn open<T0>(_arg0: T0) -> Closeable { Closeable }".to_string(),
             );
         }
         if used_calls
@@ -10811,7 +12702,7 @@ impl ExternalApiFacadeSupport {
         if !valid_rust_field_ident(&rust_name) {
             return;
         }
-        let rust_type = external_facade_return_type_with_facts(field_type, facts);
+        let rust_type = external_facade_field_type_with_facts(fact, field_type, facts);
         self.add_java_type(field_type);
         self.fields
             .entry(owner)
@@ -10989,11 +12880,17 @@ impl ExternalApiFacadeSupport {
     fn add_java_type(&mut self, java_type: &JavaType) {
         match java_type {
             JavaType::Named { name, args } => {
+                let canonical = canonical_external_receiver_type_key(name);
                 let rendered = rust_name_for_java_named_type(name);
-                if valid_rust_type_ident(&rendered) {
+                let declared_locally = self.declared_external_type_exclusions.contains(name)
+                    || self.declared_external_type_exclusions.contains(&canonical)
+                    || self.declared_external_type_exclusions.contains(&rendered);
+                if !declared_locally && valid_rust_type_ident(&rendered) {
                     self.add_opaque_type(rendered);
                 }
-                self.add_aliases_for_nested_return(name);
+                if !declared_locally {
+                    self.add_aliases_for_nested_return(name);
+                }
                 for arg in args {
                     self.add_java_type(arg);
                 }
@@ -11220,6 +13117,23 @@ impl ExternalApiFacadeSupport {
         })
     }
 
+    fn external_facade_non_overloaded_method_name(
+        &self,
+        owner: &str,
+        method: &str,
+        arg_count: usize,
+    ) -> String {
+        if self.has_method_named(owner, method)
+            && !self.has_method_signature(owner, method, arg_count)
+        {
+            let suffixed = format!("{method}_{arg_count}");
+            if !self.has_method_signature(owner, &suffixed, arg_count) {
+                return suffixed;
+            }
+        }
+        method.to_string()
+    }
+
     fn has_static_method_named(&self, owner: &str, method: &str) -> bool {
         self.impls.get(owner).is_some_and(|methods| {
             methods.iter().any(|body| {
@@ -11427,6 +13341,7 @@ impl ExternalApiFacadeSupport {
         } else {
             normalize_external_facade_return_type_text(&return_type)
         };
+        let return_type = erased_object_method_return_type_for_name(&name, &return_type);
         match self.erased_object_methods.get(&key) {
             Some(existing)
                 if existing.arg_count == arg_count && existing.return_type == return_type => {}
@@ -11500,6 +13415,9 @@ impl ExternalApiFacadeSupport {
             let HierarchyStrategy::DynTrait { trait_name } = &override_fact.strategy else {
                 continue;
             };
+            if local_type_set_matches_external_name(local_types, &override_fact.type_name) {
+                continue;
+            }
             let type_key = canonical_external_receiver_type_key(&override_fact.type_name);
             if !valid_external_facade_type_ident(&type_key)
                 || is_builtin_external_facade_type(&type_key)
@@ -11607,15 +13525,16 @@ impl ExternalApiFacadeSupport {
             {
                 continue;
             }
-            let from = rust_name_for_java_named_type(&from_key);
-            let to = rust_name_for_java_named_type(&to_key);
+            let from =
+                external_conversion_adapter_endpoint_rust_name(&adapter.from_type, &from_key);
+            let to = external_conversion_adapter_endpoint_rust_name(&adapter.to_type, &to_key);
             if local_types.contains(&from)
                 || (local_types.contains(&to) && !is_builtin_external_facade_type(&to_key))
             {
                 continue;
             }
             if !valid_external_facade_type_ident(&from)
-                || !valid_external_facade_type_ident(&to)
+                || (!valid_external_facade_type_ident(&to) && to != "InputStream")
                 || is_builtin_external_facade_type(&from)
                 || from == to
             {
@@ -11767,7 +13686,7 @@ impl ExternalApiFacadeSupport {
         }
     }
 
-    fn into_items(mut self) -> Vec<crate::rust_ir::RustItem> {
+    fn into_items(mut self, facts: &FactSet) -> Vec<crate::rust_ir::RustItem> {
         self.add_javalibs_static_owner_aliases();
         let alias_names = self.aliases.keys().cloned().collect::<BTreeSet<_>>();
         let aliases = self.aliases.clone();
@@ -11792,6 +13711,16 @@ impl ExternalApiFacadeSupport {
         });
 
         self.add_known_jdk_static_field_surfaces();
+        if self.uses_java_string_runtime_helpers
+            && (self.impls.contains_key("Appendable")
+                || self.fields.contains_key("Appendable")
+                || self.from_impls.iter().any(|(_, to)| to == "Appendable"))
+        {
+            self.from_impls
+                .insert(("StringBuilder".to_string(), "Appendable".to_string()));
+            self.from_impls
+                .insert(("StringBuffer".to_string(), "Appendable".to_string()));
+        }
 
         let emitted_support_type_names = self
             .opaque_types
@@ -11803,6 +13732,7 @@ impl ExternalApiFacadeSupport {
         let should_emit_level_constants_fallback = emitted_support_type_names.contains("Level")
             && !self.has_const_named("Level", "WARNING");
         let display_and_eq_types = self.opaque_types.iter().cloned().collect::<Vec<_>>();
+        let display_to_string_types = display_capable_external_facade_types(facts);
         for ty in &display_and_eq_types {
             if crate::javalibs::needs_conversion_constructor_for_facade(ty)
                 && !self.has_method_named(ty, "new_1")
@@ -11816,14 +13746,14 @@ impl ExternalApiFacadeSupport {
                 if !self.has_method_named(ty, "_1") {
                     self.add_method(
                         ty.clone(),
-                        "    pub fn _1(&self) -> Box<dyn std::any::Any> { Box::new(()) }"
+                        "    pub fn _1(&self) -> std::boxed::Box<dyn std::any::Any> { std::boxed::Box::new(()) }"
                             .to_string(),
                     );
                 }
                 if !self.has_method_named(ty, "_2") {
                     self.add_method(
                         ty.clone(),
-                        "    pub fn _2(&self) -> Box<dyn std::any::Any> { Box::new(()) }"
+                        "    pub fn _2(&self) -> std::boxed::Box<dyn std::any::Any> { std::boxed::Box::new(()) }"
                             .to_string(),
                     );
                 }
@@ -11856,7 +13786,10 @@ impl ExternalApiFacadeSupport {
         for ty in &display_and_eq_types {
             lines.push(external_facade_eq_impl(ty));
             lines.push(external_facade_hash_impl(ty));
-            lines.push(external_facade_display_impl(ty));
+            lines.push(external_facade_display_impl(
+                ty,
+                display_to_string_types.contains(ty),
+            ));
         }
         if should_emit_level_constants_fallback {
             lines.push(java_logging_level_constants_impl());
@@ -11880,6 +13813,12 @@ impl ExternalApiFacadeSupport {
                 lines.push(format!("impl {trait_name} for {implementor} {{}}"));
             }
         }
+        let builtin_from_impl_surface_names = self
+            .impls
+            .keys()
+            .chain(self.fields.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>();
         for (from, to) in self.from_impls {
             if alias_names.contains(&from)
                 || alias_names.contains(&to)
@@ -11887,10 +13826,9 @@ impl ExternalApiFacadeSupport {
                     && !emitted_support_type_names.contains(&from))
                 || (is_builtin_external_facade_type(&from)
                     && !is_allowed_builtin_external_from_impl(&from, &to))
-                || matches!(
-                    (from.as_str(), to.as_str()),
-                    ("OutputStream", "JavaIoOutputStream")
-                )
+                || (builtin_external_from_impl_requires_surface(&from, &to)
+                    && !self.uses_java_string_buffer_runtime_surfaces
+                    && !builtin_from_impl_surface_names.contains(&from))
             {
                 continue;
             }
@@ -11900,7 +13838,7 @@ impl ExternalApiFacadeSupport {
                 // nothing — but it is indistinguishable from a working
                 // conversion, and would silently discard the value the moment
                 // either type gains a field. Name the gap instead of hiding it.
-                "impl From<{from}> for {to} {{\n    /// Unmodelled Java upcast: {from} -> {to}.\n    fn from(_value: {from}) -> Self {{ Default::default() }}\n}}"
+                "impl From<{from}> for {to} {{\n    /// Unmodelled Java upcast: {from} -> {to}.\n    fn from(_value: {from}) -> Self {{ panic!(\"unsupported Java external upcast: {from} -> {to}\") }}\n}}"
             ));
         }
         let erased_object_return_upgrades =
@@ -11945,8 +13883,13 @@ impl ExternalApiFacadeSupport {
                 .map(external_erased_object_impl_method)
                 .collect::<Vec<_>>()
                 .join("\n");
+            let slice_impl_methods = methods
+                .iter()
+                .map(external_erased_object_slice_impl_method)
+                .collect::<Vec<_>>()
+                .join("\n");
             lines.push(format!(
-                "pub trait JavaErasedObjectFacade {{\n{trait_methods}\n}}\n\nimpl JavaErasedObjectFacade for Box<dyn std::any::Any> {{\n{impl_methods}\n}}"
+                "pub trait JavaErasedObjectFacade {{\n{trait_methods}\n}}\n\nimpl JavaErasedObjectFacade for std::boxed::Box<dyn std::any::Any> {{\n{impl_methods}\n}}\n\nimpl<T> JavaErasedObjectFacade for [T] {{\n{slice_impl_methods}\n}}"
             ));
         }
 
@@ -11998,6 +13941,18 @@ impl ExternalApiFacadeSupport {
                 }
             }
         }
+    }
+}
+
+fn erased_object_method_return_type_for_name(name: &str, return_type: &str) -> String {
+    if (name == "sortByKey" || name.starts_with("sort_by_key"))
+        && return_type
+            .strip_prefix("JavaPairRDD")
+            .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('<'))
+    {
+        "Box<dyn std::any::Any>".to_string()
+    } else {
+        return_type.to_string()
     }
 }
 
@@ -12557,6 +14512,7 @@ fn unproven_simple_static_owner_candidate(receiver_name: &str) -> bool {
         .chars()
         .next()
         .is_some_and(|ch| ch.is_ascii_uppercase())
+        || receiver_name.ends_with("_api")
         || receiver_name.ends_with("_utils")
 }
 
@@ -12966,11 +14922,13 @@ struct DisplayContextReturnHint {
 #[derive(Debug, Clone, Default)]
 struct DisplayHintTypeContext {
     bindings: BTreeMap<String, JavaType>,
+    source_fields: BTreeMap<(String, String), JavaType>,
 }
 
 impl DisplayHintTypeContext {
-    fn for_type(ty: &TypeDecl) -> Self {
+    fn for_program_type(program: &Program, ty: &TypeDecl) -> Self {
         let mut ctx = Self::default();
+        collect_display_hint_source_fields(program, &mut ctx.source_fields);
         for member in &ty.members {
             if let Member::Field(field) = member {
                 ctx.bindings.insert(field.name.clone(), field.ty.clone());
@@ -12987,15 +14945,40 @@ impl DisplayHintTypeContext {
         ctx
     }
 
+    fn with_lambda_params(&self, params: &[crate::java_ir::LambdaParam]) -> Self {
+        let mut ctx = self.clone();
+        for param in params {
+            if let Some(ty) = &param.ty {
+                ctx.insert_local(&param.name, ty);
+                if param.source_name != param.name {
+                    ctx.insert_local(&param.source_name, ty);
+                }
+            }
+        }
+        ctx
+    }
+
     fn insert_local(&mut self, name: &str, ty: &JavaType) {
         ctx_insert_binding_aliases(&mut self.bindings, name, ty);
     }
 
-    fn java_type_for_expr(&self, expr: &Expr) -> Option<&JavaType> {
+    fn java_type_for_expr(&self, expr: &Expr) -> Option<JavaType> {
         match expr {
-            Expr::Var(name) => self.bindings.get(name),
+            Expr::Var(name) => self.bindings.get(name).cloned(),
             Expr::FieldAccess(receiver, field) if matches!(receiver.as_ref(), Expr::This) => {
-                self.bindings.get(field)
+                self.bindings.get(field).cloned()
+            }
+            Expr::FieldAccess(receiver, field) => {
+                let receiver_ty = self.java_type_for_expr(receiver)?;
+                let receiver_name = match receiver_ty {
+                    JavaType::Named { name, .. } | JavaType::Unknown(name) => name,
+                    _ => return None,
+                };
+                let field_alias = crate::parser::to_snake_case(field);
+                self.source_fields
+                    .get(&(receiver_name.clone(), field.clone()))
+                    .or_else(|| self.source_fields.get(&(receiver_name, field_alias)))
+                    .cloned()
             }
             _ => None,
         }
@@ -13017,16 +15000,17 @@ fn ctx_insert_binding_aliases(
 fn collect_program_display_return_hints(program: &Program) -> BTreeSet<DisplayContextReturnHint> {
     let mut hints = BTreeSet::new();
     for ty in &program.types {
-        collect_type_display_return_hints(ty, &mut hints);
+        collect_type_display_return_hints(program, ty, &mut hints);
     }
     hints
 }
 
 fn collect_type_display_return_hints(
+    program: &Program,
     ty: &TypeDecl,
     hints: &mut BTreeSet<DisplayContextReturnHint>,
 ) {
-    let type_ctx = DisplayHintTypeContext::for_type(ty);
+    let type_ctx = DisplayHintTypeContext::for_program_type(program, ty);
     for member in &ty.members {
         match member {
             Member::Field(field) => {
@@ -13046,8 +15030,36 @@ fn collect_type_display_return_hints(
                     collect_block_display_return_hints(body, &mut ctx, hints);
                 }
             }
-            Member::Type(nested) => collect_type_display_return_hints(nested, hints),
+            Member::Type(nested) => collect_type_display_return_hints(program, nested, hints),
             Member::Unsupported { .. } => {}
+        }
+    }
+}
+
+fn collect_display_hint_source_fields(
+    program: &Program,
+    fields: &mut BTreeMap<(String, String), JavaType>,
+) {
+    for ty in &program.types {
+        collect_display_hint_type_fields(ty, fields);
+    }
+}
+
+fn collect_display_hint_type_fields(
+    ty: &TypeDecl,
+    fields: &mut BTreeMap<(String, String), JavaType>,
+) {
+    for member in &ty.members {
+        match member {
+            Member::Field(field) => {
+                fields.insert((ty.name.clone(), field.name.clone()), field.ty.clone());
+                let snake = crate::parser::to_snake_case(&field.name);
+                if snake != field.name {
+                    fields.insert((ty.name.clone(), snake), field.ty.clone());
+                }
+            }
+            Member::Type(nested) => collect_display_hint_type_fields(nested, fields),
+            _ => {}
         }
     }
 }
@@ -13165,6 +15177,9 @@ fn collect_stmt_display_return_hints(
             collect_block_display_return_hints(body, &mut try_ctx, hints);
             for catch in catches {
                 let mut catch_ctx = ctx.clone();
+                if let Some(catch_ty) = catch.types.first() {
+                    catch_ctx.insert_local(&catch.name, catch_ty);
+                }
                 collect_block_display_return_hints(&catch.body, &mut catch_ctx, hints);
             }
             if let Some(finally_block) = finally_block {
@@ -13177,12 +15192,52 @@ fn collect_stmt_display_return_hints(
                 collect_expr_display_return_hints(arg, ctx, hints);
             }
         }
-        Stmt::LocalType(ty) => collect_type_display_return_hints(ty, hints),
+        Stmt::LocalType(ty) => collect_inline_type_display_return_hints(ty, ctx, hints),
         Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
             let mut block_ctx = ctx.clone();
             collect_block_display_return_hints(block, &mut block_ctx, hints);
         }
         Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => {}
+    }
+}
+
+fn collect_inline_type_display_return_hints(
+    ty: &TypeDecl,
+    outer_ctx: &DisplayHintTypeContext,
+    hints: &mut BTreeSet<DisplayContextReturnHint>,
+) {
+    let mut type_ctx = outer_ctx.clone();
+    for member in &ty.members {
+        if let Member::Field(field) = member {
+            type_ctx
+                .bindings
+                .insert(field.name.clone(), field.ty.clone());
+        }
+    }
+    for member in &ty.members {
+        match member {
+            Member::Field(field) => {
+                if let Some(initializer) = &field.initializer {
+                    collect_expr_display_return_hints(initializer, &type_ctx, hints);
+                }
+            }
+            Member::Method(method) => {
+                if let Some(body) = &method.body {
+                    let mut ctx = type_ctx.with_params(&method.params);
+                    collect_block_display_return_hints(body, &mut ctx, hints);
+                }
+            }
+            Member::Constructor(constructor) => {
+                if let Some(body) = &constructor.body {
+                    let mut ctx = type_ctx.with_params(&constructor.params);
+                    collect_block_display_return_hints(body, &mut ctx, hints);
+                }
+            }
+            Member::Type(nested) => {
+                collect_inline_type_display_return_hints(nested, &type_ctx, hints)
+            }
+            Member::Unsupported { .. } => {}
+        }
     }
 }
 
@@ -13282,20 +15337,24 @@ fn collect_expr_display_return_hints(
                             collect_block_display_return_hints(body, &mut nested_ctx, hints);
                         }
                     }
-                    Member::Type(nested) => collect_type_display_return_hints(nested, hints),
+                    Member::Type(nested) => {
+                        collect_inline_type_display_return_hints(nested, ctx, hints)
+                    }
                     Member::Unsupported { .. } => {}
                 }
             }
         }
-        Expr::Lambda { body, .. } => match body {
-            crate::java_ir::LambdaBody::Expr(expr) => {
-                collect_expr_display_return_hints(expr, ctx, hints)
+        Expr::Lambda { params, body } => {
+            let mut lambda_ctx = ctx.with_lambda_params(params);
+            match body {
+                crate::java_ir::LambdaBody::Expr(expr) => {
+                    collect_expr_display_return_hints(expr, &lambda_ctx, hints)
+                }
+                crate::java_ir::LambdaBody::Block(block) => {
+                    collect_block_display_return_hints(block, &mut lambda_ctx, hints);
+                }
             }
-            crate::java_ir::LambdaBody::Block(block) => {
-                let mut lambda_ctx = ctx.clone();
-                collect_block_display_return_hints(block, &mut lambda_ctx, hints);
-            }
-        },
+        }
         Expr::Literal(_)
         | Expr::Var(_)
         | Expr::This
@@ -13321,7 +15380,7 @@ fn collect_display_sink_arg_return_hints(
         } => {
             if let Some(owner) = ctx
                 .java_type_for_expr(receiver)
-                .and_then(display_hint_owner_for_type)
+                .and_then(|java_type| display_hint_owner_for_type(&java_type))
             {
                 if display_hint_has_concrete_external_return(&owner, name, args.len()) {
                     collect_expr_display_return_hints(expr, ctx, hints);
@@ -13378,6 +15437,145 @@ fn display_hint_owner_for_type(java_type: &JavaType) -> Option<String> {
             rust_name_for_java_named_type(&canonical_external_receiver_type_key(name)),
         ),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod display_hint_tests {
+    use super::*;
+
+    #[test]
+    fn typed_lambda_param_shadows_outer_binding_for_display_hint_owner() {
+        let program = crate::parser::parse_java_source(
+            r#"
+class LambdaDisplayHintShadow {
+    private SequenceFile sequenceFile;
+
+    void write(StringBuffer summaryText) {
+        Consumer<OtherSequenceFile> consumer =
+            (OtherSequenceFile sequenceFile) -> summaryText.append(sequenceFile.name());
+    }
+}
+
+class SequenceFile {}
+class OtherSequenceFile {}
+"#,
+        )
+        .program;
+
+        let hints = collect_program_display_return_hints(&program);
+
+        assert!(
+            hints.contains(&DisplayContextReturnHint {
+                owner: "OtherSequenceFile".to_string(),
+                java_method: "name".to_string(),
+                rust_method: "name".to_string(),
+                arg_count: 0,
+            }),
+            "{hints:?}"
+        );
+        assert!(
+            !hints.contains(&DisplayContextReturnHint {
+                owner: "SequenceFile".to_string(),
+                java_method: "name".to_string(),
+                rust_method: "name".to_string(),
+                arg_count: 0,
+            }),
+            "lambda parameter should shadow the outer field: {hints:?}"
+        );
+    }
+
+    #[test]
+    fn catch_param_scopes_display_hint_owner() {
+        let program = crate::parser::parse_java_source(
+            r#"
+class CatchDisplayHint {
+    void write(StringBuffer summaryText) {
+        try {
+            throw new ReportException();
+        } catch (ReportException err) {
+            summaryText.append(err.summary());
+        }
+    }
+}
+
+class ReportException extends Exception {}
+"#,
+        )
+        .program;
+
+        let hints = collect_program_display_return_hints(&program);
+
+        assert!(
+            hints.contains(&DisplayContextReturnHint {
+                owner: "ReportException".to_string(),
+                java_method: "summary".to_string(),
+                rust_method: "summary".to_string(),
+                arg_count: 0,
+            }),
+            "{hints:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod external_facade_support_tests {
+    use super::*;
+
+    #[test]
+    fn external_constructor_support_suppresses_ambiguous_simple_alias() {
+        let program = crate::parser::parse_java_source(
+            r#"
+class UseExternalConstructors {
+    Object first() { return new a.Foo(); }
+    Object second() { return new b.Foo(); }
+}
+"#,
+        )
+        .program;
+
+        let support = external_api_facade_support_items_with_local_type_program(
+            &program,
+            &FactSet::default(),
+            &Program::default(),
+            &Program::default(),
+            &RepresentationPlan::default(),
+        )
+        .into_iter()
+        .map(|item| match item {
+            crate::rust_ir::RustItem::Raw(raw) => raw,
+            other => crate::emit::emit_file(&crate::rust_ir::RustFile { items: vec![other] }),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+        assert!(support.contains("pub struct AFoo"), "{support}");
+        assert!(support.contains("pub struct BFoo"), "{support}");
+        assert!(!support.contains("pub type Foo = AFoo"), "{support}");
+        assert!(!support.contains("pub type Foo = BFoo"), "{support}");
+    }
+}
+
+#[cfg(test)]
+mod java_string_runtime_support_tests {
+    use super::*;
+
+    #[test]
+    fn list_in_string_concat_emits_collection_display_support() {
+        let program = crate::parser::parse_java_source(
+            r#"
+import java.util.List;
+
+class ListDisplay {
+    String run(List<String> xs) {
+        return "xs=" + xs;
+    }
+}
+"#,
+        )
+        .program;
+
+        assert!(program_uses_java_string_runtime_helpers(&program));
     }
 }
 
@@ -13953,18 +16151,18 @@ fn external_facade_return_type_with_facts(java_type: &JavaType, facts: &FactSet)
                 java_type, facts,
             ))
         }
-        JavaType::Named { name, args }
-            if matches!(name.as_str(), "Map" | "HashMap" | "LinkedHashMap") =>
-        {
-            let key = args
-                .first()
+        JavaType::Named { .. } if java_map_type_args(java_type).is_some() => {
+            let (key_ty, value_ty) = java_map_type_args(java_type).expect("checked map type");
+            let key = Some(key_ty)
                 .map(|arg| external_facade_return_type_with_facts(arg, facts))
                 .unwrap_or_else(|| "String".to_string());
-            let value = args
-                .get(1)
+            let value = Some(value_ty)
                 .map(|arg| external_facade_return_type_with_facts(arg, facts))
                 .unwrap_or_else(|| "Box<dyn std::any::Any>".to_string());
-            format!("std::collections::HashMap<{key}, {value}>")
+            format!(
+                "{}<{key}, {value}>",
+                external_facade_map_return_owner(java_type)
+            )
         }
         JavaType::Named { name, args } if matches!(name.as_str(), "Iterable") => {
             let element = args
@@ -13989,6 +16187,14 @@ fn external_facade_return_type_with_facts(java_type: &JavaType, facts: &FactSet)
         JavaType::Unknown(name) => external_facade_crate_mapped_return_type(name, &[], facts)
             .unwrap_or_else(|| "Box<dyn std::any::Any>".to_string()),
         JavaType::Wildcard(_) => "Box<dyn std::any::Any>".to_string(),
+    }
+}
+
+fn external_facade_map_return_owner(java_type: &JavaType) -> &'static str {
+    match java_collection_kind_for_type(java_type).unwrap_or(JavaCollectionKind::Map) {
+        JavaCollectionKind::SortedMap => "std::collections::BTreeMap",
+        JavaCollectionKind::InsertionOrderedMap => "JavaLinkedHashMap",
+        _ => "std::collections::HashMap",
     }
 }
 
@@ -14219,7 +16425,10 @@ fn external_facade_abi_return_type(
     abi: &FacadeAbiFact,
     java_type: &JavaType,
 ) -> Option<String> {
-    let base = external_facade_return_type_with_facts(java_type, facts);
+    let mut base = external_facade_return_type_with_facts(java_type, facts);
+    if base == "T" && !external_facade_type_is_generic_carrier(receiver_type) {
+        base = "Box<dyn std::any::Any>".to_string();
+    }
     let rendered =
         external_facade_slot_return_type(facts, Some(receiver_type), &base, &abi.return_slot)?;
     Some(match abi.result {
@@ -14265,7 +16474,11 @@ fn external_facade_slot_return_type(
 
 fn normalize_external_facade_return_type_text(return_type: &str) -> String {
     let mut normalized = return_type.to_string();
-    normalized = normalized.replace("HashMap<", "std::collections::HashMap<");
+    normalized = normalize_unqualified_generic_type_head(
+        &normalized,
+        "HashMap",
+        "std::collections::HashMap",
+    );
     normalized = normalized.replace(
         "std::collections::std::collections::HashMap<",
         "std::collections::HashMap<",
@@ -14279,6 +16492,36 @@ fn normalize_external_facade_return_type_text(return_type: &str) -> String {
         normalized = "test_facade::AbstractAssert<Box<dyn std::any::Any>>".to_string();
     }
     normalized
+}
+
+fn normalize_unqualified_generic_type_head(
+    rendered: &str,
+    type_name: &str,
+    qualified: &str,
+) -> String {
+    let needle = format!("{type_name}<");
+    let mut out = String::new();
+    let mut rest = rendered;
+    while let Some(pos) = rest.find(&needle) {
+        let before = &rest[..pos];
+        out.push_str(before);
+        let previous = before
+            .chars()
+            .next_back()
+            .or_else(|| out.chars().next_back());
+        if previous.is_none_or(|ch| !rust_path_ident_char(ch) && ch != ':') {
+            out.push_str(qualified);
+        } else {
+            out.push_str(type_name);
+        }
+        rest = &rest[pos + type_name.len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn rust_path_ident_char(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
 }
 
 fn default_external_crate_rust_type_name(name: &str) -> String {
@@ -14414,6 +16657,17 @@ fn external_facade_return_type_with_facts_and_nullability(
     }
 }
 
+fn external_facade_field_type_with_facts(
+    fact: &ExternalFieldFact,
+    java_type: &JavaType,
+    facts: &FactSet,
+) -> String {
+    let nullability = facts
+        .field_nullability_for(&fact.field.type_name, &fact.field.field_name)
+        .unwrap_or(NullabilityState::DefinitelyNonNull);
+    external_facade_return_type_with_facts_and_nullability(facts, java_type, nullability)
+}
+
 fn external_facade_return_type_with_representations(
     java_type: &JavaType,
     facts: &FactSet,
@@ -14455,22 +16709,22 @@ fn external_facade_return_type_with_representations(
                 format!("std::collections::HashSet<{element}>")
             }
         }
-        JavaType::Named { name, args }
-            if matches!(name.as_str(), "Map" | "HashMap" | "LinkedHashMap") =>
-        {
-            let key = args
-                .first()
+        JavaType::Named { .. } if java_map_type_args(java_type).is_some() => {
+            let (key_ty, value_ty) = java_map_type_args(java_type).expect("checked map type");
+            let key = Some(key_ty)
                 .map(|arg| {
                     external_facade_return_type_with_representations(arg, facts, representations)
                 })
                 .unwrap_or_else(|| "String".to_string());
-            let value = args
-                .get(1)
+            let value = Some(value_ty)
                 .map(|arg| {
                     external_facade_return_type_with_representations(arg, facts, representations)
                 })
                 .unwrap_or_else(|| "Box<dyn std::any::Any>".to_string());
-            format!("std::collections::HashMap<{key}, {value}>")
+            format!(
+                "{}<{key}, {value}>",
+                external_facade_map_return_owner(java_type)
+            )
         }
         JavaType::Named { name, args } if matches!(name.as_str(), "Iterable") => {
             let element = args
@@ -14551,7 +16805,7 @@ fn external_facade_static_method(name: &str, arg_count: usize, return_type: &str
     let rust_name = rust_raw_ident_if_needed(name);
     format!(
         "    pub fn {rust_name}{} -> {return_type} {{ {} }}",
-        external_facade_args(arg_count),
+        external_facade_args_with_return_generics(arg_count, return_type),
         external_facade_default_expr(return_type, Some(name))
     )
 }
@@ -14572,7 +16826,13 @@ fn external_facade_static_method_with_facts(
     {
         return format!(
             "    pub fn {escaped_rust_method}{} -> {return_type} {{ _arg0.to_string() }}",
-            external_facade_args_with_facts(facts, receiver_key, java_method, arg_count),
+            external_facade_args_with_facts_and_return(
+                facts,
+                receiver_key,
+                java_method,
+                arg_count,
+                return_type,
+            ),
         );
     } else {
         external_facade_unmodelled_method_with_facts(
@@ -14598,9 +16858,21 @@ fn external_facade_unmodelled_method_with_facts(
 ) -> String {
     let escaped_rust_method = rust_method_ident_for_arity(rust_method, arg_count);
     let args = if is_static {
-        external_facade_args_with_facts(facts, receiver_key, java_method, arg_count)
+        external_facade_args_with_facts_and_unmodelled_return(
+            facts,
+            receiver_key,
+            java_method,
+            arg_count,
+            return_type,
+        )
     } else {
-        external_facade_self_args_with_facts(facts, receiver_key, java_method, arg_count)
+        external_facade_self_args_with_facts_and_unmodelled_return(
+            facts,
+            receiver_key,
+            java_method,
+            arg_count,
+            return_type,
+        )
     };
     let receiver = canonical_external_receiver_type_key(receiver_key);
     format!(
@@ -14823,30 +17095,101 @@ fn external_facade_hash_impl(ty: &str) -> String {
     )
 }
 
-fn external_facade_display_impl(ty: &str) -> String {
-    if external_facade_type_is_generic_carrier(ty) {
+fn display_capable_external_facade_types(facts: &FactSet) -> BTreeSet<String> {
+    let mut types = BTreeSet::new();
+    for fact in &facts.external_api_effect_facts {
+        if !matches!(fact.method_name.as_str(), "toString" | "to_string")
+            || fact.arg_count != Some(0)
+            || !matches!(fact.return_type, Some(JavaType::String))
+        {
+            continue;
+        }
+        let Some(receiver_type) = fact.receiver_type.as_deref() else {
+            continue;
+        };
+        let canonical = canonical_external_receiver_type_key(receiver_type);
+        types.insert(receiver_type.to_string());
+        types.insert(rust_name_for_java_named_type(receiver_type));
+        if let Some(simple) = receiver_type.rsplit('.').next() {
+            types.insert(simple.to_string());
+            types.insert(rust_name_for_java_named_type(simple));
+        }
+        types.insert(canonical.clone());
+        types.insert(rust_name_for_java_named_type(&canonical));
+    }
+    types
+}
+
+fn external_facade_display_impl(ty: &str, use_to_string_method: bool) -> String {
+    let body = if use_to_string_method {
+        "write!(f, \"{}\", self.to_string())".to_string()
+    } else {
+        format!("panic!(\"unsupported Java external facade display: {ty}\")")
+    };
+    if let Some(carrier) = external_facade_generic_carrier(ty) {
+        let generics = carrier.impl_params;
         return format!(
-            "impl<T> std::fmt::Display for {ty}<T> {{\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{ write!(f, \"\") }}\n}}"
+            "impl<{generics}> std::fmt::Display for {ty}<{generics}> {{\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{ {body} }}\n}}"
         );
     }
     format!(
-        "impl std::fmt::Display for {ty} {{\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{ write!(f, \"\") }}\n}}"
+        "impl std::fmt::Display for {ty} {{\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{ {body} }}\n}}"
     )
 }
 
 fn external_facade_type_is_generic_carrier(ty: &str) -> bool {
-    ty.ends_with("Future")
+    external_facade_generic_carrier(ty).is_some()
+}
+
+struct ExternalFacadeGenericCarrier {
+    decl_params: &'static str,
+    impl_params: &'static str,
+    marker_tuple: &'static str,
+    arity: usize,
+}
+
+fn external_facade_generic_carrier(ty: &str) -> Option<ExternalFacadeGenericCarrier> {
+    if ty.ends_with("Future") {
+        Some(ExternalFacadeGenericCarrier {
+            decl_params: "T = Box<dyn std::any::Any>",
+            impl_params: "T",
+            marker_tuple: "T",
+            arity: 1,
+        })
+    } else if ty == "Function" || ty.ends_with("Function") {
+        Some(ExternalFacadeGenericCarrier {
+            decl_params: "T0 = Box<dyn std::any::Any>, T1 = Box<dyn std::any::Any>",
+            impl_params: "T0, T1",
+            marker_tuple: "T0, T1",
+            arity: 2,
+        })
+    } else {
+        None
+    }
+}
+
+fn external_facade_receiver_generic_arity(receiver_key: &str) -> usize {
+    let receiver = canonical_external_receiver_type_key(receiver_key);
+    external_facade_generic_carrier(&receiver)
+        .map(|carrier| carrier.arity)
+        .unwrap_or(0)
 }
 
 fn external_facade_generic_carrier_struct(ty: &str) -> String {
+    let carrier = external_facade_generic_carrier(ty)
+        .expect("generic carrier struct should only render known generic facade carriers");
+    let decl_params = carrier.decl_params;
+    let impl_params = carrier.impl_params;
+    let marker_tuple = carrier.marker_tuple;
     format!(
-        "pub struct {ty}<T = Box<dyn std::any::Any>> {{\n    _marker: std::marker::PhantomData<fn() -> T>,\n}}\n\nimpl<T> Clone for {ty}<T> {{\n    fn clone(&self) -> Self {{ Self {{ _marker: std::marker::PhantomData }} }}\n}}\n\nimpl<T> std::fmt::Debug for {ty}<T> {{\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{ f.debug_struct(\"{ty}\").finish() }}\n}}\n\nimpl<T> Default for {ty}<T> {{\n    fn default() -> Self {{ Self {{ _marker: std::marker::PhantomData }} }}\n}}"
+        "pub struct {ty}<{decl_params}> {{\n    _marker: std::marker::PhantomData<fn() -> ({marker_tuple})>,\n}}\n\nimpl<{impl_params}> Clone for {ty}<{impl_params}> {{\n    fn clone(&self) -> Self {{ Self {{ _marker: std::marker::PhantomData }} }}\n}}\n\nimpl<{impl_params}> std::fmt::Debug for {ty}<{impl_params}> {{\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{ f.debug_struct(\"{ty}\").finish() }}\n}}\n\nimpl<{impl_params}> Default for {ty}<{impl_params}> {{\n    fn default() -> Self {{ Self {{ _marker: std::marker::PhantomData }} }}\n}}"
     )
 }
 
 fn external_facade_impl_header(owner: &str) -> String {
-    if external_facade_type_is_generic_carrier(owner) {
-        format!("impl<T> {owner}<T>")
+    if let Some(carrier) = external_facade_generic_carrier(owner) {
+        let generics = carrier.impl_params;
+        format!("impl<{generics}> {owner}<{generics}>")
     } else {
         format!("impl {owner}")
     }
@@ -15187,7 +17530,7 @@ fn external_facade_instance_method(name: &str, arg_count: usize, return_type: &s
     let rust_name = rust_raw_ident_if_needed(name);
     format!(
         "    pub fn {rust_name}{} -> {return_type} {{ {} }}",
-        external_facade_self_args(arg_count),
+        external_facade_self_args_with_return_generics(arg_count, return_type),
         external_facade_default_expr(return_type, Some(name))
     )
 }
@@ -15497,6 +17840,15 @@ fn external_facade_instance_method_with_facts(
             external_facade_self_args_with_facts(facts, receiver_key, java_method, arg_count),
         );
     }
+    if canonical_external_receiver_type_key(receiver_key) == "Random"
+        && matches!(java_method, "nextInt" | "next_int")
+        && arg_count == 1
+        && return_type == "Result<i32, JavaException>"
+    {
+        return format!(
+            "    pub fn next_int_result(&self, bound: i32) -> Result<i32, JavaException> {{\n        if bound <= 0 {{\n            Err(JavaException::new(\"IllegalArgumentException\", \"bound must be positive\".to_string()))\n        }} else {{\n            Ok(0)\n        }}\n    }}"
+        );
+    }
     external_facade_unmodelled_method_with_facts(
         facts,
         receiver_key,
@@ -15612,10 +17964,10 @@ fn external_facade_generic_carrier_method(
     java_name: &str,
     arg_count: usize,
 ) -> String {
-    if external_facade_type_is_generic_carrier(owner) && java_name == "get" && arg_count == 0 {
+    if owner.ends_with("Future") && java_name == "get" && arg_count == 0 {
         let rust_name = rust_raw_ident_if_needed(rust_name);
         return format!(
-            "    pub fn {rust_name}(&self) -> T {{ unimplemented!(\"{owner}.{java_name} is not modelled\") }}"
+            "    pub fn {rust_name}(&self) -> Result<T, JavaException> {{ unimplemented!(\"{owner}.{java_name} is not modelled\") }}"
         );
     }
     external_facade_builder_unmodelled_getter(
@@ -15789,7 +18141,15 @@ fn strong_external_facade_method_returns_by_signature(
 }
 
 fn weak_external_facade_return_type(return_type: &str) -> bool {
-    matches!(return_type, "()" | "Box<dyn std::any::Any>" | "R" | "T")
+    matches!(
+        return_type,
+        "()" | "Box<dyn std::any::Any>"
+            | "std::boxed::Box<dyn std::any::Any>"
+            | "Vec<Box<dyn std::any::Any>>"
+            | "Vec<std::boxed::Box<dyn std::any::Any>>"
+            | "R"
+            | "T"
+    )
 }
 
 fn external_api_role_returns_value(role: ExternalApiRole) -> bool {
@@ -15823,26 +18183,75 @@ fn external_facade_new_builder_result_type(receiver_rust: &str) -> String {
 
 fn external_erased_object_trait_method(method: &ExternalErasedObjectMethod) -> String {
     let name = rust_method_ident_for_arity(&method.name, method.arg_count);
+    let return_type = external_erased_object_method_return_type(method);
     format!(
         "    fn {}{} -> {};",
         name,
-        external_facade_self_args(method.arg_count),
-        method.return_type
+        external_facade_self_args_with_return_generics(method.arg_count, return_type),
+        return_type
     )
 }
 
 fn external_erased_object_impl_method(method: &ExternalErasedObjectMethod) -> String {
     let name = rust_method_ident_for_arity(&method.name, method.arg_count);
+    let return_type = external_erased_object_method_return_type(method);
+    let body =
+        if return_type == "String" && matches!(method.name.as_str(), "toString" | "to_string") {
+            "java_erased_object_to_string(self)".to_string()
+        } else {
+            external_erased_object_default_expr(method, return_type)
+        };
     format!(
         "    fn {}{} -> {} {{ {} }}",
         name,
-        external_facade_self_args(method.arg_count),
-        method.return_type,
-        external_facade_default_expr(&method.return_type, Some(&method.name))
+        external_facade_self_args_with_return_generics(method.arg_count, return_type),
+        return_type,
+        body
     )
 }
 
+fn external_erased_object_slice_impl_method(method: &ExternalErasedObjectMethod) -> String {
+    let name = rust_method_ident_for_arity(&method.name, method.arg_count);
+    let return_type = external_erased_object_method_return_type(method);
+    format!(
+        "    fn {}{} -> {} {{ {} }}",
+        name,
+        external_facade_self_args_with_return_generics(method.arg_count, return_type),
+        return_type,
+        external_erased_object_default_expr(method, return_type)
+    )
+}
+
+fn external_erased_object_method_return_type(method: &ExternalErasedObjectMethod) -> &str {
+    if (method.name == "sortByKey" || method.name.starts_with("sort_by_key"))
+        && method
+            .return_type
+            .strip_prefix("JavaPairRDD")
+            .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('<'))
+    {
+        "Box<dyn std::any::Any>"
+    } else {
+        &method.return_type
+    }
+}
+
+fn external_erased_object_default_expr(
+    method: &ExternalErasedObjectMethod,
+    return_type: &str,
+) -> String {
+    if return_type == "String" && matches!(method.name.as_str(), "toString" | "to_string") {
+        "panic!(\"unsupported Java erased object toString: runtime target is erased\")".to_string()
+    } else {
+        external_facade_default_expr(return_type, Some(&method.name))
+    }
+}
+
 fn external_facade_default_expr(return_type: &str, method_name: Option<&str>) -> String {
+    if return_type == "String"
+        && method_name.is_some_and(|name| matches!(name, "toString" | "to_string"))
+    {
+        return "panic!(\"unsupported Java external facade toString\")".to_string();
+    }
     if let Some(args) = raw_rust_result_args(return_type)
         && args.len() == 2
         && args[1] == "JavaException"
@@ -15850,8 +18259,15 @@ fn external_facade_default_expr(return_type: &str, method_name: Option<&str>) ->
         let ok_type = args[0];
         if ok_type == "()" {
             "Ok(())".to_string()
-        } else if ok_type == "Box<dyn std::any::Any>" {
-            "Ok(Box::new(()))".to_string()
+        } else if ok_type == "Box<dyn std::any::Any>"
+            || ok_type == "std::boxed::Box<dyn std::any::Any>"
+        {
+            "Ok(std::boxed::Box::new(()))".to_string()
+        } else if external_facade_return_type_requires_explicit_provider(ok_type) {
+            format!(
+                "Err(JavaException::new(\"UnsupportedOperationException\", \"external facade method {} has no fallback value\".to_string()))",
+                method_name.unwrap_or("<unknown>")
+            )
         } else {
             "Ok(Default::default())".to_string()
         }
@@ -15861,8 +18277,10 @@ fn external_facade_default_expr(return_type: &str, method_name: Option<&str>) ->
         "JavaClass::<()>::for_name(\"java.lang.Object\")".to_string()
     } else if return_type == "()" {
         "()".to_string()
-    } else if return_type == "Box<dyn std::any::Any>" {
-        "Box::new(())".to_string()
+    } else if return_type == "Box<dyn std::any::Any>"
+        || return_type == "std::boxed::Box<dyn std::any::Any>"
+    {
+        "std::boxed::Box::new(())".to_string()
     } else if external_facade_return_type_requires_explicit_provider(return_type) {
         format!(
             "panic!(\"external facade method {} has no fallback value\")",
@@ -15893,13 +18311,44 @@ fn external_facade_args(arg_count: usize) -> String {
     }
 }
 
-fn external_facade_args_with_facts(
+fn external_facade_args_with_return_generics(arg_count: usize, return_type: &str) -> String {
+    external_facade_args_with_extra_generics(arg_count, "", return_type)
+}
+
+fn external_facade_args_with_facts_and_return(
     facts: &FactSet,
     receiver_key: &str,
     method: &str,
     arg_count: usize,
+    return_type: &str,
 ) -> String {
-    external_facade_args_with_fact_prefix(facts, receiver_key, method, arg_count, "")
+    external_facade_args_with_fact_prefix_and_return(
+        facts,
+        receiver_key,
+        method,
+        arg_count,
+        "",
+        return_type,
+    )
+}
+
+fn external_facade_args_with_facts_and_unmodelled_return(
+    facts: &FactSet,
+    receiver_key: &str,
+    method: &str,
+    arg_count: usize,
+    return_type: &str,
+) -> String {
+    external_facade_args_with_fact_prefix_and_return_bounds(
+        facts,
+        receiver_key,
+        method,
+        arg_count,
+        "",
+        return_type,
+        ReturnOnlyGenericBounds::Unbounded,
+        0,
+    )
 }
 
 fn external_facade_generic_args(first_generic: &str, arg_count: usize) -> String {
@@ -15946,6 +18395,10 @@ fn external_facade_self_args(arg_count: usize) -> String {
     }
 }
 
+fn external_facade_self_args_with_return_generics(arg_count: usize, return_type: &str) -> String {
+    external_facade_args_with_extra_generics(arg_count, "&self", return_type)
+}
+
 fn external_facade_self_args_with_facts(
     facts: &FactSet,
     receiver_key: &str,
@@ -15963,22 +18416,109 @@ fn external_facade_self_args_with_facts(
         Some(ReceiverAbi::OwnedSelf) => "self",
         _ => "&self",
     };
-    external_facade_args_with_fact_prefix(facts, receiver_key, method, arg_count, prefix)
+    external_facade_args_with_fact_prefix_and_generic_offset(
+        facts,
+        receiver_key,
+        method,
+        arg_count,
+        prefix,
+        external_facade_receiver_generic_arity(receiver_key),
+    )
 }
 
-fn external_facade_args_with_fact_prefix(
+fn external_facade_self_args_with_facts_and_unmodelled_return(
+    facts: &FactSet,
+    receiver_key: &str,
+    method: &str,
+    arg_count: usize,
+    return_type: &str,
+) -> String {
+    let key = CallableKey::method(
+        receiver_key.to_string(),
+        method.to_string(),
+        Staticness::Unknown,
+        arg_count,
+    );
+    let prefix = match facts.facade_abi_for_key(&key).map(|abi| abi.receiver) {
+        Some(ReceiverAbi::MutBorrowedSelf) => "&mut self",
+        Some(ReceiverAbi::OwnedSelf) => "self",
+        _ => "&self",
+    };
+    external_facade_args_with_fact_prefix_and_return_bounds(
+        facts,
+        receiver_key,
+        method,
+        arg_count,
+        prefix,
+        return_type,
+        ReturnOnlyGenericBounds::Unbounded,
+        external_facade_receiver_generic_arity(receiver_key),
+    )
+}
+
+fn external_facade_args_with_fact_prefix_and_generic_offset(
     facts: &FactSet,
     receiver_key: &str,
     method: &str,
     arg_count: usize,
     prefix: &str,
+    generic_offset: usize,
+) -> String {
+    external_facade_args_with_fact_prefix_and_return_bounds(
+        facts,
+        receiver_key,
+        method,
+        arg_count,
+        prefix,
+        "",
+        ReturnOnlyGenericBounds::Default,
+        generic_offset,
+    )
+}
+
+fn external_facade_args_with_fact_prefix_and_return(
+    facts: &FactSet,
+    receiver_key: &str,
+    method: &str,
+    arg_count: usize,
+    prefix: &str,
+    return_type: &str,
+) -> String {
+    external_facade_args_with_fact_prefix_and_return_bounds(
+        facts,
+        receiver_key,
+        method,
+        arg_count,
+        prefix,
+        return_type,
+        ReturnOnlyGenericBounds::Default,
+        0,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum ReturnOnlyGenericBounds {
+    Default,
+    Unbounded,
+}
+
+fn external_facade_args_with_fact_prefix_and_return_bounds(
+    facts: &FactSet,
+    receiver_key: &str,
+    method: &str,
+    arg_count: usize,
+    prefix: &str,
+    return_type: &str,
+    return_bounds: ReturnOnlyGenericBounds,
+    generic_offset: usize,
 ) -> String {
     if arg_count == 0 {
-        return if prefix.is_empty() {
-            "()".to_string()
-        } else {
-            format!("({prefix})")
-        };
+        return external_facade_args_with_extra_generics_and_return_bounds(
+            arg_count,
+            prefix,
+            return_type,
+            return_bounds,
+        );
     }
 
     let mut generic_params = Vec::new();
@@ -15989,25 +18529,118 @@ fn external_facade_args_with_fact_prefix(
     for index in 0..arg_count {
         let arg_ty =
             if external_facade_method_uses_nullable_generic_handoff(receiver_key, method, index) {
-                let generic = format!("T{index}");
+                let generic = format!("T{}", index + generic_offset);
                 generic_params.push(generic.clone());
                 format!("Option<{generic}>")
             } else {
                 external_facade_argument_rust_type(facts, receiver_key, method, arg_count, index)
                     .unwrap_or_else(|| {
-                        let generic = format!("T{index}");
+                        let generic = format!("T{}", index + generic_offset);
                         generic_params.push(generic.clone());
                         generic
                     })
             };
         args.push(format!("_arg{index}: {arg_ty}"));
     }
+    append_return_only_generic_params(&mut generic_params, return_type, return_bounds);
 
     if generic_params.is_empty() {
         format!("({})", args.join(", "))
     } else {
         format!("<{}>({})", generic_params.join(", "), args.join(", "))
     }
+}
+
+fn external_facade_args_with_extra_generics(
+    arg_count: usize,
+    prefix: &str,
+    return_type: &str,
+) -> String {
+    external_facade_args_with_extra_generics_and_return_bounds(
+        arg_count,
+        prefix,
+        return_type,
+        ReturnOnlyGenericBounds::Default,
+    )
+}
+
+fn external_facade_args_with_extra_generics_and_return_bounds(
+    arg_count: usize,
+    prefix: &str,
+    return_type: &str,
+    return_bounds: ReturnOnlyGenericBounds,
+) -> String {
+    let mut generic_params = (0..arg_count)
+        .map(|idx| format!("T{idx}"))
+        .collect::<Vec<_>>();
+    append_return_only_generic_params(&mut generic_params, return_type, return_bounds);
+
+    let mut args = Vec::new();
+    if !prefix.is_empty() {
+        args.push(prefix.to_string());
+    }
+    args.extend((0..arg_count).map(|idx| format!("_arg{idx}: T{idx}")));
+
+    if generic_params.is_empty() {
+        format!("({})", args.join(", "))
+    } else {
+        format!("<{}>({})", generic_params.join(", "), args.join(", "))
+    }
+}
+
+fn append_return_only_generic_params(
+    generic_params: &mut Vec<String>,
+    return_type: &str,
+    return_bounds: ReturnOnlyGenericBounds,
+) {
+    let existing = generic_params
+        .iter()
+        .map(|param| generic_param_name(param).to_string())
+        .collect::<BTreeSet<_>>();
+    for generic in return_type_placeholder_generics(return_type) {
+        if !existing.contains(&generic) {
+            generic_params.push(match return_bounds {
+                ReturnOnlyGenericBounds::Default => format!("{generic}: Default"),
+                ReturnOnlyGenericBounds::Unbounded => generic,
+            });
+        }
+    }
+}
+
+fn generic_param_name(param: &str) -> &str {
+    param.split_once(':').map_or(param, |(name, _)| name).trim()
+}
+
+fn return_type_placeholder_generics(return_type: &str) -> Vec<String> {
+    let mut generics = BTreeSet::new();
+    let bytes = return_type.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] != b'T' {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        index += 1;
+        while index < bytes.len() && bytes[index].is_ascii_digit() {
+            index += 1;
+        }
+        if index == start + 1 {
+            continue;
+        }
+        let before = start.checked_sub(1).and_then(|idx| bytes.get(idx)).copied();
+        let after = bytes.get(index).copied();
+        let before_boundary = before.is_none_or(|ch| !rust_ident_byte(ch));
+        let after_boundary = after.is_none_or(|ch| !rust_ident_byte(ch));
+        if before_boundary && after_boundary {
+            generics.insert(return_type[start..index].to_string());
+        }
+    }
+    generics.into_iter().collect()
+}
+
+fn rust_ident_byte(ch: u8) -> bool {
+    ch == b'_' || ch.is_ascii_alphanumeric()
 }
 
 fn external_facade_method_uses_nullable_generic_handoff(
@@ -16375,11 +19008,15 @@ fn is_builtin_external_facade_type(name: &str) -> bool {
             | "Result"
             | "Box"
             | "Arrays"
+            | "ArrayList"
             | "Collections"
             | "Collectors"
             | "HashMap"
             | "HashSet"
             | "Iterator"
+            | "JavaIterator"
+            | "JavaUtilIterator"
+            | "JavaUtilArrayList"
             | "List"
             | "Map"
             | "Set"
@@ -16463,6 +19100,7 @@ fn is_allowed_builtin_external_from_impl(from: &str, to: &str) -> bool {
         (from, to),
         ("InputStream", "JavaIoInputStream")
             | ("JavaIoInputStream", "InputStream")
+            | ("OutputStream", "JavaIoOutputStream")
             | ("StringBuilder", "Appendable")
             | ("StringBuffer", "Appendable")
     ) || (to == "InputStream"
@@ -16480,6 +19118,13 @@ fn is_allowed_builtin_external_from_impl(from: &str, to: &str) -> bool {
         ))
 }
 
+fn builtin_external_from_impl_requires_surface(from: &str, to: &str) -> bool {
+    matches!(
+        (from, to),
+        ("StringBuilder", "Appendable") | ("StringBuffer", "Appendable")
+    )
+}
+
 fn valid_external_facade_type_ident(name: &str) -> bool {
     valid_rust_type_ident(name)
         && name
@@ -16493,6 +19138,13 @@ fn rust_name_for_exact_jdk_stream_adapter_endpoint(name: &str) -> String {
     match name {
         "java.io.InputStream" | "java.io.OutputStream" => rust_name_for_java_named_type(name),
         _ => rust_name_for_java_named_type(&canonical_external_receiver_type_key(name)),
+    }
+}
+
+fn external_conversion_adapter_endpoint_rust_name(name: &str, canonical: &str) -> String {
+    match name {
+        "InputStream" | "OutputStream" => name.to_string(),
+        _ => rust_name_for_java_named_type(canonical),
     }
 }
 
@@ -16570,51 +19222,21 @@ fn external_trait_impl_trait_name_candidates(
     candidates
 }
 
-pub fn external_static_string_constant_support_items(
-    program: &Program,
-    facts: &FactSet,
-) -> Vec<crate::rust_ir::RustItem> {
-    external_static_string_constant_support_items_with_local_type_program(program, facts, program)
-}
-
-pub fn external_static_string_constant_support_items_with_local_type_program(
-    program: &Program,
-    facts: &FactSet,
-    local_type_program: &Program,
-) -> Vec<crate::rust_ir::RustItem> {
-    external_static_string_constant_support_items_with_context_programs_and_declared_owners(
-        program,
-        facts,
-        local_type_program,
-        &Program::default(),
-        &BTreeSet::new(),
-    )
-}
-
-pub fn external_static_string_constant_support_items_with_local_type_program_and_declared_owners(
-    program: &Program,
-    facts: &FactSet,
-    local_type_program: &Program,
-    declared_owners: &BTreeSet<String>,
-) -> Vec<crate::rust_ir::RustItem> {
-    external_static_string_constant_support_items_with_context_programs_and_declared_owners(
-        program,
-        facts,
-        local_type_program,
-        &Program::default(),
-        declared_owners,
-    )
-}
-
 pub fn external_static_string_constant_support_items_with_context_programs_and_declared_owners(
     program: &Program,
     facts: &FactSet,
     local_type_program: &Program,
     source_summary_type_program: &Program,
+    context_sources_are_emitted: bool,
     declared_owners: &BTreeSet<String>,
 ) -> Vec<crate::rust_ir::RustItem> {
     let source_summary_types = local_type_keys_for_program(source_summary_type_program);
-    let local_types = local_type_keys_for_program(local_type_program)
+    let emitted_local_type_program = if context_sources_are_emitted {
+        local_type_program
+    } else {
+        program
+    };
+    let local_types = local_type_keys_for_program(emitted_local_type_program)
         .into_iter()
         .filter(|name| !source_summary_types.contains(name))
         .collect::<BTreeSet<_>>();
@@ -17638,8 +20260,9 @@ fn external_static_enum_constant_trait_impls(
         }
     }
     if !trait_impls.is_empty() {
-        lines.push(format!(
-            "impl std::fmt::Display for {owner} {{\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{ write!(f, \"\") }}\n}}"
+        lines.push(external_facade_display_impl(
+            owner,
+            display_capable_external_facade_types(facts).contains(owner),
         ));
         for trait_name in trait_impls {
             lines.push(format!("impl {trait_name} for {owner} {{}}"));
@@ -18022,7 +20645,63 @@ fn valid_rust_method_ident(name: &str) -> bool {
 }
 
 pub fn program_uses_java_platform_facades(program: &Program) -> bool {
-    if program.types.iter().any(|ty| {
+    if program_declares_java_platform_facade_support_type(program) {
+        return false;
+    }
+    program.imports.iter().any(|import| {
+        matches!(
+            import.path.as_str(),
+            "java.nio.file.Path"
+                | "java.net.URI"
+                | "java.io.File"
+                | "java.net.URL"
+                | "java.net.URLConnection"
+                | "java.net.JarURLConnection"
+                | "java.util.jar.JarFile"
+                | "java.util.jar.JarEntry"
+                | "java.util.zip.ZipEntry"
+                | "java.util.zip.ZipFile"
+                | "java.util.jar.Manifest"
+                | "java.util.jar.Attributes"
+                | "java.util.jar.Attributes.Name"
+                | "java.util.Enumeration"
+                | "java.util.Iterator"
+                | "java.util.LinkedHashMap"
+                | "java.util.LinkedHashSet"
+                | "java.lang.StringBuffer"
+                | "java.lang.StringBuilder"
+                | "java.util.StringTokenizer"
+                | "java.util.regex.Pattern"
+                | "java.util.regex.Matcher"
+                | "java.util.concurrent.atomic.AtomicInteger"
+                | "java.util.BitSet"
+                | "java.lang.ClassLoader"
+                | "java.awt.image.BufferedImage"
+                | "java.awt.Graphics"
+                | "java.awt.Graphics2D"
+        )
+    }) || program.types.iter().any(type_uses_java_platform_facades)
+}
+
+pub fn program_external_api_facts_use_java_platform_facades(
+    program: &Program,
+    facts: &FactSet,
+) -> bool {
+    if program_declares_java_platform_facade_support_type(program) {
+        return false;
+    }
+    facts.external_api_effect_facts.iter().any(|fact| {
+        external_api_effect_fact_mentions_program_type(program, fact)
+            && (fact
+                .return_type
+                .as_ref()
+                .is_some_and(java_type_uses_java_platform_facade)
+                || fact.thrown.iter().any(java_type_uses_java_platform_facade))
+    })
+}
+
+fn program_declares_java_platform_facade_support_type(program: &Program) -> bool {
+    program.types.iter().any(|ty| {
         matches!(
             crate::stdlib::canonical_external_receiver_type_key(&ty.name).as_str(),
             "Path"
@@ -18054,40 +20733,19 @@ pub fn program_uses_java_platform_facades(program: &Program) -> bool {
                 | "Graphics"
                 | "Graphics2D"
         )
-    }) {
+    })
+}
+
+fn external_api_effect_fact_mentions_program_type(
+    program: &Program,
+    fact: &ExternalApiEffectFact,
+) -> bool {
+    let Some(receiver_type) = fact.receiver_type.as_deref() else {
         return false;
-    }
-    program.imports.iter().any(|import| {
-        matches!(
-            import.path.as_str(),
-            "java.nio.file.Path"
-                | "java.net.URI"
-                | "java.io.File"
-                | "java.net.URL"
-                | "java.net.URLConnection"
-                | "java.net.JarURLConnection"
-                | "java.util.jar.JarFile"
-                | "java.util.jar.JarEntry"
-                | "java.util.zip.ZipEntry"
-                | "java.util.zip.ZipFile"
-                | "java.util.jar.Manifest"
-                | "java.util.jar.Attributes"
-                | "java.util.jar.Attributes.Name"
-                | "java.util.Enumeration"
-                | "java.util.Iterator"
-                | "java.lang.StringBuffer"
-                | "java.lang.StringBuilder"
-                | "java.util.StringTokenizer"
-                | "java.util.regex.Pattern"
-                | "java.util.regex.Matcher"
-                | "java.util.concurrent.atomic.AtomicInteger"
-                | "java.util.BitSet"
-                | "java.lang.ClassLoader"
-                | "java.awt.image.BufferedImage"
-                | "java.awt.Graphics"
-                | "java.awt.Graphics2D"
-        )
-    }) || program.types.iter().any(type_uses_java_platform_facades)
+    };
+    let canonical = crate::stdlib::canonical_external_receiver_type_key(receiver_type);
+    let simple = canonical.rsplit(['.', '$']).next().unwrap_or(&canonical);
+    program_mentions_java_type(program, simple)
 }
 
 fn type_uses_java_platform_facades(ty: &crate::java_ir::TypeDecl) -> bool {
@@ -18418,6 +21076,8 @@ pub fn is_java_platform_facade_type_name(name: &str) -> bool {
             | "AttributesName"
             | "Enumeration"
             | "Iterator"
+            | "LinkedHashMap"
+            | "LinkedHashSet"
             | "StringBuffer"
             | "StringBuilder"
             | "StringTokenizer"
@@ -18442,19 +21102,202 @@ pub fn program_uses_java_class_tokens(program: &Program) -> bool {
         .any(|ty| ty.members.iter().any(member_uses_java_class_tokens))
 }
 
-pub fn program_uses_java_string_split(program: &Program) -> bool {
-    program
-        .types
-        .iter()
-        .any(|ty| ty.members.iter().any(member_uses_java_string_split))
+pub fn program_uses_java_string_runtime_helpers(program: &Program) -> bool {
+    program_mentions_java_type(program, "StringBuilder")
+        || program_mentions_java_type(program, "StringBuffer")
+        || (program_mentions_java_type(program, "List") && program_contains_string_concat(program))
+        || program.types.iter().any(|ty| {
+            ty.members
+                .iter()
+                .any(member_uses_java_string_runtime_helpers)
+        })
 }
 
-pub fn program_uses_java_string_runtime_helpers(program: &Program) -> bool {
-    program.types.iter().any(|ty| {
-        ty.members
+fn program_contains_string_concat(program: &Program) -> bool {
+    program.types.iter().any(type_contains_string_concat)
+}
+
+fn type_contains_string_concat(ty: &TypeDecl) -> bool {
+    ty.members.iter().any(member_contains_string_concat)
+        || ty
+            .static_init_blocks
             .iter()
-            .any(member_uses_java_string_runtime_helpers)
-    })
+            .any(|block| block_contains_string_concat(&block.block))
+}
+
+fn member_contains_string_concat(member: &Member) -> bool {
+    match member {
+        Member::Field(field) => field
+            .initializer
+            .as_ref()
+            .is_some_and(expr_contains_string_concat),
+        Member::Method(method) => method
+            .body
+            .as_ref()
+            .is_some_and(block_contains_string_concat),
+        Member::Constructor(constructor) => constructor
+            .body
+            .as_ref()
+            .is_some_and(block_contains_string_concat),
+        Member::Type(nested) => type_contains_string_concat(nested),
+        Member::Unsupported { .. } => false,
+    }
+}
+
+fn block_contains_string_concat(block: &Block) -> bool {
+    block.statements.iter().any(stmt_contains_string_concat)
+}
+
+fn stmt_contains_string_concat(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Expr(expr)
+        | Stmt::Return(Some(expr))
+        | Stmt::Throw(expr)
+        | Stmt::VarDecl {
+            initializer: Some(expr),
+            ..
+        } => expr_contains_string_concat(expr),
+        Stmt::Assign { target, value } => {
+            expr_contains_string_concat(target) || expr_contains_string_concat(value)
+        }
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            expr_contains_string_concat(condition)
+                || block_contains_string_concat(then_block)
+                || else_block
+                    .as_ref()
+                    .is_some_and(block_contains_string_concat)
+        }
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => expr_contains_string_concat(condition) || block_contains_string_concat(body),
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            init.iter().any(stmt_contains_string_concat)
+                || condition.as_ref().is_some_and(expr_contains_string_concat)
+                || update.iter().any(expr_contains_string_concat)
+                || block_contains_string_concat(body)
+        }
+        Stmt::EnhancedFor { iterable, body, .. } => {
+            expr_contains_string_concat(iterable) || block_contains_string_concat(body)
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            resources.iter().any(stmt_contains_string_concat)
+                || block_contains_string_concat(body)
+                || catches
+                    .iter()
+                    .any(|catch| block_contains_string_concat(&catch.body))
+                || finally_block
+                    .as_ref()
+                    .is_some_and(block_contains_string_concat)
+        }
+        Stmt::Switch { selector, cases } => {
+            expr_contains_string_concat(selector)
+                || cases
+                    .iter()
+                    .any(|case| case.statements.iter().any(stmt_contains_string_concat))
+        }
+        Stmt::ConstructorInvocation { args, .. } => args.iter().any(expr_contains_string_concat),
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            block_contains_string_concat(block)
+        }
+        Stmt::LocalType(ty) => type_contains_string_concat(ty),
+        Stmt::VarDecl {
+            initializer: None, ..
+        }
+        | Stmt::Return(None)
+        | Stmt::Break(_)
+        | Stmt::Continue(_)
+        | Stmt::Unsupported(_) => false,
+    }
+}
+
+fn expr_contains_string_concat(expr: &Expr) -> bool {
+    match expr {
+        Expr::Binary { op, left, right } => {
+            matches!(op, BinaryOp::Add)
+                || expr_contains_string_concat(left)
+                || expr_contains_string_concat(right)
+        }
+        Expr::Call { receiver, args, .. } => {
+            receiver.as_deref().is_some_and(expr_contains_string_concat)
+                || args.iter().any(expr_contains_string_concat)
+        }
+        Expr::FieldAccess(receiver, _) => expr_contains_string_concat(receiver),
+        Expr::ArrayAccess(array, index) => {
+            expr_contains_string_concat(array) || expr_contains_string_concat(index)
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            dimensions.iter().any(expr_contains_string_concat)
+                || initializer
+                    .as_ref()
+                    .is_some_and(|values| values.iter().any(expr_contains_string_concat))
+        }
+        Expr::ArrayInitializer(values) => values.iter().any(expr_contains_string_concat),
+        Expr::Cast { expr, .. } | Expr::Unary { expr, .. } => expr_contains_string_concat(expr),
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            expr_contains_string_concat(condition)
+                || expr_contains_string_concat(then_expr)
+                || expr_contains_string_concat(else_expr)
+        }
+        Expr::Switch { selector, cases } => {
+            expr_contains_string_concat(selector)
+                || cases.iter().any(|case| {
+                    case.labels.iter().any(|label| {
+                        matches!(
+                            label,
+                            SwitchLabel::Expr(expr) if expr_contains_string_concat(expr)
+                        )
+                    }) || expr_contains_string_concat(&case.value)
+                })
+        }
+        Expr::InstanceOf { expr, .. } => expr_contains_string_concat(expr),
+        Expr::Lambda { body, .. } => match body {
+            LambdaBody::Expr(expr) => expr_contains_string_concat(expr),
+            LambdaBody::Block(block) => block_contains_string_concat(block),
+        },
+        Expr::New { args, body, .. } => {
+            args.iter().any(expr_contains_string_concat)
+                || body.iter().flatten().any(member_contains_string_concat)
+        }
+        Expr::ClassLiteral(_)
+        | Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::Raw(_)
+        | Expr::MethodReference { .. }
+        | Expr::Unsupported { .. } => false,
+    }
+}
+
+fn program_uses_java_string_buffer_runtime_surfaces(program: &Program) -> bool {
+    program_mentions_java_type(program, "StringBuilder")
+        || program_mentions_java_type(program, "StringBuffer")
 }
 
 pub fn program_uses_java_erased_object_runtime_support(program: &Program) -> bool {
@@ -19580,14 +22423,6 @@ pub struct ExternalApiMethodPolicy {
     pub provenance: FactProvenance,
 }
 
-pub fn external_api_method_policy(
-    receiver_type: Option<&str>,
-    name: &str,
-    arg_count: usize,
-) -> ExternalApiMethodPolicy {
-    external_api_method_policy_with_builtin_packs(receiver_type, name, arg_count, true)
-}
-
 pub fn external_api_method_policy_with_builtin_packs(
     receiver_type: Option<&str>,
     name: &str,
@@ -19999,7 +22834,7 @@ pub fn external_api_method_role(
         ExternalApiRole::Setter
     } else if matches!(
         name,
-        "add" | "remove" | "put" | "clear" | "advance" | "read" | "write" | "copy"
+        "add" | "remove" | "put" | "clear" | "advance" | "read" | "write" | "copy" | "fill"
     ) {
         ExternalApiRole::Mutator
     } else {
@@ -20226,7 +23061,10 @@ pub fn external_api_return_nullability(
         (_, "getCanonicalPath", 0) => NullabilityState::DefinitelyNonNull,
         (Some("StringUtils"), "isEmpty", 1) => NullabilityState::DefinitelyNonNull,
         (Some("StringUtils"), "split", 2) => NullabilityState::DefinitelyNonNull,
+        (Some("Byte"), "parseByte", 1 | 2) => NullabilityState::DefinitelyNonNull,
+        (Some("Short"), "parseShort", 1 | 2) => NullabilityState::DefinitelyNonNull,
         (Some("Integer"), "parseInt", 1 | 2) => NullabilityState::DefinitelyNonNull,
+        (Some("Long"), "parseLong", 1 | 2) => NullabilityState::DefinitelyNonNull,
         (Some("Objects"), "equals", 2) => NullabilityState::DefinitelyNonNull,
         (Some("Objects"), "nonNull" | "isNull", 1) => NullabilityState::DefinitelyNonNull,
         (Some("Collections"), "emptyList" | "emptySet" | "emptyMap", 0) => {
@@ -20354,11 +23192,15 @@ fn static_utility_method_role(
         (Some("Long"), "toBinaryString", 1) => ExternalApiRole::Getter,
         (Some("StringUtils"), "isEmpty", 1) => ExternalApiRole::BooleanGetter,
         (Some("StringUtils"), "split", 2) => ExternalApiRole::Getter,
+        (Some("Byte"), "parseByte" | "parse_byte", 1 | 2) => ExternalApiRole::Getter,
+        (Some("Short"), "parseShort" | "parse_short", 1 | 2) => ExternalApiRole::Getter,
         (
             Some("Integer"),
             "parseInt" | "parse_int" | "valueOf" | "value_of" | "toHexString" | "to_hex_string",
             1 | 2,
         ) => ExternalApiRole::Getter,
+        (Some("Long"), "parseLong" | "parse_long", 1 | 2) => ExternalApiRole::Getter,
+        (Some("Integer"), "compare", 2) => ExternalApiRole::Getter,
         (Some("Float"), "compare", 2) => ExternalApiRole::Getter,
         (
             Some("Float"),
@@ -20466,6 +23308,8 @@ fn is_static_utility_owner(receiver_type: Option<&str>) -> bool {
     matches!(
         receiver_type,
         Some("String")
+            | Some("Byte")
+            | Some("Short")
             | Some("Long")
             | Some("Integer")
             | Some("Float")
@@ -20909,6 +23753,49 @@ mod jdk_exception_hierarchy_tests {
 }
 
 #[cfg(test)]
+mod native_collection_role_tests {
+    use super::*;
+
+    fn named(name: &str) -> JavaType {
+        JavaType::Named {
+            name: name.to_string(),
+            args: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn sorted_map_navigation_methods_are_known_getters_only_for_sorted_maps() {
+        for ty in [
+            named("TreeMap"),
+            named("SortedMap"),
+            named("java.util.TreeMap"),
+        ] {
+            for method in [
+                "firstKey",
+                "lastKey",
+                "lowerKey",
+                "floorKey",
+                "ceilingKey",
+                "higherKey",
+            ] {
+                assert!(
+                    native_collection_receiver_method_known(&ty, method),
+                    "{ty:?}.{method} should be known"
+                );
+            }
+        }
+
+        let map = named("Map");
+        for method in ["lowerKey", "floorKey", "ceilingKey", "higherKey"] {
+            assert!(
+                !native_collection_receiver_method_known(&map, method),
+                "plain Map.{method} should not be treated as sorted-map navigation"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod external_nullability_derivation_tests {
     use super::*;
 
@@ -20948,7 +23835,14 @@ mod external_nullability_derivation_tests {
     fn a_qualified_receiver_answers_like_its_simple_name() {
         for (simple, qualified, name, arity) in [
             ("System", "java.lang.System", "currentTimeMillis", 0),
+            ("Byte", "java.lang.Byte", "parseByte", 1),
+            ("Byte", "java.lang.Byte", "parseByte", 2),
+            ("Short", "java.lang.Short", "parseShort", 1),
+            ("Short", "java.lang.Short", "parseShort", 2),
             ("Integer", "java.lang.Integer", "parseInt", 1),
+            ("Integer", "java.lang.Integer", "parseInt", 2),
+            ("Long", "java.lang.Long", "parseLong", 1),
+            ("Long", "java.lang.Long", "parseLong", 2),
             ("JarFile", "java.util.jar.JarFile", "getManifest", 0),
             ("Attributes", "java.util.jar.Attributes", "getValue", 1),
             ("Graphics", "java.awt.Graphics", "getClip", 0),
@@ -20970,6 +23864,21 @@ mod external_nullability_derivation_tests {
                 "{simple} and {qualified} disagree about {name}/{arity}"
             );
         }
+    }
+
+    #[test]
+    fn collections_n_copies_return_type_uses_element_argument() {
+        assert_eq!(
+            known_external_method_return_type_for_call(
+                Some(&JavaType::Unknown("Collections".to_string())),
+                "nCopies",
+                &[JavaType::Primitive(PrimitiveType::Int), JavaType::String,],
+            ),
+            Some(JavaType::Named {
+                name: "List".to_string(),
+                args: vec![JavaType::String],
+            })
+        );
     }
 
     /// The four entries that claimed a non-null for a method that returns null.
@@ -21253,5 +24162,27 @@ mod functional_interface_shape_tests {
         ] {
             assert!(functional_interface_shape(name).is_none(), "{name}");
         }
+    }
+
+    #[test]
+    fn vcf_header_to_string_fact_marks_simple_facade_display_capable() {
+        let facts = crate::external_packs::htsjdk_vcf_pack_facts();
+        assert!(
+            facts.external_api_effect_facts.iter().any(|fact| {
+                fact.receiver_type.as_deref() == Some("VCFHeader") && fact.method_name == "toString"
+            }),
+            "{:?}",
+            facts.external_api_effect_facts
+        );
+        let display_types = crate::stdlib::display_capable_external_facade_types(&facts);
+        assert!(display_types.contains("VCFHeader"), "{display_types:?}");
+        assert!(display_types.contains("VCFHeaderLine"), "{display_types:?}");
+    }
+
+    #[test]
+    fn interval_to_string_fact_marks_simple_facade_display_capable() {
+        let facts = crate::external_packs::htsjdk_samtools_util_pack_facts();
+        let display_types = crate::stdlib::display_capable_external_facade_types(&facts);
+        assert!(display_types.contains("Interval"), "{display_types:?}");
     }
 }

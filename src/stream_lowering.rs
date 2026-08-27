@@ -31,7 +31,7 @@ use crate::rust_ir::{RustClosureBody, RustClosureParam, RustExpr, RustStmt};
 use crate::shape_projection::borrowed_string_content_shape;
 use crate::signature::SignaturePlan;
 use crate::slot_render::rust_type_for_slot_with_facts;
-use crate::slot_shape::RustSlotShape;
+use crate::slot_shape::{OwnershipShape, RustSlotShape};
 use crate::stream::{
     FilterPlan, FlatMapPlan, LambdaPlan, StreamLambdaBody, StreamOp, StreamPlan,
     StreamSourceIteration, StreamSourceRange, StreamSubPipeline, StreamTerminal,
@@ -349,14 +349,6 @@ fn stream_lambda_expr(expr: RustExpr, precedence: u8) -> StreamLambdaRenderedExp
     StreamLambdaRenderedExpr { expr, precedence }
 }
 
-pub fn emit_stream_lambda_body(
-    expr: &Expr,
-    param: &str,
-    value: StreamLambdaValue,
-) -> Option<String> {
-    emit_stream_lambda_body_with_context(expr, param, value, StreamRenderContext::empty())
-}
-
 pub fn emit_stream_lambda_body_expr(
     expr: &Expr,
     param: &str,
@@ -420,7 +412,11 @@ fn emit_stream_lambda_body_with_locals_prec(
 ) -> Option<StreamLambdaRenderedExpr> {
     let lowered = match expr {
         Expr::Literal(lit) => stream_lambda_expr(RustExpr::Literal(literal_to_rust(lit)), 12),
-        Expr::Raw(raw) => stream_lambda_expr(stream_raw_expr(raw), 12),
+        Expr::Raw(raw) => {
+            let expr = stream_raw_expr(raw);
+            let precedence = crate::emit::expr_precedence(&expr);
+            stream_lambda_expr(expr, precedence)
+        }
         Expr::Var(name) if name == param => {
             stream_lambda_expr(stream_lambda_value_expr(value, param_rust), 12)
         }
@@ -728,15 +724,20 @@ fn emit_stream_lambda_body_with_locals_prec(
                 ),
             }
         }
-        Expr::New { ty, args, .. } => {
-            let rust_name = ctx
-                .facts
-                .map(|facts| {
-                    crate::call_plan::unresolved_constructor_rust_name_for_facts(
-                        ty,
-                        facts,
-                        args.len(),
-                    )
+        Expr::New {
+            ty, args, resolved, ..
+        } => {
+            let rust_name = resolved
+                .as_ref()
+                .map(|resolved| resolved.rust_name.clone())
+                .or_else(|| {
+                    ctx.facts.map(|facts| {
+                        crate::call_plan::unresolved_constructor_rust_name_for_facts(
+                            ty,
+                            facts,
+                            args.len(),
+                        )
+                    })
                 })
                 .unwrap_or_else(|| "new".to_string());
             let owner = stream_lambda_type_name(ty)?;
@@ -831,11 +832,35 @@ fn emit_stream_lambda_member_access_through_plan_expr(
 }
 
 fn stream_raw_expr(raw: &str) -> RustExpr {
-    RustExpr::raw_leaf(raw)
+    if let Some((owner, member)) = raw_java_static_member_access(raw) {
+        return owner_associated_path_projection(owner, member);
+    }
+    crate::coercion::rendered_plus_expr_projection_or_raw_leaf(raw)
 }
 
-pub fn render_stream_plan(plan: &StreamPlan<'_>, lowered_source: RustExpr) -> Option<LoweredExpr> {
-    render_stream_plan_with_context(plan, lowered_source, StreamRenderContext::empty())
+fn raw_java_static_member_access(raw: &str) -> Option<(&str, &str)> {
+    let (owner, member) = raw.split_once('.')?;
+    if member.contains('.') || !java_static_owner_ident(owner) || !rust_identifier_part(member) {
+        return None;
+    }
+    Some((owner, member))
+}
+
+fn java_static_owner_ident(owner: &str) -> bool {
+    owner
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_uppercase())
+        && rust_identifier_part(owner)
+}
+
+fn rust_identifier_part(part: &str) -> bool {
+    let mut chars = part.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 pub fn render_stream_plan_with_context(
@@ -1382,7 +1407,86 @@ fn render_stream_sub_pipeline_expr(
         item_is_borrowed,
         item_shape,
     )
-    .map(|(expr, _, _)| expr)
+    .map(|(expr, nested_item_is_borrowed, nested_item_shape)| {
+        recover_temporary_sub_pipeline_item(
+            expr,
+            source_is_lambda_param,
+            nested_item_is_borrowed,
+            &nested_item_shape,
+        )
+    })
+}
+
+fn recover_temporary_sub_pipeline_item(
+    expr: RustExpr,
+    source_is_lambda_param: bool,
+    item_is_borrowed: bool,
+    item_shape: &RustSlotShape,
+) -> RustExpr {
+    if source_is_lambda_param {
+        return expr;
+    }
+    if item_shape.java_ty == JavaType::String
+        && (item_is_borrowed || item_shape.ownership == OwnershipShape::SharedBorrow)
+    {
+        return own_temporary_string_stream_item(expr);
+    }
+    expr
+}
+
+fn own_temporary_string_stream_item(expr: RustExpr) -> RustExpr {
+    match expr {
+        RustExpr::MethodCall {
+            receiver,
+            method,
+            args,
+        } if method == "map" => {
+            let [
+                RustExpr::Closure {
+                    is_move,
+                    return_type,
+                    params,
+                    body,
+                },
+            ] = args.as_slice()
+            else {
+                return receiver_method_call_projection_exact(*receiver, &method, args);
+            };
+            let RustClosureBody::Expr(body_expr) = body;
+            let owned_body = receiver_method_call_projection_exact(
+                body_expr.as_ref().clone(),
+                "to_string",
+                Vec::new(),
+            );
+            receiver_method_call_projection_exact(
+                *receiver,
+                &method,
+                vec![RustExpr::Closure {
+                    is_move: *is_move,
+                    return_type: return_type.clone(),
+                    params: params.clone(),
+                    body: RustClosureBody::Expr(Box::new(owned_body)),
+                }],
+            )
+        }
+        other => receiver_method_call_projection_exact(
+            other,
+            "map",
+            vec![RustExpr::Closure {
+                is_move: false,
+                return_type: None,
+                params: vec![RustClosureParam {
+                    pattern: "value".to_string(),
+                    ty: None,
+                }],
+                body: RustClosureBody::Expr(Box::new(receiver_method_call_projection_exact(
+                    RustExpr::Var("value".to_string()),
+                    "to_string",
+                    Vec::new(),
+                ))),
+            }],
+        ),
+    }
 }
 
 fn stream_join_item_display_projection(item_shape: &RustSlotShape) -> RustExpr {
@@ -2201,12 +2305,20 @@ fn emit_stream_lambda_local_initializer_expr(
         false,
     )?
     .expr;
-    if stream_lambda_initializer_needs_optional_unwrap(ty, expr, ctx) {
-        lowered = unwrap_java_null_receiver_projection(lowered);
-    }
+    let needs_optional_unwrap = stream_lambda_initializer_needs_optional_unwrap(ty, expr, ctx);
     if matches!(ty, JavaType::String) && matches!(expr, Expr::ArrayAccess(_, _)) {
+        if needs_optional_unwrap {
+            lowered = unwrap_java_null_receiver_projection(receiver_method_call_projection_exact(
+                lowered,
+                "as_ref",
+                Vec::new(),
+            ));
+        }
         Some(apply_clone_projection(lowered))
     } else {
+        if needs_optional_unwrap {
+            lowered = unwrap_java_null_receiver_projection(lowered);
+        }
         Some(lowered)
     }
 }
@@ -2936,7 +3048,17 @@ fn stream_lambda_arg_actual_shape(
         Expr::FieldAccess(receiver, field) if matches!(receiver.as_ref(), Expr::This) => {
             ctx.env.and_then(|env| env.field_shape(field)).cloned()
         }
-        _ => None,
+        _ => ctx.env.map(|env| {
+            infer_expr_shape_with_context(
+                arg,
+                env,
+                ExprShapeContext {
+                    signatures: ctx.signatures,
+                    representations: None,
+                    facts: ctx.facts,
+                },
+            )
+        }),
     }
 }
 

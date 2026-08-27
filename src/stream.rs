@@ -36,12 +36,6 @@ pub enum StreamSourceRange<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamElement {
     pub shape: RustSlotShape,
-    pub value_category: StreamValueCategory,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StreamValueCategory {
-    Borrowed,
 }
 
 pub enum StreamOp<'a> {
@@ -242,7 +236,6 @@ fn build_stream_plan_core<'a>(
         terminal,
         source_element: StreamElement {
             shape: infer_stream_source_element_shape_with_facts(source, env, facts)?,
-            value_category: StreamValueCategory::Borrowed,
         },
         actual,
     })
@@ -652,7 +645,7 @@ fn infer_stream_lambda_output_shape(
     };
     let mut lambda_env = env.clone();
     lambda_env.insert_local(lambda.param_name.clone(), input_shape.java_ty.clone());
-    insert_lambda_prefix_locals(lambda, &mut lambda_env);
+    insert_lambda_prefix_locals(lambda, &mut lambda_env, facts);
     let output_shape =
         infer_stream_lambda_body_shape_with_facts(return_expr, input_shape, &lambda_env, facts);
     if matches!(lambda.body, StreamLambdaBody::Block(block) if block_has_null_return(block)) {
@@ -801,7 +794,7 @@ fn lambda_stream_chain_plan<'a>(
     let source_expr = receiver_source(return_expr)?;
     let mut lambda_env = env.clone();
     lambda_env.insert_local(lambda.param_name.clone(), input_shape.java_ty.clone());
-    insert_lambda_prefix_locals(&lambda, &mut lambda_env);
+    insert_lambda_prefix_locals(&lambda, &mut lambda_env, facts);
     let source_shape =
         infer_stream_source_element_shape_with_facts(source_expr, &lambda_env, facts)?;
     let (source, ops, output_shape) =
@@ -818,14 +811,13 @@ fn lambda_stream_chain_plan<'a>(
             ops,
             source_element: StreamElement {
                 shape: infer_stream_source_element_shape_with_facts(source, &lambda_env, facts)?,
-                value_category: StreamValueCategory::Borrowed,
             },
             output_shape,
         }),
     })
 }
 
-fn insert_lambda_prefix_locals(lambda: &LambdaPlan<'_>, env: &mut TypeEnv) {
+fn insert_lambda_prefix_locals(lambda: &LambdaPlan<'_>, env: &mut TypeEnv, facts: &FactSet) {
     let StreamLambdaBody::Block(block) = lambda.body else {
         return;
     };
@@ -834,10 +826,45 @@ fn insert_lambda_prefix_locals(lambda: &LambdaPlan<'_>, env: &mut TypeEnv) {
         .iter()
         .take(block.statements.len().saturating_sub(1))
     {
-        if let Stmt::VarDecl { ty, name, .. } = stmt {
-            env.insert_local(name.clone(), ty.clone());
+        if let Stmt::VarDecl {
+            ty,
+            name,
+            initializer,
+            ..
+        } = stmt
+        {
+            env.insert_local(
+                name.clone(),
+                stream_prefix_local_planning_type(ty, initializer.as_ref(), facts),
+            );
         }
     }
+}
+
+fn stream_prefix_local_planning_type(
+    declared_ty: &JavaType,
+    initializer: Option<&Expr>,
+    facts: &FactSet,
+) -> JavaType {
+    if crate::types::optional_element_type(declared_ty).is_some()
+        || !java_type_is_stream_capable(declared_ty, facts)
+    {
+        return declared_ty.clone();
+    }
+    match initializer {
+        Some(Expr::Literal(crate::java_ir::Literal::Null)) => {
+            optional_java_type(declared_ty.clone())
+        }
+        Some(Expr::Call { .. }) => optional_java_type(declared_ty.clone()),
+        _ => declared_ty.clone(),
+    }
+}
+
+fn java_type_is_stream_capable(java_ty: &JavaType, facts: &FactSet) -> bool {
+    crate::types::stream_element_type(java_ty).is_some()
+        || crate::stream_shape::stream_source_capability_policy(java_ty, facts)
+            .capability_element
+            .is_some()
 }
 
 fn infer_flat_map_output_shape(
@@ -880,10 +907,14 @@ pub fn stream_terminal_actual(
             LoweredType::from_java(crate::types::infer_expr_type(reduce.identity, env))
         }
         StreamTerminal::Collect(JavaCollectionKind::List) => stream_collect_actual(element_shape),
-        StreamTerminal::Collect(JavaCollectionKind::Set) => {
+        StreamTerminal::Collect(JavaCollectionKind::Set)
+        | StreamTerminal::Collect(JavaCollectionKind::SortedSet)
+        | StreamTerminal::Collect(JavaCollectionKind::InsertionOrderedSet) => {
             LoweredType::collected_set_from_element_shape(element_shape)
         }
-        StreamTerminal::Collect(JavaCollectionKind::Map) => {
+        StreamTerminal::Collect(JavaCollectionKind::Map)
+        | StreamTerminal::Collect(JavaCollectionKind::SortedMap)
+        | StreamTerminal::Collect(JavaCollectionKind::InsertionOrderedMap) => {
             LoweredType::from_java(JavaType::Unknown("stream_collect_map".to_string()))
         }
         StreamTerminal::CollectToMap { key, value } => {

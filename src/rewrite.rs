@@ -1,11 +1,3 @@
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RewriteNeed {
-    LoopContinueUpdatePath,
-    BorrowConflict,
-    EscapingInnerCapture,
-    ComplexFinally,
-}
-
 use crate::facts::MethodKey;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

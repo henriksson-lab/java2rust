@@ -15,7 +15,7 @@ use crate::slot_render::{
     rust_name_for_java_named_type, rust_type_for_java_type_with_facts,
     rust_type_for_slot_with_facts,
 };
-use crate::slot_shape::{OwnershipShape, RustSlotShape, ViewShape};
+use crate::slot_shape::{DispatchShape, OwnershipShape, RustSlotShape, ViewShape};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RepresentationTypeEmission {
@@ -55,14 +55,6 @@ impl TraitImplMethodMessagePolicy {
             self.message
         )
     }
-}
-
-pub fn type_emission_for(
-    representations: &RepresentationPlan,
-    ty: &TypeDecl,
-    signatures: &SignaturePlan,
-) -> RepresentationTypeEmission {
-    type_emission_for_with_facts(representations, ty, signatures, &FactSet::default())
 }
 
 pub fn type_emission_for_with_facts(
@@ -133,7 +125,7 @@ pub fn type_emission_for_with_facts_and_exceptions(
             });
             let payload_accessors = java_enum_payload_accessor_methods(ty, variants);
             RepresentationTypeEmission::RawRustItem(format!(
-                "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]\npub enum {rust_enum_name} {{\n{variant_items}\n}}\n{default_impl}\n\nimpl {rust_enum_name} {{\n    pub fn values() -> Vec<Self> {{ vec![{values}] }}\n\n    pub fn value_of<T: AsRef<str>>(name: T) -> Self {{\n        match name.as_ref() {{\n{value_of_arms}\n            other => panic!(\"unknown Java enum constant {{}}.{{}}\", {enum_name:?}, other),\n        }}\n    }}\n\n    #[allow(non_snake_case)]\n    pub fn valueOf<T: AsRef<str>>(name: T) -> Self {{ Self::value_of(name) }}\n\n    pub fn name(&self) -> &'static str {{\n        match self {{\n{name_arms}\n        }}\n    }}\n\n    pub fn ordinal(&self) -> i32 {{\n        match self {{\n{ordinal_arms}\n        }}\n    }}\n{payload_accessors}\n}}\n\nimpl std::fmt::Display for {rust_enum_name} {{\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{\n        write!(f, \"{{}}\", self.name())\n    }}\n}}"
+                "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]\npub enum {rust_enum_name} {{\n{variant_items}\n}}\n{default_impl}\n\nimpl {rust_enum_name} {{\n    pub fn values() -> Vec<Self> {{ vec![{values}] }}\n\n    pub fn value_of<T: AsRef<str>>(name: T) -> Self {{\n        match name.as_ref() {{\n{value_of_arms}\n            other => panic!(\"unknown Java enum constant {{}}.{{}}\", {enum_name:?}, other),\n        }}\n    }}\n\n    #[allow(non_snake_case)]\n    pub fn valueOf<T: AsRef<str>>(name: T) -> Self {{ Self::value_of(name) }}\n\n    pub fn name(&self) -> &'static str {{\n        match self {{\n{name_arms}\n        }}\n    }}\n\n    pub fn ordinal(&self) -> i32 {{\n        match self {{\n{ordinal_arms}\n        }}\n    }}\n\n    pub fn compare_to<B: std::borrow::Borrow<Self>>(&self, other: B) -> i32 {{\n        let other = other.borrow();\n        if self.ordinal() < other.ordinal() {{ -1 }} else if self.ordinal() > other.ordinal() {{ 1 }} else {{ 0 }}\n    }}\n{payload_accessors}\n}}\n\nimpl std::fmt::Display for {rust_enum_name} {{\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{\n        write!(f, \"{{}}\", self.name())\n    }}\n}}"
             ))
         }
         ObjectRepresentation::ClosedEnum {
@@ -449,21 +441,6 @@ pub fn raw_type_item_for_program_with_facts_and_exceptions(
         RepresentationTypeEmission::RawRustItem(item) => Some(item),
         RepresentationTypeEmission::LowerAsConcreteStruct => None,
     }
-}
-
-pub fn trait_impl_emissions_for_type(
-    representations: &RepresentationPlan,
-    program: &Program,
-    ty: &TypeDecl,
-    signatures: &SignaturePlan,
-) -> Vec<String> {
-    trait_impl_emissions_for_type_with_facts(
-        representations,
-        program,
-        ty,
-        signatures,
-        &FactSet::default(),
-    )
 }
 
 pub fn trait_impl_emissions_for_type_with_facts(
@@ -929,7 +906,7 @@ fn trait_impl_for_type(
 pub(crate) fn trait_object_support_method_signatures(trait_name: &str) -> Vec<String> {
     vec![
         "    fn as_any(&self) -> &dyn std::any::Any;".to_string(),
-        format!("    fn clone_box(&self) -> Box<dyn {trait_name}>;"),
+        format!("    fn clone_box(&self) -> std::boxed::Box<dyn {trait_name}>;"),
     ]
 }
 
@@ -937,7 +914,7 @@ fn trait_object_support_impl_methods(trait_name: &str) -> Vec<String> {
     vec![
         "    fn as_any(&self) -> &dyn std::any::Any { self }".to_string(),
         format!(
-            "    fn clone_box(&self) -> Box<dyn {trait_name}> {{ panic!(\"java2rust: clone_box for {trait_name} requires a cloneable Java object carrier\") }}"
+            "    fn clone_box(&self) -> std::boxed::Box<dyn {trait_name}> {{ panic!(\"java2rust: clone_box for {trait_name} requires a cloneable Java object carrier\") }}"
         ),
     ]
 }
@@ -948,7 +925,7 @@ pub(crate) fn boxed_dyn_trait_clone_impl(trait_name: &str) -> String {
     // unqualified call is ambiguous (`E0034`). Naming the trait picks the one
     // whose return type matches this `Box`.
     format!(
-        "impl Clone for Box<dyn {trait_name}> {{\n    fn clone(&self) -> Self {{ {trait_name}::clone_box(&**self) }}\n}}"
+        "impl Clone for std::boxed::Box<dyn {trait_name}> {{\n    fn clone(&self) -> Self {{ {trait_name}::clone_box(&**self) }}\n}}"
     )
 }
 
@@ -1018,7 +995,7 @@ fn forwarded_trait_method(signature: &str) -> Option<String> {
     let signature_without_semicolon = trimmed.strip_suffix(';')?;
     if name == "clone_box" && args.is_empty() {
         return Some(format!(
-            "    {signature_without_semicolon} {{ Box::new(self.clone()) }}"
+            "    {signature_without_semicolon} {{ std::boxed::Box::new(self.clone()) }}"
         ));
     }
     Some(format!(
@@ -1083,7 +1060,7 @@ fn forwarded_argument_names(params: &str) -> Option<Vec<String>> {
 
 pub(crate) fn dyn_trait_anonymous_impl(trait_name: &str) -> String {
     format!(
-        "impl dyn {trait_name} {{\n    pub fn anonymous() -> Box<dyn {trait_name}> {{ panic!(\"java2rust: anonymous class body for {trait_name} requires object lowering\") }}\n}}"
+        "impl dyn {trait_name} {{\n    pub fn anonymous() -> std::boxed::Box<dyn {trait_name}> {{ panic!(\"java2rust: anonymous class body for {trait_name} requires object lowering\") }}\n}}"
     )
 }
 
@@ -1628,9 +1605,20 @@ fn trait_param_shape_should_widen_to_implementation(
     interface_shape: &RustSlotShape,
     implementation_shape: &RustSlotShape,
 ) -> bool {
-    interface_shape.ownership == OwnershipShape::SharedBorrow
-        && implementation_shape.ownership == OwnershipShape::Owned
-        && interface_shape.java_ty == implementation_shape.java_ty
+    if interface_shape.ownership != OwnershipShape::SharedBorrow
+        || interface_shape.java_ty != implementation_shape.java_ty
+    {
+        return false;
+    }
+    if implementation_shape.ownership == OwnershipShape::Owned {
+        return true;
+    }
+    implementation_shape.ownership == OwnershipShape::SharedBorrow
+        && implementation_shape.view == ViewShape::DynTraitView
+        && matches!(
+            implementation_shape.dispatch,
+            DispatchShape::DynTrait { .. } | DispatchShape::BoxedDynTrait { .. }
+        )
 }
 
 fn trait_param_shape_should_widen_to_declared_source_param(
@@ -1650,6 +1638,12 @@ fn trait_return_shape_should_widen_to_implementation(
     interface_shape: &RustSlotShape,
     implementation_shape: &RustSlotShape,
 ) -> bool {
+    if implementation_shape
+        .optional_element_type()
+        .is_some_and(|element_ty| element_ty == interface_shape.java_ty)
+    {
+        return true;
+    }
     interface_shape.ownership == OwnershipShape::SharedBorrow
         && implementation_shape.ownership == OwnershipShape::Owned
         && interface_shape.java_ty == implementation_shape.java_ty
@@ -1890,25 +1884,133 @@ fn source_type_extends(program: &Program, ty: &TypeDecl, target_name: &str) -> b
 }
 
 fn find_type_decl<'a>(program: &'a Program, type_name: &str) -> Option<&'a TypeDecl> {
-    program
-        .types
-        .iter()
-        .find_map(|ty| find_type_decl_in_type(ty, type_name))
+    let mut matches = TypeDeclMatches::default();
+    for ty in &program.types {
+        collect_type_decl_matches(ty, type_name, &mut matches);
+    }
+    unique_type_decl(matches.exact)
+        .or_else(|| unique_type_decl(matches.emitted_alias))
+        .or_else(|| unique_type_decl(matches.simple))
 }
 
-fn find_type_decl_in_type<'a>(ty: &'a TypeDecl, type_name: &str) -> Option<&'a TypeDecl> {
-    let simple_name = ty.name.rsplit('.').next().unwrap_or(&ty.name);
-    if ty.name == type_name
-        || simple_name == type_name
-        || rust_name_for_java_named_type(&ty.name) == type_name
-        || rust_name_for_java_named_type(simple_name) == type_name
-    {
-        return Some(ty);
-    }
-    ty.members.iter().find_map(|member| match member {
-        Member::Type(nested) => find_type_decl_in_type(nested, type_name),
+#[derive(Default)]
+struct TypeDeclMatches<'a> {
+    exact: Vec<&'a TypeDecl>,
+    emitted_alias: Vec<&'a TypeDecl>,
+    simple: Vec<&'a TypeDecl>,
+}
+
+fn unique_type_decl(matches: Vec<&TypeDecl>) -> Option<&TypeDecl> {
+    match matches.as_slice() {
+        [ty] => Some(*ty),
         _ => None,
-    })
+    }
+}
+
+fn collect_type_decl_matches<'a>(
+    ty: &'a TypeDecl,
+    type_name: &str,
+    matches: &mut TypeDeclMatches<'a>,
+) {
+    let simple_name = ty.name.rsplit('.').next().unwrap_or(&ty.name);
+    if ty.name == type_name {
+        matches.exact.push(ty);
+    } else if rust_name_for_java_named_type(&ty.name) == type_name {
+        matches.emitted_alias.push(ty);
+    } else if simple_name == type_name || rust_name_for_java_named_type(simple_name) == type_name {
+        matches.simple.push(ty);
+    }
+    for member in &ty.members {
+        if let Member::Type(nested) = member {
+            collect_type_decl_matches(nested, type_name, matches);
+        }
+    }
+}
+
+#[cfg(test)]
+mod type_lookup_tests {
+    use super::find_type_decl;
+    use crate::diagnostics::Span;
+    use crate::java_ir::{Program, TypeDecl, TypeKind};
+
+    fn empty_type(name: &str) -> TypeDecl {
+        TypeDecl {
+            kind: TypeKind::Class,
+            name: name.to_string(),
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            modifiers: Vec::new(),
+            extends: None,
+            implements: Vec::new(),
+            permits: Vec::new(),
+            members: Vec::new(),
+            static_init_blocks: Vec::new(),
+            span: Span::default(),
+        }
+    }
+
+    #[test]
+    fn find_type_decl_refuses_ambiguous_simple_package_peer() {
+        let program = Program {
+            package: None,
+            imports: Vec::new(),
+            types: vec![empty_type("a.Named"), empty_type("b.Named")],
+        };
+
+        assert!(find_type_decl(&program, "Named").is_none());
+        assert_eq!(
+            find_type_decl(&program, "a.Named").map(|ty| ty.name.as_str()),
+            Some("a.Named")
+        );
+        assert_eq!(
+            find_type_decl(&program, "ANamed").map(|ty| ty.name.as_str()),
+            Some("a.Named")
+        );
+    }
+}
+
+#[cfg(test)]
+mod trait_return_shape_tests {
+    use super::trait_return_shape_should_widen_to_implementation;
+    use crate::java_ir::JavaType;
+    use crate::slot_shape::{OwnershipShape, RustSlotShape};
+
+    #[test]
+    fn trait_return_shape_widens_to_optional_implementation_return() {
+        let interface_shape = RustSlotShape::conservative(JavaType::String);
+        let implementation_shape =
+            RustSlotShape::for_storage(crate::types::optional_java_type(JavaType::String));
+
+        assert!(trait_return_shape_should_widen_to_implementation(
+            &interface_shape,
+            &implementation_shape
+        ));
+    }
+
+    #[test]
+    fn trait_return_shape_does_not_widen_to_unrelated_optional_return() {
+        let interface_shape = RustSlotShape::conservative(JavaType::String);
+        let implementation_shape = RustSlotShape::for_storage(crate::types::optional_java_type(
+            JavaType::Primitive(crate::java_ir::PrimitiveType::Int),
+        ));
+
+        assert!(!trait_return_shape_should_widen_to_implementation(
+            &interface_shape,
+            &implementation_shape
+        ));
+    }
+
+    #[test]
+    fn trait_return_shape_keeps_owned_implementation_widening() {
+        let mut interface_shape = RustSlotShape::conservative(JavaType::String);
+        interface_shape.ownership = OwnershipShape::SharedBorrow;
+        let implementation_shape = RustSlotShape::for_storage(JavaType::String);
+
+        assert!(trait_return_shape_should_widen_to_implementation(
+            &interface_shape,
+            &implementation_shape
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -1938,12 +2040,14 @@ mod shared_handle_forwarding_tests {
     fn clone_box_forwarding_preserves_the_handle() {
         let rendered = shared_handle_forwarding_impl(
             "Named",
-            &["    fn clone_box(&self) -> Box<dyn Named>;".to_string()],
+            &["    fn clone_box(&self) -> std::boxed::Box<dyn Named>;".to_string()],
         )
         .expect("forwards");
 
         assert!(
-            rendered.contains("fn clone_box(&self) -> Box<dyn Named> { Box::new(self.clone()) }"),
+            rendered.contains(
+                "fn clone_box(&self) -> std::boxed::Box<dyn Named> { std::boxed::Box::new(self.clone()) }"
+            ),
             "{rendered}"
         );
         assert!(!rendered.contains("(**self).clone_box()"), "{rendered}");

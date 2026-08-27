@@ -414,13 +414,20 @@ pub fn inherited_instance_field_refs_for_type<'a>(
     ty: &TypeDecl,
     support_program: &'a Program,
 ) -> Vec<InheritedInstanceFieldRef<'a>> {
+    inherited_instance_field_refs_for_type_in_programs(ty, &[support_program])
+}
+
+pub fn inherited_instance_field_refs_for_type_in_programs<'a>(
+    ty: &TypeDecl,
+    support_programs: &[&'a Program],
+) -> Vec<InheritedInstanceFieldRef<'a>> {
     let mut fields = Vec::new();
     let mut seen_fields = direct_instance_field_names(ty);
     let mut current = ty.extends.as_deref();
     let mut visited_types = HashSet::new();
 
     while let Some(type_name) = current {
-        let Some(super_ty) = find_type_decl(support_program, type_name) else {
+        let Some(super_ty) = find_unique_type_decl_in_programs(support_programs, type_name) else {
             break;
         };
         if !visited_types.insert(super_ty.name.clone()) {
@@ -446,6 +453,58 @@ pub fn inherited_instance_field_refs_for_type<'a>(
     }
 
     fields
+}
+
+fn find_unique_type_decl_in_programs<'a>(
+    programs: &[&'a Program],
+    type_name: &str,
+) -> Option<&'a TypeDecl> {
+    if let Some(ty) = find_unique_exact_type_decl_in_programs(programs, type_name) {
+        return Some(ty);
+    }
+    let mut found = None;
+    for program in programs {
+        let Some(ty) = find_type_decl(program, type_name) else {
+            continue;
+        };
+        if found.is_some_and(|found: &TypeDecl| found.name != ty.name) {
+            return None;
+        }
+        found = Some(ty);
+    }
+    found
+}
+
+fn find_unique_exact_type_decl_in_programs<'a>(
+    programs: &[&'a Program],
+    type_name: &str,
+) -> Option<&'a TypeDecl> {
+    let type_name = type_name.split('<').next().unwrap_or(type_name).trim();
+    let mut found = None;
+    for program in programs {
+        let Some(ty) = program
+            .types
+            .iter()
+            .find_map(|ty| find_exact_type_decl_in_type(ty, type_name))
+        else {
+            continue;
+        };
+        if found.is_some_and(|found: &TypeDecl| found.name != ty.name) {
+            return None;
+        }
+        found = Some(ty);
+    }
+    found
+}
+
+fn find_exact_type_decl_in_type<'a>(ty: &'a TypeDecl, type_name: &str) -> Option<&'a TypeDecl> {
+    if ty.name == type_name {
+        return Some(ty);
+    }
+    ty.members.iter().find_map(|member| match member {
+        Member::Type(nested) => find_exact_type_decl_in_type(nested, type_name),
+        _ => None,
+    })
 }
 
 fn direct_instance_field_names(ty: &TypeDecl) -> HashSet<String> {
@@ -606,6 +665,7 @@ mod tests {
                     source_name: format!("arg{index}"),
                     ty,
                     is_varargs: false,
+                    binding: None,
                 })
                 .collect(),
             modifiers: Vec::new(),

@@ -99,10 +99,6 @@ impl UnsupportedLoweringMessagePolicy {
     }
 }
 
-pub fn unsupported_constructor_stmt(kind: UnsupportedConstructorLowering) -> RustStmt {
-    unsupported_constructor_message_policy(kind).compile_error_stmt()
-}
-
 pub fn unsupported_constructor_body(kind: UnsupportedConstructorLowering) -> Vec<RustStmt> {
     let policy = unsupported_constructor_message_policy(kind);
     vec![
@@ -154,6 +150,8 @@ pub fn plan_unsupported_statement(stmt: &Stmt) -> Option<UnsupportedStatementLow
                 ),
                 crate::exception_plan::TryStmtPlan::CatchOnly { .. }
                     | crate::exception_plan::TryStmtPlan::WithResources { .. }
+                    | crate::exception_plan::TryStmtPlan::WithResourcesFinally { .. }
+                    | crate::exception_plan::TryStmtPlan::WithResourcesCatchFinally { .. }
                     | crate::exception_plan::TryStmtPlan::FinallyOnly { .. }
                     | crate::exception_plan::TryStmtPlan::CatchFinally { .. }
             ) {

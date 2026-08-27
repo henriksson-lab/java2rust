@@ -938,13 +938,17 @@ fn parse_enum_constant_decl(
         })
         .map(|args| parse_arg_list(args, source))
         .unwrap_or_default();
-    let initializer = (!args.is_empty()).then(|| Expr::New {
+    let body = named_children(*node)
+        .into_iter()
+        .find(|child| child.kind() == "class_body")
+        .map(|body| parse_anonymous_class_body(body, source));
+    let initializer = (!args.is_empty() || body.is_some()).then(|| Expr::New {
         ty: JavaType::Named {
             name: enum_name.to_string(),
             args: Vec::new(),
         },
         args,
-        body: None,
+        body,
         resolved: None,
     });
     Some(FieldDecl {
@@ -1141,6 +1145,7 @@ fn parse_params_node(node: tree_sitter::Node, source: &str) -> Vec<Param> {
                 source_name: to_snake_case_unescaped(&name),
                 ty,
                 is_varargs,
+                binding: None,
             })
         })
         .collect::<Vec<_>>();
@@ -1201,6 +1206,7 @@ fn parse_param_text_fallback(param_text: &str) -> Option<Param> {
         source_name: to_snake_case_unescaped(name),
         ty,
         is_varargs,
+        binding: None,
     })
 }
 
@@ -1459,6 +1465,7 @@ fn attach_label_to_stmt(label: String, stmt: Stmt) -> Stmt {
             source_var_name,
             iterable,
             body,
+            binding,
             ..
         } => Stmt::EnhancedFor {
             var_type,
@@ -1467,6 +1474,7 @@ fn attach_label_to_stmt(label: String, stmt: Stmt) -> Stmt {
             iterable,
             body,
             label: Some(label),
+            binding,
         },
         Stmt::Block(body) | Stmt::LabeledBlock { body, .. } => Stmt::LabeledBlock { label, body },
         other => Stmt::LabeledBlock {
@@ -1556,6 +1564,7 @@ fn parse_resource_declaration_text(src: &str) -> Option<Stmt> {
         name: to_snake_case(name.trim()),
         source_name: to_snake_case_unescaped(name.trim()),
         initializer: Some(parse_expr(right.trim())),
+        binding: None,
     })
 }
 
@@ -1588,7 +1597,12 @@ fn parse_catch_clause(
         .child_by_field_name("body")
         .map(|body| parse_block_like(body, source, diagnostics))
         .unwrap_or_default();
-    CatchClause { types, name, body }
+    CatchClause {
+        types,
+        name,
+        body,
+        binding: None,
+    }
 }
 
 fn parse_switch_node(
@@ -1616,6 +1630,7 @@ fn parse_switch_block(
         .into_iter()
         .filter_map(|child| match child.kind() {
             "switch_block_statement_group" => Some(parse_switch_group(child, source, diagnostics)),
+            "switch_rule" => Some(parse_switch_rule_case(child, source, diagnostics)),
             _ => None,
         })
         .collect()
@@ -1630,7 +1645,7 @@ fn parse_switch_group(
     let mut statements = Vec::new();
     for child in named_children(node) {
         match child.kind() {
-            "switch_label" => labels.push(parse_switch_label(child, source)),
+            "switch_label" => labels.extend(parse_switch_labels(child, source)),
             "line_comment" | "block_comment" => {}
             "statement" => {
                 if let Some(stmt) = first_named_child(child) {
@@ -1645,10 +1660,43 @@ fn parse_switch_group(
     SwitchCase { labels, statements }
 }
 
-fn parse_switch_label(node: tree_sitter::Node, source: &str) -> SwitchLabel {
-    first_named_child(node)
+fn parse_switch_rule_case(
+    node: tree_sitter::Node,
+    source: &str,
+    diagnostics: &mut DiagnosticBag,
+) -> SwitchCase {
+    let mut labels = Vec::new();
+    let mut statements = Vec::new();
+    for child in named_children(node) {
+        match child.kind() {
+            "switch_label" => labels.extend(parse_switch_labels(child, source)),
+            "line_comment" | "block_comment" => {}
+            "expression_statement" | "throw_statement" | "block" => {
+                statements.extend(parse_stmt_nodes(child, source, diagnostics));
+            }
+            _ => statements.extend(parse_stmt_nodes(child, source, diagnostics)),
+        }
+    }
+    if !statements
+        .last()
+        .is_some_and(|stmt| matches!(stmt, Stmt::Break(_) | Stmt::Return(_) | Stmt::Throw(_)))
+    {
+        statements.push(Stmt::Break(None));
+    }
+    SwitchCase { labels, statements }
+}
+
+fn parse_switch_labels(node: tree_sitter::Node, source: &str) -> Vec<SwitchLabel> {
+    let labels = named_children(node)
+        .into_iter()
+        .filter(|label| !matches!(label.kind(), "line_comment" | "block_comment" | "guard"))
         .map(|label| SwitchLabel::Expr(parse_expr_node(label, source)))
-        .unwrap_or(SwitchLabel::Default)
+        .collect::<Vec<_>>();
+    if labels.is_empty() {
+        vec![SwitchLabel::Default]
+    } else {
+        labels
+    }
 }
 
 fn parse_constructor_invocation(
@@ -1721,6 +1769,7 @@ fn parse_local_var_decls(node: tree_sitter::Node, source: &str) -> Vec<Stmt> {
                 name: to_snake_case(&name),
                 source_name: to_snake_case_unescaped(&name),
                 initializer,
+                binding: None,
             }
         })
         .collect()
@@ -1916,6 +1965,7 @@ fn parse_enhanced_for_node(
             .map(|stmt| statement_as_block(stmt, source, diagnostics))
             .unwrap_or_default(),
         label: None,
+        binding: None,
     }
 }
 
@@ -2121,20 +2171,7 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
         "switch_expression" => parse_switch_expr_node(node, source),
         "method_invocation" => {
             let receiver = node.child_by_field_name("object").map(|object| {
-                let mut receiver = if object.kind() == "identifier" {
-                    let ident = text(object, source);
-                    if ident
-                        .chars()
-                        .next()
-                        .is_some_and(|ch| ch.is_ascii_uppercase())
-                    {
-                        Expr::Var(ident.to_string())
-                    } else {
-                        parse_expr_node(object, source)
-                    }
-                } else {
-                    parse_expr_node(object, source)
-                };
+                let mut receiver = parse_expr_node(object, source);
                 if text(node, source).contains(".super.") {
                     receiver = Expr::FieldAccess(Box::new(receiver), "super".to_string());
                 }
@@ -2179,11 +2216,7 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
         "instanceof_expression" => parse_instanceof_expr_node(node, source),
         "lambda_expression" => parse_lambda_node(node, source),
         "method_reference" => parse_method_reference_node(node, source),
-        "class_literal" => Expr::ClassLiteral(
-            first_named_child(node)
-                .map(|ty| parse_type_node(ty, source))
-                .unwrap_or_else(|| JavaType::Unknown("class".to_string())),
-        ),
+        "class_literal" => Expr::ClassLiteral(parse_class_literal_type_node(node, source)),
         _ => unsupported_expr_node(
             node,
             &format!("unsupported expression node: {}", node.kind()),
@@ -2221,14 +2254,42 @@ fn parse_switch_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
 }
 
 fn parse_switch_expr_block(node: tree_sitter::Node, source: &str) -> Vec<SwitchExprCase> {
-    named_children(node)
-        .into_iter()
-        .filter_map(|child| match child.kind() {
-            "switch_rule" => Some(parse_switch_expr_rule(child, source)),
-            "switch_block_statement_group" => parse_switch_expr_yield_group(child, source),
-            _ => None,
-        })
-        .collect()
+    let mut cases = Vec::new();
+    let mut pending_labels = Vec::new();
+    for child in named_children(node) {
+        match child.kind() {
+            "switch_rule" => {
+                if !pending_labels.is_empty() {
+                    cases.push(SwitchExprCase {
+                        labels: std::mem::take(&mut pending_labels),
+                        value: unsupported_expr_node(
+                            child,
+                            "switch expression labels without value",
+                        ),
+                    });
+                }
+                cases.push(parse_switch_expr_rule(child, source));
+            }
+            "switch_block_statement_group" => {
+                let group = parse_switch_expr_yield_group(child, source);
+                pending_labels.extend(group.labels);
+                if let Some(value) = group.value {
+                    cases.push(SwitchExprCase {
+                        labels: std::mem::take(&mut pending_labels),
+                        value,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    if !pending_labels.is_empty() {
+        cases.push(SwitchExprCase {
+            labels: pending_labels,
+            value: unsupported_expr_node(node, "switch expression group without yield"),
+        });
+    }
+    cases
 }
 
 fn parse_switch_expr_rule(node: tree_sitter::Node, source: &str) -> SwitchExprCase {
@@ -2236,7 +2297,7 @@ fn parse_switch_expr_rule(node: tree_sitter::Node, source: &str) -> SwitchExprCa
     let mut value = None;
     for child in named_children(node) {
         match child.kind() {
-            "switch_label" => labels.push(parse_switch_label(child, source)),
+            "switch_label" => labels.extend(parse_switch_labels(child, source)),
             "expression_statement" => {
                 value = first_named_child(child).map(|expr| parse_expr_node(expr, source));
             }
@@ -2262,12 +2323,20 @@ fn parse_switch_expr_rule(node: tree_sitter::Node, source: &str) -> SwitchExprCa
     }
 }
 
-fn parse_switch_expr_yield_group(node: tree_sitter::Node, source: &str) -> Option<SwitchExprCase> {
+struct ParsedSwitchExprYieldGroup {
+    labels: Vec<SwitchLabel>,
+    value: Option<Expr>,
+}
+
+fn parse_switch_expr_yield_group(
+    node: tree_sitter::Node,
+    source: &str,
+) -> ParsedSwitchExprYieldGroup {
     let mut labels = Vec::new();
     let mut value = None;
     for child in named_children(node) {
         match child.kind() {
-            "switch_label" => labels.push(parse_switch_label(child, source)),
+            "switch_label" => labels.extend(parse_switch_labels(child, source)),
             "statement" => {
                 if let Some(stmt) = first_named_child(child)
                     && stmt.kind() == "yield_statement"
@@ -2276,10 +2345,22 @@ fn parse_switch_expr_yield_group(node: tree_sitter::Node, source: &str) -> Optio
                 }
             }
             "yield_statement" => value = parse_yield_statement_value(child, source),
+            "throw_statement" => {
+                value = Some(unsupported_expr_node(
+                    child,
+                    "unsupported switch expression throw arm",
+                ));
+            }
+            "block" => {
+                value = Some(unsupported_expr_node(
+                    child,
+                    "unsupported switch expression block arm",
+                ));
+            }
             _ => {}
         }
     }
-    value.map(|value| SwitchExprCase { labels, value })
+    ParsedSwitchExprYieldGroup { labels, value }
 }
 
 fn parse_yield_statement_value(node: tree_sitter::Node, source: &str) -> Option<Expr> {
@@ -2506,7 +2587,7 @@ fn parse_named_type_node(node: tree_sitter::Node, source: &str) -> JavaType {
         // Measured at 0 hits across the corpus and the type-shape probes.
         return parse_type_text(raw);
     }
-    let name = java_type_name_suffix(raw);
+    let name = java_type_name_from_parse_tree_node(node, raw);
     if name == "String" {
         JavaType::String
     } else {
@@ -2515,6 +2596,37 @@ fn parse_named_type_node(node: tree_sitter::Node, source: &str) -> JavaType {
             args: Vec::new(),
         }
     }
+}
+
+fn java_type_name_from_parse_tree_node(node: tree_sitter::Node, raw: &str) -> String {
+    if matches!(node.kind(), "scoped_type_identifier" | "scoped_identifier")
+        && explicit_source_package_qualified_type_name(raw)
+    {
+        return raw.trim().to_string();
+    }
+    java_type_name_suffix(raw)
+}
+
+fn explicit_source_package_qualified_type_name(raw: &str) -> bool {
+    let mut parts = raw
+        .split('.')
+        .map(str::trim)
+        .filter(|part| !part.is_empty());
+    let Some(first) = parts.next() else {
+        return false;
+    };
+    if matches!(first, "java" | "javax") {
+        return false;
+    }
+    first
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_lowercase())
+        && parts.any(|part| {
+            part.chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_uppercase())
+        })
 }
 
 fn parse_array_type_node(node: tree_sitter::Node, source: &str) -> Option<JavaType> {
@@ -2652,6 +2764,19 @@ fn parse_instanceof_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
     }
 }
 
+fn parse_class_literal_type_node(node: tree_sitter::Node, source: &str) -> JavaType {
+    let raw = text(node, source).trim();
+    if let Some(raw_ty) = raw.strip_suffix(".class") {
+        let raw_ty = raw_ty.trim();
+        if explicit_source_package_qualified_type_name(raw_ty) {
+            return parse_new_type_text(raw_ty);
+        }
+    }
+    first_named_child(node)
+        .map(|ty| parse_type_node(ty, source))
+        .unwrap_or_else(|| JavaType::Unknown("class".to_string()))
+}
+
 fn parse_new_type_node(node: tree_sitter::Node, source: &str) -> JavaType {
     let raw = text(node, source).trim();
     parse_new_type_text(raw)
@@ -2659,7 +2784,9 @@ fn parse_new_type_node(node: tree_sitter::Node, source: &str) -> JavaType {
 
 fn parse_new_type_text(raw: &str) -> JavaType {
     let mut ty = parse_type_text(raw);
-    if type_text_starts_with_type_like_segment(raw) {
+    if type_text_starts_with_type_like_segment(raw)
+        || explicit_source_package_qualified_type_name(raw)
+    {
         if let JavaType::Named { name, .. } | JavaType::Unknown(name) = &mut ty {
             *name = raw.to_string();
         }
@@ -2873,11 +3000,24 @@ pub fn parse_expr(src: &str) -> Expr {
 }
 
 fn collect_syntax_diagnostics(node: tree_sitter::Node, diagnostics: &mut DiagnosticBag) {
-    match node.kind() {
-        _ => {}
+    if node.is_error() {
+        diagnostics.push(
+            crate::diagnostics::Severity::Error,
+            "java_syntax_error",
+            format!("Java syntax error near {}", node.kind()),
+            Some(span(node)),
+        );
+    } else if node.is_missing() {
+        diagnostics.push(
+            crate::diagnostics::Severity::Error,
+            "java_syntax_missing",
+            format!("Java syntax error: missing {}", node.kind()),
+            Some(span(node)),
+        );
     }
 
-    for child in named_children(node) {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
         collect_syntax_diagnostics(child, diagnostics);
     }
 }

@@ -34,10 +34,6 @@ impl<'a> CallableAnalysis<'a> {
         self.usage.methods.get(key)
     }
 
-    pub fn method_usage_by_rust_name(&self, key: &UsageMethodKey) -> Option<&'a MethodUsageFacts> {
-        self.usage.methods_by_rust_name.get(key)
-    }
-
     pub fn method_usage_by_java_key(&self, key: &JavaCallableKey) -> Option<&'a MethodUsageFacts> {
         self.usage.methods_by_java_key.get(key)
     }
@@ -62,15 +58,11 @@ impl<'a> CallableAnalysis<'a> {
         ty: &TypeDecl,
         method: &MethodDecl,
     ) -> Option<&'a MethodSignaturePlan> {
-        self.method_signature_by_java_key(&JavaCallableKey::source_method(ty.name.clone(), method))
+        self.method_signature_by_java_key(&JavaCallableKey::source_method_for_type(ty, method))
     }
 
     pub fn constructor_usage(&self, key: &UsageConstructorKey) -> Option<&'a MethodUsageFacts> {
         self.usage.constructors.get(key)
-    }
-
-    pub fn call_graph_edge_count(&self) -> usize {
-        self.call_graph.edges.len()
     }
 
     pub fn callable_returns_result(&self, key: &crate::usage::CallableKey) -> bool {

@@ -4,10 +4,104 @@ Status: **validated by inspection** (structural)
 Severity: high — this is the mechanism the convergence plan is fighting
 Kind: IR modelling gap
 
+Partial progress 2026-08-24:
+
+- Borrow projection now recovers more raw operands into structured `RustExpr`
+  before deciding whether explicit grouping is needed. Function/method-call
+  operands such as `java_string_substring(...)` and `custom_key_view(...)` stay
+  prefix-safe under `&`, string-literal receivers with suffixes still group as
+  `&("literal".to_string())`, and mutable borrowed compound operands preserve
+  the structured binary/index shape expected by the idempotence tests.
+- The five previously baselined `--lib` failures are gone:
+  `cargo test --lib -- --nocapture` passes 327/0. This is a local reduction of
+  raw-string borrow handling debt, not closure of the broader 0007 audit.
+- A later cleanup pass removed the top-level raw-string recovery branch from
+  optional string-view construction normalization, stopped `lower.rs` from
+  post-processing return expressions through that normalizer, and reused the
+  central char-literal projection helper from `call_lowering.rs` instead of
+  duplicating `strip_prefix('&')` parsing there. The source guard
+  `rendered_string_heuristics_have_centralization_guardrails` is green again
+  after updating stale assertions to distinguish raw consumers from raw
+  constructors.
+- Another cleanup pass taught the central rendered-expression recovery helper
+  to rebuild top-level Rust ranges as `RustExpr::Range`, including inclusive
+  ranges inside grouping. This removes a small but recurring `Raw("(0..limit)")`
+  dependency from stream/coercion paths while keeping the parser conservative:
+  it ignores range tokens inside strings and nested delimiters, rejects
+  ambiguous `...`, and requires exactly one top-level range operator.
+  Regressions: `coercion::tests::rendered_projection_recovers_borrowed_leaf_expressions`,
+  `stream_plan_lowers_int_stream_range_source`, and
+  `translation_lowers_int_stream_range_source_without_static_facade`.
+- Stream lambda `Expr::Raw` ingress now runs through the same conservative
+  rendered-expression recovery helper instead of always constructing an opaque
+  `RustExpr::Raw` leaf. The stream path uses the central emitter precedence for
+  the recovered expression, so raw fragments recovered as binaries are grouped
+  correctly under stronger parent operators. Regression:
+  `stream_raw_expr_recovery_preserves_binary_precedence`.
+- Current-tree audit 2026-08-25: the direct production `RustExpr::Raw(format!(...))`
+  population described below is now largely stale. A source scan for
+  `RustExpr::Raw(format!` finds only `coercion.rs` regression fixtures, while
+  `tests/layering.rs::rendered_string_heuristics_have_centralization_guardrails`
+  and the larger `slot_shape_design` guard suite now fence many producer paths
+  against reintroducing raw formatted Rust expressions. The audit remains open
+  because `Raw` still exists as a compatibility carrier and because consumers
+  still recover structure from rendered text in bounded helpers; the next work
+  is deleting those consumer round trips or narrowing them behind explicit
+  compatibility names, not chasing the historical broad set of direct
+  `Raw(format!(...))` producers.
+- Follow-up 2026-08-25: the central rendered-expression recovery helper now
+  rebuilds simple expression-bodied closures such as `|v| v.trim()` and
+  `move |item| item.iter()` as `RustExpr::Closure` when parameters are untyped
+  and the body itself recovers structurally. It deliberately leaves typed
+  parameters and explicit-return-type closures as raw compatibility leaves.
+  Regression: `coercion::tests::rendered_projection_recovers_borrowed_leaf_expressions`.
+- Follow-up 2026-08-25: the same recovery helper now rebuilds single-tail block
+  expressions such as `{ value.trim() }` as `RustExpr::Block`, which also lets
+  block-bodied expression closures like `|v| { v.trim() }` keep their closure
+  and method-call structure. Blocks with statements/semicolons still remain raw.
+  Regression: `coercion::tests::rendered_projection_recovers_borrowed_leaf_expressions`.
+- Current-tree measurement 2026-08-26: the broad producer pattern is now much
+  smaller than the historical counts below. Excluding test modules, the guarded
+  core lowering files no longer mint direct production `RustExpr::Raw(...)`
+  constructors outside named leaf/recovery boundaries, and a scan for
+  `RustExpr::Raw(format!(...))` still finds only regression fixtures. The
+  central raw constructors are `RustExpr::raw_leaf` / `RustStmt::raw_leaf`; the
+  remaining 0007 work should therefore target named compatibility consumers,
+  recovery helpers, and places that still infer semantics from raw text rather
+  than the old bulk `Raw(format!(...))` producer class.
+- Follow-up 2026-08-26: optional mutable reborrow detection no longer asks raw
+  text first. `expr_is_optional_mut_reborrow` now accepts structured
+  zero-argument `as_deref_mut` calls directly, recovers parseable raw renderings
+  through the central rendered-expression helper, and leaves the old
+  `ends_with(".as_deref_mut()")` test behind a named raw compatibility helper
+  only for unrecoverable leaves. Regression:
+  `coercion::tests::optional_mut_reborrow_recovers_parseable_raw_projection_before_text_fallback`.
+- Follow-up 2026-08-26: optional-construction detection now keeps the structured
+  and Raw paths aligned on `Some` arity. Structured calls must be single-segment
+  `Some` with exactly one argument, and the rendered Raw fallback rejects
+  `Some()` and top-level multi-argument `Some(left, right)` instead of treating
+  the envelope alone as proof of an optional value. Regression:
+  `type_coercion::optional_construction_detection_requires_some_arity_one`.
+- Follow-up 2026-08-26: erased-object downcast protection for unresolved static
+  owner placeholders no longer renders every expression and searches for the
+  `unimplemented!("unresolved Java static call ...")` text. The guard recognizes
+  structured `RustExpr::MacroCall` placeholders through the IR, recurses through
+  wrapper nodes, and keeps the substring check only for Raw compatibility
+  leaves. Literal text mentioning the diagnostic no longer suppresses a
+  downcast. Regression:
+  `coercion::tests::unresolved_static_owner_detection_is_structural_before_raw_fallback`.
+- Follow-up 2026-08-26: the central rendered-expression recovery helper now
+  rebuilds Rust array literals as `RustExpr::ArrayLiteral`, using the same
+  top-level comma splitter that already handles tuple and `vec![]` recovery.
+  This keeps expressions such as `[left + right, helper("a, b")]` structured,
+  and also lets surrounding binary expressions like `[left, right] + tail`
+  recover without preserving the array side as a raw leaf. Regression:
+  `coercion::tests::rendered_projection_recovers_borrowed_leaf_expressions`.
+
 ## Observation
 
-`src/rust_ir.rs` defines a structured `RustExpr`, but 58% of all constructed
-expressions are the escape hatch:
+At filing, `src/rust_ir.rs` defined a structured `RustExpr`, but 58% of all
+constructed expressions were the escape hatch:
 
 | variant | construction sites across `src/` |
 |---|---|
@@ -86,9 +180,9 @@ surgery on Rust source that this same program produced moments earlier.
 
 The convergence plan (`docs/rule-generalization-convergence-plan.md`) correctly
 identifies "facts beat rendered-string checks" as the principle. But the plan
-frames the string checks as a *habit* to be replaced site by site. They are not
-a habit — they are a **forced consequence** of `RustExpr::Raw` being the
-dominant constructor. As long as 58% of expressions carry no structure, any new
+frames the string checks as a *habit* to be replaced site by site. Historically,
+they were not a habit — they were a **forced consequence** of `RustExpr::Raw`
+being the dominant constructor. As long as most expressions carry no structure, any new
 decision that needs to know what an expression is will reach for the text again,
 and the count will grow back.
 
@@ -133,7 +227,7 @@ grep -c 'let rendered = emit' src/*.rs
 grep -oh -E '(ends_with|starts_with|contains)\("[^"]+"\)' src/coercion.rs | sort -u | wc -l
 ```
 
-Current baseline: 542 `Raw` / 929 total, 37 round trips, 55 distinct fragments.
+Original baseline: 542 `Raw` / 929 total, 37 round trips, 55 distinct fragments.
 
 ---
 
@@ -1474,6 +1568,14 @@ The scanner now elides strings, raw strings, line comments, and block comments
 before parsing `impl` / `fn` lines, and it updates impl depth from code-only
 braces. The new regressions keep literal/comment method examples inert while
 real raw inherent methods are still detected.
+
+Follow-up 2026-08-26: the scanner is now scoped to the only semantic question
+that still asks it anything: whether generated Object fallback methods would
+duplicate an existing raw inherent `to_string` or `get_class`. Other raw methods
+are no longer recorded as occupied-method facts. This keeps the compatibility
+guard while shrinking the raw-text-derived fact surface. Covered by
+`lower::tests::raw_inherent_methods_ignore_literal_and_comment_mentions` and
+`lower::tests::raw_inherent_method_scan_ignores_literal_braces_for_impl_depth`.
 
 ## Update 2026-08-11 (Codex follow-up) — raw impl owner parsing keeps HRTB bounds
 
@@ -3002,3 +3104,252 @@ Optional constructed string-view normalization also stopped rebuilding accepted
 `Some(&value.as_str())` remain exact, but once they accept a legacy raw spelling
 the `value.as_str()` payload is a structured method-call tail over the raw
 receiver leaf.
+
+Optional string display no longer stores the `std::convert::AsRef::<str>::as_ref`
+callee as a raw expression. `JavaDisplayPlan::OptionalString` now builds the
+callee as a `RustExpr::GenericPath`; emission is unchanged, but downstream IR
+visitors can see that the mapped closure calls a real path instead of opaque
+text.
+
+Sorted-map navigation key lowering also stopped rendering the whole iterator
+chain through `emit_expr` and `RustExpr::Raw(format!(...))`. `lowerKey`,
+`floorKey`, `ceilingKey`, and `higherKey` now build structured `Bound` tuples,
+`range::<_, _>`, `next`/`next_back`, and the final `map(|(key, _)| key.clone())`
+closure as Rust IR. The broad `rendered_string_heuristics_have_centralization_guardrails`
+inventory is green again, and the 99-fixture differential gate still passes.
+
+2026-08-25: unresolved receiverless collection default fallbacks no longer build
+`<{ty} as Default>::default()` with `RustExpr::Raw(format!(...))`. `RustExpr` has
+a `TraitAssociatedPath { ty, trait_name, member }` node now, emitted as
+`<Type as Trait>::member`, and the `addAll(defaultNames())` fallback composes
+that path with a structured zero-argument call plus the existing postfix TODO
+comment. The focused `unresolved_set_return_in_add_all_uses_target_slot_shape`
+fixture still emits the same Rust and compiles its generated module.
+
+Follow-up the same day: prefix-borrow classification now treats
+`TraitAssociatedPath` as structured prefix-safe syntax, matching `GenericPath`
+and `TypeAssociatedPath`. The focused borrow-idempotence unit test covers
+`&<String as Default>::default` directly.
+
+Another 2026-08-25 cleanup removed a rendered-string fallibility heuristic from
+erased-object clone recovery. `borrowed_erased_object_clone_arg` no longer calls
+`emit::emit_expr(&expr)` to infer that raw text ending in `ok_or_else(...)?` is
+already borrowed-safe. Untagged raw text is now borrowed like any other opaque
+expression; structured `RustExpr::Try` and shaped result propagation remain the
+accepted evidence.
+
+Follow-up the same day: central rendered-expression recovery now promotes
+complete top-level `+` expressions when their operands can already be recovered
+structurally. `left + 12`, `left + format!("{}", name)`, and
+`left + right.method(value)` are now `RustExpr::Binary` trees with literal,
+macro-call, or method-call operands instead of one opaque raw string. The
+`left + right as usize` spelling intentionally remains raw for now because the
+current emitter parenthesizes structured/raw cast operands inside `+`, which
+would churn generated Rust without fixing a semantic hole.
+
+Follow-up the same day: the old clone-comment failure mode is now pinned
+directly. `rendered_expr_has_clone_recovery` may ignore block comments before
+checking generic clone suffixes, but `value.clone()/* TODO... */.into()` is not
+accepted as an already-recovered clone just because the removed comment-specific
+`contains` arm would have matched it. The guard keeps the comment text inert
+while preserving the structured `.into()` clone-recovery output.
+
+Follow-up the same day: arithmetic display conversion no longer has the
+`raw_arithmetic_display_conversion_receiver` strip/scan/reparse path. A raw
+`(left + right).to_string()` spelling is first recovered through the central
+rendered-expression projection, then the existing structured
+`RustExpr::MethodCall { method: "to_string" }` and `RustExpr::Binary` checks
+decide whether the conversion is redundant. Ambiguous raw text such as
+`value * (100 as f64).to_string()` is no longer treated as if the whole
+arithmetic expression had been converted to a string.
+
+Follow-up the same day: one-argument string runtime helpers now recover parseable
+raw second operands before building the helper call. `compareTo`,
+`compareToIgnoreCase`, and `equalsIgnoreCase` still emit the same helper calls,
+but a legacy `right.as_str()` operand is represented as a structured
+`RustExpr::MethodCall` argument instead of remaining opaque inside the otherwise
+structured `RustExpr::Call`.
+
+Follow-up the same day: borrowed-element slot adapter input recovery now falls
+back through `RustExpr::raw_leaf(rendered)` instead of directly rebuilding
+`RustExpr::Raw(rendered)`. Emission is unchanged, but this keeps the unavoidable
+opaque fallback behind the centralized raw-leaf constructor after the method
+receiver recovery attempt fails.
+
+Follow-up 2026-08-25: the optional-erased-string `Raw(format!(...))` hits found
+by the direct source scan were test fixtures, not production builders. The
+production optional-erased-string path is already guarded to use structured
+projection first and to reserve rendered recovery for raw leaves. Added
+`layering::coercion_production_does_not_build_raw_expression_with_format` so
+production `coercion.rs` cannot reintroduce direct `RustExpr::Raw(format!(...))`
+without an explicit test failure. This does not close 0007; it fences one noisy
+search class and keeps future cleanup focused on real production raw producers.
+
+Follow-up 2026-08-25: the raw compatibility path for integral parse null
+normalization no longer turns the stripped receiver back into
+`RustExpr::Raw(receiver.to_string())` before applying the optional-string display
+plan. It now goes through `rendered_plus_expr_projection_or_raw_leaf`, so
+parseable receivers such as optional map/list access chains recover to ordinary
+expression IR and only truly opaque receiver text remains a raw leaf. Regression:
+`lower::tests::integral_parse_nullable_arg_maps_raw_optional_string_expect_null_to_number_format_input`.
+
+Follow-up 2026-08-25 audit pass: a direct scan for
+`RustExpr::Raw(format!(...))` / `RustStmt::Raw(format!(...))` in the core
+lowering files did not find remaining production builders. The `coercion.rs`
+matches were all under its `#[cfg(test)] mod tests` recovery fixtures, and
+`exception_lowering.rs` / `array_lowering.rs` direct raw values in the sampled
+output are also test inputs or centralized compatibility consumers. The live
+0007 residue is therefore not the old direct-formatting class; it is the
+remaining intentional `RustExpr::raw_leaf` fallback surface after structured
+recovery fails.
+
+Follow-up 2026-08-25: the centralized rendered-expression recovery now handles
+simple unary `!expr` and `*expr` leaves before falling back to `RustExpr::Raw`.
+The helper only accepts the recovery when the operand is also structural, so
+opaque/broken raw text still remains a raw leaf. Regression:
+`coercion::tests::rendered_projection_recovers_borrowed_leaf_expressions`.
+
+Follow-up 2026-08-26: raw comma helpers now share the raw-string literal
+scanner. `raw_contains_top_level_comma` had a one-off
+`raw[idx..].starts_with("r#\"")` branch that recognized only one raw-string
+spelling, so commas inside forms such as `r##"a, b"##` could still be treated as
+top-level separators. It now uses `raw_string_literal_end_at`, matching the
+splitter. The private text-splitting helper was also renamed so the source guard
+anchors on the real scanner body instead of a wrapper/helper prefix collision.
+Regressions:
+`coercion::tests::raw_comma_splitter_ignores_commas_inside_raw_string_literals`
+and
+`slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`.
+
+Follow-up 2026-08-26: checked Java-null parse receiver recovery no longer
+rebuilds its `ok_or_else` closure body from a raw
+`JavaException::new("NullPointerException", ...)` string. It now reuses the
+structured `exception_lowering::new_exception_expr` helper, so the recovered
+`value.as_ref().ok_or_else(...)?` shape stays inspectable through the closure
+body. Emitted Rust is unchanged. Guarded by
+`slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`.
+
+The same guard also exposed a stale source anchor for the arrays exception
+panic helper. The helper is now anchored under its current
+`arrays_java_exception_panic_expr` name and uses `rust_string_literal_projection`
+for both exception class and message instead of rebuilding string literals with
+`RustExpr::Literal(format!(...))`.
+
+Follow-up 2026-08-26: catchable Java-null rewriting in `lower.rs` now shares the
+same structured exception constructor. `java_null_pointer_exception_expr` calls
+`exception_lowering::new_exception_expr` with `rust_string_literal_projection`
+instead of hand-building `JavaException::new` from `RustExpr::Literal` pieces.
+The rendered Rust stays the same; the NPE constructor is no longer duplicated
+between `coercion.rs` recovery and `lower.rs` rewriting. Guarded by
+`slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`.
+
+The same centralization pass also moved the list/string/index bounds exception
+helpers in `call_lowering.rs` and `coercion.rs` onto
+`exception_lowering::new_exception_expr`. Those helpers still emit the same
+`JavaException::new(..., "...".to_string())` Rust, but they no longer duplicate
+the exception-call shape with local `RustExpr::Literal` construction. The
+guard now checks these helpers as well.
+
+Follow-up 2026-08-26: the adjacent `NoSuchElementException` result helpers now
+share that path too. `map_key_result_projection` and
+`optional_get_owned_value_result_projection` still render the same
+`ok_or_else(|| JavaException::new(...))` Rust for empty sorted maps and
+`Optional.get()`, but their closure bodies now come from
+`exception_lowering::new_exception_expr` with `rust_string_literal_projection`.
+The centralization guard covers these helpers.
+
+Follow-up 2026-08-26: the fallible array-index read path in `lower.rs` now uses
+the same constructor helper for its `ArrayIndexOutOfBoundsException` closure.
+The dynamic `format!("Index {} out of bounds for length {}", ...)` message
+remains structured as a `RustExpr::MacroCall`, but the surrounding exception
+call is no longer hand-built from local `JavaException::new` pieces.
+
+The array range panic/return helpers in `coercion.rs` were moved over in the
+same style. `arrays_java_exception_panic_expr`, `return_java_exception_stmt`,
+and `panic_java_exception_stmt` now use the central constructor while keeping
+their existing panic/`Err(...)` wrappers and rendered messages.
+
+Follow-up 2026-08-26: primitive result exception helpers followed the same
+path. `math_to_int_exact_result_projection` and the radix-out-of-range branch
+inside primitive parse now use `exception_lowering::new_exception_expr` for
+`ArithmeticException`/`NumberFormatException`, with string messages carried by
+`rust_string_literal_projection`. The existing `JavaException::from_display`
+parse-error path is a different API and remains explicit.
+
+Follow-up 2026-08-26: checked Java integer division/remainder lowering in
+`operator_lowering.rs` now uses the central exception constructor for its
+catchable `/ by zero` `ArithmeticException` path. The surrounding `Err(...)`
+block stays structured; only the duplicated local `JavaException::new` pieces
+were removed.
+
+Follow-up 2026-08-26: the integral-parse nullable-argument compatibility path
+now preserves unrecoverable raw input through `RustExpr::raw_leaf(rendered)`
+instead of directly constructing `RustExpr::Raw(rendered)`. Parseable raw
+optional-string receivers still recover before applying the Java `"null"`
+number-format input rule; only the opaque fallback was centralized.
+
+Follow-up 2026-08-26: the broad source guard now strips `#[cfg(test)]` items
+instead of truncating each file at the first test-only attribute. That matters
+because files such as `coercion.rs` contain small test-only helper islands before
+later production helpers. The same guard now pins the only production raw
+constructors to `RustExpr::raw_leaf` / `RustStmt::raw_leaf` in `rust_ir.rs`.
+
+Follow-up 2026-08-26: the unrecoverable raw-statement fallback in
+`make_java_null_expect_catchable_stmt` now also goes through
+`RustStmt::raw_leaf` after structured recovery fails. Emitted Rust is unchanged,
+but the catchable-null compatibility path no longer reconstructs a raw
+statement directly. Regression coverage remains under
+`lower::tests::make_java_null_expect_catchable_recovers_raw_block_statements`
+and the source guard
+`slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`.
+
+Follow-up 2026-08-26: stream lambda raw-expression ingress now recovers the
+narrow Java static-member spelling `Owner.VALUE` to a structured associated
+path before generic raw recovery. The matcher is intentionally local to
+`stream_raw_expr` and requires exactly one dot plus an uppercase-looking owner,
+so lowercase instance-field-looking raw text such as `owner.value` is left to
+generic recovery and remains a field projection rather than an associated path.
+Regressions:
+`slot_shape_design::stream_lambda_emission_uses_structured_operator_rendering`
+and the source guard
+`slot_shape_design::stream_lambda_lowers_split_length_and_integer_parse_in_nullable_map`.
+
+Follow-up 2026-08-26: `Coercion::AsSlice` associated-path compatibility no
+longer treats raw text containing `::` plus identifier characters as semantic
+path evidence. Raw inputs now pass through `rendered_projection_or_raw_leaf`;
+only a recovered `RustExpr::Path` suppresses `.as_slice()`. The valid
+`Owner::VALUES` compatibility case still recovers to a structured path, while
+malformed path-looking text remains an opaque receiver. Regressions:
+`coercion::tests::as_slice_path_compatibility_does_not_trust_literal_text` and
+`slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`.
+
+Follow-up 2026-08-26: rendered function-call recovery now shares the central
+raw-string literal scanner when looking for the top-level call parentheses.
+`rendered_call_parts` no longer has a one-off `r#"` branch that stops at the
+next quote and misses multi-hash raw strings; it uses
+`raw_string_literal_end_at`, matching the comma and operator scanners. A call
+such as `helper(r##"a ) b"##, value)` now recovers as a structured
+`RustExpr::Call` instead of treating the `)` inside the raw-string body as
+the call close syntax. Regressions:
+`coercion::tests::rendered_projection_recovers_borrowed_leaf_expressions`,
+`coercion::tests::raw_comma_splitter_ignores_commas_inside_raw_string_literals`,
+and `slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`.
+
+Follow-up 2026-08-27: mutable-alias detection no longer jumps straight from a
+`RustExpr::Raw` leaf to the rendered-string compatibility matcher. Raw inputs
+first pass through `rendered_projection_or_raw_leaf`; recovered method/unary
+projections are checked by the same structured `rust_expr_mutable_alias_projection`
+used for non-raw IR, and the substring fallback is reserved for unrecoverable
+legacy leaves. Regressions:
+`slot_shape_design::rendered_mutable_alias_projection_names_same_call_alias_shapes`
+and `slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`.
+
+Follow-up 2026-08-26: production optional-element borrow lowering no longer
+falls back to the ownership-only carrier projection helper after already
+computing a `LoweredType`. `conversion_lowering::apply_reused_optional_unwrap`
+and the two optional-element borrow lowerers in `lower.rs` now require
+`LoweredType::OptionalElementBorrow` before rendering `.as_ref()` / `.as_mut()`,
+so those production projections keep the precise recorded element slot shape.
+The ownership-only helper remains only as a documented compatibility surface
+with direct unit coverage; no production caller depends on its imprecise
+`OptionalProjected` tag.

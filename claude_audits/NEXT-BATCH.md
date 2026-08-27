@@ -192,13 +192,13 @@ analysis handle instead of six optional sets.
 Measured against the tree on 2026-08-01, not the state the issues were filed in.
 Several have moved; two are further along than their docs say.
 
-## Where things actually stand
+## Historical snapshot from this plan
 
-| issue | measured now |
+| issue | historical measurement |
 |---|---|
 | 0002 object aliasing | `ObjectRepresentation` still has no shared **or subtype** case |
 | 0006 move analysis | binding-keyed inside, name-projected out; 6 optional sets, 12 suffix sites |
-| 0007 opaque strings | `RustExpr::Raw` **591 / 1004** (59%); 49 `emit_expr` round-trips; 56 syntax literals matched |
+| 0007 opaque strings | historical: `RustExpr::Raw` **591 / 1004** (59%); 49 `emit_expr` round-trips; 56 syntax literals matched |
 | 0008 machinery reach | `liveness` reaches `lower.rs` (7 refs); `lattice`/`fact_saturation`/`graph` still **0**; 220 bool predicates |
 | 0009 overload identity | **largely fixed** — `f_int`/`f_int_int` suffixes, child override survives, probe compiles |
 | 0010 fallibility | candidate discovery centralized; two stores remain; div/rem over-marks |
@@ -284,9 +284,9 @@ The largest single item, and three other issues are waiting on it.
    (`Rc`/`Arc` per `CONCURRENCY-SCOPE.md` — settle the `Local`/`Shared` policy
    axis *before* implementing, not after) and a **subtype** one, so a `Child`
    value can flow into a `Base` slot.
-2. Drive the choice from an escape/sharing analysis over the existing call graph
-   (`usage.rs`). `EscapeLatticeValue` already exists in `lattice.rs` and is
-   unused — this is its first real consumer, which also chips at 0008.
+2. Drive the choice from the live escape/sharing analysis over the existing call
+   graph (`usage.rs`). The old unused `EscapeLatticeValue` descriptor was
+   deleted under 0062; the live domain is `storage_strategy::Escape`.
 3. Make clone insertion require a justification: legal only when no aliasing is
    observable. Today an unjustified clone is emitted with a `TODO` comment.
 
@@ -497,8 +497,11 @@ errors: `E0308` on the erased argument, `E0310` on the downcast lifetime).
 
 **Where.** `src/rust_ir.rs`, `src/coercion.rs`, `src/lower.rs`.
 
-Current: `RustExpr::Raw` is **591 of 1004** constructions; 49 `emit_expr`
-round-trips; 56 distinct Rust-syntax literals matched.
+Historical starting point: `RustExpr::Raw` was **591 of 1004** constructions;
+49 `emit_expr` round-trips; 56 distinct Rust-syntax literals matched. Current
+tree has moved the direct production constructor surface behind `raw_leaf` /
+rendered-recovery helpers; remaining work is to reduce the compatibility
+consumers that still infer semantics from raw text.
 
 **Change, in this order.**
 1. Add `RustExprShape` (`Borrowed`, `MutBorrowed`, `OwnedRecovery`,
@@ -552,9 +555,9 @@ paper first (`CONCURRENCY-SCOPE.md`), then do the sharing case as R8.
 (`shape_has_more_generic_information`, `lowered_type_slot_has_more_generic_information`,
 `initializer_shape_is_more_specific_for_local`, `cast_target_erases_slot_generic_detail`,
 `java_types_have_same_erased_identity`, …). Give `RustSlotShape` a real
-`subsumes(&self, other) -> bool` and `join(a, b)`, implemented against the
-existing `OWNERSHIP_VALUES` / `VIEW_VALUES` / `DispatchLatticeValue` domains, and
-retire the predicates onto it.
+`subsumes(&self, other) -> bool` and `join(a, b)`, implemented against the live
+rank helpers rather than descriptor-only value arrays, and retire the predicates
+onto it.
 
 Second, mechanical part: move the ~15 hardcoded library predicates
 (`is_java_get_class_name`, `java_type_is_string_type`,
@@ -566,9 +569,9 @@ bool-predicate count in `lower.rs` falls from **220**.
 ## R8 — shared representation (0002, second half)
 
 Only after R6 and the policy decision. Extend `ObjectRepresentation` with
-`Local` (`Rc`) and `Shared` (`Arc`) cases driven by an escape/sharing analysis
-over the existing call graph; `EscapeLatticeValue` in `lattice.rs` is its first
-real consumer. Unblocks 0023 (inner-class construction panics) and 0028
+`Local` (`Rc`) and `Shared` (`Arc`) cases driven by the live escape/sharing
+analysis over the existing call graph. Unblocks 0023 (inner-class construction
+panics) and 0028
 (reference `==`).
 
 **Watch.** `Send`/`Sync` propagates through the whole object graph the first time
@@ -622,11 +625,11 @@ compile error for a silent wrong answer, which is precisely the failure class
 this audit set exists to remove. Source-hierarchy subtyping needs the
 representation work, not a coercion.
 
-## R5 (0007): not attempted
+## R5 (0007): historical round note
 
-Unchanged at **580 / 1004** `Raw`. It is a multi-day change and the step-1
-mechanical part (making `Raw` constructible only with a shape) should land as its
-own reviewable change, not tacked onto this round.
+At that point it was unchanged at **580 / 1004** `Raw`. That statement is no
+longer a current-tree measurement: the direct producer class has since been
+fenced, but the broader raw-text compatibility consumers remain multi-day work.
 
 ## Surface now
 
@@ -635,7 +638,7 @@ own reviewable change, not tacked onto this round.
 | `LowerCtx` optional sets | 6 | 4 (all derived from the analysis or a deliberate local override) |
 | `statement_suffix_*` refs | 12 | 10 (fallback only, measured unreachable) |
 | `lower.rs` bool predicates | 220 | 219 |
-| `RustExpr::Raw` share | 59% | 58% (580 / 1004; R5 not attempted) |
+| `RustExpr::Raw` share | 59% | historical: 58% (580 / 1004; R5 not attempted in that round) |
 | `type_parameter` / `type_bound` in parser | 0 | handled |
 
 
@@ -1036,9 +1039,9 @@ expensive later."* Written as
 [0002b-shared-representation-design.md](0002b-shared-representation-design.md).
 
 The finding that changes the estimate: **every analysis the design needs already
-exists** — `EscapeLatticeValue` (defined, never consumed), `src/aliasing.rs`
-(built this round), `MethodUsageFacts.mutates_self`, and the `CallGraph`. 0002b
-is a wiring change plus a lowering rewrite, not new analysis.
+exists** — `storage_strategy::Escape`, `src/aliasing.rs` (built this round),
+`MethodUsageFacts.mutates_self`, and the `CallGraph`. 0002b is a wiring change
+plus a lowering rewrite, not new analysis.
 
 Two other things fell out of writing it:
 

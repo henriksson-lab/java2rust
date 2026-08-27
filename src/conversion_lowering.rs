@@ -87,7 +87,7 @@ pub fn apply_reused_optional_unwrap(
         ReusedOptionalUnwrapProjection::ExpectBorrowedCarrier => {
             crate::coercion::unwrap_java_null_receiver_projection(option_expr)
         }
-        ReusedOptionalUnwrapProjection::BorrowElement { ownership } => {
+        ReusedOptionalUnwrapProjection::BorrowElement { .. } => {
             let projected =
                 if let LoweredType::OptionalElementBorrow { element_shape, .. } = &plan.actual {
                     crate::coercion::project_optional_element_borrow_carrier_with_shape(
@@ -95,7 +95,7 @@ pub fn apply_reused_optional_unwrap(
                         element_shape,
                     )
                 } else {
-                    crate::coercion::project_optional_element_borrow_carrier(option_expr, ownership)
+                    None
                 };
             projected.unwrap_or_else(|| {
                 crate::unsupported::compile_error_expr("unsupported optional element projection")

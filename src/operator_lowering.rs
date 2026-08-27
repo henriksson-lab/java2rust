@@ -1,7 +1,7 @@
 use crate::coercion::{
     Coercion, apply_coercions, function_call_projection, java_update_expression_projection,
     logical_not_projection, optional_string_view_projection, receiver_method_call_projection_exact,
-    recover_parseable_raw_operand_projection, shared_borrow_expr,
+    recover_parseable_raw_operand_projection, rust_string_literal_projection, shared_borrow_expr,
     string_equality_operand_projection,
 };
 use crate::facts::FactSet;
@@ -258,16 +258,9 @@ fn checked_java_integer_div_rem_block_leaf(
             }),
             then_expr: Box::new(function_call_projection(
                 RustExpr::path(["Err"]),
-                vec![function_call_projection(
-                    RustExpr::path(["JavaException", "new"]),
-                    vec![
-                        RustExpr::Literal("\"ArithmeticException\"".to_string()),
-                        receiver_method_call_projection_exact(
-                            RustExpr::Literal("\"/ by zero\"".to_string()),
-                            "to_string",
-                            Vec::new(),
-                        ),
-                    ],
+                vec![crate::exception_lowering::new_exception_expr(
+                    "ArithmeticException",
+                    rust_string_literal_projection("/ by zero"),
                 )],
             )),
             else_expr: Box::new(function_call_projection(
@@ -569,13 +562,6 @@ pub enum EqualityComparisonSource {
     EqualsCall,
 }
 
-pub fn plan_equality_comparison(
-    left: &RustSlotShape,
-    right: &RustSlotShape,
-) -> EqualityComparisonPlan {
-    plan_equality_comparison_with_facts(left, right, &FactSet::default())
-}
-
 pub fn plan_equality_comparison_with_facts(
     left: &RustSlotShape,
     right: &RustSlotShape,
@@ -662,7 +648,6 @@ fn plan_canonical_equality_comparison(
     if source == EqualityComparisonSource::EqualsCall
         && left.optional_element_type().is_none()
         && right.optional_element_type().is_none()
-        && left.java_ty == right.java_ty
         && let Some(method_name) = custom_equals_method(&left.java_ty, facts)
     {
         return EqualityComparisonPlan::CustomEquals {
@@ -762,7 +747,10 @@ fn optional_string_equality_operand_view(
     element_ty: JavaType,
 ) -> OptionalStringEqualityOperandView {
     let element_shape = crate::conversion_plan::optional_element_slot_shape(shape, element_ty);
-    if shape_is_borrowed_string_content(&element_shape) {
+    if shape_is_borrowed_string_content(&element_shape)
+        || (element_shape.java_ty == JavaType::String
+            && element_shape.ownership == OwnershipShape::SharedBorrow)
+    {
         OptionalStringEqualityOperandView::BorrowedStr
     } else {
         OptionalStringEqualityOperandView::NativeString
@@ -1305,11 +1293,12 @@ mod equality_symmetry_tests {
     #[test]
     fn equality_planning_is_symmetric_under_operand_swap() {
         let shapes = representative_shapes();
+        let facts = FactSet::default();
         let mut asymmetric = Vec::new();
         for left in &shapes {
             for right in &shapes {
-                let forward = plan_equality_comparison(left, right);
-                let backward = plan_equality_comparison(right, left);
+                let forward = plan_equality_comparison_with_facts(left, right, &facts);
+                let backward = plan_equality_comparison_with_facts(right, left, &facts);
                 if forward != backward.clone().mirrored() {
                     asymmetric.push(format!(
                         "({:?} {:?}, {:?} {:?}): forward {forward:?} but mirrored backward {:?}",
@@ -1334,9 +1323,10 @@ mod equality_symmetry_tests {
     #[test]
     fn mirroring_an_equality_plan_twice_is_the_identity() {
         let shapes = representative_shapes();
+        let facts = FactSet::default();
         for left in &shapes {
             for right in &shapes {
-                let plan = plan_equality_comparison(left, right);
+                let plan = plan_equality_comparison_with_facts(left, right, &facts);
                 assert_eq!(plan.clone().mirrored().mirrored(), plan);
             }
         }

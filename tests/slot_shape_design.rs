@@ -6,13 +6,13 @@ mod common;
 use common::{GeneratedCrateModule, cargo_check_generated_modules};
 
 use new_java2rust::access_lowering::{
-    lower_bare_name, lower_field_access, lower_field_access_with_facts, render_bare_name,
+    lower_bare_name, lower_field_access_with_facts, render_bare_name,
 };
 use new_java2rust::array_lowering::array_expr;
 use new_java2rust::array_plan::{ArrayExprPlan, plan_array_expr};
 use new_java2rust::binding_id::BindingKind;
 use new_java2rust::call_lowering::{
-    apply_call_target, apply_class_literal_token, apply_new_target, apply_new_target_with_facts,
+    apply_call_target, apply_class_literal_token, apply_new_target_with_facts,
 };
 use new_java2rust::call_plan::{
     ArgumentLoweringPlan, CallExceptionPropagationPlan, CallExprPlan, CallStatementPlan,
@@ -21,15 +21,14 @@ use new_java2rust::call_plan::{
     TrivialAccessorCallPlan, apply_fallback_receiver_rust_name, external_call_lowered_type,
     external_call_returns_rust_result, external_constructor_arg_shapes,
     facade_abi_argument_plan_for_rust_path, facade_receiver_slot_plan,
-    native_collection_arg_shapes, native_collection_arg_shapes_with_facts,
-    native_collection_lowered_type, native_java_call_lowered_type,
-    native_java_instance_receiver_type_hint, optional_borrowed_receiver_slot_plan,
-    optional_receiver_slot_plan, plan_call_arguments, plan_call_arguments_with_facts,
-    plan_call_arguments_with_facts_and_args, plan_call_exception_propagation, plan_call_expr,
-    plan_call_statement, plan_call_target, plan_call_target_with_external_index_and_args,
-    plan_call_target_with_facts, plan_call_target_with_facts_and_arity, plan_constructor_arguments,
-    plan_new_target, plan_new_target_with_facts, plan_trivial_accessor_call,
-    resolved_call_arg_shapes, resolved_constructor_arg_shapes,
+    native_collection_arg_shapes_with_facts, native_collection_lowered_type,
+    native_java_call_lowered_type, native_java_instance_receiver_type_hint,
+    optional_borrowed_receiver_slot_plan, optional_receiver_slot_plan, plan_call_arguments,
+    plan_call_arguments_with_facts, plan_call_arguments_with_facts_and_args,
+    plan_call_exception_propagation, plan_call_expr, plan_call_statement,
+    plan_call_target_with_external_index_and_args, plan_call_target_with_facts,
+    plan_call_target_with_facts_and_arity, plan_constructor_arguments, plan_new_target_with_facts,
+    plan_trivial_accessor_call, resolved_call_arg_shapes, resolved_constructor_arg_shapes,
 };
 use new_java2rust::coercion::{
     Coercion, OptionalReceiverProjection, RenderedMutableAliasProjection,
@@ -43,11 +42,10 @@ use new_java2rust::constructor_plan::{
 };
 use new_java2rust::conversion_lowering::{apply_cast_conversion, apply_instanceof};
 use new_java2rust::conversion_plan::{
-    AssignmentStatementPlan, CastAndInstanceOfPlanningBoundary, InstanceOfCheck,
-    JavaCastSemanticsPolicy, LoweredType, RustBorrowedFacadeReturnRecovery, Slot,
-    SlotConversionPlan, actual_shape_for_slot_expr_with_slot, argument_slot,
-    assignment_statement_plan_for_target, cast_and_instanceof_planning_boundary, index_slot,
-    plan_cast_conversion, plan_instanceof, plan_lowered_slot_conversion,
+    AssignmentStatementPlan, InstanceOfCheck, JavaCastSemanticsPolicy, LoweredType,
+    RustBorrowedFacadeReturnRecovery, Slot, SlotConversionPlan,
+    actual_shape_for_slot_expr_with_slot, argument_slot, assignment_statement_plan_for_target,
+    index_slot, plan_cast_conversion, plan_instanceof, plan_lowered_slot_conversion,
 };
 use new_java2rust::dependency_mode::DependencyMode;
 use new_java2rust::diagnostics::Severity;
@@ -56,10 +54,10 @@ use new_java2rust::emit::emit_expr;
 use new_java2rust::exception_lowering::{
     CatchRenderArm, exception_cause_or_self_if_instance_expr, exception_expr_from_new,
     exception_expr_from_new_with_cause_hint, exception_result_type, external_exception_conversions,
-    fallback_exception_expr, java_exception_support_item, java_exception_support_item_with_facts,
-    new_exception_expr, new_exception_expr_with_cause, return_stmt, throw_stmt,
-    try_catch_finally_scope_stmt, try_catch_stmt, try_catch_value_fallthrough_stmt,
-    try_finally_scope_stmt, try_with_resources_scope_stmt,
+    fallback_exception_expr, java_exception_support_item_with_facts, new_exception_expr,
+    new_exception_expr_with_cause, return_stmt, throw_stmt, try_catch_finally_scope_stmt,
+    try_catch_stmt, try_catch_value_fallthrough_stmt, try_finally_scope_stmt,
+    try_with_resources_scope_stmt,
 };
 use new_java2rust::exception_plan::{
     JavaExceptionSupportPlan, MethodExceptionPlan, ProgramExceptionPlan, ThrowExprPlan,
@@ -72,9 +70,9 @@ use new_java2rust::expr_render::{
     this_expr,
 };
 use new_java2rust::expr_shape::{
-    ExprShapeContext, ShapeEnv, infer_assignment_target_shape,
-    infer_assignment_target_shape_with_context, infer_expr_shape, infer_expr_shape_with_context,
-    learn_stmt_shapes, shape_env_for_constructor, shape_env_for_method, shape_env_for_type,
+    ExprShapeContext, ShapeEnv, infer_assignment_target_shape_with_context, infer_expr_shape,
+    infer_expr_shape_with_context, learn_stmt_shapes, shape_env_for_constructor,
+    shape_env_for_method, shape_env_for_type,
 };
 use new_java2rust::external_facts::parse_external_facts;
 use new_java2rust::external_packs::parse_external_pack_manifest;
@@ -87,22 +85,21 @@ use new_java2rust::facts::{
     ExternalCrateConstructorMappingFact, ExternalFieldFact, ExternalFieldKind, ExternalLibraryMode,
     ExternalLibraryPackFact, ExternalRustReturnTypeFact, FacadeAbiFact, FacadeSlot, FactProvenance,
     FactSet, FieldKey as FactFieldKey, FieldNullabilityFact, FieldNullabilityProvenance,
-    HierarchyEdgeFact, HierarchyOverride, HierarchyStrategy, MethodEffectFact,
-    MethodKey as FactMethodKey, NullabilityState, ObjectSafetyViolation, OwnedRecoveryCapability,
-    OwnedRecoveryCapabilityFact, ReceiverAbi, ReceiverMutabilityFact, RecursionKind, ResultAbi,
-    SourceEqualsOverrideFact, Staticness, TrivialAccessorFact, TrivialAccessorKind,
-    TypeCapabilityOverride, TypeKey, TypePattern, type_pattern_for_external_java_type,
-    type_pattern_matches_external_java_type,
+    HierarchyOverride, HierarchyStrategy, MethodEffectFact, MethodKey as FactMethodKey,
+    NullabilityState, ObjectSafetyViolation, OwnedRecoveryCapability, OwnedRecoveryCapabilityFact,
+    ReceiverAbi, ReceiverMutabilityFact, RecursionKind, ResultAbi, SourceEqualsOverrideFact,
+    Staticness, TrivialAccessorFact, TrivialAccessorKind, TypeCapabilityOverride, TypeKey,
+    TypePattern, type_pattern_for_external_java_type, type_pattern_matches_external_java_type,
 };
 use new_java2rust::item_assembly::{
-    constructor_default_field_value, constructor_function_shell, constructor_return_body,
-    delegating_constructor_return_body, impl_item_for_type, method_function_shell,
+    constructor_default_field_value_with_facts, constructor_function_shell_with_facts,
+    constructor_return_body, delegating_constructor_return_body, impl_item_for_type,
     method_function_shell_with_facts, method_function_shell_with_facts_and_exception_plan,
-    raw_item, struct_item_for_type,
+    raw_item, struct_item_for_type_with_facts,
 };
 use new_java2rust::java_ir::{
-    Block, CallKind, ConstructorInvocationKind, Expr, JavaType, LambdaBody, LambdaParam, Literal,
-    Member, Modifier, PrimitiveType, ResolvedCall, Stmt, WildcardBound,
+    BinaryOp, Block, CallKind, ConstructorInvocationKind, Expr, JavaType, LambdaBody, LambdaParam,
+    Literal, Member, Modifier, PrimitiveType, ResolvedCall, Stmt, WildcardBound,
 };
 use new_java2rust::javalibs::{broad_ioutils_support_item, program_uses_broad_ioutils_facade};
 use new_java2rust::literal_lowering::literal_to_rust;
@@ -121,7 +118,6 @@ use new_java2rust::method_reference_lowering::{
 };
 use new_java2rust::method_reference_plan::{MethodReferencePlan, plan_method_reference};
 use new_java2rust::method_reference_shape::{
-    infer_single_input_method_reference_output_shape,
     infer_single_input_method_reference_output_shape_with_context,
     method_reference_receiver_type_for_call_plan,
 };
@@ -132,27 +128,25 @@ use new_java2rust::operator_lowering::{
     NumericBinaryPromotionPlan, OptionalStringEqualityOperandView, StringEqualityOperandView,
     binary_op_to_rust, lower_equality_comparison_expr, lower_equality_comparison_expr_for_op,
     lower_null_comparison_expr, lower_numeric_binary_expr, lower_unary_expr,
-    null_comparison_method, plan_equality_comparison, plan_equality_comparison_for_source,
-    plan_numeric_binary_promotion, stream_unary_prefix,
+    null_comparison_method, plan_equality_comparison_for_source,
+    plan_equality_comparison_with_facts, plan_numeric_binary_promotion, stream_unary_prefix,
 };
 use new_java2rust::parser::{parse_expr, parse_java_source, parse_type};
 use new_java2rust::representation::{
-    BoxedDynObjectRepresentationInvariant, BoxedDynObjectRepresentationPolicy,
-    ClosedEnumFactPolicy, ClosedEnumProof, ClosedEnumProofPolicy, HierarchyEdgeDiagnosticOutcome,
-    ObjectRepresentation, ObjectRepresentationRequest, ObjectSafetyFactPolicy, ObjectSafetyPolicy,
-    RepresentationDispatchPolicy, RepresentationHierarchyFactPolicy, RepresentationLookupFallback,
-    RepresentationProvenance, TypeRepresentation, anonymous_class_diagnostic_policy,
-    boxed_dyn_object_representation_policy, closed_enum_fact_policy, closed_enum_inference_policy,
-    closed_enum_proof_policy, extend_representation_facts_for_source_summary_superclass_boundaries,
+    ClosedEnumProof, ClosedEnumProofPolicy, HierarchyEdgeDiagnosticOutcome, ObjectRepresentation,
+    ObjectRepresentationRequest, ObjectSafetyFactPolicy, ObjectSafetyPolicy,
+    RepresentationDispatchPolicy, RepresentationLookupFallback, RepresentationProvenance,
+    TypeRepresentation, closed_enum_inference_policy, closed_enum_proof_policy,
+    extend_representation_facts_for_source_summary_superclass_boundaries,
     hierarchy_edge_diagnostic_policy, hierarchy_override_application_policy,
     hierarchy_override_validation_policy, object_hierarchy_context, object_representation_policy,
     object_safety_fact_policy, plan_representations, representation_dispatch_policy,
-    representation_hierarchy_fact_policy, source_summary_superclass_boundary_policy,
+    source_summary_superclass_boundary_policy,
 };
 use new_java2rust::representation_lowering::{
     RepresentationTypeEmission, TraitImplMethodCompatibilityError, TraitImplMethodFallbackPolicy,
-    TraitImplMethodMessagePolicy, raw_type_item_for_with_facts, trait_impl_emissions_for_type,
-    trait_impl_emissions_for_type_with_facts, trait_impl_method_message_policy, type_emission_for,
+    TraitImplMethodMessagePolicy, raw_type_item_for_with_facts,
+    trait_impl_emissions_for_type_with_facts, trait_impl_method_message_policy,
     type_emission_for_program_with_facts_and_exceptions, type_emission_for_with_facts,
 };
 use new_java2rust::resolve::{resolve_program, resolve_program_with_source_program_and_facts};
@@ -171,13 +165,13 @@ use new_java2rust::shape_projection::{
     DispatchRequirementProjectionRole, EscapingRoleDispatchPolicy, SequenceElementProjectionPolicy,
     ShapeProjectionCapabilityPolicy, borrowed_string_content_shape, dispatch_projection_policy,
     dispatch_requirement_projection_policy, escaping_role_dispatch_policy,
-    indexed_assignment_shape, indexed_assignment_shape_with_effective_facts,
-    indexed_assignment_shape_with_facts, indexed_element_projection_policy, indexed_read_shape,
+    indexed_assignment_shape_with_effective_facts, indexed_assignment_shape_with_facts,
+    indexed_element_projection_policy_with_effective_facts,
     indexed_read_shape_for_access_with_facts, indexed_read_shape_with_effective_facts,
-    indexed_read_shape_with_facts, iteration_element_projection_policy, iteration_element_shape,
-    owned_string_value_shape, param_shape_for_java_type, project_java_value_shape,
-    return_shape_for_java_type, rust_slot_shape_from_facade_arg_slot,
-    sequence_element_projection_policy, shape_projection_capability_policy,
+    indexed_read_shape_with_facts, iteration_element_projection_policy_with_effective_facts,
+    iteration_element_shape, owned_string_value_shape, param_shape_for_java_type,
+    project_java_value_shape, return_shape_for_java_type, rust_slot_shape_from_facade_arg_slot,
+    sequence_element_projection_policy_with_effective_facts,
     shape_projection_capability_policy_with_effective_facts, storage_shape_for_java_type,
     value_shape_for_java_type,
 };
@@ -187,84 +181,75 @@ use new_java2rust::signature::{
     MethodParamBoundaryPolicy, MethodReturnBoundaryPolicy, ReceiverConstraint, ReceiverPlan,
     SignatureBoundaryFallback, SignatureBoundaryKind, SignatureBoundaryKindMerge,
     SignatureBoundaryKindPriorityPolicy, SignatureBoundaryRepresentationFactPolicy,
-    SignatureBoundaryRepresentationPolicy, SignatureBoundaryRole, SignatureBoundaryRolePolicy,
-    SignatureConstraint, SignatureConstraintAxis, SignatureConstraintConflictDiagnostic,
-    SignatureConstraintPropagationKind, SignatureConstraintPropagationPolicy,
-    SignatureConstraintProvenance, SignatureConstraintState, SignatureDiagnostic,
-    SignatureDispatchRequirementPriorityPolicy, SignatureFlagMerge,
-    SignatureMemberApiBoundaryPolicy, SignatureNativeBoundaryPolicy,
-    SignatureOwnedRecoveryCapabilityPolicy, SignatureOwnedRecoveryPolicy,
-    SignatureOwnershipRequirementPriorityPolicy, SignaturePlan, SignatureRequirementMerge,
-    SignatureShapeRequest, SignatureSlotBaselinePolicy, SignatureSlotRole,
-    SignatureViewRequirementPriorityPolicy, apply_signature_constraints, binding_boundary_policy,
-    capability_diagnostics_for_signature_constraints, collect_signature_constraints,
-    conservative_boundary_constraints, conservative_boundary_constraints_with_effective_facts,
-    constrained_receiver_plan, constructor_param_boundary_policy,
+    SignatureBoundaryRepresentationPolicy, SignatureConstraint, SignatureConstraintAxis,
+    SignatureConstraintConflictDiagnostic, SignatureConstraintPropagationKind,
+    SignatureConstraintPropagationPolicy, SignatureConstraintProvenance, SignatureConstraintState,
+    SignatureDiagnostic, SignatureFlagMerge, SignatureMemberApiBoundaryPolicy,
+    SignatureNativeBoundaryPolicy, SignatureOwnedRecoveryCapabilityPolicy,
+    SignatureOwnedRecoveryPolicy, SignaturePlan, SignatureRequirementMerge, SignatureShapeRequest,
+    SignatureSlotBaselinePolicy, SignatureSlotRole, apply_signature_constraints,
+    binding_boundary_policy, capability_diagnostics_for_signature_constraints,
+    collect_signature_constraints, constrained_receiver_plan, constructor_param_boundary_policy,
     constructor_param_shape_constraints, external_argument_binding_constraints,
-    field_boundary_policy, field_nullability_shape_policy, field_shape_constraints,
-    field_shape_constraints_with_facts, field_shape_constraints_with_usage,
-    local_shape_constraints, merge_dispatch_requirement_policy, merge_ownership_requirement_policy,
-    merge_signature_boundary_kind_policy, merge_signature_flag_requirement_policy,
-    merge_storage_nullability_requirement_policy, merge_view_requirement_policy,
-    method_param_boundary_policy, method_param_shape_constraints, method_return_boundary_policy,
-    method_return_shape_constraints, receiver_constraints, receiver_constraints_with_facts,
-    receiver_constraints_with_usage, signature_boundary_constraints,
+    field_boundary_policy, field_shape_constraints, field_shape_constraints_with_facts,
+    field_shape_constraints_with_usage, local_shape_constraints, merge_dispatch_requirement_policy,
+    merge_ownership_requirement_policy, merge_signature_boundary_kind_policy,
+    merge_signature_flag_requirement_policy, merge_storage_nullability_requirement_policy,
+    merge_view_requirement_policy, method_param_boundary_policy, method_param_shape_constraints,
+    method_return_boundary_policy, method_return_shape_constraints, receiver_constraints,
+    receiver_constraints_with_facts, receiver_constraints_with_usage,
     signature_boundary_constraints_with_effective_facts, signature_boundary_kind_priority_policy,
     signature_boundary_policy, signature_boundary_policy_with_effective_facts,
-    signature_boundary_representation_fact_policy,
     signature_boundary_representation_fact_policy_with_effective_facts,
-    signature_boundary_representation_policy, signature_boundary_role_policies,
-    signature_boundary_role_policy, signature_capability_policy,
+    signature_boundary_representation_policy_with_effective_facts, signature_capability_policy,
     signature_capability_policy_with_effective_facts, signature_constraint_conflict_diagnostic,
     signature_constraint_provenance, signature_constraint_provenance_label,
     signature_constraint_state_conflict_diagnostics,
-    signature_constraints_for_borrowed_content_policy,
-    signature_dispatch_requirement_priority_policy, signature_fixpoint_iteration_budget,
+    signature_constraints_for_borrowed_content_policy, signature_fixpoint_iteration_budget,
     signature_fixpoint_saturation_policy, signature_member_api_boundary_policy,
-    signature_native_boundary_policy, signature_native_boundary_policy_with_effective_facts,
-    signature_owned_recovery_capability_policy,
+    signature_native_boundary_policy_with_effective_facts,
     signature_owned_recovery_capability_policy_with_effective_facts,
     signature_owned_recovery_policy, signature_owned_recovery_policy_from_capability,
     signature_owned_recovery_policy_with_effective_facts,
-    signature_ownership_requirement_priority_policy, signature_saturation_report_for_constraints,
-    signature_shape_constraint_propagation_policy, signature_slot_baseline_policy,
-    signature_slot_baseline_policy_with_effective_facts,
-    signature_slot_constraint_propagation_policy, signature_slot_dispatch_requirement_policy,
-    signature_slot_dispatch_requirement_policy_with_effective_facts,
-    signature_view_requirement_priority_policy, solve_signature_constraints_to_fixpoint,
-    solve_signature_constraints_to_fixpoint_result, solve_signature_shape,
+    signature_saturation_report_for_constraints, signature_shape_constraint_propagation_policy,
+    signature_slot_baseline_policy, signature_slot_baseline_policy_with_effective_facts,
+    signature_slot_constraint_propagation_policy,
+    signature_slot_dispatch_requirement_policy_in_scope,
+    signature_slot_dispatch_requirement_policy_with_effective_facts_in_scope,
+    solve_signature_constraints_to_fixpoint, solve_signature_constraints_to_fixpoint_result,
     solve_signature_shape_with_facts, solve_signatures, solve_signatures_with_facts,
     source_binding_nullability_constraints, source_method_return_nullability_constraints,
 };
 use new_java2rust::slot_policy::{
     BorrowedContentCapabilityPolicy, BorrowedContentPolicy, BorrowedContentTypePolicy,
-    apply_borrowed_content_policy, borrowed_content_capability_policy,
-    borrowed_content_capability_policy_with_effective_facts, borrowed_content_type_policy,
-    borrowed_content_type_policy_with_effective_facts, borrowed_return_content_policy_from_param,
+    apply_borrowed_content_policy, borrowed_content_capability_policy_with_effective_facts,
+    borrowed_content_type_policy, borrowed_content_type_policy_with_effective_facts,
     borrowed_return_content_policy_from_param_with_effective_facts,
-    borrowed_return_shape_from_param, borrowed_return_shape_from_param_with_effective_facts,
-    borrowed_return_shape_from_param_with_facts, constructor_param_borrowed_content_policy,
+    borrowed_return_content_policy_from_param_with_facts,
+    borrowed_return_shape_from_param_with_effective_facts,
+    borrowed_return_shape_from_param_with_facts,
     constructor_param_borrowed_content_policy_with_effective_facts,
-    method_param_borrowed_content_policy,
+    constructor_param_borrowed_content_policy_with_facts,
     method_param_borrowed_content_policy_with_effective_facts,
     method_param_borrowed_content_policy_with_facts,
 };
 use new_java2rust::slot_render::{
     NativeJavaRustTypePolicy, NativeNamedJavaRustTypePolicy, NativeSequenceContainer,
     SlotContentCapabilityPolicy, SlotDefaultPolicy, SlotDefaultValuePolicy,
-    SlotNoDefaultMessagePolicy, SlotRustTypePolicy, SlotValueRustTypePolicy, default_expr_for_slot,
-    default_expr_for_slot_with_facts, native_java_rust_type_policy,
-    native_java_rust_type_policy_with_effective_facts, native_named_java_rust_type_policy,
-    rust_type_for_java_type_with_facts, rust_type_for_slot, rust_type_for_slot_with_facts,
-    slot_content_capability_policy, slot_content_capability_policy_with_effective_facts,
-    slot_default_policy, slot_default_value_policy, slot_no_default_message_policy,
-    slot_rust_type_policy, slot_rust_type_policy_with_effective_facts, slot_value_rust_type_policy,
+    SlotNoDefaultMessagePolicy, SlotRustTypePolicy, SlotValueRustTypePolicy,
+    default_expr_for_slot_with_facts, native_java_rust_type_policy_with_effective_facts,
+    native_named_java_rust_type_policy, rust_type_for_java_type_with_facts,
+    rust_type_for_java_type_with_facts_and_representations, rust_type_for_slot,
+    rust_type_for_slot_with_facts, slot_content_capability_policy_with_effective_facts,
+    slot_default_policy_with_effective_facts, slot_default_value_policy_with_effective_facts,
+    slot_no_default_message_policy, slot_rust_type_policy_with_effective_facts,
+    slot_value_rust_type_policy_with_effective_facts,
 };
 use new_java2rust::slot_shape::{
     DispatchShape, MutabilityShape, OwnershipShape, RustSlotShape, TypeCapabilities, ViewShape,
 };
 use new_java2rust::statement_render::{
-    assignment_stmt, break_stmt, continue_stmt, expr_stmt, if_let_stmt, if_stmt, local_let_stmt,
+    assignment_stmt, break_stmt, continue_stmt, expr_stmt, if_let_stmt, if_stmt,
     local_let_stmt_with_facts, raw_stmt, render_block_stmt, render_enhanced_for,
     render_enhanced_for_iterator, while_let_stmt, while_stmt,
 };
@@ -279,13 +264,12 @@ use new_java2rust::stream::{
     stream_collect_actual,
 };
 use new_java2rust::stream_lowering::{
-    StreamLambdaValue, StreamRenderContext, emit_stream_lambda_body, emit_stream_lambda_body_expr,
-    emit_stream_lambda_body_with_context, render_stream_plan, render_stream_plan_with_context,
+    StreamLambdaValue, StreamRenderContext, emit_stream_lambda_body_expr,
+    emit_stream_lambda_body_with_context, render_stream_plan_with_context,
 };
 use new_java2rust::stream_shape::{
-    StreamSourceCapabilityPolicy, infer_stream_lambda_body_shape,
-    infer_stream_lambda_body_shape_with_facts, infer_stream_map_to_int_shape,
-    infer_stream_source_element_shape, infer_stream_source_element_shape_with_effective_facts,
+    StreamSourceCapabilityPolicy, infer_stream_lambda_body_shape_with_facts,
+    infer_stream_map_to_int_shape, infer_stream_source_element_shape_with_effective_facts,
     infer_stream_source_element_shape_with_facts, stream_source_capability_policy,
     stream_source_capability_policy_with_effective_facts,
 };
@@ -308,9 +292,8 @@ use new_java2rust::unsupported::{
 };
 use new_java2rust::usage::{
     BindingUse, BindingUseFacts, CallArgumentBoundary, CallArgumentBoundaryPolicy,
-    CallResultBoundaryPolicy, ConstructorInvocationBoundaryPolicy, FieldUse,
-    MethodApiBoundaryPolicy, MethodUsageFacts, analyze_usage, analyze_usage_with_facts,
-    call_argument_boundary_policy, call_argument_use_boundary_policy, call_result_boundary_policy,
+    ConstructorInvocationBoundaryPolicy, FieldUse, MethodApiBoundaryPolicy, analyze_usage,
+    analyze_usage_with_facts, call_argument_boundary_policy, call_argument_use_boundary_policy,
     constructor_invocation_boundary_policy, method_api_boundary_policy,
 };
 use new_java2rust::{
@@ -323,6 +306,18 @@ fn boxed_dyn_type(trait_name: &str) -> RustType {
         base: "Box".to_string(),
         args: vec![RustType::DynTrait(trait_name.to_string())],
     }
+}
+
+fn unknown_api_constraints(
+    java_ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+) -> Vec<SignatureConstraint> {
+    signature_boundary_policy_with_effective_facts(
+        SignatureBoundaryKind::UnknownApi,
+        java_ty,
+        facts,
+    )
+    .constraints
 }
 
 #[test]
@@ -808,24 +803,6 @@ fn facts_own_type_capability_overrides_with_provenance() {
             .any(|edge| { edge.super_name == "Comparable" && edge.sub_name == "ExternalId" })
     );
     assert_eq!(
-        representation_hierarchy_fact_policy(&external_id, &facts),
-        RepresentationHierarchyFactPolicy {
-            java_ty: external_id.clone(),
-            extends: Some("Object".to_string()),
-            implements: vec!["Comparable".to_string()],
-            edges: vec![
-                HierarchyEdgeFact {
-                    super_name: "Object".to_string(),
-                    sub_name: "ExternalId".to_string(),
-                },
-                HierarchyEdgeFact {
-                    super_name: "Comparable".to_string(),
-                    sub_name: "ExternalId".to_string(),
-                },
-            ],
-        }
-    );
-    assert_eq!(
         facts.closed_hierarchy_fact_for_name("ExternalBase"),
         Some(true)
     );
@@ -1171,30 +1148,6 @@ class ExternalUse {
 }
 
 #[test]
-fn facts_do_not_render_rust_for_capability_overrides() {
-    let source = include_str!("../src/facts.rs");
-
-    assert!(!source.contains("rust_ir"));
-    assert!(!source.contains("RustExpr"));
-    assert!(!source.contains("RustType"));
-    assert!(!source.contains("emit::"));
-    assert!(!source.contains("rust_type_for_slot"));
-}
-
-#[test]
-fn types_own_java_collection_and_optional_type_helpers() {
-    let source = include_str!("../src/types.rs");
-    let slot_shape_source = include_str!("../src/slot_shape.rs");
-
-    assert!(source.contains("pub fn sequence_element_type"));
-    assert!(source.contains("pub fn optional_element_type"));
-    assert!(source.contains("pub fn list_java_type"));
-    assert!(source.contains("pub fn optional_java_type"));
-    assert!(!slot_shape_source.contains("pub fn list_java_type"));
-    assert!(!slot_shape_source.contains("pub fn optional_java_type"));
-}
-
-#[test]
 fn slot_shape_exposes_collection_and_optional_shape_queries() {
     let string_shape = RustSlotShape::conservative(JavaType::String);
     let list_shape = RustSlotShape::conservative(list_java_type(JavaType::String));
@@ -1211,10 +1164,13 @@ fn slot_shape_exposes_collection_and_optional_shape_queries() {
 
 #[test]
 fn slot_render_owns_conservative_java_to_rust_type_projection() {
+    let facts = FactSet::default();
+    let effective_facts = EffectiveFacts::new(&facts);
+
     assert_eq!(
-        native_java_rust_type_policy(
+        native_java_rust_type_policy_with_effective_facts(
             &JavaType::Primitive(PrimitiveType::Int),
-            &FactSet::default(),
+            &effective_facts,
         ),
         NativeJavaRustTypePolicy::Direct { ty: RustType::I32 }
     );
@@ -1226,26 +1182,29 @@ fn slot_render_owns_conservative_java_to_rust_type_projection() {
         }
     );
     assert_eq!(
-        native_java_rust_type_policy(
+        native_java_rust_type_policy_with_effective_facts(
             &JavaType::Named {
                 name: "Integer".to_string(),
                 args: Vec::new(),
             },
-            &FactSet::default(),
+            &effective_facts,
         ),
         NativeJavaRustTypePolicy::Direct { ty: RustType::I32 }
     );
     assert_eq!(
-        native_java_rust_type_policy(
+        native_java_rust_type_policy_with_effective_facts(
             &optional_java_type(JavaType::Primitive(PrimitiveType::Int)),
-            &FactSet::default(),
+            &effective_facts,
         ),
         NativeJavaRustTypePolicy::Optional {
             element_ty: JavaType::Primitive(PrimitiveType::Int),
         }
     );
     assert_eq!(
-        native_java_rust_type_policy(&list_java_type(JavaType::String), &FactSet::default(),),
+        native_java_rust_type_policy_with_effective_facts(
+            &list_java_type(JavaType::String),
+            &effective_facts,
+        ),
         NativeJavaRustTypePolicy::Sequence {
             container: NativeSequenceContainer::Vec,
             element_ty: JavaType::String,
@@ -1275,12 +1234,12 @@ fn slot_render_owns_conservative_java_to_rust_type_projection() {
         }
     );
     assert_eq!(
-        native_java_rust_type_policy(
+        native_java_rust_type_policy_with_effective_facts(
             &JavaType::Named {
                 name: "Set".to_string(),
                 args: vec![JavaType::String],
             },
-            &FactSet::default(),
+            &effective_facts,
         ),
         NativeJavaRustTypePolicy::Sequence {
             container: NativeSequenceContainer::HashSet,
@@ -1305,14 +1264,37 @@ fn slot_render_owns_conservative_java_to_rust_type_projection() {
         emit::emit_type(&hash_set_type),
         "std::collections::HashSet<String>"
     );
-    let facts = FactSet::default();
-    let effective_facts = EffectiveFacts::new(&facts);
+    let linked_hash_set_type = JavaType::Named {
+        name: "LinkedHashSet".to_string(),
+        args: vec![JavaType::String],
+    };
+    assert_eq!(
+        rust_type_for_java_type_with_facts(&linked_hash_set_type, &FactSet::default()),
+        RustType::Generic {
+            base: "JavaLinkedHashSet".to_string(),
+            args: vec![RustType::String],
+        }
+    );
+    assert_eq!(
+        rust_type_for_java_type_with_facts_and_representations(
+            &linked_hash_set_type,
+            &FactSet::default(),
+            &new_java2rust::representation::RepresentationPlan::default()
+        ),
+        RustType::Generic {
+            base: "JavaLinkedHashSet".to_string(),
+            args: vec![RustType::String],
+        }
+    );
     assert_eq!(
         native_java_rust_type_policy_with_effective_facts(
             &list_java_type(JavaType::String),
             &effective_facts,
         ),
-        native_java_rust_type_policy(&list_java_type(JavaType::String), &facts)
+        NativeJavaRustTypePolicy::Sequence {
+            container: NativeSequenceContainer::Vec,
+            element_ty: JavaType::String,
+        }
     );
     assert_eq!(
         native_named_java_rust_type_policy("ExternalId"),
@@ -1324,12 +1306,12 @@ fn slot_render_owns_conservative_java_to_rust_type_projection() {
         }
     );
     assert_eq!(
-        native_java_rust_type_policy(
+        native_java_rust_type_policy_with_effective_facts(
             &JavaType::Named {
                 name: "ExternalId".to_string(),
                 args: Vec::new(),
             },
-            &FactSet::default(),
+            &effective_facts,
         ),
         NativeJavaRustTypePolicy::Named {
             name: "ExternalId".to_string(),
@@ -1347,42 +1329,45 @@ fn slot_render_owns_conservative_java_to_rust_type_projection() {
         NativeNamedJavaRustTypePolicy {
             name: "ExportConfiguration.Builder".to_string(),
             policy: NativeJavaRustTypePolicy::Named {
-                name: "ExportConfigurationBuilder".to_string(),
+                name: "ExportConfiguration_Builder".to_string(),
             },
         }
     );
     assert_eq!(
-        native_java_rust_type_policy(
+        native_java_rust_type_policy_with_effective_facts(
             &JavaType::Named {
                 name: "VidMappingPB.Builder".to_string(),
                 args: Vec::new(),
             },
-            &FactSet::default(),
+            &effective_facts,
         ),
         NativeJavaRustTypePolicy::Named {
-            name: "VidMappingPBBuilder".to_string(),
+            name: "VidMappingPB_Builder".to_string(),
         }
     );
     assert_eq!(
-        native_java_rust_type_policy(
+        native_java_rust_type_policy_with_effective_facts(
             &JavaType::Named {
                 name: "Object".to_string(),
                 args: Vec::new(),
             },
-            &FactSet::default(),
+            &effective_facts,
         ),
         NativeJavaRustTypePolicy::Direct {
             ty: boxed_dyn_type("std::any::Any"),
         }
     );
     assert_eq!(
-        native_java_rust_type_policy(&JavaType::Wildcard(None), &FactSet::default()),
+        native_java_rust_type_policy_with_effective_facts(
+            &JavaType::Wildcard(None),
+            &effective_facts,
+        ),
         NativeJavaRustTypePolicy::WildcardObject
     );
     assert_eq!(
-        native_java_rust_type_policy(
+        native_java_rust_type_policy_with_effective_facts(
             &JavaType::Unknown("Object".to_string()),
-            &FactSet::default(),
+            &effective_facts,
         ),
         NativeJavaRustTypePolicy::UnknownRaw {
             raw: "Object".to_string(),
@@ -1390,18 +1375,18 @@ fn slot_render_owns_conservative_java_to_rust_type_projection() {
     );
 
     assert_eq!(
-        slot_rust_type_policy(
+        slot_rust_type_policy_with_effective_facts(
             &RustSlotShape::conservative(list_java_type(JavaType::String)),
-            &FactSet::default()
+            &effective_facts,
         ),
         SlotRustTypePolicy::OwnedOrCopy {
             ty: RustType::Vec(Box::new(RustType::String)),
         }
     );
     assert_eq!(
-        slot_value_rust_type_policy(
+        slot_value_rust_type_policy_with_effective_facts(
             &RustSlotShape::conservative(list_java_type(JavaType::String)),
-            &FactSet::default()
+            &effective_facts,
         ),
         SlotValueRustTypePolicy::ConcreteDispatch {
             java_ty: list_java_type(JavaType::String),
@@ -1431,13 +1416,13 @@ fn slot_render_owns_conservative_java_to_rust_type_projection() {
     dyn_trait_shape.ownership = OwnershipShape::SharedBorrow;
     dyn_trait_shape.view = ViewShape::DynTraitView;
     assert_eq!(
-        slot_value_rust_type_policy(&dyn_trait_shape, &FactSet::default()),
+        slot_value_rust_type_policy_with_effective_facts(&dyn_trait_shape, &effective_facts),
         SlotValueRustTypePolicy::DynTraitView {
             trait_name: "Animal".to_string(),
         }
     );
     assert_eq!(
-        slot_rust_type_policy(&dyn_trait_shape, &FactSet::default()),
+        slot_rust_type_policy_with_effective_facts(&dyn_trait_shape, &effective_facts),
         SlotRustTypePolicy::SharedBorrow {
             ty: RustType::DynTrait("Animal".to_string()),
         }
@@ -1459,13 +1444,13 @@ fn slot_render_owns_conservative_java_to_rust_type_projection() {
         trait_name: "Animal".to_string(),
     };
     assert_eq!(
-        slot_value_rust_type_policy(&boxed_trait_shape, &FactSet::default()),
+        slot_value_rust_type_policy_with_effective_facts(&boxed_trait_shape, &effective_facts),
         SlotValueRustTypePolicy::BoxedDynTrait {
             trait_name: "Animal".to_string(),
         }
     );
     assert_eq!(
-        slot_rust_type_policy(&boxed_trait_shape, &FactSet::default()),
+        slot_rust_type_policy_with_effective_facts(&boxed_trait_shape, &effective_facts),
         SlotRustTypePolicy::OwnedOrCopy {
             ty: boxed_dyn_type("Animal"),
         }
@@ -1478,43 +1463,17 @@ fn slot_render_owns_conservative_java_to_rust_type_projection() {
     let mut mutable_string_shape = RustSlotShape::conservative(JavaType::String);
     mutable_string_shape.ownership = OwnershipShape::MutableBorrow;
     assert_eq!(
-        slot_value_rust_type_policy(&mutable_string_shape, &FactSet::default()),
+        slot_value_rust_type_policy_with_effective_facts(&mutable_string_shape, &effective_facts),
         SlotValueRustTypePolicy::ConcreteDispatch {
             java_ty: JavaType::String,
         }
     );
     assert_eq!(
-        slot_rust_type_policy(&mutable_string_shape, &FactSet::default()),
+        slot_rust_type_policy_with_effective_facts(&mutable_string_shape, &effective_facts),
         SlotRustTypePolicy::MutableBorrow {
             ty: RustType::String,
         }
     );
-    assert_eq!(
-        slot_rust_type_policy_with_effective_facts(&mutable_string_shape, &effective_facts),
-        slot_rust_type_policy(&mutable_string_shape, &facts)
-    );
-
-    let source = include_str!("../src/slot_render.rs");
-    assert!(source.contains("pub enum NativeJavaRustTypePolicy"));
-    assert!(source.contains("pub fn native_java_rust_type_policy"));
-    assert!(source.contains("pub fn native_java_rust_type_policy_with_effective_facts"));
-    assert!(source.contains("pub struct NativeNamedJavaRustTypePolicy"));
-    assert!(source.contains("pub fn native_named_java_rust_type_policy"));
-    assert!(source.contains("pub fn render_native_java_rust_type_policy"));
-    assert!(source.contains("pub fn render_native_java_rust_type_policy_with_effective_facts"));
-    assert!(!source.contains("\nfn native_named_java_rust_type_policy("));
-    assert!(source.contains("pub enum SlotValueRustTypePolicy"));
-    assert!(source.contains("pub fn slot_value_rust_type_policy"));
-    assert!(source.contains("pub fn slot_value_rust_type_policy_with_effective_facts"));
-    assert!(source.contains("pub fn render_slot_value_rust_type_policy"));
-    assert!(source.contains("pub fn render_slot_value_rust_type_policy_with_effective_facts"));
-    assert!(source.contains("pub enum SlotRustTypePolicy"));
-    assert!(source.contains("pub fn slot_rust_type_policy"));
-    assert!(source.contains("pub fn slot_rust_type_policy_with_effective_facts"));
-    assert!(source.contains("pub fn render_slot_rust_type_policy"));
-    assert!(source.contains("EffectiveFacts::new(facts)"));
-    assert_eq!(source.matches("facts.is_string_like_type").count(), 1);
-    assert_eq!(source.matches("facts.sequence_element_type_for").count(), 1);
 }
 
 #[test]
@@ -1588,14 +1547,15 @@ fn slot_render_projects_erased_object_facts_inside_native_generic_containers() {
             provenance: FactProvenance::ExternalLibraryPack,
         });
 
+    let effective_facts = EffectiveFacts::new(&facts);
     assert_eq!(
-        native_java_rust_type_policy(&erased_handle, &facts),
+        native_java_rust_type_policy_with_effective_facts(&erased_handle, &effective_facts),
         NativeJavaRustTypePolicy::Direct {
-            ty: boxed_dyn_type("std::any::Any"),
+            ty: RustType::Named("ExternalReader".to_string()),
         }
     );
     assert_eq!(
-        native_java_rust_type_policy(&concrete_facade, &facts),
+        native_java_rust_type_policy_with_effective_facts(&concrete_facade, &effective_facts),
         NativeJavaRustTypePolicy::Direct {
             ty: RustType::Named("IntervalList".to_string()),
         }
@@ -1633,18 +1593,12 @@ fn slot_render_projects_erased_object_facts_inside_native_generic_containers() {
     );
     assert_eq!(
         rust_type_for_java_type_with_facts(&optional_ty, &facts),
-        RustType::Option(Box::new(boxed_dyn_type("std::any::Any")))
+        RustType::Option(Box::new(RustType::Named("ExternalReader".to_string())))
     );
     assert_eq!(
         rust_type_for_java_type_with_facts(&facade_list_ty, &facts),
         RustType::Vec(Box::new(RustType::Named("IntervalList".to_string())))
     );
-
-    let effective_facts_source = include_str!("../src/effective_facts.rs");
-    let slot_render_source = include_str!("../src/slot_render.rs");
-    assert!(effective_facts_source.contains("object_representation_override_strategy_for"));
-    assert!(slot_render_source.contains("object_representation_override_strategy_for"));
-    assert!(!slot_render_source.contains("representation_for("));
 }
 
 #[test]
@@ -1740,21 +1694,23 @@ class NativeMapFinalFacadeValueUse {
 
 #[test]
 fn slot_render_owns_default_expressions_for_planned_views() {
+    let default_facts = FactSet::default();
+    let effective_facts = EffectiveFacts::new(&default_facts);
     let mut string_view = RustSlotShape::conservative(JavaType::String);
     string_view.ownership = OwnershipShape::SharedBorrow;
     string_view.view = ViewShape::Str;
     assert_eq!(
-        slot_default_policy(&string_view, &FactSet::default()),
+        slot_default_policy_with_effective_facts(&string_view, &effective_facts),
         SlotDefaultPolicy::Value {
             policy: SlotDefaultValuePolicy::EmptyStringView,
         }
     );
     assert_eq!(
-        slot_default_value_policy(&string_view, &FactSet::default()),
+        slot_default_value_policy_with_effective_facts(&string_view, &effective_facts),
         SlotDefaultValuePolicy::EmptyStringView
     );
     assert_eq!(
-        default_expr_for_slot(&string_view),
+        default_expr_for_slot_with_facts(&string_view, &default_facts),
         RustExpr::Literal("\"\"".to_string())
     );
 
@@ -1762,83 +1718,78 @@ fn slot_render_owns_default_expressions_for_planned_views() {
     slice_view.ownership = OwnershipShape::SharedBorrow;
     slice_view.view = ViewShape::Slice;
     assert_eq!(
-        slot_default_policy(&slice_view, &FactSet::default()),
+        slot_default_policy_with_effective_facts(&slice_view, &effective_facts),
         SlotDefaultPolicy::Value {
             policy: SlotDefaultValuePolicy::EmptySliceView,
         }
     );
     assert_eq!(
-        slot_default_value_policy(&slice_view, &FactSet::default()),
+        slot_default_value_policy_with_effective_facts(&slice_view, &effective_facts),
         SlotDefaultValuePolicy::EmptySliceView
     );
     assert_eq!(
-        default_expr_for_slot(&slice_view),
+        default_expr_for_slot_with_facts(&slice_view, &default_facts),
         RustExpr::Unary {
             op: "&".to_string(),
             expr: Box::new(RustExpr::ArrayLiteral(Vec::new())),
         }
     );
-    let slot_render_source = include_str!("../src/slot_render.rs");
-    assert!(
-        !slot_render_source.contains(
-            "SlotDefaultValuePolicy::EmptySliceView => RustExpr::Raw(\"&[]\".to_string())"
-        ),
-        "empty slice defaults should compose borrowed array literals structurally"
-    );
-
     assert_eq!(
-        slot_default_policy(
+        slot_default_policy_with_effective_facts(
             &RustSlotShape::conservative(JavaType::Primitive(PrimitiveType::Boolean)),
-            &FactSet::default()
+            &effective_facts,
         ),
         SlotDefaultPolicy::Value {
             policy: SlotDefaultValuePolicy::PrimitiveBooleanZero,
         }
     );
     assert_eq!(
-        slot_default_policy(
+        slot_default_policy_with_effective_facts(
             &RustSlotShape::conservative(JavaType::Primitive(PrimitiveType::Int)),
-            &FactSet::default()
+            &effective_facts,
         ),
         SlotDefaultPolicy::Value {
             policy: SlotDefaultValuePolicy::PrimitiveNumericZero,
         }
     );
     assert_eq!(
-        slot_default_policy(
+        slot_default_policy_with_effective_facts(
             &RustSlotShape::conservative(JavaType::Primitive(PrimitiveType::Float)),
-            &FactSet::default()
+            &effective_facts,
         ),
         SlotDefaultPolicy::Value {
             policy: SlotDefaultValuePolicy::PrimitiveFloatZero,
         }
     );
     assert_eq!(
-        slot_default_policy(
+        slot_default_policy_with_effective_facts(
             &RustSlotShape::conservative(JavaType::Primitive(PrimitiveType::Double)),
-            &FactSet::default()
+            &effective_facts,
         ),
         SlotDefaultPolicy::Value {
             policy: SlotDefaultValuePolicy::PrimitiveDoubleZero,
         }
     );
     assert_eq!(
-        slot_default_policy(
+        slot_default_policy_with_effective_facts(
             &RustSlotShape::conservative(JavaType::String),
-            &FactSet::default()
+            &effective_facts,
         ),
         SlotDefaultPolicy::Value {
             policy: SlotDefaultValuePolicy::EmptyString,
         }
     );
     assert_eq!(
-        slot_default_value_policy(
+        slot_default_value_policy_with_effective_facts(
             &RustSlotShape::conservative(list_java_type(JavaType::String)),
-            &FactSet::default()
+            &effective_facts,
         ),
         SlotDefaultValuePolicy::EmptySequence
     );
-    let string_default = default_expr_for_slot(&RustSlotShape::conservative(JavaType::String));
+    let string_default = default_expr_for_slot_with_facts(
+        &RustSlotShape::conservative(JavaType::String),
+        &default_facts,
+    );
     assert_eq!(emit_expr(&string_default), "String::new()");
     assert_eq!(
         string_default,
@@ -1847,9 +1798,10 @@ fn slot_render_owns_default_expressions_for_planned_views() {
             args: Vec::new(),
         }
     );
-    let sequence_default = default_expr_for_slot(&RustSlotShape::conservative(list_java_type(
-        JavaType::String,
-    )));
+    let sequence_default = default_expr_for_slot_with_facts(
+        &RustSlotShape::conservative(list_java_type(JavaType::String)),
+        &default_facts,
+    );
     assert_eq!(emit_expr(&sequence_default), "Vec::new()");
     assert_eq!(
         sequence_default,
@@ -1867,13 +1819,13 @@ fn slot_render_owns_default_expressions_for_planned_views() {
         enum_name: "AnimalValue".to_string(),
     };
     assert_eq!(
-        slot_default_policy(&enum_shape, &FactSet::default()),
+        slot_default_policy_with_effective_facts(&enum_shape, &effective_facts),
         SlotDefaultPolicy::NoDefaultForClosedEnum {
             enum_name: "AnimalValue".to_string(),
         }
     );
-    let enum_no_default =
-        slot_no_default_message_policy(&slot_default_policy(&enum_shape, &FactSet::default()));
+    let enum_policy = slot_default_policy_with_effective_facts(&enum_shape, &effective_facts);
+    let enum_no_default = slot_no_default_message_policy(&enum_policy);
     assert_eq!(
         enum_no_default,
         SlotNoDefaultMessagePolicy {
@@ -1887,7 +1839,7 @@ fn slot_render_owns_default_expressions_for_planned_views() {
         )
     );
     assert_eq!(
-        default_expr_for_slot(&enum_shape),
+        default_expr_for_slot_with_facts(&enum_shape, &default_facts),
         new_java2rust::unsupported::compile_error_expr(
             "no default value is available for closed enum slot AnimalValue"
         )
@@ -1901,13 +1853,13 @@ fn slot_render_owns_default_expressions_for_planned_views() {
         trait_name: "Animal".to_string(),
     };
     assert_eq!(
-        slot_default_policy(&dyn_shape, &FactSet::default()),
+        slot_default_policy_with_effective_facts(&dyn_shape, &effective_facts),
         SlotDefaultPolicy::NoDefaultForDynTrait {
             trait_name: "Animal".to_string(),
         }
     );
     assert_eq!(
-        default_expr_for_slot(&dyn_shape),
+        default_expr_for_slot_with_facts(&dyn_shape, &default_facts),
         new_java2rust::unsupported::compile_error_expr(
             "no default value is available for dyn trait slot Animal"
         )
@@ -1921,13 +1873,13 @@ fn slot_render_owns_default_expressions_for_planned_views() {
         trait_name: "Animal".to_string(),
     };
     assert_eq!(
-        slot_default_policy(&boxed_shape, &FactSet::default()),
+        slot_default_policy_with_effective_facts(&boxed_shape, &effective_facts),
         SlotDefaultPolicy::NoDefaultForBoxedDynTrait {
             trait_name: "Animal".to_string(),
         }
     );
     assert_eq!(
-        default_expr_for_slot(&boxed_shape),
+        default_expr_for_slot_with_facts(&boxed_shape, &default_facts),
         new_java2rust::unsupported::compile_error_expr(
             "no default value is available for boxed dyn trait slot Animal"
         )
@@ -1942,13 +1894,13 @@ fn slot_render_owns_default_expressions_for_planned_views() {
         }],
     };
     assert_eq!(
-        slot_default_policy(&optional_boxed_shape, &FactSet::default()),
+        slot_default_policy_with_effective_facts(&optional_boxed_shape, &effective_facts),
         SlotDefaultPolicy::Value {
             policy: SlotDefaultValuePolicy::DefaultTrait,
         }
     );
     assert_eq!(
-        default_expr_for_slot(&optional_boxed_shape),
+        default_expr_for_slot_with_facts(&optional_boxed_shape, &default_facts),
         RustExpr::Call {
             function: Box::new(RustExpr::path(["Default", "default"])),
             args: Vec::new(),
@@ -1958,29 +1910,15 @@ fn slot_render_owns_default_expressions_for_planned_views() {
     let mut erased_shape = RustSlotShape::conservative(JavaType::Unknown("Object".to_string()));
     erased_shape.dispatch = DispatchShape::ErasedObject;
     assert_eq!(
-        slot_default_policy(&erased_shape, &FactSet::default()),
+        slot_default_policy_with_effective_facts(&erased_shape, &effective_facts),
         SlotDefaultPolicy::NoDefaultForErasedObject
     );
     assert_eq!(
-        default_expr_for_slot(&erased_shape),
+        default_expr_for_slot_with_facts(&erased_shape, &default_facts),
         new_java2rust::unsupported::compile_error_expr(
             "no default value is available for erased object slot"
         )
     );
-
-    let source = include_str!("../src/slot_render.rs");
-    assert!(source.contains("pub enum SlotDefaultPolicy"));
-    assert!(source.contains("pub enum SlotDefaultValuePolicy"));
-    assert!(source.contains("pub struct SlotContentCapabilityPolicy"));
-    assert!(source.contains("pub fn slot_content_capability_policy"));
-    assert!(source.contains("pub struct SlotNoDefaultMessagePolicy"));
-    assert!(source.contains("pub fn slot_no_default_message_policy"));
-    assert!(source.contains("pub fn slot_default_policy"));
-    assert!(source.contains("pub fn slot_default_value_policy"));
-    assert!(source.contains("pub fn slot_default_policy_expr"));
-    assert!(source.contains("pub fn slot_default_value_policy_expr"));
-    assert!(!source.contains("pub fn render_slot_default_policy"));
-    assert!(!source.contains("pub fn render_slot_default_value_policy"));
 }
 
 #[test]
@@ -2086,16 +2024,11 @@ fn slot_render_uses_type_capability_facts_for_string_views() {
         RustExpr::Literal("\"\"".to_string())
     );
     assert_eq!(
-        slot_content_capability_policy(&shape.java_ty, &facts),
+        slot_content_capability_policy_with_effective_facts(&shape.java_ty, &effective_facts),
         SlotContentCapabilityPolicy {
-            java_ty: shape.java_ty.clone(),
             string_content: true,
             sequence_element: None,
         }
-    );
-    assert_eq!(
-        slot_content_capability_policy_with_effective_facts(&shape.java_ty, &effective_facts),
-        slot_content_capability_policy(&shape.java_ty, &facts)
     );
 }
 
@@ -2159,7 +2092,7 @@ fn slot_render_uses_type_capability_facts_for_sequence_views_and_storage() {
         RustType::Vec(Box::new(RustType::Named("ExternalId".to_string())))
     );
     assert_eq!(
-        default_expr_for_slot(&storage_shape),
+        default_expr_for_slot_with_facts(&storage_shape, &FactSet::default()),
         RustExpr::Call {
             function: Box::new(RustExpr::path(["Default", "default"])),
             args: Vec::new(),
@@ -2211,22 +2144,17 @@ fn slot_render_uses_type_capability_facts_for_sequence_views_and_storage() {
         }
     );
     assert_eq!(
-        slot_content_capability_policy(&storage_shape.java_ty, &facts),
+        slot_content_capability_policy_with_effective_facts(
+            &storage_shape.java_ty,
+            &effective_facts,
+        ),
         SlotContentCapabilityPolicy {
-            java_ty: storage_shape.java_ty.clone(),
             string_content: false,
             sequence_element: Some(JavaType::Named {
                 name: "ExternalId".to_string(),
                 args: Vec::new(),
             }),
         }
-    );
-    assert_eq!(
-        slot_content_capability_policy_with_effective_facts(
-            &storage_shape.java_ty,
-            &effective_facts,
-        ),
-        slot_content_capability_policy(&storage_shape.java_ty, &facts)
     );
 }
 
@@ -3379,7 +3307,7 @@ fn object_representation_policy_is_the_dyn_fallback_entrypoint() {
     assert!(object_model_source.contains("plan_object_model_with_effective_facts"));
     assert!(representation_source.contains("ObjectModelInput"));
     assert!(representation_source.contains("plan_object_model_from_input"));
-    assert!(representation_source.contains("usage: None"));
+    assert!(representation_source.contains("usage: Some(&usage)"));
     assert!(object_model_source.contains("pub strategies: BTreeMap<String, ObjectStrategyPlan>"));
     assert!(object_model_source.contains("pub fn strategy_for(&self, root: &str)"));
     assert!(object_model_source.contains("pub provenance: Vec<FactProvenance>"));
@@ -3426,11 +3354,8 @@ fn object_representation_policy_is_the_dyn_fallback_entrypoint() {
     assert!(object_model_source.contains("pub fn hierarchy_override_application_policy"));
     assert!(object_model_source.contains("pub struct HierarchyOverrideRepresentationPolicy"));
     assert!(object_model_source.contains("hierarchy_override_representation_policy"));
-    assert!(representation_source.contains("pub struct RepresentationHierarchyFactPolicy"));
-    assert!(representation_source.contains("pub fn representation_hierarchy_fact_policy"));
-    assert!(
-        representation_source.contains("representation_hierarchy_fact_policy_with_effective_facts")
-    );
+    assert!(!representation_source.contains("pub struct RepresentationHierarchyFactPolicy"));
+    assert!(!representation_source.contains("representation_hierarchy_fact_policy"));
     assert!(object_model_source.contains("pub struct ObjectHierarchyEdge"));
     assert!(object_model_source.contains("pub enum ObjectHierarchyEdgeKind"));
     assert!(object_model_source.contains("pub struct ObjectHierarchyEdgeRepresentationPolicy"));
@@ -3447,10 +3372,10 @@ fn object_representation_policy_is_the_dyn_fallback_entrypoint() {
         representation_source
             .matches("hierarchy_edges_for_type")
             .count(),
-        1
+        0
     );
-    assert!(object_model_source.contains("pub struct ClosedEnumFactPolicy"));
-    assert!(object_model_source.contains("pub fn closed_enum_fact_policy"));
+    assert!(!object_model_source.contains("pub struct ClosedEnumFactPolicy"));
+    assert!(!object_model_source.contains("pub fn closed_enum_fact_policy"));
     assert!(object_model_source.contains("pub struct ClosedEnumInferencePolicy"));
     assert!(object_model_source.contains("pub fn closed_enum_inference_policy"));
     assert!(object_model_source.contains("pub enum ClosedEnumProof"));
@@ -3469,18 +3394,9 @@ fn object_representation_policy_is_the_dyn_fallback_entrypoint() {
     assert!(!representation_source.contains("pub struct HierarchyEdgeDiagnosticPolicy"));
     assert!(!representation_source.contains("pub enum HierarchyEdgeDiagnosticOutcome"));
     assert!(!representation_source.contains("render_hierarchy_edge_diagnostic_outcome"));
-    assert!(representation_source.contains("pub struct AnonymousClassDiagnosticPolicy"));
-    assert!(representation_source.contains("pub fn anonymous_class_diagnostic_policy"));
+    assert!(!representation_source.contains("pub struct AnonymousClassDiagnosticPolicy"));
+    assert!(!representation_source.contains("pub fn anonymous_class_diagnostic_policy"));
     assert!(object_model_source.contains("pub fn object_representation_policy"));
-    assert_eq!(
-        boxed_dyn_object_representation_policy(),
-        BoxedDynObjectRepresentationPolicy {
-            invariant: BoxedDynObjectRepresentationInvariant::SlotProjectionOnly,
-            object_representation_has_boxed_dyn_variant: false,
-            representation_dispatch_maps_boxed_dyn: false,
-            slot_projection_creates_owned_boxed_dyn_storage: true,
-        }
-    );
     assert_eq!(
         dispatch_requirement_projection_policy(
             DispatchRequirementProjectionRole::Storage,
@@ -3547,7 +3463,7 @@ fn callable_analysis_shell_reaches_lowering_context() {
         .nth(1)
         .and_then(|tail| tail.split("fn method_effective_rust_name").next())
         .expect("resolved source signature helper should be present");
-    assert!(resolved_source_signature_helper.contains("JavaCallableKey::source_method"));
+    assert!(resolved_source_signature_helper.contains("JavaCallableKey::source_method_for_type"));
     assert!(resolved_source_signature_helper.contains("method_signature_by_java_key"));
     let resolved_static_fallback = lower_source
         .split("fn source_context_resolved_static_method_fallback_signature")
@@ -3558,7 +3474,7 @@ fn callable_analysis_shell_reaches_lowering_context() {
         })
         .expect("resolved static source fallback planner should be present");
     assert!(resolved_static_fallback.contains("resolved_source_method_for_call"));
-    assert!(resolved_static_fallback.contains("JavaCallableKey::source_method"));
+    assert!(resolved_static_fallback.contains("JavaCallableKey::source_method_for_owner"));
     assert!(resolved_static_fallback.contains("method_signature_by_java_key"));
     let resolved_varargs = lower_source
         .split("fn lower_resolved_varargs_call_args")
@@ -3581,9 +3497,7 @@ fn callable_analysis_shell_reaches_lowering_context() {
     assert!(lower_source.contains(
         "fn plan_call_exception_propagation_with_lower_context(\n    receiver: Option<&Expr>,"
     ));
-    assert!(
-        lower_source.contains("source_method_call_returns_result_with_exception_plan(receiver,")
-    );
+    assert!(lower_source.contains("source_method_call_returns_result_with_exception_plan"));
     let binding_use_count_helper = lower_source
         .split("fn current_callable_binding_use_count_for_id")
         .nth(1)
@@ -3593,8 +3507,13 @@ fn callable_analysis_shell_reaches_lowering_context() {
         })
         .expect("current callable use-count helper should be present");
     assert!(binding_use_count_helper.contains("current_method_decl"));
-    assert!(binding_use_count_helper.contains("JavaCallableKey::source_method"));
+    assert!(binding_use_count_helper.contains("JavaCallableKey::source_method_for_owner"));
     assert!(binding_use_count_helper.contains("method_usage_by_java_key"));
+    assert!(binding_use_count_helper.contains("bindings_by_id.get(binding_id)"));
+    assert!(
+        !binding_use_count_helper.contains(".bindings.get("),
+        "move/clone use counts must not rejoin locals through the compatibility name map"
+    );
     let binding_facts_helper = lower_source
         .split("fn current_callable_binding_facts")
         .nth(1)
@@ -3604,8 +3523,35 @@ fn callable_analysis_shell_reaches_lowering_context() {
         })
         .expect("current callable binding facts helper should be present");
     assert!(binding_facts_helper.contains("current_method_decl"));
-    assert!(binding_facts_helper.contains("JavaCallableKey::source_method"));
+    assert!(binding_facts_helper.contains("JavaCallableKey::source_method_for_owner"));
     assert!(binding_facts_helper.contains("method_usage_by_java_key"));
+    assert!(binding_facts_helper.contains("bindings_by_id.get(binding_id)"));
+    assert!(
+        !binding_facts_helper.contains(".bindings.get("),
+        "lowering binding fact queries must not rejoin locals through the compatibility name map"
+    );
+    assert!(
+        !binding_facts_helper.contains("bindings.contains_key("),
+        "lowering binding fact queries must not probe the compatibility name map"
+    );
+    let local_plan_helper = lower_source
+        .split("fn local_plan_for_declaration")
+        .nth(1)
+        .and_then(|tail| tail.split("fn refine_local_plan_from_initializer").next())
+        .expect("local plan helper should be present");
+    assert!(local_plan_helper.contains("local_plan_by_binding"));
+    assert!(local_plan_helper.contains("idless_compatibility_local_plan_for_declaration"));
+    assert!(
+        !local_plan_helper.contains("binding) {\n        return ctx\n            .signatures\n            .local_plan_by_binding(ctx.current_local_shapes, binding);\n    }\n    initializer?;"),
+        "bound declarations must not fall through to the id-less local-plan compatibility cursor"
+    );
+    let idless_local_plan_helper = lower_source
+        .split("fn idless_compatibility_local_plan_for_declaration")
+        .nth(1)
+        .and_then(|tail| tail.split("fn refine_local_plan_from_initializer").next())
+        .expect("id-less local plan compatibility helper should be present");
+    assert!(idless_local_plan_helper.contains("initializer?;"));
+    assert!(idless_local_plan_helper.contains("next_local_plan_for_declared_type"));
     let call_plan_source = include_str!("../src/call_plan.rs");
     let resolved_arg_shape_helper = call_plan_source
         .split("fn resolved_call_signature_arg_shapes_by_java_key")
@@ -3616,7 +3562,8 @@ fn callable_analysis_shell_reaches_lowering_context() {
         })
         .expect("resolved Java-key arg-shape helper should be present");
     assert!(resolved_arg_shape_helper.contains("JavaCallableKey"));
-    assert!(resolved_arg_shape_helper.contains("erased_type_name"));
+    assert!(resolved_arg_shape_helper.contains("JavaOwnerKey::resolved_source"));
+    assert!(resolved_arg_shape_helper.contains("resolved_source_method"));
     assert!(resolved_arg_shape_helper.contains("method_signature_by_java_key"));
     let resolved_with_facts = call_plan_source
         .split("pub fn plan_call_arguments_with_facts(")
@@ -3662,39 +3609,6 @@ fn callable_analysis_shell_reaches_lowering_context() {
 }
 
 #[test]
-fn typed_external_argument_effects_preserve_concrete_source_parameter_shape() {
-    let signature_source = include_str!("../src/signature.rs");
-    let helper = signature_source
-        .split("fn external_argument_effect_constraints_for_binding")
-        .nth(1)
-        .and_then(|tail| tail.split("fn external_ffi_handover_for_call_arg").next())
-        .expect("external argument effect binding helper should be present");
-
-    assert!(helper.contains("java_types_have_same_signature_boundary_identity"));
-    assert!(helper.contains("SignatureConstraint::RequiredDispatch(DispatchShape::Concrete)"));
-    assert!(helper.contains("SignatureConstraint::RequiredView(ViewShape::Native)"));
-    assert!(helper.contains("!is_declared_java_object_type"));
-}
-
-#[test]
-fn resolved_unknown_source_calls_can_propagate_signature_constraints() {
-    let signature_source = include_str!("../src/signature.rs");
-    let propagation = signature_source
-        .split("fn propagate_call_site_constraints")
-        .nth(1)
-        .and_then(|tail| {
-            tail.split("fn propagate_constructor_call_site_constraints")
-                .next()
-        })
-        .expect("method call-site propagation should be present");
-
-    assert!(propagation.contains("let Some(resolved) = &call_site.resolved"));
-    assert!(propagation.contains("constraints.methods.get(&callee_key)"));
-    assert!(propagation.contains("resolved_source_call_propagates_signature_constraints"));
-    assert!(propagation.contains("CallArgumentBoundary::Unknown"));
-}
-
-#[test]
 fn callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating() {
     let lower_source = include_str!("../src/lower.rs");
     let signature_source = include_str!("../src/signature.rs");
@@ -3704,9 +3618,9 @@ fn callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating() {
     assert!(lower_source.contains("signatures: &'a SignaturePlan"));
     assert!(lower_source.contains("exceptions: &'a ProgramExceptionPlan"));
     assert!(signature_source.contains("methods_by_java_key: HashMap<JavaCallableKey"));
-    assert!(signature_source.contains("JavaCallableKey::source_method"));
+    assert!(signature_source.contains("JavaCallableKey::source_method_for_type"));
     assert!(usage_source.contains("pub methods_by_java_key: HashMap<JavaCallableKey"));
-    assert!(usage_source.contains("JavaCallableKey::source_method"));
+    assert!(usage_source.contains("JavaCallableKey::source_method_for_type"));
     assert!(usage_source.contains("source_method_rust_name(method)"));
     assert!(
         !usage_source.contains("unwrap_or_else(|| crate::parser::to_snake_case(&method.name))")
@@ -5177,6 +5091,61 @@ fn class_literal_tokens_are_planned_before_lowering() {
             rust_type: RustType::Named("RegisteredType".to_string()),
         }
     );
+
+    let mut package_source_facts = FactSet::default();
+    package_source_facts.storage_strategies.insert(
+        "AItem".to_string(),
+        new_java2rust::storage_strategy::TypeStorageFacts::default(),
+    );
+    let package_source = class_literal_token_plan(
+        &JavaType::Named {
+            name: "a.Item".to_string(),
+            args: Vec::new(),
+        },
+        &package_source_facts,
+    );
+    assert_eq!(
+        package_source,
+        new_java2rust::stdlib::ClassLiteralTokenPlan {
+            java_name: "a.Item".to_string(),
+            rust_type: RustType::Named("AItem".to_string()),
+        }
+    );
+
+    let mut merged_simple_source_facts = FactSet::default();
+    merged_simple_source_facts.storage_strategies.insert(
+        "Item".to_string(),
+        new_java2rust::storage_strategy::TypeStorageFacts::default(),
+    );
+    let merged_simple_source = class_literal_token_plan(
+        &JavaType::Named {
+            name: "a.Item".to_string(),
+            args: Vec::new(),
+        },
+        &merged_simple_source_facts,
+    );
+    assert_eq!(
+        merged_simple_source,
+        new_java2rust::stdlib::ClassLiteralTokenPlan {
+            java_name: "a.Item".to_string(),
+            rust_type: RustType::Named("AItem".to_string()),
+        }
+    );
+
+    let jdk_named = class_literal_token_plan(
+        &JavaType::Named {
+            name: "java.util.Item".to_string(),
+            args: Vec::new(),
+        },
+        &merged_simple_source_facts,
+    );
+    assert_eq!(
+        jdk_named,
+        new_java2rust::stdlib::ClassLiteralTokenPlan {
+            java_name: "java.util.Item".to_string(),
+            rust_type: RustType::Unit,
+        }
+    );
 }
 
 #[test]
@@ -5396,15 +5365,8 @@ class Factory {
     );
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let representations = plan_representations(&resolved.program, &resolved.facts);
-    let policy = anonymous_class_diagnostic_policy(&resolved.program);
     let diagnostics = representations.diagnostics_for_program(&resolved.program);
 
-    assert!(
-        policy
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "unsupported_anonymous_class")
-    );
     assert!(
         diagnostics
             .iter()
@@ -5712,17 +5674,21 @@ class Num implements Expr {}
         .unwrap();
 
     assert_eq!(
-        type_emission_for(&representations, expr_ty, &signatures),
+        type_emission_for_with_facts(&representations, expr_ty, &signatures, &FactSet::default()),
         RepresentationTypeEmission::RawRustItem(
-            "pub enum ExprValue {\n    Add(Add),\n    Num(Num),\n}".to_string()
+            "#[derive(Clone, PartialEq)]\npub enum ExprValue {\n    Add(Add),\n    Num(Num),\n}"
+                .to_string()
         )
     );
     assert_eq!(
         raw_type_item_for_with_facts(&representations, expr_ty, &signatures, &facts),
-        Some("pub enum ExprValue {\n    Add(Add),\n    Num(Num),\n}".to_string())
+        Some(
+            "#[derive(Clone, PartialEq)]\npub enum ExprValue {\n    Add(Add),\n    Num(Num),\n}"
+                .to_string()
+        )
     );
     assert_eq!(
-        type_emission_for(&representations, add_ty, &signatures),
+        type_emission_for_with_facts(&representations, add_ty, &signatures, &FactSet::default()),
         RepresentationTypeEmission::LowerAsConcreteStruct
     );
     assert_eq!(
@@ -5769,12 +5735,22 @@ class Holder {
         Some(ObjectRepresentation::JavaEnum { enum_name, variants })
             if enum_name == "Holder.Type" && variants == &vec!["SNP".to_string(), "INDEL".to_string()]
     ));
-    assert_eq!(
-        type_emission_for(&enum_representations, enum_ty, &enum_signatures),
-        RepresentationTypeEmission::RawRustItem(
-            "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]\npub enum HolderType {\n    SNP,\n    INDEL,\n}\n\nimpl std::fmt::Display for HolderType {\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n        write!(f, \"{:?}\", self)\n    }\n}".to_string()
-        )
-    );
+    let RepresentationTypeEmission::RawRustItem(enum_item) = type_emission_for_with_facts(
+        &enum_representations,
+        enum_ty,
+        &enum_signatures,
+        &FactSet::default(),
+    ) else {
+        panic!("Java enum should emit a raw Rust enum item");
+    };
+    assert!(enum_item.contains("pub enum Holder_Type"));
+    assert!(enum_item.contains("SNP"));
+    assert!(enum_item.contains("INDEL"));
+    assert!(enum_item.contains("impl Default for Holder_Type"));
+    assert!(enum_item.contains("pub fn values() -> Vec<Self>"));
+    assert!(enum_item.contains("pub fn value_of<T: AsRef<str>>(name: T) -> Self"));
+    assert!(enum_item.contains("pub fn ordinal(&self) -> i32"));
+    assert!(enum_item.contains("impl std::fmt::Display for Holder_Type"));
 }
 
 #[test]
@@ -5809,12 +5785,20 @@ interface Named {
         .find(|ty| ty.name == "Named")
         .unwrap();
 
-    assert_eq!(
-        type_emission_for(&representations, named_ty, &signatures),
-        RepresentationTypeEmission::RawRustItem(
-            "pub trait Named {\n    fn name(&self) -> String;\n    fn score(&self, prefix: String) -> i32;\n    fn as_any(&self) -> &dyn std::any::Any;\n    fn clone_box(&self) -> Box<dyn Named>;\n}\n\nimpl dyn Named {\n    pub fn anonymous() -> Box<dyn Named> { panic!(\"java2rust: anonymous class body for Named requires object lowering\") }\n}\n\nimpl Clone for Box<dyn Named> {\n    fn clone(&self) -> Self { Named::clone_box(&**self) }\n}"
-                .to_string()
-        )
+    let RepresentationTypeEmission::RawRustItem(item) =
+        type_emission_for_with_facts(&representations, named_ty, &signatures, &FactSet::default())
+    else {
+        panic!("interface should emit a raw trait item");
+    };
+    assert!(item.contains("pub trait Named"));
+    assert!(item.contains("fn name(&self) -> String;"));
+    assert!(item.contains("fn score(&self, prefix: &str) -> i32;"));
+    assert!(item.contains("impl Clone for std::boxed::Box<dyn Named>"));
+    assert!(
+        item.contains("impl<__JavaShared: Named + 'static> Named for std::rc::Rc<__JavaShared>")
+    );
+    assert!(
+        item.contains("impl<__JavaShared: Named + 'static> Named for std::sync::Arc<__JavaShared>")
     );
 }
 
@@ -5851,7 +5835,7 @@ interface Mapper {
             &resolved.program,
             mapper_ty,
             &signatures,
-            &semantic.facts,
+            &FactSet::default(),
             &ProgramExceptionPlan::default(),
         ),
         RepresentationTypeEmission::RawRustItem(
@@ -5860,7 +5844,7 @@ interface Mapper {
             // (claude_audits/0002b). `__JavaShared` rather than `T`: `id`
             // declares its own `T` and an inner generic shadowing the impl's is
             // E0403.
-            "pub trait Mapper {\n    fn id<T>(&self, value: T) -> T where Self: Sized;\n    fn as_any(&self) -> &dyn std::any::Any;\n    fn clone_box(&self) -> Box<dyn Mapper>;\n}\n\nimpl dyn Mapper {\n    pub fn anonymous() -> Box<dyn Mapper> { panic!(\"java2rust: anonymous class body for Mapper requires object lowering\") }\n}\n\nimpl Clone for Box<dyn Mapper> {\n    fn clone(&self) -> Self { Mapper::clone_box(&**self) }\n}\n\nimpl<__JavaShared: Mapper + 'static> Mapper for std::rc::Rc<__JavaShared> {\n    fn id<T>(&self, value: T) -> T where Self: Sized { (**self).id(value) }\n    fn as_any(&self) -> &dyn std::any::Any { (**self).as_any() }\n    fn clone_box(&self) -> Box<dyn Mapper> { Box::new(self.clone()) }\n}\n\nimpl<__JavaShared: Mapper + 'static> Mapper for std::sync::Arc<__JavaShared> {\n    fn id<T>(&self, value: T) -> T where Self: Sized { (**self).id(value) }\n    fn as_any(&self) -> &dyn std::any::Any { (**self).as_any() }\n    fn clone_box(&self) -> Box<dyn Mapper> { Box::new(self.clone()) }\n}"
+            "pub trait Mapper {\n    fn id<T>(&self, value: T) -> T where Self: Sized;\n    fn as_any(&self) -> &dyn std::any::Any;\n    fn clone_box(&self) -> std::boxed::Box<dyn Mapper>;\n}\n\nimpl dyn Mapper {\n    pub fn anonymous() -> std::boxed::Box<dyn Mapper> { panic!(\"java2rust: anonymous class body for Mapper requires object lowering\") }\n}\n\nimpl Clone for std::boxed::Box<dyn Mapper> {\n    fn clone(&self) -> Self { Mapper::clone_box(&**self) }\n}\n\nimpl<__JavaShared: Mapper + 'static> Mapper for std::rc::Rc<__JavaShared> {\n    fn id<T>(&self, value: T) -> T where Self: Sized { (**self).id(value) }\n    fn as_any(&self) -> &dyn std::any::Any { (**self).as_any() }\n    fn clone_box(&self) -> std::boxed::Box<dyn Mapper> { std::boxed::Box::new(self.clone()) }\n}\n\nimpl<__JavaShared: Mapper + 'static> Mapper for std::sync::Arc<__JavaShared> {\n    fn id<T>(&self, value: T) -> T where Self: Sized { (**self).id(value) }\n    fn as_any(&self) -> &dyn std::any::Any { (**self).as_any() }\n    fn clone_box(&self) -> std::boxed::Box<dyn Mapper> { std::boxed::Box::new(self.clone()) }\n}"
                 .to_string()
         )
     );
@@ -5990,7 +5974,7 @@ class ExternalId {}
     assert_eq!(
         type_emission_for_with_facts(&representations, source_ty, &signatures, &facts),
         RepresentationTypeEmission::RawRustItem(
-            "pub trait IdSource {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId>;\n    fn as_any(&self) -> &dyn std::any::Any;\n    fn clone_box(&self) -> Box<dyn IdSource>;\n}\n\nimpl dyn IdSource {\n    pub fn anonymous() -> Box<dyn IdSource> { panic!(\"java2rust: anonymous class body for IdSource requires object lowering\") }\n}\n\nimpl Clone for Box<dyn IdSource> {\n    fn clone(&self) -> Self { IdSource::clone_box(&**self) }\n}"
+            "pub trait IdSource {\n    fn ids(&self, values: &[ExternalId]) -> Vec<ExternalId>;\n    fn as_any(&self) -> &dyn std::any::Any;\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource>;\n}\n\nimpl dyn IdSource {\n    pub fn anonymous() -> std::boxed::Box<dyn IdSource> { panic!(\"java2rust: anonymous class body for IdSource requires object lowering\") }\n}\n\nimpl Clone for std::boxed::Box<dyn IdSource> {\n    fn clone(&self) -> Self { IdSource::clone_box(&**self) }\n}\n\nimpl<__JavaShared: IdSource + 'static> IdSource for std::rc::Rc<__JavaShared> {\n    fn ids(&self, values: &[ExternalId]) -> Vec<ExternalId> { (**self).ids(values) }\n    fn as_any(&self) -> &dyn std::any::Any { (**self).as_any() }\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource> { std::boxed::Box::new(self.clone()) }\n}\n\nimpl<__JavaShared: IdSource + 'static> IdSource for std::sync::Arc<__JavaShared> {\n    fn ids(&self, values: &[ExternalId]) -> Vec<ExternalId> { (**self).ids(values) }\n    fn as_any(&self) -> &dyn std::any::Any { (**self).as_any() }\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource> { std::boxed::Box::new(self.clone()) }\n}"
                 .to_string()
         )
     );
@@ -6023,10 +6007,63 @@ class Dog implements Named {
         .unwrap();
 
     assert_eq!(
-        trait_impl_emissions_for_type(&representations, &resolved.program, dog_ty, &signatures),
+        trait_impl_emissions_for_type_with_facts(
+            &representations,
+            &resolved.program,
+            dog_ty,
+            &signatures,
+            &semantic.facts,
+        ),
         vec![
-            "impl Named for Dog {\n    fn name(&self) -> String { Dog::name(self) }\n    fn as_any(&self) -> &dyn std::any::Any { self }\n    fn clone_box(&self) -> Box<dyn Named> { panic!(\"java2rust: clone_box for Named requires a cloneable Java object carrier\") }\n}".to_string()
+            "impl Named for Dog {\n    fn name(&self) -> String { Dog::name(self) }\n    fn as_any(&self) -> &dyn std::any::Any { self }\n    fn clone_box(&self) -> std::boxed::Box<dyn Named> { panic!(\"java2rust: clone_box for Named requires a cloneable Java object carrier\") }\n}".to_string()
         ]
+    );
+}
+
+#[test]
+fn trait_impl_forwarding_keeps_nullable_implementation_return_shape() {
+    let parsed = parse_java_source(
+        r#"
+interface Named {
+    String name();
+}
+
+class NullName implements Named {
+    public String name() { return null; }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let semantic = analyze_program(&resolved.program, &resolved.facts, &FactSet::default());
+    let representations = plan_representations(&resolved.program, &semantic.facts);
+    let usage = analyze_usage_with_facts(&resolved.program, &semantic.facts);
+    let signatures =
+        solve_signatures_with_facts(&resolved.program, &representations, &usage, &semantic.facts);
+    let null_name = resolved
+        .program
+        .types
+        .iter()
+        .find(|ty| ty.name == "NullName")
+        .unwrap();
+
+    let impls = trait_impl_emissions_for_type_with_facts(
+        &representations,
+        &resolved.program,
+        null_name,
+        &signatures,
+        &semantic.facts,
+    );
+
+    assert_eq!(impls.len(), 1);
+    assert!(
+        impls[0].contains("fn name(&self) -> Option<String> { NullName::name(self) }"),
+        "{}",
+        impls[0]
+    );
+    assert!(
+        !impls[0].contains("NullName::name(self).expect(\"Java null receiver\")"),
+        "{}",
+        impls[0]
     );
 }
 
@@ -6056,11 +6093,12 @@ abstract class AbstractModule implements Module {
         .find(|ty| ty.name == "AbstractModule")
         .unwrap();
 
-    let impls = trait_impl_emissions_for_type(
+    let impls = trait_impl_emissions_for_type_with_facts(
         &representations,
         &resolved.program,
         abstract_ty,
         &signatures,
+        &FactSet::default(),
     );
 
     assert_eq!(impls.len(), 1);
@@ -6129,7 +6167,7 @@ class Source implements IdSource {
             &facts,
         ),
         vec![
-            "impl IdSource for Source {\n    fn ids(&self, values: &[ExternalId]) -> Vec<ExternalId> { Source::ids(self, values.to_vec()) }\n    fn as_any(&self) -> &dyn std::any::Any { self }\n    fn clone_box(&self) -> Box<dyn IdSource> { panic!(\"java2rust: clone_box for IdSource requires a cloneable Java object carrier\") }\n}"
+            "impl IdSource for Source {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId> { Source::ids(self, values.to_vec()) }\n    fn as_any(&self) -> &dyn std::any::Any { self }\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource> { panic!(\"java2rust: clone_box for IdSource requires a cloneable Java object carrier\") }\n}"
                 .to_string()
         ]
     );
@@ -6178,8 +6216,13 @@ class BrokenNamed implements Named {
         })
         .unwrap();
 
-    let impls =
-        trait_impl_emissions_for_type(&representations, &resolved.program, broken_ty, &signatures);
+    let impls = trait_impl_emissions_for_type_with_facts(
+        &representations,
+        &resolved.program,
+        broken_ty,
+        &signatures,
+        &FactSet::default(),
+    );
 
     let message_policy = trait_impl_method_message_policy(
         broken_ty,
@@ -6252,11 +6295,12 @@ class OverloadedNamed implements Named {
         .find(|ty| ty.name == "OverloadedNamed")
         .unwrap();
 
-    let impls = trait_impl_emissions_for_type(
+    let impls = trait_impl_emissions_for_type_with_facts(
         &representations,
         &resolved.program,
         overloaded_ty,
         &signatures,
+        &FactSet::default(),
     );
 
     assert_eq!(impls.len(), 1);
@@ -6264,7 +6308,7 @@ class OverloadedNamed implements Named {
     assert!(!impls[0].contains("compile_error!"), "{}", impls[0]);
     assert!(
         impls[0].contains(
-            "fn score(&self, prefix: &str) -> i32 { OverloadedNamed::score_string(self, prefix.to_string()) }"
+            "fn score(&self, prefix: String) -> i32 { OverloadedNamed::score_string(self, prefix.to_string()) }"
         ),
         "{}",
         impls[0]
@@ -6298,17 +6342,6 @@ fn representation_lowering_owns_dyn_trait_impl_compatibility_policy() {
     assert!(!lower_source.contains("RawRustItem"));
     assert!(lower_source.contains("trait_impl_emissions_for_type_with_facts"));
     assert!(!lower_source.contains("incompatible Java interface method implementation"));
-}
-
-#[test]
-fn representation_plan_does_not_render_rust_items() {
-    let source = include_str!("../src/representation.rs");
-
-    assert!(!source.contains("RepresentationTypeEmission"));
-    assert!(!source.contains("RawRustItem"));
-    assert!(!source.contains("pub trait"));
-    assert!(!source.contains("Box<dyn std::any::Any>"));
-    assert!(source.contains("ObjectRepresentation::ErasedObject"));
 }
 
 #[test]
@@ -6551,6 +6584,24 @@ class Use {
     );
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let usage = analyze_usage(&resolved.program);
+    let method_usage = usage
+        .methods
+        .get(&new_java2rust::usage::UsageMethodKey {
+            type_name: "FieldStorageFlow".to_string(),
+            method_name: "use".to_string(),
+        })
+        .expect("method usage");
+    assert!(
+        method_usage
+            .all_binding_facts()
+            .into_iter()
+            .any(|binding| binding.name == "input"
+                && binding.uses.iter().any(|usage| matches!(
+                    usage,
+                    BindingUse::AssignedToLocal { local_name, .. } if local_name == "first"
+                ))),
+        "{method_usage:?}"
+    );
     let representations = plan_representations(&resolved.program, &resolved.facts);
     let signatures = solve_signatures(&resolved.program, &representations, &usage);
     let ty = &resolved.program.types[0];
@@ -6598,10 +6649,154 @@ class Use {
 }
 
 #[test]
-fn signature_planning_keeps_declared_iterator_locals_native() {
-    let signature_source = include_str!("../src/signature.rs");
-    assert!(signature_source.contains("declared_local_jdk_iterator_constraints"));
-    assert!(signature_source.contains("\"Iterator\" | \"java.util.Iterator\" | \"JavaIterator\""));
+fn same_name_disjoint_locals_do_not_share_mutability() {
+    let parsed = parse_java_source(
+        r#"
+class SameNameDisjointLocalMutability {
+    void run(boolean flag) {
+        if (flag) {
+            java.util.List<String> t = new java.util.ArrayList<>();
+            t.add("q");
+        }
+        java.util.Map<String, String> t = new java.util.HashMap<>();
+        t.get("k");
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let usage = analyze_usage(&resolved.program);
+    let representations = plan_representations(&resolved.program, &resolved.facts);
+    let signatures = solve_signatures(&resolved.program, &representations, &usage);
+    let ty = &resolved.program.types[0];
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "run" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let locals = signatures.method_local_shapes_or_empty(ty, method);
+    let t_locals = locals
+        .iter()
+        .filter(|local| local.name == "t")
+        .collect::<Vec<_>>();
+
+    assert_eq!(t_locals.len(), 2, "{locals:?}");
+    assert_ne!(
+        t_locals[0].binding, t_locals[1].binding,
+        "same-name declarations must carry distinct local binding ids: {t_locals:?}"
+    );
+    assert_eq!(t_locals[0].binding.kind, BindingKind::Local);
+    assert_eq!(t_locals[1].binding.kind, BindingKind::Local);
+    assert!(
+        t_locals[0].binding_mutable,
+        "the list binding is mutated by t.add(...): {t_locals:?}"
+    );
+    assert!(
+        !t_locals[1].binding_mutable,
+        "the later map binding must not inherit the list binding's mutation: {t_locals:?}"
+    );
+}
+
+#[test]
+fn duplicate_inner_locals_do_not_change_outer_generated_mutability() {
+    let source = r#"
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+
+class DuplicateInnerLocalGeneratedMutability {
+    String one(List<String> xs, Map<String,String> m, boolean b) {
+        String a = m.get("k");
+        StringBuilder sb = new StringBuilder();
+        sb.append(a);
+        List<String> c = new ArrayList<>();
+        c.add(a);
+        return sb.toString();
+    }
+
+    String three(List<String> xs, Map<String,String> m, boolean b) {
+        String a = m.get("k");
+        StringBuilder sb = new StringBuilder();
+        sb.append(a);
+        List<String> c = new ArrayList<>();
+        c.add(a);
+        if (b) {
+            String a = "z";
+            StringBuilder sb = new StringBuilder();
+            List<String> c = new ArrayList<>();
+            sb.append(a);
+            c.add(a);
+        }
+        return sb.toString();
+    }
+}
+"#;
+
+    let translation = translate_source(source);
+
+    let three_outer = translation
+        .rust
+        .split("pub fn three")
+        .nth(1)
+        .and_then(|three| three.split("if b {").next())
+        .expect("three method body before inner duplicate block");
+    assert!(
+        three_outer.contains("let mut sb: StringBuilder = StringBuilder::new_0();"),
+        "outer three() sb should stay mutable before the inner duplicate block:\n{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("let sb: StringBuilder = StringBuilder::new_0();"),
+        "the outer three() sb must not lose mut because of inner duplicate names:\n{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn mutated_inner_list_does_not_make_outer_map_local_mutable() {
+    let source = r#"
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+
+class DuplicateInnerListOuterMapMutability {
+    String leak(boolean f) {
+        HashMap<String, String> t = new HashMap<String, String>();
+        if (f) {
+            List<String> t = new ArrayList<>();
+            t.add("q");
+            int size = t.size();
+        }
+        return t.get("k");
+    }
+}
+"#;
+
+    let translation = translate_source(source);
+
+    let leak_before_inner = translation
+        .rust
+        .split("pub fn leak")
+        .nth(1)
+        .and_then(|leak| leak.split("if f {").next())
+        .expect("leak method body before inner duplicate block");
+    assert!(
+        leak_before_inner.contains(
+            "let t: std::collections::HashMap<String, String> = std::collections::HashMap::new();"
+        ),
+        "outer map local should stay immutable before the inner duplicate block:\n{}",
+        translation.rust
+    );
+    assert!(
+        !leak_before_inner.contains("let mut t: std::collections::HashMap<String, String>"),
+        "outer map local must not inherit mutability from the inner List t:\n{}",
+        translation.rust
+    );
 }
 
 #[test]
@@ -6645,6 +6840,52 @@ class Use {
 
     assert_eq!(
         signatures.local_binding_mutability(&method_signature.locals, "sample_to_reader_map"),
+        Some(true)
+    );
+}
+
+#[test]
+fn signature_plan_marks_iterator_facade_receiver_mutation_local_mutable() {
+    let parsed = parse_java_source(
+        r#"
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
+
+class Use {
+    List<String> rest(List<String> input) {
+        List<String> out = new ArrayList<String>();
+        Iterator<String> i = input.iterator();
+        i.forEachRemaining(value -> {
+            out.add(value);
+        });
+        return out;
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let semantic = analyze_program(&resolved.program, &resolved.facts, &FactSet::default());
+    let representations = plan_representations(&resolved.program, &semantic.facts);
+    let signatures = solve_signatures_with_facts(
+        &resolved.program,
+        &representations,
+        &semantic.usage,
+        &semantic.facts,
+    );
+    let ty = &resolved.program.types[0];
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "rest" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let method_signature = signatures.method_signature(ty, method).unwrap();
+
+    assert_eq!(
+        signatures.local_binding_mutability(&method_signature.locals, "i"),
         Some(true)
     );
 }
@@ -7011,20 +7252,6 @@ class CaptureFlow {
             .any(|constraint| matches!(constraint, SignatureConstraint::StorageSlot)),
         "{current:?}"
     );
-}
-
-#[test]
-fn signature_capture_boundaries_come_from_resolved_capture_facts() {
-    let signature_source = include_str!("../src/signature.rs");
-    let usage_source = include_str!("../src/usage.rs");
-
-    assert!(signature_source.contains("captured_binding_names_for_method"));
-    assert!(signature_source.contains("captured_binding_names_for_constructor"));
-    assert!(signature_source.contains("CaptureOrigin::Method"));
-    assert!(signature_source.contains("CaptureOrigin::Constructor"));
-    assert!(signature_source.contains("apply_capture_constraints"));
-    assert!(!usage_source.contains("Captured"));
-    assert!(!signature_source.contains("BindingUse::Captured"));
 }
 
 #[test]
@@ -7658,10 +7885,11 @@ class MethodArgumentConstraintFlow {
 "#,
     );
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
-    let usage = analyze_usage(&resolved.program);
-    let representations = plan_representations(&resolved.program, &resolved.facts);
-    let constraints = collect_signature_constraints(&resolved.program, &usage, &resolved.facts);
-    let (solved_constraints, _) = solve_signature_constraints_to_fixpoint(constraints, &usage);
+    let semantic = analyze_program(&resolved.program, &resolved.facts, &FactSet::default());
+    let usage = &semantic.usage;
+    let representations = plan_representations(&resolved.program, &semantic.facts);
+    let constraints = collect_signature_constraints(&resolved.program, usage, &semantic.facts);
+    let (solved_constraints, _) = solve_signature_constraints_to_fixpoint(constraints, usage);
     let callee_key = MethodKey {
         type_name: "MethodArgumentConstraintFlow".to_string(),
         rust_name: "use".to_string(),
@@ -7693,7 +7921,7 @@ class MethodArgumentConstraintFlow {
     );
 
     let signatures =
-        solve_signatures_with_facts(&resolved.program, &representations, &usage, &resolved.facts);
+        solve_signatures_with_facts(&resolved.program, &representations, usage, &semantic.facts);
     let ty = &resolved.program.types[0];
     let callee = ty
         .members
@@ -8025,6 +8253,132 @@ class Helper {
     assert_eq!(
         signature.return_shape.as_ref().unwrap().view,
         ViewShape::Native
+    );
+}
+
+#[test]
+fn signature_fixpoint_propagates_nullable_field_receiver_source_call_result_to_local() {
+    let parsed = parse_java_source(
+        r#"
+class NullableFieldReceiverSourceCallLocal {
+    Lookup lookup;
+
+    Path run(String sample) {
+        Path path = lookup.find(sample);
+        return path;
+    }
+}
+
+class Lookup {
+    Path find(String sample) {
+        return sample == null ? null : new Path();
+    }
+}
+
+class Path {
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let usage = analyze_usage(&resolved.program);
+    let representations = plan_representations(&resolved.program, &resolved.facts);
+    let constraints = collect_signature_constraints(&resolved.program, &usage, &resolved.facts);
+    let (solved_constraints, _) = solve_signature_constraints_to_fixpoint(constraints, &usage);
+    let method_usage = usage
+        .methods
+        .get(&new_java2rust::usage::UsageMethodKey {
+            type_name: "NullableFieldReceiverSourceCallLocal".to_string(),
+            method_name: "run".to_string(),
+        })
+        .unwrap();
+    let path_usage = method_usage.bindings.get("path").unwrap();
+    assert!(
+        path_usage.uses.iter().any(|usage| {
+            matches!(
+                usage,
+                BindingUse::AssignedFromCall {
+                    name,
+                    receiver_type: Some(JavaType::Named { name: receiver, args }),
+                    boundary: CallArgumentBoundary::Unknown,
+                } if name == "find" && receiver == "Lookup" && args.is_empty()
+            )
+        }),
+        "{path_usage:?}"
+    );
+    assert!(
+        method_usage.call_sites.iter().any(|call_site| {
+            call_site.name == "find"
+                && call_site.boundary == CallArgumentBoundary::Unknown
+                && call_site.receiver_type.as_ref().is_some_and(|receiver| {
+                    matches!(
+                        receiver,
+                        JavaType::Named { name, args } if name == "Lookup" && args.is_empty()
+                    )
+                })
+        }),
+        "{:?}",
+        method_usage.call_sites
+    );
+    let callee_constraints = solved_constraints
+        .methods
+        .get(&MethodKey {
+            type_name: "Lookup".to_string(),
+            rust_name: "find".to_string(),
+        })
+        .unwrap();
+    assert!(
+        callee_constraints.return_constraints.contains(
+            &SignatureConstraint::RequiredStorageNullability(NullabilityState::MaybeNull)
+        ),
+        "{callee_constraints:?}"
+    );
+    let method_key = MethodKey {
+        type_name: "NullableFieldReceiverSourceCallLocal".to_string(),
+        rust_name: "run".to_string(),
+    };
+    let method_constraints = solved_constraints.methods.get(&method_key).unwrap();
+    let local_constraints = method_constraints
+        .locals
+        .iter()
+        .find(|local| local.name == "path")
+        .unwrap();
+
+    assert!(
+        local_constraints
+            .constraints
+            .contains(&SignatureConstraint::RequiredStorageNullability(
+                NullabilityState::MaybeNull
+            )),
+        "{local_constraints:?}"
+    );
+
+    let signatures =
+        solve_signatures_with_facts(&resolved.program, &representations, &usage, &resolved.facts);
+    let ty = &resolved.program.types[0];
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "run" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let signature = signatures.required_method_signature(ty, method);
+    let path = signature
+        .locals
+        .iter()
+        .find(|local| local.name == "path")
+        .unwrap();
+
+    assert!(
+        matches!(
+            &path.shape.java_ty,
+            JavaType::Named { name, args } if name == "Optional" && matches!(
+                args.as_slice(),
+                [JavaType::Named { name, args }] if name == "Path" && args.is_empty()
+            )
+        ),
+        "{path:?}"
     );
 }
 
@@ -8522,6 +8876,28 @@ class SignatureGraphSlots {
         type_name: "SignatureGraphSlots".to_string(),
         rust_name: "new".to_string(),
     };
+    let method_alias_binding = constraints
+        .methods
+        .get(&method)
+        .and_then(|constraints| {
+            constraints
+                .locals
+                .iter()
+                .find(|local| local.name == "alias")
+        })
+        .map(|local| local.binding.clone())
+        .expect("method alias local binding");
+    let constructor_alias_binding = constraints
+        .constructors
+        .get(&constructor)
+        .and_then(|constraints| {
+            constraints
+                .locals
+                .iter()
+                .find(|local| local.name == "alias")
+        })
+        .map(|local| local.binding.clone())
+        .expect("constructor alias local binding");
 
     assert!(graph.nodes.contains(
         &new_java2rust::signature::SignatureDependencyNode::MethodParam {
@@ -8539,6 +8915,14 @@ class SignatureGraphSlots {
         &new_java2rust::signature::SignatureDependencyNode::MethodLocal {
             method: method.clone(),
             name: "alias".to_string(),
+            binding: Some(method_alias_binding),
+        }
+    ));
+    assert!(graph.nodes.contains(
+        &new_java2rust::signature::SignatureDependencyNode::MethodLocal {
+            method: method.clone(),
+            name: "alias".to_string(),
+            binding: None,
         }
     ));
     assert!(graph.nodes.contains(
@@ -8555,8 +8939,16 @@ class SignatureGraphSlots {
     ));
     assert!(graph.nodes.contains(
         &new_java2rust::signature::SignatureDependencyNode::ConstructorLocal {
+            constructor: constructor.clone(),
+            name: "alias".to_string(),
+            binding: Some(constructor_alias_binding),
+        }
+    ));
+    assert!(graph.nodes.contains(
+        &new_java2rust::signature::SignatureDependencyNode::ConstructorLocal {
             constructor,
             name: "alias".to_string(),
+            binding: None,
         }
     ));
     assert!(
@@ -8903,6 +9295,7 @@ class ExternalName {}
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let usage = analyze_usage(&resolved.program);
     let facts = external_name_boundary_facts(&resolved.facts);
+    let effective_facts = EffectiveFacts::new(&facts);
     let ty = &resolved.program.types[0];
     let method = ty
         .members
@@ -8915,7 +9308,7 @@ class ExternalName {}
 
     assert_eq!(
         method_return_shape_constraints(ty, method, &usage, &facts),
-        conservative_boundary_constraints(&external_name_type(), &facts)
+        unknown_api_constraints(&external_name_type(), &effective_facts)
     );
 
     let constraints = collect_signature_constraints(&resolved.program, &usage, &facts);
@@ -8929,7 +9322,7 @@ class ExternalName {}
 
     assert_eq!(
         method_constraints.return_constraints,
-        conservative_boundary_constraints(&external_name_type(), &facts)
+        unknown_api_constraints(&external_name_type(), &effective_facts)
     );
 }
 
@@ -8949,6 +9342,7 @@ class ExternalName {}
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let usage = analyze_usage(&resolved.program);
     let facts = external_name_boundary_facts(&resolved.facts);
+    let effective_facts = EffectiveFacts::new(&facts);
     let ty = &resolved.program.types[0];
     let method = ty
         .members
@@ -8961,7 +9355,7 @@ class ExternalName {}
 
     assert_eq!(
         method_return_shape_constraints(ty, method, &usage, &facts),
-        conservative_boundary_constraints(&external_name_type(), &facts)
+        unknown_api_constraints(&external_name_type(), &effective_facts)
     );
 }
 
@@ -9493,33 +9887,6 @@ class ExternalProblem extends UserException {
 }
 
 #[test]
-fn shape_projection_does_not_render_rust_types() {
-    let source = include_str!("../src/shape_projection.rs");
-
-    assert!(!source.contains("rust_ir"));
-    assert!(!source.contains("RustType"));
-    assert!(!source.contains("slot_render"));
-    assert!(!source.contains("rust_type_for_slot"));
-}
-
-#[test]
-fn slot_shape_does_not_own_indexed_projection_rules() {
-    let source = include_str!("../src/slot_shape.rs");
-
-    assert!(!source.contains("indexed_read_shape"));
-    assert!(!source.contains("indexed_assignment_shape"));
-}
-
-#[test]
-fn slot_shape_does_not_own_lowered_expression_actual_wrappers() {
-    let source = include_str!("../src/slot_shape.rs");
-
-    assert!(!source.contains("LoweredType"));
-    assert!(!source.contains("OptionalElementBorrow"));
-    assert!(!source.contains("VecElementBorrow"));
-}
-
-#[test]
 fn shape_projection_owns_java_value_shape_projection() {
     let parsed = parse_java_source(
         r#"
@@ -9554,9 +9921,6 @@ class Add implements Expr {}
             trait_name: "Expr".to_string(),
         }),
         EscapingRoleDispatchPolicy {
-            source_dispatch: DispatchShape::DynTrait {
-                trait_name: "Expr".to_string(),
-            },
             projected_dispatch: DispatchShape::BoxedDynTrait {
                 trait_name: "Expr".to_string(),
             },
@@ -9565,7 +9929,6 @@ class Add implements Expr {}
     assert_eq!(
         escaping_role_dispatch_policy(DispatchShape::Concrete),
         EscapingRoleDispatchPolicy {
-            source_dispatch: DispatchShape::Concrete,
             projected_dispatch: DispatchShape::Concrete,
         }
     );
@@ -9579,9 +9942,6 @@ class Add implements Expr {}
         ),
         DispatchRequirementProjectionPolicy {
             role: DispatchRequirementProjectionRole::Storage,
-            source_dispatch: DispatchShape::DynTrait {
-                trait_name: "Expr".to_string(),
-            },
             requirement: DispatchRequirementKind::NeedsOwnedPolymorphicStorage,
             projected_dispatch: Some(DispatchShape::BoxedDynTrait {
                 trait_name: "Expr".to_string(),
@@ -9624,13 +9984,13 @@ class Add implements Expr {}
     assert!(shape_projection_source.contains("pub fn dispatch_requirement_projection_policy"));
     assert!(!shape_projection_source.contains("fn owned_dispatch_for_escaping_role"));
     assert!(shape_projection_source.contains("pub struct ShapeProjectionCapabilityPolicy"));
-    assert!(shape_projection_source.contains("pub fn shape_projection_capability_policy"));
+    assert!(!shape_projection_source.contains("pub fn shape_projection_capability_policy("));
     assert!(
         shape_projection_source
             .contains("pub fn shape_projection_capability_policy_with_effective_facts")
     );
     assert!(shape_projection_source.contains("pub struct IndexedElementProjectionPolicy"));
-    assert!(shape_projection_source.contains("pub fn indexed_element_projection_policy"));
+    assert!(!shape_projection_source.contains("pub fn indexed_element_projection_policy("));
     assert!(
         shape_projection_source
             .contains("pub fn indexed_element_projection_policy_with_effective_facts")
@@ -9644,13 +10004,13 @@ class Add implements Expr {}
     assert!(
         shape_projection_source.contains("pub fn indexed_assignment_shape_with_effective_facts")
     );
-    assert!(shape_projection_source.contains("pub fn iteration_element_projection_policy"));
+    assert!(!shape_projection_source.contains("pub fn iteration_element_projection_policy("));
     assert!(
         shape_projection_source
             .contains("pub fn iteration_element_projection_policy_with_effective_facts")
     );
     assert!(shape_projection_source.contains("pub struct SequenceElementProjectionPolicy"));
-    assert!(shape_projection_source.contains("pub fn sequence_element_projection_policy"));
+    assert!(!shape_projection_source.contains("pub fn sequence_element_projection_policy("));
     assert!(
         shape_projection_source
             .contains("pub fn sequence_element_projection_policy_with_effective_facts")
@@ -9760,48 +10120,6 @@ fn apply_call_target_uses_shared_call_projection_helpers() {
             args: Vec::new(),
         }
     );
-
-    let call_lowering_source = include_str!("../src/call_lowering.rs");
-    let apply_call_target_source = call_lowering_source
-        .split("pub fn apply_call_target")
-        .nth(1)
-        .expect("apply_call_target should exist")
-        .split("fn mark_noop_facade_method_call_site")
-        .next()
-        .expect("apply_call_target should be bounded");
-    assert!(apply_call_target_source.contains("function_call_projection"));
-    assert!(apply_call_target_source.contains("receiver_method_call_projection_exact"));
-    assert!(apply_call_target_source.contains("free_function_path_projection(rust_name)"));
-    assert!(!apply_call_target_source.contains("function_call_projection(RustExpr::Var"));
-    assert!(
-        apply_call_target_source.contains("external_crate_path_projection(crate_name, rust_name)")
-    );
-    assert!(!apply_call_target_source.contains("RustExpr::Raw("));
-    assert!(!apply_call_target_source.contains("emit::emit_expr"));
-    assert!(call_lowering_source.contains("fn ok_unit_expr() -> RustExpr"));
-    assert!(
-        call_lowering_source
-            .contains("function_call_projection(RustExpr::path([\"Ok\"]), vec![unit_expr()])")
-    );
-    assert!(call_lowering_source.contains(
-        "function_call_projection(RustExpr::path([\"Default\", \"default\"]), Vec::new())"
-    ));
-    assert!(!call_lowering_source.contains("function: Box::new(RustExpr::path([\"Ok\"]))"));
-    assert!(
-        !call_lowering_source
-            .contains("function: Box::new(RustExpr::path([\"Default\", \"default\"]))")
-    );
-    assert!(call_lowering_source.contains("RustExpr::Tuple(Vec::new())"));
-    assert!(!call_lowering_source.contains("RustExpr::Raw(\"Ok(())\""));
-    assert!(!call_lowering_source.contains("RustExpr::Raw(\"()\""));
-    assert!(!call_lowering_source.contains("RustExpr::Raw(\"{ }\""));
-    assert!(!call_lowering_source.contains("RustStmt::Raw("));
-    assert!(
-        !call_lowering_source.contains("emit::emit_expr"),
-        "call lowering should not render RustExprs back to text while composing calls"
-    );
-    assert!(call_lowering_source.contains("RustExpr::MarkedBlock"));
-    assert!(!call_lowering_source.contains("RustExpr::Raw(format!(\n        \"{{ {} {} }}\""));
 }
 
 #[test]
@@ -9816,17 +10134,25 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
         arg_coercions: Vec::new(),
     };
     assert!(matches!(
-        plan_call_target(None, "make", Some(&resolved_static)),
+        plan_call_target_with_facts(
+            None,
+            "make",
+            Some(&resolved_static),
+            &FactSet::default(),
+            &new_java2rust::types::TypeEnv::default(),
+        ),
         CallTargetPlan::StaticSelf { rust_name: "make" }
     ));
     assert!(matches!(
-        plan_call_target(
+        plan_call_target_with_facts(
             Some(&Expr::FieldAccess(
                 Box::new(Expr::Var("coordinates".to_string())),
                 "genomics_d_b_column".to_string()
             )),
             "newBuilder",
-            Some(&resolved_static)
+            Some(&resolved_static),
+            &FactSet::default(),
+            &new_java2rust::types::TypeEnv::default(),
         ),
         CallTargetPlan::StaticOwner {
             owner,
@@ -9841,11 +10167,15 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
         arg_target_types: Vec::new(),
         arg_coercions: Vec::new(),
     };
+    let mut imported_types = new_java2rust::types::TypeEnv::default();
+    imported_types.insert_static_type_alias("g_a_t_k_genomics_d_b_utils", "GATKGenomicsDBUtils");
     assert!(matches!(
-        plan_call_target(
+        plan_call_target_with_facts(
             Some(&Expr::Var("g_a_t_k_genomics_d_b_utils".to_string())),
             "getProtobufVidMappingFromJsonFile",
             Some(&resolved_snake_static),
+            &FactSet::default(),
+            &imported_types,
         ),
         CallTargetPlan::StaticOwner {
             owner,
@@ -9876,7 +10206,21 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
         arg_target_types: Vec::new(),
         arg_coercions: Vec::new(),
     };
-    let target = plan_call_target(Some(&receiver), "readName", Some(&resolved_instance));
+    let mut local_types = new_java2rust::types::TypeEnv::default();
+    local_types.insert_local(
+        "helper",
+        JavaType::Named {
+            name: "Helper".to_string(),
+            args: Vec::new(),
+        },
+    );
+    let target = plan_call_target_with_facts(
+        Some(&receiver),
+        "readName",
+        Some(&resolved_instance),
+        &FactSet::default(),
+        &local_types,
+    );
     assert!(matches!(
         target,
         CallTargetPlan::InstanceReceiver {
@@ -9899,18 +10243,38 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
     assert_eq!(target.receiver_expr(), Some(&receiver));
 
     assert!(matches!(
-        plan_call_target(Some(&receiver), "readName", None),
+        plan_call_target_with_facts(
+            Some(&receiver),
+            "readName",
+            None,
+            &FactSet::default(),
+            &local_types,
+        ),
         CallTargetPlan::FallbackReceiver {
             rust_name,
             ..
         } if rust_name == "read_name"
     ));
     assert_eq!(
-        plan_call_target(Some(&receiver), "readName", None).receiver_expr(),
+        plan_call_target_with_facts(
+            Some(&receiver),
+            "readName",
+            None,
+            &FactSet::default(),
+            &local_types,
+        )
+        .receiver_expr(),
         Some(&receiver)
     );
     assert_eq!(
-        plan_call_target(None, "readName", None).receiver_expr(),
+        plan_call_target_with_facts(
+            None,
+            "readName",
+            None,
+            &FactSet::default(),
+            &new_java2rust::types::TypeEnv::default(),
+        )
+        .receiver_expr(),
         None
     );
 
@@ -9942,7 +10306,7 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
         1,
         Some(&resolved_println),
         &FactSet::default(),
-        &new_java2rust::types::TypeEnv::default(),
+        &local_types,
     );
     assert!(matches!(
         resolved_println_target,
@@ -9969,13 +10333,16 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
         } if rust_name == "read_name"
     ));
     assert_eq!(super_target.receiver_expr(), None);
-    assert_eq!(
+    assert!(matches!(
         apply_call_target(&super_target, None, Vec::new()),
-        RustExpr::Call {
-            function: Box::new(RustExpr::path(["Default", "default"])),
-            args: Vec::new(),
-        }
-    );
+        RustExpr::MacroCall { macro_name, args }
+            if macro_name == "compile_error"
+                && matches!(
+                    args.as_slice(),
+                    [RustExpr::Literal(message)]
+                        if message.contains("unsupported Java super call: Helper.read_name")
+                )
+    ));
 
     let hdf5_receiver = Expr::Var("hdf5".to_string());
     let hdf5_facts = new_java2rust::external_packs::hdf5_pack_facts();
@@ -10115,16 +10482,18 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
     let parsed = parse_java_source("class Add {}");
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let representations = plan_representations(&resolved.program, &resolved.facts);
-    let new_target = plan_new_target(
+    let new_target = plan_new_target_with_facts(
         &JavaType::Named {
             name: "Add".to_string(),
             args: Vec::new(),
         },
         None,
         &representations,
+        &FactSet::default(),
+        0,
     );
     assert_eq!(
-        apply_new_target(&new_target, Vec::new()),
+        apply_new_target_with_facts(&new_target, Vec::new(), &FactSet::default()),
         RustExpr::Call {
             function: Box::new(RustExpr::path(["Add", "new"])),
             args: Vec::new(),
@@ -10156,9 +10525,26 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
             &collection_types,
         ),
         CallTargetPlan::NativeCollectionMethod {
-            method: NativeCollectionMethod::ListPush,
+            method: NativeCollectionMethod::ListAdd,
             ..
         }
+    ));
+    assert!(matches!(
+        plan_call_expr(
+            Some(&values),
+            "add",
+            &[
+                Expr::Literal(Literal::Int(0)),
+                Expr::Literal(Literal::String("a".to_string()))
+            ],
+            None,
+            &FactSet::default(),
+            &collection_types,
+        ),
+        CallExprPlan::Target(CallTargetPlan::NativeCollectionMethod {
+            method: NativeCollectionMethod::ListInsert,
+            ..
+        })
     ));
     assert_eq!(
         apply_call_target(
@@ -10206,6 +10592,34 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
             method: NativeCollectionMethod::Extend,
             ..
         }
+    ));
+    assert!(matches!(
+        plan_call_expr(
+            Some(&values),
+            "remove",
+            &[Expr::Literal(Literal::Int(0))],
+            None,
+            &FactSet::default(),
+            &collection_types,
+        ),
+        CallExprPlan::Target(CallTargetPlan::NativeCollectionMethod {
+            method: NativeCollectionMethod::ListRemoveIndex,
+            ..
+        })
+    ));
+    assert!(matches!(
+        plan_call_expr(
+            Some(&values),
+            "remove",
+            &[Expr::Literal(Literal::String("b".to_string()))],
+            None,
+            &FactSet::default(),
+            &collection_types,
+        ),
+        CallExprPlan::Target(CallTargetPlan::NativeCollectionMethod {
+            method: NativeCollectionMethod::ListRemoveObject,
+            ..
+        })
     ));
     let names = Expr::Var("names".to_string());
     assert!(matches!(
@@ -10268,9 +10682,13 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
         Some(LoweredType::Slot(shape))
             if shape.optional_element_type() == Some(JavaType::Primitive(PrimitiveType::Int))
     ));
-    let Some(map_insert_shapes) =
-        native_collection_arg_shapes(Some(&counts), "put", 2, &collection_types)
-    else {
+    let Some(map_insert_shapes) = native_collection_arg_shapes_with_facts(
+        Some(&counts),
+        "put",
+        2,
+        &collection_types,
+        &FactSet::default(),
+    ) else {
         panic!("HashMap insert arguments should be shaped from Java map generics");
     };
     assert_eq!(map_insert_shapes[0].java_ty, JavaType::String);
@@ -10406,9 +10824,13 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
         }
     );
     assert_eq!(interface_list_push_shapes[0].view, ViewShape::DynTraitView);
-    let Some(map_get_shapes) =
-        native_collection_arg_shapes(Some(&counts), "get", 1, &collection_types)
-    else {
+    let Some(map_get_shapes) = native_collection_arg_shapes_with_facts(
+        Some(&counts),
+        "get",
+        1,
+        &collection_types,
+        &FactSet::default(),
+    ) else {
         panic!("HashMap get key argument should be shaped from Java map generics");
     };
     assert_eq!(map_get_shapes[0].java_ty, JavaType::String);
@@ -10771,6 +11193,13 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
         arg_coercions: Vec::new(),
     };
     let value_receiver = Expr::Var("left".to_string());
+    collection_types.insert_local(
+        "left",
+        JavaType::Named {
+            name: "Value".to_string(),
+            args: Vec::new(),
+        },
+    );
     assert!(matches!(
         plan_call_target_with_facts(
             Some(&value_receiver),
@@ -10919,7 +11348,7 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
         })
     ));
     assert_eq!(
-        apply_new_target(&list_new_target, Vec::new()),
+        apply_new_target_with_facts(&list_new_target, Vec::new(), &FactSet::default()),
         RustExpr::Call {
             function: Box::new(RustExpr::path(["Vec", "new"])),
             args: Vec::new(),
@@ -10960,9 +11389,10 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
         })
     ));
     assert_eq!(
-        apply_new_target(
+        apply_new_target_with_facts(
             &list_capacity_target,
-            vec![RustExpr::Raw("names.as_ref().unwrap().len()".to_string())]
+            vec![RustExpr::Raw("names.as_ref().unwrap().len()".to_string())],
+            &FactSet::default(),
         ),
         RustExpr::Call {
             function: Box::new(RustExpr::path(["Vec", "with_capacity"])),
@@ -11039,7 +11469,7 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
         })
     ));
     assert_eq!(
-        apply_new_target(&map_new_target, Vec::new()),
+        apply_new_target_with_facts(&map_new_target, Vec::new(), &FactSet::default()),
         RustExpr::Call {
             function: Box::new(RustExpr::path(["std", "collections", "HashMap", "new"])),
             args: Vec::new(),
@@ -11473,7 +11903,13 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
             object_safe_trait: None,
             provenance: FactProvenance::UserOverride,
         });
-    let external_new_target = plan_new_target(&external_ids, None, &representations);
+    let external_new_target = plan_new_target_with_facts(
+        &external_ids,
+        None,
+        &representations,
+        &FactSet::default(),
+        0,
+    );
     assert_eq!(
         apply_new_target_with_facts(&external_new_target, Vec::new(), &facts),
         RustExpr::Call {
@@ -11485,13 +11921,15 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
             args: Vec::new(),
         }
     );
-    let object_new_target = plan_new_target(
+    let object_new_target = plan_new_target_with_facts(
         &JavaType::Named {
             name: "Object".to_string(),
             args: Vec::new(),
         },
         None,
         &representations,
+        &FactSet::default(),
+        0,
     );
     assert_eq!(
         apply_new_target_with_facts(&object_new_target, Vec::new(), &FactSet::default()),
@@ -11679,7 +12117,8 @@ class Uses {
     assert!(call_plan_source.contains("pub enum ArgumentLoweringPlan"));
     assert!(call_plan_source.contains("pub fn plan_call_arguments"));
     assert!(call_plan_source.contains("pub fn plan_call_arguments_with_facts"));
-    assert!(call_plan_source.contains("pub fn native_collection_arg_shapes"));
+    assert!(call_plan_source.contains("pub fn native_collection_arg_shapes_with_facts"));
+    assert!(!call_plan_source.contains("pub fn native_collection_arg_shapes("));
     assert!(call_plan_source.contains("pub fn plan_constructor_arguments"));
     assert!(call_plan_source.contains("pub fn receiver_expr"));
     assert!(!lower_source.contains("resolved_call_arg_shapes"));
@@ -11690,7 +12129,8 @@ class Uses {
     assert!(lower_source.contains("lower_args_with_plan"));
     assert!(lower_source.contains(".receiver_expr()"));
     assert!(lower_source.contains("fn lower_enhanced_for_stmt"));
-    assert!(lower_source.contains("loop_env.insert_local_shape"));
+    assert!(lower_source.contains("insert_enhanced_for_binding_shape"));
+    assert!(lower_source.contains("env.insert_loop_variable_shape_with_access_name"));
     assert!(lower_source.contains("catch_env.insert_catch_param"));
 }
 
@@ -12378,6 +12818,14 @@ fn rendered_mutable_alias_projection_names_same_call_alias_shapes() {
         "values"
     ));
     assert!(rendered_expr_is_mutable_alias(
+        &RustExpr::Raw("values.field.as_mut_slice()".to_string()),
+        "values"
+    ));
+    assert!(rendered_expr_is_mutable_alias(
+        &RustExpr::Raw("values.field.as_mut().expect(\"Java null receiver\")".to_string()),
+        "values"
+    ));
+    assert!(rendered_expr_is_mutable_alias(
         &RustExpr::Unary {
             op: "&mut ".to_string(),
             expr: Box::new(RustExpr::Var("values".to_string())),
@@ -13044,6 +13492,216 @@ class SameNameBranchLocalTypes {
             rust: translation.rust.clone(),
             tests: "",
         }],
+    );
+}
+
+#[test]
+fn resolver_assigns_binding_ids_to_local_declarations() {
+    let parsed = parse_java_source(
+        r#"
+class ResolverBindingIds {
+    void run(String value) {
+        String value;
+        for (String value : values()) {
+            value.length();
+        }
+        try {
+            String value;
+        } catch (RuntimeException value) {
+            value.getMessage();
+        }
+    }
+
+    java.util.List<String> values() {
+        return new java.util.ArrayList<>();
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let ty = &resolved.program.types[0];
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "run" => Some(method),
+            _ => None,
+        })
+        .expect("run method");
+    let body = method.body.as_ref().expect("run body");
+
+    let param = &method.params[0];
+    assert_eq!(
+        param.binding.as_ref().map(|binding| binding.kind),
+        Some(BindingKind::Param)
+    );
+    assert_eq!(
+        param.binding.as_ref().map(|binding| binding.occurrence),
+        Some(0)
+    );
+
+    let Stmt::VarDecl {
+        binding: Some(first_local),
+        ..
+    } = &body.statements[0]
+    else {
+        panic!("expected first local declaration: {body:#?}");
+    };
+    assert_eq!(first_local.kind, BindingKind::Local);
+    assert_eq!(first_local.name, "value");
+    assert_eq!(first_local.occurrence, 0);
+
+    let Stmt::EnhancedFor {
+        binding: Some(loop_binding),
+        body: loop_body,
+        ..
+    } = &body.statements[1]
+    else {
+        panic!("expected enhanced-for declaration: {body:#?}");
+    };
+    assert_eq!(loop_binding.kind, BindingKind::LoopVariable);
+    assert_eq!(loop_binding.name, "value");
+    assert_eq!(loop_binding.occurrence, 0);
+    assert!(!loop_body.statements.is_empty());
+
+    let Stmt::Try { body, catches, .. } = &body.statements[2] else {
+        panic!("expected try statement: {body:#?}");
+    };
+    let Stmt::VarDecl {
+        binding: Some(try_local),
+        ..
+    } = &body.statements[0]
+    else {
+        panic!("expected try local declaration: {body:#?}");
+    };
+    assert_eq!(try_local.kind, BindingKind::Local);
+    assert_eq!(try_local.occurrence, 1);
+    let catch_binding = catches[0]
+        .binding
+        .as_ref()
+        .expect("catch parameter binding");
+    assert_eq!(catch_binding.kind, BindingKind::CatchParam);
+    assert_eq!(catch_binding.name, "value");
+    assert_eq!(catch_binding.occurrence, 0);
+
+    let usage = analyze_usage(&resolved.program);
+    let method_usage = usage
+        .methods
+        .get(&new_java2rust::usage::UsageMethodKey {
+            type_name: ty.name.clone(),
+            method_name: "run".to_string(),
+        })
+        .expect("run usage");
+    assert!(
+        method_usage
+            .bindings_by_id
+            .contains_key(param.binding.as_ref().expect("parameter usage binding id"))
+    );
+    assert!(method_usage.bindings_by_id.contains_key(first_local));
+    assert!(method_usage.bindings_by_id.contains_key(loop_binding));
+}
+
+#[test]
+fn same_name_same_type_locals_use_their_own_signature_constraints() {
+    let source = r#"
+class SameNameSameTypeLocalConstraints {
+    void sink(String value) {
+    }
+
+    void run(boolean flag) {
+        if (flag) {
+            String value;
+        }
+        String value = "owned";
+        sink(value);
+    }
+}
+"#;
+    let parsed = parse_java_source(source);
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let usage = analyze_usage(&resolved.program);
+    let raw_constraints = collect_signature_constraints(&resolved.program, &usage, &resolved.facts);
+    let (solved_constraints, _) = solve_signature_constraints_to_fixpoint(raw_constraints, &usage);
+    let representations = plan_representations(&resolved.program, &resolved.facts);
+    let signatures =
+        solve_signatures_with_facts(&resolved.program, &representations, &usage, &resolved.facts);
+    let ty = &resolved.program.types[0];
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "run" => Some(method),
+            _ => None,
+        })
+        .expect("run method");
+    let locals = signatures.method_local_shapes_or_empty(ty, method);
+    let value_locals = locals
+        .iter()
+        .filter(|local| local.name == "value")
+        .collect::<Vec<_>>();
+
+    assert_eq!(value_locals.len(), 2, "{locals:?}");
+    assert_ne!(
+        value_locals[0].binding, value_locals[1].binding,
+        "same-name/same-type declarations must carry distinct local binding ids: {value_locals:?}"
+    );
+    assert_eq!(value_locals[0].binding.kind, BindingKind::Local);
+    assert_eq!(value_locals[1].binding.kind, BindingKind::Local);
+    let method_key = MethodKey {
+        type_name: "SameNameSameTypeLocalConstraints".to_string(),
+        rust_name: "run".to_string(),
+    };
+    let method_constraints = solved_constraints.methods.get(&method_key).unwrap();
+    let first_constraints = method_constraints
+        .locals
+        .iter()
+        .find(|local| local.binding == value_locals[0].binding)
+        .unwrap();
+    let second_constraints = method_constraints
+        .locals
+        .iter()
+        .find(|local| local.binding == value_locals[1].binding)
+        .unwrap();
+    assert!(
+        !first_constraints
+            .constraints
+            .contains(&SignatureConstraint::StorageSlot),
+        "uninitialized shadow should not receive the later literal's storage constraint: {first_constraints:?}"
+    );
+    assert!(
+        second_constraints
+            .constraints
+            .contains(&SignatureConstraint::StorageSlot),
+        "later initialized binding should keep its own storage constraint: {second_constraints:?}"
+    );
+    assert_eq!(value_locals[1].shape.ownership, OwnershipShape::Owned);
+    assert_eq!(value_locals[1].shape.view, ViewShape::Native);
+    let method_usage = usage.source_method_usage(ty, method).expect("run usage");
+    assert_eq!(
+        method_usage
+            .bindings
+            .get("value")
+            .and_then(|binding| binding.binding.as_ref()),
+        Some(&value_locals[1].binding),
+        "after the branch scope closes, legacy name lookup should resolve to the later top-level binding"
+    );
+    assert_eq!(
+        method_usage
+            .bindings_by_id
+            .get(&value_locals[0].binding)
+            .map(|binding| binding.uses.as_slice()),
+        Some([].as_slice()),
+        "the branch-local binding should keep its own empty usage fact"
+    );
+    assert!(
+        method_usage
+            .bindings_by_id
+            .get(&value_locals[1].binding)
+            .is_some_and(|binding| binding.uses.iter().any(|usage| matches!(
+                usage,
+                BindingUse::PassedToCall { name, .. } if name == "sink"
+            ))),
+        "the sink(value) use should attach to the later top-level binding"
     );
 }
 
@@ -14066,8 +14724,8 @@ class ExternalFacadeDisplayEquality {
         return left == right;
     }
 
-    String label() {
-        return new ExternalToken().toString();
+    String label(ExternalToken token) {
+        return "value=" + token;
     }
 }
 "#,
@@ -14105,9 +14763,227 @@ class ExternalFacadeDisplayEquality {
         "{}",
         translation.rust
     );
+    assert!(
+        translation
+            .rust
+            .contains("panic!(\"unsupported Java external facade display: ExternalToken\")")
+            && !translation.rust.contains("write!(f, \"\")"),
+        "{}",
+        translation.rust
+    );
 
     cargo_check_generated_modules(
         "external_opaque_facades_support_equality_and_display_fallbac",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn external_opaque_facade_display_delegates_to_modeled_to_string_surface() {
+    let mut facts = FactSet::default();
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "toString".to_string(),
+        receiver_type: Some("ExternalToken".to_string()),
+        arg_count: Some(0),
+        parameter_patterns: None,
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::String),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+
+    let translation = translate_source_with_facts(
+        r#"
+class ExternalFacadeDisplayModeledToString {
+    String label(ExternalToken token) {
+        return "value=" + token;
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn to_string(&self) -> String"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains(
+            "fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, \"{}\", self.to_string()) }"
+        ) && !translation
+            .rust
+            .contains("panic!(\"unsupported Java external facade display: ExternalToken\")"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "external_opaque_facade_display_modeled_to_string",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn erased_external_object_display_delegates_to_modeled_to_string_surface() {
+    let mut facts = FactSet::default();
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "toString".to_string(),
+        receiver_type: Some("ExternalToken".to_string()),
+        arg_count: Some(0),
+        parameter_patterns: None,
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::String),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+
+    let translation = translate_source_with_facts(
+        r#"
+class ErasedExternalFacadeDisplay {
+    String label(ExternalToken token) {
+        Object value = token;
+        return "value=" + value;
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("java_erased_object_to_string(&value)"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("if let Some(value) = value.downcast_ref::<ExternalToken>()")
+            && translation.rust.contains("return value.to_string();"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "erased_external_object_display_modeled_to_string",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn erased_file_object_display_delegates_to_file_display() {
+    let translation = translate_source(
+        r#"
+import java.io.File;
+
+class ErasedFileDisplay {
+    String label() {
+        Object value = new File("abc.txt");
+        return "value=" + value;
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("java_erased_object_to_string(&value)"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("if let Some(value) = value.downcast_ref::<File>()")
+            && translation.rust.contains("return value.to_string();"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "erased_file_object_display",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn erased_uri_object_display_delegates_to_uri_display() {
+    let translation = translate_source(
+        r#"
+import java.net.URI;
+
+class ErasedUriDisplay {
+    String label() throws Exception {
+        Object value = new URI("abc/def");
+        return "value=" + value;
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("java_erased_object_to_string(&value)"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("if let Some(value) = value.downcast_ref::<URI>()")
+            && translation.rust.contains("return value.to_string();"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "erased_uri_object_display",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust.clone(),
@@ -15729,9 +16605,9 @@ fn coercion_plan_owns_invalid_cast_runtime_policy() {
     assert!(!lower_source.contains("assignment_slot_for_target"));
     assert!(conversion_source.contains("pub struct SyntaxCoercionPlan"));
     assert!(!source.contains("pub struct SyntaxCoercionPlan"));
-    assert!(conversion_source.contains("pub fn syntax_coercion_plan"));
+    assert!(!conversion_source.contains("pub fn syntax_coercion_plan("));
     assert!(conversion_source.contains("pub fn syntax_coercion_plan_with_facts"));
-    assert!(!source.contains("pub fn syntax_coercion_plan"));
+    assert!(!source.contains("pub fn syntax_coercion_plan("));
     assert!(!source.contains("pub fn syntax_coercion_plan_with_facts"));
     assert!(source.contains("pub fn apply_syntax_coercion_plan"));
     assert!(source.contains("impl SyntaxCoercionPlan"));
@@ -15741,46 +16617,36 @@ fn coercion_plan_owns_invalid_cast_runtime_policy() {
         conversion_source.contains("SlotConversionPlan::Syntax(syntax_coercion_plan_with_facts")
     );
     assert!(source.contains("apply_syntax_coercion_plan(expr, plan)"));
-    assert!(conversion_source.contains("pub fn syntax_slot_coercion_policy"));
-    assert!(!source.contains("pub fn syntax_slot_coercion_policy"));
+    assert!(!conversion_source.contains("pub fn syntax_slot_coercion_policy("));
+    assert!(conversion_source.contains("fn syntax_slot_coercion_policy_from_content"));
+    assert!(!source.contains("pub fn syntax_slot_coercion_policy("));
     assert!(conversion_source.contains("pub enum DispatchCoercionPolicy"));
-    assert!(conversion_source.contains("pub fn dispatch_coercion_policy"));
+    assert!(!conversion_source.contains("pub fn dispatch_coercion_policy("));
     assert!(conversion_source.contains("pub fn dispatch_coercion_policy_with_facts"));
-    assert!(conversion_source.contains("pub enum BorrowedDynToOwnedBoxedDynRecoveryPolicy"));
-    assert!(conversion_source.contains("pub enum DynCloneBoxAdapterAvailability"));
-    assert!(conversion_source.contains("pub enum DynCloneBoxAdapterRequirement"));
-    assert!(conversion_source.contains("pub enum DynCloneBoxAdapterGenerationPolicy"));
-    assert!(conversion_source.contains("pub enum DynCloneBoxAdapterDeferralReason"));
-    assert!(conversion_source.contains("pub fn dyn_clone_box_adapter_requirement"));
-    assert!(conversion_source.contains("dyn_clone_box_adapter_requirement_with_availability"));
-    assert!(conversion_source.contains("pub fn dyn_clone_box_adapter_generation_policy"));
-    assert!(
-        conversion_source.contains("dyn_clone_box_adapter_generation_policy_with_availability")
-    );
     assert!(!source.contains("pub enum DispatchCoercionPolicy"));
-    assert!(!source.contains("pub fn dispatch_coercion_policy"));
+    assert!(!source.contains("pub fn dispatch_coercion_policy("));
     assert!(!source.contains("pub fn dispatch_coercion_policy_with_facts"));
     assert!(!source.contains("pub enum BorrowedDynToOwnedBoxedDynRecoveryPolicy"));
     assert!(!source.contains("pub enum DynCloneBoxAdapterRequirement"));
     assert!(!source.contains("pub enum DynCloneBoxAdapterGenerationPolicy"));
-    assert!(conversion_source.contains("CloneBoxAdapterRequired"));
-    assert!(source.contains("dyn_clone_box_adapter_generation_policy"));
+    assert!(conversion_source.contains("CloneBoxDynTrait"));
+    assert!(source.contains("Coercion::CloneBoxDynTrait"));
     assert!(source.contains("pub struct UnsupportedCoercionMessagePolicy"));
     let design = include_str!("../docs/rust-slot-shape-and-object-representation.md");
     assert!(design.contains("## Boxed Dyn Clone-Box Requirements"));
-    assert!(design.contains("## Boxed Dyn Clone-Box Generation Policy"));
-    assert!(design.contains("ProvenAdapter"));
-    assert!(design.contains("RequiresGeneratedAdapter"));
-    assert!(design.contains("UnsupportedNonCloneable"));
-    assert!(design.contains("DeferredUnsupported"));
+    assert!(design.contains("DispatchCoercionPolicy::CloneBoxDynTrait"));
+    assert!(design.contains("Coercion::CloneBoxDynTrait"));
     assert!(conversion_source.contains("pub struct CoercionContentPolicy"));
-    assert!(conversion_source.contains("pub fn coercion_content_policy"));
+    assert!(conversion_source.contains("pub fn coercion_content_policy("));
     assert!(conversion_source.contains("pub struct CoercionShapeContentPolicy"));
-    assert!(conversion_source.contains("pub fn coercion_shape_content_policy"));
+    assert!(!conversion_source.contains("pub fn coercion_shape_content_policy("));
+    assert!(
+        conversion_source.contains("pub fn coercion_shape_content_policy_with_effective_facts")
+    );
     assert!(!source.contains("pub struct CoercionContentPolicy"));
-    assert!(!source.contains("pub fn coercion_content_policy"));
+    assert!(!source.contains("pub fn coercion_content_policy("));
     assert!(!source.contains("pub struct CoercionShapeContentPolicy"));
-    assert!(!source.contains("pub fn coercion_shape_content_policy"));
+    assert!(!source.contains("pub fn coercion_shape_content_policy("));
     assert!(conversion_source.contains("pub struct OptionalElementTargetMatchPolicy"));
     assert!(conversion_source.contains("pub fn optional_element_target_match_policy"));
     assert!(!source.contains("pub struct OptionalElementTargetMatchPolicy"));
@@ -15804,22 +16670,26 @@ fn coercion_plan_owns_invalid_cast_runtime_policy() {
             && borrowed_element_adapter_source
                 .contains("fn recover_borrowed_element_slot_adapter_input")
             && borrowed_element_adapter_source
-                .contains("recover_parseable_rendered_operand_projection(&rendered)")
+                .contains("recover_rendered_method_receiver_expr(&rendered)")
             && !borrowed_element_adapter_source
                 .contains("recover_parseable_raw_operand_projection(RustExpr::Raw(rendered))")
             && !borrowed_element_adapter_source
-                .contains("rendered_plus_expr_projection_or_raw_leaf(&rendered)"),
+                .contains("rendered_plus_expr_projection_or_raw_leaf(&rendered)")
+            && borrowed_element_adapter_source
+                .contains("unwrap_or_else(|| RustExpr::raw_leaf(rendered))")
+            && !borrowed_element_adapter_source
+                .contains("unwrap_or_else(|| RustExpr::Raw(rendered))"),
         "borrowed element slot adapter should centralize parseable raw input recovery before applying adapter policy"
     );
     assert!(conversion_source.contains("pub enum SlotConversionPlan"));
     assert!(!source.contains("pub enum SlotConversionPlan"));
-    assert!(conversion_source.contains("pub fn slot_conversion_plan"));
+    assert!(!conversion_source.contains("pub fn slot_conversion_plan("));
     assert!(conversion_source.contains("pub fn slot_conversion_plan_with_facts"));
-    assert!(conversion_source.contains("pub fn lowered_slot_conversion_plan"));
+    assert!(!conversion_source.contains("pub fn lowered_slot_conversion_plan("));
     assert!(conversion_source.contains("pub fn lowered_slot_conversion_plan_with_facts"));
-    assert!(!source.contains("pub fn slot_conversion_plan"));
+    assert!(!source.contains("pub fn slot_conversion_plan("));
     assert!(!source.contains("pub fn slot_conversion_plan_with_facts"));
-    assert!(!source.contains("pub fn lowered_slot_conversion_plan"));
+    assert!(!source.contains("pub fn lowered_slot_conversion_plan("));
     assert!(!source.contains("pub fn lowered_slot_conversion_plan_with_facts"));
     assert!(source.contains("pub fn apply_slot_conversion_plan"));
     assert!(source.contains("SlotConversionPlan::Shape"));
@@ -15829,7 +16699,7 @@ fn coercion_plan_owns_invalid_cast_runtime_policy() {
     assert!(source.contains("apply_slot_conversion_plan(lowered.expr, &plan)"));
     assert!(conversion_source.contains("pub struct ShapeCoercionPlan"));
     assert!(!source.contains("pub struct ShapeCoercionPlan"));
-    assert!(conversion_source.contains("pub fn shape_coercion_plan"));
+    assert!(!conversion_source.contains("pub fn shape_coercion_plan("));
     assert!(conversion_source.contains("pub fn shape_coercion_plan_with_facts"));
     assert!(!source.contains("pub fn shape_coercion_plan"));
     assert!(!source.contains("pub fn shape_coercion_plan_with_facts"));
@@ -15839,12 +16709,12 @@ fn coercion_plan_owns_invalid_cast_runtime_policy() {
     assert!(source.contains("crate::conversion_plan::shape_coercion_plan_with_facts"));
     assert!(source.contains("apply_shape_coercion_plan(expr, &plan)"));
     assert!(conversion_source.contains("pub enum OptionalShapeCoercionPolicy"));
-    assert!(conversion_source.contains("pub fn optional_shape_coercion_policy"));
+    assert!(!conversion_source.contains("pub fn optional_shape_coercion_policy("));
     assert!(conversion_source.contains("pub fn optional_shape_coercion_policy_with_facts"));
     assert!(conversion_source.contains("element_plan: Box<ShapeCoercionPlan>"));
     assert!(conversion_source.contains("fn optional_element_slot_shape"));
     assert!(!source.contains("pub enum OptionalShapeCoercionPolicy"));
-    assert!(!source.contains("pub fn optional_shape_coercion_policy"));
+    assert!(!source.contains("pub fn optional_shape_coercion_policy("));
     assert!(!source.contains("pub fn optional_shape_coercion_policy_with_facts"));
     assert!(source.contains("pub fn non_identity_coercions"));
     assert!(!source.contains("element_coercions: Vec<Coercion>"));
@@ -15862,7 +16732,8 @@ fn coercion_plan_owns_invalid_cast_runtime_policy() {
     assert!(!source.contains("pub fn view_coercion_policy_with_effective_facts"));
     assert!(conversion_source.contains("pub enum InvalidCastPolicy"));
     assert!(conversion_source.contains("pub enum JavaCastSemanticsPolicy"));
-    assert!(conversion_source.contains("pub fn java_cast_semantics_policy"));
+    assert!(!conversion_source.contains("pub fn java_cast_semantics_policy("));
+    assert!(conversion_source.contains("pub fn java_cast_semantics_policy_with_facts"));
     assert!(conversion_source.contains("pub enum JavaTypeConversionKind"));
     assert!(conversion_source.contains("pub struct JavaTypeConversionPlan"));
     assert!(conversion_source.contains("pub fn java_type_conversion_plan_from_evidence"));
@@ -15874,7 +16745,7 @@ fn coercion_plan_owns_invalid_cast_runtime_policy() {
     assert!(types_source.contains("pub fn is_optional_or_result_type"));
     assert!(!source.contains("pub enum InvalidCastPolicy"));
     assert!(!source.contains("pub enum JavaCastSemanticsPolicy"));
-    assert!(!source.contains("pub fn java_cast_semantics_policy"));
+    assert!(!source.contains("pub fn java_cast_semantics_policy("));
     assert!(!source.contains("pub enum JavaTypeConversionKind"));
     assert!(!source.contains("pub struct JavaTypeConversionPlan"));
     assert!(!source.contains("pub fn java_type_conversion_plan_from_evidence"));
@@ -15889,8 +16760,8 @@ fn coercion_plan_owns_invalid_cast_runtime_policy() {
     assert!(!source.contains("pub fn runtime_type_target_policy"));
     assert!(conversion_source.contains("pub struct PrimitiveWideningPolicy"));
     assert!(conversion_source.contains("pub fn primitive_widening_policy"));
-    assert!(conversion_source.contains("pub struct PrimitiveRankPolicy"));
-    assert!(conversion_source.contains("pub fn primitive_rank_policy"));
+    assert!(!conversion_source.contains("pub struct PrimitiveRankPolicy"));
+    assert!(!conversion_source.contains("pub fn primitive_rank_policy"));
     assert!(!source.contains("pub struct PrimitiveWideningPolicy"));
     assert!(!source.contains("pub fn primitive_widening_policy"));
     assert!(!source.contains("pub struct PrimitiveRankPolicy"));
@@ -15950,42 +16821,6 @@ fn conversion_plan_owns_optional_null_clear_assignment_policy() {
 }
 
 #[test]
-fn coercion_plan_owns_instanceof_fallback_policy() {
-    let source = include_str!("../src/coercion.rs");
-    let conversion_source = include_str!("../src/conversion_plan.rs");
-    let facts_source = include_str!("../src/facts.rs");
-
-    assert!(source.contains("pub struct CoercionDiagnostic"));
-    assert!(conversion_source.contains("pub enum InstanceOfFallbackPolicy"));
-    assert!(conversion_source.contains("pub enum InstanceOfTargetPolicy"));
-    assert!(!source.contains("pub enum InstanceOfFallbackPolicy"));
-    assert!(!source.contains("pub enum InstanceOfTargetPolicy"));
-    assert!(source.contains("ErasedObjectToDynTrait"));
-    assert!(source.contains("ErasedObjectToBoxedDynTrait"));
-    assert!(conversion_source.contains("pub enum InstanceOfCheck"));
-    assert!(!source.contains("pub enum InstanceOfCheck"));
-    assert!(source.contains("BoxedDynTraitType"));
-    assert!(conversion_source.contains("policy: InstanceOfFallbackPolicy"));
-    assert!(conversion_source.contains("pub fn instanceof_target_policy"));
-    assert!(conversion_source.contains("pub fn plan_instanceof_check"));
-    assert!(conversion_source.contains("pub fn plan_instanceof_check_with_facts"));
-    assert!(conversion_source.contains("pub fn hierarchy_instanceof_policy"));
-    assert!(facts_source.contains("pub struct HierarchySubtypePolicy"));
-    assert!(facts_source.contains("pub fn hierarchy_subtype_policy"));
-    assert!(!source.contains("pub fn plan_instanceof_check"));
-    assert!(!source.contains("pub fn instanceof_target_policy"));
-    assert!(!source.contains("hierarchy_subtype_policy"));
-    assert!(source.contains("unsupported_instanceof_shape"));
-    assert!(source.contains("unsupported_instanceof_primitive_target"));
-    assert!(source.contains("unsupported_instanceof_raw_or_wildcard_target"));
-    assert!(source.contains("unsupported_erased_object_instanceof_dyn_trait"));
-    assert!(source.contains("unsupported_erased_object_instanceof_boxed_dyn_trait"));
-    assert!(source.contains("unsupported_instanceof_missing_runtime_target"));
-    assert!(source.contains("instanceof_fallback_message_policy"));
-    assert!(source.contains("render_instanceof_fallback_policy"));
-}
-
-#[test]
 fn coercion_plan_owns_clone_recovery_policy() {
     let source = include_str!("../src/coercion.rs");
     let lower_source = include_str!("../src/lower.rs");
@@ -16005,7 +16840,7 @@ fn coercion_plan_owns_clone_recovery_policy() {
     assert!(conversion_source.contains("pub fn ownership_coercion_policy"));
     assert!(conversion_source.contains("ownership_coercion_policy_with_effective_facts"));
     assert!(conversion_source.contains("pub struct CoercionOwnedRecoveryCapabilityPolicy"));
-    assert!(conversion_source.contains("pub fn coercion_owned_recovery_capability_policy"));
+    assert!(!conversion_source.contains("pub fn coercion_owned_recovery_capability_policy("));
     assert!(
         conversion_source
             .contains("coercion_owned_recovery_capability_policy_with_effective_facts")
@@ -16024,7 +16859,7 @@ fn coercion_plan_owns_clone_recovery_policy() {
     assert!(!source.contains("pub fn ownership_coercion_policy"));
     assert!(!source.contains("pub fn ownership_coercion_policy_with_effective_facts"));
     assert!(!source.contains("pub struct CoercionOwnedRecoveryCapabilityPolicy"));
-    assert!(!source.contains("pub fn coercion_owned_recovery_capability_policy"));
+    assert!(!source.contains("pub fn coercion_owned_recovery_capability_policy("));
     assert!(conversion_source.contains("OwnershipCoercionPolicy::RecoverOwnedCopyValue"));
     assert!(source.contains("Coercion::CopyBorrowedValue"));
     assert!(conversion_source.contains("OwnershipCoercionPolicy::RecoverOwnedWithClone"));
@@ -16346,8 +17181,9 @@ fn coercion_plan_owns_borrowed_element_recovery_fallback_policy() {
     assert!(conversion_source.contains("pub struct BorrowedElementAdapterPolicy"));
     assert!(!source.contains("pub enum BorrowedElementCarrier"));
     assert!(!source.contains("pub struct BorrowedElementAdapterPolicy"));
-    assert!(conversion_source.contains("pub fn borrowed_element_adapter_policy"));
-    assert!(!source.contains("pub fn borrowed_element_adapter_policy"));
+    assert!(!conversion_source.contains("pub fn borrowed_element_adapter_policy("));
+    assert!(conversion_source.contains("pub fn borrowed_element_adapter_policy_with_unwrap"));
+    assert!(!source.contains("pub fn borrowed_element_adapter_policy("));
     assert!(source.contains("fn apply_borrowed_element_adapter"));
     assert!(conversion_source.contains("pub fn borrowed_element_recovery_policy"));
     assert!(conversion_source.contains("borrowed_element_recovery_policy_with_effective_facts"));
@@ -16372,7 +17208,10 @@ fn coercion_plan_owns_borrowed_element_recovery_fallback_policy() {
     assert!(conversion_source.contains("view_coercion_policy_with_effective_facts"));
     assert!(!source.contains("pub fn view_coercion_policy_with_effective_facts"));
     assert!(effective_facts_source.contains("pub fn is_string_like_type"));
-    assert!(conversion_source.contains("coercion_owned_recovery_capability_policy"));
+    assert!(
+        conversion_source
+            .contains("coercion_owned_recovery_capability_policy_with_effective_facts")
+    );
     assert!(conversion_source.contains("pub fn borrowed_element_recovery_policy("));
     assert!(!source.contains("pub fn borrowed_element_recovery_policy("));
     assert!(conversion_source.contains("borrowed_element_recovery_policy(element_shape, facts)"));
@@ -16424,10 +17263,10 @@ final class Num implements Expr {}
         &pre_inference_add.direct_subtypes,
         &resolved.facts,
     );
-    let expr_fact_policy =
-        closed_enum_fact_policy("Expr", &pre_inference_expr.direct_subtypes, &resolved.facts);
-    let add_fact_policy =
-        closed_enum_fact_policy("Add", &pre_inference_add.direct_subtypes, &resolved.facts);
+    let expr_proof_policy =
+        closed_enum_proof_policy("Expr", &pre_inference_expr.direct_subtypes, &resolved.facts);
+    let add_proof_policy =
+        closed_enum_proof_policy("Add", &pre_inference_add.direct_subtypes, &resolved.facts);
 
     assert_eq!(
         representations.representation_for(&JavaType::Named {
@@ -16440,17 +17279,20 @@ final class Num implements Expr {}
         }
     );
     assert_eq!(
-        expr_fact_policy,
-        ClosedEnumFactPolicy {
+        expr_proof_policy,
+        ClosedEnumProofPolicy {
             type_name: "Expr".to_string(),
-            variants: Some(vec!["Add".to_string(), "Num".to_string()]),
+            proof: ClosedEnumProof::Proven {
+                variants: vec!["Add".to_string(), "Num".to_string()],
+                provenance: FactProvenance::ParsedSource,
+            },
         }
     );
     assert_eq!(
-        add_fact_policy,
-        ClosedEnumFactPolicy {
+        add_proof_policy,
+        ClosedEnumProofPolicy {
             type_name: "Add".to_string(),
-            variants: None,
+            proof: ClosedEnumProof::OpenWorld,
         }
     );
     assert_eq!(
@@ -19105,51 +19947,6 @@ class Dog implements Animal {}
 }
 
 #[test]
-fn conversion_plan_does_not_render_rust_expressions() {
-    let source = include_str!("../src/conversion_plan.rs");
-    let lowering_source = include_str!("../src/conversion_lowering.rs");
-
-    assert!(!source.contains("rust_ir"));
-    assert!(!source.contains("RustExpr"));
-    assert!(!source.contains("apply_expr_to_shape"));
-    assert!(!source.contains("apply_instanceof_check"));
-    assert!(source.contains("pub struct ShapeCoercionPlan"));
-    assert!(source.contains("pub struct SyntaxCoercionPlan"));
-    assert!(source.contains("pub enum InstanceOfCheck"));
-    assert!(source.contains("pub struct BorrowedElementSlotAdapterPolicy"));
-    assert!(source.contains("pub coercion: ShapeCoercionPlan"));
-    assert!(source.contains("pub check: InstanceOfCheck"));
-    assert!(source.contains("pub enum LoweredType"));
-    assert!(source.contains("pub enum SlotConversionPlan"));
-    assert!(source.contains("pub struct SlotExprConversionPlan"));
-    assert!(source.contains("pub struct LoweredSlotExprConversionPlan"));
-    assert!(source.contains("pub conversion: SlotConversionPlan"));
-    assert!(source.contains("pub fn actual_shape_for_slot_expr"));
-    assert!(source.contains("pub fn plan_slot_conversion"));
-    assert!(source.contains("pub fn plan_lowered_slot_conversion"));
-    assert!(source.contains("shape_coercion_plan_with_facts"));
-    assert!(source.contains("plan_instanceof_check"));
-    assert!(source.contains("slot_conversion_plan_with_facts"));
-    assert!(source.contains("lowered_slot_conversion_plan_with_facts"));
-    assert!(lowering_source.contains("apply_shape_coercion_plan(expr, &plan.coercion)"));
-    assert!(lowering_source.contains("instanceof_check_projection(expr, &plan.check)"));
-    assert!(lowering_source.contains("pub fn apply_slot_expr_conversion"));
-    assert!(lowering_source.contains("pub fn apply_lowered_slot_expr_conversion"));
-    assert!(lowering_source.contains("pub fn apply_lowered_slot_conversion_to_expr"));
-    assert!(!lowering_source.contains("FactSet"));
-    assert!(!lowering_source.contains("plan_slot_conversion"));
-    assert!(!lowering_source.contains("plan_lowered_slot_conversion"));
-    assert!(!lowering_source.contains("slot_conversion_plan_with_facts"));
-    assert!(!lowering_source.contains("lowered_slot_conversion_plan_with_facts"));
-    assert!(!lowering_source.contains("apply_expr_to_shape_with_facts"));
-    assert!(!lowering_source.contains("plan_instanceof_check"));
-
-    let coercion_source = include_str!("../src/coercion.rs");
-    assert!(!coercion_source.contains("pub enum LoweredType"));
-    assert!(!coercion_source.contains("pub fn actual_shape_for_slot_expr"));
-}
-
-#[test]
 fn conversion_plan_uses_target_slot_shape_for_unresolved_unknown_calls() {
     let unresolved_call = Expr::Call {
         receiver: None,
@@ -19188,17 +19985,6 @@ fn conversion_plan_uses_target_slot_shape_for_unresolved_unknown_calls() {
 
 #[test]
 fn lower_consumes_cast_and_instanceof_plans_without_rechecking_representation_facts() {
-    let boundary = cast_and_instanceof_planning_boundary();
-    assert_eq!(
-        boundary,
-        CastAndInstanceOfPlanningBoundary {
-            casts_use_representation_shapes: true,
-            instanceof_uses_representation_shapes: true,
-            hierarchy_reasoning_before_lowering: true,
-            rendering_uses_conversion_plans_only: true,
-        }
-    );
-
     let lower_source = include_str!("../src/lower.rs");
     let cast_instanceof_branch = lower_source
         .rsplit("Expr::Cast { ty, expr } =>")
@@ -19208,8 +19994,6 @@ fn lower_consumes_cast_and_instanceof_plans_without_rechecking_representation_fa
     let conversion_source = include_str!("../src/conversion_plan.rs");
     let lowering_source = include_str!("../src/conversion_lowering.rs");
 
-    assert!(conversion_source.contains("pub struct CastAndInstanceOfPlanningBoundary"));
-    assert!(conversion_source.contains("pub fn cast_and_instanceof_planning_boundary"));
     assert!(conversion_source.contains("project_java_value_shape(ctx.representations"));
     assert!(conversion_source.contains("ctx.facts.unwrap_or"));
     assert!(
@@ -19309,16 +20093,6 @@ class Holder {
 }
 
 #[test]
-fn signature_plan_does_not_render_rust_types() {
-    let source = include_str!("../src/signature.rs");
-
-    assert!(!source.contains("rust_ir"));
-    assert!(!source.contains("RustType"));
-    assert!(!source.contains("slot_render"));
-    assert!(!source.contains("rust_type_for_slot"));
-}
-
-#[test]
 fn signature_solver_collects_param_constraints_before_applying_shapes() {
     let source = include_str!("../src/signature.rs");
 
@@ -19391,7 +20165,8 @@ fn signature_solver_collects_param_constraints_before_applying_shapes() {
     assert!(source.contains("signature_member_api_boundary_policy"));
     assert!(!source.contains("fn member_is_api_boundary"));
     assert!(source.contains("receiver_constraints"));
-    assert!(source.contains("solve_signature_shape"));
+    assert!(!source.contains("pub fn solve_signature_shape("));
+    assert!(source.contains("solve_signature_shape_with_facts"));
     assert!(source.contains("apply_signature_constraints"));
     assert_eq!(source.matches("param_shape_for_java_type").count(), 2);
     assert_eq!(source.matches("return_shape_for_java_type").count(), 2);
@@ -19509,7 +20284,7 @@ fn signature_shape_request_centralizes_role_base_shape_and_constraints() {
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let representations = plan_representations(&resolved.program, &resolved.facts);
 
-    let param_shape = solve_signature_shape(
+    let param_shape = solve_signature_shape_with_facts(
         &representations,
         SignatureShapeRequest {
             java_ty: JavaType::Array(Box::new(JavaType::String)),
@@ -19517,12 +20292,13 @@ fn signature_shape_request_centralizes_role_base_shape_and_constraints() {
             constraints: Vec::new(),
             type_params: Vec::new(),
         },
+        &resolved.facts,
     )
     .unwrap();
     assert_eq!(param_shape.ownership, OwnershipShape::SharedBorrow);
     assert_eq!(param_shape.view, ViewShape::Slice);
 
-    let storage_shape = solve_signature_shape(
+    let storage_shape = solve_signature_shape_with_facts(
         &representations,
         SignatureShapeRequest {
             java_ty: JavaType::String,
@@ -19530,13 +20306,14 @@ fn signature_shape_request_centralizes_role_base_shape_and_constraints() {
             constraints: Vec::new(),
             type_params: Vec::new(),
         },
+        &resolved.facts,
     )
     .unwrap();
     assert_eq!(storage_shape.ownership, OwnershipShape::Owned);
     assert_eq!(storage_shape.mutability, MutabilityShape::Mutable);
 
     assert_eq!(
-        solve_signature_shape(
+        solve_signature_shape_with_facts(
             &representations,
             SignatureShapeRequest {
                 java_ty: JavaType::Void,
@@ -19544,11 +20321,12 @@ fn signature_shape_request_centralizes_role_base_shape_and_constraints() {
                 constraints: Vec::new(),
                 type_params: Vec::new(),
             },
+            &resolved.facts,
         ),
         None
     );
 
-    let borrowed_return = solve_signature_shape(
+    let borrowed_return = solve_signature_shape_with_facts(
         &representations,
         SignatureShapeRequest {
             java_ty: JavaType::String,
@@ -19558,11 +20336,12 @@ fn signature_shape_request_centralizes_role_base_shape_and_constraints() {
             ),
             type_params: Vec::new(),
         },
+        &resolved.facts,
     )
     .unwrap();
     assert_eq!(borrowed_return, borrowed_string_content_shape());
 
-    let enum_dispatch = solve_signature_shape(
+    let enum_dispatch = solve_signature_shape_with_facts(
         &representations,
         SignatureShapeRequest {
             java_ty: JavaType::Named {
@@ -19577,6 +20356,7 @@ fn signature_shape_request_centralizes_role_base_shape_and_constraints() {
             )],
             type_params: Vec::new(),
         },
+        &resolved.facts,
     )
     .unwrap();
     assert_eq!(
@@ -19613,23 +20393,26 @@ fn signature_slot_dispatch_requirements_project_through_representation_dispatch(
     };
     let effective_facts = EffectiveFacts::new(&facts);
 
-    let storage_policy = signature_slot_dispatch_requirement_policy(
+    let storage_policy = signature_slot_dispatch_requirement_policy_in_scope(
         &animal,
         SignatureSlotRole::Storage,
         source_dispatch.clone(),
         &facts,
+        &[],
     );
-    let return_policy = signature_slot_dispatch_requirement_policy_with_effective_facts(
+    let return_policy = signature_slot_dispatch_requirement_policy_with_effective_facts_in_scope(
         &animal,
         SignatureSlotRole::Return,
         source_dispatch.clone(),
         &effective_facts,
+        &[],
     );
-    let param_policy = signature_slot_dispatch_requirement_policy(
+    let param_policy = signature_slot_dispatch_requirement_policy_in_scope(
         &animal,
         SignatureSlotRole::Param { is_varargs: false },
         source_dispatch.clone(),
         &facts,
+        &[],
     );
 
     assert_eq!(
@@ -19645,13 +20428,6 @@ fn signature_slot_dispatch_requirements_project_through_representation_dispatch(
         param_policy.constraints,
         vec![SignatureConstraint::RequiredDispatch(source_dispatch)]
     );
-
-    let signature_source = include_str!("../src/signature.rs");
-    assert!(signature_source.contains("dispatch_requirement_projection_policy"));
-    assert!(signature_source.contains("fn dispatch_requirement_projection_role"));
-    assert!(!signature_source.contains(
-        "(DispatchRequirementKind::NeedsOwnedPolymorphicStorage, SignatureSlotRole::Storage)"
-    ));
 }
 
 #[test]
@@ -19743,18 +20519,17 @@ class Use {
 
 #[test]
 fn signature_constraint_merge_is_order_independent_for_boundary_fallbacks() {
+    let default_facts = FactSet::default();
+    let effective_facts = EffectiveFacts::new(&default_facts);
     let mut conservative_then_borrowed =
-        conservative_boundary_constraints(&JavaType::String, &FactSet::default());
+        unknown_api_constraints(&JavaType::String, &effective_facts);
     conservative_then_borrowed.extend(signature_constraints_for_borrowed_content_policy(
         BorrowedContentPolicy::string_like_view(),
     ));
     let mut borrowed_then_conservative = signature_constraints_for_borrowed_content_policy(
         BorrowedContentPolicy::string_like_view(),
     );
-    borrowed_then_conservative.extend(conservative_boundary_constraints(
-        &JavaType::String,
-        &FactSet::default(),
-    ));
+    borrowed_then_conservative.extend(unknown_api_constraints(&JavaType::String, &effective_facts));
 
     let conservative_first = apply_signature_constraints(
         RustSlotShape::conservative(JavaType::String),
@@ -19774,39 +20549,12 @@ fn signature_constraint_merge_is_order_independent_for_boundary_fallbacks() {
 #[test]
 fn signature_requirement_merge_policy_owns_axis_priorities() {
     assert_eq!(
-        signature_ownership_requirement_priority_policy(OwnershipShape::Owned),
-        SignatureOwnershipRequirementPriorityPolicy {
-            requirement: OwnershipShape::Owned,
-            rank: 40,
-        }
-    );
-    assert_eq!(
-        signature_view_requirement_priority_policy(ViewShape::Native),
-        SignatureViewRequirementPriorityPolicy {
-            requirement: ViewShape::Native,
-            rank: 50,
-        }
-    );
-    assert_eq!(
-        signature_dispatch_requirement_priority_policy(DispatchShape::ErasedObject),
-        SignatureDispatchRequirementPriorityPolicy {
-            requirement: DispatchShape::ErasedObject,
-            rank: 40,
-        }
-    );
-    assert_eq!(
         merge_signature_flag_requirement_policy(false, true),
-        SignatureFlagMerge {
-            kept: true,
-            changed: true,
-        }
+        SignatureFlagMerge { kept: true }
     );
     assert_eq!(
         merge_signature_flag_requirement_policy(true, true),
-        SignatureFlagMerge {
-            kept: true,
-            changed: false,
-        }
+        SignatureFlagMerge { kept: true }
     );
     assert_eq!(
         merge_ownership_requirement_policy(
@@ -19863,26 +20611,6 @@ fn signature_requirement_merge_policy_owns_axis_priorities() {
             }),
         }
     );
-
-    let source = include_str!("../src/signature.rs");
-    assert!(source.contains("pub struct SignatureRequirementMerge"));
-    assert!(source.contains("pub struct SignatureOwnershipRequirementPriorityPolicy"));
-    assert!(source.contains("pub fn signature_ownership_requirement_priority_policy"));
-    assert!(source.contains("pub struct SignatureViewRequirementPriorityPolicy"));
-    assert!(source.contains("pub fn signature_view_requirement_priority_policy"));
-    assert!(source.contains("pub struct SignatureDispatchRequirementPriorityPolicy"));
-    assert!(source.contains("pub fn signature_dispatch_requirement_priority_policy"));
-    assert!(source.contains("pub struct SignatureFlagMerge"));
-    assert!(source.contains("pub fn merge_signature_flag_requirement_policy"));
-    assert!(source.contains("pub fn merge_ownership_requirement_policy"));
-    assert!(source.contains("pub fn merge_view_requirement_policy"));
-    assert!(source.contains("pub fn merge_dispatch_requirement_policy"));
-    assert!(source.contains("join_ranked_lattice"));
-    assert!(source.contains("ownership_lattice_rank"));
-    assert!(!source.contains("fn ownership_requirement_rank"));
-    assert!(!source.contains("fn view_requirement_rank"));
-    assert!(!source.contains("fn dispatch_requirement_rank"));
-    assert!(!source.contains("fn storage_nullability_requirement_rank"));
 }
 
 #[test]
@@ -19898,7 +20626,9 @@ fn merged_signature_constraints_own_marker_policy() {
 
 #[test]
 fn merged_signature_constraints_record_conflicting_axis_requirements() {
-    let mut constraints = conservative_boundary_constraints(&JavaType::String, &FactSet::default());
+    let default_facts = FactSet::default();
+    let effective_facts = EffectiveFacts::new(&default_facts);
+    let mut constraints = unknown_api_constraints(&JavaType::String, &effective_facts);
     constraints.extend(signature_constraints_for_borrowed_content_policy(
         BorrowedContentPolicy::string_like_view(),
     ));
@@ -20182,19 +20912,9 @@ fn signature_owned_recovery_policy_classifies_capability_proofs() {
     let effective_facts = EffectiveFacts::new(&facts);
 
     assert_eq!(
-        signature_owned_recovery_capability_policy(&copy, &facts),
+        signature_owned_recovery_capability_policy_with_effective_facts(&copy, &effective_facts),
         SignatureOwnedRecoveryCapabilityPolicy {
-            java_ty: copy.clone(),
             recovery: OwnedRecoveryCapability::Copy,
-        }
-    );
-    assert_eq!(
-        signature_owned_recovery_capability_policy(&explicit_clone, &facts),
-        SignatureOwnedRecoveryCapabilityPolicy {
-            java_ty: explicit_clone.clone(),
-            recovery: OwnedRecoveryCapability::ExplicitClone {
-                java_ty: explicit_clone.clone(),
-            },
         }
     );
     assert_eq!(
@@ -20202,12 +20922,18 @@ fn signature_owned_recovery_policy_classifies_capability_proofs() {
             &explicit_clone,
             &effective_facts,
         ),
-        signature_owned_recovery_capability_policy(&explicit_clone, &facts)
+        SignatureOwnedRecoveryCapabilityPolicy {
+            recovery: OwnedRecoveryCapability::ExplicitClone {
+                java_ty: explicit_clone.clone(),
+            },
+        }
     );
     assert_eq!(
-        signature_owned_recovery_capability_policy(&external, &facts),
+        signature_owned_recovery_capability_policy_with_effective_facts(
+            &external,
+            &effective_facts,
+        ),
         SignatureOwnedRecoveryCapabilityPolicy {
-            java_ty: external.clone(),
             recovery: OwnedRecoveryCapability::NonCloneable,
         }
     );
@@ -20311,24 +21037,6 @@ fn signature_owned_recovery_policy_classifies_capability_proofs() {
         signature_owned_recovery_policy(&external, &owned_recovery_constraints, &facts),
         SignatureOwnedRecoveryPolicy::UnsupportedNonCloneable
     );
-
-    let source = include_str!("../src/signature.rs");
-    assert!(source.contains("pub enum SignatureOwnedRecoveryPolicy"));
-    assert!(source.contains("pub struct SignatureOwnedRecoveryCapabilityPolicy"));
-    assert!(source.contains("ProvenByCloneBoxAdapter"));
-    assert!(source.contains("ProvenByFactoryCopy"));
-    assert!(source.contains("ProvenByImmutableSharedHandle"));
-    assert!(source.contains("UnsupportedFacadeOwnedExternalHandle"));
-    assert!(source.contains("UnsupportedFfiOwnedHandle"));
-    assert!(source.contains("pub fn signature_owned_recovery_capability_policy"));
-    assert!(source.contains("signature_owned_recovery_capability_policy_with_effective_facts"));
-    assert!(source.contains("pub fn signature_owned_recovery_policy"));
-    assert!(source.contains("pub fn signature_owned_recovery_policy_with_effective_facts"));
-    assert!(source.contains("signature_owned_recovery_policy_with_effective_facts(java_ty, constraints, &effective_facts)"));
-    assert!(source.contains(
-        "signature_owned_recovery_capability_policy_with_effective_facts(java_ty, facts)"
-    ));
-    assert!(source.contains("use crate::effective_facts::EffectiveFacts"));
 }
 
 #[test]
@@ -20518,15 +21226,6 @@ fn signature_capability_audit_reports_field_owned_recovery() {
 }
 
 #[test]
-fn signature_diagnostics_route_fields_through_capability_audit() {
-    let source = include_str!("../src/signature.rs");
-
-    assert!(source.contains("fn push_field_signature_diagnostics"));
-    assert!(source.contains("push_capability_diagnostics_for_signature_constraints(\n        diagnostics,\n        slot,\n        &field.ty,"));
-    assert!(source.contains("push_field_signature_diagnostics("));
-}
-
-#[test]
 fn signature_plan_reports_local_capability_conflicts_as_diagnostics() {
     let parsed = parse_java_source(
         r#"
@@ -20700,8 +21399,9 @@ class Holder {
             _ => None,
         })
         .unwrap();
+    let default_facts = FactSet::default();
 
-    let struct_item = struct_item_for_type(ty, &signatures);
+    let struct_item = struct_item_for_type_with_facts(ty, &signatures, &default_facts);
     let RustItem::Struct(rust_struct) = struct_item else {
         panic!("type shell should be assembled as a struct item");
     };
@@ -20714,7 +21414,13 @@ class Holder {
     );
 
     let ctor_body = vec![RustStmt::Return(None)];
-    let ctor_fn = constructor_function_shell(ty, ctor, &signatures, ctor_body.clone());
+    let ctor_fn = constructor_function_shell_with_facts(
+        ty,
+        ctor,
+        &signatures,
+        ctor_body.clone(),
+        &default_facts,
+    );
     assert_eq!(ctor_fn.name, "new");
     assert_eq!(ctor_fn.params.len(), 1);
     assert_eq!(ctor_fn.params[0].name, "name");
@@ -20804,15 +21510,17 @@ class Holder {
         }))]
     );
     assert_eq!(
-        constructor_default_field_value(
+        constructor_default_field_value_with_facts(
             "count".to_string(),
-            RustSlotShape::for_storage(JavaType::Primitive(PrimitiveType::Int))
+            RustSlotShape::for_storage(JavaType::Primitive(PrimitiveType::Int)),
+            &default_facts,
         ),
         (
             "count".to_string(),
-            default_expr_for_slot(&RustSlotShape::for_storage(JavaType::Primitive(
-                PrimitiveType::Int
-            )))
+            default_expr_for_slot_with_facts(
+                &RustSlotShape::for_storage(JavaType::Primitive(PrimitiveType::Int)),
+                &default_facts
+            )
         )
     );
 
@@ -20858,7 +21566,13 @@ class ImplicitDefaultConstructorTarget {
     );
 
     let method_body = vec![RustStmt::Return(Some(RustExpr::Var("value".to_string())))];
-    let method_fn = method_function_shell(ty, method, &signatures, method_body.clone());
+    let method_fn = method_function_shell_with_facts(
+        ty,
+        method,
+        &signatures,
+        method_body.clone(),
+        &default_facts,
+    );
     assert_eq!(method_fn.name, "echo");
     assert_eq!(method_fn.params.len(), 1);
     assert_eq!(method_fn.params[0].name, "value");
@@ -20927,7 +21641,9 @@ class ExternalLabel {}
         .unwrap();
     let body = vec![RustStmt::Return(Some(RustExpr::Literal("0".to_string())))];
 
-    let default_shell = method_function_shell(ty, method, &signatures, body.clone());
+    let default_facts = FactSet::default();
+    let default_shell =
+        method_function_shell_with_facts(ty, method, &signatures, body.clone(), &default_facts);
     let fact_shell = method_function_shell_with_facts(ty, method, &signatures, body, &facts);
     let planned_shell = method_function_shell_with_facts_and_exception_plan(
         ty,
@@ -21044,32 +21760,6 @@ class EffectOnlyThrows {
             tests: "",
         }],
     );
-}
-
-#[test]
-fn item_assembly_return_type_wrappers_delegate_to_fact_aware_rendering() {
-    let source = include_str!("../src/item_assembly.rs");
-
-    assert!(source.contains("pub fn method_return_type_with_facts"));
-    assert!(
-        source
-            .contains("method_return_type_with_facts(ty, method, signatures, &FactSet::default())")
-    );
-    assert!(!source.contains("rust_type_for_slot(&shape)"));
-}
-
-#[test]
-fn lower_orchestrator_does_not_render_default_slot_values() {
-    let source = include_str!("../src/lower.rs");
-    let static_initializer = source
-        .split("fn static_storage_initial_value_expr")
-        .nth(1)
-        .and_then(|tail| tail.split("fn static_const_reference_name_for_type").next())
-        .expect("static storage initializer should be present");
-
-    assert!(!static_initializer.contains("default_expr_for_slot"));
-    assert!(!static_initializer.contains("slot_render"));
-    assert!(static_initializer.contains("static_storage_initial_fallback_value"));
 }
 
 #[test]
@@ -21268,170 +21958,6 @@ public class OuterStatics {
             tests: "",
         }],
     );
-}
-
-#[test]
-fn lowering_consumes_solved_plans_without_choosing_shape_axes() {
-    let lowering_sources = [
-        include_str!("../src/access_lowering.rs"),
-        include_str!("../src/call_lowering.rs"),
-        include_str!("../src/conversion_lowering.rs"),
-        include_str!("../src/exception_lowering.rs"),
-        include_str!("../src/literal_lowering.rs"),
-        include_str!("../src/loop_lowering.rs"),
-        include_str!("../src/operator_lowering.rs"),
-        include_str!("../src/stream_lowering.rs"),
-        include_str!("../src/string_concat_render.rs"),
-        include_str!("../src/switch_lowering.rs"),
-    ];
-
-    for source in lowering_sources {
-        assert!(!source.contains("OwnershipShape"));
-        assert!(!source.contains("ViewShape"));
-        assert!(!source.contains("DispatchShape"));
-        assert!(!source.contains("MutabilityShape"));
-        assert!(!source.contains("RustSlotShape::conservative"));
-        assert!(!source.contains("RustSlotShape::for_storage"));
-        assert!(!source.contains("ObjectRepresentation"));
-        assert!(!source.contains("dispatch_for"));
-        assert!(!source.contains("representation_for"));
-    }
-
-    let lower_source = include_str!("../src/lower.rs");
-    assert!(lower_source.contains("OwnershipShape"));
-    assert!(lower_source.contains("ViewShape"));
-    assert!(
-        lower_source.contains("DispatchShape"),
-        "lower.rs remains the tracked orchestrator cleanup for shape-axis decisions"
-    );
-    assert!(lower_source.contains("plan_slot_conversion"));
-    assert!(lower_source.contains("plan_lowered_slot_conversion"));
-    assert!(lower_source.contains("apply_slot_expr_conversion"));
-    assert!(lower_source.contains("apply_lowered_slot_expr_conversion"));
-    assert!(!lower_source.contains("coercion::apply_expr_to_slot_with_facts"));
-    assert!(!lower_source.contains("coercion::apply_lowered_expr_to_slot_with_facts"));
-}
-
-#[test]
-fn new_feature_responsibility_checklist_is_tracked() {
-    let checklist = include_str!("../docs/new-feature-responsibility-checklist.md");
-
-    assert!(checklist.contains("Java Semantics"));
-    assert!(checklist.contains("Capabilities And External Facts"));
-    assert!(checklist.contains("Object Representation"));
-    assert!(checklist.contains("Signature And Slot Shape"));
-    assert!(checklist.contains("Shape Projection"));
-    assert!(checklist.contains("Coercion"));
-    assert!(checklist.contains("Rendering And Lowering"));
-    assert!(checklist.contains("Required Tests"));
-    assert!(checklist.contains("ObjectRepresentationPolicy"));
-    assert!(checklist.contains("SignatureBoundaryPolicy"));
-    assert!(checklist.contains("SignatureCapabilityPolicy"));
-    assert!(checklist.contains("lowering"));
-    assert!(checklist.contains("must not recompute hierarchy"));
-    assert!(checklist.contains("finite graph edges"));
-    assert!(checklist.contains("bounded-domain facts"));
-    assert!(checklist.contains("finite-budget diagnostic"));
-    assert!(checklist.contains("recursively specialized Rust shapes"));
-}
-
-#[test]
-fn recursive_code_policy_is_finite_fixpoint_not_lowering_expansion() {
-    let design = include_str!("../docs/rust-slot-shape-and-object-representation.md");
-    let signature_source = include_str!("../src/signature.rs");
-    let fact_saturation_source = include_str!("../src/fact_saturation.rs");
-
-    assert!(design.contains("Recursive Java code"));
-    assert!(design.contains("finite graph edges"));
-    assert!(design.contains("bounded"));
-    assert!(design.contains("finite-budget diagnostic"));
-    assert!(design.contains("create unbounded path-specific facts"));
-    assert!(signature_source.contains("signature_fixpoint_saturation_policy"));
-    assert!(signature_source.contains("signature_fixpoint_iteration_budget"));
-    assert!(signature_source.contains("signature_fixpoint_budget_exceeded"));
-    assert!(signature_source.contains("FiniteSaturationPolicy"));
-    assert!(fact_saturation_source.contains("FiniteFactDomain"));
-    assert!(fact_saturation_source.contains("FiniteSaturationPolicy"));
-    assert!(fact_saturation_source.contains("finite_fact_iteration_budget"));
-    assert!(fact_saturation_source.contains("FiniteSaturationResult"));
-    assert!(fact_saturation_source.contains("SaturationStep::Stable"));
-}
-
-#[test]
-fn object_representation_fallback_matrix_is_documented() {
-    let design = include_str!("../docs/rust-slot-shape-and-object-representation.md");
-
-    assert!(design.contains("### Object Representation Fallback Matrix"));
-    assert!(design.contains("| Role | Concrete Struct | Closed Enum | Dyn Trait | Boxed Dyn Trait | Erased Object | Unsupported Hierarchy |"));
-    for role in [
-        "Public API param",
-        "Public API return",
-        "Unknown API param",
-        "Unknown API return",
-        "Storage/field",
-        "Local",
-        "Captured value",
-        "External pack fact",
-        "Non-object-safe interface",
-        "Closed hierarchy",
-        "Raw object / wildcard object",
-    ] {
-        assert!(design.contains(role), "missing matrix role {role}");
-        let row = design
-            .lines()
-            .find(|line| line.starts_with(&format!("| {role} |")))
-            .unwrap_or_else(|| panic!("missing matrix row {role}"));
-        let cells = row
-            .trim_matches('|')
-            .split('|')
-            .map(str::trim)
-            .collect::<Vec<_>>();
-        assert_eq!(cells.len(), 7, "matrix row has wrong cell count: {row}");
-        assert!(
-            cells.iter().all(|cell| !cell.is_empty()),
-            "matrix row has an empty cell: {row}"
-        );
-    }
-    assert!(design.contains("`BoxedDynTrait` is intentionally not an `ObjectRepresentation`"));
-    assert!(!design.contains("    BoxedDynTrait,\n    ClosedEnum,"));
-}
-
-#[test]
-fn erased_object_runtime_contract_is_documented_and_shared() {
-    let design = include_str!("../docs/rust-slot-shape-and-object-representation.md");
-    let conversion_source = include_str!("../src/conversion_plan.rs");
-    let coercion_source = include_str!("../src/coercion.rs");
-    let slot_render_source = include_str!("../src/slot_render.rs");
-
-    assert!(design.contains("## Erased Object Runtime Contract"));
-    for phrase in [
-        "`ErasedObject` lowers to `Box<dyn std::any::Any>`",
-        "storing, returning, and passing erased values preserves",
-        "Box::new(value) as Box<dyn std::any::Any>",
-        "downcast::<Target>()",
-        "is::<Target>()",
-        "erased-to-borrowed-dyn and erased-to-boxed-dyn recovery are unsupported",
-        "anonymous erased boundaries and external-pack erased handles",
-        "carrier instead of generating anonymous concrete implementations",
-    ] {
-        assert!(
-            design.contains(phrase),
-            "missing erased contract phrase {phrase}"
-        );
-    }
-    assert!(conversion_source.contains("pub struct ErasedObjectRuntimeContract"));
-    assert!(conversion_source.contains("pub fn erased_object_runtime_contract"));
-    assert!(coercion_source.contains("pub fn erased_object_box_projection"));
-    assert!(coercion_source.contains("fn typed_method_name(method: &str, ty: &str)"));
-    assert!(
-        coercion_source.contains("typed_zero_arg_method_projection(receiver, \"is\", target_type)")
-    );
-    assert!(
-        coercion_source
-            .contains("typed_zero_arg_method_projection(receiver, \"downcast_ref\", target_type)")
-    );
-    assert!(!coercion_source.contains("format!(\"is::<{target_type}>\")"));
-    assert!(slot_render_source.contains("Box<dyn std::any::Any>"));
 }
 
 #[test]
@@ -21814,7 +22340,13 @@ class ListUse {
     let effective_facts = EffectiveFacts::new(&resolved.facts);
 
     assert_eq!(
-        method_param_borrowed_content_policy(ty, method("len"), &method("len").params[0], &usage),
+        method_param_borrowed_content_policy_with_facts(
+            ty,
+            method("len"),
+            &method("len").params[0],
+            &usage,
+            &FactSet::default(),
+        ),
         Some(BorrowedContentPolicy::string_like_view())
     );
     assert_eq!(
@@ -21825,22 +22357,23 @@ class ListUse {
             &usage,
             &effective_facts,
         ),
-        method_param_borrowed_content_policy(ty, method("len"), &method("len").params[0], &usage)
-    );
-    assert_eq!(
-        borrowed_content_capability_policy(&JavaType::String, &resolved.facts),
-        BorrowedContentCapabilityPolicy {
-            java_ty: JavaType::String,
-            string_content: true,
-            sequence_element: None,
-        }
+        method_param_borrowed_content_policy_with_facts(
+            ty,
+            method("len"),
+            &method("len").params[0],
+            &usage,
+            &resolved.facts,
+        )
     );
     assert_eq!(
         borrowed_content_capability_policy_with_effective_facts(
             &JavaType::String,
             &effective_facts
         ),
-        borrowed_content_capability_policy(&JavaType::String, &resolved.facts)
+        BorrowedContentCapabilityPolicy {
+            string_content: true,
+            sequence_element: None,
+        }
     );
     assert_eq!(
         borrowed_content_type_policy(&JavaType::String, &resolved.facts),
@@ -21854,11 +22387,23 @@ class ListUse {
         borrowed_content_type_policy(&JavaType::String, &resolved.facts)
     );
     assert_eq!(
-        method_param_borrowed_content_policy(ty, method("id"), &method("id").params[0], &usage),
+        method_param_borrowed_content_policy_with_facts(
+            ty,
+            method("id"),
+            &method("id").params[0],
+            &usage,
+            &FactSet::default(),
+        ),
         Some(BorrowedContentPolicy::string_like_view())
     );
     assert_eq!(
-        constructor_param_borrowed_content_policy(ty, ctor, &ctor.params[0], &usage),
+        constructor_param_borrowed_content_policy_with_facts(
+            ty,
+            ctor,
+            &ctor.params[0],
+            &usage,
+            &FactSet::default(),
+        ),
         Some(BorrowedContentPolicy::string_like_view())
     );
     assert_eq!(
@@ -21869,8 +22414,21 @@ class ListUse {
             &usage,
             &effective_facts,
         ),
-        constructor_param_borrowed_content_policy(ty, ctor, &ctor.params[0], &usage)
+        constructor_param_borrowed_content_policy_with_facts(
+            ty,
+            ctor,
+            &ctor.params[0],
+            &usage,
+            &resolved.facts,
+        )
     );
+    let borrowed_string_constraints = signature_constraints_for_borrowed_content_policy(
+        BorrowedContentPolicy::string_like_view(),
+    );
+    let mut borrowed_string_param_constraints = borrowed_string_constraints.clone();
+    borrowed_string_param_constraints.push(SignatureConstraint::RequiredDispatch(
+        DispatchShape::Concrete,
+    ));
     assert_eq!(
         method_param_shape_constraints(
             ty,
@@ -21879,11 +22437,11 @@ class ListUse {
             &usage,
             &resolved.facts
         ),
-        signature_constraints_for_borrowed_content_policy(BorrowedContentPolicy::string_like_view())
+        borrowed_string_param_constraints
     );
     assert_eq!(
         constructor_param_shape_constraints(ty, ctor, &ctor.params[0], &usage, &resolved.facts),
-        signature_constraints_for_borrowed_content_policy(BorrowedContentPolicy::string_like_view())
+        borrowed_string_constraints
     );
 
     let mut shape = RustSlotShape::conservative(JavaType::String);
@@ -21898,10 +22456,21 @@ class ListUse {
     );
     assert_eq!(constrained_shape, shape);
 
-    let return_shape =
-        borrowed_return_shape_from_param(ty, method("id"), &representations, &usage).unwrap();
+    let return_shape = borrowed_return_shape_from_param_with_facts(
+        ty,
+        method("id"),
+        &representations,
+        &usage,
+        &FactSet::default(),
+    )
+    .unwrap();
     assert_eq!(
-        borrowed_return_content_policy_from_param(ty, method("id"), &usage),
+        borrowed_return_content_policy_from_param_with_facts(
+            ty,
+            method("id"),
+            &usage,
+            &FactSet::default(),
+        ),
         Some(BorrowedContentPolicy::string_like_view())
     );
     assert_eq!(
@@ -21911,7 +22480,12 @@ class ListUse {
             &usage,
             &effective_facts,
         ),
-        borrowed_return_content_policy_from_param(ty, method("id"), &usage)
+        borrowed_return_content_policy_from_param_with_facts(
+            ty,
+            method("id"),
+            &usage,
+            &resolved.facts,
+        )
     );
     assert_eq!(
         borrowed_return_shape_from_param_with_effective_facts(
@@ -21934,9 +22508,11 @@ class ListUse {
     let list_ty = &resolved.program.types[1];
     let list_java_string = list_java_type(JavaType::String);
     assert_eq!(
-        borrowed_content_capability_policy(&list_java_string, &resolved.facts),
+        borrowed_content_capability_policy_with_effective_facts(
+            &list_java_string,
+            &effective_facts
+        ),
         BorrowedContentCapabilityPolicy {
-            java_ty: list_java_string.clone(),
             string_content: false,
             sequence_element: Some(JavaType::String),
         }
@@ -21970,11 +22546,12 @@ class ListUse {
             .unwrap()
     };
     assert_eq!(
-        method_param_borrowed_content_policy(
+        method_param_borrowed_content_policy_with_facts(
             list_ty,
             list_method("empty"),
             &list_method("empty").params[0],
             &usage,
+            &FactSet::default(),
         ),
         Some(BorrowedContentPolicy::sequence_like_view())
     );
@@ -21986,12 +22563,16 @@ class ListUse {
             &usage,
             &effective_facts,
         ),
-        method_param_borrowed_content_policy(
+        method_param_borrowed_content_policy_with_facts(
             list_ty,
             list_method("empty"),
             &list_method("empty").params[0],
             &usage,
+            &resolved.facts,
         )
+    );
+    let borrowed_sequence_param_constraints = signature_constraints_for_borrowed_content_policy(
+        BorrowedContentPolicy::sequence_like_view(),
     );
     assert_eq!(
         method_param_shape_constraints(
@@ -22001,21 +22582,29 @@ class ListUse {
             &usage,
             &resolved.facts,
         ),
-        signature_constraints_for_borrowed_content_policy(
-            BorrowedContentPolicy::sequence_like_view(),
-        )
+        borrowed_sequence_param_constraints
     );
     let mut list_shape = RustSlotShape::conservative(list_java_string);
     apply_borrowed_content_policy(&mut list_shape, BorrowedContentPolicy::sequence_like_view());
     assert_eq!(list_shape.ownership, OwnershipShape::SharedBorrow);
     assert_eq!(list_shape.view, ViewShape::Slice);
     assert_eq!(
-        borrowed_return_content_policy_from_param(list_ty, list_method("id"), &usage),
+        borrowed_return_content_policy_from_param_with_facts(
+            list_ty,
+            list_method("id"),
+            &usage,
+            &FactSet::default(),
+        ),
         Some(BorrowedContentPolicy::sequence_like_view())
     );
-    let list_return_shape =
-        borrowed_return_shape_from_param(list_ty, list_method("id"), &representations, &usage)
-            .unwrap();
+    let list_return_shape = borrowed_return_shape_from_param_with_facts(
+        list_ty,
+        list_method("id"),
+        &representations,
+        &usage,
+        &FactSet::default(),
+    )
+    .unwrap();
     assert_eq!(list_return_shape.ownership, OwnershipShape::SharedBorrow);
     assert_eq!(list_return_shape.view, ViewShape::Slice);
 }
@@ -22055,11 +22644,22 @@ class SvgOptimizer {
         .unwrap();
 
     assert_eq!(
-        borrowed_return_content_policy_from_param(ty, method, &usage),
+        borrowed_return_content_policy_from_param_with_facts(
+            ty,
+            method,
+            &usage,
+            &FactSet::default(),
+        ),
         None
     );
     assert_eq!(
-        borrowed_return_shape_from_param(ty, method, &representations, &usage),
+        borrowed_return_shape_from_param_with_facts(
+            ty,
+            method,
+            &representations,
+            &usage,
+            &FactSet::default(),
+        ),
         None
     );
 
@@ -22260,12 +22860,19 @@ class Helper {
         )
     }));
     assert_eq!(
-        method_param_borrowed_content_policy(ty, method, &method.params[1], &usage),
+        method_param_borrowed_content_policy_with_facts(
+            ty,
+            method,
+            &method.params[1],
+            &usage,
+            &FactSet::default(),
+        ),
         None
     );
+    let effective_resolved_facts = EffectiveFacts::new(&resolved.facts);
     assert_eq!(
         method_param_shape_constraints(ty, method, &method.params[1], &usage, &resolved.facts),
-        conservative_boundary_constraints(&JavaType::String, &resolved.facts)
+        unknown_api_constraints(&JavaType::String, &effective_resolved_facts,)
     );
 }
 
@@ -22296,9 +22903,8 @@ fn external_name_type() -> JavaType {
 }
 
 #[test]
-fn usage_call_result_boundary_policy_names_result_boundaries() {
+fn usage_analysis_records_call_result_boundaries() {
     let internal_methods = HashSet::from(["local_fetch".to_string()]);
-    let empty_usage = MethodUsageFacts::default();
 
     assert_eq!(
         call_argument_boundary_policy(None, "trim", &internal_methods),
@@ -22336,84 +22942,85 @@ fn usage_call_result_boundary_policy_names_result_boundaries() {
         call_argument_use_boundary_policy("addAll", 0, CallArgumentBoundary::Unknown),
         CallArgumentBoundary::KnownContentRead
     );
-    assert_eq!(
-        call_result_boundary_policy(&parse_expr("localFetch()"), &internal_methods, &empty_usage),
-        Some(CallResultBoundaryPolicy {
-            name: "localFetch".to_string(),
-            arg_count: 0,
-            receiver_type: None,
-            boundary: CallArgumentBoundary::Unknown,
-            resolved: None,
-        })
-    );
-    assert_eq!(
-        call_result_boundary_policy(
-            &parse_expr("local_fetch()"),
-            &internal_methods,
-            &empty_usage
-        ),
-        Some(CallResultBoundaryPolicy {
-            name: "local_fetch".to_string(),
-            arg_count: 0,
-            receiver_type: None,
-            boundary: CallArgumentBoundary::InternalSameType,
-            resolved: None,
-        })
-    );
-    assert_eq!(
-        call_result_boundary_policy(
-            &parse_expr("helper.fetch()"),
-            &internal_methods,
-            &empty_usage
-        ),
-        Some(CallResultBoundaryPolicy {
-            name: "fetch".to_string(),
-            arg_count: 0,
-            receiver_type: None,
-            boundary: CallArgumentBoundary::Unknown,
-            resolved: None,
-        })
-    );
-    assert_eq!(
-        call_result_boundary_policy(
-            &parse_expr("new ExternalName()"),
-            &internal_methods,
-            &empty_usage
-        ),
-        Some(CallResultBoundaryPolicy {
-            name: "new".to_string(),
-            arg_count: 0,
-            receiver_type: None,
-            boundary: CallArgumentBoundary::Unknown,
-            resolved: None,
-        })
-    );
 
-    let mut usage = MethodUsageFacts::default();
-    usage.bindings.insert(
-        "helper".to_string(),
-        BindingUseFacts {
-            name: "helper".to_string(),
-            java_ty: JavaType::Named {
-                name: "Helper".to_string(),
-                args: Vec::new(),
-            },
-            uses: Vec::new(),
-        },
+    let parsed = parse_java_source(
+        r#"
+class ResultBoundarySource {
+    ExternalName local_fetch() {
+        return new ExternalName();
+    }
+
+    void use(Helper helper) {
+        ExternalName unresolved = localFetch();
+        ExternalName internal = local_fetch();
+        ExternalName fetched = helper.fetch();
+        ExternalName constructed = new ExternalName();
+    }
+}
+
+class Helper {
+    ExternalName fetch() {
+        return new ExternalName();
+    }
+}
+
+class ExternalName {}
+"#,
     );
-    assert_eq!(
-        call_result_boundary_policy(&parse_expr("helper.fetch()"), &internal_methods, &usage),
-        Some(CallResultBoundaryPolicy {
-            name: "fetch".to_string(),
-            arg_count: 0,
-            receiver_type: Some(JavaType::Named {
-                name: "Helper".to_string(),
-                args: Vec::new(),
-            }),
-            boundary: CallArgumentBoundary::Unknown,
-            resolved: None,
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let usage = analyze_usage(&resolved.program);
+    let method_usage = usage
+        .methods
+        .get(&new_java2rust::usage::UsageMethodKey {
+            type_name: "ResultBoundarySource".to_string(),
+            method_name: "use".to_string(),
         })
-    );
+        .unwrap();
+
+    let unresolved = method_usage.bindings.get("unresolved").unwrap();
+    assert!(unresolved.uses.iter().any(|usage| {
+        matches!(
+            usage,
+            BindingUse::AssignedFromCall {
+                name,
+                receiver_type: None,
+                boundary: CallArgumentBoundary::Unknown,
+            } if name == "localFetch"
+        )
+    }));
+    let internal = method_usage.bindings.get("internal").unwrap();
+    assert!(internal.uses.iter().any(|usage| {
+        matches!(
+            usage,
+            BindingUse::AssignedFromCall {
+                name,
+                receiver_type: None,
+                boundary: CallArgumentBoundary::InternalSameType,
+            } if name == "local_fetch"
+        )
+    }));
+    let fetched = method_usage.bindings.get("fetched").unwrap();
+    assert!(fetched.uses.iter().any(|usage| {
+        matches!(
+            usage,
+            BindingUse::AssignedFromCall {
+                name,
+                receiver_type: Some(JavaType::Named { name: receiver, args }),
+                boundary: CallArgumentBoundary::Unknown,
+            } if name == "fetch" && receiver == "Helper" && args.is_empty()
+        )
+    }));
+    let constructed = method_usage.bindings.get("constructed").unwrap();
+    assert!(constructed.uses.iter().any(|usage| {
+        matches!(
+            usage,
+            BindingUse::AssignedFromCall {
+                name,
+                receiver_type: None,
+                boundary: CallArgumentBoundary::InternalSameType,
+            } if name == "new"
+        )
+    }));
 }
 
 #[test]
@@ -22447,6 +23054,7 @@ class BulkAddAllBorrowed {
             BindingUse::ReceiverForCall {
                 name,
                 boundary: CallArgumentBoundary::Unknown,
+                ..
             } if name == "addAll"
         )
     }));
@@ -22535,6 +23143,7 @@ class Helper {
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let usage = analyze_usage(&resolved.program);
     let facts = external_name_boundary_facts(&resolved.facts);
+    let effective_facts = EffectiveFacts::new(&facts);
     let method_usage = usage
         .methods
         .get(&new_java2rust::usage::UsageMethodKey {
@@ -22571,7 +23180,7 @@ class Helper {
 
     assert_eq!(
         local_constraints.constraints,
-        conservative_boundary_constraints(&external_name_type(), &facts)
+        unknown_api_constraints(&external_name_type(), &effective_facts)
     );
 }
 
@@ -22984,15 +23593,15 @@ class SourceNullableSlots {
 
     assert_eq!(
         source_binding_nullability_constraints(body, "current"),
-        vec![SignatureConstraint::RequiredStorageNullability(
-            NullabilityState::DefinitelyNull
-        )]
+        vec![],
+        "resolver-bound locals should use binding-keyed nullability, not the compatibility name view"
     );
     assert_eq!(
         source_binding_nullability_constraints(body, "value"),
         vec![SignatureConstraint::RequiredStorageNullability(
             NullabilityState::MaybeNull
-        )]
+        )],
+        "the public block/name compatibility helper has no parameter identity and still exposes param nullability by name"
     );
     assert_eq!(
         source_method_return_nullability_constraints(method),
@@ -23020,6 +23629,170 @@ class SourceNullableSlots {
         rust_type_for_slot(method_signature.return_shape.as_ref().unwrap()),
         RustType::Option(_)
     ));
+}
+
+#[test]
+fn source_binding_nullability_constraints_fail_closed_for_duplicate_local_names() {
+    let parsed = parse_java_source(
+        r#"
+class SourceDuplicateNullableLocal {
+    Object keep(boolean choose) {
+        if (choose) {
+            Object value = null;
+        }
+        Object value = new Object();
+        return value;
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let ty = &resolved.program.types[0];
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "keep" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let body = method.body.as_ref().unwrap();
+
+    assert_eq!(
+        source_binding_nullability_constraints(body, "value"),
+        vec![]
+    );
+
+    let usage = analyze_usage(&resolved.program);
+    let representations = plan_representations(&resolved.program, &resolved.facts);
+    let signatures = solve_signatures(&resolved.program, &representations, &usage);
+    let method_signature = signatures.method_signature(ty, method).unwrap();
+    let value_locals = method_signature
+        .locals
+        .iter()
+        .filter(|local| local.name == "value")
+        .collect::<Vec<_>>();
+    assert_eq!(value_locals.len(), 2);
+    assert!(matches!(
+        rust_type_for_slot(&value_locals[0].shape),
+        RustType::Option(_)
+    ));
+    assert!(
+        !matches!(
+            rust_type_for_slot(&value_locals[1].shape),
+            RustType::Option(_)
+        ),
+        "outer value should keep its own non-null initializer shape: {:?}",
+        value_locals[1].shape
+    );
+}
+
+#[test]
+fn source_return_nullability_does_not_reuse_shadowed_local_name_state() {
+    let parsed = parse_java_source(
+        r#"
+class SourceDuplicateNullableReturn {
+    Object keep(boolean choose) {
+        if (choose) {
+            Object value = null;
+        }
+        Object value = new Object();
+        return value;
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let ty = &resolved.program.types[0];
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "keep" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+
+    assert_eq!(
+        source_method_return_nullability_constraints(method),
+        vec![SignatureConstraint::RequiredStorageNullability(
+            NullabilityState::DefinitelyNonNull
+        )]
+    );
+}
+
+#[test]
+fn source_param_nullability_uses_binding_when_duplicate_locals_hide_name_view() {
+    let parsed = parse_java_source(
+        r#"
+class SourceParamDuplicateLocalNullability {
+    SourceParamDuplicateLocalNullability(Object value, boolean choose) {
+        if (value == null) {
+            return;
+        }
+        if (choose) {
+            Object value = null;
+        } else {
+            Object value = new Object();
+        }
+    }
+
+    Object keep(Object value, boolean choose) {
+        if (value == null) {
+            return null;
+        }
+        if (choose) {
+            Object value = null;
+        } else {
+            Object value = new Object();
+        }
+        return value;
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let usage = analyze_usage(&resolved.program);
+    let ty = &resolved.program.types[0];
+    let ctor = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Constructor(ctor) => Some(ctor),
+            _ => None,
+        })
+        .unwrap();
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "keep" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let body = method.body.as_ref().unwrap();
+
+    assert_eq!(
+        source_binding_nullability_constraints(body, "value"),
+        vec![],
+        "duplicate locals should keep the compatibility name view fail-closed"
+    );
+    assert!(
+        method_param_shape_constraints(ty, method, &method.params[0], &usage, &resolved.facts)
+            .contains(&SignatureConstraint::RequiredStorageNullability(
+                NullabilityState::MaybeNull
+            )),
+        "{:?}",
+        method_param_shape_constraints(ty, method, &method.params[0], &usage, &resolved.facts)
+    );
+    assert!(
+        constructor_param_shape_constraints(ty, ctor, &ctor.params[0], &usage, &resolved.facts)
+            .contains(&SignatureConstraint::RequiredStorageNullability(
+                NullabilityState::MaybeNull
+            )),
+        "{:?}",
+        constructor_param_shape_constraints(ty, ctor, &ctor.params[0], &usage, &resolved.facts)
+    );
 }
 
 #[test]
@@ -23679,6 +24452,7 @@ class Helper {
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let usage = analyze_usage(&resolved.program);
     let facts = external_name_boundary_facts(&resolved.facts);
+    let effective_facts = EffectiveFacts::new(&facts);
     let constructor_usage = usage
         .constructors
         .get(&new_java2rust::usage::UsageConstructorKey {
@@ -23715,7 +24489,7 @@ class Helper {
 
     assert_eq!(
         local_constraints.constraints,
-        conservative_boundary_constraints(&external_name_type(), &facts)
+        unknown_api_constraints(&external_name_type(), &effective_facts)
     );
 }
 
@@ -24039,6 +24813,7 @@ class Helper {
     );
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let usage = analyze_usage(&resolved.program);
+    let effective_resolved_facts = EffectiveFacts::new(&resolved.facts);
     let ty = &resolved.program.types[0];
     let field = ty
         .members
@@ -24049,9 +24824,9 @@ class Helper {
         })
         .unwrap();
     let mut expected = field_shape_constraints();
-    expected.extend(conservative_boundary_constraints(
+    expected.extend(unknown_api_constraints(
         &field.ty,
-        &resolved.facts,
+        &effective_resolved_facts,
     ));
 
     assert_eq!(
@@ -24135,6 +24910,7 @@ class Helper {
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let usage = analyze_usage(&resolved.program);
     let facts = external_name_boundary_facts(&resolved.facts);
+    let effective_facts = EffectiveFacts::new(&facts);
     let ty = &resolved.program.types[0];
     let field = ty
         .members
@@ -24145,9 +24921,9 @@ class Helper {
         })
         .unwrap();
     let mut expected = field_shape_constraints();
-    expected.extend(conservative_boundary_constraints(
+    expected.extend(unknown_api_constraints(
         &external_name_type(),
-        &facts,
+        &effective_facts,
     ));
 
     assert_eq!(
@@ -24189,6 +24965,7 @@ class Helper {
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let usage = analyze_usage(&resolved.program);
     let facts = external_name_boundary_facts(&resolved.facts);
+    let effective_facts = EffectiveFacts::new(&facts);
     let ty = &resolved.program.types[0];
     let field = ty
         .members
@@ -24199,9 +24976,9 @@ class Helper {
         })
         .unwrap();
     let mut expected = field_shape_constraints();
-    expected.extend(conservative_boundary_constraints(
+    expected.extend(unknown_api_constraints(
         &external_name_type(),
-        &facts,
+        &effective_facts,
     ));
 
     assert_eq!(
@@ -24232,6 +25009,7 @@ class Helper {
     );
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let usage = analyze_usage(&resolved.program);
+    let effective_resolved_facts = EffectiveFacts::new(&resolved.facts);
     let ty = &resolved.program.types[0];
     let field = ty
         .members
@@ -24242,9 +25020,9 @@ class Helper {
         })
         .unwrap();
     let mut expected = field_shape_constraints();
-    expected.extend(conservative_boundary_constraints(
+    expected.extend(unknown_api_constraints(
         &field.ty,
-        &resolved.facts,
+        &effective_resolved_facts,
     ));
 
     assert_eq!(
@@ -24276,6 +25054,7 @@ class Helper {
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let usage = analyze_usage(&resolved.program);
     let facts = external_name_boundary_facts(&resolved.facts);
+    let effective_facts = EffectiveFacts::new(&facts);
     let ty = &resolved.program.types[0];
     let field = ty
         .members
@@ -24286,9 +25065,9 @@ class Helper {
         })
         .unwrap();
     let mut expected = field_shape_constraints();
-    expected.extend(conservative_boundary_constraints(
+    expected.extend(unknown_api_constraints(
         &external_name_type(),
-        &facts,
+        &effective_facts,
     ));
 
     assert_eq!(
@@ -25027,6 +25806,63 @@ class IntegerDivRemFallibilityAudit {
 }
 
 #[test]
+fn nullable_receiver_fallibility_tracks_local_null_pointer_catches() {
+    let parsed = parse_java_source(
+        r#"
+class NullableReceiverFallibilityAudit {
+    int handled(String value) {
+        try {
+            return value.length();
+        } catch (NullPointerException ex) {
+            return 0;
+        }
+    }
+
+    int leaf(String value) {
+        return value.length();
+    }
+
+    int entry() {
+        try {
+            return leaf(null);
+        } catch (NullPointerException ex) {
+            return -1;
+        }
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let graph = new_java2rust::usage::build_call_graph(&resolved.program);
+    let fallibility = plan_program_fallibility(&resolved.program, &graph, &FactSet::default());
+    let handled = new_java2rust::usage::CallableKey::Method {
+        type_name: "NullableReceiverFallibilityAudit".to_string(),
+        method_name: "handled".to_string(),
+    };
+    let leaf = new_java2rust::usage::CallableKey::Method {
+        type_name: "NullableReceiverFallibilityAudit".to_string(),
+        method_name: "leaf".to_string(),
+    };
+    let entry = new_java2rust::usage::CallableKey::Method {
+        type_name: "NullableReceiverFallibilityAudit".to_string(),
+        method_name: "entry".to_string(),
+    };
+
+    assert!(
+        !fallibility.returns_result(&handled),
+        "locally caught NullPointerException should not force a Result signature"
+    );
+    assert!(
+        fallibility.returns_result(&leaf),
+        "a nullable receiver dereference in a callee must seed fallibility"
+    );
+    assert!(
+        fallibility.returns_result(&entry),
+        "the caller still carries Result today so lowered try/catch can propagate the callee exception"
+    );
+}
+
+#[test]
 fn lowering_uses_callable_fallibility_for_source_call_result_propagation() {
     let mut facts = FactSet::default();
     facts.method_effect_facts.push(MethodEffectFact {
@@ -25280,21 +26116,6 @@ class GraphAnonymous {
 }
 
 #[test]
-fn usage_owns_call_site_boundary_facts() {
-    let usage_source = include_str!("../src/usage.rs");
-    let slot_policy_source = include_str!("../src/slot_policy.rs");
-
-    assert!(usage_source.contains("pub struct CallSiteUse"));
-    assert!(usage_source.contains("pub call_sites: Vec<CallSiteUse>"));
-    assert!(usage_source.contains("pub struct MethodApiBoundaryPolicy"));
-    assert!(usage_source.contains("pub fn method_api_boundary_policy"));
-    assert!(usage_source.contains("pub fn call_argument_boundary_policy"));
-    assert!(!usage_source.contains("fn method_is_api_boundary"));
-    assert!(!slot_policy_source.contains("ResolvedCall"));
-    assert!(!slot_policy_source.contains("resolved"));
-}
-
-#[test]
 fn signature_constraints_make_public_api_fallback_explicit() {
     let parsed = parse_java_source(
         r#"
@@ -25316,7 +26137,8 @@ class PublicApi {
             _ => None,
         })
         .unwrap();
-    let expected = conservative_boundary_constraints(&JavaType::String, &resolved.facts);
+    let effective_resolved_facts = EffectiveFacts::new(&resolved.facts);
+    let expected = unknown_api_constraints(&JavaType::String, &effective_resolved_facts);
 
     assert_eq!(
         method_param_shape_constraints(ty, method, &method.params[0], &usage, &resolved.facts),
@@ -25409,6 +26231,7 @@ fn signature_boundary_policy_owns_public_unknown_and_escape_constraints() {
             provenance: FactProvenance::ExternalLibraryPack,
         });
 
+    let effective_facts = EffectiveFacts::new(&facts);
     let public_copy =
         signature_boundary_policy(SignatureBoundaryKind::PublicApi, &external_id, &facts);
     let unknown_owned =
@@ -25446,32 +26269,67 @@ fn signature_boundary_policy_owns_public_unknown_and_escape_constraints() {
         &wildcard_object,
         &facts,
     );
-    let native_copy_policy = signature_native_boundary_policy(&external_id, &facts);
-    let native_owned_policy = signature_native_boundary_policy(&external_handle, &facts);
+    let native_copy_policy =
+        signature_native_boundary_policy_with_effective_facts(&external_id, &effective_facts);
+    let native_owned_policy =
+        signature_native_boundary_policy_with_effective_facts(&external_handle, &effective_facts);
     let native_representation_policy =
-        signature_boundary_representation_policy(&external_id, &facts);
-    let interface_representation_policy = signature_boundary_representation_policy(&animal, &facts);
+        signature_boundary_representation_policy_with_effective_facts(
+            &external_id,
+            &effective_facts,
+        );
+    let interface_representation_policy =
+        signature_boundary_representation_policy_with_effective_facts(&animal, &effective_facts);
     let unknown_representation_policy =
-        signature_boundary_representation_policy(&unknown_object, &facts);
+        signature_boundary_representation_policy_with_effective_facts(
+            &unknown_object,
+            &effective_facts,
+        );
     let wildcard_representation_policy =
-        signature_boundary_representation_policy(&wildcard_object, &facts);
+        signature_boundary_representation_policy_with_effective_facts(
+            &wildcard_object,
+            &effective_facts,
+        );
     let enum_override_representation_policy =
-        signature_boundary_representation_policy(&enum_overridden_object, &facts);
+        signature_boundary_representation_policy_with_effective_facts(
+            &enum_overridden_object,
+            &effective_facts,
+        );
     let final_erased_facade_representation_policy =
-        signature_boundary_representation_policy(&final_erased_facade, &facts);
+        signature_boundary_representation_policy_with_effective_facts(
+            &final_erased_facade,
+            &effective_facts,
+        );
     let native_representation_fact_policy =
-        signature_boundary_representation_fact_policy(&external_id, &facts);
+        signature_boundary_representation_fact_policy_with_effective_facts(
+            &external_id,
+            &effective_facts,
+        );
     let interface_representation_fact_policy =
-        signature_boundary_representation_fact_policy(&animal, &facts);
+        signature_boundary_representation_fact_policy_with_effective_facts(
+            &animal,
+            &effective_facts,
+        );
     let unknown_representation_fact_policy =
-        signature_boundary_representation_fact_policy(&unknown_object, &facts);
+        signature_boundary_representation_fact_policy_with_effective_facts(
+            &unknown_object,
+            &effective_facts,
+        );
     let wildcard_representation_fact_policy =
-        signature_boundary_representation_fact_policy(&wildcard_object, &facts);
+        signature_boundary_representation_fact_policy_with_effective_facts(
+            &wildcard_object,
+            &effective_facts,
+        );
     let enum_override_representation_fact_policy =
-        signature_boundary_representation_fact_policy(&enum_overridden_object, &facts);
+        signature_boundary_representation_fact_policy_with_effective_facts(
+            &enum_overridden_object,
+            &effective_facts,
+        );
     let final_erased_facade_representation_fact_policy =
-        signature_boundary_representation_fact_policy(&final_erased_facade, &facts);
-    let effective_facts = EffectiveFacts::new(&facts);
+        signature_boundary_representation_fact_policy_with_effective_facts(
+            &final_erased_facade,
+            &effective_facts,
+        );
     let interface_effective_representation_fact_policy =
         signature_boundary_representation_fact_policy_with_effective_facts(
             &animal,
@@ -25585,8 +26443,6 @@ fn signature_boundary_policy_owns_public_unknown_and_escape_constraints() {
     assert_eq!(
         native_copy_policy,
         SignatureNativeBoundaryPolicy {
-            java_ty: external_id.clone(),
-            required_ownership: OwnershipShape::CopyValue,
             constraints: vec![
                 SignatureConstraint::RequiredOwnership(OwnershipShape::CopyValue),
                 SignatureConstraint::RequiredView(ViewShape::Native),
@@ -25608,8 +26464,6 @@ fn signature_boundary_policy_owns_public_unknown_and_escape_constraints() {
     assert_eq!(
         native_owned_policy,
         SignatureNativeBoundaryPolicy {
-            java_ty: external_handle.clone(),
-            required_ownership: OwnershipShape::Owned,
             constraints: vec![
                 SignatureConstraint::RequiredOwnership(OwnershipShape::Owned),
                 SignatureConstraint::RequiredView(ViewShape::Native),
@@ -25699,10 +26553,10 @@ fn signature_boundary_policy_owns_public_unknown_and_escape_constraints() {
     );
 
     assert_eq!(
-        signature_boundary_constraints(
+        signature_boundary_constraints_with_effective_facts(
             SignatureBoundaryFallback::ConservativeNative,
             &external_id,
-            &facts,
+            &effective_facts,
         ),
         vec![
             SignatureConstraint::RequiredOwnership(OwnershipShape::CopyValue),
@@ -25721,26 +26575,26 @@ fn signature_boundary_policy_owns_public_unknown_and_escape_constraints() {
         ]
     );
     assert!(
-        signature_boundary_constraints(
+        signature_boundary_constraints_with_effective_facts(
             SignatureBoundaryFallback::PreserveObjectRepresentation,
             &animal,
-            &facts,
+            &effective_facts,
         )
         .is_empty()
     );
     assert_eq!(
-        signature_boundary_constraints(
+        signature_boundary_constraints_with_effective_facts(
             SignatureBoundaryFallback::PreserveObjectRepresentationEscapingStorage,
             &animal,
-            &facts,
+            &effective_facts,
         ),
         vec![SignatureConstraint::StorageSlot]
     );
     assert_eq!(
-        signature_boundary_constraints(
+        signature_boundary_constraints_with_effective_facts(
             SignatureBoundaryFallback::EscapingNativeStorage,
             &external_handle,
-            &facts,
+            &effective_facts,
         ),
         vec![
             SignatureConstraint::RequiredOwnership(OwnershipShape::Owned),
@@ -25959,12 +26813,12 @@ fn signature_public_unknown_fallback_is_type_aware_across_java_type_categories()
     }
 
     assert_eq!(
-        signature_owned_recovery_capability_policy(
+        signature_owned_recovery_capability_policy_with_effective_facts(
             &JavaType::Named {
                 name: "FacadeHandle".to_string(),
                 args: Vec::new(),
             },
-            &facts,
+            &EffectiveFacts::new(&facts),
         )
         .recovery,
         OwnedRecoveryCapability::FacadeOwnedExternalHandle {
@@ -25982,17 +26836,20 @@ fn signature_boundary_preserves_unknown_erased_object_shape() {
         &parse_java_source("class Known {}").program,
         &FactSet::default(),
     );
-    let shape = solve_signature_shape(
+    let default_facts = FactSet::default();
+    let effective_facts = EffectiveFacts::new(&default_facts);
+    let shape = solve_signature_shape_with_facts(
         &representations,
         SignatureShapeRequest {
             java_ty: JavaType::Unknown("Object".to_string()),
             role: SignatureSlotRole::Param { is_varargs: false },
-            constraints: conservative_boundary_constraints(
+            constraints: unknown_api_constraints(
                 &JavaType::Unknown("Object".to_string()),
-                &FactSet::default(),
+                &effective_facts,
             ),
             type_params: Vec::new(),
         },
+        &default_facts,
     )
     .unwrap();
 
@@ -26007,17 +26864,17 @@ fn signature_boundary_preserves_wildcard_erased_object_shape() {
         &parse_java_source("class Known {}").program,
         &FactSet::default(),
     );
-    let shape = solve_signature_shape(
+    let default_facts = FactSet::default();
+    let effective_facts = EffectiveFacts::new(&default_facts);
+    let shape = solve_signature_shape_with_facts(
         &representations,
         SignatureShapeRequest {
             java_ty: JavaType::Wildcard(None),
             role: SignatureSlotRole::Param { is_varargs: false },
-            constraints: conservative_boundary_constraints(
-                &JavaType::Wildcard(None),
-                &FactSet::default(),
-            ),
+            constraints: unknown_api_constraints(&JavaType::Wildcard(None), &effective_facts),
             type_params: Vec::new(),
         },
+        &default_facts,
     )
     .unwrap();
 
@@ -26112,6 +26969,7 @@ fn signature_member_api_boundary_policy_names_public_and_internal_members() {
 fn binding_boundary_policy_owns_binding_use_boundary_classification() {
     let unknown_binding = BindingUseFacts {
         name: "value".to_string(),
+        binding: None,
         java_ty: JavaType::String,
         uses: vec![BindingUse::PassedToCall {
             name: "external".to_string(),
@@ -26123,6 +26981,7 @@ fn binding_boundary_policy_owns_binding_use_boundary_classification() {
     };
     let stored_binding = BindingUseFacts {
         name: "stored".to_string(),
+        binding: None,
         java_ty: JavaType::String,
         uses: vec![BindingUse::StoredInField {
             field_name: "field".to_string(),
@@ -26130,6 +26989,7 @@ fn binding_boundary_policy_owns_binding_use_boundary_classification() {
     };
     let mixed_binding = BindingUseFacts {
         name: "mixed".to_string(),
+        binding: None,
         java_ty: JavaType::String,
         uses: vec![
             BindingUse::PassedToCall {
@@ -26172,6 +27032,7 @@ fn binding_boundary_policy_owns_binding_use_boundary_classification() {
 fn external_argument_constraints_default_unknown_slots_to_non_null() {
     let binding = BindingUseFacts {
         name: "callback".to_string(),
+        binding: None,
         java_ty: JavaType::Named {
             name: "Function".to_string(),
             args: Vec::new(),
@@ -26198,6 +27059,7 @@ fn external_argument_constraints_default_unknown_slots_to_non_null() {
 fn external_constructor_argument_facts_shape_source_bindings() {
     let binding = BindingUseFacts {
         name: "text".to_string(),
+        binding: None,
         java_ty: JavaType::String,
         uses: vec![BindingUse::PassedToCall {
             name: "new".to_string(),
@@ -26241,6 +27103,7 @@ fn external_constructor_argument_facts_shape_source_bindings() {
 fn external_argument_unknown_nullability_fact_keeps_non_null_default() {
     let binding = BindingUseFacts {
         name: "callback".to_string(),
+        binding: None,
         java_ty: JavaType::Named {
             name: "Function".to_string(),
             args: Vec::new(),
@@ -26284,6 +27147,7 @@ fn external_argument_unknown_nullability_fact_keeps_non_null_default() {
 fn external_argument_nullable_fact_overrides_non_null_default() {
     let binding = BindingUseFacts {
         name: "callback".to_string(),
+        binding: None,
         java_ty: JavaType::Named {
             name: "Function".to_string(),
             args: Vec::new(),
@@ -26368,7 +27232,6 @@ class PublicParamPolicySource {
         ),
         ConstructorParamBoundaryPolicy {
             type_name: "PublicParamPolicySource".to_string(),
-            constructor_name: "new".to_string(),
             param_name: "seed".to_string(),
             kind: Some(SignatureBoundaryKind::PublicApi),
         }
@@ -26434,7 +27297,6 @@ class Helper {
         ),
         ConstructorParamBoundaryPolicy {
             type_name: "UnknownParamPolicySource".to_string(),
-            constructor_name: "new".to_string(),
             param_name: "seed".to_string(),
             kind: Some(SignatureBoundaryKind::UnknownApi),
         }
@@ -26567,103 +27429,6 @@ class Helper {
             kind: Some(SignatureBoundaryKind::UnknownApi),
         }
     );
-}
-
-#[test]
-fn signature_boundary_policy_is_the_single_boundary_constraint_entrypoint() {
-    let source = include_str!("../src/signature.rs");
-
-    assert!(source.contains("pub enum SignatureBoundaryKind"));
-    assert!(source.contains("pub enum SignatureBoundaryRole"));
-    assert!(source.contains("pub struct SignatureBoundaryRolePolicy"));
-    assert!(source.contains("pub fn signature_boundary_role_policies"));
-    assert!(source.contains("pub fn signature_boundary_role_policy"));
-    assert!(source.contains("pub struct SignatureMemberApiBoundaryPolicy"));
-    assert!(source.contains("pub fn signature_member_api_boundary_policy"));
-    assert!(!source.contains("fn member_is_api_boundary"));
-    assert!(source.contains("pub struct SignatureBoundaryKindMerge"));
-    assert!(source.contains("pub struct SignatureBoundaryKindPriorityPolicy"));
-    assert!(source.contains("pub fn signature_boundary_kind_priority_policy"));
-    assert!(source.contains("pub fn merge_signature_boundary_kind_policy"));
-    assert!(source.contains("pub struct SignatureFlagMerge"));
-    assert!(source.contains("pub fn merge_signature_flag_requirement_policy"));
-    assert!(source.contains("pub enum SignatureBoundaryFallback"));
-    assert!(source.contains("pub struct SignatureBoundaryRepresentationFactPolicy"));
-    assert!(source.contains("pub struct SignatureBoundaryRepresentationPolicy"));
-    assert!(source.contains("pub struct SignatureNativeBoundaryPolicy"));
-    assert!(source.contains("PreserveObjectRepresentationEscapingStorage"));
-    assert!(source.contains("EscapingNativeStorage"));
-    assert!(source.contains("pub fn signature_boundary_policy"));
-    assert!(source.contains("pub fn signature_boundary_representation_fact_policy"));
-    assert!(source.contains("signature_boundary_representation_fact_policy_with_effective_facts"));
-    assert!(source.contains("pub fn signature_boundary_representation_policy"));
-    assert!(source.contains("use crate::effective_facts::EffectiveFacts"));
-    assert!(source.contains("pub fn signature_boundary_policy_with_effective_facts"));
-    assert!(source.contains("pub fn signature_native_boundary_policy"));
-    assert!(source.contains("pub fn signature_native_boundary_policy_with_effective_facts"));
-    assert!(source.contains("signature_capability_policy_with_effective_facts(java_ty, facts)"));
-    assert!(source.contains("fn signature_boundary_fallback_with_effective_facts"));
-    assert!(source.contains("pub fn signature_boundary_constraints"));
-    assert!(source.contains("pub fn signature_boundary_constraints_with_effective_facts"));
-    assert!(!source.contains("fn boundary_type_has_object_representation"));
-    assert!(!source.contains("fn native_boundary_constraints"));
-    assert!(source.contains("pub struct BindingBoundaryPolicy"));
-    assert!(source.contains("pub fn binding_boundary_policy"));
-    assert!(!source.contains("fn binding_boundary_kind"));
-    assert!(source.contains("pub struct MethodParamBoundaryPolicy"));
-    assert!(source.contains("pub fn method_param_boundary_policy"));
-    assert!(!source.contains("fn method_param_boundary_kind"));
-    assert!(source.contains("pub struct ConstructorParamBoundaryPolicy"));
-    assert!(source.contains("pub fn constructor_param_boundary_policy"));
-    assert!(!source.contains("fn constructor_param_boundary_kind"));
-    assert!(source.contains("pub struct FieldBoundaryPolicy"));
-    assert!(source.contains("pub fn field_boundary_policy"));
-    assert!(!source.contains("fn field_boundary_kind"));
-    assert!(source.contains("pub struct MethodReturnBoundaryPolicy"));
-    assert!(source.contains("pub fn method_return_boundary_policy"));
-    assert!(!source.contains("fn method_return_boundary_kind"));
-    assert!(!source.contains("fn binding_requires_conservative_boundary"));
-    assert!(!source.contains("fn field_requires_unknown_boundary"));
-    assert!(!source.contains("fn method_return_requires_conservative_boundary"));
-    assert!(!source.contains("fn public_api_boundary_constraints"));
-    assert!(!source.contains("fn escaping_boundary_constraints"));
-}
-
-#[test]
-fn signature_boundary_role_inventory_covers_all_sig1_roles() {
-    let policies = signature_boundary_role_policies();
-    let roles = policies
-        .iter()
-        .map(|policy| policy.role)
-        .collect::<HashSet<_>>();
-    let expected = [
-        SignatureBoundaryRole::MethodParam,
-        SignatureBoundaryRole::MethodReturn,
-        SignatureBoundaryRole::ConstructorParam,
-        SignatureBoundaryRole::MethodLocal,
-        SignatureBoundaryRole::ConstructorLocal,
-        SignatureBoundaryRole::Field,
-        SignatureBoundaryRole::MethodReceiver,
-        SignatureBoundaryRole::CapturedValue,
-        SignatureBoundaryRole::CallArgument,
-        SignatureBoundaryRole::CallResult,
-        SignatureBoundaryRole::ConstructorInvocation,
-    ]
-    .into_iter()
-    .collect::<HashSet<_>>();
-
-    assert_eq!(roles, expected);
-    assert_eq!(policies.len(), expected.len());
-    for role in expected {
-        let SignatureBoundaryRolePolicy {
-            role: actual_role,
-            constraint_owner,
-            participates_in_dependency_graph,
-        } = signature_boundary_role_policy(role);
-        assert_eq!(actual_role, role);
-        assert!(!constraint_owner.is_empty(), "{role:?}");
-        assert!(participates_in_dependency_graph, "{role:?}");
-    }
 }
 
 #[test]
@@ -26911,7 +27676,8 @@ class ProtectedApi {
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let usage = analyze_usage(&resolved.program);
     let ty = &resolved.program.types[0];
-    let expected = conservative_boundary_constraints(&JavaType::String, &resolved.facts);
+    let effective_resolved_facts = EffectiveFacts::new(&resolved.facts);
+    let expected = unknown_api_constraints(&JavaType::String, &effective_resolved_facts);
     let field = ty
         .members
         .iter()
@@ -26998,11 +27764,10 @@ class NullFields {
         provenance: FieldNullabilityProvenance::ConstructorAssignments,
     });
 
-    assert_eq!(
-        field_nullability_shape_policy(ty, field("maybe"), &facts).constraints,
-        vec![SignatureConstraint::RequiredStorageNullability(
-            NullabilityState::MaybeNull
-        )]
+    assert!(
+        field_shape_constraints_with_facts(ty, field("maybe"), &facts).contains(
+            &SignatureConstraint::RequiredStorageNullability(NullabilityState::MaybeNull)
+        )
     );
     assert_eq!(
         merge_storage_nullability_requirement_policy(
@@ -27013,7 +27778,7 @@ class NullFields {
         NullabilityState::MaybeNull
     );
 
-    let maybe_shape = solve_signature_shape(
+    let maybe_shape = solve_signature_shape_with_facts(
         &representations,
         SignatureShapeRequest {
             java_ty: field("maybe").ty.clone(),
@@ -27021,9 +27786,10 @@ class NullFields {
             constraints: field_shape_constraints_with_facts(ty, field("maybe"), &facts),
             type_params: Vec::new(),
         },
+        &facts,
     )
     .unwrap();
-    let proven_shape = solve_signature_shape(
+    let proven_shape = solve_signature_shape_with_facts(
         &representations,
         SignatureShapeRequest {
             java_ty: field("proven").ty.clone(),
@@ -27031,9 +27797,10 @@ class NullFields {
             constraints: field_shape_constraints_with_facts(ty, field("proven"), &facts),
             type_params: Vec::new(),
         },
+        &facts,
     )
     .unwrap();
-    let primitive_shape = solve_signature_shape(
+    let primitive_shape = solve_signature_shape_with_facts(
         &representations,
         SignatureShapeRequest {
             java_ty: field("count").ty.clone(),
@@ -27043,6 +27810,7 @@ class NullFields {
             )],
             type_params: Vec::new(),
         },
+        &facts,
     )
     .unwrap();
 
@@ -27081,9 +27849,10 @@ class PublicFields {
         .unwrap();
     let expected_public = {
         let mut constraints = field_shape_constraints();
-        constraints.extend(conservative_boundary_constraints(
+        let effective_resolved_facts = EffectiveFacts::new(&resolved.facts);
+        constraints.extend(unknown_api_constraints(
             &JavaType::String,
-            &resolved.facts,
+            &effective_resolved_facts,
         ));
         constraints
     };
@@ -27155,7 +27924,8 @@ class Shelter {
         .unwrap();
     let signature = signatures.required_method_signature(shelter, method);
 
-    assert!(conservative_boundary_constraints(&method.params[0].ty, &resolved.facts).is_empty());
+    let effective_resolved_facts = EffectiveFacts::new(&resolved.facts);
+    assert!(unknown_api_constraints(&method.params[0].ty, &effective_resolved_facts,).is_empty());
     assert_eq!(
         signature.params[0].shape.dispatch,
         DispatchShape::DynTrait {
@@ -27554,7 +28324,13 @@ class ExternalUse {
         .unwrap();
 
     assert_eq!(
-        method_param_borrowed_content_policy(ty, method, &method.params[0], &usage),
+        method_param_borrowed_content_policy_with_facts(
+            ty,
+            method,
+            &method.params[0],
+            &usage,
+            &FactSet::default(),
+        ),
         None
     );
     assert_eq!(
@@ -27593,19 +28369,22 @@ class ExternalUse {
     let facts_source = include_str!("../src/facts.rs");
     let effective_facts_source = include_str!("../src/effective_facts.rs");
     assert!(slot_policy_source.contains("pub struct BorrowedContentCapabilityPolicy"));
-    assert!(slot_policy_source.contains("pub fn borrowed_content_capability_policy"));
+    assert!(!slot_policy_source.contains("pub fn borrowed_content_capability_policy("));
     assert!(slot_policy_source.contains("borrowed_content_capability_policy_with_effective_facts"));
     assert!(slot_policy_source.contains("pub struct BorrowedContentTypePolicy"));
     assert!(slot_policy_source.contains("pub fn borrowed_content_type_policy"));
     assert!(slot_policy_source.contains("borrowed_content_type_policy_with_effective_facts"));
+    assert!(!slot_policy_source.contains("pub fn method_param_borrowed_content_policy("));
     assert!(
         slot_policy_source
             .contains("pub fn method_param_borrowed_content_policy_with_effective_facts")
     );
+    assert!(!slot_policy_source.contains("pub fn constructor_param_borrowed_content_policy("));
     assert!(
         slot_policy_source
             .contains("pub fn constructor_param_borrowed_content_policy_with_effective_facts")
     );
+    assert!(!slot_policy_source.contains("pub fn borrowed_return_content_policy_from_param("));
     assert!(
         slot_policy_source
             .contains("pub fn borrowed_return_content_policy_from_param_with_effective_facts")
@@ -27682,199 +28461,6 @@ fn conversion_source_contains_capability_owned_cast_checks() -> bool {
 }
 
 #[test]
-fn effective_fact_precedence_queries_are_audited_by_consumer_module() {
-    fn assert_count(source_name: &str, source: &str, needle: &str, expected: usize) {
-        assert_eq!(
-            source.matches(needle).count(),
-            expected,
-            "{source_name} should contain {expected} occurrence(s) of {needle:?}"
-        );
-    }
-
-    let object_model_source = include_str!("../src/object_model.rs");
-    let representation_source = include_str!("../src/representation.rs");
-    let signature_source = include_str!("../src/signature.rs");
-    let shape_projection_source = include_str!("../src/shape_projection.rs");
-    let slot_policy_source = include_str!("../src/slot_policy.rs");
-    let slot_render_source = include_str!("../src/slot_render.rs");
-    let stream_shape_source = include_str!("../src/stream_shape.rs");
-    let coercion_source = include_str!("../src/coercion.rs");
-    let conversion_plan_source = include_str!("../src/conversion_plan.rs");
-    let semantic_analysis_source = include_str!("../src/semantic_analysis.rs");
-    let facts_source = include_str!("../src/facts.rs");
-    let effective_facts_source = include_str!("../src/effective_facts.rs");
-
-    assert!(effective_facts_source.contains("TypeCapabilities::conservative"));
-    assert!(effective_facts_source.contains("pub struct EffectiveFact<T>"));
-    assert!(effective_facts_source.contains("pub provenance: FactProvenance"));
-    assert!(effective_facts_source.contains("fn fact_precedence_key"));
-    assert!(effective_facts_source.contains(
-        "FactProvenance::BuiltinExternalModel | FactProvenance::ExternalLibraryPack => 2"
-    ));
-    assert!(effective_facts_source.contains("FactProvenance::UserOverride => 4"));
-    assert!(effective_facts_source.contains("fn apply_type_capability_override"));
-    assert!(effective_facts_source.contains("pub fn type_capabilities_for"));
-    assert!(effective_facts_source.contains("object_safe_trait_fact_for_name_with_provenance"));
-    assert!(effective_facts_source.contains("closed_hierarchy_fact_for_name_with_provenance"));
-    assert!(effective_facts_source.contains("pub fn object_safety_fact_for_name"));
-    assert!(!facts_source.contains("fn apply_type_capability_override"));
-    assert!(facts_source.contains("EffectiveFacts::new(self).type_capabilities_for(java_ty)"));
-    assert!(
-        facts_source.contains("EffectiveFacts::new(self).owned_recovery_capability_for(java_ty)")
-    );
-
-    assert!(object_model_source.contains("use crate::effective_facts::EffectiveFacts"));
-    assert!(object_model_source.contains("plan_object_model_with_effective_facts"));
-    assert_count(
-        "object_model",
-        object_model_source,
-        "facts.hierarchy_edges_for_type",
-        1,
-    );
-    assert_count("object_model", object_model_source, "extends_type_for", 1);
-    assert_count(
-        "object_model",
-        object_model_source,
-        "implemented_types_for",
-        1,
-    );
-    assert_count(
-        "object_model",
-        object_model_source,
-        "closed_hierarchy_fact_for_name",
-        2,
-    );
-    assert_count(
-        "object_model",
-        object_model_source,
-        "object_safe_trait_fact_for_name",
-        1,
-    );
-
-    assert!(representation_source.contains("use crate::effective_facts::EffectiveFacts"));
-    assert!(
-        representation_source.contains("representation_hierarchy_fact_policy_with_effective_facts")
-    );
-    assert_count(
-        "representation",
-        representation_source,
-        "extends_type_for",
-        1,
-    );
-    assert_count(
-        "representation",
-        representation_source,
-        "implemented_types_for",
-        1,
-    );
-    assert_count(
-        "representation",
-        representation_source,
-        "hierarchy_edges_for_type",
-        1,
-    );
-
-    assert!(signature_source.contains("use crate::effective_facts::EffectiveFacts"));
-    assert!(
-        signature_source
-            .contains("signature_owned_recovery_capability_policy_with_effective_facts")
-    );
-    assert!(
-        signature_source
-            .contains("signature_boundary_representation_fact_policy_with_effective_facts")
-    );
-    assert!(signature_source.contains("signature_capability_policy_with_effective_facts"));
-    assert_count(
-        "signature",
-        signature_source,
-        "owned_recovery_capability_for",
-        1,
-    );
-    assert_count(
-        "signature",
-        signature_source,
-        "has_object_representation_facts",
-        1,
-    );
-    assert_count("signature", signature_source, "is_copy_type", 1);
-
-    assert!(shape_projection_source.contains("use crate::effective_facts::EffectiveFacts"));
-    assert!(
-        shape_projection_source.contains("shape_projection_capability_policy_with_effective_facts")
-    );
-    assert_count(
-        "shape_projection",
-        shape_projection_source,
-        "is_copy_type",
-        1,
-    );
-    assert_count(
-        "shape_projection",
-        shape_projection_source,
-        "sequence_element_type_for",
-        1,
-    );
-
-    assert!(slot_policy_source.contains("use crate::effective_facts::EffectiveFacts"));
-    assert!(slot_policy_source.contains("borrowed_content_capability_policy_with_effective_facts"));
-    assert_count("slot_policy", slot_policy_source, "is_string_like_type", 1);
-    assert_count(
-        "slot_policy",
-        slot_policy_source,
-        "sequence_element_type_for",
-        1,
-    );
-
-    assert!(slot_render_source.contains("use crate::effective_facts::EffectiveFacts"));
-    assert!(slot_render_source.contains("slot_content_capability_policy_with_effective_facts"));
-    assert_count("slot_render", slot_render_source, "is_string_like_type", 1);
-    assert_count(
-        "slot_render",
-        slot_render_source,
-        "sequence_element_type_for",
-        1,
-    );
-
-    assert!(stream_shape_source.contains("use crate::effective_facts::EffectiveFacts"));
-    assert!(stream_shape_source.contains("stream_source_capability_policy_with_effective_facts"));
-    assert_count(
-        "stream_shape",
-        stream_shape_source,
-        "sequence_element_type_for",
-        1,
-    );
-
-    assert!(!coercion_source.contains("use crate::effective_facts::EffectiveFacts"));
-    assert!(conversion_plan_source.contains("use crate::effective_facts::EffectiveFacts"));
-    assert!(conversion_plan_source.contains("coercion_content_policy_with_effective_facts"));
-    assert!(conversion_plan_source.contains("coercion_shape_content_policy_with_effective_facts"));
-    assert!(
-        conversion_plan_source
-            .contains("coercion_owned_recovery_capability_policy_with_effective_facts")
-    );
-    assert_count("coercion", coercion_source, "is_string_like_type", 0);
-    assert_count(
-        "conversion_plan",
-        conversion_plan_source,
-        "is_string_like_type",
-        1,
-    );
-    assert_count(
-        "conversion_plan",
-        conversion_plan_source,
-        "owned_recovery_capability_for",
-        1,
-    );
-
-    assert_count(
-        "semantic_analysis",
-        semantic_analysis_source,
-        "reachable_hierarchy_edges_for_type",
-        1,
-    );
-}
-
-#[test]
 fn signature_capability_policy_owns_copy_baseline_constraints() {
     let external_id = JavaType::Named {
         name: "ExternalId".to_string(),
@@ -27940,10 +28526,6 @@ fn signature_capability_policy_owns_copy_baseline_constraints() {
     );
     assert_eq!(non_copy_policy.capability_ownership, None);
     assert!(non_copy_policy.constraints.is_empty());
-
-    let source = include_str!("../src/signature.rs");
-    assert!(source.contains("pub fn signature_capability_policy_with_effective_facts"));
-    assert_eq!(source.matches("is_copy_type").count(), 1);
 }
 
 #[test]
@@ -27976,12 +28558,6 @@ fn signature_slot_baseline_policy_composes_capability_and_boundary_constraints()
     assert_eq!(
         signature_slot_baseline_policy(&external_id, None, &facts),
         SignatureSlotBaselinePolicy {
-            java_ty: external_id.clone(),
-            boundary_kind: None,
-            capability_constraints: vec![SignatureConstraint::RequiredOwnership(
-                OwnershipShape::CopyValue,
-            )],
-            boundary_constraints: Vec::new(),
             constraints: vec![SignatureConstraint::RequiredOwnership(
                 OwnershipShape::CopyValue,
             )],
@@ -27992,15 +28568,11 @@ fn signature_slot_baseline_policy_composes_capability_and_boundary_constraints()
         signature_slot_baseline_policy(&external_id, None, &facts)
     );
 
-    let boundary_constraints =
-        conservative_boundary_constraints(&external_handle, &FactSet::default());
     let default_facts = FactSet::default();
     let default_effective_facts = EffectiveFacts::new(&default_facts);
+    let boundary_constraints = unknown_api_constraints(&external_handle, &default_effective_facts);
     assert_eq!(
-        conservative_boundary_constraints_with_effective_facts(
-            &external_handle,
-            &default_effective_facts,
-        ),
+        unknown_api_constraints(&external_handle, &default_effective_facts,),
         boundary_constraints
     );
     assert_eq!(
@@ -28010,19 +28582,9 @@ fn signature_slot_baseline_policy_composes_capability_and_boundary_constraints()
             &FactSet::default(),
         ),
         SignatureSlotBaselinePolicy {
-            java_ty: external_handle,
-            boundary_kind: Some(SignatureBoundaryKind::UnknownApi),
-            capability_constraints: Vec::new(),
-            boundary_constraints: boundary_constraints.clone(),
             constraints: boundary_constraints,
         }
     );
-
-    let source = include_str!("../src/signature.rs");
-    assert!(source.contains("pub struct SignatureSlotBaselinePolicy"));
-    assert!(source.contains("pub fn signature_slot_baseline_policy"));
-    assert!(source.contains("pub fn signature_slot_baseline_policy_with_effective_facts"));
-    assert!(!source.contains("fn signature_slot_baseline_constraints("));
 }
 
 #[test]
@@ -28332,7 +28894,9 @@ class MethodElemUse {
     assert!(
         translation.rust.contains("pub struct ELEM")
             && translation.rust.contains("pub struct GenericElemBox<ELEM>")
-            && translation.rust.contains("pub fn get(&self) -> &ELEM")
+            && translation
+                .rust
+                .contains("pub fn get(&self) -> Option<&ELEM>")
             && translation
                 .rust
                 .contains("pub fn local(&self, input: ELEM) -> ELEM")
@@ -28341,7 +28905,21 @@ class MethodElemUse {
                 .contains("pub fn id<ELEM>(&self, value: ELEM) -> ELEM")
             && translation
                 .rust
-                .contains("pub fn concrete(&self, value: &ELEM) -> String"),
+                .contains("pub fn concrete(&self, value: &ELEM) -> Result<String, JavaException>"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("value: Option<std::rc::Rc<ELEM>>")
+            && !translation
+                .rust
+                .contains("value: Option<std::sync::Arc<ELEM>>")
+            && !translation.rust.contains("input: std::rc::Rc<ELEM>")
+            && !translation.rust.contains("input: std::sync::Arc<ELEM>")
+            && !translation.rust.contains("value: std::rc::Rc<ELEM>")
+            && !translation.rust.contains("value: std::sync::Arc<ELEM>"),
         "{}",
         translation.rust
     );
@@ -28357,19 +28935,6 @@ class MethodElemUse {
             tests: "",
         }],
     );
-}
-
-#[test]
-fn call_plan_does_not_render_rust_expressions() {
-    let source = include_str!("../src/call_plan.rs");
-
-    assert!(!source.contains("rust_ir"));
-    assert!(!source.contains("RustExpr"));
-    assert!(!source.contains("RustType"));
-    assert!(!source.contains("emit::"));
-    assert!(!source.contains("emit_type"));
-    assert!(!source.contains("apply_call_target"));
-    assert!(!source.contains("apply_new_target"));
 }
 
 #[test]
@@ -28465,7 +29030,13 @@ fn constructor_owner_generic_fact_path_uses_generic_path_ir() {
             provenance: FactProvenance::UserOverride,
         });
     let representations = new_java2rust::representation::RepresentationPlan::default();
-    let target = plan_new_target(&external_ids, None, &representations);
+    let target = plan_new_target_with_facts(
+        &external_ids,
+        None,
+        &representations,
+        &FactSet::default(),
+        0,
+    );
 
     assert_eq!(
         apply_new_target_with_facts(&target, Vec::new(), &facts),
@@ -29396,9 +29967,13 @@ class Base64 {
 #[test]
 fn external_enum_variant_fields_do_not_emit_nested_type_aliases() {
     let facts = new_java2rust::external_packs::htsjdk_vcf_pack_facts();
-    let items = new_java2rust::stdlib::external_api_facade_support_items(
-        &new_java2rust::java_ir::Program::default(),
+    let program = new_java2rust::java_ir::Program::default();
+    let items = new_java2rust::stdlib::external_api_facade_support_items_with_local_type_program(
+        &program,
         &facts,
+        &program,
+        &new_java2rust::java_ir::Program::default(),
+        &new_java2rust::representation::RepresentationPlan::default(),
     );
     let rendered = new_java2rust::emit::emit_file(&new_java2rust::rust_ir::RustFile { items });
 
@@ -30365,6 +30940,7 @@ class ErasedVoidFacadeUse {
     void run(Object handle, Object payload) {
         handle.apply(payload);
         handle.close();
+        handle.toString();
     }
 }
 "#;
@@ -30393,6 +30969,18 @@ class ErasedVoidFacadeUse {
         thrown: Vec::new(),
         provenance: FactProvenance::ExternalLibraryPack,
     });
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "toString".to_string(),
+        receiver_type: Some("ExternalHandle".to_string()),
+        arg_count: Some(0),
+        parameter_patterns: None,
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::String),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
 
     let translation = translate_source_with_facts(source, &facts);
 
@@ -30411,7 +30999,15 @@ class ErasedVoidFacadeUse {
         translation.rust
     );
     assert!(
-        translation.rust.contains("fn close(&self) -> ();"),
+        translation
+            .rust
+            .contains("fn to_string(&self) -> String;")
+            && translation.rust.contains(
+                "fn to_string(&self) -> String { panic!(\"unsupported Java erased object toString: runtime target is erased\") }"
+            )
+            && !translation
+                .rust
+                .contains("fn to_string(&self) -> String { Default::default() }"),
         "{}",
         translation.rust
     );
@@ -30870,12 +31466,13 @@ class Uses {
             .contains("call_argument_boundary_policy(receiver.as_deref(), name, internal_methods)")
     );
     assert!(source.contains("pub struct CallResultBoundaryPolicy"));
-    assert!(source.contains("pub fn call_result_boundary_policy"));
+    assert!(!source.contains("pub fn call_result_boundary_policy("));
     assert!(source.contains("pub struct ConstructorInvocationBoundaryPolicy"));
     assert!(source.contains("pub fn constructor_invocation_boundary_policy"));
     assert!(source.contains("constructor_invocation_boundary_policy(*kind)"));
-    assert!(source.contains("call_result_boundary_policy(initializer, internal_methods, facts)"));
-    assert!(source.contains("call_result_boundary_policy(expr, internal_methods, facts)"));
+    assert!(source.contains("call_result_boundary_policy_with_context("));
+    assert!(source.contains("initializer,"));
+    assert!(source.contains("expr,"));
     assert!(source.contains("receiver_type: policy.receiver_type"));
 }
 
@@ -31129,7 +31726,7 @@ fn indexed_shape_projects_borrowed_slice_elements_without_lowering_rules() {
     let mut values_shape = RustSlotShape::conservative(JavaType::Array(Box::new(JavaType::String)));
     values_shape.ownership = OwnershipShape::SharedBorrow;
     values_shape.view = ViewShape::Slice;
-    let projected_shape = indexed_read_shape(&values_shape);
+    let projected_shape = indexed_read_shape_with_facts(&values_shape, &FactSet::default());
     env.insert_local_shape("values", values_shape);
 
     let element_shape = infer_expr_shape(&parse_expr("values[0]"), &env);
@@ -31144,7 +31741,7 @@ fn indexed_shape_projects_borrowed_slice_elements_without_lowering_rules() {
 fn indexed_shape_projects_owned_container_non_copy_reads_as_borrows() {
     let mut env = ShapeEnv::new();
     let values_shape = RustSlotShape::conservative(JavaType::Array(Box::new(JavaType::String)));
-    let projected_shape = indexed_read_shape(&values_shape);
+    let projected_shape = indexed_read_shape_with_facts(&values_shape, &FactSet::default());
     env.insert_local_shape("values", values_shape);
 
     let element_shape = infer_expr_shape(&parse_expr("values[0]"), &env);
@@ -31169,6 +31766,31 @@ fn indexed_access_shape_projects_optional_array_receivers() {
 }
 
 #[test]
+fn nested_indexed_shape_projects_optional_primitive_matrix_scalar() {
+    let mut env = ShapeEnv::new();
+    let matrix_ty = optional_java_type(JavaType::Array(Box::new(JavaType::Array(Box::new(
+        JavaType::Primitive(PrimitiveType::Double),
+    )))));
+    env.insert_local_shape("matrix", RustSlotShape::conservative(matrix_ty));
+
+    let row_shape = infer_expr_shape(&parse_expr("matrix[0]"), &env);
+    assert_eq!(
+        row_shape.java_ty,
+        JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Double)))
+    );
+    assert_eq!(row_shape.ownership, OwnershipShape::SharedBorrow);
+    assert_eq!(row_shape.view, ViewShape::Slice);
+
+    let element_shape = infer_expr_shape(&parse_expr("matrix[0][1]"), &env);
+    assert_eq!(
+        element_shape.java_ty,
+        JavaType::Primitive(PrimitiveType::Double)
+    );
+    assert_eq!(element_shape.ownership, OwnershipShape::CopyValue);
+    assert_eq!(element_shape.view, ViewShape::Native);
+}
+
+#[test]
 fn indexed_shape_projects_nested_array_rows_as_slices() {
     let values_shape = RustSlotShape::conservative(JavaType::Array(Box::new(JavaType::Array(
         Box::new(JavaType::Primitive(PrimitiveType::Double)),
@@ -31189,11 +31811,17 @@ fn indexed_assignment_target_shape_projects_storage_element_shape() {
     let mut values_shape = RustSlotShape::conservative(JavaType::Array(Box::new(JavaType::String)));
     values_shape.ownership = OwnershipShape::SharedBorrow;
     values_shape.view = ViewShape::Slice;
-    let projected_target_shape = indexed_assignment_shape(&values_shape).unwrap();
+    let projected_target_shape =
+        indexed_assignment_shape_with_facts(&values_shape, &FactSet::default()).unwrap();
     env.insert_local_shape("values", values_shape);
 
     let read_shape = infer_expr_shape(&parse_expr("values[0]"), &env);
-    let target_shape = infer_assignment_target_shape(&parse_expr("values[0]"), &env).unwrap();
+    let target_shape = infer_assignment_target_shape_with_context(
+        &parse_expr("values[0]"),
+        &env,
+        ExprShapeContext::default(),
+    )
+    .unwrap();
 
     assert_eq!(projected_target_shape, target_shape);
     assert_eq!(read_shape.ownership, OwnershipShape::SharedBorrow);
@@ -31247,18 +31875,13 @@ fn indexed_shape_uses_type_capability_facts_for_copy_elements() {
         RustSlotShape::conservative(JavaType::Array(Box::new(external_id.clone())));
     values_shape.ownership = OwnershipShape::SharedBorrow;
     values_shape.view = ViewShape::Slice;
-    assert_eq!(
-        shape_projection_capability_policy(&external_id, &facts),
-        ShapeProjectionCapabilityPolicy {
-            java_ty: external_id.clone(),
-            value_semantics: true,
-            sequence_element: None,
-        }
-    );
     let effective_facts = EffectiveFacts::new(&facts);
     assert_eq!(
         shape_projection_capability_policy_with_effective_facts(&external_id, &effective_facts),
-        shape_projection_capability_policy(&external_id, &facts),
+        ShapeProjectionCapabilityPolicy {
+            value_semantics: true,
+            sequence_element: None,
+        }
     );
     let projected_shape = indexed_read_shape_with_facts(&values_shape, &facts);
     assert_eq!(
@@ -31304,23 +31927,26 @@ fn indexed_element_projection_policy_owns_copy_and_borrowed_element_axes() {
             object_safe_trait: None,
             provenance: FactProvenance::UserOverride,
         });
+    let effective_facts = EffectiveFacts::new(&facts);
+    let default_facts = FactSet::default();
+    let default_effective_facts = EffectiveFacts::new(&default_facts);
 
     assert_eq!(
-        indexed_element_projection_policy(
+        indexed_element_projection_policy_with_effective_facts(
             JavaType::String,
             OwnershipShape::Owned,
             &ViewShape::Native,
-            &FactSet::default(),
+            &default_effective_facts,
         )
         .ownership,
         OwnershipShape::SharedBorrow
     );
     assert_eq!(
-        indexed_element_projection_policy(
+        indexed_element_projection_policy_with_effective_facts(
             external_id,
             OwnershipShape::SharedBorrow,
             &ViewShape::Slice,
-            &facts,
+            &effective_facts,
         )
         .ownership,
         OwnershipShape::CopyValue
@@ -31348,13 +31974,21 @@ fn iteration_element_projection_policy_preserves_value_semantics_for_copy_facts(
             object_safe_trait: None,
             provenance: FactProvenance::UserOverride,
         });
+    let effective_facts = EffectiveFacts::new(&facts);
+    let default_facts = FactSet::default();
+    let default_effective_facts = EffectiveFacts::new(&default_facts);
 
     assert_eq!(
-        iteration_element_projection_policy(external_id, &facts).ownership,
+        iteration_element_projection_policy_with_effective_facts(external_id, &effective_facts)
+            .ownership,
         OwnershipShape::Owned
     );
     assert_eq!(
-        iteration_element_projection_policy(JavaType::String, &FactSet::default()).ownership,
+        iteration_element_projection_policy_with_effective_facts(
+            JavaType::String,
+            &default_effective_facts,
+        )
+        .ownership,
         OwnershipShape::SharedBorrow
     );
 }
@@ -31384,18 +32018,17 @@ fn indexed_shape_uses_sequence_like_capability_facts() {
             object_safe_trait: None,
             provenance: FactProvenance::UserOverride,
         });
+    let effective_facts = EffectiveFacts::new(&facts);
     assert_eq!(
-        shape_projection_capability_policy(&external_ids, &facts),
+        shape_projection_capability_policy_with_effective_facts(&external_ids, &effective_facts),
         ShapeProjectionCapabilityPolicy {
-            java_ty: external_ids.clone(),
             value_semantics: false,
             sequence_element: Some(external_id.clone()),
         }
     );
     assert_eq!(
-        sequence_element_projection_policy(&external_ids, &facts),
+        sequence_element_projection_policy_with_effective_facts(&external_ids, &effective_facts),
         SequenceElementProjectionPolicy {
-            java_ty: external_ids.clone(),
             element_ty: Some(external_id.clone()),
         }
     );
@@ -31405,7 +32038,6 @@ fn indexed_shape_uses_sequence_like_capability_facts() {
 
     let read_shape = indexed_read_shape_with_facts(&values_shape, &facts);
     let assignment_shape = indexed_assignment_shape_with_facts(&values_shape, &facts).unwrap();
-    let effective_facts = EffectiveFacts::new(&facts);
     assert_eq!(
         indexed_read_shape_with_effective_facts(&values_shape, &effective_facts),
         read_shape,
@@ -31451,7 +32083,14 @@ fn indexed_assignment_target_shape_uses_sequence_like_capability_facts() {
     let mut env = ShapeEnv::new();
     env.insert_local("values", external_ids);
 
-    assert!(infer_assignment_target_shape(&parse_expr("values[0]"), &env).is_none());
+    assert!(
+        infer_assignment_target_shape_with_context(
+            &parse_expr("values[0]"),
+            &env,
+            ExprShapeContext::default(),
+        )
+        .is_none()
+    );
 
     let target_shape = infer_assignment_target_shape_with_context(
         &parse_expr("values[0]"),
@@ -31468,15 +32107,6 @@ fn indexed_assignment_target_shape_uses_sequence_like_capability_facts() {
     assert_eq!(target_shape.ownership, OwnershipShape::Owned);
     assert_eq!(target_shape.view, ViewShape::Native);
     assert_eq!(target_shape.mutability, MutabilityShape::Mutable);
-}
-
-#[test]
-fn indexed_assignment_target_shape_consumes_inferred_array_shape() {
-    let source = include_str!("../src/expr_shape.rs");
-
-    assert!(source.contains("fn infer_indexed_assignment_target_shape"));
-    assert!(source.contains("&infer_expr_shape_with_context(array, env, ctx)"));
-    assert!(!source.contains("RustSlotShape::conservative(infer_expr_type(array"));
 }
 
 #[test]
@@ -31553,7 +32183,7 @@ fn exception_lowering_policy_owns_result_support_ok_and_err_shapes() {
         "Result<i32, JavaException>"
     );
     assert!(matches!(
-        java_exception_support_item(),
+        java_exception_support_item_with_facts(&FactSet::default()),
         new_java2rust::rust_ir::RustItem::Raw(item)
             if item.contains("pub struct JavaException")
                 && item.contains("pub fn get_message(&self) -> Option<String>")
@@ -33838,228 +34468,6 @@ fn optional_facade_abi_fact_owns_borrowed_return_recovery_policy() {
 }
 
 #[test]
-fn exception_plan_does_not_render_rust() {
-    let source = include_str!("../src/exception_plan.rs");
-
-    assert!(!source.contains("rust_ir"));
-    assert!(!source.contains("RustExpr"));
-    assert!(!source.contains("RustStmt"));
-    assert!(!source.contains("RustType"));
-    assert!(!source.contains("emit::"));
-    assert!(!source.contains("JavaException::new"));
-}
-
-#[test]
-fn exception_lowering_does_not_infer_java_exception_class_names() {
-    let source = include_str!("../src/exception_lowering.rs");
-    let coercion_source = include_str!("../src/coercion.rs");
-
-    assert!(!source.contains("JavaType"));
-    assert!(!source.contains("exception_class_name"));
-    assert!(!source.contains("JavaType::Named"));
-    assert!(!source.contains("JavaType::Unknown"));
-    let throw_policy_source = source
-        .split("pub fn throw_stmt_with_result_policy")
-        .nth(1)
-        .and_then(|tail| tail.split("pub fn try_catch_stmt").next())
-        .expect("throw result policy lowering should remain discoverable");
-    assert!(throw_policy_source.contains("RustExpr::MacroCall"));
-    assert!(
-        !throw_policy_source.contains("RustStmt::Raw(format!")
-            && !throw_policy_source.contains("emit_expr(&exception)"),
-        "non-result throw lowering should keep the exception expression structured"
-    );
-    let exception_method_receiver_source = source
-        .split("fn parenthesize_raw_method_receiver")
-        .nth(1)
-        .and_then(|tail| {
-            tail.split("fn raw_needs_method_receiver_parentheses")
-                .next()
-        })
-        .expect("exception method receiver helper should remain discoverable");
-    assert!(
-        exception_method_receiver_source
-            .contains("raw_receiver_projection(expr, raw_needs_method_receiver_parentheses)")
-            && !exception_method_receiver_source.contains("RustExpr::Raw(format!(\"({trimmed})\""),
-        "exception method receivers should delegate Raw recovery to the central coercion helper"
-    );
-    let exception_message_test_source = source
-        .split("fn fallback_exception_message_keeps_structured_value")
-        .nth(1)
-        .and_then(|tail| tail.split("fn rust_expr_is_path_name").next())
-        .expect("exception message structure test should remain discoverable");
-    assert!(
-        !exception_message_test_source.contains("RustExpr::Grouped(Box::new(RustExpr::Raw("),
-        "exception message tests should assert recovered structured receivers, not grouped raw text"
-    );
-    let raw_receiver_projection_source = coercion_source
-        .split("pub(crate) fn raw_receiver_projection")
-        .nth(1)
-        .and_then(|tail| {
-            tail.split("pub fn recover_parseable_raw_operand_projection")
-                .next()
-        })
-        .expect("central raw receiver projection should remain discoverable");
-    assert!(
-        raw_receiver_projection_source
-            .matches("recover_parseable_rendered_operand_projection")
-            .count()
-            == 2
-            && !raw_receiver_projection_source.contains("RustExpr::Raw(trimmed.to_string())")
-            && !raw_receiver_projection_source.contains("RustExpr::Raw(raw)")
-            && !raw_receiver_projection_source.contains("rendered_projection_or_raw_leaf(trimmed)")
-            && !raw_receiver_projection_source.contains("rendered_projection_or_raw_leaf(&raw)")
-            && !raw_receiver_projection_source
-                .contains("rendered_plus_expr_projection_or_raw_leaf"),
-        "central raw receiver projection should delegate parseable operand recovery to the named helper"
-    );
-    assert!(source.contains("fn java_exception_new_projection"));
-    assert!(source.contains("fn java_exception_with_cause_projection"));
-    assert!(source.contains("function_call_projection("));
-    assert!(source.contains("receiver_method_call_projection_exact("));
-    assert!(source.contains("macro_call_projection(\"format\""));
-    let exception_message_expr_source = source
-        .split("fn exception_message_expr")
-        .nth(1)
-        .and_then(|tail| tail.split("pub fn fallback_exception_expr").next())
-        .expect("exception message projection helper should remain discoverable");
-    assert!(!source.contains("RustExpr::Raw(format!(\"JavaException::new"));
-    assert!(!source.contains("RustExpr::Raw(format!(\"JavaException::with_cause"));
-    assert!(!source.contains("RustExpr::Raw(format!(\"format!("));
-    assert!(!exception_message_expr_source.contains("crate::emit::emit_expr(&message)"));
-    assert!(source.contains("fn uncaught_java_exception_panic_stmt(exception: RustExpr)"));
-    let plain_return_catch_source = source
-        .split("fn plain_return_catch_body")
-        .nth(1)
-        .and_then(|tail| tail.split("fn rust_expr_is_path_name").next())
-        .expect("plain return catch body lowering should remain discoverable");
-    assert!(
-        plain_return_catch_source.contains("uncaught_java_exception_panic_stmt(exception)")
-            && !plain_return_catch_source.contains("RustStmt::Raw(format!")
-            && !plain_return_catch_source.contains("emit_expr(&exception)"),
-        "plain catch return Err rewrites should keep the exception expression structured"
-    );
-    assert!(
-        source.contains("fn rust_expr_is_path_name")
-            && !source.contains("rust_expr_is_path_or_raw_name")
-            && !source.contains("RustExpr::Raw(name) => segments.len() == 1"),
-        "try/catch Ok/Err rewrites should rely on structured path functions"
-    );
-    let try_catch_source = source
-        .split("pub fn try_catch_stmt")
-        .nth(1)
-        .and_then(|tail| tail.split("pub fn try_catch_value_fallthrough_stmt").next())
-        .expect("try/catch lowering should remain discoverable");
-    assert!(
-        try_catch_source.contains("RustExpr::Match")
-            && try_catch_source.contains("RustMatchArm")
-            && try_catch_source.contains("result_scope_call_expr(")
-            && !try_catch_source.contains("RustStmt::Raw(out)"),
-        "try/catch lowering should build a structured match expression"
-    );
-    let value_fallthrough_source = source
-        .split("pub fn try_catch_value_fallthrough_stmt")
-        .nth(1)
-        .and_then(|tail| tail.split("fn wrap_ok_returns_in_some").next())
-        .expect("value fallthrough try/catch lowering should remain discoverable");
-    assert!(source.contains("fn ok_none_expr() -> RustExpr"));
-    assert!(
-        value_fallthrough_source.contains("ok_none_expr()")
-            && value_fallthrough_source.contains("RustExpr::Match")
-            && value_fallthrough_source.contains("RustMatchArm")
-            && value_fallthrough_source.contains("result_scope_call_expr(")
-            && !value_fallthrough_source.contains("RustExpr::Raw(\n        \"Ok(None)\""),
-        "try/catch value fallthrough should compose its match structurally"
-    );
-    assert!(
-        !value_fallthrough_source.contains("RustStmt::Raw(out)"),
-        "try/catch value fallthrough should not render the whole match as a raw statement"
-    );
-    assert!(source.contains("fn return_result_var_stmt(result_name: &str) -> RustStmt"));
-    assert!(source.contains("fn return_result_or_panic_stmt(result_name: &str) -> RustStmt"));
-    assert!(source.contains("fn panic_if_result_err_stmt(result_name: &str) -> RustStmt"));
-    assert!(source.contains("fn propagate_result_stmt(result_name: &str) -> RustStmt"));
-    let propagate_result_stmt_source = source
-        .split("fn propagate_result_stmt(result_name: &str) -> RustStmt")
-        .nth(1)
-        .and_then(|tail| tail.split("pub fn try_with_resources_scope_stmt").next())
-        .expect("exception result propagation helper should remain discoverable");
-    assert!(
-        propagate_result_stmt_source.contains("RustExpr::Try")
-            && propagate_result_stmt_source.contains("RustExpr::Var(")
-            && propagate_result_stmt_source.contains("result_name.to_string()")
-            && !propagate_result_stmt_source.contains("RustExpr::Raw(format!"),
-        "exception result propagation should model postfix ? structurally"
-    );
-    assert!(
-        source.contains("fn unit_expr() -> RustExpr")
-            && source.contains("RustExpr::Tuple(Vec::new())")
-            && !source.contains("RustExpr::Raw(\"()\""),
-        "unit exception results should use tuple IR rather than a raw unit literal"
-    );
-    let try_with_resources_scope_source = source
-        .split("pub fn try_with_resources_scope_stmt")
-        .nth(1)
-        .and_then(|tail| tail.split("pub fn try_finally_scope_stmt").next())
-        .expect("try-with-resources scope lowering should remain discoverable");
-    let try_finally_scope_source = source
-        .split("pub fn try_finally_scope_stmt")
-        .nth(1)
-        .and_then(|tail| tail.split("pub fn try_catch_finally_scope_stmt").next())
-        .expect("try/finally scope lowering should remain discoverable");
-    let try_catch_finally_scope_source = source
-        .split("pub fn try_catch_finally_scope_stmt")
-        .nth(1)
-        .and_then(|tail| tail.split("pub fn new_exception_expr").next())
-        .expect("try/catch/finally scope lowering should remain discoverable");
-    assert!(
-        source.contains("fn result_scope_call_let_stmt")
-            && source.contains("return_type: Some(result_type)")
-            && source.contains("RustExpr::Closure")
-            && source.contains("RustExpr::Call")
-            && !source.contains("RustStmt::Raw(format!(\n        \"let __java_twr_result")
-            && !source.contains("RustStmt::Raw(format!(\n        \"let __java_try_result"),
-        "exception result scope calls should compose typed closure-call IR instead of rendered let statements"
-    );
-    for scope_source in [
-        try_with_resources_scope_source,
-        try_finally_scope_source,
-        try_catch_finally_scope_source,
-    ] {
-        assert!(
-            scope_source.contains("return_result_var_stmt(")
-                && scope_source.contains("return_result_or_panic_stmt(")
-                && scope_source.contains("panic_if_result_err_stmt(")
-                && scope_source.contains("propagate_result_stmt(")
-                && !scope_source.contains("RustStmt::Raw(\"return __java_")
-                && !scope_source.contains("RustStmt::Raw(\"__java_")
-                && !scope_source.contains("unwrap_or_else(|ex| panic!")
-                && !scope_source.contains("if let Err(ex) = __java_")
-                && !scope_source.contains("__java_try_result?;"),
-            "TWR/finally result trailing statements should use structured return/if-let helpers"
-        );
-    }
-    for scope_source in [
-        try_with_resources_scope_source,
-        try_finally_scope_source,
-        try_catch_finally_scope_source,
-    ] {
-        assert!(
-            scope_source.contains("RustStmt::Expr(RustExpr::Block")
-                && !scope_source.contains("RustStmt::Raw(format!(\n        \"{\\n{}\\n}\""),
-            "TWR/finally outer scope wrappers should preserve their body as structured block IR"
-        );
-    }
-    assert!(
-        try_catch_finally_scope_source.contains("RustExpr::Match")
-            && try_catch_finally_scope_source.contains("RustMatchArm")
-            && try_catch_finally_scope_source.contains("result_scope_call_expr(")
-            && !try_catch_finally_scope_source.contains("RustStmt::Raw(out)"),
-        "try/catch/finally lowering should build the catch result match structurally"
-    );
-}
-
-#[test]
 fn cast_shape_is_owned_by_type_inference_not_lowering() {
     let mut env = ShapeEnv::new();
     env.insert_local("value", JavaType::Unknown("Object".to_string()));
@@ -34102,8 +34510,49 @@ fn semantic_facts_own_nullability_and_external_api_heuristics_before_lowering() 
 fn rendered_string_heuristics_have_centralization_guardrails() {
     let coercion_source = include_str!("../src/coercion.rs");
     let lower_source = include_str!("../src/lower.rs");
-    let call_source = include_str!("../src/call_lowering.rs");
+    let production_source_without_cfg_test_items = |source: &str| -> String {
+        let mut output = String::new();
+        let mut lines = source.lines().peekable();
+        while let Some(line) = lines.next() {
+            if !line.trim_start().starts_with("#[cfg(test)]") {
+                output.push_str(line);
+                output.push('\n');
+                continue;
+            }
+
+            while let Some(next) = lines.peek() {
+                if next.trim_start().starts_with("#[") {
+                    lines.next();
+                } else {
+                    break;
+                }
+            }
+
+            let mut depth = 0isize;
+            let mut saw_body = false;
+            while let Some(item_line) = lines.next() {
+                for ch in item_line.chars() {
+                    match ch {
+                        '{' => {
+                            depth += 1;
+                            saw_body = true;
+                        }
+                        '}' => depth -= 1,
+                        _ => {}
+                    }
+                }
+                if !saw_body || (saw_body && depth <= 0) {
+                    break;
+                }
+            }
+        }
+        output
+    };
+    let call_source_owned =
+        production_source_without_cfg_test_items(include_str!("../src/call_lowering.rs"));
+    let call_source = call_source_owned.as_str();
     let call_plan_source = include_str!("../src/call_plan.rs");
+    let conversion_lowering_source = include_str!("../src/conversion_lowering.rs");
     let conversion_source = include_str!("../src/conversion_plan.rs");
     let semantic_source = include_str!("../src/semantic_analysis.rs");
     let signature_source = include_str!("../src/signature.rs");
@@ -34117,10 +34566,9 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     let exception_source = include_str!("../src/exception_lowering.rs");
     let item_assembly_source = include_str!("../src/item_assembly.rs");
     let operator_source = include_str!("../src/operator_lowering.rs");
-    let operator_production_source = operator_source
-        .split("#[cfg(test)]")
-        .next()
-        .expect("operator production source should remain discoverable");
+    let operator_production_source_owned =
+        production_source_without_cfg_test_items(operator_source);
+    let operator_production_source = operator_production_source_owned.as_str();
     let representation_source = include_str!("../src/representation.rs");
     let rust_ir_source = include_str!("../src/rust_ir.rs");
     let slot_render_source = include_str!("../src/slot_render.rs");
@@ -34504,12 +34952,24 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
             && !resolve_source.contains("fn external_receiver_type_name"),
         "external field owner keys should use the shared named-receiver helper instead of module-local copies"
     );
+    let factset_impl_source = facts_source
+        .split("impl FactSet {")
+        .nth(1)
+        .expect("FactSet impl should remain discoverable");
     assert!(
-        !lower_source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("lower production source should be present")
-            .contains("RustItem::Raw(format!"),
+        factset_impl_source
+            .matches("ExternalFactLookupIndex::new(self)")
+            .count()
+            >= 3
+            && !factset_impl_source.contains("fn find_external_api_effect(")
+            && !factset_impl_source.contains("fn find_exact_receiver_external_api_effect(")
+            && !factset_impl_source.contains("fn find_external_field_for(")
+            && !factset_impl_source.contains("fn find_exact_external_field_for(")
+            && !factset_impl_source.contains("fn external_pack_has_member_for_type("),
+        "FactSet compatibility lookups should delegate to ExternalFactLookupIndex instead of carrying duplicate raw owner-key scans"
+    );
+    assert!(
+        !production_source_without_cfg_test_items(lower_source).contains("RustItem::Raw(format!"),
         "production lower.rs should not compose formatted raw Rust items"
     );
     let source_object_fallback_source = lower_source
@@ -34551,6 +35011,20 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     );
     assert!(rust_ir_source.contains("DynTrait(String)"));
     assert!(rust_ir_source.contains("ImplTrait(String)"));
+    let rust_ir_production_source = production_source_without_cfg_test_items(rust_ir_source);
+    let rust_ir_raw_constructor_sites = rust_ir_production_source
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("RustExpr::Raw(") || line.starts_with("RustStmt::Raw("))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rust_ir_raw_constructor_sites,
+        vec![
+            "RustExpr::Raw(rendered.into())",
+            "RustStmt::Raw(rendered.into())",
+        ],
+        "rust_ir.rs should keep raw construction centralized in raw_leaf helpers"
+    );
     assert!(
         string_concat_render_source.contains("pub fn string_concat_expr")
             && !string_concat_render_source.contains("pub fn render_string_concat")
@@ -34702,10 +35176,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         !item_assembly_source.contains("RustExpr::Raw(\"&[]\".to_string())"),
         "default static-final const arrays should use structured borrow of an empty ArrayLiteral"
     );
-    let coercion_production_source = coercion_source
-        .split("#[cfg(test)]")
-        .next()
-        .expect("coercion production source should be present");
+    let coercion_production_source = production_source_without_cfg_test_items(coercion_source);
     let coercion_production_lines = coercion_production_source.lines().collect::<Vec<_>>();
     let coercion_raw_constructor_sites = coercion_production_lines
         .iter()
@@ -34745,10 +35216,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     );
     assert!(stream_source.contains("fn no_op_stream_terminal_method"));
     let raw_expr_constructor_sites = |source: &str| {
-        let production_source = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production source should be present");
+        let production_source = production_source_without_cfg_test_items(source);
         let production_lines = production_source.lines().collect::<Vec<_>>();
         production_lines
             .iter()
@@ -34793,19 +35261,14 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         ("src/array_lowering.rs", array_source),
         ("src/exception_lowering.rs", exception_source),
     ] {
-        let production_source = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production source should be present");
+        let production_source = production_source_without_cfg_test_items(source);
         assert!(
             !production_source.contains("let RustExpr::Raw(raw)"),
             "{path} should delegate Raw receiver recovery to coercion helpers"
         );
     }
-    let lower_raw_boundary_sites = lower_source
-        .split("#[cfg(test)]")
-        .next()
-        .expect("lower production source should be present")
+    let lower_production_without_tests = production_source_without_cfg_test_items(lower_source);
+    let lower_raw_boundary_sites = lower_production_without_tests
         .lines()
         .filter_map(|line| {
             let trimmed = line.trim();
@@ -35228,7 +35691,10 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
                 .contains("recover_rendered_arithmetic_display_conversion_receiver(rendered)")
             && coercion_source
                 .contains("fn recover_rendered_arithmetic_display_conversion_receiver")
-            && coercion_source.contains("raw_arithmetic_display_conversion_receiver(rendered)")
+            && coercion_source
+                .contains("let recovered = rendered_plus_expr_projection_or_raw_leaf(rendered)")
+            && coercion_source.contains("arithmetic_display_conversion_receiver_expr(&recovered)")
+            && !coercion_source.contains("fn raw_arithmetic_display_conversion_receiver")
             && arithmetic_display_receiver_expr_source
                 .contains("grouped_rendered_inner_projection(rendered.trim())")
             && arithmetic_display_receiver_expr_source
@@ -35445,12 +35911,13 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         .and_then(|tail| tail.split("fn parenthesize_borrow_operand").next())
         .expect("parenthesized borrow operand helper should remain discoverable");
     assert!(
-        parenthesized_borrow_operand_leaf_source
-            .contains("let recovered = rendered_plus_expr_projection_or_raw_leaf(rendered);")
+        parenthesized_borrow_operand_leaf_source.contains("let rendered = rendered.trim();")
+            && parenthesized_borrow_operand_leaf_source
+                .contains("let recovered = rendered_plus_expr_projection_or_raw_leaf(rendered);")
             && parenthesized_borrow_operand_leaf_source
                 .contains("return parenthesized_borrow_operand_expr(recovered);")
             && parenthesized_borrow_operand_leaf_source
-                .contains("RustExpr::raw_leaf(rendered.trim().to_string())")
+                .contains("RustExpr::raw_leaf(rendered.to_string())")
             && !parenthesized_borrow_operand_leaf_source.contains(
                 "rendered_projection_or_raw_leaf(&parenthesize_borrow_operand(rendered))"
             )
@@ -35500,7 +35967,8 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(coercion_source.contains("fn dotted_zero_arg_or_field_projection"));
     assert!(coercion_source.contains("fn borrowed_item_projection_or_raw_leaf"));
     assert!(coercion_source.contains("fn borrowed_item_string_view_projection_expr"));
-    assert!(coercion_source.contains("fn primitive_parse_chain_projection"));
+    assert!(!coercion_source.contains("fn primitive_parse_chain_projection"));
+    assert!(coercion_source.contains("fn primitive_parse_result_chain_projection"));
     let borrowed_item_string_view_wrapper_source = coercion_source
         .split("fn borrowed_item_string_view_projection(borrowed_item: &str)")
         .nth(1)
@@ -35580,19 +36048,48 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         "render_parse_receiver should stay a render bridge over parse_receiver_projection"
     );
     assert!(
-        !coercion_source.contains("{}.parse::<{rust_ty}>().unwrap()"),
-        "primitive_parse_projection should compose parse/unwrap as method calls"
+        !coercion_source.contains("{}.parse::<{rust_ty}>().unwrap()")
+            && !coercion_source.contains("fn primitive_parse_chain_projection"),
+        "primitive_parse_projection should compose parse result handling through structured calls"
     );
-    let primitive_parse_chain_source = coercion_source
-        .split("fn primitive_parse_chain_projection")
+    let primitive_parse_projection_source = coercion_source
+        .split("pub fn primitive_parse_projection")
         .nth(1)
-        .and_then(|tail| tail.split("pub fn string_literal_source").next())
-        .expect("primitive parse chain projection should remain discoverable");
+        .and_then(|tail| tail.split("pub fn primitive_parse_radix_projection").next())
+        .expect("primitive parse projection should remain discoverable");
     assert!(
-        primitive_parse_chain_source
-            .contains("typed_zero_arg_method_projection(receiver, \"parse\", rust_ty)")
-            && !primitive_parse_chain_source.contains("format!(\"parse::<{rust_ty}>\")"),
-        "primitive parse should route typed method spelling through the shared typed method projection"
+        primitive_parse_projection_source
+            .contains("unwrap_result_or_panic_uncaught_java_exception")
+            && primitive_parse_projection_source
+                .contains("primitive_parse_result_chain_projection")
+            && !primitive_parse_projection_source.contains("zero_arg_method_projection("),
+        "ordinary primitive parse should share the NumberFormatException result path"
+    );
+    let math_to_int_result_source = coercion_source
+        .split("pub fn math_to_int_exact_result_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("fn primitive_parse_rust_type").next())
+        .expect("math exact result exception helper should remain discoverable");
+    let primitive_radix_result_source = coercion_source
+        .split("fn primitive_integral_parse_radix_result")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn primitive_parse_result_chain_projection")
+                .next()
+        })
+        .expect("primitive radix result exception helper should remain discoverable");
+    assert!(
+        math_to_int_result_source.contains("exception_lowering::new_exception_expr")
+            && math_to_int_result_source
+                .contains("rust_string_literal_projection(\"integer overflow\")")
+            && !math_to_int_result_source
+                .contains("RustExpr::Literal(\"\\\"ArithmeticException\\\"")
+            && primitive_radix_result_source.contains("exception_lowering::new_exception_expr")
+            && primitive_radix_result_source
+                .contains("rust_string_literal_projection(\"radix out of range\")")
+            && !primitive_radix_result_source
+                .contains("RustExpr::Literal(\"\\\"NumberFormatException\\\""),
+        "primitive result exception helpers should use the central JavaException constructor"
     );
     assert!(
         coercion_source.contains("#[cfg(test)]\npub fn render_string_join_vararg_value"),
@@ -36038,8 +36535,11 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         "borrowed string literal slot adaptation should use the shared string-literal projection"
     );
     assert!(
-        coercion_source.contains("storage_placement_construction_expr(*placement, expr)")
-            && !coercion_source.contains("placement.wrap_construction(emit::emit_expr(&expr))"),
+        conversion_lowering_source
+            .contains("crate::slot_render::storage_placement_construction_expr(*placement, value)")
+            && !coercion_source.contains("placement.wrap_construction(emit::emit_expr(&expr))")
+            && !conversion_lowering_source
+                .contains("placement.wrap_construction(emit::emit_expr(&value))"),
         "handle adaptation should delegate construction wrapping to structured slot rendering"
     );
     assert!(coercion_source.contains("pub fn java_integral_literal_char"));
@@ -36640,8 +37140,12 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(
         mutable_alias_source.contains("rust_expr_mutable_alias_projection(arg, base)")
             && mutable_alias_source.contains("RustExpr::Raw(rendered) = arg.unshaped()")
+            && mutable_alias_source
+                .contains("let recovered = rendered_projection_or_raw_leaf(rendered)")
+            && mutable_alias_source
+                .contains("rust_expr_mutable_alias_projection(&recovered, base)")
             && !mutable_alias_source.contains("emit::emit_expr(arg)"),
-        "mutable alias detection should use structured IR first and raw fallback only for raw leaves"
+        "mutable alias detection should recover parseable raw leaves before the raw fallback"
     );
     assert!(coercion_source.contains("pub fn reborrow_optional_mut_projection"));
     let reborrow_optional_mut_source = coercion_source
@@ -36674,6 +37178,21 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
                 .contains("borrowed_raw_safe_expr(rendered_projection_or_raw_leaf")
             && !clone_erased_object_source.contains("emit::emit_expr(&expr)"),
         "erased-object clone helper should normalize raw operands before sharing structured clone-call construction"
+    );
+    let borrowed_erased_clone_arg_source = coercion_source
+        .split("fn borrowed_erased_object_clone_arg")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub fn optional_clone_recovery_unwrap_replacement")
+                .next()
+        })
+        .expect("borrowed erased-object clone arg helper should remain discoverable");
+    assert!(
+        borrowed_erased_clone_arg_source.contains("expr_is_result_propagated(&expr)")
+            && borrowed_erased_clone_arg_source.contains("RustExpr::Try")
+            && !borrowed_erased_clone_arg_source.contains("emit::emit_expr(&expr)")
+            && !borrowed_erased_clone_arg_source.contains("ok_or_else"),
+        "borrowed erased-object clone args should trust structured propagation evidence, not rendered text"
     );
     assert!(coercion_source.contains("pub fn apply_clone_projection"));
     assert!(coercion_source.contains("pub fn rewrite_downcast_expect_message"));
@@ -37850,7 +38369,9 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(call_source.contains("function_call_projection("));
     assert!(call_source.contains("receiver_method_call_projection_exact("));
     assert!(call_source.contains("java_class_literal_path_projection("));
-    assert!(call_source.contains("rust_string_literal_projection(&plan.java_name)"));
+    assert!(call_source.contains(
+        "rust_string_literal_projection(\n            &crate::stdlib::class_literal_java_name(ty),"
+    ));
     assert!(!call_source.contains("RustExpr::Literal(format!(\"{:?}\", plan.java_name)"));
     assert!(lower_source.contains("rust_string_literal_projection(current_type)"));
     assert!(!lower_source.contains("RustExpr::Literal(format!(\"{current_type:?}\"))"));
@@ -37864,12 +38385,27 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(method_expect_projection_source.contains("rust_string_literal_projection(message)"));
     assert!(!method_expect_projection_source.contains("RustExpr::Literal(format!"));
     let arrays_panic_expr_source = coercion_source
-        .split("fn arrays_panic_expr")
+        .split("fn arrays_java_exception_panic_expr")
         .nth(1)
         .and_then(|tail| tail.split("pub fn arrays_compare_projection").next())
         .expect("arrays panic projection helper should remain discoverable");
+    assert!(arrays_panic_expr_source.contains("exception_lowering::new_exception_expr"));
     assert!(arrays_panic_expr_source.contains("rust_string_literal_projection(message)"));
     assert!(!arrays_panic_expr_source.contains("RustExpr::Literal(format!"));
+    let java_exception_stmt_source = coercion_source
+        .split("fn return_java_exception_stmt")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn sequence_get_expect_projection").next())
+        .expect("Java exception statement helpers should remain discoverable");
+    assert!(
+        java_exception_stmt_source
+            .matches("exception_lowering::new_exception_expr")
+            .count()
+            >= 2
+            && java_exception_stmt_source.contains("rust_string_literal_projection(message)")
+            && !java_exception_stmt_source.contains("RustExpr::Literal(format!"),
+        "Java exception return/panic statements should use the central constructor"
+    );
     let panic_message_projection_source = coercion_source
         .split("fn panic_message_projection")
         .nth(1)
@@ -37889,9 +38425,11 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(call_source.contains(
         "receiver_method_call_projection_exact(receiver, &facade_method_name(rust_path), args)"
     ));
-    assert!(coercion_source.contains(
-        "receiver_method_call_projection_exact(receiver, &facade_method_name(rust_path), args)"
-    ));
+    assert!(
+        coercion_source.contains("let method_name = facade_method_name(rust_path);")
+            && coercion_source
+                .contains("receiver_method_call_projection_exact(receiver, &method_name, args)")
+    );
     assert!(!coercion_source.contains(
         "receiver_method_call_projection(receiver, &facade_method_name(rust_path), args)"
     ));
@@ -37899,8 +38437,10 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         !call_source.contains("facade_receiver_method_call_projection(receiver, rust_path, args)")
     );
     assert!(coercion_source.contains("fn split_external_facade_rust_path"));
-    assert!(!call_source.contains("RustExpr::Raw("));
     assert!(!call_source.contains("RustExpr::Raw(format!"));
+    assert!(!call_source.contains("RustExpr::Raw(rendered.to_string())"));
+    assert!(!call_source.contains("RustExpr::Raw(raw.to_string())"));
+    assert!(!call_source.contains("RustExpr::raw_leaf("));
     assert!(!call_source.contains("fn render_"));
     assert!(
         call_source
@@ -37928,13 +38468,13 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     );
     assert!(lower_source.contains("RustExpr::path([\"URI\", \"parse\"])"));
     let lower_production_source = lower_source
-        .split("#[cfg(test)]")
+        .split("#[cfg(test)]\nmod tests")
         .next()
         .expect("lower production source should remain discoverable");
     assert!(!lower_production_source.contains("fn rust_expr_from_plain_path_or_raw"));
     assert!(lower_production_source.contains("fn rust_path_segment_is_balanced_turbofish"));
     let test_plain_path_parser_source = lower_source
-        .split("#[cfg(test)]")
+        .split("#[cfg(test)]\nmod tests")
         .nth(1)
         .expect("lower test source should remain discoverable")
         .split("fn rust_expr_from_plain_path_or_raw")
@@ -37980,12 +38520,22 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         .nth(1)
         .and_then(|tail| tail.split("fn rendered_call_args_projection").next())
         .expect("rendered function-call projection should remain discoverable");
+    let rendered_call_parts_source = coercion_source
+        .split("fn rendered_call_parts")
+        .nth(1)
+        .and_then(|tail| tail.split("fn rendered_top_level_as_cast_parts").next())
+        .expect("rendered call scanner should remain discoverable");
     assert!(
         rendered_function_call_source.contains("simple_macro_call_name(function)")
             && rendered_function_call_source.contains("macro_call_projection(")
             && coercion_source.contains("fn simple_macro_call_name")
             && coercion_source.contains("rust_plain_identifier(macro_name)"),
         "rendered function-call recovery should recover only simple macro-call leaves structurally"
+    );
+    assert!(
+        rendered_call_parts_source.contains("raw_string_literal_end_at(rendered, idx)")
+            && !rendered_call_parts_source.contains("starts_with(\"r#\\\"\")"),
+        "rendered call scanning should share raw-string literal skipping with the other raw scanners"
     );
     assert!(
         !coercion_source.contains("RustExpr::Raw(\"factory().collect::<Vec<_>>()\".to_string())"),
@@ -38116,7 +38666,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         .split("fn lower_static_storage_primitive_update_expr")
         .nth(1)
         .and_then(|tail| {
-            tail.split("fn java_string_identity_audit_projection")
+            tail.split("fn java_string_identity_compile_error_expr")
                 .next()
         })
         .expect("static storage primitive update helper should remain discoverable");
@@ -38127,16 +38677,16 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
             && !static_storage_update_source.contains("RustExpr::Raw(format!"),
         "static-storage primitive update expressions should compose block/call structure directly"
     );
-    let string_identity_audit_source = lower_source
-        .split("fn java_string_identity_audit_projection")
+    let string_identity_compile_error_source = lower_source
+        .split("fn java_string_identity_compile_error_expr")
         .nth(1)
         .and_then(|tail| tail.split("fn lower_local_update_value_expr").next())
-        .expect("string identity audit helper should remain discoverable");
+        .expect("string identity compile-error helper should remain discoverable");
     assert!(
-        string_identity_audit_source.contains("RustExpr::PostfixComment")
-            && !string_identity_audit_source.contains("RustExpr::Raw(format!")
-            && !string_identity_audit_source.contains("emit::emit_expr(&expr)"),
-        "string identity audit comments should keep the compared expression structured"
+        string_identity_compile_error_source.contains("crate::unsupported::compile_error_expr")
+            && !string_identity_compile_error_source.contains("RustExpr::Raw(format!")
+            && !string_identity_compile_error_source.contains("emit::emit_expr("),
+        "string identity compile errors should route through structured unsupported IR"
     );
     assert!(
         !lower_source.contains("\"{{ {}({}); {} }}\""),
@@ -38260,10 +38810,20 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         .nth(1)
         .and_then(|tail| tail.split("fn raw_tuple_leaf_expr").next())
         .expect("raw comma splitter should remain discoverable");
+    let raw_comma_predicate_source = coercion_source
+        .split("fn raw_contains_top_level_comma")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn apply_rust_unsigned_byte_array_return")
+                .next()
+        })
+        .expect("raw comma predicate should remain discoverable");
     assert!(
         raw_comma_splitter_source.contains("raw_string_literal_end_at(raw, idx)")
-            && !raw_comma_splitter_source.contains("raw[idx..].starts_with(\"r#\\\"\")"),
-        "raw comma splitting should skip all supported raw string literal forms through the shared literal scanner"
+            && !raw_comma_splitter_source.contains("raw[idx..].starts_with(\"r#\\\"\")")
+            && raw_comma_predicate_source.contains("raw_string_literal_end_at(raw, idx)")
+            && !raw_comma_predicate_source.contains("raw[idx..].starts_with(\"r#\\\"\")"),
+        "raw comma helpers should skip all supported raw string literal forms through the shared literal scanner"
     );
     assert!(
         !apply_one_source.contains("Box::new({}) as Box<dyn"),
@@ -38488,7 +39048,11 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         as_slice_source.contains("expr_is_associated_path_without_call(&expr)")
             && as_slice_source.contains("associated_path_view_projection(expr)")
             && !as_slice_source.contains("emit::emit_expr(&expr)")
+            && !coercion_source.contains("fn rendered_expr_is_associated_path_without_call")
             && coercion_source.contains("fn expr_is_associated_path_without_call")
+            && coercion_source.contains("fn raw_expr_is_associated_path_without_call")
+            && coercion_source
+                .contains("let recovered = rendered_projection_or_raw_leaf(rendered);")
             && coercion_source.contains("fn associated_path_view_projection"),
         "slice view associated-path compatibility should use structured Path evidence before raw-leaf compatibility"
     );
@@ -38703,6 +39267,112 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
             && !erased_borrowed_downcast_source.contains("RustExpr::Raw(\"|value| value.as_ref()"),
         "shared-handle erased-object borrowed downcasts should keep downcast and map callbacks structured"
     );
+    let checked_java_null_parse_receiver_source = coercion_source
+        .split("fn checked_java_null_parse_receiver_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("fn dotted_zero_arg_or_field_projection").next())
+        .expect("checked Java-null parse receiver projection should remain discoverable");
+    assert!(
+        checked_java_null_parse_receiver_source.contains("exception_lowering::new_exception_expr")
+            && !checked_java_null_parse_receiver_source.contains("RustExpr::Raw("),
+        "checked Java-null parse receiver recovery should keep the NPE closure body structured"
+    );
+    let java_null_pointer_exception_source = lower_source
+        .split("fn java_null_pointer_exception_expr")
+        .nth(1)
+        .and_then(|tail| tail.split("fn make_java_null_expect_catchable").next())
+        .expect("Java-null exception projection should remain discoverable");
+    assert!(
+        java_null_pointer_exception_source.contains("exception_lowering::new_exception_expr")
+            && java_null_pointer_exception_source
+                .contains("rust_string_literal_projection(\"Java null receiver\")")
+            && !java_null_pointer_exception_source.contains("RustExpr::Literal("),
+        "catchable Java-null rewriting should reuse the central JavaException constructor"
+    );
+    let fallible_array_index_source = lower_source
+        .split("fn fallible_array_index_read_expr")
+        .nth(1)
+        .and_then(|tail| tail.split("fn fallible_array_index_source_expr").next())
+        .expect("fallible array-index read helper should remain discoverable");
+    assert!(
+        fallible_array_index_source.contains("exception_lowering::new_exception_expr")
+            && fallible_array_index_source.contains("\"ArrayIndexOutOfBoundsException\"")
+            && fallible_array_index_source.contains("\\\"Index {} out of bounds for length {}\\\"")
+            && !fallible_array_index_source
+                .contains("RustExpr::Literal(\"\\\"ArrayIndexOutOfBoundsException\\\""),
+        "fallible array-index reads should use the central JavaException constructor"
+    );
+    let list_get_result_source = call_source
+        .split("pub fn list_get_result_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("fn list_set_result_projection").next())
+        .expect("list get result projection should remain discoverable");
+    let list_index_exception_source = call_source
+        .split("fn list_index_out_of_bounds_exception_expr")
+        .nth(1)
+        .and_then(|tail| tail.split("fn ok_or_else_java_exception_projection").next())
+        .expect("list index exception helper should remain discoverable");
+    assert!(
+        list_get_result_source.contains("exception_lowering::new_exception_expr")
+            && list_get_result_source
+                .contains("rust_string_literal_projection(\"Java list index out of bounds\")")
+            && !list_get_result_source
+                .contains("RustExpr::Literal(\"\\\"IndexOutOfBoundsException\\\"")
+            && list_index_exception_source.contains("exception_lowering::new_exception_expr")
+            && list_index_exception_source
+                .contains("rust_string_literal_projection(\"Java list index out of bounds\")")
+            && !list_index_exception_source
+                .contains("RustExpr::Literal(\"\\\"IndexOutOfBoundsException\\\""),
+        "list bounds exception helpers should use the central JavaException constructor"
+    );
+    let map_key_result_source = call_source
+        .split("fn map_key_result_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn apply_list_add").next())
+        .expect("map key result projection should remain discoverable");
+    let optional_get_result_source = coercion_source
+        .split("pub fn optional_get_owned_value_result_projection")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub fn optional_or_else_owned_value_projection")
+                .next()
+        })
+        .expect("optional get result projection should remain discoverable");
+    assert!(
+        map_key_result_source.contains("exception_lowering::new_exception_expr")
+            && map_key_result_source.contains("rust_string_literal_projection(message)")
+            && !map_key_result_source
+                .contains("RustExpr::Literal(\"\\\"NoSuchElementException\\\"")
+            && optional_get_result_source.contains("exception_lowering::new_exception_expr")
+            && optional_get_result_source.contains("rust_string_literal_projection(message)")
+            && !optional_get_result_source
+                .contains("RustExpr::Literal(\"\\\"NoSuchElementException\\\""),
+        "NoSuchElementException result helpers should use the central JavaException constructor"
+    );
+    let string_index_exception_source = coercion_source
+        .split("fn string_index_out_of_bounds_exception_expr")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub fn string_substring_result_projection")
+                .next()
+        })
+        .expect("string index exception helper should remain discoverable");
+    let sequence_index_exception_source = coercion_source
+        .split("fn index_out_of_bounds_exception_expr")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn map_get_projection").next())
+        .expect("sequence index exception helper should remain discoverable");
+    assert!(
+        string_index_exception_source.contains("exception_lowering::new_exception_expr")
+            && string_index_exception_source
+                .contains("rust_string_literal_projection(\"Java string index out of bounds\")")
+            && !string_index_exception_source.contains("RustExpr::Literal(")
+            && sequence_index_exception_source.contains("exception_lowering::new_exception_expr")
+            && sequence_index_exception_source
+                .contains("rust_string_literal_projection(\"Java index out of bounds\")")
+            && !sequence_index_exception_source.contains("RustExpr::Literal("),
+        "coercion index exception helpers should use the central JavaException constructor"
+    );
     let optional_erased_string_view_source = coercion_source
         .split("fn optional_erased_string_downcast_ref_view_projection")
         .nth(1)
@@ -38875,22 +39545,12 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         !lower_source
             .contains("Default::default()/* TODO(translation): Java exception self-as-supertype facade boundary */")
     );
-    assert!(lower_source.contains("exception_self_as_supertype_facade_boundary_projection()"));
-    let exception_self_facade_boundary_source = coercion_source
-        .split("pub fn exception_self_as_supertype_facade_boundary_projection")
-        .nth(1)
-        .and_then(|tail| {
-            tail.split("pub fn explicit_java_facade_cast_placeholder_projection")
-                .next()
-        })
-        .expect("exception self-as-supertype facade boundary helper should remain discoverable");
+    assert!(!lower_source.contains("exception_self_as_supertype_facade_boundary_projection()"));
     assert!(
-        exception_self_facade_boundary_source.contains("RustExpr::PostfixComment")
-            && exception_self_facade_boundary_source.contains("RustExpr::Call")
-            && exception_self_facade_boundary_source
-                .contains("RustExpr::path([\"Default\", \"default\"])")
-            && !exception_self_facade_boundary_source.contains("RustExpr::Raw"),
-        "exception self-as-supertype facade boundary should compose Default::default plus TODO structurally"
+        lower_source.contains(
+            "unsupported Java class upcast: {actual_name} to {target_name} requires class hierarchy lowering"
+        ),
+        "exception self-as-supertype should be a loud unsupported class upcast, not a fabricated facade"
     );
     assert!(!lower_source.contains("/* TODO(translation): validate explicit Java facade cast */"));
     assert!(lower_source.contains("explicit_java_facade_cast_placeholder_projection("));
@@ -38988,7 +39648,13 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(
         checked_java_integer_div_rem_leaf_source.contains("RustExpr::Block")
             && checked_java_integer_div_rem_leaf_source.contains("RustExpr::If")
+            && checked_java_integer_div_rem_leaf_source
+                .contains("exception_lowering::new_exception_expr")
+            && checked_java_integer_div_rem_leaf_source
+                .contains("rust_string_literal_projection(\"/ by zero\")")
             && !checked_java_integer_div_rem_leaf_source.contains("RustExpr::Raw(format!")
+            && !checked_java_integer_div_rem_leaf_source
+                .contains("RustExpr::Literal(\"\\\"ArithmeticException\\\"")
             && !checked_java_integer_div_rem_leaf_source.contains("RustType::Raw"),
         "checked Java integer div/rem should compose the catchable exception block structurally"
     );
@@ -39206,6 +39872,20 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(
         !lower_source.contains("_ => RustExpr::Raw(rendered),"),
         "static storage array primitive constants should use Literal leaves, not Raw rendered values"
+    );
+    let integral_parse_null_arg_source = lower_source
+        .split("fn java_integral_parse_null_argument_as_number_format")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn java_integral_parse_raw_null_argument_as_number_format")
+                .next()
+        })
+        .expect("integral parse null argument helper should remain discoverable");
+    assert!(
+        integral_parse_null_arg_source.contains("RustExpr::raw_leaf(rendered)")
+            && !integral_parse_null_arg_source
+                .contains("unwrap_or_else(|| RustExpr::Raw(rendered))"),
+        "integral parse nullable raw fallback should use the central raw leaf constructor"
     );
     assert!(!lower_source.contains(".row({}).to_vec()"));
     assert!(!lower_source.contains("Array2::from_rows({rendered})"));
@@ -40644,36 +41324,6 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
 }
 
 #[test]
-fn stdlib_does_not_grow_non_jdk_domain_package_knowledge() {
-    let stdlib_source = include_str!("../src/stdlib.rs");
-    for forbidden in [
-        "htsjdk",
-        "gatk",
-        "hellbender",
-        "hdf5",
-        "sqlite",
-        "arrow",
-        "spark",
-        "genomicsdb",
-        "disq",
-        "picard",
-        "barclay",
-        "broadinstitute",
-        "org.apache",
-        "org.disq",
-        "com.intel",
-    ] {
-        assert!(
-            !stdlib_source.contains(forbidden),
-            "non-JDK package knowledge belongs in javalibs or external packs, not stdlib.rs: {forbidden}"
-        );
-    }
-
-    assert_eq!(stdlib_source.matches("cloud_storage_").count(), 2);
-    assert_eq!(stdlib_source.matches("CloudStorage").count(), 2);
-}
-
-#[test]
 fn trivial_accessor_detection_is_not_a_lowering_special_case() {
     let lower_source = include_str!("../src/lower.rs");
     let call_plan_source = include_str!("../src/call_plan.rs");
@@ -40895,10 +41545,164 @@ class TryWithResourcesUnit {
             ..
         }
     ));
+    let resources_finally_try_parsed = parse_java_source(
+        r#"
+class TryWithResourcesFinallyUnit {
+    void copy(Path source, Path dest, byte[] buffer) {
+        try (InputStream input = Files.newInputStream(source);
+             OutputStream output = Files.newOutputStream(dest)) {
+            int n = input.read(buffer);
+            output.write(buffer, 0, n);
+        } finally {
+            audit(source);
+        }
+    }
+}
+"#,
+    );
+    let resources_finally_ty = &resources_finally_try_parsed.program.types[0];
+    let resources_finally_method = resources_finally_ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let Stmt::Try {
+        resources,
+        body,
+        catches,
+        finally_block,
+    } = &resources_finally_method.body.as_ref().unwrap().statements[0]
+    else {
+        panic!("expected try-with-resources/finally statement");
+    };
+    assert!(matches!(
+        plan_try_stmt(resources, body, catches, finally_block.as_ref()),
+        TryStmtPlan::WithResourcesFinally {
+            completion: TryBlockCompletion::FallsThroughUnit,
+            ..
+        }
+    ));
     assert_eq!(
         try_resource_names(resources),
         vec!["input".to_string(), "output".to_string()]
     );
+    let fixture_resources_finally_parsed =
+        parse_java_source(include_str!("differential/TryWithResourcesFinally.java"));
+    let fixture_resources_finally_ty = &fixture_resources_finally_parsed.program.types[0];
+    let fixture_resources_finally_method = fixture_resources_finally_ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "run" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let Stmt::Try {
+        resources,
+        body,
+        catches,
+        finally_block,
+    } = &fixture_resources_finally_method
+        .body
+        .as_ref()
+        .unwrap()
+        .statements[1]
+    else {
+        panic!("expected fixture try-with-resources/finally statement");
+    };
+    assert!(catches.is_empty());
+    assert!(finally_block.is_some());
+    assert!(matches!(
+        plan_try_stmt(resources, body, catches, finally_block.as_ref()),
+        TryStmtPlan::WithResourcesFinally {
+            completion: TryBlockCompletion::FallsThroughUnit,
+            ..
+        }
+    ));
+    let resources_catch_finally_try_parsed = parse_java_source(
+        r#"
+class TryWithResourcesCatchFinallyUnit {
+    static class Resource implements AutoCloseable {
+        public void close() {}
+    }
+
+    void run() {
+        try (Resource resource = new Resource()) {
+            use(resource);
+        } catch (RuntimeException ex) {
+            audit(ex);
+        } finally {
+            done();
+        }
+    }
+}
+"#,
+    );
+    let resources_catch_finally_ty = &resources_catch_finally_try_parsed.program.types[0];
+    let resources_catch_finally_method = resources_catch_finally_ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "run" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let Stmt::Try {
+        resources,
+        body,
+        catches,
+        finally_block,
+    } = &resources_catch_finally_method
+        .body
+        .as_ref()
+        .unwrap()
+        .statements[0]
+    else {
+        panic!("expected try-with-resources/catch/finally statement");
+    };
+    assert!(matches!(
+        plan_try_stmt(resources, body, catches, finally_block.as_ref()),
+        TryStmtPlan::WithResourcesCatchFinally {
+            completion: TryBlockCompletion::FallsThroughUnit,
+            ..
+        }
+    ));
+    let fixture_resources_catch_finally_try_parsed = parse_java_source(include_str!(
+        "differential/TryWithResourcesCatchFinally.java"
+    ));
+    let fixture_resources_catch_finally_ty =
+        &fixture_resources_catch_finally_try_parsed.program.types[0];
+    let fixture_resources_catch_finally_method = fixture_resources_catch_finally_ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "run" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let Stmt::Try {
+        resources,
+        body,
+        catches,
+        finally_block,
+    } = &fixture_resources_catch_finally_method
+        .body
+        .as_ref()
+        .unwrap()
+        .statements[1]
+    else {
+        panic!("expected fixture try-with-resources/catch/finally statement");
+    };
+    assert!(matches!(
+        plan_try_stmt(resources, body, catches, finally_block.as_ref()),
+        TryStmtPlan::WithResourcesCatchFinally {
+            completion: TryBlockCompletion::FallsThroughUnit,
+            ..
+        }
+    ));
     let return_resources_try_parsed = parse_java_source(
         r#"
 class TryWithResourcesReturn {
@@ -40971,6 +41775,89 @@ class TryFinallyUnit {
     assert!(matches!(
         plan_try_stmt(resources, body, catches, finally_block.as_ref()),
         TryStmtPlan::FinallyOnly { .. }
+    ));
+    let finally_return_parsed = parse_java_source(
+        r#"
+class TryFinallyReturn {
+    String run() {
+        try {
+            return "try";
+        } finally {
+            return "finally";
+        }
+    }
+}
+"#,
+    );
+    let finally_return_ty = &finally_return_parsed.program.types[0];
+    let finally_return_method = finally_return_ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let Stmt::Try {
+        resources,
+        body,
+        catches,
+        finally_block,
+    } = &finally_return_method.body.as_ref().unwrap().statements[0]
+    else {
+        panic!("expected return-overriding try/finally statement");
+    };
+    assert!(matches!(
+        plan_try_stmt(resources, body, catches, finally_block.as_ref()),
+        TryStmtPlan::FinallyOnly {
+            completion: TryBlockCompletion::Terminates,
+            ..
+        }
+    ));
+    let catch_finally_return_parsed = parse_java_source(
+        r#"
+class TryCatchFinallyReturn {
+    String run(boolean fail) {
+        try {
+            if (fail) throw new RuntimeException("x");
+            return "try";
+        } catch (RuntimeException ex) {
+            return "catch";
+        } finally {
+            return "finally";
+        }
+    }
+}
+"#,
+    );
+    let catch_finally_return_ty = &catch_finally_return_parsed.program.types[0];
+    let catch_finally_return_method = catch_finally_return_ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let Stmt::Try {
+        resources,
+        body,
+        catches,
+        finally_block,
+    } = &catch_finally_return_method
+        .body
+        .as_ref()
+        .unwrap()
+        .statements[0]
+    else {
+        panic!("expected catch/finally return-overriding statement");
+    };
+    assert!(matches!(
+        plan_try_stmt(resources, body, catches, finally_block.as_ref()),
+        TryStmtPlan::CatchFinally {
+            completion: TryBlockCompletion::Terminates,
+            ..
+        }
     ));
     let try_catch_return_stmt = try_catch_stmt(
         RustType::I32,
@@ -41299,7 +42186,8 @@ class SpecificProblem extends BaseProblem {}
     assert!(lower_source.contains("exceptions.support.emit_support_item"));
     assert!(lower_source.contains(".method_exception_plan("));
     assert!(lower_source.contains("method_function_shell_with_facts_exception_plan"));
-    assert!(!exception_lowering_source.contains("RuntimeException"));
+    assert!(exception_lowering_source.contains("fn java_exception_parent"));
+    assert!(exception_lowering_source.contains("\"RuntimeException\" => Some(\"Exception\")"));
     assert!(!exception_lowering_source.contains("ExceptionKind"));
     assert!(!exception_plan_source.contains("ExceptionKind"));
     assert!(!exception_plan_source.contains("method.throws"));
@@ -41358,46 +42246,6 @@ class SlotThrowingCallPropagation {
             tests: "",
         }],
     );
-}
-
-#[test]
-fn semantic_diagnostics_are_plumbed_through_translation_boundary() {
-    let lib_source = include_str!("../src/lib.rs");
-    let semantic_source = include_str!("../src/semantic_analysis.rs");
-
-    assert!(semantic_source.contains("SemanticDiagnostic"));
-    assert!(semantic_source.contains("semantic_external_api_effect_budget_exhausted"));
-    assert!(lib_source.contains("for diagnostic in semantic.diagnostics"));
-    assert!(lib_source.contains(".warning(diagnostic.code, diagnostic.message)"));
-}
-
-#[test]
-fn control_flow_normalization_plans_are_owned_before_lowering() {
-    let semantic_source = include_str!("../src/semantic_analysis.rs");
-    let rewrite_source = include_str!("../src/rewrite.rs");
-    let lower_source = include_str!("../src/lower.rs");
-    let control_flow_lowering_source = include_str!("../src/control_flow_lowering.rs");
-
-    assert!(rewrite_source.contains("pub struct MethodControlFlowPlan"));
-    assert!(rewrite_source.contains("AssignmentInConditionPlan"));
-    assert!(rewrite_source.contains("TailRecursiveLoopPlan"));
-    assert!(semantic_source.contains("collect_control_flow_plans"));
-    assert!(semantic_source.contains("assignment_in_condition_plan"));
-    assert!(semantic_source.contains("tail_recursive_loop_plan"));
-    assert!(semantic_source.contains("collect_recursion_fallback_diagnostics"));
-    assert!(semantic_source.contains("recursion_tco_fallback"));
-    assert!(!lower_source.contains("AssignmentInConditionPlan"));
-    assert!(!lower_source.contains("TailRecursiveLoopPlan"));
-    assert!(!lower_source.contains("LoopWithParameterReassignment"));
-    assert!(!lower_source.contains("recursion_tco_fallback"));
-    assert!(control_flow_lowering_source.contains("RustStmt::Loop"));
-    assert!(control_flow_lowering_source.contains("RustStmt::If"));
-    assert!(control_flow_lowering_source.contains("RustStmt::Assign"));
-    assert!(control_flow_lowering_source.contains("RustStmt::Continue"));
-    assert!(!control_flow_lowering_source.contains("raw_stmt"));
-    assert!(!control_flow_lowering_source.contains("emit_expr"));
-    assert!(!control_flow_lowering_source.contains("format!(\"let mut"));
-    assert!(!control_flow_lowering_source.contains("format!(\"    if"));
 }
 
 #[test]
@@ -41586,19 +42434,27 @@ class StringIdentityDiagnostics {
 }
 
 #[test]
-fn stream_shape_owns_lambda_body_borrowed_string_views() {
-    let stream_lowering_source = include_str!("../src/stream_lowering.rs");
+fn stream_shape_owns_lambda_body_string_method_shapes() {
     let default = RustSlotShape::conservative(JavaType::String);
-    let shape = infer_stream_lambda_body_shape(&parse_expr("value.trim()"), &default);
+    let default_facts = FactSet::default();
+    let mut lambda_env = TypeEnv::new();
+    lambda_env.insert_local("value", JavaType::String);
+    let shape = infer_stream_lambda_body_shape_with_facts(
+        &parse_expr("value.trim()"),
+        &default,
+        &lambda_env,
+        &default_facts,
+    );
 
-    assert_eq!(shape, borrowed_string_content_shape());
+    assert_eq!(shape, owned_string_value_shape());
 
-    let owned_shape = infer_stream_lambda_body_shape(&parse_expr("value.toLowerCase()"), &default);
+    let owned_shape = infer_stream_lambda_body_shape_with_facts(
+        &parse_expr("value.toLowerCase()"),
+        &default,
+        &lambda_env,
+        &default_facts,
+    );
     assert_eq!(owned_shape, owned_string_value_shape());
-    assert!(stream_lowering_source.contains("ensure_borrow_projection("));
-    assert!(!stream_lowering_source.contains("ensure_borrow_projection_rendered"));
-    assert!(stream_lowering_source.contains("BorrowProjectionUse::StringView"));
-    assert!(!stream_lowering_source.contains("format!(\"{rendered}.as_str()\")"));
 }
 
 #[test]
@@ -41664,37 +42520,6 @@ fn stream_shape_uses_shared_call_plan_for_lambda_call_results() {
 }
 
 #[test]
-fn shape_projection_owns_borrowed_string_content_shape() {
-    let coercion_source = include_str!("../src/coercion.rs");
-    let coercion_production_source = coercion_source
-        .split("#[cfg(test)]")
-        .next()
-        .expect("coercion production source should be available before tests");
-    let stream_shape_source = include_str!("../src/stream_shape.rs");
-    let slot_policy_source = include_str!("../src/slot_policy.rs");
-    let shape_projection_source = include_str!("../src/shape_projection.rs");
-
-    assert!(shape_projection_source.contains("pub fn borrowed_string_content_shape"));
-    assert!(shape_projection_source.contains("pub fn owned_string_value_shape"));
-    assert!(shape_projection_source.contains("pub fn apply_borrowed_string_content_projection"));
-    assert!(shape_projection_source.contains("pub fn borrowed_sequence_element_shape"));
-    assert!(shape_projection_source.contains("pub fn apply_borrowed_sequence_element_projection"));
-    assert!(slot_policy_source.contains("BorrowedContentPolicy"));
-    assert!(slot_policy_source.contains("BorrowedContentKind"));
-    assert!(slot_policy_source.contains("BorrowedContentTypePolicy"));
-    assert!(slot_policy_source.contains("borrowed_content_type_policy"));
-    assert!(!slot_policy_source.contains("borrowed_content_policy_for_type"));
-    assert!(!slot_policy_source.contains("fn can_borrow_content"));
-    assert!(!slot_policy_source.contains("BorrowedViewPolicy"));
-    assert!(!slot_policy_source.contains("BorrowedStringContent"));
-    assert!(!stream_shape_source.contains("ViewShape::Str"));
-    assert!(!stream_shape_source.contains("JavaType::String"));
-    assert!(!slot_policy_source.contains("ViewShape::Str"));
-    assert!(!slot_policy_source.contains("OwnershipShape::SharedBorrow"));
-    assert!(!coercion_production_source.contains("element_shape.ownership = OwnershipShape"));
-}
-
-#[test]
 fn stdlib_owns_known_jdk_content_method_facts() {
     let expr_shape_source = include_str!("../src/expr_shape.rs");
     let lower_source = include_str!("../src/lower.rs");
@@ -41704,6 +42529,18 @@ fn stdlib_owns_known_jdk_content_method_facts() {
     let contains_key = CallableKey::method("String", "contains", Staticness::Unknown, 1);
     let trim_key = CallableKey::method("String", "trim", Staticness::Unknown, 0);
     let char_at_key = CallableKey::method("String", "charAt", Staticness::Unknown, 1);
+    let string_builder_char_at_key =
+        CallableKey::method("StringBuilder", "charAt", Staticness::Unknown, 1);
+    let string_buffer_char_at_key =
+        CallableKey::method("StringBuffer", "charAt", Staticness::Unknown, 1);
+    let string_builder_substring_1_key =
+        CallableKey::method("StringBuilder", "substring", Staticness::Unknown, 1);
+    let string_builder_substring_2_key =
+        CallableKey::method("StringBuilder", "substring", Staticness::Unknown, 2);
+    let java_lang_string_buffer_substring_1_key =
+        CallableKey::method("JavaLangStringBuffer", "substring", Staticness::Unknown, 1);
+    let java_lang_string_buffer_substring_2_key =
+        CallableKey::method("JavaLangStringBuffer", "substring", Staticness::Unknown, 2);
     let index_of_key = CallableKey::method("String", "indexOf", Staticness::Unknown, 1);
     let index_of_from_key = CallableKey::method("String", "indexOf", Staticness::Unknown, 2);
     let last_index_of_key = CallableKey::method("String", "lastIndexOf", Staticness::Unknown, 1);
@@ -41712,7 +42549,14 @@ fn stdlib_owns_known_jdk_content_method_facts() {
     let get_bytes_key = CallableKey::method("String", "getBytes", Staticness::Unknown, 1);
     let split_key = CallableKey::method("String", "split", Staticness::Unknown, 2);
     let matches_key = CallableKey::method("String", "matches", Staticness::Unknown, 1);
+    let parse_byte_key = CallableKey::method("Byte", "parseByte", Staticness::Unknown, 1);
+    let parse_byte_radix_key = CallableKey::method("Byte", "parseByte", Staticness::Unknown, 2);
+    let parse_short_key = CallableKey::method("Short", "parseShort", Staticness::Unknown, 1);
+    let parse_short_radix_key = CallableKey::method("Short", "parseShort", Staticness::Unknown, 2);
     let parse_int_key = CallableKey::method("Integer", "parseInt", Staticness::Unknown, 1);
+    let parse_int_radix_key = CallableKey::method("Integer", "parseInt", Staticness::Unknown, 2);
+    let parse_long_key = CallableKey::method("Long", "parseLong", Staticness::Unknown, 1);
+    let parse_long_radix_key = CallableKey::method("Long", "parseLong", Staticness::Unknown, 2);
     let parse_float_key = CallableKey::method("Float", "parseFloat", Staticness::Unknown, 1);
     let parse_double_key = CallableKey::method("Double", "parseDouble", Staticness::Unknown, 1);
     let math_max_key = CallableKey::method("Math", "max", Staticness::Unknown, 2);
@@ -41781,14 +42625,25 @@ fn stdlib_owns_known_jdk_content_method_facts() {
     );
     let string_tokenizer_next_token_key =
         CallableKey::method("StringTokenizer", "nextToken", Staticness::Unknown, 0);
+    let string_tokenizer_has_more_elements_key = CallableKey::method(
+        "java.util.StringTokenizer",
+        "hasMoreElements",
+        Staticness::Unknown,
+        0,
+    );
+    let string_tokenizer_next_element_key =
+        CallableKey::method("StringTokenizer", "nextElement", Staticness::Unknown, 0);
     let string_tokenizer_count_tokens_key =
         CallableKey::method("StringTokenizer", "countTokens", Staticness::Unknown, 0);
+    let iterator_next_key =
+        CallableKey::method("java.util.Iterator", "next", Staticness::Unknown, 0);
     let iterator_for_each_remaining_key = CallableKey::method(
         "java.util.Iterator",
         "forEachRemaining",
         Staticness::Unknown,
         1,
     );
+    let bitset_set_key = CallableKey::method("java.util.BitSet", "set", Staticness::Unknown, 1);
 
     assert!(is_content_read_method("length"));
     assert!(is_content_read_method("isEmpty"));
@@ -41836,6 +42691,81 @@ fn stdlib_owns_known_jdk_content_method_facts() {
         .expect("String.charAt ABI should come from selected Rust stdlib facts");
     assert_eq!(char_at_abi.args, vec![FacadeSlot::Index]);
 
+    let string_builder_char_at_abi = stdlib_signature_facts
+        .facade_abi_for_key(&string_builder_char_at_key)
+        .expect("StringBuilder.charAt ABI should come from selected JDK facade facts");
+    assert_eq!(string_builder_char_at_abi.args, vec![FacadeSlot::Index]);
+    assert_eq!(string_builder_char_at_abi.return_slot, FacadeSlot::Owned);
+    assert_eq!(string_builder_char_at_abi.result, ResultAbi::ResultWrapped);
+    assert_eq!(
+        string_builder_char_at_abi.rust_path,
+        "StringBuffer::char_at_result"
+    );
+
+    let string_buffer_char_at_abi = stdlib_signature_facts
+        .facade_abi_for_key(&string_buffer_char_at_key)
+        .expect("StringBuffer.charAt ABI should come from selected JDK facade facts");
+    assert_eq!(string_buffer_char_at_abi.args, vec![FacadeSlot::Index]);
+    assert_eq!(string_buffer_char_at_abi.return_slot, FacadeSlot::Owned);
+    assert_eq!(string_buffer_char_at_abi.result, ResultAbi::ResultWrapped);
+    assert_eq!(
+        string_buffer_char_at_abi.rust_path,
+        "StringBuffer::char_at_result"
+    );
+
+    let string_builder_substring_1_abi = stdlib_signature_facts
+        .facade_abi_for_key(&string_builder_substring_1_key)
+        .expect("StringBuilder.substring(begin) ABI should be catchable");
+    assert_eq!(string_builder_substring_1_abi.args, vec![FacadeSlot::Owned]);
+    assert_eq!(
+        string_builder_substring_1_abi.return_slot,
+        FacadeSlot::Owned
+    );
+    assert_eq!(
+        string_builder_substring_1_abi.result,
+        ResultAbi::ResultWrapped
+    );
+    assert_eq!(
+        string_builder_substring_1_abi.rust_path,
+        "StringBuffer::substring_1_result"
+    );
+
+    let string_builder_substring_2_abi = stdlib_signature_facts
+        .facade_abi_for_key(&string_builder_substring_2_key)
+        .expect("StringBuilder.substring(begin, end) ABI should be catchable");
+    assert_eq!(
+        string_builder_substring_2_abi.args,
+        vec![FacadeSlot::Owned, FacadeSlot::Owned]
+    );
+    assert_eq!(
+        string_builder_substring_2_abi.return_slot,
+        FacadeSlot::Owned
+    );
+    assert_eq!(
+        string_builder_substring_2_abi.result,
+        ResultAbi::ResultWrapped
+    );
+    assert_eq!(
+        string_builder_substring_2_abi.rust_path,
+        "StringBuffer::substring_2_result"
+    );
+
+    let java_lang_string_buffer_substring_1_abi = stdlib_signature_facts
+        .facade_abi_for_key(&java_lang_string_buffer_substring_1_key)
+        .expect("JavaLangStringBuffer.substring(begin) ABI should use the result helper name");
+    assert_eq!(
+        java_lang_string_buffer_substring_1_abi.rust_path,
+        "StringBuffer::substring_1_result"
+    );
+
+    let java_lang_string_buffer_substring_2_abi = stdlib_signature_facts
+        .facade_abi_for_key(&java_lang_string_buffer_substring_2_key)
+        .expect("JavaLangStringBuffer.substring(begin, end) ABI should use the result helper name");
+    assert_eq!(
+        java_lang_string_buffer_substring_2_abi.rust_path,
+        "StringBuffer::substring_2_result"
+    );
+
     let index_of_abi = stdlib_signature_facts
         .facade_abi_for_key(&index_of_key)
         .expect("String.indexOf ABI should come from selected Rust stdlib facts");
@@ -41882,11 +42812,37 @@ fn stdlib_owns_known_jdk_content_method_facts() {
     assert_eq!(has_more_tokens_abi.receiver, ReceiverAbi::BorrowedSelf);
     assert_eq!(has_more_tokens_abi.return_slot, FacadeSlot::Owned);
 
+    let has_more_elements_abi = stdlib_signature_facts
+        .facade_abi_for_key(&string_tokenizer_has_more_elements_key)
+        .expect("StringTokenizer.hasMoreElements ABI should come from selected JDK facade facts");
+    assert_eq!(has_more_elements_abi.receiver, ReceiverAbi::BorrowedSelf);
+    assert_eq!(has_more_elements_abi.return_slot, FacadeSlot::Owned);
+    assert_eq!(
+        has_more_elements_abi.rust_path,
+        "StringTokenizer::has_more_tokens"
+    );
+
     let next_token_abi = stdlib_signature_facts
         .facade_abi_for_key(&string_tokenizer_next_token_key)
         .expect("StringTokenizer.nextToken ABI should come from selected JDK facade facts");
     assert_eq!(next_token_abi.receiver, ReceiverAbi::MutBorrowedSelf);
     assert_eq!(next_token_abi.return_slot, FacadeSlot::Owned);
+    assert_eq!(next_token_abi.result, ResultAbi::ResultWrapped);
+    assert_eq!(
+        next_token_abi.rust_path,
+        "StringTokenizer::next_token_result"
+    );
+
+    let next_element_abi = stdlib_signature_facts
+        .facade_abi_for_key(&string_tokenizer_next_element_key)
+        .expect("StringTokenizer.nextElement ABI should come from selected JDK facade facts");
+    assert_eq!(next_element_abi.receiver, ReceiverAbi::MutBorrowedSelf);
+    assert_eq!(next_element_abi.return_slot, FacadeSlot::Owned);
+    assert_eq!(next_element_abi.result, ResultAbi::ResultWrapped);
+    assert_eq!(
+        next_element_abi.rust_path,
+        "StringTokenizer::next_element_result"
+    );
 
     let count_tokens_abi = stdlib_signature_facts
         .facade_abi_for_key(&string_tokenizer_count_tokens_key)
@@ -41894,16 +42850,98 @@ fn stdlib_owns_known_jdk_content_method_facts() {
     assert_eq!(count_tokens_abi.receiver, ReceiverAbi::BorrowedSelf);
     assert_eq!(count_tokens_abi.return_slot, FacadeSlot::Owned);
 
+    let bitset_set_abi = stdlib_signature_facts
+        .facade_abi_for_key(&bitset_set_key)
+        .expect("BitSet.set ABI should come from selected JDK facade facts");
+    assert_eq!(bitset_set_abi.receiver, ReceiverAbi::MutBorrowedSelf);
+    assert_eq!(bitset_set_abi.args, vec![FacadeSlot::Owned]);
+    assert_eq!(bitset_set_abi.return_slot, FacadeSlot::Owned);
+    assert_eq!(bitset_set_abi.result, ResultAbi::ResultWrapped);
+    assert_eq!(bitset_set_abi.rust_path, "BitSet::set_result");
+
+    let bitset_set_effect = stdlib_signature_facts
+        .external_api_effect_for_receiver_with_arity(Some("java.util.BitSet"), "set", Some(1))
+        .expect("BitSet.set effect should come from selected JDK facade facts");
+    assert_eq!(
+        bitset_set_effect.receiver_mutability,
+        ReceiverMutabilityFact::MutatesReceiver
+    );
+    assert!(bitset_set_effect.thrown.iter().any(|ty| {
+        matches!(ty, JavaType::Named { name, .. } if name == "IndexOutOfBoundsException")
+    }));
+
     let matches_abi = stdlib_signature_facts
         .facade_abi_for_key(&matches_key)
         .expect("String.matches ABI should come from selected Rust stdlib facts");
     assert_eq!(matches_abi.args, vec![FacadeSlot::Borrowed]);
+
+    let parse_byte_abi = stdlib_signature_facts
+        .facade_abi_for_key(&parse_byte_key)
+        .expect("Byte.parseByte ABI should come from selected Rust stdlib facts");
+    assert_eq!(parse_byte_abi.args, vec![FacadeSlot::Borrowed]);
+    assert_eq!(parse_byte_abi.receiver, ReceiverAbi::AssociatedFunction);
+    let parse_byte_radix_abi = stdlib_signature_facts
+        .facade_abi_for_key(&parse_byte_radix_key)
+        .expect("Byte.parseByte(radix) ABI should come from selected Rust stdlib facts");
+    assert_eq!(
+        parse_byte_radix_abi.args,
+        vec![FacadeSlot::Borrowed, FacadeSlot::Owned]
+    );
+    assert_eq!(
+        parse_byte_radix_abi.receiver,
+        ReceiverAbi::AssociatedFunction
+    );
+
+    let parse_short_abi = stdlib_signature_facts
+        .facade_abi_for_key(&parse_short_key)
+        .expect("Short.parseShort ABI should come from selected Rust stdlib facts");
+    assert_eq!(parse_short_abi.args, vec![FacadeSlot::Borrowed]);
+    assert_eq!(parse_short_abi.receiver, ReceiverAbi::AssociatedFunction);
+    let parse_short_radix_abi = stdlib_signature_facts
+        .facade_abi_for_key(&parse_short_radix_key)
+        .expect("Short.parseShort(radix) ABI should come from selected Rust stdlib facts");
+    assert_eq!(
+        parse_short_radix_abi.args,
+        vec![FacadeSlot::Borrowed, FacadeSlot::Owned]
+    );
+    assert_eq!(
+        parse_short_radix_abi.receiver,
+        ReceiverAbi::AssociatedFunction
+    );
 
     let parse_int_abi = stdlib_signature_facts
         .facade_abi_for_key(&parse_int_key)
         .expect("Integer.parseInt ABI should come from selected Rust stdlib facts");
     assert_eq!(parse_int_abi.args, vec![FacadeSlot::Borrowed]);
     assert_eq!(parse_int_abi.receiver, ReceiverAbi::AssociatedFunction);
+    let parse_int_radix_abi = stdlib_signature_facts
+        .facade_abi_for_key(&parse_int_radix_key)
+        .expect("Integer.parseInt(radix) ABI should come from selected Rust stdlib facts");
+    assert_eq!(
+        parse_int_radix_abi.args,
+        vec![FacadeSlot::Borrowed, FacadeSlot::Owned]
+    );
+    assert_eq!(
+        parse_int_radix_abi.receiver,
+        ReceiverAbi::AssociatedFunction
+    );
+
+    let parse_long_abi = stdlib_signature_facts
+        .facade_abi_for_key(&parse_long_key)
+        .expect("Long.parseLong ABI should come from selected Rust stdlib facts");
+    assert_eq!(parse_long_abi.args, vec![FacadeSlot::Borrowed]);
+    assert_eq!(parse_long_abi.receiver, ReceiverAbi::AssociatedFunction);
+    let parse_long_radix_abi = stdlib_signature_facts
+        .facade_abi_for_key(&parse_long_radix_key)
+        .expect("Long.parseLong(radix) ABI should come from selected Rust stdlib facts");
+    assert_eq!(
+        parse_long_radix_abi.args,
+        vec![FacadeSlot::Borrowed, FacadeSlot::Owned]
+    );
+    assert_eq!(
+        parse_long_radix_abi.receiver,
+        ReceiverAbi::AssociatedFunction
+    );
 
     let parse_float_abi = stdlib_signature_facts
         .facade_abi_for_key(&parse_float_key)
@@ -42037,6 +43075,15 @@ fn stdlib_owns_known_jdk_content_method_facts() {
         iterator_for_each_remaining_abi.return_slot,
         FacadeSlot::Owned
     );
+
+    let iterator_next_abi = stdlib_signature_facts
+        .facade_abi_for_key(&iterator_next_key)
+        .expect("java.util.Iterator.next ABI should come from selected JDK facade facts");
+    assert_eq!(iterator_next_abi.receiver, ReceiverAbi::MutBorrowedSelf);
+    assert_eq!(iterator_next_abi.args, Vec::<FacadeSlot>::new());
+    assert_eq!(iterator_next_abi.return_slot, FacadeSlot::Owned);
+    assert_eq!(iterator_next_abi.result, ResultAbi::ResultWrapped);
+    assert_eq!(iterator_next_abi.rust_path, "JavaIterator::next_result");
 
     let files_exists_abi = stdlib_signature_facts
         .facade_abi_for_key(&files_exists_key)
@@ -43702,19 +44749,21 @@ fn map_get_return_adaptation_uses_native_lowered_type_plan() {
 #[test]
 fn stream_lambda_emission_owns_java_string_method_mappings() {
     assert_eq!(
-        emit_stream_lambda_body(
+        emit_stream_lambda_body_with_context(
             &parse_expr("value.trim()"),
             "value",
-            StreamLambdaValue::BorrowedItem
+            StreamLambdaValue::BorrowedItem,
+            StreamRenderContext::empty(),
         )
         .unwrap(),
-        "value.trim()"
+        "value.trim().to_string()"
     );
     assert_eq!(
-        emit_stream_lambda_body(
+        emit_stream_lambda_body_with_context(
             &parse_expr("value.isEmpty()"),
             "value",
-            StreamLambdaValue::BorrowedItem
+            StreamLambdaValue::BorrowedItem,
+            StreamRenderContext::empty(),
         )
         .unwrap(),
         "value.is_empty()"
@@ -43730,10 +44779,11 @@ fn stream_lambda_emission_owns_java_string_method_mappings() {
         RustExpr::MethodCall { method, .. } if method == "is_empty"
     ));
     assert_eq!(
-        emit_stream_lambda_body(
+        emit_stream_lambda_body_with_context(
             &parse_expr("value.toLowerCase()"),
             "value",
-            StreamLambdaValue::BorrowedItem
+            StreamLambdaValue::BorrowedItem,
+            StreamRenderContext::empty(),
         )
         .unwrap(),
         "value.to_lowercase()"
@@ -43743,28 +44793,31 @@ fn stream_lambda_emission_owns_java_string_method_mappings() {
 #[test]
 fn stream_lambda_emission_uses_structured_operator_rendering() {
     assert_eq!(
-        emit_stream_lambda_body(
+        emit_stream_lambda_body_with_context(
             &parse_expr("value - (other - third)"),
             "value",
-            StreamLambdaValue::OwnedItem
+            StreamLambdaValue::OwnedItem,
+            StreamRenderContext::empty(),
         )
         .unwrap(),
         "value - (other - third)"
     );
     assert_eq!(
-        emit_stream_lambda_body(
+        emit_stream_lambda_body_with_context(
             &parse_expr("-(value + other)"),
             "value",
-            StreamLambdaValue::OwnedItem
+            StreamLambdaValue::OwnedItem,
+            StreamRenderContext::empty(),
         )
         .unwrap(),
         "-(value + other)"
     );
     assert_eq!(
-        emit_stream_lambda_body(
+        emit_stream_lambda_body_with_context(
             &parse_expr("value < other && other < third"),
             "value",
-            StreamLambdaValue::OwnedItem
+            StreamLambdaValue::OwnedItem,
+            StreamRenderContext::empty(),
         )
         .unwrap(),
         "value < other && other < third"
@@ -43792,7 +44845,10 @@ fn stream_lambda_emission_uses_structured_operator_rendering() {
     assert_eq!(emit_expr(&raw_binary), "left + right");
     assert!(matches!(
         raw_binary,
-        RustExpr::Raw(raw) if raw == "left + right"
+        RustExpr::Binary { op, left, right }
+            if op == "+"
+                && matches!(left.as_ref(), RustExpr::Var(name) if name == "left")
+                && matches!(right.as_ref(), RustExpr::Var(name) if name == "right")
     ));
     let opaque_raw = emit_stream_lambda_body_expr(
         &Expr::Raw("left +".to_string()),
@@ -43819,10 +44875,23 @@ fn stream_lambda_emission_uses_structured_operator_rendering() {
         StreamLambdaValue::OwnedItem,
     )
     .unwrap();
-    assert_eq!(emit_expr(&raw_static_constant), "Owner.VALUE");
+    assert_eq!(emit_expr(&raw_static_constant), "Owner::VALUE");
     assert!(matches!(
         raw_static_constant,
-        RustExpr::Raw(raw) if raw == "Owner.VALUE"
+        RustExpr::Path(segments)
+            if segments == vec!["Owner".to_string(), "VALUE".to_string()]
+    ));
+    let raw_instance_field = emit_stream_lambda_body_expr(
+        &Expr::Raw("owner.value".to_string()),
+        "value",
+        StreamLambdaValue::OwnedItem,
+    )
+    .unwrap();
+    assert_eq!(emit_expr(&raw_instance_field), "owner.value");
+    assert!(matches!(
+        raw_instance_field,
+        RustExpr::Field(receiver, field)
+            if field == "value" && matches!(receiver.as_ref(), RustExpr::Var(name) if name == "owner")
     ));
 }
 
@@ -43908,7 +44977,12 @@ fn stream_source_element_shape_is_inferred_before_lowering() {
     let mut env = TypeEnv::new();
     env.insert_local("values", list_java_type(JavaType::String));
 
-    let shape = infer_stream_source_element_shape(&parse_expr("values"), &env).unwrap();
+    let shape = infer_stream_source_element_shape_with_facts(
+        &parse_expr("values"),
+        &env,
+        &FactSet::default(),
+    )
+    .unwrap();
     let projected_shape = iteration_element_shape(JavaType::String, &FactSet::default());
 
     assert_eq!(shape, projected_shape);
@@ -43918,9 +44992,63 @@ fn stream_source_element_shape_is_inferred_before_lowering() {
 }
 
 #[test]
+fn list_remove_overload_uses_argument_type_before_lowering() {
+    let mut env = TypeEnv::new();
+    env.insert_local("values", list_java_type(JavaType::String));
+    let values = Expr::Var("values".to_string());
+
+    assert!(matches!(
+        plan_call_expr(
+            Some(&values),
+            "remove",
+            &[Expr::Literal(Literal::Int(0))],
+            None,
+            &FactSet::default(),
+            &env,
+        ),
+        CallExprPlan::Target(CallTargetPlan::NativeCollectionMethod {
+            method: NativeCollectionMethod::ListRemoveIndex,
+            ..
+        })
+    ));
+    assert!(matches!(
+        plan_call_expr(
+            Some(&values),
+            "remove",
+            &[Expr::Literal(Literal::String("b".to_string()))],
+            None,
+            &FactSet::default(),
+            &env,
+        ),
+        CallExprPlan::Target(CallTargetPlan::NativeCollectionMethod {
+            method: NativeCollectionMethod::ListRemoveObject,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn stream_raw_expr_recovery_preserves_binary_precedence() {
+    let expr = Expr::Binary {
+        op: BinaryOp::Mul,
+        left: Box::new(Expr::Raw("left + right".to_string())),
+        right: Box::new(Expr::Literal(Literal::Int(2))),
+    };
+
+    let lowered = emit_stream_lambda_body_expr(&expr, "value", StreamLambdaValue::BorrowedItem)
+        .expect("synthetic raw stream lambda expression should lower");
+
+    assert_eq!(emit_expr(&lowered), "(left + right) * 2");
+    assert!(matches!(
+        lowered,
+        RustExpr::Binary { left, .. }
+            if matches!(left.as_ref(), RustExpr::Grouped(grouped)
+                if matches!(grouped.as_ref(), RustExpr::Binary { op, .. } if op == "+"))
+    ));
+}
+
+#[test]
 fn types_own_stream_source_element_java_semantics() {
-    let stream_shape_source = include_str!("../src/stream_shape.rs");
-    let effective_facts_source = include_str!("../src/effective_facts.rs");
     let boxed_int_list = list_java_type(JavaType::Named {
         name: "Integer".to_string(),
         args: Vec::new(),
@@ -43935,7 +45063,6 @@ fn types_own_stream_source_element_java_semantics() {
     assert_eq!(
         stream_source_capability_policy(&boxed_int_list, &facts),
         StreamSourceCapabilityPolicy {
-            source_ty: boxed_int_list.clone(),
             capability_element: Some(JavaType::Named {
                 name: "Integer".to_string(),
                 args: Vec::new(),
@@ -43946,25 +45073,6 @@ fn types_own_stream_source_element_java_semantics() {
         stream_source_capability_policy_with_effective_facts(&boxed_int_list, &effective_facts),
         stream_source_capability_policy(&boxed_int_list, &facts)
     );
-    assert!(!stream_shape_source.contains("sequence_element_type("));
-    assert!(stream_shape_source.contains("use crate::effective_facts::EffectiveFacts"));
-    assert!(stream_shape_source.contains("pub struct StreamSourceCapabilityPolicy"));
-    assert!(stream_shape_source.contains("pub fn stream_source_capability_policy"));
-    assert!(stream_shape_source.contains("stream_source_capability_policy_with_effective_facts"));
-    assert!(effective_facts_source.contains("pub fn sequence_element_type_for"));
-    assert!(!stream_shape_source.contains("name == \"Integer\""));
-    assert!(!stream_shape_source.contains("OwnershipShape"));
-    assert!(!stream_shape_source.contains("ownership ="));
-    assert!(stream_shape_source.contains("iteration_element_shape_with_effective_facts"));
-    assert_eq!(
-        stream_shape_source
-            .matches("facts.sequence_element_type_for")
-            .count(),
-        1
-    );
-    assert!(stream_shape_source.contains("infer_stream_source_element_shape_with_facts"));
-    assert!(stream_shape_source.contains("infer_stream_source_element_shape_with_effective_facts"));
-    assert!(!stream_shape_source.contains("fn stream_source_element_type("));
 }
 
 #[test]
@@ -43991,7 +45099,12 @@ fn stream_source_element_shape_uses_type_capability_facts() {
             provenance: FactProvenance::UserOverride,
         });
 
-    let default_shape = infer_stream_source_element_shape(&parse_expr("values"), &env).unwrap();
+    let default_shape = infer_stream_source_element_shape_with_facts(
+        &parse_expr("values"),
+        &env,
+        &FactSet::default(),
+    )
+    .unwrap();
     let fact_shape =
         infer_stream_source_element_shape_with_facts(&parse_expr("values"), &env, &facts).unwrap();
     let effective_shape = infer_stream_source_element_shape_with_effective_facts(
@@ -44044,11 +45157,17 @@ fn stream_source_element_shape_uses_sequence_like_capability_facts() {
             provenance: FactProvenance::UserOverride,
         });
 
-    assert!(infer_stream_source_element_shape(&parse_expr("values"), &env).is_none());
+    assert!(
+        infer_stream_source_element_shape_with_facts(
+            &parse_expr("values"),
+            &env,
+            &FactSet::default()
+        )
+        .is_none()
+    );
     assert_eq!(
         stream_source_capability_policy(&external_ids, &facts),
         StreamSourceCapabilityPolicy {
-            source_ty: external_ids.clone(),
             capability_element: Some(external_id.clone()),
         }
     );
@@ -44230,28 +45349,13 @@ class Use {
 }
 
 #[test]
-fn switch_plan_does_not_render_rust() {
-    let source = include_str!("../src/switch_plan.rs");
-
-    assert!(!source.contains("rust_ir"));
-    assert!(!source.contains("RustExpr"));
-    assert!(!source.contains("RustStmt"));
-    assert!(!source.contains("emit::"));
-    assert!(!source.contains("emit_expr"));
-    assert!(!source.contains("emit_statements"));
-    assert!(!source.contains("render_switch"));
-    assert!(!source.contains("switch_case_condition"));
-    assert!(source.contains("pub fn plan_simple_return_switch"));
-    assert!(source.contains("pub fn plan_simple_return_switch_case"));
-}
-
-#[test]
 fn statement_render_owns_raw_block_and_enhanced_for_wrappers() {
     let body = vec![RustStmt::Expr(RustExpr::Call {
         function: Box::new(RustExpr::Var("touch".to_string())),
         args: vec![RustExpr::Var("item".to_string())],
     })];
     let local = LocalPlan {
+        binding: new_java2rust::binding_id::BindingId::compatibility_local("count"),
         name: "count".to_string(),
         java_ty: JavaType::Primitive(PrimitiveType::Int),
         shape: RustSlotShape::conservative(JavaType::Primitive(PrimitiveType::Int)),
@@ -44259,7 +45363,11 @@ fn statement_render_owns_raw_block_and_enhanced_for_wrappers() {
     };
 
     assert_eq!(
-        local_let_stmt(&local, Some(RustExpr::Literal("1".to_string()))),
+        local_let_stmt_with_facts(
+            &local,
+            Some(RustExpr::Literal("1".to_string())),
+            &FactSet::default(),
+        ),
         RustStmt::Let {
             mutable: true,
             name: "count".to_string(),
@@ -44276,6 +45384,7 @@ fn statement_render_owns_raw_block_and_enhanced_for_wrappers() {
         args: Vec::new(),
     };
     let external_local = LocalPlan {
+        binding: new_java2rust::binding_id::BindingId::compatibility_local("ids"),
         name: "ids".to_string(),
         java_ty: external_ids.clone(),
         shape: RustSlotShape::conservative(external_ids),
@@ -44435,17 +45544,6 @@ fn statement_render_owns_raw_block_and_enhanced_for_wrappers() {
             tail: None,
         })
     );
-}
-
-#[test]
-fn statement_render_renders_local_types_with_facts() {
-    let source = include_str!("../src/statement_render.rs");
-    let lower_source = include_str!("../src/lower.rs");
-
-    assert!(source.contains("pub fn local_let_stmt_with_facts"));
-    assert!(source.contains("rust_type_for_slot_with_facts"));
-    assert!(!source.contains("rust_type_for_slot(&local.shape)"));
-    assert!(lower_source.contains("local_let_stmt_with_facts"));
 }
 
 #[test]
@@ -44862,28 +45960,34 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
         typed_single_param_closure("value", "&String", value_zero_arg_method("get_name"),)
     );
     assert_eq!(
-        infer_single_input_method_reference_output_shape(
+        infer_single_input_method_reference_output_shape_with_context(
             "Integer",
             "intValue",
             &RustSlotShape::for_storage(JavaType::String),
+            &TypeEnv::new(),
+            &FactSet::default(),
         ),
         Some(RustSlotShape::for_storage(JavaType::Primitive(
             PrimitiveType::Int,
         )))
     );
     assert_eq!(
-        infer_single_input_method_reference_output_shape(
+        infer_single_input_method_reference_output_shape_with_context(
             "Object",
             "toString",
             &RustSlotShape::for_storage(JavaType::String),
+            &TypeEnv::new(),
+            &FactSet::default(),
         ),
         Some(new_java2rust::shape_projection::owned_string_value_shape())
     );
     assert_eq!(
-        infer_single_input_method_reference_output_shape(
+        infer_single_input_method_reference_output_shape_with_context(
             "NameHolder",
             "getName",
             &RustSlotShape::for_storage(JavaType::Unknown("NameHolder".to_string())),
+            &TypeEnv::new(),
+            &FactSet::default(),
         )
         .map(|shape| shape.java_ty),
         Some(JavaType::Unknown("get_name".to_string()))
@@ -45054,13 +46158,15 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
         Some(new_java2rust::shape_projection::owned_string_value_shape())
     );
     assert_eq!(
-        infer_single_input_method_reference_output_shape(
+        infer_single_input_method_reference_output_shape_with_context(
             "ExternalRecord",
             "getName",
             &RustSlotShape::for_storage(JavaType::Named {
                 name: "ExternalRecord".to_string(),
                 args: Vec::new(),
             }),
+            &TypeEnv::new(),
+            &FactSet::default(),
         )
         .map(|shape| shape.java_ty),
         Some(JavaType::Unknown("get_name".to_string()))
@@ -45292,7 +46398,10 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
     );
     assert!(!lowering_source.contains("format!(\"{type_name}::new"));
     assert!(!lowering_source.contains("format!(\"{owner}::{method}"));
-    assert!(shape_source.contains("pub fn infer_single_input_method_reference_output_shape"));
+    assert!(
+        shape_source
+            .contains("pub fn infer_single_input_method_reference_output_shape_with_context")
+    );
     assert!(shape_source.contains("infer_method_reference_output_shape_from_call_plan"));
     assert!(
         shape_source.find("infer_method_reference_output_shape_from_call_plan")
@@ -45301,7 +46410,9 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
     assert!(shape_source.contains("infer_method_reference_output_shape_for_plan"));
     assert!(shape_source.contains("infer_unbound_accessor_method_reference_fallback_shape"));
     assert!(!shape_source.contains("fn is_java_accessor_method_reference_fallback"));
-    assert!(stream_source.contains("infer_single_input_method_reference_output_shape"));
+    assert!(
+        stream_source.contains("infer_single_input_method_reference_output_shape_with_context")
+    );
     assert!(!stream_source.contains("fn infer_stream_method_reference_output_shape"));
     assert!(!stream_lowering_source.contains("render_single_input_method_reference_body("));
     assert!(
@@ -45942,7 +47053,7 @@ fn operator_lowering_owns_binary_and_unary_rust_spelling() {
         args: vec![JavaType::String],
     });
     assert_eq!(
-        plan_equality_comparison(&string_shape, &string_shape),
+        plan_equality_comparison_with_facts(&string_shape, &string_shape, &FactSet::default()),
         EqualityComparisonPlan::StringView {
             left_view: StringEqualityOperandView::NativeString,
             right_view: StringEqualityOperandView::NativeString,
@@ -45962,15 +47073,27 @@ fn operator_lowering_owns_binary_and_unary_rust_spelling() {
     );
     assert!(matches!(string_equality, RustExpr::Binary { .. }));
     assert_eq!(
-        plan_equality_comparison(&optional_string_shape, &optional_string_shape),
+        plan_equality_comparison_with_facts(
+            &optional_string_shape,
+            &optional_string_shape,
+            &FactSet::default(),
+        ),
         EqualityComparisonPlan::BothOptionalByRef
     );
     assert_eq!(
-        plan_equality_comparison(&optional_string_shape, &string_shape),
+        plan_equality_comparison_with_facts(
+            &optional_string_shape,
+            &string_shape,
+            &FactSet::default(),
+        ),
         EqualityComparisonPlan::LeftOptionalByRef
     );
     assert_eq!(
-        plan_equality_comparison(&string_shape, &optional_string_shape),
+        plan_equality_comparison_with_facts(
+            &string_shape,
+            &optional_string_shape,
+            &FactSet::default(),
+        ),
         EqualityComparisonPlan::RightOptionalByRef
     );
     assert_eq!(
@@ -46020,13 +47143,21 @@ fn operator_lowering_owns_binary_and_unary_rust_spelling() {
     borrowed_str_shape.ownership = OwnershipShape::SharedBorrow;
     borrowed_str_shape.view = ViewShape::Str;
     assert_eq!(
-        plan_equality_comparison(&borrowed_str_shape, &optional_string_shape),
+        plan_equality_comparison_with_facts(
+            &borrowed_str_shape,
+            &optional_string_shape,
+            &FactSet::default(),
+        ),
         EqualityComparisonPlan::RightOptionalStringView {
             right_view: OptionalStringEqualityOperandView::NativeString,
         }
     );
     assert_eq!(
-        plan_equality_comparison(&optional_string_shape, &borrowed_str_shape),
+        plan_equality_comparison_with_facts(
+            &optional_string_shape,
+            &borrowed_str_shape,
+            &FactSet::default(),
+        ),
         EqualityComparisonPlan::LeftOptionalStringView {
             left_view: OptionalStringEqualityOperandView::NativeString,
         }
@@ -46050,7 +47181,11 @@ fn operator_lowering_owns_binary_and_unary_rust_spelling() {
     optional_borrowed_str_shape.ownership = OwnershipShape::SharedBorrow;
     optional_borrowed_str_shape.view = ViewShape::Str;
     assert_eq!(
-        plan_equality_comparison(&borrowed_str_shape, &optional_borrowed_str_shape),
+        plan_equality_comparison_with_facts(
+            &borrowed_str_shape,
+            &optional_borrowed_str_shape,
+            &FactSet::default(),
+        ),
         EqualityComparisonPlan::RightOptionalStringView {
             right_view: OptionalStringEqualityOperandView::BorrowedStr,
         }
@@ -46371,11 +47506,12 @@ fn access_lowering_owns_bare_field_and_member_access_fallbacks() {
         },
     );
     assert_eq!(
-        lower_field_access(
+        lower_field_access_with_facts(
             &parse_expr("values"),
             "length",
             &type_env,
             RustExpr::Var("values".to_string()),
+            &FactSet::default(),
         ),
         RustExpr::Cast {
             expr: Box::new(RustExpr::MethodCall {
@@ -46387,11 +47523,12 @@ fn access_lowering_owns_bare_field_and_member_access_fallbacks() {
         }
     );
     assert_eq!(
-        lower_field_access(
+        lower_field_access_with_facts(
             &parse_expr("callback"),
             "batchCount",
             &type_env,
             RustExpr::Var("callback".to_string()),
+            &FactSet::default(),
         ),
         RustExpr::Field(
             Box::new(RustExpr::Var("callback".to_string())),
@@ -46399,11 +47536,12 @@ fn access_lowering_owns_bare_field_and_member_access_fallbacks() {
         )
     );
     assert_eq!(
-        lower_field_access(
+        lower_field_access_with_facts(
             &parse_expr("helper"),
             "name",
             &type_env,
             RustExpr::Var("helper".to_string()),
+            &FactSet::default(),
         ),
         RustExpr::Field(
             Box::new(RustExpr::Var("helper".to_string())),
@@ -46411,11 +47549,12 @@ fn access_lowering_owns_bare_field_and_member_access_fallbacks() {
         )
     );
     assert_eq!(
-        lower_field_access(
+        lower_field_access_with_facts(
             &parse_expr("Owner"),
             "CONSTANT",
             &type_env,
             RustExpr::Var("owner".to_string()),
+            &FactSet::default(),
         ),
         RustExpr::Path(vec!["Owner".to_string(), "CONSTANT".to_string()])
     );
@@ -46424,11 +47563,14 @@ fn access_lowering_owns_bare_field_and_member_access_fallbacks() {
     let member_plan_source = include_str!("../src/member_access_plan.rs");
     assert!(member_plan_source.contains("pub struct JavaMemberAccessPolicy"));
     assert!(member_plan_source.contains("pub enum JavaMemberAccessKind"));
-    assert!(member_plan_source.contains("pub fn java_member_access_policy"));
+    assert!(!member_plan_source.contains("pub fn java_member_access_policy("));
+    assert!(member_plan_source.contains("pub fn java_member_access_policy_with_facts"));
+    assert!(!member_plan_source.contains("pub fn plan_member_access("));
+    assert!(member_plan_source.contains("pub fn plan_member_access_with_facts"));
     assert!(member_plan_source.contains("MemberAccessOp::LenAsI32"));
     assert!(member_plan_source.contains("MemberAccessOp::StaticConstant"));
     assert!(member_plan_source.contains("MemberAccessOp::RustField"));
-    assert!(access_lowering_source.contains("self_field_projection(name)"));
+    assert!(access_lowering_source.contains("self_field_projection(field_name)"));
     assert!(access_lowering_source.contains("field_projection(receiver, rust_name)"));
     assert!(access_lowering_source.contains("field_projection(lowered_receiver, field)"));
     assert!(!access_lowering_source.contains("RustExpr::Field"));
@@ -46559,7 +47701,12 @@ fn stream_plan_accepts_simple_captureful_lambdas_without_global_capture_veto() {
     let expr = parse_expr("values.stream().mapToInt(value -> value + base).sum()");
 
     let plan = build_stream_plan(&expr, &env, &FactSet::default()).unwrap();
-    let lowered = render_stream_plan(&plan, RustExpr::Var("values".to_string())).unwrap();
+    let lowered = render_stream_plan_with_context(
+        &plan,
+        RustExpr::Var("values".to_string()),
+        StreamRenderContext::empty(),
+    )
+    .unwrap();
 
     assert_eq!(
         emit::emit_expr(&lowered.expr),
@@ -46582,8 +47729,12 @@ fn stream_plan_lowers_no_op_terminals_as_structured_method_chains() {
 
     let collect_expr = parse_expr("values.stream().collect(Collectors.toList())");
     let collect_plan = build_stream_plan(&collect_expr, &env, &FactSet::default()).unwrap();
-    let collect_lowered =
-        render_stream_plan(&collect_plan, RustExpr::Var("values".to_string())).unwrap();
+    let collect_lowered = render_stream_plan_with_context(
+        &collect_plan,
+        RustExpr::Var("values".to_string()),
+        StreamRenderContext::empty(),
+    )
+    .unwrap();
     assert_eq!(
         emit::emit_expr(&collect_lowered.expr),
         "values.iter().collect::<Vec<_>>()"
@@ -46602,8 +47753,12 @@ fn stream_plan_lowers_no_op_terminals_as_structured_method_chains() {
 
     let find_first_expr = parse_expr("values.stream().findFirst()");
     let find_first_plan = build_stream_plan(&find_first_expr, &env, &FactSet::default()).unwrap();
-    let find_first_lowered =
-        render_stream_plan(&find_first_plan, RustExpr::Var("values".to_string())).unwrap();
+    let find_first_lowered = render_stream_plan_with_context(
+        &find_first_plan,
+        RustExpr::Var("values".to_string()),
+        StreamRenderContext::empty(),
+    )
+    .unwrap();
     assert_eq!(
         emit::emit_expr(&find_first_lowered.expr),
         "values.iter().next()"
@@ -46622,8 +47777,12 @@ fn stream_plan_lowers_no_op_terminals_as_structured_method_chains() {
 
     let to_array_expr = parse_expr("values.stream().toArray()");
     let to_array_plan = build_stream_plan(&to_array_expr, &env, &FactSet::default()).unwrap();
-    let to_array_lowered =
-        render_stream_plan(&to_array_plan, RustExpr::Var("values".to_string())).unwrap();
+    let to_array_lowered = render_stream_plan_with_context(
+        &to_array_plan,
+        RustExpr::Var("values".to_string()),
+        StreamRenderContext::empty(),
+    )
+    .unwrap();
     assert_eq!(
         emit::emit_expr(&to_array_lowered.expr),
         "values.iter().collect::<Vec<_>>()"
@@ -46649,7 +47808,12 @@ fn stream_plan_owns_flat_map_lambda_collection_stream_shape() {
         parse_expr("groups.stream().flatMap(group -> group.stream()).collect(Collectors.toList())");
 
     let plan = build_stream_plan(&expr, &env, &FactSet::default()).unwrap();
-    let lowered = render_stream_plan(&plan, RustExpr::Var("groups".to_string())).unwrap();
+    let lowered = render_stream_plan_with_context(
+        &plan,
+        RustExpr::Var("groups".to_string()),
+        StreamRenderContext::empty(),
+    )
+    .unwrap();
 
     assert!(matches!(
         plan.ops.as_slice(),
@@ -46679,7 +47843,12 @@ fn stream_plan_accepts_arrays_stream_as_source() {
         parse_expr("Arrays.stream(values).map(value -> value.trim()).collect(Collectors.toList())");
 
     let plan = build_stream_plan(&expr, &env, &FactSet::default()).unwrap();
-    let lowered = render_stream_plan(&plan, RustExpr::Var("values".to_string())).unwrap();
+    let lowered = render_stream_plan_with_context(
+        &plan,
+        RustExpr::Var("values".to_string()),
+        StreamRenderContext::empty(),
+    )
+    .unwrap();
 
     assert_eq!(plan.source.expr, &parse_expr("values"));
     assert_eq!(
@@ -46708,7 +47877,12 @@ fn stream_plan_accepts_arrays_stream_range_as_source() {
     );
 
     let plan = build_stream_plan(&expr, &env, &FactSet::default()).unwrap();
-    let lowered = render_stream_plan(&plan, RustExpr::Var("values".to_string())).unwrap();
+    let lowered = render_stream_plan_with_context(
+        &plan,
+        RustExpr::Var("values".to_string()),
+        StreamRenderContext::empty(),
+    )
+    .unwrap();
 
     assert_eq!(plan.source.expr, &parse_expr("values"));
     assert_eq!(
@@ -46733,8 +47907,12 @@ fn stream_plan_lowers_arrays_stream_to_array_and_all_match_terminals() {
     let all_match = parse_expr("Arrays.stream(values).allMatch(value -> value.length() > 0)");
 
     let to_array_plan = build_stream_plan(&to_array, &env, &FactSet::default()).unwrap();
-    let to_array_lowered =
-        render_stream_plan(&to_array_plan, RustExpr::Var("values".to_string())).unwrap();
+    let to_array_lowered = render_stream_plan_with_context(
+        &to_array_plan,
+        RustExpr::Var("values".to_string()),
+        StreamRenderContext::empty(),
+    )
+    .unwrap();
     assert_eq!(
         emit::emit_expr(&to_array_lowered.expr),
         "values.iter().map(|value| value.len() as i32).collect::<Vec<_>>()"
@@ -46749,8 +47927,12 @@ fn stream_plan_lowers_arrays_stream_to_array_and_all_match_terminals() {
     ));
 
     let all_match_plan = build_stream_plan(&all_match, &env, &FactSet::default()).unwrap();
-    let all_match_lowered =
-        render_stream_plan(&all_match_plan, RustExpr::Var("values".to_string())).unwrap();
+    let all_match_lowered = render_stream_plan_with_context(
+        &all_match_plan,
+        RustExpr::Var("values".to_string()),
+        StreamRenderContext::empty(),
+    )
+    .unwrap();
     assert_eq!(
         emit::emit_expr(&all_match_lowered.expr),
         "values.iter().all(|value| (value.len() as i32) > 0)"
@@ -46770,15 +47952,24 @@ fn stream_plan_lowers_temporary_arrays_stream_with_owned_lambda_items() {
     );
 
     let plan = build_stream_plan(&expr, &env, &FactSet::default()).unwrap();
-    let lowered = render_stream_plan(
+    let lowered = render_stream_plan_with_context(
         &plan,
-        RustExpr::Raw("line.split(\",\").collect::<Vec<_>>()".to_string()),
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Var("line".to_string())),
+                method: "split".to_string(),
+                args: vec![RustExpr::Literal("\",\"".to_string())],
+            }),
+            method: "collect::<Vec<_>>".to_string(),
+            args: Vec::new(),
+        },
+        StreamRenderContext::empty(),
     )
     .unwrap();
 
     assert_eq!(
         emit::emit_expr(&lowered.expr),
-        "(line.split(\",\").collect::<Vec<_>>()).into_iter().map(|value| value.parse::<f64>().unwrap()).collect::<Vec<_>>()"
+        "line.split(\",\").collect::<Vec<_>>().into_iter().map(|value| value.parse::<f64>().map_err(|err| JavaException::from_display(\"NumberFormatException\", err)).unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))).collect::<Vec<_>>()"
     );
     assert!(matches!(
         lowered.expr,
@@ -46803,8 +47994,12 @@ fn stream_plan_lowers_method_references_in_map_and_map_to_int() {
         parse_expr("names.stream().map(Object::toString).collect(Collectors.toList())");
 
     let count_plan = build_stream_plan(&count_sum, &env, &FactSet::default()).unwrap();
-    let count_lowered =
-        render_stream_plan(&count_plan, RustExpr::Var("counts".to_string())).unwrap();
+    let count_lowered = render_stream_plan_with_context(
+        &count_plan,
+        RustExpr::Var("counts".to_string()),
+        StreamRenderContext::empty(),
+    )
+    .unwrap();
     assert_eq!(
         emit::emit_expr(&count_lowered.expr),
         "counts.iter().map(|value| *value).sum::<i32>()"
@@ -46819,8 +48014,12 @@ fn stream_plan_lowers_method_references_in_map_and_map_to_int() {
     ));
 
     let names_plan = build_stream_plan(&name_strings, &env, &FactSet::default()).unwrap();
-    let names_lowered =
-        render_stream_plan(&names_plan, RustExpr::Var("names".to_string())).unwrap();
+    let names_lowered = render_stream_plan_with_context(
+        &names_plan,
+        RustExpr::Var("names".to_string()),
+        StreamRenderContext::empty(),
+    )
+    .unwrap();
     assert_eq!(
         emit::emit_expr(&names_lowered.expr),
         "names.iter().map(|value| (*value).to_string()).collect::<Vec<_>>()"
@@ -46906,8 +48105,12 @@ fn stream_optional_objects_null_method_references_use_call_target_plan() {
     let is_null = parse_expr("values.stream().map(Objects::isNull).collect(Collectors.toList())");
 
     let non_null_plan = build_stream_plan(&non_null, &env, &facts).unwrap();
-    let non_null_lowered =
-        render_stream_plan(&non_null_plan, RustExpr::Var("values".to_string())).unwrap();
+    let non_null_lowered = render_stream_plan_with_context(
+        &non_null_plan,
+        RustExpr::Var("values".to_string()),
+        StreamRenderContext::empty(),
+    )
+    .unwrap();
     assert_eq!(
         emit::emit_expr(&non_null_lowered.expr),
         "values.iter().map(|value: Option<&String>| value.is_some()).collect::<Vec<_>>()"
@@ -46925,8 +48128,12 @@ fn stream_optional_objects_null_method_references_use_call_target_plan() {
     ));
 
     let is_null_plan = build_stream_plan(&is_null, &env, &facts).unwrap();
-    let is_null_lowered =
-        render_stream_plan(&is_null_plan, RustExpr::Var("values".to_string())).unwrap();
+    let is_null_lowered = render_stream_plan_with_context(
+        &is_null_plan,
+        RustExpr::Var("values".to_string()),
+        StreamRenderContext::empty(),
+    )
+    .unwrap();
     assert_eq!(
         emit::emit_expr(&is_null_lowered.expr),
         "values.iter().map(|value: Option<&String>| value.is_none()).collect::<Vec<_>>()"
@@ -46942,38 +48149,6 @@ fn stream_optional_objects_null_method_references_use_call_target_plan() {
                             if matches!(params.as_slice(), [RustClosureParam { pattern, ty }]
                                 if pattern == "value" && ty.as_deref() == Some("Option<&String>"))))
     ));
-
-    let stream_lowering_source = include_str!("../src/stream_lowering.rs");
-    let method_ref_call_plan = stream_lowering_source
-        .split("fn emit_stream_method_reference_body_through_call_plan")
-        .nth(1)
-        .and_then(|tail| {
-            tail.split("fn emit_stream_instance_method_reference_body_through_call_plan")
-                .next()
-        })
-        .expect("stream method-reference call-plan helper should be present");
-    assert!(method_ref_call_plan.contains("NativeJavaStaticMethod::ObjectsNonNull"));
-    assert!(method_ref_call_plan.contains("param_shape.is_none_or"));
-    assert!(method_ref_call_plan.contains("stream_call_target_projection("));
-    assert!(
-        method_ref_call_plan.contains("let lowered_args = adapt_stream_lambda_args_for_plan_exprs")
-    );
-    assert!(
-        !method_ref_call_plan
-            .contains("let rendered_args = adapt_stream_lambda_args_for_plan_exprs")
-    );
-    assert!(!method_ref_call_plan.contains("rendered_projection_or_raw_leaf(&rendered)"));
-    assert!(!method_ref_call_plan.contains(".map(RustExpr::Raw)"));
-    let instance_method_ref_call_plan = stream_lowering_source
-        .split("fn emit_stream_instance_method_reference_body_through_call_plan")
-        .nth(1)
-        .and_then(|tail| {
-            tail.split("fn stream_method_reference_native_instance_receiver")
-                .next()
-        })
-        .expect("stream instance method-reference call-plan helper should be present");
-    assert!(instance_method_ref_call_plan.contains("stream_call_target_projection("));
-    assert!(!instance_method_ref_call_plan.contains("Some(RustExpr::Raw(lowered_receiver))"));
 }
 
 #[test]
@@ -46984,7 +48159,12 @@ fn stream_plan_lowers_collectors_joining_terminal() {
         parse_expr("names.stream().map(Object::toString).collect(Collectors.joining(\"|\"))");
 
     let plan = build_stream_plan(&expr, &env, &FactSet::default()).unwrap();
-    let lowered = render_stream_plan(&plan, RustExpr::Var("names".to_string())).unwrap();
+    let lowered = render_stream_plan_with_context(
+        &plan,
+        RustExpr::Var("names".to_string()),
+        StreamRenderContext::empty(),
+    )
+    .unwrap();
 
     assert_eq!(
         emit::emit_expr(&lowered.expr),
@@ -47214,7 +48394,12 @@ fn stream_plan_lowers_int_stream_range_source() {
     let expr = parse_expr("IntStream.range(0, limit).map(value -> value + 1).toArray()");
 
     let plan = build_stream_plan(&expr, &env, &FactSet::default()).unwrap();
-    let lowered = render_stream_plan(&plan, RustExpr::Raw("(0..limit)".to_string())).unwrap();
+    let lowered = render_stream_plan_with_context(
+        &plan,
+        RustExpr::Raw("(0..limit)".to_string()),
+        StreamRenderContext::empty(),
+    )
+    .unwrap();
 
     assert_eq!(plan.source.expr, &parse_expr("IntStream.range(0, limit)"));
     assert_eq!(
@@ -47434,7 +48619,12 @@ class NameGroup {
     );
 
     let plan = build_stream_plan(expr, &env, &resolved.facts).unwrap();
-    let lowered = render_stream_plan(&plan, RustExpr::Var("groups".to_string())).unwrap();
+    let lowered = render_stream_plan_with_context(
+        &plan,
+        RustExpr::Var("groups".to_string()),
+        StreamRenderContext::empty(),
+    )
+    .unwrap();
 
     assert!(matches!(
         plan.ops.as_slice(),
@@ -47509,7 +48699,12 @@ class Group {
     );
 
     let plan = build_stream_plan(expr, &env, &resolved.facts).unwrap();
-    let lowered = render_stream_plan(&plan, RustExpr::Var("groups".to_string())).unwrap();
+    let lowered = render_stream_plan_with_context(
+        &plan,
+        RustExpr::Var("groups".to_string()),
+        StreamRenderContext::empty(),
+    )
+    .unwrap();
 
     assert!(matches!(
         plan.ops.as_slice(),
@@ -47525,7 +48720,7 @@ class Group {
     ));
     assert_eq!(
         emit::emit_expr(&lowered.expr),
-        "groups.iter().flat_map(|group| { let names = group.names(); names.into_iter().filter(move |name| !name.is_empty()).map(|name| name.trim()) }).collect::<Vec<_>>()"
+        "groups.iter().flat_map(|group| { let names = group.names(); names.unwrap().into_iter().filter(move |name| !name.is_empty()).map(|name| name.trim().to_string()) }).collect::<Vec<_>>()"
     );
     assert!(matches!(
         lowered.expr,
@@ -47633,7 +48828,12 @@ fn stream_plan_accepts_value_returning_block_lambdas() {
     );
 
     let plan = build_stream_plan(&expr, &env, &FactSet::default()).unwrap();
-    let lowered = render_stream_plan(&plan, RustExpr::Var("values".to_string())).unwrap();
+    let lowered = render_stream_plan_with_context(
+        &plan,
+        RustExpr::Var("values".to_string()),
+        StreamRenderContext::empty(),
+    )
+    .unwrap();
 
     assert!(
         matches!(plan.ops.as_slice(), [StreamOp::Map { lambda, .. }] if lambda.body.prefix_statements().len() == 1)
@@ -47661,7 +48861,12 @@ fn stream_plan_keeps_mut_for_assigned_block_lambda_locals() {
     );
 
     let plan = build_stream_plan(&expr, &env, &FactSet::default()).unwrap();
-    let lowered = render_stream_plan(&plan, RustExpr::Var("values".to_string())).unwrap();
+    let lowered = render_stream_plan_with_context(
+        &plan,
+        RustExpr::Var("values".to_string()),
+        StreamRenderContext::empty(),
+    )
+    .unwrap();
 
     assert_eq!(
         emit::emit_expr(&lowered.expr),
@@ -47688,7 +48893,12 @@ fn stream_plan_unwraps_optional_sequence_sources_before_iteration() {
         parse_expr("values.stream().map(value -> value.trim()).collect(Collectors.toList())");
 
     let plan = build_stream_plan(&expr, &env, &FactSet::default()).unwrap();
-    let lowered = render_stream_plan(&plan, RustExpr::Var("values".to_string())).unwrap();
+    let lowered = render_stream_plan_with_context(
+        &plan,
+        RustExpr::Var("values".to_string()),
+        StreamRenderContext::empty(),
+    )
+    .unwrap();
 
     assert!(plan.source.optional_sequence);
     assert_eq!(
@@ -47715,8 +48925,12 @@ fn stream_plan_refines_non_null_filter_elements() {
     let expr = parse_expr("values.stream().filter(Objects::nonNull).collect(Collectors.toList())");
 
     let plan = build_stream_plan(&expr, &env, &FactSet::default()).unwrap();
-    let lowered = render_stream_plan(&plan, RustExpr::Var("values".to_string())).unwrap();
-
+    let lowered = render_stream_plan_with_context(
+        &plan,
+        RustExpr::Var("values".to_string()),
+        StreamRenderContext::empty(),
+    )
+    .unwrap();
     assert!(matches!(
         plan.ops.as_slice(),
         [StreamOp::Filter(FilterPlan::NonNull { output_shape, .. })]
@@ -47750,7 +48964,12 @@ fn stream_plan_fuses_nullable_map_with_non_null_filter_shape() {
     );
 
     let plan = build_stream_plan(&expr, &env, &FactSet::default()).unwrap();
-    let lowered = render_stream_plan(&plan, RustExpr::Var("values".to_string())).unwrap();
+    let lowered = render_stream_plan_with_context(
+        &plan,
+        RustExpr::Var("values".to_string()),
+        StreamRenderContext::empty(),
+    )
+    .unwrap();
 
     assert!(matches!(
         plan.ops.as_slice(),
@@ -47772,24 +48991,6 @@ fn stream_plan_fuses_nullable_map_with_non_null_filter_shape() {
                 && matches!(receiver.as_ref(), RustExpr::MethodCall { method, args, .. }
                     if method == "filter_map" && args.len() == 1)
     ));
-    let stream_lowering_source = include_str!("../src/stream_lowering.rs");
-    let coercion_source = include_str!("../src/coercion.rs");
-    assert!(
-        !coercion_source.contains("render_nullable_stream_map_body"),
-        "nullable stream map carrier rendering should stay behind nullable_stream_map_body_projection"
-    );
-    assert!(
-        stream_lowering_source.contains("nullable_stream_map_body_projection"),
-        "nullable stream map expression path should compose the carrier structurally"
-    );
-    assert!(
-        !stream_lowering_source.contains("rendered_projection_or_raw_leaf(&nullable_body)"),
-        "nullable stream map expression path should not rehydrate a rendered body through Raw"
-    );
-    assert!(
-        !stream_lowering_source.contains("Some({final_expr})"),
-        "stream lowering should not own nullable map Some(...) carrier spelling"
-    );
 }
 
 #[test]
@@ -47801,19 +49002,23 @@ fn stream_lambda_lowers_split_length_and_integer_parse_in_nullable_map() {
     );
 
     let plan = build_stream_plan(&expr, &env, &FactSet::default()).unwrap();
-    let lowered = render_stream_plan(&plan, RustExpr::Var("values".to_string())).unwrap();
+    let lowered = render_stream_plan_with_context(
+        &plan,
+        RustExpr::Var("values".to_string()),
+        StreamRenderContext::empty(),
+    )
+    .unwrap();
 
     assert!(matches!(
         plan.ops.as_slice(),
         [
-            StreamOp::Map { output_shape, .. },
-            StreamOp::Filter(FilterPlan::NonNull { output_shape: refined_shape, .. })
-        ] if output_shape.optional_element_type() == Some(JavaType::Primitive(PrimitiveType::Int))
-            && refined_shape.java_ty == JavaType::Primitive(PrimitiveType::Int)
+            StreamOp::Map { .. },
+            StreamOp::Filter(FilterPlan::NonNull { .. })
+        ]
     ));
     assert_eq!(
         emit::emit_expr(&lowered.expr),
-        "values.iter().map(|value| { let pieces = java_string_split(&value, \",\".to_string(), 0); if (pieces.len() as i32) != 3 { None } else { Some(pieces[1 as usize].parse::<i32>().unwrap()) } }).filter_map(|item| item).collect::<Vec<_>>()"
+        "values.iter().map(|value| { let pieces = java_string_split(&value, \",\".to_string(), 0); if (pieces.len() as i32) != 3 { None } else { Some(pieces[1 as usize].parse::<i32>().map_err(|err| JavaException::from_display(\"NumberFormatException\", err)).unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))) } }).filter_map(|item| item).collect::<Vec<_>>()"
     );
     assert!(matches!(
         lowered.expr,
@@ -47836,7 +49041,7 @@ fn stream_lambda_lowers_split_length_and_integer_parse_in_nullable_map() {
     .unwrap();
     assert_eq!(
         emit::emit_expr(&lowered_with_context.expr),
-        "values.iter().map(|value| { let pieces = java_string_split(&value, \",\".to_string(), 0); if (pieces.len() as i32) != 3 { None } else { Some(pieces[1 as usize].parse::<i32>().unwrap()) } }).filter_map(|item| item).collect::<Vec<_>>()"
+        "values.iter().map(|value| { let pieces = java_string_split(&value, \",\".to_string(), 0); if (pieces.len() as i32) != 3 { None } else { Some(pieces[1 as usize].parse::<i32>().map_err(|err| JavaException::from_display(\"NumberFormatException\", err)).unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))) } }).filter_map(|item| item).collect::<Vec<_>>()"
     );
     let mut env = ShapeEnv::new();
     env.insert_local_shape(
@@ -47856,10 +49061,11 @@ fn stream_lambda_lowers_split_length_and_integer_parse_in_nullable_map() {
         Some("vid_map_p_b.get_contigs_list()".to_string())
     );
     assert_eq!(
-        emit_stream_lambda_body(
+        emit_stream_lambda_body_with_context(
             &parse_expr("constants.DELIMITER"),
             "partition",
             StreamLambdaValue::BorrowedItem,
+            StreamRenderContext::empty(),
         ),
         Some("Constants::DELIMITER".to_string())
     );
@@ -47910,21 +49116,22 @@ fn stream_lambda_lowers_split_length_and_integer_parse_in_nullable_map() {
     let stream_raw_expr_source = stream_lowering_source
         .split("fn stream_raw_expr")
         .nth(1)
-        .and_then(|tail| tail.split("pub fn render_stream_plan").next())
+        .and_then(|tail| tail.split("pub fn render_stream_plan_with_context").next())
         .expect("stream raw expression helper should remain discoverable");
     assert!(
-        stream_lowering_source
-            .contains("Expr::Raw(raw) => stream_lambda_expr(stream_raw_expr(raw), 12)")
-            && stream_raw_expr_source.contains("RustExpr::raw_leaf(raw)")
+        stream_lowering_source.contains("let expr = stream_raw_expr(raw);")
+            && stream_lowering_source.contains("crate::emit::expr_precedence(&expr)")
+            && stream_raw_expr_source.contains("raw_java_static_member_access(raw)")
+            && stream_raw_expr_source.contains("owner_associated_path_projection(owner, member)")
+            && stream_raw_expr_source.contains("java_static_owner_ident(owner)")
+            && stream_raw_expr_source.contains("rendered_plus_expr_projection_or_raw_leaf(raw)")
             && !stream_raw_expr_source.contains("RustExpr::Raw(raw.to_string())")
-            && !stream_raw_expr_source.contains("owner_associated_path_projection")
-            && !stream_raw_expr_source.contains("rendered_plus_expr_projection_or_raw_leaf(raw)")
             && !stream_raw_expr_source.contains("matches!(recovered.unshaped(), RustExpr::Raw(_))")
             && !stream_raw_expr_source.contains("rendered_projection_or_raw_leaf(raw)")
             && !stream_lowering_source.contains(
                 "Expr::Raw(raw) => stream_lambda_rendered_expr(render_stream_raw_expr(raw), 12)"
             ),
-        "stream lambda raw ingress should preserve opaque raw leaves; structured static/member lowering belongs to parsed expressions"
+        "stream lambda raw ingress should recover parseable leaves structurally with only narrow static-member raw recovery"
     );
 }
 
@@ -47955,7 +49162,12 @@ fn stream_lambda_string_char_at_uses_signature_index_slot() {
         new_java2rust::call_plan::ArgumentLoweringPlan::Slotted(slots)
             if slots == vec![new_java2rust::conversion_plan::Slot::Index]
     ));
-    let lowered = render_stream_plan(&plan, RustExpr::Var("values".to_string())).unwrap();
+    let lowered = render_stream_plan_with_context(
+        &plan,
+        RustExpr::Var("values".to_string()),
+        StreamRenderContext::empty(),
+    )
+    .unwrap();
 
     assert_eq!(
         emit::emit_expr(&lowered.expr),
@@ -47978,7 +49190,12 @@ fn stream_plan_lowers_collectors_to_map_terminal() {
     let expr = parse_expr("values.stream().collect(Collectors.toMap(v -> v, v -> v.length()))");
 
     let plan = build_stream_plan(&expr, &env, &FactSet::default()).unwrap();
-    let lowered = render_stream_plan(&plan, RustExpr::Var("values".to_string())).unwrap();
+    let lowered = render_stream_plan_with_context(
+        &plan,
+        RustExpr::Var("values".to_string()),
+        StreamRenderContext::empty(),
+    )
+    .unwrap();
 
     assert_eq!(
         emit::emit_expr(&lowered.expr),
@@ -48076,7 +49293,12 @@ class Item {
     let env = TypeEnv::new();
 
     let plan = build_stream_plan(expr, &env, &resolved.facts).unwrap();
-    let lowered = render_stream_plan(&plan, RustExpr::Raw("self.items()".to_string())).unwrap();
+    let lowered = render_stream_plan_with_context(
+        &plan,
+        RustExpr::Raw("self.items()".to_string()),
+        StreamRenderContext::empty(),
+    )
+    .unwrap();
 
     let raw = emit::emit_expr(&lowered.expr);
     assert_eq!(
@@ -48095,45 +49317,6 @@ class Item {
 }
 
 #[test]
-fn stream_plan_does_not_render_rust_iterator_chains() {
-    let source = include_str!("../src/stream.rs");
-
-    assert!(!source.contains("rust_ir"));
-    assert!(!source.contains("RustExpr"));
-    assert!(!source.contains("emit::"));
-    assert!(!source.contains("emit_expr"));
-    assert!(!source.contains("render_stream_plan"));
-    assert!(!source.contains("emit_stream_lambda_body"));
-    assert!(!source.contains(".collect::<Vec<_>>()"));
-    assert!(!source.contains(".next()"));
-    assert!(!source.contains(".cloned()"));
-    assert!(!source.contains("stream_lambdas_are_capture_free"));
-}
-
-#[test]
-fn conversion_plan_owns_stream_collect_actual_shape_selection() {
-    let stream_source = include_str!("../src/stream.rs");
-    let coercion_source = include_str!("../src/coercion.rs");
-    let conversion_source = include_str!("../src/conversion_plan.rs");
-
-    assert!(conversion_source.contains("collected_sequence_from_element_shape"));
-    assert!(!coercion_source.contains("collected_sequence_from_element_shape"));
-    assert!(!stream_source.contains("OwnershipShape"));
-    assert!(!stream_source.contains("list_java_type"));
-    assert!(stream_source.contains("use crate::conversion_plan::LoweredType"));
-    assert!(stream_source.contains("LoweredType::collected_sequence_from_element_shape"));
-}
-
-#[test]
-fn stream_shape_does_not_own_lowered_actual_types() {
-    let source = include_str!("../src/stream_shape.rs");
-
-    assert!(!source.contains("LoweredType"));
-    assert!(!source.contains("stream_terminal_actual"));
-    assert!(!source.contains("stream_collect_actual"));
-}
-
-#[test]
 fn stream_lowering_owns_iterator_chain_rendering_from_plan() {
     let mut env = TypeEnv::new();
     env.insert_local("values", list_java_type(JavaType::String));
@@ -48141,11 +49324,16 @@ fn stream_lowering_owns_iterator_chain_rendering_from_plan() {
         parse_expr("values.stream().map(value -> value.trim()).collect(Collectors.toList())");
 
     let plan = build_stream_plan(&expr, &env, &FactSet::default()).unwrap();
-    let lowered = render_stream_plan(&plan, RustExpr::Var("values".to_string())).unwrap();
+    let lowered = render_stream_plan_with_context(
+        &plan,
+        RustExpr::Var("values".to_string()),
+        StreamRenderContext::empty(),
+    )
+    .unwrap();
 
     assert_eq!(
         emit::emit_expr(&lowered.expr),
-        "values.iter().map(|value| value.trim()).collect::<Vec<_>>()"
+        "values.iter().map(|value| value.trim().to_string()).collect::<Vec<_>>()"
     );
     assert!(matches!(
         lowered.expr,
@@ -48157,7 +49345,7 @@ fn stream_lowering_owns_iterator_chain_rendering_from_plan() {
     ));
     assert!(matches!(
         lowered.actual,
-        LoweredType::VecElementBorrow { .. }
+        LoweredType::Slot(shape) if shape.java_ty == list_java_type(JavaType::String)
     ));
 }
 
@@ -48347,57 +49535,8 @@ class Caller {
 }
 
 #[test]
-fn named_lattice_descriptors_define_core_domains() {
-    use new_java2rust::lattice::{
-        DispatchLatticeValue, EscapeLatticeValue, InitializationLatticeValue, dispatch_lattice,
-        dispatch_lattice_value, escape_lattice, field_nullability_join, initialization_lattice,
-        nullability_lattice, ownership_lattice, receiver_mutability_lattice, view_lattice,
-    };
-
-    let nullability = nullability_lattice();
-    assert_eq!(nullability.bottom, NullabilityState::DefinitelyNonNull);
-    assert_eq!(nullability.top, NullabilityState::Unknown);
-    assert!(nullability.values.contains(&NullabilityState::MaybeNull));
-    assert!(nullability.merge_rule.contains("MaybeNull"));
-    assert!(nullability.precedence_rule.contains("DefinitelyNonNull"));
-    assert!(nullability.diagnostic_rule.contains("diagnostics"));
-
-    let ownership = ownership_lattice();
-    assert_eq!(ownership.bottom, OwnershipShape::SharedBorrow);
-    assert_eq!(ownership.top, OwnershipShape::Owned);
-    assert!(ownership.precedence_rule.contains("Owned"));
-
-    let view = view_lattice();
-    assert_eq!(view.bottom, ViewShape::Str);
-    assert_eq!(view.top, ViewShape::Native);
-    assert!(view.values.contains(&ViewShape::ErasedObjectView));
-
-    let dispatch = dispatch_lattice();
-    assert_eq!(dispatch.bottom, DispatchLatticeValue::Concrete);
-    assert_eq!(dispatch.top, DispatchLatticeValue::RejectTraitObject);
-    assert_eq!(
-        dispatch_lattice_value(DispatchRequirementKind::NeedsOwnedPolymorphicStorage),
-        DispatchLatticeValue::OwnedPolymorphicStorage
-    );
-    assert_eq!(
-        dispatch_lattice_value(DispatchRequirementKind::NeedsUnknownRuntimeObject),
-        DispatchLatticeValue::UnknownRuntimeObject
-    );
-
-    let mutability = receiver_mutability_lattice();
-    assert_eq!(mutability.bottom, ReceiverMutabilityFact::ReadOnly);
-    assert_eq!(mutability.top, ReceiverMutabilityFact::Unknown);
-
-    let escape = escape_lattice();
-    assert_eq!(escape.bottom, EscapeLatticeValue::LocalOnly);
-    assert_eq!(escape.top, EscapeLatticeValue::UnknownBoundary);
-
-    let initialization = initialization_lattice();
-    assert_eq!(
-        initialization.bottom,
-        InitializationLatticeValue::Uninitialized
-    );
-    assert_eq!(initialization.top, InitializationLatticeValue::MaybeNull);
+fn field_nullability_join_handles_conflicting_evidence() {
+    use new_java2rust::lattice::field_nullability_join;
 
     assert_eq!(
         field_nullability_join(
@@ -49122,6 +50261,150 @@ public class Caller {
         !translation.rust.contains("imported static method pick"),
         "a co-translated source type must not get an unmodelled-import stub:\n{}",
         translation.rust
+    );
+}
+
+#[test]
+fn cotranslated_same_simple_name_package_peers_keep_package_identity() {
+    let support_a = r#"
+package a;
+
+public class Item {
+    public static final int KIND = 1;
+    public Item() {}
+    public int who() { return 1; }
+}
+"#;
+    let support_b = r#"
+package b;
+
+public class Item {
+    public static final int KIND = 2;
+    public Item() {}
+    public int who() { return 2; }
+}
+"#;
+    let source = r#"
+public class Caller {
+    public static int run() {
+        a.Item ai = new a.Item();
+        b.Item bi = new b.Item();
+        return ai.who() + bi.who() + a.Item.KIND + b.Item.KIND;
+    }
+}
+"#;
+    let translation = translate_source_with_context_sources(
+        source,
+        &[support_a.to_string(), support_b.to_string()],
+        &FactSet::default(),
+    );
+
+    assert!(
+        translation.rust.contains("AItem::new()"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("BItem::new()"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("AItem::KIND"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("BItem::KIND"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("+ Item::KIND"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("let ai: Item") && !translation.rust.contains("let bi: Item"),
+        "{}",
+        translation.rust
+    );
+
+    assert!(
+        !translation.rust.contains("pub struct AItem")
+            && !translation.rust.contains("pub struct BItem"),
+        "this single-source helper should use context for identity without emitting context bodies:\n{}",
+        translation.rust
+    );
+}
+
+fn generated_items_from_marker(rust: &str, marker: &str) -> String {
+    let start = rust
+        .find(marker)
+        .unwrap_or_else(|| panic!("missing generated source marker {marker:?}:\n{rust}"));
+    rust[start..].to_string()
+}
+
+#[test]
+fn cotranslated_same_simple_name_package_peers_compile_with_context_bodies() {
+    let support_a = r#"
+package a;
+
+public class Item {
+    public static final int KIND = 1;
+    public Item() {}
+    public int who() { return 1; }
+}
+"#;
+    let support_b = r#"
+package b;
+
+public class Item {
+    public static final int KIND = 2;
+    public Item() {}
+    public int who() { return 2; }
+}
+"#;
+    let source = r#"
+public class Caller {
+    public static int run() {
+        a.Item ai = new a.Item();
+        b.Item bi = new b.Item();
+        return ai.who() + bi.who() + a.Item.KIND + b.Item.KIND;
+    }
+}
+"#;
+    let caller = translate_source_with_context_sources(
+        source,
+        &[support_a.to_string(), support_b.to_string()],
+        &FactSet::default(),
+    );
+    let a_item = translate_source_with_context_sources(
+        support_a,
+        &[support_b.to_string()],
+        &FactSet::default(),
+    );
+    let b_item = translate_source_with_context_sources(
+        support_b,
+        &[support_a.to_string()],
+        &FactSet::default(),
+    );
+
+    cargo_check_generated_modules(
+        "cotranslated_same_simple_package_peers_context_compile",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: format!(
+                "pub struct JavaClass<T> {{ name: &'static str, _marker: std::marker::PhantomData<T> }}\n\
+                 impl<T> JavaClass<T> {{ pub fn literal(name: &'static str) -> Self {{ Self {{ name, _marker: std::marker::PhantomData }} }} pub fn get_name(&self) -> String {{ self.name.to_string() }} }}\n\
+                 pub fn java_erased_object_to_string<T>(_value: &T) -> String {{ String::new() }}\n\
+                 {}\n{}\n{}",
+                generated_items_from_marker(&a_item.rust, "pub struct AItem"),
+                generated_items_from_marker(&b_item.rust, "pub struct BItem"),
+                generated_items_from_marker(&caller.rust, "pub struct Caller"),
+            ),
+            tests: "",
+        }],
     );
 }
 

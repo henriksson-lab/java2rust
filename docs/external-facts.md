@@ -515,11 +515,10 @@ Manifest coverage audits also check hierarchy rows beyond representation
 strategy. A pack-owned closed-hierarchy fact without a corresponding
 `external-pack-closed` row reports
 `external_pack_manifest_missing_closed_hierarchy_coverage`; a stale open/closed
-value reports `external_pack_manifest_closed_hierarchy_mismatch`. A pack-owned
-object-safety fact without a corresponding `external-pack-object-safety` row
-reports `external_pack_manifest_missing_object_safety_coverage`; a stale or
-different violation set reports
-`external_pack_manifest_object_safety_mismatch`.
+value reports `external_pack_manifest_closed_hierarchy_mismatch`. External-pack
+object-safety rows are parsed directly into pack-owned `ObjectSafetyFact` values;
+boundary audits still report object-safety facts whose type is not owned by any
+declared pack.
 
 ## Field Nullability
 

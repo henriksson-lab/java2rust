@@ -1,5 +1,7 @@
 use crate::diagnostics::Span;
 
+use crate::binding_id::BindingId;
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Program {
     pub package: Option<String>,
@@ -99,6 +101,7 @@ pub struct Param {
     pub source_name: String,
     pub ty: JavaType,
     pub is_varargs: bool,
+    pub binding: Option<BindingId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,6 +156,7 @@ pub enum Stmt {
         name: String,
         source_name: String,
         initializer: Option<Expr>,
+        binding: Option<BindingId>,
     },
     Assign {
         target: Expr,
@@ -189,6 +193,7 @@ pub enum Stmt {
         iterable: Expr,
         body: Block,
         label: Option<String>,
+        binding: Option<BindingId>,
     },
     Switch {
         selector: Expr,
@@ -234,6 +239,7 @@ pub struct CatchClause {
     pub types: Vec<JavaType>,
     pub name: String,
     pub body: Block,
+    pub binding: Option<BindingId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

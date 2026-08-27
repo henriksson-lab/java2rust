@@ -804,10 +804,9 @@ even if the generated Rust count improves.
       `RepresentationDispatchPolicy`.
   - Decision: `BoxedDynTrait` is not an `ObjectRepresentation`. It is a slot
     projection result for owned escaping/storage uses of a dyn-trait
-    representation. Implemented by
-    `boxed_dyn_object_representation_policy` and covered by
-    `object_representation_policy_is_the_dyn_fallback_entrypoint`, which also
-    asserts `NeedsOwnedPolymorphicStorage` projects dyn trait dispatch to
+    representation. Covered by
+    `object_representation_policy_is_the_dyn_fallback_entrypoint`, which asserts
+    `NeedsOwnedPolymorphicStorage` projects dyn trait dispatch to
     `DispatchShape::BoxedDynTrait`.
 
 - [x] `OBJ-2`: Complete the matrix for concrete struct, closed enum, dyn trait, boxed
@@ -894,8 +893,7 @@ even if the generated Rust count improves.
     unsupported cases, anonymous erased boundaries, external-pack erased
     handles, store/pass/return/match behavior, and diagnostics all use the same
     runtime contract.
-  - Implemented by `ErasedObjectRuntimeContract` and the `Erased Object
-    Runtime Contract` section in
+  - Documented by the `Erased Object Runtime Contract` section in
     `docs/rust-slot-shape-and-object-representation.md`. Covered by
     `erased_object_runtime_contract_covers_carrier_downcast_instanceof_and_recovery`,
     `erased_object_runtime_contract_is_documented_and_shared`,
@@ -921,10 +919,10 @@ even if the generated Rust count improves.
     recovery adapter is proven. If the adapter is unavailable, generated Rust
     should contain a deliberate unsupported diagnostic rather than a fake
     clone, invalid move, or erased downcast.
-  - Implementation Rule: conversion planning classifies borrowed-dyn to
-    boxed-dyn recovery through named adapter availability states. Coercion
-    rendering consumes that classification; representation lowering is
-    responsible only for emitting adapters that have been explicitly planned.
+  - Implementation Rule: conversion planning classifies same-trait borrowed-dyn
+    to boxed-dyn recovery as `CloneBoxDynTrait`. Coercion rendering consumes that
+    reachable policy by emitting `.clone_box()`; representation lowering remains
+    responsible for the trait support that makes that call valid.
   - Required Facts: dyn trait type, source value ownership, clone/copy/
     clone-box capability, object safety, adapter availability, and target slot
     ownership requirement.
@@ -932,19 +930,17 @@ even if the generated Rust count improves.
     capability/effective facts own proof of recoverability; `coercion` renders
     the chosen adapter or diagnostic; `representation_lowering` owns emitted
     helper items.
-  - Fallback Shape: missing or deferred adapters produce a structured
-    clone-box diagnostic; they must not silently erase to `Box<dyn Any>` or
-    assume `Clone` on `dyn Trait`.
-  - Evidence: borrowed dyn to owned boxed dyn reports either proven adapter,
-    required generated adapter, or unsupported non-cloneable fallback.
-  - Implemented by `DynCloneBoxAdapterRequirement`,
-    `DynCloneBoxAdapterAvailability`, and
-    `dyn_clone_box_adapter_requirement_with_availability` in
-    `src/conversion_plan.rs`, with renderer diagnostics in `src/coercion.rs`
-    consuming the same classification. Covered by
+  - Fallback Shape: unsupported dispatch still reports a structured dispatch
+    diagnostic; the reachable same-trait path must not silently erase to
+    `Box<dyn Any>` or assume `Clone` on `dyn Trait`.
+  - Evidence: borrowed dyn to owned boxed dyn plans `CloneBoxDynTrait` and
+    lowers to `.clone_box()`.
+  - Implemented by `DispatchCoercionPolicy::CloneBoxDynTrait` in
+    `src/conversion_plan.rs` and `Coercion::CloneBoxDynTrait` in
+    `src/coercion.rs`. Covered by
     `dispatch_coercion_uses_clone_facts_for_borrowed_dyn_to_boxed_dyn_fallback`
     and design assertions in `coercion_plan_owns_clone_recovery_policy`.
-    Adapter generation remains explicitly scoped to `DYN-2`.
+    Trait support remains explicitly scoped to `DYN-2`.
 
 - [x] `DYN-2`: Generate or explicitly defer dyn clone-box adapters.
   - Owner: `src/representation_lowering.rs`, `src/item_assembly.rs`
@@ -953,29 +949,25 @@ even if the generated Rust count improves.
     objects into `Box<dyn Trait>`. When it is out of scope, the output should
     fail at a stable, documented diagnostic site instead of emitting invalid
     trait-object clone code.
-  - Implementation Rule: adapter generation policy is a named conversion-plan
-    outcome. Item assembly may emit helper items only for implemented policy
-    states; deferred states remain explicit diagnostics consumed by coercion.
-  - Required Facts: adapter requirement from `DYN-1`, object safety, trait
+  - Implementation Rule: the conversion plan names the need for clone-box
+    recovery with `CloneBoxDynTrait`. Item assembly may emit helper items only
+    when object-safety and cloneability requirements are met.
+  - Required Facts: clone-box recovery from `DYN-1`, object safety, trait
     cloneability, helper item availability, and whether the current run mode
     permits support-item emission.
   - Owning Layer: `conversion_plan` owns generation/defer policy;
     `representation_lowering` and `item_assembly` own helper item emission;
     `coercion` owns diagnostic rendering for deferred cases.
-  - Fallback Shape: deferred generation remains a stable compile-error
-    diagnostic with a specific code and test coverage.
+  - Fallback Shape: if generated trait support is unavailable, the output should
+    fail at a stable diagnostic site rather than producing an invalid
+    `.clone_box()` call.
   - Evidence if implemented: a focused trait-object fixture passes
     `cargo check` without a compile-error placeholder for clone-box recovery.
-  - Evidence if deferred: docs mark adapter generation out of scope and tests
-    assert the structured diagnostic is intentional.
-  - Implemented as explicit deferral by
-    `DynCloneBoxAdapterGenerationPolicy`,
-    `DynCloneBoxAdapterDeferralReason`, and
-    `dyn_clone_box_adapter_generation_policy_with_availability` in
-    `src/conversion_plan.rs`. `src/coercion.rs` renders the same policy as a
-    consuming `compile_error!` placeholder with the
-    `unsupported_borrowed_dyn_to_owned_boxed_dyn_clone_box_adapter_deferred`
-    diagnostic. Covered by
+  - Evidence if deferred: docs mark support-item generation out of scope and
+    tests assert the stable diagnostic is intentional.
+  - Current status: the obsolete conversion-plan deferral descriptors were
+    removed after the planner gained a reachable `CloneBoxDynTrait` outcome.
+    Covered by
     `dispatch_coercion_handles_dispatch_shapes` and
     `dispatch_coercion_uses_clone_facts_for_borrowed_dyn_to_boxed_dyn_fallback`,
     plus design assertions in `coercion_plan_owns_clone_recovery_policy`.
@@ -1898,9 +1890,11 @@ even if the generated Rust count improves.
     conversion/`instanceof` diagnostic rather than branching in `lower.rs`.
   - Evidence: guard tests prove `lower.rs` does not rediscover hierarchy or
     package names for casts/instanceof.
-  - Implemented by `CastAndInstanceOfPlanningBoundary` in
-    `src/conversion_plan.rs` and enforced by
-    `lower_consumes_cast_and_instanceof_plans_without_rechecking_representation_facts`.
+  - Enforced by
+    `lower_consumes_cast_and_instanceof_plans_without_rechecking_representation_facts`;
+    the former `CastAndInstanceOfPlanningBoundary` descriptor was removed
+    because it duplicated the source guard without being consulted by
+    production code.
     `lower.rs` passes representation/fact context into `plan_cast_conversion`
     and `plan_instanceof`, then renders via `apply_cast_conversion` and
     `apply_instanceof`; it does not call representation, hierarchy,
@@ -4456,7 +4450,8 @@ even if the generated Rust count improves.
       stronger explicit field type fact.
     - Owning Layer: `stdlib` owns the conservative external field type
       heuristic; `member_access_plan` owns borrowed static string shape;
-      `external_static_string_constant_support_items` owns facade emission;
+      `external_static_string_constant_support_items_with_context_programs_and_declared_owners`
+      owns facade emission;
       lowering only renders the planned associated-constant access.
     - Fallback Shape: constants without known types and without string-like
       names remain unknown. If a dependency pack later supplies a precise field

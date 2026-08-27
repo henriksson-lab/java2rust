@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::facts::FactSet;
 use crate::java_ir::{
@@ -54,6 +54,14 @@ pub struct CallableFallibility {
 pub enum FallibilityReason {
     /// Integer `/` or `%` can throw ArithmeticException on a zero divisor.
     IntegerDivRemThrow,
+    /// `Math.toIntExact(long)` can throw ArithmeticException on overflow.
+    MathToIntExactThrow,
+    /// A nullable Java reference was dereferenced as a receiver and can throw
+    /// NullPointerException.
+    NullReceiverThrow,
+    /// A Java `throw` statement escapes the callable. Runtime exceptions are
+    /// unchecked by javac, but they are still catchable Java control flow.
+    DirectThrow,
     /// Equalized across an override set: a trait method and its implementations
     /// must share one Rust signature.
     PropagatedFromOverride,
@@ -73,6 +81,19 @@ pub enum TryStmtPlan<'a> {
         resources: &'a [Stmt],
         body: &'a Block,
         catches: &'a [CatchClause],
+        completion: TryBlockCompletion,
+    },
+    WithResourcesFinally {
+        resources: &'a [Stmt],
+        body: &'a Block,
+        finally_block: &'a Block,
+        completion: TryBlockCompletion,
+    },
+    WithResourcesCatchFinally {
+        resources: &'a [Stmt],
+        body: &'a Block,
+        catches: &'a [CatchClause],
+        finally_block: &'a Block,
         completion: TryBlockCompletion,
     },
     FinallyOnly {
@@ -146,6 +167,7 @@ pub fn program_uses_java_exception_with_facts(program: &Program, facts: &FactSet
         || !facts.catch_facts.is_empty()
         || program_has_lowerable_try_scope(program)
         || program_has_integer_div_rem_expr(program)
+        || program_has_math_to_int_exact_call(program)
 }
 
 pub fn plan_java_exception_support(program: &Program, facts: &FactSet) -> JavaExceptionSupportPlan {
@@ -421,6 +443,33 @@ fn switch_label_has_integer_div_rem_expr(label: &crate::java_ir::SwitchLabel) ->
     }
 }
 
+fn program_has_math_to_int_exact_call(program: &Program) -> bool {
+    program.types.iter().any(type_has_math_to_int_exact_call)
+}
+
+fn type_has_math_to_int_exact_call(ty: &TypeDecl) -> bool {
+    ty.members.iter().any(|member| match member {
+        Member::Method(method) => method
+            .body
+            .as_ref()
+            .is_some_and(block_has_math_to_int_exact_call),
+        Member::Constructor(constructor) => constructor
+            .body
+            .as_ref()
+            .is_some_and(block_has_math_to_int_exact_call),
+        Member::Field(field) => field
+            .initializer
+            .as_ref()
+            .is_some_and(expr_has_math_to_int_exact_call),
+        Member::Type(nested) => type_has_math_to_int_exact_call(nested),
+        Member::Unsupported { .. } => false,
+    })
+}
+
+fn block_has_math_to_int_exact_call(block: &Block) -> bool {
+    block.statements.iter().any(stmt_has_math_to_int_exact_call)
+}
+
 /// The **only** producer of `MethodExceptionPlan`.
 ///
 /// `plan_method_exceptions` used to derive `wrap_returns_in_result` a second
@@ -477,6 +526,27 @@ pub fn plan_program_fallibility(
         if !entry.returns_result {
             entry.returns_result = true;
             entry.reasons.push(FallibilityReason::IntegerDivRemThrow);
+        }
+    }
+    for key in math_to_int_exact_callables(program) {
+        let entry = callables.entry(key).or_default();
+        if !entry.returns_result {
+            entry.returns_result = true;
+            entry.reasons.push(FallibilityReason::MathToIntExactThrow);
+        }
+    }
+    for key in nullable_receiver_throw_callables(program) {
+        let entry = callables.entry(key).or_default();
+        if !entry.returns_result {
+            entry.returns_result = true;
+            entry.reasons.push(FallibilityReason::NullReceiverThrow);
+        }
+    }
+    for key in direct_throw_callables(program, facts) {
+        let entry = callables.entry(key).or_default();
+        if !entry.returns_result {
+            entry.returns_result = true;
+            entry.reasons.push(FallibilityReason::DirectThrow);
         }
     }
     let override_groups = override_groups_for_program(program);
@@ -685,10 +755,10 @@ fn integer_div_rem_callables(program: &Program) -> Vec<CallableKey> {
                         .as_ref()
                         .is_some_and(block_has_unhandled_integer_div_rem)
                     {
-                        keys.push(CallableKey::Constructor {
-                            type_name: ty.name.clone(),
-                            rust_name: constructor.name.clone(),
-                        });
+                        keys.push(CallableKey::source_constructor(
+                            ty.name.clone(),
+                            constructor,
+                        ));
                     }
                 }
                 _ => {}
@@ -696,6 +766,822 @@ fn integer_div_rem_callables(program: &Program) -> Vec<CallableKey> {
         }
     }
     keys
+}
+
+fn math_to_int_exact_callables(program: &Program) -> Vec<CallableKey> {
+    let mut types = Vec::new();
+    for ty in &program.types {
+        collect_type_decls(ty, &mut types);
+    }
+    let mut keys = Vec::new();
+    for ty in types {
+        for member in &ty.members {
+            match member {
+                Member::Method(method) => {
+                    if method
+                        .body
+                        .as_ref()
+                        .is_some_and(block_has_unhandled_math_to_int_exact)
+                    {
+                        keys.push(CallableKey::source_method(ty.name.clone(), method));
+                    }
+                }
+                Member::Constructor(constructor) => {
+                    if constructor
+                        .body
+                        .as_ref()
+                        .is_some_and(block_has_unhandled_math_to_int_exact)
+                    {
+                        keys.push(CallableKey::source_constructor(
+                            ty.name.clone(),
+                            constructor,
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    keys
+}
+
+fn block_has_unhandled_math_to_int_exact(block: &Block) -> bool {
+    block
+        .statements
+        .iter()
+        .any(stmt_has_unhandled_math_to_int_exact)
+}
+
+fn stmt_has_unhandled_math_to_int_exact(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            let guarded_counts = !catches_arithmetic_exception(catches);
+            (guarded_counts
+                && (resources.iter().any(stmt_has_unhandled_math_to_int_exact)
+                    || block_has_unhandled_math_to_int_exact(body)))
+                || catches
+                    .iter()
+                    .any(|catch| block_has_unhandled_math_to_int_exact(&catch.body))
+                || finally_block
+                    .as_ref()
+                    .is_some_and(block_has_unhandled_math_to_int_exact)
+        }
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            expr_has_math_to_int_exact_call(condition)
+                || block_has_unhandled_math_to_int_exact(then_block)
+                || else_block
+                    .as_ref()
+                    .is_some_and(block_has_unhandled_math_to_int_exact)
+        }
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
+            expr_has_math_to_int_exact_call(condition)
+                || block_has_unhandled_math_to_int_exact(body)
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            init.iter().any(stmt_has_unhandled_math_to_int_exact)
+                || condition
+                    .as_ref()
+                    .is_some_and(expr_has_math_to_int_exact_call)
+                || update.iter().any(expr_has_math_to_int_exact_call)
+                || block_has_unhandled_math_to_int_exact(body)
+        }
+        Stmt::EnhancedFor { iterable, body, .. } => {
+            expr_has_math_to_int_exact_call(iterable) || block_has_unhandled_math_to_int_exact(body)
+        }
+        Stmt::Block(body) | Stmt::LabeledBlock { body, .. } => {
+            block_has_unhandled_math_to_int_exact(body)
+        }
+        Stmt::Switch { selector, cases } => {
+            expr_has_math_to_int_exact_call(selector)
+                || cases.iter().any(|case| {
+                    case.labels
+                        .iter()
+                        .any(switch_label_has_math_to_int_exact_call)
+                        || case
+                            .statements
+                            .iter()
+                            .any(stmt_has_unhandled_math_to_int_exact)
+                })
+        }
+        _ => stmt_has_math_to_int_exact_call(stmt),
+    }
+}
+
+fn stmt_has_math_to_int_exact_call(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::VarDecl { initializer, .. } => initializer
+            .as_ref()
+            .is_some_and(expr_has_math_to_int_exact_call),
+        Stmt::Assign { target, value } => {
+            expr_has_math_to_int_exact_call(target) || expr_has_math_to_int_exact_call(value)
+        }
+        Stmt::Expr(expr) | Stmt::Return(Some(expr)) => expr_has_math_to_int_exact_call(expr),
+        Stmt::Return(None) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => false,
+        Stmt::Throw(expr) => expr_has_math_to_int_exact_call(expr),
+        _ => false,
+    }
+}
+
+fn switch_label_has_math_to_int_exact_call(label: &crate::java_ir::SwitchLabel) -> bool {
+    match label {
+        crate::java_ir::SwitchLabel::Default => false,
+        crate::java_ir::SwitchLabel::Expr(expr) => expr_has_math_to_int_exact_call(expr),
+    }
+}
+
+fn expr_has_math_to_int_exact_call(expr: &Expr) -> bool {
+    match expr {
+        Expr::Call {
+            receiver,
+            name,
+            args,
+            ..
+        } => {
+            call_is_math_to_int_exact(receiver.as_deref(), name, args.len())
+                || receiver
+                    .as_ref()
+                    .is_some_and(|receiver| expr_has_math_to_int_exact_call(receiver))
+                || args.iter().any(expr_has_math_to_int_exact_call)
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            expr_has_math_to_int_exact_call(condition)
+                || expr_has_math_to_int_exact_call(then_expr)
+                || expr_has_math_to_int_exact_call(else_expr)
+        }
+        Expr::Switch { selector, cases } => {
+            expr_has_math_to_int_exact_call(selector)
+                || cases.iter().any(|case| {
+                    expr_has_math_to_int_exact_call(&case.value)
+                        || case
+                            .labels
+                            .iter()
+                            .any(switch_label_has_math_to_int_exact_call)
+                })
+        }
+        Expr::FieldAccess(receiver, _)
+        | Expr::ArrayAccess(receiver, _)
+        | Expr::Unary { expr: receiver, .. }
+        | Expr::Cast { expr: receiver, .. }
+        | Expr::InstanceOf { expr: receiver, .. } => expr_has_math_to_int_exact_call(receiver),
+        Expr::Binary { left, right, .. } => {
+            expr_has_math_to_int_exact_call(left) || expr_has_math_to_int_exact_call(right)
+        }
+        Expr::New { args, body, .. } => {
+            args.iter().any(expr_has_math_to_int_exact_call)
+                || body.as_ref().is_some_and(|members| {
+                    members.iter().any(|member| match member {
+                        Member::Method(method) => method
+                            .body
+                            .as_ref()
+                            .is_some_and(block_has_math_to_int_exact_call),
+                        Member::Constructor(constructor) => constructor
+                            .body
+                            .as_ref()
+                            .is_some_and(block_has_math_to_int_exact_call),
+                        Member::Field(field) => field
+                            .initializer
+                            .as_ref()
+                            .is_some_and(expr_has_math_to_int_exact_call),
+                        Member::Type(nested) => type_has_math_to_int_exact_call(nested),
+                        Member::Unsupported { .. } => false,
+                    })
+                })
+        }
+        Expr::ArrayInitializer(args) => args.iter().any(expr_has_math_to_int_exact_call),
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            dimensions.iter().any(expr_has_math_to_int_exact_call)
+                || initializer
+                    .as_ref()
+                    .is_some_and(|items| items.iter().any(expr_has_math_to_int_exact_call))
+        }
+        Expr::Lambda { .. }
+        | Expr::MethodReference { .. }
+        | Expr::ClassLiteral(_)
+        | Expr::Unsupported { .. }
+        | Expr::Raw(_)
+        | Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super => false,
+    }
+}
+
+fn call_is_math_to_int_exact(receiver: Option<&Expr>, name: &str, arg_count: usize) -> bool {
+    matches!(name, "toIntExact" | "to_int_exact")
+        && arg_count == 1
+        && receiver.is_none_or(expr_is_math_static_owner)
+}
+
+fn expr_is_math_static_owner(expr: &Expr) -> bool {
+    match expr {
+        Expr::Var(name) => matches!(name.as_str(), "Math" | "StrictMath"),
+        Expr::FieldAccess(owner, field) => {
+            if matches!(field.as_str(), "Math" | "StrictMath") {
+                return true;
+            }
+            expr_is_math_static_owner(owner)
+        }
+        _ => false,
+    }
+}
+
+fn nullable_receiver_throw_callables(program: &Program) -> Vec<CallableKey> {
+    let mut types = Vec::new();
+    for ty in &program.types {
+        collect_type_decls(ty, &mut types);
+    }
+    let mut keys = Vec::new();
+    for ty in types {
+        for member in &ty.members {
+            match member {
+                Member::Method(method) => {
+                    let nullable_params = nullable_reference_param_names(&method.params);
+                    if !nullable_params.is_empty()
+                        && method.body.as_ref().is_some_and(|body| {
+                            block_has_unhandled_nullable_receiver_deref(body, &nullable_params)
+                        })
+                    {
+                        keys.push(CallableKey::source_method(ty.name.clone(), method));
+                    }
+                }
+                Member::Constructor(constructor) => {
+                    let nullable_params = nullable_reference_param_names(&constructor.params);
+                    if !nullable_params.is_empty()
+                        && constructor.body.as_ref().is_some_and(|body| {
+                            block_has_unhandled_nullable_receiver_deref(body, &nullable_params)
+                        })
+                    {
+                        keys.push(CallableKey::source_constructor(
+                            ty.name.clone(),
+                            constructor,
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    keys
+}
+
+fn direct_throw_callables(program: &Program, facts: &FactSet) -> Vec<CallableKey> {
+    let mut types = Vec::new();
+    for ty in &program.types {
+        collect_type_decls(ty, &mut types);
+    }
+    let mut keys = Vec::new();
+    for ty in types {
+        for member in &ty.members {
+            match member {
+                Member::Method(method) => {
+                    if method
+                        .body
+                        .as_ref()
+                        .is_some_and(|body| block_has_unhandled_direct_throw(body, facts, &[]))
+                    {
+                        keys.push(CallableKey::source_method(ty.name.clone(), method));
+                    }
+                }
+                Member::Constructor(constructor) => {
+                    if constructor
+                        .body
+                        .as_ref()
+                        .is_some_and(|body| block_has_unhandled_direct_throw(body, facts, &[]))
+                    {
+                        keys.push(CallableKey::source_constructor(
+                            ty.name.clone(),
+                            constructor,
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    keys
+}
+
+fn block_has_unhandled_direct_throw(block: &Block, facts: &FactSet, handled: &[JavaType]) -> bool {
+    block
+        .statements
+        .iter()
+        .any(|stmt| stmt_has_unhandled_direct_throw(stmt, facts, handled))
+}
+
+fn stmt_has_unhandled_direct_throw(stmt: &Stmt, facts: &FactSet, handled: &[JavaType]) -> bool {
+    match stmt {
+        Stmt::Throw(expr) => !catch_types_handle_throw_expr(handled, expr, facts),
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            block_has_unhandled_direct_throw(block, facts, handled)
+        }
+        Stmt::VarDecl { initializer, .. } => initializer
+            .as_ref()
+            .is_some_and(|expr| expr_has_unhandled_direct_throw(expr, facts, handled)),
+        Stmt::Assign { target, value } => {
+            expr_has_unhandled_direct_throw(target, facts, handled)
+                || expr_has_unhandled_direct_throw(value, facts, handled)
+        }
+        Stmt::Expr(expr) | Stmt::Return(Some(expr)) => {
+            expr_has_unhandled_direct_throw(expr, facts, handled)
+        }
+        Stmt::Return(None) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => false,
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            expr_has_unhandled_direct_throw(condition, facts, handled)
+                || block_has_unhandled_direct_throw(then_block, facts, handled)
+                || else_block
+                    .as_ref()
+                    .is_some_and(|block| block_has_unhandled_direct_throw(block, facts, handled))
+        }
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
+            expr_has_unhandled_direct_throw(condition, facts, handled)
+                || block_has_unhandled_direct_throw(body, facts, handled)
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            init.iter()
+                .any(|stmt| stmt_has_unhandled_direct_throw(stmt, facts, handled))
+                || condition
+                    .as_ref()
+                    .is_some_and(|expr| expr_has_unhandled_direct_throw(expr, facts, handled))
+                || update
+                    .iter()
+                    .any(|expr| expr_has_unhandled_direct_throw(expr, facts, handled))
+                || block_has_unhandled_direct_throw(body, facts, handled)
+        }
+        Stmt::EnhancedFor { iterable, body, .. } => {
+            expr_has_unhandled_direct_throw(iterable, facts, handled)
+                || block_has_unhandled_direct_throw(body, facts, handled)
+        }
+        Stmt::Switch { selector, cases } => {
+            expr_has_unhandled_direct_throw(selector, facts, handled)
+                || cases.iter().any(|case| {
+                    case.labels
+                        .iter()
+                        .any(|label| switch_label_has_unhandled_direct_throw(label, facts, handled))
+                        || case
+                            .statements
+                            .iter()
+                            .any(|stmt| stmt_has_unhandled_direct_throw(stmt, facts, handled))
+                })
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            let mut guarded_handled = handled.to_vec();
+            for catch in catches {
+                guarded_handled.extend(catch.types.iter().cloned());
+            }
+            resources
+                .iter()
+                .any(|stmt| stmt_has_unhandled_direct_throw(stmt, facts, &guarded_handled))
+                || block_has_unhandled_direct_throw(body, facts, &guarded_handled)
+                || catches
+                    .iter()
+                    .any(|catch| block_has_unhandled_direct_throw(&catch.body, facts, handled))
+                || finally_block
+                    .as_ref()
+                    .is_some_and(|block| block_has_unhandled_direct_throw(block, facts, handled))
+        }
+        Stmt::ConstructorInvocation { args, .. } => args
+            .iter()
+            .any(|expr| expr_has_unhandled_direct_throw(expr, facts, handled)),
+        Stmt::LocalType(_) => false,
+    }
+}
+
+fn expr_has_unhandled_direct_throw(expr: &Expr, facts: &FactSet, handled: &[JavaType]) -> bool {
+    match expr {
+        Expr::Lambda { .. } => false,
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            expr_has_unhandled_direct_throw(condition, facts, handled)
+                || expr_has_unhandled_direct_throw(then_expr, facts, handled)
+                || expr_has_unhandled_direct_throw(else_expr, facts, handled)
+        }
+        Expr::Switch { selector, cases } => {
+            expr_has_unhandled_direct_throw(selector, facts, handled)
+                || cases.iter().any(|case| {
+                    expr_has_unhandled_direct_throw(&case.value, facts, handled)
+                        || case.labels.iter().any(|label| {
+                            switch_label_has_unhandled_direct_throw(label, facts, handled)
+                        })
+                })
+        }
+        Expr::FieldAccess(receiver, _)
+        | Expr::ArrayAccess(receiver, _)
+        | Expr::Unary { expr: receiver, .. }
+        | Expr::Cast { expr: receiver, .. }
+        | Expr::InstanceOf { expr: receiver, .. } => {
+            expr_has_unhandled_direct_throw(receiver, facts, handled)
+        }
+        Expr::Binary { left, right, .. } => {
+            expr_has_unhandled_direct_throw(left, facts, handled)
+                || expr_has_unhandled_direct_throw(right, facts, handled)
+        }
+        Expr::Call { receiver, args, .. } => {
+            receiver
+                .as_ref()
+                .is_some_and(|receiver| expr_has_unhandled_direct_throw(receiver, facts, handled))
+                || args
+                    .iter()
+                    .any(|arg| expr_has_unhandled_direct_throw(arg, facts, handled))
+        }
+        Expr::New { args, .. } => args
+            .iter()
+            .any(|arg| expr_has_unhandled_direct_throw(arg, facts, handled)),
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            dimensions
+                .iter()
+                .any(|expr| expr_has_unhandled_direct_throw(expr, facts, handled))
+                || initializer.as_ref().is_some_and(|items| {
+                    items
+                        .iter()
+                        .any(|expr| expr_has_unhandled_direct_throw(expr, facts, handled))
+                })
+        }
+        Expr::ArrayInitializer(items) => items
+            .iter()
+            .any(|expr| expr_has_unhandled_direct_throw(expr, facts, handled)),
+        Expr::MethodReference { .. }
+        | Expr::ClassLiteral(_)
+        | Expr::Unsupported { .. }
+        | Expr::Raw(_)
+        | Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super => false,
+    }
+}
+
+fn switch_label_has_unhandled_direct_throw(
+    label: &crate::java_ir::SwitchLabel,
+    facts: &FactSet,
+    handled: &[JavaType],
+) -> bool {
+    match label {
+        crate::java_ir::SwitchLabel::Default => false,
+        crate::java_ir::SwitchLabel::Expr(expr) => {
+            expr_has_unhandled_direct_throw(expr, facts, handled)
+        }
+    }
+}
+
+fn catch_types_handle_throw_expr(catch_types: &[JavaType], expr: &Expr, facts: &FactSet) -> bool {
+    let Some(thrown_name) = thrown_expr_type_name(expr) else {
+        return catch_types.iter().any(|catch_ty| {
+            matches!(
+                exception_class_name(catch_ty).as_str(),
+                "Throwable" | "Exception" | "RuntimeException"
+            )
+        });
+    };
+    catch_types.iter().any(|catch_ty| {
+        let catch_name = exception_class_name(catch_ty);
+        thrown_name == catch_name
+            || facts
+                .hierarchy_subtype_policy(
+                    &JavaType::Named {
+                        name: thrown_name.clone(),
+                        args: Vec::new(),
+                    },
+                    catch_ty,
+                )
+                .reaches
+            || crate::stdlib::is_known_java_subtype(&thrown_name, &catch_name)
+    })
+}
+
+fn thrown_expr_type_name(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::New { ty, .. } | Expr::Cast { ty, .. } => Some(exception_class_name(ty)),
+        Expr::Var(name) => Some(name.clone()),
+        _ => None,
+    }
+}
+
+fn nullable_reference_param_names(params: &[crate::java_ir::Param]) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for param in params {
+        if java_type_can_be_null(&param.ty) {
+            names.insert(param.name.clone());
+            names.insert(param.source_name.clone());
+        }
+    }
+    names
+}
+
+fn java_type_can_be_null(ty: &JavaType) -> bool {
+    !matches!(ty, JavaType::Void | JavaType::Primitive(_))
+}
+
+fn catches_null_pointer_exception(catches: &[CatchClause]) -> bool {
+    catches.iter().any(|catch| {
+        catch.types.iter().any(|ty| {
+            let name = exception_class_name(ty);
+            let simple = name.rsplit('.').next().unwrap_or(&name);
+            matches!(
+                simple,
+                "NullPointerException" | "RuntimeException" | "Exception" | "Throwable"
+            )
+        })
+    })
+}
+
+fn block_has_unhandled_nullable_receiver_deref(block: &Block, names: &HashSet<String>) -> bool {
+    block
+        .statements
+        .iter()
+        .any(|stmt| stmt_has_unhandled_nullable_receiver_deref(stmt, names))
+}
+
+fn stmt_has_unhandled_nullable_receiver_deref(stmt: &Stmt, names: &HashSet<String>) -> bool {
+    match stmt {
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            let guarded_counts = !catches_null_pointer_exception(catches);
+            (guarded_counts
+                && (resources
+                    .iter()
+                    .any(|stmt| stmt_has_unhandled_nullable_receiver_deref(stmt, names))
+                    || block_has_unhandled_nullable_receiver_deref(body, names)))
+                || catches
+                    .iter()
+                    .any(|catch| block_has_unhandled_nullable_receiver_deref(&catch.body, names))
+                || finally_block
+                    .as_ref()
+                    .is_some_and(|block| block_has_unhandled_nullable_receiver_deref(block, names))
+        }
+        Stmt::VarDecl { initializer, .. } => initializer
+            .as_ref()
+            .is_some_and(|expr| expr_has_nullable_receiver_deref(expr, names)),
+        Stmt::Assign { target, value } => {
+            expr_has_nullable_receiver_deref(target, names)
+                || expr_has_nullable_receiver_deref(value, names)
+        }
+        Stmt::Expr(expr) | Stmt::Return(Some(expr)) | Stmt::Throw(expr) => {
+            expr_has_nullable_receiver_deref(expr, names)
+        }
+        Stmt::Return(None) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => false,
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            expr_has_nullable_receiver_deref(condition, names)
+                || block_has_unhandled_nullable_receiver_deref(then_block, names)
+                || else_block
+                    .as_ref()
+                    .is_some_and(|block| block_has_unhandled_nullable_receiver_deref(block, names))
+        }
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
+            expr_has_nullable_receiver_deref(condition, names)
+                || block_has_unhandled_nullable_receiver_deref(body, names)
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            init.iter()
+                .any(|stmt| stmt_has_unhandled_nullable_receiver_deref(stmt, names))
+                || condition
+                    .as_ref()
+                    .is_some_and(|expr| expr_has_nullable_receiver_deref(expr, names))
+                || update
+                    .iter()
+                    .any(|expr| expr_has_nullable_receiver_deref(expr, names))
+                || block_has_unhandled_nullable_receiver_deref(body, names)
+        }
+        Stmt::EnhancedFor { iterable, body, .. } => {
+            expr_has_nullable_receiver_deref(iterable, names)
+                || block_has_unhandled_nullable_receiver_deref(body, names)
+        }
+        Stmt::Switch { selector, cases } => {
+            expr_has_nullable_receiver_deref(selector, names)
+                || cases.iter().any(|case| {
+                    case.labels
+                        .iter()
+                        .any(|label| switch_label_has_nullable_receiver_deref(label, names))
+                        || case
+                            .statements
+                            .iter()
+                            .any(|stmt| stmt_has_unhandled_nullable_receiver_deref(stmt, names))
+                })
+        }
+        Stmt::Block(body) | Stmt::LabeledBlock { body, .. } => {
+            block_has_unhandled_nullable_receiver_deref(body, names)
+        }
+        Stmt::LocalType(nested) => type_has_nullable_receiver_throw(nested),
+        Stmt::ConstructorInvocation { args, .. } => args
+            .iter()
+            .any(|expr| expr_has_nullable_receiver_deref(expr, names)),
+    }
+}
+
+fn type_has_nullable_receiver_throw(ty: &TypeDecl) -> bool {
+    ty.members.iter().any(|member| match member {
+        Member::Method(method) => {
+            let nullable_params = nullable_reference_param_names(&method.params);
+            !nullable_params.is_empty()
+                && method.body.as_ref().is_some_and(|body| {
+                    block_has_unhandled_nullable_receiver_deref(body, &nullable_params)
+                })
+        }
+        Member::Constructor(constructor) => {
+            let nullable_params = nullable_reference_param_names(&constructor.params);
+            !nullable_params.is_empty()
+                && constructor.body.as_ref().is_some_and(|body| {
+                    block_has_unhandled_nullable_receiver_deref(body, &nullable_params)
+                })
+        }
+        Member::Type(nested) => type_has_nullable_receiver_throw(nested),
+        _ => false,
+    })
+}
+
+fn switch_label_has_nullable_receiver_deref(
+    label: &crate::java_ir::SwitchLabel,
+    names: &HashSet<String>,
+) -> bool {
+    match label {
+        crate::java_ir::SwitchLabel::Expr(expr) => expr_has_nullable_receiver_deref(expr, names),
+        crate::java_ir::SwitchLabel::Default => false,
+    }
+}
+
+fn expr_has_nullable_receiver_deref(expr: &Expr, names: &HashSet<String>) -> bool {
+    match expr {
+        Expr::FieldAccess(receiver, _) => {
+            expr_is_nullable_param_ref(receiver, names)
+                || expr_has_nullable_receiver_deref(receiver, names)
+        }
+        Expr::ArrayAccess(receiver, index) => {
+            expr_is_nullable_param_ref(receiver, names)
+                || expr_has_nullable_receiver_deref(receiver, names)
+                || expr_has_nullable_receiver_deref(index, names)
+        }
+        Expr::Call { receiver, args, .. } => {
+            receiver.as_deref().is_some_and(|receiver| {
+                expr_is_nullable_param_ref(receiver, names)
+                    || expr_has_nullable_receiver_deref(receiver, names)
+            }) || args
+                .iter()
+                .any(|arg| expr_has_nullable_receiver_deref(arg, names))
+        }
+        Expr::Binary { left, right, .. } => {
+            expr_has_nullable_receiver_deref(left, names)
+                || expr_has_nullable_receiver_deref(right, names)
+        }
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::InstanceOf { expr, .. } => {
+            expr_has_nullable_receiver_deref(expr, names)
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            expr_has_nullable_receiver_deref(condition, names)
+                || expr_has_nullable_receiver_deref(then_expr, names)
+                || expr_has_nullable_receiver_deref(else_expr, names)
+        }
+        Expr::Switch { selector, cases } => {
+            expr_has_nullable_receiver_deref(selector, names)
+                || cases.iter().any(|case| {
+                    case.labels
+                        .iter()
+                        .any(|label| switch_label_has_nullable_receiver_deref(label, names))
+                        || expr_has_nullable_receiver_deref(&case.value, names)
+                })
+        }
+        Expr::New { args, body, .. } => {
+            args.iter()
+                .any(|arg| expr_has_nullable_receiver_deref(arg, names))
+                || body
+                    .iter()
+                    .flatten()
+                    .any(|member| member_has_nullable_receiver_deref(member, names))
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            dimensions
+                .iter()
+                .any(|expr| expr_has_nullable_receiver_deref(expr, names))
+                || initializer
+                    .iter()
+                    .flatten()
+                    .any(|expr| expr_has_nullable_receiver_deref(expr, names))
+        }
+        Expr::ArrayInitializer(values) => values
+            .iter()
+            .any(|expr| expr_has_nullable_receiver_deref(expr, names)),
+        Expr::Lambda { body, .. } => match body {
+            crate::java_ir::LambdaBody::Expr(expr) => expr_has_nullable_receiver_deref(expr, names),
+            crate::java_ir::LambdaBody::Block(block) => {
+                block_has_unhandled_nullable_receiver_deref(block, names)
+            }
+        },
+        Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::MethodReference { .. }
+        | Expr::ClassLiteral(_)
+        | Expr::Unsupported { .. }
+        | Expr::Raw(_) => false,
+    }
+}
+
+fn member_has_nullable_receiver_deref(member: &Member, names: &HashSet<String>) -> bool {
+    match member {
+        Member::Field(field) => field
+            .initializer
+            .as_ref()
+            .is_some_and(|expr| expr_has_nullable_receiver_deref(expr, names)),
+        Member::Method(method) => method
+            .body
+            .as_ref()
+            .is_some_and(|body| block_has_unhandled_nullable_receiver_deref(body, names)),
+        Member::Constructor(constructor) => constructor
+            .body
+            .as_ref()
+            .is_some_and(|body| block_has_unhandled_nullable_receiver_deref(body, names)),
+        Member::Type(nested) => type_has_nullable_receiver_throw(nested),
+        Member::Unsupported { .. } => false,
+    }
+}
+
+fn expr_is_nullable_param_ref(expr: &Expr, names: &HashSet<String>) -> bool {
+    match expr {
+        Expr::Var(name) => names.contains(name),
+        Expr::Cast { expr, .. } => expr_is_nullable_param_ref(expr, names),
+        _ => false,
+    }
 }
 
 /// Groups each declared method with the supertype method it overrides or
@@ -838,16 +1724,30 @@ pub fn plan_try_stmt<'a>(
 ) -> TryStmtPlan<'a> {
     if let Some(finally_block) = finally_block {
         let completion = plan_block_exception_completion(body);
-        if resources.is_empty()
-            && plan_block_exception_completion(finally_block)
-                == TryBlockCompletion::FallsThroughUnit
-        {
-            if catches.is_empty() {
+        let finally_completion = plan_block_exception_completion(finally_block);
+        if resources.is_empty() {
+            if catches.is_empty() && finally_completion_allows_try_finally(finally_completion) {
                 return TryStmtPlan::FinallyOnly {
                     body,
                     finally_block,
                     completion,
                 };
+            }
+            if finally_completion != TryBlockCompletion::FallsThroughUnit {
+                if finally_completion == TryBlockCompletion::Terminates
+                    && completion == TryBlockCompletion::Terminates
+                    && catches
+                        .iter()
+                        .all(|catch| block_terminates_with_exception_boundary(&catch.body))
+                {
+                    return TryStmtPlan::CatchFinally {
+                        body,
+                        catches,
+                        finally_block,
+                        completion,
+                    };
+                }
+                return TryStmtPlan::Unsupported;
             }
             if completion == TryBlockCompletion::Terminates
                 && catches
@@ -863,11 +1763,47 @@ pub fn plan_try_stmt<'a>(
                 completion,
             };
         }
+        if catches.is_empty()
+            && finally_completion == TryBlockCompletion::FallsThroughUnit
+            && try_resources_are_declarations(resources)
+            && !block_has_abrupt_loop_completion(body)
+            && !block_has_abrupt_loop_completion(finally_block)
+        {
+            return TryStmtPlan::WithResourcesFinally {
+                resources,
+                body,
+                finally_block,
+                completion,
+            };
+        }
+        if finally_completion == TryBlockCompletion::FallsThroughUnit
+            && try_resources_are_declarations(resources)
+            && !block_has_abrupt_loop_completion(body)
+            && catches
+                .iter()
+                .all(|catch| !block_has_abrupt_loop_completion(&catch.body))
+            && !block_has_abrupt_loop_completion(finally_block)
+        {
+            if completion == TryBlockCompletion::Terminates
+                && catches
+                    .iter()
+                    .any(|catch| !block_terminates_with_exception_boundary(&catch.body))
+            {
+                return TryStmtPlan::Unsupported;
+            }
+            return TryStmtPlan::WithResourcesCatchFinally {
+                resources,
+                body,
+                catches,
+                finally_block,
+                completion,
+            };
+        }
         return TryStmtPlan::Unsupported;
     }
     let completion = plan_block_exception_completion(body);
     if !resources.is_empty() {
-        if !resources.iter().all(stmt_is_resource_declaration) {
+        if !try_resources_are_declarations(resources) {
             return TryStmtPlan::Unsupported;
         }
         if catches
@@ -893,6 +1829,86 @@ pub fn plan_try_stmt<'a>(
     }
 }
 
+fn block_has_abrupt_loop_completion(block: &Block) -> bool {
+    block.statements.iter().any(stmt_has_abrupt_loop_completion)
+}
+
+fn stmt_has_abrupt_loop_completion(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Break(_) | Stmt::Continue(_) => true,
+        Stmt::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            block_has_abrupt_loop_completion(then_block)
+                || else_block
+                    .as_ref()
+                    .is_some_and(block_has_abrupt_loop_completion)
+        }
+        Stmt::While { body, .. }
+        | Stmt::DoWhile { body, .. }
+        | Stmt::For { body, .. }
+        | Stmt::EnhancedFor { body, .. }
+        | Stmt::Block(body)
+        | Stmt::LabeledBlock { body, .. } => block_has_abrupt_loop_completion(body),
+        Stmt::Switch { cases, .. } => cases
+            .iter()
+            .any(|case| case.statements.iter().any(stmt_has_abrupt_loop_completion)),
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            resources.iter().any(stmt_has_abrupt_loop_completion)
+                || block_has_abrupt_loop_completion(body)
+                || catches
+                    .iter()
+                    .any(|catch| block_has_abrupt_loop_completion(&catch.body))
+                || finally_block
+                    .as_ref()
+                    .is_some_and(block_has_abrupt_loop_completion)
+        }
+        Stmt::LocalType(ty) => ty.members.iter().any(|member| match member {
+            Member::Method(method) => method
+                .body
+                .as_ref()
+                .is_some_and(block_has_abrupt_loop_completion),
+            Member::Constructor(ctor) => ctor
+                .body
+                .as_ref()
+                .is_some_and(block_has_abrupt_loop_completion),
+            Member::Type(nested) => nested.members.iter().any(|member| match member {
+                Member::Method(method) => method
+                    .body
+                    .as_ref()
+                    .is_some_and(block_has_abrupt_loop_completion),
+                Member::Constructor(ctor) => ctor
+                    .body
+                    .as_ref()
+                    .is_some_and(block_has_abrupt_loop_completion),
+                _ => false,
+            }),
+            _ => false,
+        }),
+        Stmt::VarDecl { .. }
+        | Stmt::Assign { .. }
+        | Stmt::Expr(_)
+        | Stmt::Return(_)
+        | Stmt::Throw(_)
+        | Stmt::ConstructorInvocation { .. }
+        | Stmt::Unsupported(_) => false,
+    }
+}
+
+fn finally_completion_allows_try_finally(completion: TryBlockCompletion) -> bool {
+    matches!(
+        completion,
+        TryBlockCompletion::FallsThroughUnit | TryBlockCompletion::Terminates
+    )
+}
+
 pub fn try_resource_names(resources: &[Stmt]) -> Vec<String> {
     resources
         .iter()
@@ -901,6 +1917,10 @@ pub fn try_resource_names(resources: &[Stmt]) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+pub fn try_resources_are_declarations(resources: &[Stmt]) -> bool {
+    resources.iter().all(stmt_is_resource_declaration)
 }
 
 fn stmt_is_resource_declaration(stmt: &Stmt) -> bool {
@@ -1007,6 +2027,12 @@ fn stmt_terminates_with_exception_boundary(stmt: &Stmt) -> bool {
                 completion: TryBlockCompletion::Terminates,
                 ..
             } | TryStmtPlan::WithResources {
+                completion: TryBlockCompletion::Terminates,
+                ..
+            } | TryStmtPlan::WithResourcesFinally {
+                completion: TryBlockCompletion::Terminates,
+                ..
+            } | TryStmtPlan::WithResourcesCatchFinally {
                 completion: TryBlockCompletion::Terminates,
                 ..
             } | TryStmtPlan::FinallyOnly {

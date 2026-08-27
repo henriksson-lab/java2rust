@@ -38,14 +38,6 @@ pub struct MemberAccessPlan {
     pub op: MemberAccessOp,
 }
 
-pub fn java_member_access_policy(
-    receiver: &Expr,
-    member: &str,
-    env: &TypeEnv,
-) -> Option<JavaMemberAccessPolicy> {
-    java_member_access_policy_with_facts(receiver, member, env, &FactSet::default())
-}
-
 pub fn java_member_access_policy_with_facts(
     receiver: &Expr,
     member: &str,
@@ -122,14 +114,6 @@ fn receiver_is_static_type_name(receiver: &Expr) -> bool {
     matches!(receiver, Expr::Var(owner) if owner.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()))
 }
 
-pub fn plan_member_access(
-    receiver: &Expr,
-    member: &str,
-    env: &TypeEnv,
-) -> Option<MemberAccessPlan> {
-    plan_member_access_with_facts(receiver, member, env, &FactSet::default())
-}
-
 pub fn plan_member_access_with_facts(
     receiver: &Expr,
     member: &str,
@@ -179,8 +163,13 @@ fn member_access_shape(kind: JavaMemberAccessKind, java_ty: JavaType) -> RustSlo
 }
 
 fn static_constant_owner(receiver: &Expr, env: &TypeEnv) -> Option<String> {
-    let Expr::Var(owner) = receiver else {
-        return None;
+    let owner = match receiver {
+        Expr::Var(owner) => owner,
+        Expr::FieldAccess(_, _) => {
+            let owner = static_receiver_java_name(receiver)?;
+            return Some(crate::slot_render::rust_name_for_java_named_type(&owner));
+        }
+        _ => return None,
     };
     let upper_camel_owner = owner
         .chars()

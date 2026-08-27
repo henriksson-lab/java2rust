@@ -8,8 +8,8 @@ use crate::facts::{
     FactSet, FieldKey, FieldNullabilityFact, FieldNullabilityProvenance, HierarchyOverride,
     HierarchyStrategy, MethodEffectFact, MethodKey, NodeId, NullabilityState, ObjectSafetyFact,
     ObjectSafetyViolation, ReceiverMutabilityFact, RecursionFact, RecursionKind,
-    TrivialAccessorFact, TrivialAccessorKind, TypeCapabilityOverride, UnsupportedExternalApiFact,
-    UnsupportedExternalConstructorFact, UnsupportedExternalFieldFact,
+    TrivialAccessorFact, TrivialAccessorKind, TypeCapabilityOverride, TypePattern,
+    UnsupportedExternalApiFact, UnsupportedExternalConstructorFact, UnsupportedExternalFieldFact,
 };
 use crate::java_ir::JavaType;
 use crate::parser::parse_type;
@@ -1338,7 +1338,7 @@ fn push_external_api_effect_fact(
         method_name: method_name.to_string(),
         receiver_type: parse_receiver_type(receiver_type),
         arg_count: parsed_metadata.arg_count,
-        parameter_patterns: None,
+        parameter_patterns: parsed_metadata.parameter_patterns,
         role,
         receiver_mutability,
         return_type: parsed_metadata.return_type,
@@ -1546,6 +1546,7 @@ fn parse_external_argument_metadata(
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct ExternalApiMetadata {
     arg_count: Option<usize>,
+    parameter_patterns: Option<Vec<TypePattern>>,
     return_type: Option<JavaType>,
     thrown: Vec<JavaType>,
 }
@@ -1567,6 +1568,44 @@ fn parse_external_api_metadata(
                 return None;
             };
             parsed.arg_count = Some(arg_count);
+        } else if let Some(params) = token.strip_prefix("params=") {
+            if params.is_empty() {
+                push_external_fact_error(
+                    diagnostics,
+                    line_index,
+                    "external-api params metadata must name at least one Java type",
+                );
+                return None;
+            }
+            let mut patterns = Vec::new();
+            for param in params.split(',').filter(|param| !param.is_empty()) {
+                let Some(pattern) =
+                    parse_external_api_parameter_pattern(diagnostics, line_index, param)
+                else {
+                    return None;
+                };
+                patterns.push(pattern);
+            }
+            if patterns.is_empty() {
+                push_external_fact_error(
+                    diagnostics,
+                    line_index,
+                    "external-api params metadata must name at least one Java type",
+                );
+                return None;
+            }
+            if let Some(arg_count) = parsed.arg_count
+                && arg_count != patterns.len()
+            {
+                push_external_fact_error(
+                    diagnostics,
+                    line_index,
+                    "external-api params metadata length must match args metadata",
+                );
+                return None;
+            }
+            parsed.arg_count = Some(patterns.len());
+            parsed.parameter_patterns = Some(patterns);
         } else if let Some(return_type) = token.strip_prefix("return=") {
             if return_type.is_empty() {
                 push_external_fact_error(
@@ -1606,12 +1645,33 @@ fn parse_external_api_metadata(
             push_external_fact_error(
                 diagnostics,
                 line_index,
-                "unrecognized external-api metadata; expected args=N, return=Type or throws=TypeA,TypeB",
+                "unrecognized external-api metadata; expected args=N, params=TypeA,TypeB, return=Type or throws=TypeA,TypeB",
             );
             return None;
         }
     }
     Some(parsed)
+}
+
+fn parse_external_api_parameter_pattern(
+    diagnostics: &mut DiagnosticBag,
+    line_index: usize,
+    param: &str,
+) -> Option<TypePattern> {
+    if let Some(name) = param.strip_prefix("type-param:") {
+        if name.is_empty() {
+            push_external_fact_error(
+                diagnostics,
+                line_index,
+                "external-api params type-param metadata must name a type parameter",
+            );
+            return None;
+        }
+        return Some(TypePattern::TypeParam(name.to_string()));
+    }
+    Some(crate::facts::type_pattern_for_external_java_type(
+        &parse_type(param),
+    ))
 }
 
 fn push_external_field_fact(

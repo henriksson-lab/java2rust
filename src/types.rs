@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::java_ir::{BinaryOp, Expr, JavaType, Literal, PrimitiveType, Stmt};
+use crate::java_ir::{BinaryOp, Expr, JavaType, Literal, PrimitiveType, Stmt, WildcardBound};
 
 #[derive(Debug, Clone, Default)]
 pub struct TypeEnv {
@@ -46,6 +46,16 @@ impl TypeEnv {
     ) {
         self.static_type_aliases
             .insert(alias.into(), type_name.into());
+    }
+
+    pub fn insert_static_type_alias_if_absent(
+        &mut self,
+        alias: impl Into<String>,
+        type_name: impl Into<String>,
+    ) {
+        self.static_type_aliases
+            .entry(alias.into())
+            .or_insert_with(|| type_name.into());
     }
 
     pub fn insert_static_member_import(
@@ -326,7 +336,7 @@ pub fn sequence_element_type(java_ty: &JavaType) -> Option<JavaType> {
         JavaType::Array(inner) => Some((**inner).clone()),
         JavaType::Named { name, args }
             if crate::stdlib::java_collection_kind_for_name(name)
-                .is_some_and(|kind| kind != crate::stdlib::JavaCollectionKind::Map)
+                .is_some_and(|kind| !kind.is_map_like())
                 && args.len() == 1 =>
         {
             Some(args[0].clone())
@@ -334,6 +344,13 @@ pub fn sequence_element_type(java_ty: &JavaType) -> Option<JavaType> {
         JavaType::Named { .. } => crate::javalibs::facade_sequence_element_type(java_ty),
         _ => None,
     }
+}
+
+pub fn sequence_mutation_element_type(java_ty: &JavaType) -> Option<JavaType> {
+    sequence_element_type(java_ty).map(|element_ty| match element_ty {
+        JavaType::Wildcard(Some(WildcardBound::Super(bound))) => *bound,
+        other => other,
+    })
 }
 
 pub fn sequence_element_type_after_optional(java_ty: &JavaType) -> Option<JavaType> {

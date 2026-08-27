@@ -6985,13 +6985,12 @@ Reduced VCF reruns:
   imported nested exception spellings such as
   `TribbleException.InternalCodecException` as aliases for pack facts such as
   `htsjdk.tribble.TribbleException.InternalCodecException` and
-  `InternalCodecException`, but only for exception-kind classification. This
-  keeps unchecked nested exceptions from forcing `Result` return shells. The VCF
-  `VCFCompoundHeaderLine`/format/info `to_string_encoding` methods now return
-  plain `String`, and the two `to_string()` returning
-  `Result<String, JavaException>` mismatches disappeared.
-  Verification passed: focused idiom
-  `nested_unchecked_exception_throw_does_not_force_result_return_shell`, nearby
+  `InternalCodecException`, initially only for exception-kind classification.
+  Later exception lowering changed the model: unchecked direct throws are
+  catchable Java control flow, so escaping direct throws now force `Result`
+  return shells just like checked throws.
+  Verification at the time covered focused idiom
+  `nested_unchecked_exception_throw_forces_result_return_shell`, nearby
   idiom `plain_returning_method_recovers_fallible_helper_call_without_question_mark`,
   focused semantic exception tests
   `records_checked_and_unchecked_exception_kinds` and

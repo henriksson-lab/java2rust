@@ -592,17 +592,14 @@ still require real hierarchy lowering.
 ## Boxed Dyn Clone-Box Requirements
 
 Borrowed dyn to owned boxed dyn recovery is not an ordinary `.clone()` on the
-trait object. The conversion planner must classify it before rendering:
+trait object. The live conversion planner represents this boundary directly:
+when the actual slot is `DynTrait` and the target slot is the same
+`BoxedDynTrait`, it emits `DispatchCoercionPolicy::CloneBoxDynTrait`, lowers that
+to `Coercion::CloneBoxDynTrait`, and renders the receiver through `.clone_box()`.
 
-- `ProvenAdapter` when a clone-box adapter is known to be available for the
-  trait;
-- `RequiresGeneratedAdapter` when the concrete Java type is clone-capable but
-  the dyn adapter still has to be generated;
-- `UnsupportedNonCloneable` when no ownership proof exists.
-
-Until adapter generation is implemented, `RequiresGeneratedAdapter` remains an
-unsupported conversion diagnostic that preserves whether the clone proof was
-explicit or conservative.
+The old deferred adapter-generation descriptors were removed because production
+never entered them; tests now assert the reachable `clone_box()` coercion path
+instead of constructing unavailable policy states.
 
 ## Owned Recovery Capability Facts
 
@@ -652,26 +649,6 @@ where `<kind>` is one of `copy`, `explicit-clone`, `clone-box-adapter`,
 `factory-copy`, `immutable-shared-handle`,
 `facade-owned-external-handle`, `ffi-owned-handle`,
 `conservative-clone`, or `non-cloneable`.
-
-## Boxed Dyn Clone-Box Generation Policy
-
-The adapter decision is separate from the requirement classification. The
-planner maps each `DynCloneBoxAdapterRequirement` to a
-`DynCloneBoxAdapterGenerationPolicy` before diagnostics or compile-error
-rendering:
-
-- `AlreadyAvailable` means the target trait already has a known clone-box
-  adapter and the conversion can be emitted by the adapter-aware path;
-- `GenerateAdapter` is reserved for a future support item emitted by
-  representation lowering or item assembly;
-- `DeferredUnsupported` is the current behavior for missing generation support
-  and for missing ownership proof.
-
-`DeferredUnsupported` must produce a structured diagnostic and a consuming
-`compile_error!` placeholder. Generated crates that encounter borrowed dyn to
-owned boxed dyn recovery are therefore intentionally blocked until the adapter
-emitter exists, instead of producing Rust that appears complete but cannot
-represent Java ownership safely.
 
 ## Java Cast Semantics
 
@@ -731,7 +708,7 @@ lower through the representation-shaped `InstanceOfCheck` variants.
 facts, object representations, dispatch strategies, package names, or Java type
 capabilities for casts or `instanceof`.
 
-The boundary is named by `CastAndInstanceOfPlanningBoundary`:
+The boundary is enforced by `lower_consumes_cast_and_instanceof_plans_without_rechecking_representation_facts`:
 
 - casts consume representation-shaped source and target slots through
   `CastConversionPlan`;

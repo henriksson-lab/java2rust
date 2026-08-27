@@ -14,7 +14,7 @@ say, and one is *less* closed than `NEXT-BATCH.md` records.
 | issue | filed as | measured now | what is actually left |
 |---|---|---|---|
 | **0002** | aliasing → clone | 0002a done; `src/aliasing.rs` reports `observable_alias` (1 hit / 196 files) | nothing to *repair* — needs 0002b |
-| **0002b** | design | on paper, **0 lines of code**: `grep -c StorageStrategy src/*.rs` = 0, `EscapeLatticeValue` referenced only in `lattice.rs` | steps 1–5 |
+| **0002b** | design | storage strategy and `storage_strategy::Escape` now exist; the old unused `EscapeLatticeValue` descriptor was deleted under 0062 | remaining shared-representation steps |
 | **0006** | 5 approximations | closed on soundness; `statement_suffix_*` = 0; queries are binding-keyed | 2 `HashSet<String>` overrides on `LowerCtx` (lines 259–260), load-bearing for **expression-bodied lambdas only** |
 | **0007** | 58% `Raw` | `Shaped` exists, 4 families migrated. **600 `Raw` / 1038**, 12 `Shaped`, 52 round trips (39 in `coercion.rs`), 56 distinct fragments | `OptionalProjected`/`MutBorrowed`; remaining clone producers; delete the comment-matching arm; the lint |
 | **0008** | machinery unreachable | steps 1–3 done. `lower.rs` **158** `fn … -> bool`, `stdlib.rs` **195**, `lattice` refs in `lower.rs` still 0 (deliberate) | step 4 — the hardcoded library predicates. The mass is in `stdlib.rs`, not `lower.rs` |
@@ -275,8 +275,8 @@ escapes(T) ∈ {Stored, UnknownBoundary} ∨ locally_aliased(T)
   : Value
 ```
 
-All four inputs exist: `EscapeLatticeValue` (`lattice.rs` — this is its **first
-consumer**), `src/aliasing.rs`, `MethodUsageFacts.mutates_self`, `CallGraph`.
+All four inputs now have live homes: `storage_strategy::Escape`,
+`src/aliasing.rs`, `MethodUsageFacts.mutates_self`, `CallGraph`.
 Every type the plan says should be shared but that lowering emits by value is
 an `observable_alias`-class diagnostic.
 
@@ -451,9 +451,10 @@ the thing the plan said to instrument.
 
 ## Corrections to the plan's own premises
 
-- **0002b's "every input already exists" was too strong.** `EscapeLatticeValue`
-  is a value domain with no analysis behind it; the escape input had to be
-  written. The other three inputs were reused as-is.
+- **0002b's "every input already exists" was too strong.** The old
+  `EscapeLatticeValue` was a value-domain descriptor with no analysis behind it
+  and has since been deleted; the escape input had to be written as
+  `storage_strategy::Escape`. The other three inputs were reused as-is.
 - **0008's step-4 list conflates library knowledge with core-language
   knowledge**, and `javalibs.rs` is Rust, not a manifest. The genuinely movable
   predicates were moved; expressing the rest as data is a design task, not a

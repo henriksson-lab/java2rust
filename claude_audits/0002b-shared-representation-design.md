@@ -76,7 +76,7 @@ and strictly cheaper than `SharedLocal`.
 
 | input | question | source |
 |---|---|---|
-| **escapes** | can a value of `T` be reachable from two live places? | `EscapeLatticeValue` in `src/lattice.rs` (`LocalOnly \| Returned \| Stored \| UnknownBoundary`) — defined, never consumed |
+| **escapes** | can a value of `T` be reachable from two live places? | `storage_strategy::Escape` (`LocalOnly \| Returned \| Stored \| UnknownBoundary`) computed by the storage-strategy planner |
 | **locally aliased** | `T b = a;` with both live | `src/aliasing.rs`, built for 0002 detection |
 | **mutated** | any field write or `mutates_self` method | `MethodUsageFacts.mutates_self` in `src/usage.rs` |
 | **threaded** | reachable from `Runnable.run` / `Thread` / `ExecutorService.submit` | `CallGraph` in `src/usage.rs` |
@@ -232,12 +232,12 @@ population.
 
 > "**Every input already exists.** Not one of them needs to be built."
 
-That was too strong. `EscapeLatticeValue` is a *value domain* in `lattice.rs`
-with no analysis behind it — nothing computes escape for a type. The escape
-input had to be written (`storage_strategy::Escape` plus the walk that fills
-it), and the version here is deliberately shallow: a field of type `T`, or an
-alias stored into a field or array element, is `Stored`; a method returning `T`
-is `Returned`. `UnknownBoundary` is in the domain and is not yet produced,
+That was too strong. The old `EscapeLatticeValue` was only an unused descriptor
+domain and has since been deleted as part of 0062. The escape input had to be
+written (`storage_strategy::Escape` plus the walk that fills it), and the version
+here is deliberately shallow: a field of type `T`, or an alias stored into a
+field or array element, is `Stored`; a method returning `T` is `Returned`.
+`UnknownBoundary` is in the live domain and is not yet produced,
 because an unresolved-call escape needs the call graph.
 
 The other three inputs *were* already there and were used as-is:
@@ -1417,6 +1417,36 @@ the `Expr::New` test, not inferred — inferring it is the unanswerable question
 Keeping the handle decision *on the plan* is also what stops
 `Some(Rc::new(Some(..)))`: the `Some` and the handle are now one decision instead
 of two that can disagree.
+
+#### Follow-up 2026-08-26 — optional element fixture actually closed
+
+Codex re-ran
+`constructor_nested_arg_reads_assigned_field_without_cloning_self` and found the
+fixture still failing. The generated constructor assignment had two residual
+problems:
+
+```rust
+Some(std::rc::Rc::new(std::rc::Rc::<Wrapper>::new(Holder::new(..))))
+```
+
+The outer duplicate wrap came from treating `Rc::<T>::new(..)` as different from
+`Rc::new(..)` in `storage_placement_construction_expr_is_wrapped`. The
+constructor call itself came from rendering a constructor owner path through the
+storage-decorated slot type, so a path position used `Rc::<Wrapper>::new` rather
+than `Wrapper::new`.
+
+Both are now fixed:
+
+- storage wrapper detection recognizes generic path calls such as
+  `std::rc::Rc::<Wrapper>::new(..)`;
+- constructor owner paths are rendered from the source Java owner name, not the
+  storage-decorated slot type.
+
+The pinned idiom fixture now emits:
+
+```rust
+__java_self.wrapper = Some(std::rc::Rc::new(Wrapper::new(Holder::new(..))));
+```
 
 ### The one remaining break is a design fork, not a missing fix
 

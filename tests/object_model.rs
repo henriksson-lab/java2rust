@@ -11,8 +11,8 @@ use new_java2rust::object_model::{
     ObjectHierarchyEdgeKind, ObjectModelInput, ObjectRepresentation, ObjectRepresentationRequest,
     ObjectSafetyPolicy, RepresentationLookupFallback, dispatch_requirements_from_usage,
     object_hierarchy_edge_diagnostic_policy, object_hierarchy_edge_representation_policy,
-    object_representation_lookup_policy, object_representation_policy, plan_object_model,
-    plan_object_model_from_input,
+    object_representation_lookup_policy, object_representation_policy,
+    plan_object_model_from_input, plan_object_model_with_effective_facts,
 };
 use new_java2rust::parser::parse_java_source;
 use new_java2rust::representation::{plan_representations, representation_dispatch_policy};
@@ -28,6 +28,14 @@ use new_java2rust::{
     facts::{FactSet, TypeCapabilityOverride},
     slot_shape::DispatchShape,
 };
+
+fn plan_object_model_for_test(
+    program: &new_java2rust::java_ir::Program,
+    facts: &FactSet,
+) -> new_java2rust::object_model::ObjectModelPlan {
+    let effective_facts = EffectiveFacts::new(facts);
+    plan_object_model_with_effective_facts(program, &effective_facts)
+}
 
 #[test]
 fn object_model_owns_initial_interface_strategy_and_object_safety_fallback() {
@@ -49,7 +57,7 @@ interface PredicateLike {
 "#,
     );
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
-    let object_plan = plan_object_model(&resolved.program, &resolved.facts);
+    let object_plan = plan_object_model_for_test(&resolved.program, &resolved.facts);
 
     let named = object_plan.strategy_for("Named").unwrap();
     let factory = object_plan.strategy_for("Factory").unwrap();
@@ -119,7 +127,7 @@ interface ReadLike {
 "#,
     );
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
-    let object_plan = plan_object_model(&resolved.program, &resolved.facts);
+    let object_plan = plan_object_model_for_test(&resolved.program, &resolved.facts);
     let read_like = object_plan.strategy_for("ReadLike").unwrap();
 
     assert_eq!(
@@ -145,7 +153,7 @@ interface Factory {
 "#,
     );
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
-    let object_plan = plan_object_model(&resolved.program, &resolved.facts);
+    let object_plan = plan_object_model_for_test(&resolved.program, &resolved.facts);
     let factory = object_plan.strategy_for("Factory").unwrap();
 
     assert_eq!(factory.strategy, ObjectRepresentation::ErasedObject);
@@ -176,7 +184,7 @@ interface TransformerLike {
 "#,
     );
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
-    let object_plan = plan_object_model(&resolved.program, &resolved.facts);
+    let object_plan = plan_object_model_for_test(&resolved.program, &resolved.facts);
     let filter = object_plan.strategy_for("FilterLike").unwrap();
     let transformer = object_plan.strategy_for("TransformerLike").unwrap();
 
@@ -222,9 +230,9 @@ final class Dog implements Animal {}
         effective_facts: &effective_facts,
         usage: None,
     });
-    let from_legacy_api = plan_object_model(&resolved.program, &resolved.facts);
+    let from_effective_api = plan_object_model_for_test(&resolved.program, &resolved.facts);
 
-    assert_eq!(from_input, from_legacy_api);
+    assert_eq!(from_input, from_effective_api);
     assert!(from_input.strategy_for("Animal").is_some());
     assert!(from_input.strategy_for("Dog").is_some());
 }
@@ -587,7 +595,7 @@ class Dog implements Animal {}
             provenance: FactProvenance::UserOverride,
         });
 
-    let object_plan = plan_object_model(&resolved.program, &facts);
+    let object_plan = plan_object_model_for_test(&resolved.program, &facts);
     let animal = object_plan.strategy_for("Animal").unwrap();
 
     assert_eq!(
@@ -634,6 +642,7 @@ interface RejectedReceiver {}
                         "stored".to_string(),
                         BindingUseFacts {
                             name: "stored".to_string(),
+                            binding: None,
                             java_ty: JavaType::Named {
                                 name: "Stored".to_string(),
                                 args: Vec::new(),
@@ -647,6 +656,7 @@ interface RejectedReceiver {}
                         "borrowed".to_string(),
                         BindingUseFacts {
                             name: "borrowed".to_string(),
+                            binding: None,
                             java_ty: JavaType::Named {
                                 name: "Borrowed".to_string(),
                                 args: Vec::new(),
@@ -664,6 +674,7 @@ interface RejectedReceiver {}
                         "unknown".to_string(),
                         BindingUseFacts {
                             name: "unknown".to_string(),
+                            binding: None,
                             java_ty: JavaType::Named {
                                 name: "UnknownArg".to_string(),
                                 args: Vec::new(),
@@ -681,6 +692,7 @@ interface RejectedReceiver {}
                         "receiver".to_string(),
                         BindingUseFacts {
                             name: "receiver".to_string(),
+                            binding: None,
                             java_ty: JavaType::Named {
                                 name: "RejectedReceiver".to_string(),
                                 args: Vec::new(),
@@ -688,6 +700,7 @@ interface RejectedReceiver {}
                             uses: vec![BindingUse::ReceiverForCall {
                                 name: "external".to_string(),
                                 boundary: CallArgumentBoundary::Unknown,
+                                has_literal_null_arg: false,
                             }],
                         },
                     ),
@@ -825,7 +838,7 @@ class InterfaceWriterFactory {
         "{writer_requirements:?}"
     );
 
-    let object_plan = plan_object_model(&resolved.program, &resolved.facts);
+    let object_plan = plan_object_model_for_test(&resolved.program, &resolved.facts);
     assert_eq!(
         object_plan.strategy_for("Writer").unwrap().strategy,
         ObjectRepresentation::DynTrait {
@@ -845,7 +858,7 @@ final class Num implements Expr {}
     );
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
 
-    let object_plan = plan_object_model(&resolved.program, &resolved.facts);
+    let object_plan = plan_object_model_for_test(&resolved.program, &resolved.facts);
     let expr = object_plan.strategy_for("Expr").unwrap();
 
     assert_eq!(
@@ -901,7 +914,7 @@ final class InfoLine extends HeaderLine {}
             provenance: FactProvenance::ParsedSource,
         });
 
-    let object_plan = plan_object_model(&resolved.program, &facts);
+    let object_plan = plan_object_model_for_test(&resolved.program, &facts);
     let header_line = object_plan.strategy_for("HeaderLine").unwrap();
 
     assert_eq!(
@@ -944,7 +957,7 @@ abstract class ReadKey {
         args: Vec::new(),
     }));
 
-    let object_plan = plan_object_model(&resolved.program, &resolved.facts);
+    let object_plan = plan_object_model_for_test(&resolved.program, &resolved.facts);
     let read_key = object_plan.strategy_for("ReadKey").unwrap();
 
     assert_eq!(
@@ -959,8 +972,8 @@ abstract class ReadKey {
         ObjectRepresentation::ClosedEnum {
             enum_name: "ReadKeyValue".to_string(),
             variants: vec![
-                "ReadKeyFragmentKey".to_string(),
-                "ReadKeyPairKey".to_string()
+                "ReadKey_FragmentKey".to_string(),
+                "ReadKey_PairKey".to_string()
             ],
         }
     );
@@ -989,7 +1002,7 @@ abstract class OpenBase {
         args: Vec::new(),
     }));
 
-    let object_plan = plan_object_model(&resolved.program, &resolved.facts);
+    let object_plan = plan_object_model_for_test(&resolved.program, &resolved.facts);
     let open_base = object_plan.strategy_for("OpenBase").unwrap();
 
     assert_eq!(
@@ -1016,7 +1029,7 @@ final class NumberToken implements Token {}
         provenance: FactProvenance::ExternalLibraryPack,
     });
 
-    let object_plan = plan_object_model(&resolved.program, &facts);
+    let object_plan = plan_object_model_for_test(&resolved.program, &facts);
     let token = object_plan.strategy_for("Token").unwrap();
 
     assert_eq!(
@@ -1047,7 +1060,7 @@ class Dog implements Animal {}
             provenance: FactProvenance::ParsedSource,
         });
 
-    let object_plan = plan_object_model(&resolved.program, &facts);
+    let object_plan = plan_object_model_for_test(&resolved.program, &facts);
     let animal = object_plan.strategy_for("Animal").unwrap();
 
     assert_eq!(animal.direct_subtypes, vec!["Dog".to_string()]);
@@ -1084,7 +1097,7 @@ final class Num implements Expr {}
         provenance: FactProvenance::UserOverride,
     });
 
-    let object_plan = plan_object_model(&resolved.program, &facts);
+    let object_plan = plan_object_model_for_test(&resolved.program, &facts);
     let expr = object_plan.strategy_for("Expr").unwrap();
 
     assert_eq!(expr.strategy, ObjectRepresentation::ErasedObject);
@@ -1114,7 +1127,7 @@ class FastqConstants {
         provenance: FactProvenance::ExternalLibraryPack,
     });
 
-    let object_plan = plan_object_model(&resolved.program, &facts);
+    let object_plan = plan_object_model_for_test(&resolved.program, &facts);
     let constants = object_plan.strategy_for("FastqConstants").unwrap();
 
     assert_eq!(constants.strategy, ObjectRepresentation::ConcreteStruct);
@@ -1139,7 +1152,7 @@ final class Num implements Expr {}
         DispatchRequirementKind::NeedsPublicExtensibleApi,
     );
 
-    let object_plan = plan_object_model(&resolved.program, &facts);
+    let object_plan = plan_object_model_for_test(&resolved.program, &facts);
     let expr = object_plan.strategy_for("Expr").unwrap();
 
     assert_eq!(
@@ -1216,7 +1229,7 @@ class Dog implements Animal {}
         DispatchRequirementKind::RejectTraitObject,
     );
 
-    let object_plan = plan_object_model(&resolved.program, &facts);
+    let object_plan = plan_object_model_for_test(&resolved.program, &facts);
     let animal = object_plan.strategy_for("Animal").unwrap();
 
     assert_eq!(animal.strategy, ObjectRepresentation::ErasedObject);
@@ -1256,7 +1269,7 @@ class Dog implements Animal {}
         DispatchRequirementKind::NeedsUnknownRuntimeObject,
     );
 
-    let object_plan = plan_object_model(&resolved.program, &facts);
+    let object_plan = plan_object_model_for_test(&resolved.program, &facts);
     let animal = object_plan.strategy_for("Animal").unwrap();
 
     assert_eq!(animal.strategy, ObjectRepresentation::ErasedObject);

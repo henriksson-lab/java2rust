@@ -160,7 +160,8 @@ Default behavior should be conservative and deterministic.
 Add these to `src/facts.rs` in small, queryable structs:
 
 - Fact identity:
-  - `FactKind` for bounded-domain accounting
+  - bounded-domain accounting for fact categories, introduced with real
+    producers/consumers rather than a standalone unused enum
   - stable keys for types, fields, methods, constructors, symbols, call sites,
     and control-flow sites
 - Field nullability:

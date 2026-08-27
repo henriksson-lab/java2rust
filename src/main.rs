@@ -167,7 +167,11 @@ fn main() -> ExitCode {
     print_diagnostics(&fact_diagnostics);
     print_diagnostics(&translation.diagnostics);
     println!("{}", translation.rust);
-    ExitCode::SUCCESS
+    if fact_diagnostics.has_errors() || translation.diagnostics.has_errors() {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -673,10 +677,12 @@ fn run_translate_batch(
             .iter()
             .filter(|diagnostic| diagnostic.code == "unsupported_member")
             .count();
+        let translate_status = translate_status_for_diagnostics(&translation.diagnostics);
         status.push_str(&format!(
-            "{}\t{}\tok\t{}\t{}\t{}\t{}\n",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             translation.path,
             rust_path.display(),
+            translate_status,
             translation.diagnostics.len(),
             invalid_patterns,
             unsupported_members,
@@ -990,6 +996,18 @@ fn append_batch_phase_event(
         .map_err(|err| format!("failed to append {path}: {err}"))?;
     writeln!(file, "{phase}\t{status}\t{elapsed_ms}\t{detail}")
         .map_err(|err| format!("failed to write {path}: {err}"))
+}
+
+fn translate_status_for_diagnostics(
+    diagnostics: &new_java2rust::diagnostics::DiagnosticBag,
+) -> &'static str {
+    if diagnostics.has_errors() {
+        "errors"
+    } else if diagnostics.is_empty() {
+        "ok"
+    } else {
+        "diagnostics"
+    }
 }
 
 fn append_batch_worker_event(

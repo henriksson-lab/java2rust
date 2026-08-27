@@ -1,4 +1,25 @@
-use crate::java_ir::{JavaType, MethodDecl, Modifier, Param};
+use crate::java_ir::{CallKind, JavaType, MethodDecl, Modifier, Param, TypeDecl};
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct JavaOwnerKey(String);
+
+impl JavaOwnerKey {
+    pub fn source_type(ty: &TypeDecl) -> Self {
+        Self(ty.name.clone())
+    }
+
+    pub fn resolved_source(owner: impl Into<String>) -> Self {
+        Self(owner.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct JavaCallableKey {
@@ -30,7 +51,36 @@ pub enum JavaCallableStaticness {
 }
 
 impl JavaCallableKey {
-    pub fn source_method(owner: impl Into<String>, method: &MethodDecl) -> Self {
+    pub fn source_method_for_type(ty: &TypeDecl, method: &MethodDecl) -> Self {
+        Self::source_method_for_owner(JavaOwnerKey::source_type(ty), method)
+    }
+
+    pub fn source_method_for_owner(owner: JavaOwnerKey, method: &MethodDecl) -> Self {
+        Self::source_method(owner.into_string(), method)
+    }
+
+    pub fn resolved_source_method(
+        owner: JavaOwnerKey,
+        java_name: impl Into<String>,
+        arg_target_types: &[JavaType],
+        kind: CallKind,
+    ) -> Self {
+        Self {
+            owner: owner.into_string(),
+            java_name: java_name.into(),
+            erased_param_types: arg_target_types
+                .iter()
+                .map(|ty| erased_type_name(ty, false))
+                .collect(),
+            kind: JavaCallableKind::Method,
+            staticness: match kind {
+                CallKind::Static => JavaCallableStaticness::Static,
+                CallKind::Instance => JavaCallableStaticness::Instance,
+            },
+        }
+    }
+
+    fn source_method(owner: impl Into<String>, method: &MethodDecl) -> Self {
         Self {
             owner: owner.into(),
             java_name: method.name.clone(),

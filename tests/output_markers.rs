@@ -524,6 +524,35 @@ fn audit_readme_links_resolve() {
     );
 }
 
+#[test]
+fn exception_audit_does_not_reopen_promoted_catch_finally_loop_fixtures() {
+    let audit = std::fs::read_to_string(concat_repo_path(
+        "claude_audits/0057-exceptions-are-panics-and-finally-is-a-closure.md",
+    ))
+    .expect("0057 audit");
+
+    for fixture in [
+        "CatchFinallyBreak.java",
+        "CatchFinallyContinue.java",
+        "CatchFinallyLabeledContinue.java",
+        "TryCatchFinallyBodyBreak.java",
+        "TryWithResourcesBodyBreak.java",
+        "TryWithResourcesBodyContinue.java",
+    ] {
+        assert!(
+            concat_repo_path("tests/differential")
+                .join(fixture)
+                .exists(),
+            "{fixture} should stay promoted while 0057 describes it as covered"
+        );
+        assert!(audit.contains(fixture), "0057 should name {fixture}");
+    }
+    assert!(
+        !audit.contains("fail with Rust E0267"),
+        "0057 should not still direct work at the old catch/finally closure-boundary failure"
+    );
+}
+
 /// An unmodelled upcast is not a no-op facade *method*, and counting it as one
 /// made the facade counter almost pure noise.
 ///

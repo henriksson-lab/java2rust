@@ -9,8 +9,39 @@
 
 use std::fs;
 use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Fixture {
+    pub(crate) relative_path: PathBuf,
+    pub(crate) source: String,
+}
+
+pub(crate) fn load_java_fixtures(root: impl AsRef<Path>) -> std::io::Result<Vec<Fixture>> {
+    let root = root.as_ref();
+    let mut files = Vec::new();
+    collect_java_files(root, root, &mut files)?;
+    files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    Ok(files)
+}
+
+fn collect_java_files(root: &Path, dir: &Path, out: &mut Vec<Fixture>) -> std::io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_java_files(root, &path, out)?;
+        } else if path.extension().and_then(|e| e.to_str()) == Some("java") {
+            out.push(Fixture {
+                relative_path: path.strip_prefix(root).unwrap_or(&path).to_path_buf(),
+                source: fs::read_to_string(&path)?,
+            });
+        }
+    }
+    Ok(())
+}
 
 pub struct GeneratedCrateModule {
     pub name: &'static str,
@@ -24,6 +55,27 @@ pub(crate) fn cargo_check_generated_modules(crate_name: &str, modules: Vec<Gener
 
 pub(crate) fn cargo_test_generated_modules(crate_name: &str, modules: Vec<GeneratedCrateModule>) {
     cargo_verify_generated_modules(crate_name, modules, "test");
+}
+
+pub(crate) fn cargo_check_generated_modules_fails_with(
+    crate_name: &str,
+    modules: Vec<GeneratedCrateModule>,
+    expected_stderr: &str,
+) {
+    let run = cargo_run_generated_modules(crate_name, modules, "check");
+    let Some(status) = run.output.status else {
+        panic!("generated crate check for {crate_name} timed out before producing diagnostics");
+    };
+    assert!(
+        !status.success(),
+        "generated crate check for {crate_name} unexpectedly succeeded"
+    );
+    assert!(
+        run.output.stderr.contains(expected_stderr),
+        "generated crate check for {crate_name} did not include expected diagnostic {expected_stderr:?}\nstderr:\n{}",
+        run.output.stderr
+    );
+    let _ = fs::remove_dir_all(&run.crate_dir);
 }
 
 /// How long a nested `cargo` invocation may run before its test fails.
@@ -99,6 +151,35 @@ pub(crate) fn cargo_verify_generated_modules(
     modules: Vec<GeneratedCrateModule>,
     cargo_command: &str,
 ) {
+    let run = cargo_run_generated_modules(crate_name, modules, cargo_command);
+    let timeout = generated_crate_verify_timeout();
+    let Some(status) = run.output.status else {
+        panic!(
+            "generated crate {cargo_command} for {crate_name} did not finish within {}s and was killed",
+            timeout.as_secs()
+        );
+    };
+
+    if !status.success() {
+        keep_sources_discard_build_artifacts(&run.crate_dir);
+        panic!(
+            "generated crate {cargo_command} failed for {crate_name}\nstdout:\n{}\nstderr:\n{}",
+            run.output.stdout, run.output.stderr
+        );
+    }
+    let _ = fs::remove_dir_all(&run.crate_dir);
+}
+
+struct GeneratedCrateRun {
+    crate_dir: PathBuf,
+    output: WatchedOutput,
+}
+
+fn cargo_run_generated_modules(
+    crate_name: &str,
+    modules: Vec<GeneratedCrateModule>,
+    cargo_command: &str,
+) -> GeneratedCrateRun {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -139,7 +220,7 @@ pub(crate) fn cargo_verify_generated_modules(
     let timeout = generated_crate_verify_timeout();
     let output = run_with_watchdog(&mut command, timeout);
 
-    let Some(status) = output.status else {
+    if output.status.is_none() {
         keep_sources_discard_build_artifacts(&crate_dir);
         panic!(
             "generated crate {cargo_command} for {crate_name} did not finish within {}s and was killed; \
@@ -149,15 +230,7 @@ pub(crate) fn cargo_verify_generated_modules(
         );
     };
 
-    if !status.success() {
-        keep_sources_discard_build_artifacts(&crate_dir);
-        panic!(
-            "generated crate {cargo_command} failed for {crate_name}\nstdout:\n{}\nstderr:\n{}",
-            output.stdout, output.stderr
-        );
-    }
-
-    let _ = fs::remove_dir_all(&crate_dir);
+    GeneratedCrateRun { crate_dir, output }
 }
 
 /// Keep a failed crate's `Cargo.toml` and `src/`, drop its `target/`.

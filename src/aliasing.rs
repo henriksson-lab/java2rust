@@ -24,7 +24,7 @@
 //! does not have, so until then the honest output is a diagnostic rather than a
 //! clone that compiles and lies.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::diagnostics::{DiagnosticBag, Severity};
 use crate::facts::{FactSet, ReceiverMutabilityFact};
@@ -745,9 +745,15 @@ fn receiver_java_type_for_handle(
     handle: &str,
     method_usage: Option<&MethodUsageFacts>,
 ) -> Option<JavaType> {
-    method_usage
-        .and_then(|usage| usage.bindings.get(handle))
-        .map(|binding| binding.java_ty.clone())
+    let usage = method_usage?;
+    let mut matches = usage
+        .all_binding_facts()
+        .into_iter()
+        .filter(|binding| binding.name == handle);
+    let java_ty = matches.next()?.java_ty.clone();
+    matches
+        .all(|binding| binding.java_ty == java_ty)
+        .then_some(java_ty)
 }
 
 fn collect_statements<'a>(block: &'a Block, out: &mut Vec<&'a Stmt>) {
@@ -1046,15 +1052,6 @@ fn expr_reads_this_field(expr: &Expr, field: &str) -> bool {
     }
 }
 
-/// Names of the locals a body aliases observably — the projection lowering
-/// would need if it ever gains a shared representation to spend the answer on.
-pub fn observably_aliased_locals(program: &Program, usage: &UsageFacts) -> HashSet<String> {
-    observable_aliases(program, usage)
-        .into_iter()
-        .flat_map(|alias| [alias.original, alias.alias])
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1096,6 +1093,44 @@ mod tests {
             provenance: FactProvenance::ExternalLibraryPack,
         });
         facts
+    }
+
+    #[test]
+    fn receiver_java_type_for_handle_rejects_same_name_type_disagreement() {
+        let first = crate::binding_id::BindingId::new(
+            crate::binding_id::BindingKind::Local,
+            "handle".to_string(),
+            0,
+        );
+        let second = crate::binding_id::BindingId::new(
+            crate::binding_id::BindingKind::Local,
+            "handle".to_string(),
+            1,
+        );
+        let mut usage = MethodUsageFacts::default();
+        usage.bindings_by_id.insert(
+            first.clone(),
+            crate::usage::BindingUseFacts {
+                name: "handle".to_string(),
+                binding: Some(first),
+                java_ty: JavaType::String,
+                uses: Vec::new(),
+            },
+        );
+        usage.bindings_by_id.insert(
+            second.clone(),
+            crate::usage::BindingUseFacts {
+                name: "handle".to_string(),
+                binding: Some(second),
+                java_ty: JavaType::Named {
+                    name: "Record".to_string(),
+                    args: Vec::new(),
+                },
+                uses: Vec::new(),
+            },
+        );
+
+        assert_eq!(receiver_java_type_for_handle("handle", Some(&usage)), None);
     }
 
     /// The archetype from audit 0002. Java prints 5; a copy prints 0.

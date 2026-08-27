@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
+use crate::binding_id::{BindingId, BindingKind};
 use crate::diagnostics::DiagnosticBag;
 use crate::facts::{
     Capture, CaptureFacts, CaptureOrigin, CaptureOwner, CaptureOwnerKind, CaptureSource,
@@ -198,14 +199,15 @@ pub fn resolve_program_with_source_symbols_and_facts(
     let mut diagnostics = diagnostics;
     let mut program = program.clone();
     qualify_nested_type_names(&mut program);
+    assign_local_binding_ids(&mut program);
     let mut program_counts = ProgramMethodCounts::new();
     for ty in &program.types {
         collect_program_method_counts(ty, &mut program_counts);
     }
-    for ty in &mut program.types {
-        assign_type_rust_names(ty, &mut diagnostics, &program_counts);
-    }
     let symbols = &source_symbols.symbols;
+    for ty in &mut program.types {
+        assign_type_rust_names_with_source_symbols(ty, &mut diagnostics, &program_counts, symbols);
+    }
     let mut resolver_facts = FactSet::default();
     for ty in &mut program.types {
         resolve_type_calls(
@@ -234,6 +236,160 @@ pub fn declaration_facts_from_program(program: &Program) -> FactSet {
     collect_static_final_constant_value_facts(&program, &mut facts);
     collect_method_declaration_effect_facts(&program, &mut facts);
     facts
+}
+
+fn assign_local_binding_ids(program: &mut Program) {
+    for ty in &mut program.types {
+        assign_local_binding_ids_for_type(ty);
+    }
+}
+
+fn assign_local_binding_ids_for_type(ty: &mut TypeDecl) {
+    for member in &mut ty.members {
+        match member {
+            Member::Method(method) => {
+                let mut occurrences = HashMap::new();
+                for param in &mut method.params {
+                    param.binding = Some(next_binding_id(
+                        BindingKind::Param,
+                        &param.source_name,
+                        &mut occurrences,
+                    ));
+                }
+                if let Some(body) = &mut method.body {
+                    assign_local_binding_ids_for_block(body, &mut occurrences);
+                }
+            }
+            Member::Constructor(constructor) => {
+                let mut occurrences = HashMap::new();
+                for param in &mut constructor.params {
+                    param.binding = Some(next_binding_id(
+                        BindingKind::Param,
+                        &param.source_name,
+                        &mut occurrences,
+                    ));
+                }
+                if let Some(body) = &mut constructor.body {
+                    assign_local_binding_ids_for_block(body, &mut occurrences);
+                }
+            }
+            Member::Type(nested) => assign_local_binding_ids_for_type(nested),
+            _ => {}
+        }
+    }
+}
+
+fn assign_local_binding_ids_for_block(
+    block: &mut Block,
+    occurrences: &mut HashMap<(BindingKind, String), usize>,
+) {
+    for stmt in &mut block.statements {
+        assign_local_binding_ids_for_stmt(stmt, occurrences);
+    }
+}
+
+fn assign_local_binding_ids_for_stmt(
+    stmt: &mut Stmt,
+    occurrences: &mut HashMap<(BindingKind, String), usize>,
+) {
+    match stmt {
+        Stmt::VarDecl {
+            source_name,
+            binding,
+            ..
+        } => {
+            *binding = Some(next_binding_id(
+                BindingKind::Local,
+                source_name,
+                occurrences,
+            ));
+        }
+        Stmt::For { init, body, .. } => {
+            for init_stmt in init {
+                assign_local_binding_ids_for_stmt(init_stmt, occurrences);
+            }
+            assign_local_binding_ids_for_block(body, occurrences);
+        }
+        Stmt::EnhancedFor {
+            source_var_name,
+            body,
+            binding,
+            ..
+        } => {
+            *binding = Some(next_binding_id(
+                BindingKind::LoopVariable,
+                source_var_name,
+                occurrences,
+            ));
+            assign_local_binding_ids_for_block(body, occurrences);
+        }
+        Stmt::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            assign_local_binding_ids_for_block(then_block, occurrences);
+            if let Some(else_block) = else_block {
+                assign_local_binding_ids_for_block(else_block, occurrences);
+            }
+        }
+        Stmt::While { body, .. }
+        | Stmt::DoWhile { body, .. }
+        | Stmt::Block(body)
+        | Stmt::LabeledBlock { body, .. } => {
+            assign_local_binding_ids_for_block(body, occurrences);
+        }
+        Stmt::Switch { cases, .. } => {
+            for case in cases {
+                for stmt in &mut case.statements {
+                    assign_local_binding_ids_for_stmt(stmt, occurrences);
+                }
+            }
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            for resource in resources {
+                assign_local_binding_ids_for_stmt(resource, occurrences);
+            }
+            assign_local_binding_ids_for_block(body, occurrences);
+            for catch in catches {
+                catch.binding = Some(next_binding_id(
+                    BindingKind::CatchParam,
+                    &catch.name,
+                    occurrences,
+                ));
+                assign_local_binding_ids_for_block(&mut catch.body, occurrences);
+            }
+            if let Some(finally_block) = finally_block {
+                assign_local_binding_ids_for_block(finally_block, occurrences);
+            }
+        }
+        Stmt::LocalType(local) => assign_local_binding_ids_for_type(local),
+        Stmt::Assign { .. }
+        | Stmt::Expr(_)
+        | Stmt::Return(_)
+        | Stmt::Throw(_)
+        | Stmt::ConstructorInvocation { .. }
+        | Stmt::Break(_)
+        | Stmt::Continue(_)
+        | Stmt::Unsupported(_) => {}
+    }
+}
+
+fn next_binding_id(
+    kind: BindingKind,
+    name: &str,
+    occurrences: &mut HashMap<(BindingKind, String), usize>,
+) -> BindingId {
+    let key = (kind, name.to_string());
+    let occurrence = occurrences.entry(key).or_default();
+    let binding = BindingId::new(kind, name, *occurrence);
+    *occurrence += 1;
+    binding
 }
 
 fn collect_method_declaration_effect_facts(program: &Program, facts: &mut FactSet) {
@@ -286,21 +442,20 @@ fn qualify_nested_type_names_for_type(
     ty: &mut TypeDecl,
     enclosing_nested: &HashMap<String, String>,
 ) {
-    let direct_nested = ty
-        .members
-        .iter()
-        .filter_map(|member| match member {
-            Member::Type(nested) => Some((
-                nested.name.clone(),
-                format!(
-                    "{}.{}",
-                    ty.name,
-                    nested.name.rsplit('.').next().unwrap_or(&nested.name)
-                ),
-            )),
-            _ => None,
-        })
-        .collect::<HashMap<_, _>>();
+    let mut direct_nested = HashMap::new();
+    for member in &ty.members {
+        if let Member::Type(nested) = member {
+            let nested_simple = nested.name.rsplit('.').next().unwrap_or(&nested.name);
+            let nested_qualified = format!("{}.{}", ty.name, nested_simple);
+            direct_nested.insert(nested.name.clone(), nested_qualified.clone());
+            collect_nested_type_path_aliases(
+                nested,
+                nested_simple.to_string(),
+                nested_qualified,
+                &mut direct_nested,
+            );
+        }
+    }
 
     let mut visible_nested = enclosing_nested.clone();
     visible_nested.extend(direct_nested.clone());
@@ -317,7 +472,34 @@ fn qualify_nested_type_names_for_type(
     }
 }
 
+fn collect_nested_type_path_aliases(
+    ty: &TypeDecl,
+    reference_prefix: String,
+    qualified_prefix: String,
+    aliases: &mut HashMap<String, String>,
+) {
+    for member in &ty.members {
+        if let Member::Type(nested) = member {
+            let nested_simple = nested.name.rsplit('.').next().unwrap_or(&nested.name);
+            let reference_name = format!("{reference_prefix}.{nested_simple}");
+            let qualified_name = format!("{qualified_prefix}.{nested_simple}");
+            aliases.insert(reference_name.clone(), qualified_name.clone());
+            collect_nested_type_path_aliases(nested, reference_name, qualified_name, aliases);
+        }
+    }
+}
+
 fn rewrite_type_decl_references(ty: &mut TypeDecl, direct_nested: &HashMap<String, String>) {
+    if let Some(extends) = &mut ty.extends
+        && let Some(qualified) = direct_nested.get(extends)
+    {
+        *extends = qualified.clone();
+    }
+    for implements in &mut ty.implements {
+        if let Some(qualified) = direct_nested.get(implements) {
+            *implements = qualified.clone();
+        }
+    }
     for bound in &mut ty.type_param_bounds {
         if let Some(bound) = bound {
             qualify_nested_java_type(bound, direct_nested);
@@ -711,6 +893,45 @@ fn assign_type_rust_names(
     assign_type_rust_names_with_counts(ty, diagnostics, program_counts, method_counts, ctor_count)
 }
 
+fn assign_type_rust_names_with_source_symbols(
+    ty: &mut TypeDecl,
+    diagnostics: &mut DiagnosticBag,
+    program_counts: &ProgramMethodCounts,
+    symbols: &ProgramSymbols,
+) {
+    let method_counts = method_counts_including_source_hierarchy(ty, program_counts, symbols);
+    let mut ctor_count = 0usize;
+    for member in &ty.members {
+        if let Member::Constructor(_) = member {
+            ctor_count += 1;
+        }
+    }
+    assign_type_rust_names_with_source_symbols_and_counts(
+        ty,
+        diagnostics,
+        program_counts,
+        symbols,
+        method_counts,
+        ctor_count,
+    )
+}
+
+fn method_counts_including_source_hierarchy(
+    ty: &TypeDecl,
+    program_counts: &ProgramMethodCounts,
+    symbols: &ProgramSymbols,
+) -> HashMap<String, usize> {
+    let mut counts = HashMap::new();
+    for method in symbols.methods_for_hierarchy(&ty.name) {
+        *counts.entry(method.java_name).or_default() += 1;
+    }
+    if counts.is_empty() {
+        method_counts_including_supertypes(ty, program_counts)
+    } else {
+        counts
+    }
+}
+
 fn assign_type_rust_names_with_counts(
     ty: &mut TypeDecl,
     diagnostics: &mut DiagnosticBag,
@@ -730,6 +951,35 @@ fn assign_type_rust_names_with_counts(
             _ => {}
         }
     }
+    allocate_unique_declared_method_rust_names(ty);
+}
+
+fn assign_type_rust_names_with_source_symbols_and_counts(
+    ty: &mut TypeDecl,
+    diagnostics: &mut DiagnosticBag,
+    program_counts: &ProgramMethodCounts,
+    symbols: &ProgramSymbols,
+    method_counts: HashMap<String, usize>,
+    ctor_count: usize,
+) {
+    let extends = ty.extends.clone();
+    for member in &mut ty.members {
+        match member {
+            Member::Method(method) => resolve_method(method, &method_counts, extends.as_deref()),
+            Member::Constructor(ctor) => resolve_constructor(ctor, ctor_count),
+            Member::Type(nested) => assign_type_rust_names_with_source_symbols(
+                nested,
+                diagnostics,
+                program_counts,
+                symbols,
+            ),
+            Member::Unsupported { reason, .. } => {
+                diagnostics.unsupported("unsupported_member", reason.clone());
+            }
+            _ => {}
+        }
+    }
+    allocate_unique_declared_method_rust_names(ty);
 }
 
 fn resolve_type_calls(
@@ -843,6 +1093,30 @@ fn resolve_method(
         .collect::<Vec<_>>()
         .join("_");
     method.rust_name = Some(format!("{base}_{suffix}"));
+}
+
+fn allocate_unique_declared_method_rust_names(ty: &mut TypeDecl) {
+    let mut occupied = ty
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            Member::Constructor(ctor) => ctor.rust_name.clone(),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+
+    for member in &mut ty.members {
+        let Member::Method(method) = member else {
+            continue;
+        };
+        let base = method
+            .rust_name
+            .clone()
+            .unwrap_or_else(|| crate::parser::to_snake_case(&method.name));
+        let rust_name = crate::java_naming::allocate_rust_ident(&base, &occupied);
+        occupied.insert(rust_name.clone());
+        method.rust_name = Some(rust_name);
+    }
 }
 
 fn source_method_overrides_jdk_input_stream_read_3(
@@ -1988,6 +2262,7 @@ fn substitute_method_symbol(
                 source_name: param.source_name.clone(),
                 ty: substitute_method_type_variables(&param.ty, substitutions),
                 is_varargs: param.is_varargs,
+                binding: param.binding.clone(),
             })
             .collect(),
         return_type: substitute_method_type_variables(&method.return_type, substitutions),
@@ -2588,6 +2863,7 @@ fn constructor_params_for_constructed_type(
             source_name: param.source_name.clone(),
             ty: substitute_method_type_variables(&param.ty, &substitutions),
             is_varargs: param.is_varargs,
+            binding: param.binding.clone(),
         })
         .collect()
 }
@@ -4703,6 +4979,7 @@ fn resolve_same_class_call(
             source_name: param.source_name.clone(),
             ty: substitute_method_type_variables(&param.ty, &substitutions),
             is_varargs: param.is_varargs,
+            binding: param.binding.clone(),
         })
         .collect();
     let param_types = substituted_params
@@ -4969,6 +5246,7 @@ fn resolve_same_class_constructor(
             source_name: param.source_name.clone(),
             ty: substitute_method_type_variables(&param.ty, &substitutions),
             is_varargs: param.is_varargs,
+            binding: param.binding.clone(),
         })
         .collect::<Vec<_>>();
     let param_types = params

@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::facts::{ExceptionKind, FactSet, TrivialAccessorKind};
+use crate::binding_id::BindingId;
+use crate::facts::{ExceptionKind, FactSet, NullabilityState, TrivialAccessorKind};
 use crate::java_ir::{
     Block, ConstructorInvocationKind, Expr, JavaType, LambdaBody, Member, Modifier, Program,
     ResolvedCall, ResolvedConstructor, Stmt, SwitchLabel, TypeDecl,
@@ -78,6 +79,19 @@ impl CallableKey {
             method_name: crate::java_signature::source_method_rust_name(method),
         }
     }
+
+    pub fn source_constructor(
+        type_name: impl Into<String>,
+        constructor: &crate::java_ir::ConstructorDecl,
+    ) -> Self {
+        CallableKey::Constructor {
+            type_name: type_name.into(),
+            rust_name: constructor
+                .rust_name
+                .clone()
+                .unwrap_or_else(|| "new".to_string()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,6 +130,7 @@ pub struct UsageConstructorKey {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MethodUsageFacts {
     pub bindings: HashMap<String, BindingUseFacts>,
+    pub bindings_by_id: HashMap<BindingId, BindingUseFacts>,
     pub call_sites: Vec<CallSiteUse>,
     pub constructor_call_sites: Vec<ConstructorCallSiteUse>,
     pub returned_call_results: Vec<ReturnedCallResultUse>,
@@ -130,13 +145,145 @@ impl UsageFacts {
         method: &crate::java_ir::MethodDecl,
     ) -> Option<&MethodUsageFacts> {
         self.methods_by_java_key
-            .get(&JavaCallableKey::source_method(ty.name.clone(), method))
+            .get(&JavaCallableKey::source_method_for_type(ty, method))
+    }
+}
+
+impl MethodUsageFacts {
+    pub fn binding_for_declaration(
+        &self,
+        binding: Option<&BindingId>,
+        name: &str,
+    ) -> Option<&BindingUseFacts> {
+        self.binding_for_declaration_with_name_fallback(binding, name, true)
+    }
+
+    pub fn binding_for_declaration_with_name_fallback(
+        &self,
+        binding: Option<&BindingId>,
+        name: &str,
+        allow_name_fallback: bool,
+    ) -> Option<&BindingUseFacts> {
+        match binding {
+            Some(binding) => self.bindings_by_id.get(binding),
+            None if allow_name_fallback => self.bindings.get(name).filter(|binding| {
+                if let Some(id) = &binding.binding {
+                    return self.bindings_by_id.contains_key(id);
+                }
+                self.id_less_binding_name_is_unambiguous(name)
+            }),
+            None => None,
+        }
+    }
+
+    pub fn visible_binding_id_for_name(&self, name: &str) -> Option<BindingId> {
+        let binding_id = self
+            .bindings
+            .get(name)
+            .and_then(|binding| binding.binding.clone())?;
+        self.bindings_by_id
+            .contains_key(&binding_id)
+            .then_some(binding_id)
+    }
+
+    pub fn name_binding_is_current(&self, name: &str) -> bool {
+        let Some(binding) = self.bindings.get(name) else {
+            return false;
+        };
+        self.binding_use_facts_are_current(name, binding)
+    }
+
+    pub fn snapshot_visible_binding_for_scope(&self, name: &str) -> Option<BindingUseFacts> {
+        self.bindings
+            .get(name)
+            .filter(|binding| self.binding_use_facts_are_current(name, binding))
+            .cloned()
+    }
+
+    pub fn hide_visible_binding_for_scope(&mut self, name: &str) -> Option<BindingUseFacts> {
+        let saved = self.snapshot_visible_binding_for_scope(name);
+        self.bindings.remove(name);
+        saved
+    }
+
+    pub fn restore_visible_binding_for_scope(
+        &mut self,
+        name: String,
+        saved: Option<BindingUseFacts>,
+    ) {
+        self.bindings.remove(&name);
+        if let Some(saved) = saved {
+            let restored = if let Some(binding) = saved.binding.as_ref() {
+                let Some(current) = self.bindings_by_id.get(binding).cloned() else {
+                    return;
+                };
+                current
+            } else {
+                saved
+            };
+            if let Some(binding) = &restored.binding {
+                self.bindings.insert(name, restored.clone());
+                self.bindings_by_id.insert(binding.clone(), restored);
+            } else {
+                self.bindings.insert(name, restored);
+            }
+        }
+    }
+
+    pub fn record_visible_binding_use(&mut self, name: &str, usage: BindingUse) {
+        let binding_id = self.visible_binding_id_for_name(name);
+        if self.name_binding_is_current(name)
+            && let Some(binding) = self.bindings.get_mut(name)
+        {
+            binding.uses.push(usage.clone());
+        }
+        if let Some(binding_id) = binding_id
+            && let Some(binding) = self.bindings_by_id.get_mut(&binding_id)
+        {
+            binding.uses.push(usage);
+        }
+    }
+
+    pub fn all_binding_facts(&self) -> Vec<&BindingUseFacts> {
+        let mut facts = Vec::new();
+        let mut seen_bindings = HashSet::new();
+        for (binding_id, binding) in &self.bindings_by_id {
+            seen_bindings.insert(binding_id.clone());
+            facts.push(binding);
+        }
+        for binding in self.bindings.values() {
+            if let Some(binding_id) = &binding.binding {
+                if seen_bindings.contains(binding_id) {
+                    continue;
+                }
+                if !self.bindings_by_id.contains_key(binding_id) {
+                    continue;
+                }
+            } else if !self.id_less_binding_name_is_unambiguous(&binding.name) {
+                continue;
+            }
+            facts.push(binding);
+        }
+        facts
+    }
+
+    fn id_less_binding_name_is_unambiguous(&self, name: &str) -> bool {
+        !self.bindings_by_id.keys().any(|id| id.name() == name)
+    }
+
+    fn binding_use_facts_are_current(&self, name: &str, binding: &BindingUseFacts) -> bool {
+        binding
+            .binding
+            .as_ref()
+            .map(|binding_id| self.bindings_by_id.contains_key(binding_id))
+            .unwrap_or_else(|| self.id_less_binding_name_is_unambiguous(name))
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BindingUseFacts {
     pub name: String,
+    pub binding: Option<BindingId>,
     pub java_ty: JavaType,
     pub uses: Vec<BindingUse>,
 }
@@ -146,6 +293,7 @@ pub enum BindingUse {
     ContentRead,
     AssignedToLocal {
         local_name: String,
+        local_binding: Option<BindingId>,
     },
     AssignedFromCall {
         name: String,
@@ -162,6 +310,7 @@ pub enum BindingUse {
     ReceiverForCall {
         name: String,
         boundary: CallArgumentBoundary,
+        has_literal_null_arg: bool,
     },
     StoredInField {
         field_name: String,
@@ -210,6 +359,7 @@ pub struct CallSiteUse {
     pub receiver_targets_self_field: bool,
     pub receiver_type: Option<JavaType>,
     pub null_arg_indices: Vec<usize>,
+    pub nullable_source_call_arg_indices: Vec<usize>,
     pub boundary: CallArgumentBoundary,
     pub resolved: Option<ResolvedCall>,
 }
@@ -219,6 +369,7 @@ pub struct ConstructorCallSiteUse {
     pub name: String,
     pub arg_count: usize,
     pub null_arg_indices: Vec<usize>,
+    pub nullable_source_call_arg_indices: Vec<usize>,
     pub boundary: CallArgumentBoundary,
     pub resolved: Option<ResolvedConstructor>,
 }
@@ -362,6 +513,7 @@ pub fn build_call_graph_with_facts(program: &Program, facts: &FactSet) -> CallGr
 
 fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts, semantic_facts: &FactSet) {
     let internal_methods = internal_method_names(ty);
+    let source_return_nullability = source_return_nullability_by_call_name(ty);
     let field_names = field_names(ty);
     let field_types = field_types(ty);
     for member in &ty.members {
@@ -370,13 +522,11 @@ fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts, semantic_facts: &Fa
                 let mut method_facts = MethodUsageFacts::default();
                 let type_env = usage_type_env(ty, &method.type_params, &method.type_param_bounds);
                 for param in &method.params {
-                    method_facts.bindings.insert(
+                    insert_binding_use_facts(
+                        &mut method_facts,
                         param.name.clone(),
-                        BindingUseFacts {
-                            name: param.name.clone(),
-                            java_ty: param.ty.clone(),
-                            uses: Vec::new(),
-                        },
+                        param.binding.clone(),
+                        param.ty.clone(),
                     );
                 }
                 if let Some(body) = &method.body {
@@ -390,6 +540,7 @@ fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts, semantic_facts: &Fa
                             &field_types,
                             semantic_facts,
                             &type_env,
+                            &source_return_nullability,
                         );
                     }
                 }
@@ -411,7 +562,7 @@ fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts, semantic_facts: &Fa
                 };
                 facts.methods.insert(rust_key, method_facts.clone());
                 facts.methods_by_java_key.insert(
-                    JavaCallableKey::source_method(ty.name.clone(), method),
+                    JavaCallableKey::source_method_for_type(ty, method),
                     method_facts.clone(),
                 );
                 facts.methods.insert(java_key, method_facts);
@@ -420,13 +571,11 @@ fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts, semantic_facts: &Fa
                 let mut ctor_facts = MethodUsageFacts::default();
                 let type_env = usage_type_env(ty, &ctor.type_params, &ctor.type_param_bounds);
                 for param in &ctor.params {
-                    ctor_facts.bindings.insert(
+                    insert_binding_use_facts(
+                        &mut ctor_facts,
                         param.name.clone(),
-                        BindingUseFacts {
-                            name: param.name.clone(),
-                            java_ty: param.ty.clone(),
-                            uses: Vec::new(),
-                        },
+                        param.binding.clone(),
+                        param.ty.clone(),
                     );
                 }
                 if let Some(body) = &ctor.body {
@@ -440,6 +589,7 @@ fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts, semantic_facts: &Fa
                             &field_types,
                             semantic_facts,
                             &type_env,
+                            &source_return_nullability,
                         );
                     }
                 }
@@ -901,6 +1051,16 @@ fn call_graph_method_target(
     resolved: &Option<ResolvedCall>,
     context: &CallGraphBuildContext,
 ) -> (CallableKey, CallGraphEdgeKind) {
+    if matches!(receiver, Some(Expr::Super)) {
+        return (
+            CallableKey::ExternalMethod {
+                receiver_type: Some("super".to_string()),
+                method_name: name.to_string(),
+                arg_count,
+            },
+            CallGraphEdgeKind::UnresolvedExternalMethodCall,
+        );
+    }
     if let Some(resolved) = resolved {
         return (
             CallableKey::Method {
@@ -1196,22 +1356,17 @@ fn analyze_stmt(
     field_types: &HashMap<String, JavaType>,
     semantic_facts: &FactSet,
     type_env: &TypeEnv,
+    source_return_nullability: &HashMap<(String, usize), NullabilityState>,
 ) {
     match stmt {
         Stmt::VarDecl {
             ty,
             name,
             initializer,
+            binding,
             ..
         } => {
-            facts
-                .bindings
-                .entry(name.clone())
-                .or_insert(BindingUseFacts {
-                    name: name.clone(),
-                    java_ty: ty.clone(),
-                    uses: Vec::new(),
-                });
+            insert_binding_use_facts(facts, name.clone(), binding.clone(), ty.clone());
             if let Some(initializer) = initializer {
                 if let Expr::Var(source_name) = initializer {
                     record_use(
@@ -1219,6 +1374,7 @@ fn analyze_stmt(
                         source_name,
                         BindingUse::AssignedToLocal {
                             local_name: name.clone(),
+                            local_binding: binding.clone(),
                         },
                     );
                 }
@@ -1251,6 +1407,7 @@ fn analyze_stmt(
                     field_types,
                     semantic_facts,
                     type_env,
+                    source_return_nullability,
                 );
             }
         }
@@ -1279,11 +1436,13 @@ fn analyze_stmt(
                 } else {
                     record_use(facts, name, BindingUse::Mutated);
                     if let Expr::Var(source_name) = value {
+                        let local_binding = facts.visible_binding_id_for_name(name);
                         record_use(
                             facts,
                             source_name,
                             BindingUse::AssignedToLocal {
                                 local_name: name.clone(),
+                                local_binding,
                             },
                         );
                     }
@@ -1344,6 +1503,7 @@ fn analyze_stmt(
                 field_types,
                 semantic_facts,
                 type_env,
+                source_return_nullability,
             );
             analyze_expr(
                 value,
@@ -1354,6 +1514,7 @@ fn analyze_stmt(
                 field_types,
                 semantic_facts,
                 type_env,
+                source_return_nullability,
             );
         }
         Stmt::Return(Some(expr)) => {
@@ -1392,6 +1553,7 @@ fn analyze_stmt(
                 field_types,
                 semantic_facts,
                 type_env,
+                source_return_nullability,
             );
         }
         Stmt::Return(None) => {}
@@ -1415,6 +1577,7 @@ fn analyze_stmt(
                 field_types,
                 semantic_facts,
                 type_env,
+                source_return_nullability,
             );
         }
         Stmt::If {
@@ -1431,10 +1594,22 @@ fn analyze_stmt(
                 field_types,
                 semantic_facts,
                 type_env,
+                source_return_nullability,
             );
-            for stmt in &then_block.statements {
-                analyze_stmt(
-                    stmt,
+            analyze_scoped_statements(
+                &then_block.statements,
+                facts,
+                current_type,
+                internal_methods,
+                field_names,
+                field_types,
+                semantic_facts,
+                type_env,
+                source_return_nullability,
+            );
+            if let Some(else_block) = else_block {
+                analyze_scoped_statements(
+                    &else_block.statements,
                     facts,
                     current_type,
                     internal_methods,
@@ -1442,21 +1617,8 @@ fn analyze_stmt(
                     field_types,
                     semantic_facts,
                     type_env,
+                    source_return_nullability,
                 );
-            }
-            if let Some(else_block) = else_block {
-                for stmt in &else_block.statements {
-                    analyze_stmt(
-                        stmt,
-                        facts,
-                        current_type,
-                        internal_methods,
-                        field_names,
-                        field_types,
-                        semantic_facts,
-                        type_env,
-                    );
-                }
             }
         }
         Stmt::While {
@@ -1474,19 +1636,19 @@ fn analyze_stmt(
                 field_types,
                 semantic_facts,
                 type_env,
+                source_return_nullability,
             );
-            for stmt in &body.statements {
-                analyze_stmt(
-                    stmt,
-                    facts,
-                    current_type,
-                    internal_methods,
-                    field_names,
-                    field_types,
-                    semantic_facts,
-                    type_env,
-                );
-            }
+            analyze_scoped_statements(
+                &body.statements,
+                facts,
+                current_type,
+                internal_methods,
+                field_names,
+                field_types,
+                semantic_facts,
+                type_env,
+                source_return_nullability,
+            );
         }
         Stmt::For {
             init,
@@ -1495,6 +1657,7 @@ fn analyze_stmt(
             body,
             ..
         } => {
+            let saved_init_bindings = save_direct_var_decl_bindings(facts, init);
             for stmt in init {
                 analyze_stmt(
                     stmt,
@@ -1505,6 +1668,7 @@ fn analyze_stmt(
                     field_types,
                     semantic_facts,
                     type_env,
+                    source_return_nullability,
                 );
             }
             if let Some(condition) = condition {
@@ -1517,6 +1681,7 @@ fn analyze_stmt(
                     field_types,
                     semantic_facts,
                     type_env,
+                    source_return_nullability,
                 );
             }
             for expr in update {
@@ -1529,26 +1694,28 @@ fn analyze_stmt(
                     field_types,
                     semantic_facts,
                     type_env,
+                    source_return_nullability,
                 );
             }
-            for stmt in &body.statements {
-                analyze_stmt(
-                    stmt,
-                    facts,
-                    current_type,
-                    internal_methods,
-                    field_names,
-                    field_types,
-                    semantic_facts,
-                    type_env,
-                );
-            }
+            analyze_scoped_statements(
+                &body.statements,
+                facts,
+                current_type,
+                internal_methods,
+                field_names,
+                field_types,
+                semantic_facts,
+                type_env,
+                source_return_nullability,
+            );
+            restore_scoped_binding_uses(facts, saved_init_bindings);
         }
         Stmt::EnhancedFor {
             var_type,
             var_name,
             iterable,
             body,
+            binding,
             ..
         } => {
             analyze_expr(
@@ -1560,32 +1727,22 @@ fn analyze_stmt(
                 field_types,
                 semantic_facts,
                 type_env,
+                source_return_nullability,
             );
-            let saved_binding = facts.bindings.remove(var_name);
-            facts.bindings.insert(
-                var_name.clone(),
-                BindingUseFacts {
-                    name: var_name.clone(),
-                    java_ty: var_type.clone(),
-                    uses: Vec::new(),
-                },
+            let saved_binding = facts.hide_visible_binding_for_scope(var_name);
+            insert_binding_use_facts(facts, var_name.clone(), binding.clone(), var_type.clone());
+            analyze_scoped_statements(
+                &body.statements,
+                facts,
+                current_type,
+                internal_methods,
+                field_names,
+                field_types,
+                semantic_facts,
+                type_env,
+                source_return_nullability,
             );
-            for stmt in &body.statements {
-                analyze_stmt(
-                    stmt,
-                    facts,
-                    current_type,
-                    internal_methods,
-                    field_names,
-                    field_types,
-                    semantic_facts,
-                    type_env,
-                );
-            }
-            if let Some(saved_binding) = saved_binding {
-                facts.bindings.remove(var_name);
-                facts.bindings.insert(var_name.clone(), saved_binding);
-            }
+            restore_binding_use_facts(facts, var_name.clone(), saved_binding);
         }
         Stmt::Switch { selector, cases } => {
             analyze_expr(
@@ -1597,26 +1754,11 @@ fn analyze_stmt(
                 field_types,
                 semantic_facts,
                 type_env,
+                source_return_nullability,
             );
             for case in cases {
-                for stmt in &case.statements {
-                    analyze_stmt(
-                        stmt,
-                        facts,
-                        current_type,
-                        internal_methods,
-                        field_names,
-                        field_types,
-                        semantic_facts,
-                        type_env,
-                    );
-                }
-            }
-        }
-        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
-            for stmt in &block.statements {
-                analyze_stmt(
-                    stmt,
+                analyze_scoped_statements(
+                    &case.statements,
                     facts,
                     current_type,
                     internal_methods,
@@ -1624,12 +1766,30 @@ fn analyze_stmt(
                     field_types,
                     semantic_facts,
                     type_env,
+                    source_return_nullability,
                 );
             }
         }
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            analyze_scoped_statements(
+                &block.statements,
+                facts,
+                current_type,
+                internal_methods,
+                field_names,
+                field_types,
+                semantic_facts,
+                type_env,
+                source_return_nullability,
+            );
+        }
         Stmt::Try {
-            resources, body, ..
+            resources,
+            body,
+            catches,
+            finally_block,
         } => {
+            let saved_resource_bindings = save_direct_var_decl_bindings(facts, resources);
             for resource in resources {
                 analyze_stmt(
                     resource,
@@ -1640,18 +1800,65 @@ fn analyze_stmt(
                     field_types,
                     semantic_facts,
                     type_env,
+                    source_return_nullability,
                 );
             }
-            for stmt in &body.statements {
-                analyze_stmt(
-                    stmt,
+            analyze_scoped_statements(
+                &body.statements,
+                facts,
+                current_type,
+                internal_methods,
+                field_names,
+                field_types,
+                semantic_facts,
+                type_env,
+                source_return_nullability,
+            );
+            restore_scoped_binding_uses(facts, saved_resource_bindings);
+            for catch in catches {
+                let mut catch_env = type_env.clone();
+                let catch_ty = catch
+                    .types
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| JavaType::Unknown("Throwable".to_string()));
+                catch_env.insert_local(catch.name.clone(), catch_ty);
+                let saved_catch_binding = facts.hide_visible_binding_for_scope(&catch.name);
+                insert_binding_use_facts(
+                    facts,
+                    catch.name.clone(),
+                    catch.binding.clone(),
+                    catch
+                        .types
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| JavaType::Unknown("Throwable".to_string())),
+                );
+                analyze_scoped_statements(
+                    &catch.body.statements,
                     facts,
                     current_type,
                     internal_methods,
                     field_names,
                     field_types,
                     semantic_facts,
-                    type_env,
+                    &mut catch_env,
+                    source_return_nullability,
+                );
+                restore_binding_use_facts(facts, catch.name.clone(), saved_catch_binding);
+            }
+            if let Some(finally_block) = finally_block {
+                let mut finally_env = type_env.clone();
+                analyze_scoped_statements(
+                    &finally_block.statements,
+                    facts,
+                    current_type,
+                    internal_methods,
+                    field_names,
+                    field_types,
+                    semantic_facts,
+                    &mut finally_env,
+                    source_return_nullability,
                 );
             }
         }
@@ -1664,6 +1871,7 @@ fn analyze_stmt(
             field_types,
             semantic_facts,
             type_env,
+            source_return_nullability,
         ),
         Stmt::ConstructorInvocation {
             kind,
@@ -1675,6 +1883,10 @@ fn analyze_stmt(
                 name: "constructor".to_string(),
                 arg_count: args.len(),
                 null_arg_indices: null_argument_indices(args),
+                nullable_source_call_arg_indices: nullable_source_call_arg_indices(
+                    args,
+                    source_return_nullability,
+                ),
                 boundary: policy.boundary,
                 resolved: resolved.clone(),
             });
@@ -1701,6 +1913,7 @@ fn analyze_stmt(
                     field_types,
                     semantic_facts,
                     type_env,
+                    source_return_nullability,
                 );
             }
         }
@@ -1723,27 +1936,7 @@ fn is_unshadowed_field_name(
     field_names: &HashSet<String>,
     name: &str,
 ) -> bool {
-    field_names.contains(name) && !facts.bindings.contains_key(name)
-}
-
-pub fn call_result_boundary_policy(
-    expr: &Expr,
-    internal_methods: &HashSet<String>,
-    facts: &MethodUsageFacts,
-) -> Option<CallResultBoundaryPolicy> {
-    let empty_field_types = HashMap::new();
-    let empty_facts = FactSet::default();
-    let empty_type_env = TypeEnv::new();
-    call_result_boundary_policy_with_context(
-        expr,
-        internal_methods,
-        facts,
-        "",
-        &HashSet::new(),
-        &empty_field_types,
-        &empty_facts,
-        &empty_type_env,
-    )
+    field_names.contains(name) && !facts.name_binding_is_current(name)
 }
 
 fn call_result_boundary_policy_with_context(
@@ -1828,10 +2021,7 @@ fn call_result_receiver_type_with_context(
 
 fn call_result_receiver_type(receiver: &Expr, facts: &MethodUsageFacts) -> Option<JavaType> {
     match receiver {
-        Expr::Var(name) => facts
-            .bindings
-            .get(name)
-            .map(|binding| binding.java_ty.clone()),
+        Expr::Var(name) => agreed_binding_java_type(facts, name),
         Expr::This | Expr::Super => None,
         Expr::Cast { ty, .. } => Some(ty.clone()),
         _ => None,
@@ -1847,6 +2037,7 @@ fn analyze_expr(
     field_types: &HashMap<String, JavaType>,
     semantic_facts: &FactSet,
     type_env: &TypeEnv,
+    source_return_nullability: &HashMap<(String, usize), NullabilityState>,
 ) {
     analyze_expr_with_context(
         expr,
@@ -1857,6 +2048,7 @@ fn analyze_expr(
         field_types,
         semantic_facts,
         type_env,
+        source_return_nullability,
         false,
     );
 }
@@ -1870,6 +2062,7 @@ fn analyze_return_expr(
     field_types: &HashMap<String, JavaType>,
     semantic_facts: &FactSet,
     type_env: &TypeEnv,
+    source_return_nullability: &HashMap<(String, usize), NullabilityState>,
 ) {
     analyze_expr_with_context(
         expr,
@@ -1880,6 +2073,7 @@ fn analyze_return_expr(
         field_types,
         semantic_facts,
         type_env,
+        source_return_nullability,
         true,
     );
 }
@@ -1893,6 +2087,7 @@ fn analyze_nested_argument_expr(
     field_types: &HashMap<String, JavaType>,
     semantic_facts: &FactSet,
     type_env: &TypeEnv,
+    source_return_nullability: &HashMap<(String, usize), NullabilityState>,
 ) {
     if matches!(expr, Expr::Var(_)) {
         return;
@@ -1906,6 +2101,7 @@ fn analyze_nested_argument_expr(
         field_types,
         semantic_facts,
         type_env,
+        source_return_nullability,
     );
 }
 
@@ -1916,8 +2112,95 @@ fn call_receiver_is_self(receiver: Option<&Expr>) -> bool {
 fn null_argument_indices(args: &[Expr]) -> Vec<usize> {
     args.iter()
         .enumerate()
+        .filter_map(|(index, arg)| expr_is_null_literal(arg).then_some(index))
+        .collect()
+}
+
+fn expr_is_null_literal(expr: &Expr) -> bool {
+    matches!(expr, Expr::Literal(crate::java_ir::Literal::Null))
+}
+
+fn nullable_source_call_arg_indices(
+    args: &[Expr],
+    source_return_nullability: &HashMap<(String, usize), NullabilityState>,
+) -> Vec<usize> {
+    args.iter()
+        .enumerate()
         .filter_map(|(index, arg)| {
-            matches!(arg, Expr::Literal(crate::java_ir::Literal::Null)).then_some(index)
+            source_call_arg_nullability(arg, source_return_nullability)
+                .is_some_and(|state| {
+                    matches!(
+                        state,
+                        NullabilityState::DefinitelyNull | NullabilityState::MaybeNull
+                    )
+                })
+                .then_some(index)
+        })
+        .collect()
+}
+
+fn source_call_arg_nullability(
+    arg: &Expr,
+    source_return_nullability: &HashMap<(String, usize), NullabilityState>,
+) -> Option<NullabilityState> {
+    let Expr::Call {
+        receiver,
+        name,
+        args,
+        resolved,
+        ..
+    } = arg
+    else {
+        return None;
+    };
+    if !matches!(
+        receiver.as_deref(),
+        None | Some(Expr::This) | Some(Expr::Super)
+    ) {
+        return None;
+    }
+    let key = resolved
+        .as_ref()
+        .map(|resolved| (resolved.rust_name.clone(), args.len()))
+        .unwrap_or_else(|| (name.clone(), args.len()));
+    source_return_nullability.get(&key).copied()
+}
+
+fn source_return_nullability_by_call_name(
+    ty: &TypeDecl,
+) -> HashMap<(String, usize), NullabilityState> {
+    ty.members
+        .iter()
+        .filter_map(|member| {
+            let Member::Method(method) = member else {
+                return None;
+            };
+            let constraints =
+                crate::signature::source_method_return_nullability_constraints(method);
+            let state = constraints
+                .into_iter()
+                .find_map(|constraint| match constraint {
+                    crate::signature::SignatureConstraint::RequiredStorageNullability(state) => {
+                        Some(state)
+                    }
+                    _ => None,
+                })?;
+            Some((source_method_rust_name(method), method.params.len(), state))
+        })
+        .flat_map(|(rust_name, arity, state)| {
+            let mut entries = vec![((rust_name.clone(), arity), state)];
+            if let Some(method) = ty.members.iter().find_map(|member| match member {
+                Member::Method(method)
+                    if source_method_rust_name(method) == rust_name
+                        && method.params.len() == arity =>
+                {
+                    Some(method)
+                }
+                _ => None,
+            }) {
+                entries.push(((method.name.clone(), arity), state));
+            }
+            entries
         })
         .collect()
 }
@@ -1931,6 +2214,7 @@ fn analyze_expr_with_context(
     field_types: &HashMap<String, JavaType>,
     semantic_facts: &FactSet,
     type_env: &TypeEnv,
+    source_return_nullability: &HashMap<(String, usize), NullabilityState>,
     result_returned: bool,
 ) {
     if expr_mutates_self_field(
@@ -1959,6 +2243,7 @@ fn analyze_expr_with_context(
                 field_types,
                 semantic_facts,
                 type_env,
+                source_return_nullability,
             );
         }
         Expr::Call {
@@ -2010,6 +2295,10 @@ fn analyze_expr_with_context(
                     .is_some_and(|receiver| expr_targets_self_field(receiver, facts, field_names)),
                 receiver_type: receiver_type.clone(),
                 null_arg_indices: null_argument_indices(args),
+                nullable_source_call_arg_indices: nullable_source_call_arg_indices(
+                    args,
+                    source_return_nullability,
+                ),
                 boundary: call_boundary,
                 resolved: resolved.clone(),
             });
@@ -2029,6 +2318,7 @@ fn analyze_expr_with_context(
                     BindingUse::ReceiverForCall {
                         name: name.clone(),
                         boundary: call_boundary,
+                        has_literal_null_arg: args.iter().any(expr_is_null_literal),
                     },
                 );
             }
@@ -2067,6 +2357,7 @@ fn analyze_expr_with_context(
                     field_types,
                     semantic_facts,
                     type_env,
+                    source_return_nullability,
                 );
             }
             if let Some(receiver) = receiver {
@@ -2079,6 +2370,7 @@ fn analyze_expr_with_context(
                     field_types,
                     semantic_facts,
                     type_env,
+                    source_return_nullability,
                 );
             }
         }
@@ -2092,6 +2384,7 @@ fn analyze_expr_with_context(
                 field_types,
                 semantic_facts,
                 type_env,
+                source_return_nullability,
             );
             analyze_expr(
                 right,
@@ -2102,6 +2395,7 @@ fn analyze_expr_with_context(
                 field_types,
                 semantic_facts,
                 type_env,
+                source_return_nullability,
             );
         }
         Expr::Cast { expr, .. } => analyze_expr_with_context(
@@ -2113,6 +2407,7 @@ fn analyze_expr_with_context(
             field_types,
             semantic_facts,
             type_env,
+            source_return_nullability,
             result_returned,
         ),
         Expr::Unary { expr, .. } => analyze_expr(
@@ -2124,6 +2419,7 @@ fn analyze_expr_with_context(
             field_types,
             semantic_facts,
             type_env,
+            source_return_nullability,
         ),
         Expr::InstanceOf { expr, ty, .. } => {
             if let Expr::Var(binding) = expr.as_ref() {
@@ -2144,6 +2440,7 @@ fn analyze_expr_with_context(
                 field_types,
                 semantic_facts,
                 type_env,
+                source_return_nullability,
             );
         }
         Expr::ArrayAccess(array, index) => {
@@ -2156,6 +2453,7 @@ fn analyze_expr_with_context(
                 field_types,
                 semantic_facts,
                 type_env,
+                source_return_nullability,
             );
             analyze_expr(
                 index,
@@ -2166,6 +2464,7 @@ fn analyze_expr_with_context(
                 field_types,
                 semantic_facts,
                 type_env,
+                source_return_nullability,
             );
         }
         Expr::ArrayCreation {
@@ -2183,6 +2482,7 @@ fn analyze_expr_with_context(
                     field_types,
                     semantic_facts,
                     type_env,
+                    source_return_nullability,
                 );
             }
             if let Some(initializer) = initializer {
@@ -2196,6 +2496,7 @@ fn analyze_expr_with_context(
                         field_types,
                         semantic_facts,
                         type_env,
+                        source_return_nullability,
                     );
                 }
             }
@@ -2211,6 +2512,7 @@ fn analyze_expr_with_context(
                     field_types,
                     semantic_facts,
                     type_env,
+                    source_return_nullability,
                 );
             }
         }
@@ -2228,6 +2530,7 @@ fn analyze_expr_with_context(
                 field_types,
                 semantic_facts,
                 type_env,
+                source_return_nullability,
             );
             analyze_expr_with_context(
                 then_expr,
@@ -2238,6 +2541,7 @@ fn analyze_expr_with_context(
                 field_types,
                 semantic_facts,
                 type_env,
+                source_return_nullability,
                 result_returned,
             );
             analyze_expr_with_context(
@@ -2249,12 +2553,24 @@ fn analyze_expr_with_context(
                 field_types,
                 semantic_facts,
                 type_env,
+                source_return_nullability,
                 result_returned,
             );
         }
         Expr::New {
             ty, args, resolved, ..
         } => {
+            facts.constructor_call_sites.push(ConstructorCallSiteUse {
+                name: "new".to_string(),
+                arg_count: args.len(),
+                null_arg_indices: null_argument_indices(args),
+                nullable_source_call_arg_indices: nullable_source_call_arg_indices(
+                    args,
+                    source_return_nullability,
+                ),
+                boundary: constructor_invocation_boundary_policy_for_expr(resolved.as_ref()),
+                resolved: resolved.clone(),
+            });
             for (arg_index, arg) in args.iter().enumerate() {
                 record_call_arg_use(
                     facts,
@@ -2278,6 +2594,7 @@ fn analyze_expr_with_context(
                     field_types,
                     semantic_facts,
                     type_env,
+                    source_return_nullability,
                 );
             }
         }
@@ -2291,6 +2608,7 @@ fn analyze_expr_with_context(
             field_types,
             semantic_facts,
             type_env,
+            source_return_nullability,
         ),
         Expr::Switch { selector, cases } => {
             analyze_expr(
@@ -2302,6 +2620,7 @@ fn analyze_expr_with_context(
                 field_types,
                 semantic_facts,
                 type_env,
+                source_return_nullability,
             );
             for case in cases {
                 for label in &case.labels {
@@ -2315,6 +2634,7 @@ fn analyze_expr_with_context(
                             field_types,
                             semantic_facts,
                             type_env,
+                            source_return_nullability,
                         );
                     }
                 }
@@ -2327,6 +2647,7 @@ fn analyze_expr_with_context(
                     field_types,
                     semantic_facts,
                     type_env,
+                    source_return_nullability,
                 );
             }
         }
@@ -2351,21 +2672,20 @@ fn analyze_lambda_body(
     field_types: &HashMap<String, JavaType>,
     semantic_facts: &FactSet,
     type_env: &TypeEnv,
+    source_return_nullability: &HashMap<(String, usize), NullabilityState>,
 ) {
     let saved_params = params
         .iter()
         .map(|param| {
-            let saved = facts.bindings.remove(&param.name);
-            facts.bindings.insert(
+            let saved = facts.hide_visible_binding_for_scope(&param.name);
+            insert_binding_use_facts(
+                facts,
                 param.name.clone(),
-                BindingUseFacts {
-                    name: param.name.clone(),
-                    java_ty: param
-                        .ty
-                        .clone()
-                        .unwrap_or_else(|| JavaType::Unknown("lambda parameter".to_string())),
-                    uses: Vec::new(),
-                },
+                None,
+                param
+                    .ty
+                    .clone()
+                    .unwrap_or_else(|| JavaType::Unknown("lambda parameter".to_string())),
             );
             (param.name.clone(), saved)
         })
@@ -2381,6 +2701,7 @@ fn analyze_lambda_body(
             field_types,
             semantic_facts,
             type_env,
+            source_return_nullability,
         ),
         LambdaBody::Block(block) => {
             for stmt in &block.statements {
@@ -2393,16 +2714,14 @@ fn analyze_lambda_body(
                     field_types,
                     semantic_facts,
                     type_env,
+                    source_return_nullability,
                 );
             }
         }
     }
 
     for (name, saved) in saved_params {
-        facts.bindings.remove(&name);
-        if let Some(saved) = saved {
-            facts.bindings.insert(name, saved);
-        }
+        restore_binding_use_facts(facts, name, saved);
     }
 }
 
@@ -2571,8 +2890,12 @@ fn facade_abi_matches_call_receiver(
     let Some(Expr::Var(receiver_name)) = receiver else {
         return true;
     };
-    if usage.bindings.contains_key(receiver_name) {
-        return true;
+    if let Some(receiver_ty) = agreed_binding_java_type(usage, receiver_name) {
+        let Some(receiver_type_name) = usage_java_type_name(&receiver_ty) else {
+            return false;
+        };
+        return crate::stdlib::canonical_external_receiver_type_key(receiver_type_name)
+            == crate::stdlib::canonical_external_receiver_type_key(owner);
     }
     crate::stdlib::canonical_external_receiver_type_key(receiver_name)
         == crate::stdlib::canonical_external_receiver_type_key(owner)
@@ -2595,13 +2918,29 @@ fn call_receiver_java_type(receiver: Option<&Expr>, facts: &MethodUsageFacts) ->
     let Some(Expr::Var(name)) = receiver else {
         return None;
     };
+    agreed_binding_java_type(facts, name).or_else(|| {
+        static_owner_receiver_name(name).map(|owner| JavaType::Unknown(owner.to_string()))
+    })
+}
+
+fn agreed_binding_java_type(facts: &MethodUsageFacts, name: &str) -> Option<JavaType> {
+    if let Some(binding_id) = facts.visible_binding_id_for_name(name) {
+        return facts
+            .bindings_by_id
+            .get(&binding_id)
+            .map(|binding| binding.java_ty.clone());
+    }
     facts
-        .bindings
-        .get(name)
+        .binding_for_declaration_with_name_fallback(None, name, true)
         .map(|binding| binding.java_ty.clone())
-        .or_else(|| {
-            static_owner_receiver_name(name).map(|owner| JavaType::Unknown(owner.to_string()))
-        })
+}
+
+fn usage_java_type_name(java_ty: &JavaType) -> Option<&str> {
+    match java_ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(name),
+        JavaType::String => Some("String"),
+        _ => None,
+    }
 }
 
 fn call_receiver_java_type_with_context(
@@ -2755,6 +3094,59 @@ fn array_expr_targets_self_field(
     }
 }
 
+fn analyze_scoped_statements(
+    statements: &[Stmt],
+    facts: &mut MethodUsageFacts,
+    current_type: &str,
+    internal_methods: &HashSet<String>,
+    field_names: &HashSet<String>,
+    field_types: &HashMap<String, JavaType>,
+    semantic_facts: &FactSet,
+    type_env: &TypeEnv,
+    source_return_nullability: &HashMap<(String, usize), NullabilityState>,
+) {
+    let saved_bindings = save_direct_var_decl_bindings(facts, statements);
+    for stmt in statements {
+        analyze_stmt(
+            stmt,
+            facts,
+            current_type,
+            internal_methods,
+            field_names,
+            field_types,
+            semantic_facts,
+            type_env,
+            source_return_nullability,
+        );
+    }
+    restore_scoped_binding_uses(facts, saved_bindings);
+}
+
+fn save_direct_var_decl_bindings(
+    facts: &mut MethodUsageFacts,
+    statements: &[Stmt],
+) -> Vec<(String, Option<BindingUseFacts>)> {
+    let mut saved = Vec::new();
+    let mut seen = HashSet::new();
+    for stmt in statements {
+        if let Stmt::VarDecl { name, .. } = stmt
+            && seen.insert(name.clone())
+        {
+            saved.push((name.clone(), facts.snapshot_visible_binding_for_scope(name)));
+        }
+    }
+    saved
+}
+
+fn restore_scoped_binding_uses(
+    facts: &mut MethodUsageFacts,
+    saved_bindings: Vec<(String, Option<BindingUseFacts>)>,
+) {
+    for (name, saved) in saved_bindings.into_iter().rev() {
+        restore_binding_use_facts(facts, name, saved);
+    }
+}
+
 fn expr_mutates_self_field(
     expr: &Expr,
     facts: &MethodUsageFacts,
@@ -2881,6 +3273,16 @@ fn constructor_argument_boundary_policy(
     }
 }
 
+fn constructor_invocation_boundary_policy_for_expr(
+    resolved: Option<&ResolvedConstructor>,
+) -> CallArgumentBoundary {
+    if resolved.is_some() {
+        CallArgumentBoundary::InternalSameType
+    } else {
+        CallArgumentBoundary::Unknown
+    }
+}
+
 fn resolved_receiver_call_boundary(
     boundary: CallArgumentBoundary,
     receiver_type: Option<&JavaType>,
@@ -2973,7 +3375,698 @@ pub fn call_argument_use_boundary_policy(
 }
 
 fn record_use(facts: &mut MethodUsageFacts, name: &str, usage: BindingUse) {
-    if let Some(binding) = facts.bindings.get_mut(name) {
-        binding.uses.push(usage);
+    facts.record_visible_binding_use(name, usage);
+}
+
+fn insert_binding_use_facts(
+    facts: &mut MethodUsageFacts,
+    name: String,
+    binding: Option<BindingId>,
+    java_ty: JavaType,
+) -> Option<BindingUseFacts> {
+    let binding_facts = BindingUseFacts {
+        name: name.clone(),
+        binding: binding.clone(),
+        java_ty,
+        uses: Vec::new(),
+    };
+    if let Some(binding) = binding {
+        facts.bindings_by_id.insert(binding, binding_facts.clone());
+    }
+    facts.bindings.insert(name, binding_facts)
+}
+
+fn restore_binding_use_facts(
+    facts: &mut MethodUsageFacts,
+    name: String,
+    saved: Option<BindingUseFacts>,
+) {
+    facts.restore_visible_binding_for_scope(name, saved);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::binding_id::BindingKind;
+    use crate::facts::{
+        BorrowSource, BorrowedReturnRecovery, CallableKey as FactCallableKey, FacadeAbiFact,
+        FacadeSlot, FactProvenance, ReceiverAbi, ResultAbi, Staticness,
+    };
+    use crate::java_ir::PrimitiveType;
+
+    fn binding_fact(name: &str, binding: Option<BindingId>) -> BindingUseFacts {
+        BindingUseFacts {
+            name: name.to_string(),
+            binding,
+            java_ty: JavaType::String,
+            uses: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn all_binding_facts_includes_id_facts_and_legacy_name_only_facts_once() {
+        let first = BindingId::new(BindingKind::Local, "value", 0);
+        let second = BindingId::new(BindingKind::Local, "value", 1);
+        let mut facts = MethodUsageFacts::default();
+        facts
+            .bindings_by_id
+            .insert(first.clone(), binding_fact("value", Some(first.clone())));
+        facts
+            .bindings_by_id
+            .insert(second.clone(), binding_fact("value", Some(second.clone())));
+        facts
+            .bindings
+            .insert("value".to_string(), binding_fact("value", Some(second)));
+        facts
+            .bindings
+            .insert("legacy".to_string(), binding_fact("legacy", None));
+
+        let mut seen = facts
+            .all_binding_facts()
+            .into_iter()
+            .map(|binding| {
+                (
+                    binding.name.clone(),
+                    binding.binding.as_ref().map(|binding| binding.occurrence),
+                )
+            })
+            .collect::<Vec<_>>();
+        seen.sort();
+
+        assert_eq!(
+            seen,
+            vec![
+                ("legacy".to_string(), None),
+                ("value".to_string(), Some(0)),
+                ("value".to_string(), Some(1)),
+            ]
+        );
+    }
+
+    #[test]
+    fn all_binding_facts_deduplicates_by_binding_id_key() {
+        let binding = BindingId::new(BindingKind::Local, "value", 1);
+        let mut facts = MethodUsageFacts::default();
+        facts.bindings_by_id.insert(
+            binding.clone(),
+            BindingUseFacts {
+                binding: None,
+                ..binding_fact("value", None)
+            },
+        );
+        facts
+            .bindings
+            .insert("value".to_string(), binding_fact("value", Some(binding)));
+
+        let all = facts.all_binding_facts();
+
+        assert_eq!(
+            all.iter().filter(|fact| fact.name == "value").count(),
+            1,
+            "{all:?}"
+        );
+        assert_eq!(all[0].binding, None);
+    }
+
+    #[test]
+    fn binding_for_declaration_does_not_fall_back_by_name_when_id_is_known() {
+        let first = BindingId::new(BindingKind::Local, "value", 0);
+        let second = BindingId::new(BindingKind::Local, "value", 1);
+        let mut facts = MethodUsageFacts::default();
+        facts
+            .bindings_by_id
+            .insert(first.clone(), binding_fact("value", Some(first)));
+        facts.bindings.insert(
+            "value".to_string(),
+            binding_fact("value", Some(second.clone())),
+        );
+
+        assert!(
+            facts
+                .binding_for_declaration(Some(&second), "value")
+                .is_none(),
+            "a resolver-assigned declaration id must not silently rejoin by name"
+        );
+        assert!(
+            facts.binding_for_declaration(None, "value").is_some(),
+            "id-less compatibility callers keep the legacy name fallback"
+        );
+    }
+
+    #[test]
+    fn id_less_name_fallback_rejects_same_name_bound_history() {
+        let bound = BindingId::new(BindingKind::Local, "value", 0);
+        let mut facts = MethodUsageFacts::default();
+        facts.bindings_by_id.insert(
+            bound.clone(),
+            BindingUseFacts {
+                java_ty: JavaType::String,
+                ..binding_fact("value", Some(bound))
+            },
+        );
+        facts.bindings.insert(
+            "value".to_string(),
+            BindingUseFacts {
+                binding: None,
+                java_ty: JavaType::Primitive(PrimitiveType::Int),
+                ..binding_fact("value", None)
+            },
+        );
+
+        assert!(
+            facts
+                .binding_for_declaration_with_name_fallback(None, "value", true)
+                .is_none(),
+            "id-less fallback cannot prove which same-name declaration it represents"
+        );
+        assert_eq!(
+            call_receiver_java_type(Some(&Expr::Var("value".to_string())), &facts),
+            None,
+            "call receiver type must fail closed instead of using an id-less stale name fact"
+        );
+    }
+
+    #[test]
+    fn ambiguous_id_less_name_map_entry_is_not_current_or_aggregated() {
+        let bound = BindingId::new(BindingKind::Local, "value", 0);
+        let mut facts = MethodUsageFacts::default();
+        facts
+            .bindings_by_id
+            .insert(bound.clone(), binding_fact("value", Some(bound)));
+        facts
+            .bindings
+            .insert("value".to_string(), binding_fact("value", None));
+
+        assert!(!facts.name_binding_is_current("value"));
+        assert_eq!(
+            facts.all_binding_facts().len(),
+            1,
+            "ambiguous id-less name-map facts must not leak through aggregate readers"
+        );
+        assert!(
+            is_unshadowed_field_name(&facts, &HashSet::from(["value".to_string()]), "value"),
+            "an ambiguous id-less local cannot shadow a same-name field"
+        );
+
+        record_use(&mut facts, "value", BindingUse::Returned);
+
+        assert!(
+            facts
+                .bindings
+                .get("value")
+                .is_some_and(|binding| binding.uses.is_empty()),
+            "ambiguous id-less name-map facts must not collect new uses"
+        );
+        assert_eq!(
+            facts
+                .bindings_by_id
+                .values()
+                .flat_map(|binding| binding.uses.iter())
+                .count(),
+            0,
+            "without a visible binding id, record_use must fail closed"
+        );
+    }
+
+    #[test]
+    fn visible_binding_id_for_name_centralizes_compatibility_lookup() {
+        let binding = BindingId::new(BindingKind::Local, "value", 1);
+        let mut facts = MethodUsageFacts::default();
+        facts.bindings.insert(
+            "value".to_string(),
+            binding_fact("value", Some(binding.clone())),
+        );
+        facts.bindings_by_id.insert(
+            binding.clone(),
+            binding_fact("value", Some(binding.clone())),
+        );
+
+        assert_eq!(facts.visible_binding_id_for_name("value"), Some(binding));
+        assert_eq!(facts.visible_binding_id_for_name("missing"), None);
+    }
+
+    #[test]
+    fn visible_binding_id_for_name_rejects_stale_name_map_binding() {
+        let binding = BindingId::new(BindingKind::Local, "value", 1);
+        let mut facts = MethodUsageFacts::default();
+        facts
+            .bindings
+            .insert("value".to_string(), binding_fact("value", Some(binding)));
+
+        assert_eq!(facts.visible_binding_id_for_name("value"), None);
+        assert!(!facts.name_binding_is_current("value"));
+        assert!(
+            facts
+                .binding_for_declaration_with_name_fallback(None, "value", true)
+                .is_none()
+        );
+        assert!(facts.binding_for_declaration(None, "value").is_none());
+        assert!(facts.all_binding_facts().is_empty());
+    }
+
+    #[test]
+    fn record_use_rejects_stale_name_map_binding() {
+        let binding = BindingId::new(BindingKind::Local, "value", 1);
+        let mut facts = MethodUsageFacts::default();
+        facts.bindings.insert(
+            "value".to_string(),
+            binding_fact("value", Some(binding.clone())),
+        );
+
+        record_use(&mut facts, "value", BindingUse::Returned);
+
+        assert!(
+            facts
+                .bindings
+                .get("value")
+                .expect("stale compatibility name entry remains stored")
+                .uses
+                .is_empty()
+        );
+        assert!(facts.bindings_by_id.get(&binding).is_none());
+    }
+
+    #[test]
+    fn restore_binding_use_facts_rejects_stale_saved_binding_id() {
+        let binding = BindingId::new(BindingKind::Local, "value", 1);
+        let mut facts = MethodUsageFacts::default();
+
+        restore_binding_use_facts(
+            &mut facts,
+            "value".to_string(),
+            Some(binding_fact("value", Some(binding.clone()))),
+        );
+
+        assert!(facts.bindings.get("value").is_none());
+        assert!(facts.bindings_by_id.get(&binding).is_none());
+    }
+
+    #[test]
+    fn restore_binding_use_facts_keeps_legacy_idless_binding() {
+        let mut facts = MethodUsageFacts::default();
+
+        restore_binding_use_facts(
+            &mut facts,
+            "value".to_string(),
+            Some(binding_fact("value", None)),
+        );
+
+        assert!(facts.bindings.get("value").is_some());
+    }
+
+    #[test]
+    fn visible_binding_scope_helpers_reject_stale_saved_binding_id() {
+        let binding = BindingId::new(BindingKind::Local, "value", 1);
+        let mut facts = MethodUsageFacts::default();
+        facts.bindings.insert(
+            "value".to_string(),
+            binding_fact("value", Some(binding.clone())),
+        );
+
+        let saved = facts.hide_visible_binding_for_scope("value");
+
+        assert_eq!(saved, None);
+        assert!(facts.bindings.get("value").is_none());
+        facts.restore_visible_binding_for_scope(
+            "value".to_string(),
+            Some(binding_fact("value", Some(binding.clone()))),
+        );
+        assert!(facts.bindings.get("value").is_none());
+        assert!(facts.bindings_by_id.get(&binding).is_none());
+    }
+
+    #[test]
+    fn stale_name_map_binding_does_not_shadow_field() {
+        let binding = BindingId::new(BindingKind::Local, "value", 1);
+        let mut facts = MethodUsageFacts::default();
+        facts
+            .bindings
+            .insert("value".to_string(), binding_fact("value", Some(binding)));
+        let fields = HashSet::from(["value".to_string()]);
+
+        assert!(is_unshadowed_field_name(&facts, &fields, "value"));
+    }
+
+    #[test]
+    fn usage_name_binding_id_recovery_goes_through_visible_binding_helper() {
+        let source = include_str!("usage.rs");
+        let analyze_stmt_source = source
+            .split("fn analyze_stmt")
+            .nth(1)
+            .and_then(|tail| tail.split("fn analyze_expr").next())
+            .expect("analyze_stmt source should be discoverable");
+        let record_use_source = source
+            .split("fn record_use")
+            .nth(1)
+            .and_then(|tail| tail.split("fn insert_binding_use_facts").next())
+            .expect("record_use source should be discoverable");
+        let unshadowed_field_source = source
+            .split("fn is_unshadowed_field_name")
+            .nth(1)
+            .and_then(|tail| {
+                tail.split("fn call_result_boundary_policy_with_context")
+                    .next()
+            })
+            .expect("is_unshadowed_field_name source should be discoverable");
+
+        assert!(analyze_stmt_source.contains("facts.visible_binding_id_for_name(name)"));
+        assert!(record_use_source.contains("facts.record_visible_binding_use(name, usage)"));
+        assert!(!record_use_source.contains("facts.visible_binding_id_for_name(name)"));
+        assert!(unshadowed_field_source.contains("!facts.name_binding_is_current(name)"));
+        assert!(!unshadowed_field_source.contains("!facts.bindings.contains_key(name)"));
+        assert!(
+            !analyze_stmt_source.contains(".bindings\n                            .get(name)"),
+            "assignment aliasing should not recover target binding ids by open-coded map lookup"
+        );
+        assert!(
+            !record_use_source.contains(".bindings\n        .get(name)"),
+            "record_use should not recover binding ids by open-coded map lookup"
+        );
+    }
+
+    #[test]
+    fn usage_scope_shadowing_goes_through_visible_binding_helpers() {
+        let source = include_str!("usage.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production usage source should be discoverable");
+        let analyze_stmt_source = production_source
+            .split("fn analyze_stmt")
+            .nth(1)
+            .and_then(|tail| tail.split("fn analyze_expr").next())
+            .expect("analyze_stmt source should be discoverable");
+        let analyze_lambda_source = production_source
+            .split("fn analyze_lambda_body")
+            .nth(1)
+            .and_then(|tail| tail.split("fn analyze_scoped_statements").next())
+            .expect("analyze_lambda_body source should be discoverable");
+        let save_direct_source = production_source
+            .split("fn save_direct_var_decl_bindings")
+            .nth(1)
+            .and_then(|tail| tail.split("fn restore_scoped_binding_uses").next())
+            .expect("save_direct_var_decl_bindings source should be discoverable");
+
+        assert!(analyze_stmt_source.contains("facts.hide_visible_binding_for_scope(var_name)"));
+        assert!(analyze_stmt_source.contains("facts.hide_visible_binding_for_scope(&catch.name)"));
+        assert!(
+            analyze_lambda_source.contains("facts.hide_visible_binding_for_scope(&param.name)")
+        );
+        assert!(save_direct_source.contains("facts.snapshot_visible_binding_for_scope(name)"));
+        assert!(
+            !analyze_stmt_source.contains("facts.bindings.remove")
+                && !analyze_lambda_source.contains("facts.bindings.remove")
+                && !save_direct_source.contains("facts.bindings.get"),
+            "scope shadowing should use MethodUsageFacts visible-binding helpers"
+        );
+    }
+
+    #[test]
+    fn block_scoped_local_does_not_shadow_field_after_scope() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+class ScopedFieldReturn {
+    int value;
+
+    int f(boolean b) {
+        if (b) {
+            int value = 1;
+        }
+        return value;
+    }
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let usage = analyze_usage(&resolved.program);
+        let method_usage = usage
+            .methods
+            .get(&UsageMethodKey {
+                type_name: "ScopedFieldReturn".to_string(),
+                method_name: "f".to_string(),
+            })
+            .expect("method usage should be recorded");
+
+        assert!(
+            method_usage.field_uses.iter().any(|use_fact| matches!(
+                use_fact,
+                FieldUse::Returned { field_name } if field_name == "value"
+            )),
+            "{method_usage:?}"
+        );
+        assert!(
+            !method_usage
+                .all_binding_facts()
+                .iter()
+                .any(|binding| binding
+                    .uses
+                    .iter()
+                    .any(|use_fact| matches!(use_fact, BindingUse::Returned))),
+            "the out-of-scope local must not receive the return use: {method_usage:?}"
+        );
+    }
+
+    #[test]
+    fn call_receiver_type_uses_current_visible_binding_before_same_name_history() {
+        let first = BindingId::new(BindingKind::Local, "value", 0);
+        let second = BindingId::new(BindingKind::Local, "value", 1);
+        let mut facts = MethodUsageFacts::default();
+        facts.bindings_by_id.insert(
+            first.clone(),
+            BindingUseFacts {
+                java_ty: JavaType::String,
+                ..binding_fact("value", Some(first))
+            },
+        );
+        facts.bindings_by_id.insert(
+            second.clone(),
+            BindingUseFacts {
+                java_ty: JavaType::Primitive(PrimitiveType::Int),
+                ..binding_fact("value", Some(second.clone()))
+            },
+        );
+        facts.bindings.insert(
+            "value".to_string(),
+            BindingUseFacts {
+                java_ty: JavaType::Primitive(PrimitiveType::Int),
+                ..binding_fact("value", Some(second))
+            },
+        );
+
+        assert_eq!(
+            call_receiver_java_type(Some(&Expr::Var("value".to_string())), &facts),
+            Some(JavaType::Primitive(PrimitiveType::Int))
+        );
+        assert_eq!(
+            call_result_receiver_type(&Expr::Var("value".to_string()), &facts),
+            Some(JavaType::Primitive(PrimitiveType::Int))
+        );
+    }
+
+    #[test]
+    fn call_receiver_type_reads_authoritative_binding_id_fact() {
+        let binding = BindingId::new(BindingKind::Local, "value", 1);
+        let mut facts = MethodUsageFacts::default();
+        facts.bindings_by_id.insert(
+            binding.clone(),
+            BindingUseFacts {
+                java_ty: JavaType::Primitive(PrimitiveType::Int),
+                ..binding_fact("value", Some(binding.clone()))
+            },
+        );
+        facts.bindings.insert(
+            "value".to_string(),
+            BindingUseFacts {
+                java_ty: JavaType::String,
+                ..binding_fact("value", Some(binding))
+            },
+        );
+
+        assert_eq!(
+            call_receiver_java_type(Some(&Expr::Var("value".to_string())), &facts),
+            Some(JavaType::Primitive(PrimitiveType::Int))
+        );
+        assert_eq!(
+            call_result_receiver_type(&Expr::Var("value".to_string()), &facts),
+            Some(JavaType::Primitive(PrimitiveType::Int))
+        );
+    }
+
+    #[test]
+    fn call_receiver_type_rejects_stale_visible_name_binding() {
+        let binding = BindingId::new(BindingKind::Local, "value", 1);
+        let mut facts = MethodUsageFacts::default();
+        facts.bindings.insert(
+            "value".to_string(),
+            BindingUseFacts {
+                java_ty: JavaType::Primitive(PrimitiveType::Int),
+                ..binding_fact("value", Some(binding))
+            },
+        );
+
+        assert_eq!(
+            call_receiver_java_type(Some(&Expr::Var("value".to_string())), &facts),
+            None
+        );
+        assert_eq!(
+            call_result_receiver_type(&Expr::Var("value".to_string()), &facts),
+            None
+        );
+    }
+
+    #[test]
+    fn call_receiver_type_uses_legacy_name_when_unambiguous() {
+        let mut facts = MethodUsageFacts::default();
+        facts
+            .bindings
+            .insert("value".to_string(), binding_fact("value", None));
+
+        assert_eq!(
+            call_receiver_java_type(Some(&Expr::Var("value".to_string())), &facts),
+            Some(JavaType::String)
+        );
+        assert_eq!(
+            call_result_receiver_type(&Expr::Var("value".to_string()), &facts),
+            Some(JavaType::String)
+        );
+    }
+
+    #[test]
+    fn call_receiver_type_rejects_same_name_history_without_visible_binding_even_when_types_agree()
+    {
+        let first = BindingId::new(BindingKind::Local, "value", 0);
+        let second = BindingId::new(BindingKind::Local, "value", 1);
+        let mut facts = MethodUsageFacts::default();
+        facts.bindings_by_id.insert(
+            first.clone(),
+            BindingUseFacts {
+                java_ty: JavaType::String,
+                ..binding_fact("value", Some(first))
+            },
+        );
+        facts.bindings_by_id.insert(
+            second.clone(),
+            BindingUseFacts {
+                java_ty: JavaType::String,
+                ..binding_fact("value", Some(second))
+            },
+        );
+
+        assert_eq!(
+            call_receiver_java_type(Some(&Expr::Var("value".to_string())), &facts),
+            None
+        );
+        assert_eq!(
+            call_result_receiver_type(&Expr::Var("value".to_string()), &facts),
+            None
+        );
+    }
+
+    fn mut_borrow_abi(owner: &str) -> FacadeAbiFact {
+        FacadeAbiFact {
+            key: FactCallableKey::method(owner, "copyInto", Staticness::Instance, 1),
+            rust_path: "copy_into".to_string(),
+            receiver: ReceiverAbi::BorrowedSelf,
+            args: vec![FacadeSlot::MutBorrowed],
+            return_slot: FacadeSlot::Owned,
+            result: ResultAbi::Plain,
+            borrow_source: None::<BorrowSource>,
+            borrowed_return_recovery: None::<BorrowedReturnRecovery>,
+            provenance: FactProvenance::UserOverride,
+        }
+    }
+
+    #[test]
+    fn facade_abi_receiver_match_rejects_wrong_local_receiver_type() {
+        let binding_id = BindingId::new(BindingKind::Local, "helper", 0);
+        let mut usage = MethodUsageFacts::default();
+        let helper = BindingUseFacts {
+            java_ty: JavaType::Named {
+                name: "OtherHelper".to_string(),
+                args: Vec::new(),
+            },
+            ..binding_fact("helper", Some(binding_id.clone()))
+        };
+        usage.bindings_by_id.insert(binding_id, helper.clone());
+        usage.bindings.insert("helper".to_string(), helper);
+
+        let mut facts = FactSet::default();
+        facts.facade_abi_facts.push(mut_borrow_abi("CopyHelper"));
+        let fields = HashSet::from(["out".to_string()]);
+
+        assert!(
+            !call_mut_borrow_arg_targets_self_field(
+                Some(&Expr::Var("helper".to_string())),
+                "copyInto",
+                &[Expr::Var("out".to_string())],
+                &usage,
+                &fields,
+                &facts,
+            ),
+            "a local receiver of a different Java type must not claim CopyHelper's mut-borrow ABI"
+        );
+    }
+
+    #[test]
+    fn facade_abi_receiver_match_accepts_matching_local_receiver_type() {
+        let binding_id = BindingId::new(BindingKind::Local, "helper", 0);
+        let mut usage = MethodUsageFacts::default();
+        let helper = BindingUseFacts {
+            java_ty: JavaType::Named {
+                name: "CopyHelper".to_string(),
+                args: Vec::new(),
+            },
+            ..binding_fact("helper", Some(binding_id.clone()))
+        };
+        usage.bindings_by_id.insert(binding_id, helper.clone());
+        usage.bindings.insert("helper".to_string(), helper);
+
+        let mut facts = FactSet::default();
+        facts.facade_abi_facts.push(mut_borrow_abi("CopyHelper"));
+        let fields = HashSet::from(["out".to_string()]);
+
+        assert!(call_mut_borrow_arg_targets_self_field(
+            Some(&Expr::Var("helper".to_string())),
+            "copyInto",
+            &[Expr::Var("out".to_string())],
+            &usage,
+            &fields,
+            &facts,
+        ));
+    }
+
+    #[test]
+    fn facade_abi_receiver_match_rejects_same_name_history_without_visible_binding() {
+        let first = BindingId::new(BindingKind::Local, "helper", 0);
+        let second = BindingId::new(BindingKind::Local, "helper", 1);
+        let mut usage = MethodUsageFacts::default();
+        for binding in [first, second] {
+            usage.bindings_by_id.insert(
+                binding.clone(),
+                BindingUseFacts {
+                    java_ty: JavaType::Named {
+                        name: "CopyHelper".to_string(),
+                        args: Vec::new(),
+                    },
+                    ..binding_fact("helper", Some(binding))
+                },
+            );
+        }
+
+        let mut facts = FactSet::default();
+        facts.facade_abi_facts.push(mut_borrow_abi("CopyHelper"));
+        let fields = HashSet::from(["out".to_string()]);
+
+        assert!(
+            !call_mut_borrow_arg_targets_self_field(
+                Some(&Expr::Var("helper".to_string())),
+                "copyInto",
+                &[Expr::Var("out".to_string())],
+                &usage,
+                &fields,
+                &facts,
+            ),
+            "receiver ABI matching must not recover a type from non-visible same-name history"
+        );
     }
 }

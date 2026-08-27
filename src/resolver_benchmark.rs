@@ -1037,50 +1037,6 @@ fn collect_anonymous_constructor_target_names_for_expr(
     }
 }
 
-pub fn benchmark_java_file(
-    path: &Path,
-    report: &mut ResolverBenchmarkReport,
-) -> std::io::Result<()> {
-    let source = fs::read_to_string(path)?;
-    report.files_seen += 1;
-
-    let parsed = crate::parser::parse_java_source(&source);
-    report.parser_diagnostics += parsed.diagnostics.len();
-    if !parsed.diagnostics.has_errors() {
-        report.files_parsed_without_errors += 1;
-    }
-
-    let source_type_names = source_type_names(&parsed.program);
-    let source_symbols = crate::resolve::source_symbols_from_program(&parsed.program);
-    let file_label = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string());
-    collect_object_representation_counts_for_programs(
-        std::iter::once((file_label.as_str(), &parsed.program)),
-        &FactSet::default(),
-        report,
-        ObjectRepresentationBenchmarkMode {
-            count_representations: true,
-            collect_diagnostics: true,
-        },
-    );
-    benchmark_parsed_java_file(
-        parsed,
-        &source_symbols,
-        &source_type_names,
-        None,
-        &FactSet::default(),
-        true,
-        report,
-        &file_label,
-        DependencyMode::PrimarySource,
-        &HashMap::new(),
-        &HashMap::new(),
-    );
-    Ok(())
-}
-
 #[derive(Debug, Clone)]
 struct ParsedJavaFile {
     parsed: ParsedProgram,

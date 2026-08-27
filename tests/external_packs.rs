@@ -1,12 +1,15 @@
+mod common;
+
+use common::{GeneratedCrateModule, cargo_check_generated_modules};
 use new_java2rust::external_facts::parse_external_facts;
 use new_java2rust::external_packs::{
     ExternalPackApiEffect, ExternalPackClosedHierarchy, ExternalPackManifest,
     ExternalPackModeledApi, ExternalPackModeledConstructor, ExternalPackModeledField,
-    ExternalPackObjectSafety, ExternalPackObjectSafetyViolation, ExternalPackUnsupportedApi,
-    apache_commons_codec_pack_facts, apache_commons_collections_pack_facts,
-    apache_commons_compress_pack_facts, apache_commons_config_pack_facts,
-    apache_commons_lang_pack_facts, apache_commons_math_optim_pack_facts,
-    apache_commons_math_pack_facts, apache_commons_math_stats_pack_facts, apache_http_pack_facts,
+    ExternalPackUnsupportedApi, apache_commons_codec_pack_facts,
+    apache_commons_collections_pack_facts, apache_commons_compress_pack_facts,
+    apache_commons_config_pack_facts, apache_commons_lang_pack_facts,
+    apache_commons_math_optim_pack_facts, apache_commons_math_pack_facts,
+    apache_commons_math_stats_pack_facts, apache_http_pack_facts,
     audit_external_pack_fact_boundaries, audit_external_pack_manifest_coverage, avro_pack_facts,
     barclay_argparser_pack_facts, barclay_help_pack_facts, barclay_utils_pack_facts,
     broad_hellbender_utils_pack_facts, broad_http_pack_facts, builtin_external_library_pack_facts,
@@ -27,10 +30,10 @@ use new_java2rust::external_packs::{
     htsjdk_tribble_index_pack_facts, htsjdk_variantcontext_pack_facts, htsjdk_vcf_pack_facts,
     iharder_base64_pack_facts, intel_gkl_pack_facts, jackson_databind_pack_facts, jama_pack_facts,
     java_sql_pack_facts, jgrapht_pack_facts, kryo_pack_facts, kryo_serializers_pack_facts,
-    opencsv_pack_facts, org_json_pack_facts, parse_external_pack_manifest,
-    picard_markduplicates_pack_facts, picard_metrics_pack_facts, picard_programgroups_pack_facts,
-    picard_vcf_pack_facts, reflections_pack_facts, representation_facts_for_type,
-    scala_tuple_pack_facts, spark_pack_facts, sqlite_pack_facts,
+    modeled_no_state_external_super_constructor, opencsv_pack_facts, org_json_pack_facts,
+    parse_external_pack_manifest, picard_markduplicates_pack_facts, picard_metrics_pack_facts,
+    picard_programgroups_pack_facts, picard_vcf_pack_facts, reflections_pack_facts,
+    representation_facts_for_type, scala_tuple_pack_facts, spark_pack_facts, sqlite_pack_facts,
     unsupported_external_api_for_receiver,
 };
 use new_java2rust::facts::{
@@ -873,8 +876,12 @@ fn builtin_external_member_lookup_uses_cached_pack_facts() {
         assert_eq!(effect.role, role);
         assert_eq!(effect.provenance, FactProvenance::ExternalLibraryPack);
 
-        let policy =
-            new_java2rust::stdlib::external_api_method_policy(Some("IOUtils"), method_name, arity);
+        let policy = new_java2rust::stdlib::external_api_method_policy_with_builtin_packs(
+            Some("IOUtils"),
+            method_name,
+            arity,
+            true,
+        );
         assert_eq!(policy.role, role);
         assert_eq!(policy.provenance, FactProvenance::ExternalLibraryPack);
     }
@@ -1409,17 +1416,24 @@ fn pack_owned_domain_getters_take_precedence_over_generic_stdlib_provenance() {
                 .unwrap_or_else(|| panic!("{receiver}.{method} should be pack-dispatched"));
         assert_eq!(pack_fact.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
-            new_java2rust::stdlib::external_api_method_policy(Some(receiver), method, 0).provenance,
+            new_java2rust::stdlib::external_api_method_policy_with_builtin_packs(
+                Some(receiver),
+                method,
+                0,
+                true,
+            )
+            .provenance,
             FactProvenance::ExternalLibraryPack,
             "{receiver}.{method} should be owned by its external pack, not generic stdlib"
         );
     }
 
     assert_eq!(
-        new_java2rust::stdlib::external_api_method_policy(
+        new_java2rust::stdlib::external_api_method_policy_with_builtin_packs(
             Some("UnlinkedReferenceSequence"),
             "getBases",
             0,
+            true,
         )
         .provenance,
         FactProvenance::BuiltinExternalModel,
@@ -1503,12 +1517,6 @@ fn external_pack_manifest_coverage_audit_reports_unclassified_pack_facts() {
         closed_hierarchy: &[ExternalPackClosedHierarchy {
             type_name: "dep.audit.KnownClosed",
             closed: true,
-        }],
-        object_safety: &[ExternalPackObjectSafety {
-            type_name: "dep.audit.KnownObjectSafety",
-            violation: ExternalPackObjectSafetyViolation::SelfReferentialReturn {
-                method_name: "copy",
-            },
         }],
         type_capabilities: &[],
         field_nullability: &[],
@@ -1807,8 +1815,6 @@ fn external_pack_manifest_coverage_audit_reports_unclassified_pack_facts() {
     assert!(audit.has_code("external_pack_manifest_missing_object_strategy_coverage"));
     assert!(audit.has_code("external_pack_manifest_missing_closed_hierarchy_coverage"));
     assert!(audit.has_code("external_pack_manifest_closed_hierarchy_mismatch"));
-    assert!(audit.has_code("external_pack_manifest_missing_object_safety_coverage"));
-    assert!(audit.has_code("external_pack_manifest_object_safety_mismatch"));
     assert!(audit.has_code("external_pack_manifest_missing_type_capability_coverage"));
     assert!(audit.has_code("external_pack_manifest_missing_field_nullability_coverage"));
     assert!(audit.has_code("external_pack_manifest_missing_exception_coverage"));
@@ -1826,7 +1832,6 @@ fn external_pack_manifest_coverage_audits_crate_mapping_facts() {
         rust_target: Some("dep_crate"),
         object_strategies: &[],
         closed_hierarchy: &[],
-        object_safety: &[],
         type_capabilities: &[],
         field_nullability: &[],
         argument_effects: &[],
@@ -2170,7 +2175,6 @@ fn external_pack_manifest_coverage_lookup_is_member_kind_symmetric() {
         rust_target: None,
         object_strategies: &[],
         closed_hierarchy: &[],
-        object_safety: &[],
         type_capabilities: &[],
         field_nullability: &[],
         argument_effects: &[],
@@ -2774,6 +2778,80 @@ fn callable_keys_lookup_external_pack_api_constructor_and_field_facts() {
 }
 
 #[test]
+fn external_api_params_can_declare_type_parameter_patterns() {
+    let parsed = parse_external_pack_manifest(
+        r#"
+        external-pack dep.typeparam dep.typeparam external-fact-model semantic
+        external-pack-api dep.typeparam dep.typeparam.Box acceptAny semantic getter read-only definitely-non-null params=type-param:T return=Object
+        external-pack-api dep.typeparam dep.typeparam.Box acceptAny semantic getter read-only definitely-non-null params=String return=String
+        "#,
+    );
+    assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+
+    let type_param_key = CallableKey::method_with_params(
+        "dep.typeparam.Box",
+        "acceptAny",
+        Staticness::Unknown,
+        vec![new_java2rust::facts::TypePattern::TypeParam(
+            "T".to_string(),
+        )],
+    );
+    let type_param_fact = parsed
+        .facts
+        .external_api_effect_for_key(&type_param_key)
+        .expect("type-parameter pattern should be addressable by callable key");
+    assert_eq!(
+        type_param_fact.parameter_patterns,
+        Some(vec![new_java2rust::facts::TypePattern::TypeParam(
+            "T".to_string()
+        )])
+    );
+
+    let index = parsed.facts.external_lookup_index();
+    let exact = index
+        .external_api_effect_for_call(Some("dep.typeparam.Box"), "acceptAny", &[JavaType::String])
+        .expect("exact String pattern should still outrank the type-parameter fallback");
+    assert_eq!(exact.return_type, Some(JavaType::String));
+
+    let fallback = index
+        .external_api_effect_for_call(
+            Some("dep.typeparam.Box"),
+            "acceptAny",
+            &[JavaType::Primitive(PrimitiveType::Int)],
+        )
+        .expect("type-parameter pattern should match non-String arguments");
+    assert_eq!(
+        fallback.return_type,
+        Some(JavaType::Named {
+            name: "Object".to_string(),
+            args: Vec::new(),
+        })
+    );
+}
+
+#[test]
+fn external_fact_api_params_can_declare_type_parameter_patterns() {
+    let parsed = parse_external_facts(
+        r#"
+        external-api accept dep.override.Box getter read-only definitely-non-null params=type-param:E return=Object
+        "#,
+    );
+    assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+
+    let fact = parsed
+        .facts
+        .external_api_effect_for_receiver(Some("dep.override.Box"), "accept")
+        .expect("external fact override should produce an API effect fact");
+    assert_eq!(fact.arg_count, Some(1));
+    assert_eq!(
+        fact.parameter_patterns,
+        Some(vec![new_java2rust::facts::TypePattern::TypeParam(
+            "E".to_string()
+        )])
+    );
+}
+
+#[test]
 fn builtin_external_pack_constructor_lookup_uses_callable_key_index() {
     let key = CallableKey::constructor("HDF5File", vec![new_java2rust::facts::TypePattern::Any]);
     let constructor = new_java2rust::external_packs::external_constructor_for_key(&key)
@@ -2835,6 +2913,45 @@ fn external_pack_rust_usize_return_declares_index_facade_slot() {
         .expect("rust-return metadata should emit a return type fact");
     assert_eq!(fact.rust_type_name, "usize");
     assert_eq!(fact.return_slot, FacadeSlot::Index);
+}
+
+#[test]
+fn external_pack_rust_crate_return_declares_crate_handle_facade_slot() {
+    let parsed = parse_external_pack_manifest(
+        r#"
+        external-pack dep.handle dep.handle external-fact-model semantic
+        external-pack-api dep.handle dep.handle.Reader handle semantic getter read-only definitely-non-null args=0 return=dep.handle.Handle rust-return=dep_facade::ReaderHandle
+        "#,
+    );
+    assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+
+    let fact = parsed
+        .facts
+        .external_rust_return_type_facts
+        .iter()
+        .find(|fact| fact.receiver_type.as_deref() == Some("dep.handle.Reader"))
+        .expect("rust-return metadata should emit a return type fact");
+    assert_eq!(fact.rust_type_name, "dep_facade::ReaderHandle");
+    assert_eq!(
+        fact.return_slot,
+        FacadeSlot::CrateHandle("dep_facade::ReaderHandle".to_string())
+    );
+}
+
+#[test]
+fn shared_facade_slot_parser_recognizes_crate_handles_and_dyn_traits() {
+    assert_eq!(
+        new_java2rust::facts::facade_slot_for_rust_type("dep_facade::ReaderHandle"),
+        FacadeSlot::CrateHandle("dep_facade::ReaderHandle".to_string())
+    );
+    assert_eq!(
+        new_java2rust::facts::facade_slot_for_rust_type("Box<dyn Animal>"),
+        FacadeSlot::DynTrait("Animal".to_string())
+    );
+    assert_eq!(
+        new_java2rust::facts::facade_slot_for_rust_type("std::path::PathBuf"),
+        FacadeSlot::Owned
+    );
 }
 
 #[test]
@@ -3594,7 +3711,13 @@ fn htsjdk_variantcontext_pack_models_builder_and_getter_effects() {
         NullabilityState::DefinitelyNonNull
     );
     assert_eq!(
-        new_java2rust::stdlib::external_api_method_policy(Some("Allele"), "create", 1).provenance,
+        new_java2rust::stdlib::external_api_method_policy_with_builtin_packs(
+            Some("Allele"),
+            "create",
+            1,
+            true,
+        )
+        .provenance,
         FactProvenance::ExternalLibraryPack,
         "Allele.create precision should come from the variantcontext pack, not stdlib"
     );
@@ -3607,8 +3730,13 @@ fn htsjdk_variantcontext_pack_models_builder_and_getter_effects() {
     );
     assert_eq!(allele_base_string.return_type, Some(JavaType::String));
     assert_eq!(
-        new_java2rust::stdlib::external_api_method_policy(Some("Allele"), "getBaseString", 0)
-            .provenance,
+        new_java2rust::stdlib::external_api_method_policy_with_builtin_packs(
+            Some("Allele"),
+            "getBaseString",
+            0,
+            true,
+        )
+        .provenance,
         FactProvenance::ExternalLibraryPack,
         "Allele.getBaseString precision should come from the variantcontext pack, not stdlib"
     );
@@ -3625,19 +3753,36 @@ fn htsjdk_variantcontext_pack_models_builder_and_getter_effects() {
             "{receiver}.{method} should be pack-owned"
         );
         assert_eq!(
-            new_java2rust::stdlib::external_api_method_policy(Some(receiver), method, 0).provenance,
+            new_java2rust::stdlib::external_api_method_policy_with_builtin_packs(
+                Some(receiver),
+                method,
+                0,
+                true,
+            )
+            .provenance,
             FactProvenance::ExternalLibraryPack,
             "{receiver}.{method} precision should come from the variantcontext pack, not stdlib"
         );
     }
     assert_eq!(
-        new_java2rust::stdlib::external_api_method_policy(Some("Allele"), "equals", 1).provenance,
+        new_java2rust::stdlib::external_api_method_policy_with_builtin_packs(
+            Some("Allele"),
+            "equals",
+            1,
+            true,
+        )
+        .provenance,
         FactProvenance::BuiltinExternalModel,
         "Object-inherited methods stay generic builtin even when a pack also models the receiver"
     );
     assert_eq!(
-        new_java2rust::stdlib::external_api_method_policy(Some("ExternalSequence"), "getBases", 0)
-            .provenance,
+        new_java2rust::stdlib::external_api_method_policy_with_builtin_packs(
+            Some("ExternalSequence"),
+            "getBases",
+            0,
+            true,
+        )
+        .provenance,
         FactProvenance::BuiltinExternalModel,
         "unknown-library domain getters should keep the generic stdlib fallback"
     );
@@ -7342,6 +7487,18 @@ fn java_platform_concurrent_static_factory_declares_precise_return_type() {
 }
 
 #[test]
+fn parent_writer_super_constructor_is_modeled_as_no_state_boundary() {
+    assert!(modeled_no_state_external_super_constructor(
+        "ParentWriter",
+        2
+    ));
+    assert!(!modeled_no_state_external_super_constructor(
+        "ParentWriter",
+        1
+    ));
+}
+
+#[test]
 fn semantic_analysis_uses_hadoop_conf_pack_for_gatk_shaped_configuration_io() {
     let semantic = analyze(
         r#"
@@ -7858,6 +8015,26 @@ fn spark_pack_declares_runtime_boundary() {
         Some(JavaType::Named {
             name: "JavaPairRDD".to_string(),
             args: Vec::new(),
+        })
+    );
+
+    let collect_as_map = facts
+        .external_api_effect_for_receiver_with_arity(Some("JavaPairRDD"), "collectAsMap", Some(0))
+        .expect("JavaPairRDD.collectAsMap/0 should be pack-modeled");
+    assert_eq!(
+        collect_as_map.return_type,
+        Some(JavaType::Named {
+            name: "Map".to_string(),
+            args: vec![
+                JavaType::Named {
+                    name: "T0".to_string(),
+                    args: Vec::new(),
+                },
+                JavaType::Named {
+                    name: "T1".to_string(),
+                    args: Vec::new(),
+                },
+            ],
         })
     );
 
@@ -9488,8 +9665,10 @@ class BroadHttpBucketUtilsUse {
     );
 
     assert!(
-        translation.rust.contains("pub struct Function;"),
-        "Function facade should be declared when a typed imported static method returns Function"
+        translation.rust.contains(
+            "pub struct Function<T0 = Box<dyn std::any::Any>, T1 = Box<dyn std::any::Any>>"
+        ),
+        "Function facade should be declared as a generic carrier when a typed imported static method returns Function"
     );
     assert!(
         translation
@@ -9502,6 +9681,64 @@ class BroadHttpBucketUtilsUse {
             .rust
             .contains("get_prefetching_wrapper<R: Default"),
         "BucketUtils.getPrefetchingWrapper(int) should not fall back to generic R inference"
+    );
+    cargo_check_generated_modules(
+        "broad_http_bucket_prefetch_wrapper",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn generic_function_facade_methods_do_not_shadow_receiver_generics() {
+    let translation = new_java2rust::translate_source(
+        r#"
+import java.util.function.Function;
+import java.util.function.ToIntFunction;
+
+class GenericFunctionFacadeUse {
+    String apply(Function<String, String> function) {
+        return function.apply("x");
+    }
+
+    int measure(ToIntFunction<String> function) {
+        return function.applyAsInt("abcd");
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("impl<T0, T1> Function<T0, T1>"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn apply<T2>(&self, _arg0: T2)")
+            && translation
+                .rust
+                .contains("pub fn apply_as_int<T2>(&self, _arg0: T2)"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("pub fn apply<T0>(&self")
+            && !translation.rust.contains("pub fn apply_as_int<T0>(&self"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "generic_function_facade_methods",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -12953,10 +13190,11 @@ fn apache_commons_compress_and_lang_packs_declare_helper_constructor_boundaries(
         assert_eq!(effect.role, ExternalApiRole::Getter);
         assert_eq!(effect.receiver_mutability, ReceiverMutabilityFact::ReadOnly);
         assert_eq!(
-            new_java2rust::stdlib::external_api_method_policy(
+            new_java2rust::stdlib::external_api_method_policy_with_builtin_packs(
                 Some(type_name),
                 method_name,
-                arg_len
+                arg_len,
+                true,
             )
             .provenance,
             FactProvenance::ExternalLibraryPack,

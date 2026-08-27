@@ -628,14 +628,33 @@ impl<'a> ExternalFactLookupIndex<'a> {
         indices.sort_by(|left, right| right.cmp(left));
         for index in indices {
             let pack = &self.facts.external_library_packs[index];
-            if self
-                .facts
-                .external_pack_has_member_for_type(pack, type_name)
-            {
+            if self.external_pack_has_member_for_type(pack, type_name) {
                 return Some(pack);
             }
         }
         None
+    }
+
+    fn external_pack_has_member_for_type(
+        &self,
+        pack: &ExternalLibraryPackFact,
+        type_name: &str,
+    ) -> bool {
+        if !type_name.contains('.') {
+            return false;
+        }
+        self.facts.external_api_effect_facts.iter().any(|fact| {
+            fact.receiver_type.as_deref().is_some_and(|receiver_type| {
+                external_type_name_matches(receiver_type, type_name)
+                    && external_pack_owns_type(pack, receiver_type)
+            })
+        }) || self.facts.external_constructor_facts.iter().any(|fact| {
+            external_type_name_matches(&fact.type_name, type_name)
+                && external_pack_owns_type(pack, &fact.type_name)
+        }) || self.facts.external_field_facts.iter().any(|fact| {
+            external_type_name_matches(&fact.field.type_name, type_name)
+                && external_pack_owns_type(pack, &fact.field.type_name)
+        })
     }
 }
 
@@ -697,12 +716,7 @@ impl<'a> HierarchyFactLookupIndex<'a> {
                 .any(|edge| edge.super_name == super_name),
             _ => false,
         };
-        HierarchySubtypePolicy {
-            subtype: subtype.clone(),
-            supertype: supertype.clone(),
-            reaches,
-            diagnostics: result.diagnostics,
-        }
+        HierarchySubtypePolicy { reaches }
     }
 }
 
@@ -749,48 +763,13 @@ pub struct HierarchyReachabilityResult {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HierarchySubtypePolicy {
-    pub subtype: JavaType,
-    pub supertype: JavaType,
     pub reaches: bool,
-    pub diagnostics: Vec<HierarchyReachabilityDiagnostic>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HierarchyReachabilityDiagnostic {
     pub code: &'static str,
     pub message: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum FactKind {
-    Capture,
-    HierarchyOverride,
-    ClosedHierarchy,
-    SealedPermits,
-    ObjectSafety,
-    TypeCapability,
-    FieldNullability,
-    TrivialAccessor,
-    MethodEffect,
-    ConstructorRecursion,
-    ExternalApiEffect,
-    ExternalApiArgumentEffect,
-    ExternalConstructorArgumentEffect,
-    ExternalConversionAdapter,
-    ExternalCrateApiMapping,
-    ExternalCrateConstructorMapping,
-    FacadeAbi,
-    ExternalRustReturnType,
-    ExternalConstructor,
-    ExternalField,
-    ControlFlow,
-    UnresolvedTarget,
-    DispatchRequirement,
-    ExceptionHierarchy,
-    ExternalLibraryPack,
-    UnsupportedExternalApi,
-    UnsupportedExternalConstructor,
-    UnsupportedExternalField,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -807,8 +786,6 @@ pub enum CallableKind {
     Constructor,
     StaticField,
     InstanceField,
-    FieldGetter,
-    FieldSetter,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1222,7 +1199,20 @@ pub fn facade_slot_for_rust_type(ty: &str) -> FacadeSlot {
         }
         return FacadeSlot::Borrowed;
     }
+    if let Some(trait_name) = crate::types::raw_rust_box_dyn_trait(ty) {
+        return FacadeSlot::DynTrait(trait_name.to_string());
+    }
+    if rust_type_is_crate_handle(ty) {
+        return FacadeSlot::CrateHandle(ty.to_string());
+    }
     FacadeSlot::Owned
+}
+
+fn rust_type_is_crate_handle(ty: &str) -> bool {
+    ty.contains("::")
+        && !ty.starts_with("std::")
+        && !ty.starts_with("core::")
+        && !ty.starts_with("alloc::")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1963,22 +1953,8 @@ impl FactSet {
         method_name: &str,
         arg_count: Option<usize>,
     ) -> Option<&ExternalApiEffectFact> {
-        self.find_external_api_effect(
-            receiver_type,
-            method_name,
-            arg_count,
-            Some(FactProvenance::UserOverride),
-        )
-        .or_else(|| {
-            self.find_external_api_effect(
-                None,
-                method_name,
-                arg_count,
-                Some(FactProvenance::UserOverride),
-            )
-        })
-        .or_else(|| self.find_external_api_effect(receiver_type, method_name, arg_count, None))
-        .or_else(|| self.find_external_api_effect(None, method_name, arg_count, None))
+        let index = ExternalFactLookupIndex::new(self);
+        index.external_api_effect_for_receiver_with_arity(receiver_type, method_name, arg_count)
     }
 
     pub fn external_api_effect_for_receiver_with_arity_or_rust_name(
@@ -2017,100 +1993,6 @@ impl FactSet {
     ) -> Option<&ExternalApiEffectFact> {
         let index = ExternalFactLookupIndex::new(self);
         index.external_api_effect_for_call(receiver_type, method_name, arg_types)
-    }
-
-    fn find_external_api_effect(
-        &self,
-        receiver_type: Option<&str>,
-        method_name: &str,
-        arg_count: Option<usize>,
-        provenance: Option<FactProvenance>,
-    ) -> Option<&ExternalApiEffectFact> {
-        if let Some(receiver_type) = receiver_type
-            && let Some(effect) = self.find_exact_receiver_external_api_effect(
-                receiver_type,
-                method_name,
-                arg_count,
-                provenance,
-            )
-        {
-            return Some(effect);
-        }
-        if provenance.is_none() {
-            if let Some(effect) = arg_count.and_then(|arg_count| {
-                self.external_api_effect_facts.iter().rev().find(|fact| {
-                    external_method_name_matches(&fact.method_name, method_name)
-                        && external_optional_type_name_matches(
-                            fact.receiver_type.as_deref(),
-                            receiver_type,
-                        )
-                        && fact.arg_count == Some(arg_count)
-                        && fact.return_type.is_some()
-                })
-            }) {
-                return Some(effect);
-            }
-            if let Some(effect) = self.external_api_effect_facts.iter().rev().find(|fact| {
-                external_method_name_matches(&fact.method_name, method_name)
-                    && external_optional_type_name_matches(
-                        fact.receiver_type.as_deref(),
-                        receiver_type,
-                    )
-                    && (arg_count.is_none() || fact.arg_count.is_none())
-                    && fact.return_type.is_some()
-            }) {
-                return Some(effect);
-            }
-        }
-        arg_count
-            .and_then(|arg_count| {
-                self.external_api_effect_facts.iter().rev().find(|fact| {
-                    external_method_name_matches(&fact.method_name, method_name)
-                        && external_optional_type_name_matches(
-                            fact.receiver_type.as_deref(),
-                            receiver_type,
-                        )
-                        && fact.arg_count == Some(arg_count)
-                        && provenance.is_none_or(|provenance| fact.provenance == provenance)
-                })
-            })
-            .or_else(|| {
-                self.external_api_effect_facts.iter().rev().find(|fact| {
-                    external_method_name_matches(&fact.method_name, method_name)
-                        && external_optional_type_name_matches(
-                            fact.receiver_type.as_deref(),
-                            receiver_type,
-                        )
-                        && (arg_count.is_none() || fact.arg_count.is_none())
-                        && provenance.is_none_or(|provenance| fact.provenance == provenance)
-                })
-            })
-    }
-
-    fn find_exact_receiver_external_api_effect(
-        &self,
-        receiver_type: &str,
-        method_name: &str,
-        arg_count: Option<usize>,
-        provenance: Option<FactProvenance>,
-    ) -> Option<&ExternalApiEffectFact> {
-        arg_count
-            .and_then(|arg_count| {
-                self.external_api_effect_facts.iter().rev().find(|fact| {
-                    external_method_name_matches(&fact.method_name, method_name)
-                        && fact.receiver_type.as_deref() == Some(receiver_type)
-                        && fact.arg_count == Some(arg_count)
-                        && provenance.is_none_or(|provenance| fact.provenance == provenance)
-                })
-            })
-            .or_else(|| {
-                self.external_api_effect_facts.iter().rev().find(|fact| {
-                    external_method_name_matches(&fact.method_name, method_name)
-                        && fact.receiver_type.as_deref() == Some(receiver_type)
-                        && (arg_count.is_none() || fact.arg_count.is_none())
-                        && provenance.is_none_or(|provenance| fact.provenance == provenance)
-                })
-            })
     }
 
     pub fn external_api_argument_effect_for_receiver(
@@ -2662,27 +2544,6 @@ impl FactSet {
             })
     }
 
-    pub fn external_crate_constructor_rust_type_name_for(&self, type_name: &str) -> Option<&str> {
-        self.external_crate_constructor_mapping_facts
-            .iter()
-            .rev()
-            .find(|fact| {
-                external_type_name_directly_matches(&fact.type_name, type_name)
-                    && fact.rust_type_name.is_some()
-                    && fact.provenance == FactProvenance::UserOverride
-            })
-            .or_else(|| {
-                self.external_crate_constructor_mapping_facts
-                    .iter()
-                    .rev()
-                    .find(|fact| {
-                        external_type_name_matches(&fact.type_name, type_name)
-                            && fact.rust_type_name.is_some()
-                    })
-            })
-            .and_then(|fact| fact.rust_type_name.as_deref())
-    }
-
     pub fn external_rust_result_for_receiver(
         &self,
         receiver_type: Option<&str>,
@@ -2802,9 +2663,8 @@ impl FactSet {
         type_name: &str,
         field_name: &str,
     ) -> Option<&ExternalFieldFact> {
-        self.find_exact_external_field_for(type_name, field_name)
-            .or_else(|| self.find_external_field_for(type_name, field_name, true))
-            .or_else(|| self.find_external_field_for(type_name, field_name, false))
+        let index = ExternalFactLookupIndex::new(self);
+        index.external_field_for(type_name, field_name)
     }
 
     pub fn external_field_value_for(
@@ -2836,10 +2696,7 @@ impl FactSet {
     pub fn external_field_for_key(&self, key: &CallableKey) -> Option<&ExternalFieldFact> {
         if !matches!(
             key.kind,
-            CallableKind::StaticField
-                | CallableKind::InstanceField
-                | CallableKind::FieldGetter
-                | CallableKind::FieldSetter
+            CallableKind::StaticField | CallableKind::InstanceField
         ) {
             return None;
         }
@@ -2870,75 +2727,12 @@ impl FactSet {
         })
     }
 
-    fn find_external_field_for(
-        &self,
-        type_name: &str,
-        field_name: &str,
-        direct_match_only: bool,
-    ) -> Option<&ExternalFieldFact> {
-        self.external_field_facts.iter().rev().find(|fact| {
-            let type_matches = if direct_match_only {
-                external_type_name_directly_matches(&fact.field.type_name, type_name)
-            } else {
-                external_type_name_matches(&fact.field.type_name, type_name)
-            };
-            type_matches && external_field_name_matches(&fact.field.field_name, field_name)
-        })
-    }
-
-    fn find_exact_external_field_for(
-        &self,
-        type_name: &str,
-        field_name: &str,
-    ) -> Option<&ExternalFieldFact> {
-        self.external_field_facts.iter().rev().find(|fact| {
-            fact.field.type_name == type_name
-                && external_field_name_matches(&fact.field.field_name, field_name)
-        })
-    }
-
     pub fn external_library_pack_for_type(
         &self,
         type_name: &str,
     ) -> Option<&ExternalLibraryPackFact> {
-        self.external_library_packs
-            .iter()
-            .rev()
-            .find(|pack| external_pack_directly_owns_type(pack, type_name))
-            .or_else(|| {
-                self.external_library_packs
-                    .iter()
-                    .rev()
-                    .find(|pack| external_pack_owns_type(pack, type_name))
-            })
-            .or_else(|| {
-                self.external_library_packs
-                    .iter()
-                    .rev()
-                    .find(|pack| self.external_pack_has_member_for_type(pack, type_name))
-            })
-    }
-
-    fn external_pack_has_member_for_type(
-        &self,
-        pack: &ExternalLibraryPackFact,
-        type_name: &str,
-    ) -> bool {
-        if !type_name.contains('.') {
-            return false;
-        }
-        self.external_api_effect_facts.iter().any(|fact| {
-            fact.receiver_type.as_deref().is_some_and(|receiver_type| {
-                external_type_name_matches(receiver_type, type_name)
-                    && external_pack_owns_type(pack, receiver_type)
-            })
-        }) || self.external_constructor_facts.iter().any(|fact| {
-            external_type_name_matches(&fact.type_name, type_name)
-                && external_pack_owns_type(pack, &fact.type_name)
-        }) || self.external_field_facts.iter().any(|fact| {
-            external_type_name_matches(&fact.field.type_name, type_name)
-                && external_pack_owns_type(pack, &fact.field.type_name)
-        })
+        let index = ExternalFactLookupIndex::new(self);
+        index.external_library_pack_for_type(type_name)
     }
 
     pub fn unsupported_external_api_for_receiver(
@@ -3017,17 +2811,6 @@ impl FactSet {
             .collect()
     }
 
-    pub fn constructor_recursion_facts_for(
-        &self,
-        type_name: &str,
-        rust_name: &str,
-    ) -> Vec<&ConstructorRecursionFact> {
-        self.constructor_recursion_facts
-            .iter()
-            .filter(|fact| constructor_key_matches(&fact.constructor, type_name, rust_name))
-            .collect()
-    }
-
     pub fn method_effect_for(
         &self,
         type_name: &str,
@@ -3064,14 +2847,6 @@ impl FactSet {
         thrown.iter().any(|ty| {
             java_type_name(ty).and_then(|name| self.exception_kind_for(name))
                 != Some(ExceptionKind::Unchecked)
-        })
-    }
-
-    pub fn has_method_effects(&self) -> bool {
-        self.method_effect_facts.iter().any(|fact| {
-            fact.receiver_mutability != ReceiverMutabilityFact::Unknown
-                || fact.return_nullability != NullabilityState::Unknown
-                || !fact.thrown.is_empty()
         })
     }
 
@@ -3251,12 +3026,7 @@ impl FactSet {
                 .any(|edge| edge.super_name == super_name),
             _ => false,
         };
-        HierarchySubtypePolicy {
-            subtype: subtype.clone(),
-            supertype: supertype.clone(),
-            reaches,
-            diagnostics: result.diagnostics,
-        }
+        HierarchySubtypePolicy { reaches }
     }
 
     pub fn reachable_hierarchy_edges_for_type_with_stats(
@@ -3726,11 +3496,6 @@ fn method_key_matches(method: &MethodKey, type_name: &str, method_name: &str) ->
     external_type_name_matches(&method.type_name, type_name)
         && (method.method_name == method_name
             || crate::parser::to_snake_case(&method.method_name) == method_name)
-}
-
-fn constructor_key_matches(constructor: &ConstructorKey, type_name: &str, rust_name: &str) -> bool {
-    external_type_name_matches(&constructor.type_name, type_name)
-        && constructor.rust_name == rust_name
 }
 
 fn capability_type_name(java_ty: &JavaType) -> Option<&str> {

@@ -101,10 +101,9 @@ type*: does any object of this type become reachable from two live places at
 once, and is it mutated after that point?
 
 That is an **escape / sharing analysis** producing a representation decision,
-not a local rule. Note `EscapeLatticeValue` already exists in
-`src/lattice.rs` (`LocalOnly | Returned | Stored | UnknownBoundary`) — the
-lattice was designed but the object model has no representation to spend the
-answer on.
+not a local rule. The old unused `EscapeLatticeValue` descriptor in
+`src/lattice.rs` has since been deleted as part of 0062; the live domain is
+`storage_strategy::Escape`, which is computed by the storage-strategy planner.
 
 ## Proposed machinery
 
@@ -210,8 +209,12 @@ the analysis can only name the defect. The two-part split above stands: 0002b is
 the representation work, unchanged.
 
 `tests/differential/known-gaps/Aliasing.java` reproduces four cases against the
-Java oracle (`5|7|3|9` vs `0|0|0|0`). The original implementation detected
-three; the array-element case is lifted below.
+Java oracle (`5|7|3|9` vs `0|0|0|0`). The
+`known_gap_fixtures_are_valid_java_and_match_expected_failure_mode` test now
+verifies that this fixture is still live: Java must print `5|7|3|9`, the current
+translation must print `0|0|0|0`, and the translator must report
+`observable_alias`. The original implementation detected three; the
+array-element case is lifted below.
 
 
 ---

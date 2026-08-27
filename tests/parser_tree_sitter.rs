@@ -57,6 +57,54 @@ fn parses_package_and_imports_from_fixture() {
 }
 
 #[test]
+fn parses_chained_method_invocation_receiver_as_call() {
+    let parsed = parse_java_source(
+        r#"
+import java.util.HashMap;
+
+class MapKeySetSize {
+    int count(HashMap<String, Object> values) {
+        return values.keySet().size();
+    }
+}
+"#,
+    );
+    let ty = &parsed.program.types[0];
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "count" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let body = method.body.as_ref().unwrap();
+    let Stmt::Return(Some(Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        ..
+    })) = &body.statements[0]
+    else {
+        panic!("expected outer size call, got {:?}", body.statements[0]);
+    };
+    assert_eq!(name, "size");
+    assert!(args.is_empty());
+    let Expr::Call {
+        receiver: Some(map_receiver),
+        name,
+        args,
+        ..
+    } = receiver.as_ref()
+    else {
+        panic!("expected keySet call receiver, got {receiver:?}");
+    };
+    assert_eq!(name, "keySet");
+    assert!(args.is_empty());
+    assert!(matches!(map_receiver.as_ref(), Expr::Var(name) if name == "values"));
+}
+
+#[test]
 fn parses_simple_class_members() {
     let parsed = parse_java_source(&fixture("04-objects/SimpleClass.java"));
     let ty = &parsed.program.types[0];
@@ -336,6 +384,37 @@ class Tree<T> {
             args: Vec::new(),
         }
     );
+}
+
+#[test]
+fn parses_package_qualified_class_literal_type_identity() {
+    let parsed = parse_java_source(
+        r#"
+class ClassLiteralPackageIdentity {
+    Object literal() {
+        return a.Item.class;
+    }
+}
+"#,
+    );
+    let ty = &parsed.program.types[0];
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "literal" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let body = method.body.as_ref().unwrap();
+    let Stmt::Return(Some(Expr::ClassLiteral(JavaType::Named { name, args }))) =
+        &body.statements[0]
+    else {
+        panic!("expected package-qualified class literal");
+    };
+
+    assert_eq!(name, "a.Item");
+    assert!(args.is_empty());
 }
 
 #[test]
