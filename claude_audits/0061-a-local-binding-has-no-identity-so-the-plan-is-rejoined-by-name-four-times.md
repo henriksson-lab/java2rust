@@ -155,6 +155,24 @@ guards both the single caller and the absence of the old cursor symbols. The
   `bindings_by_id` no longer shadows a same-named field when usage analysis
   decides whether a bare name can be a field. Regression:
   `usage::tests::stale_name_map_binding_does_not_shadow_field`.
+- Follow-up 2026-08-28: the remaining name-set local-mutability helper is no
+  longer a public `signature` API named like a general shape primitive. It is
+  private and explicitly named
+  `legacy_name_set_local_mutability_constraints`, leaving the public surface on
+  the binding/liveness-aware path and keeping the old set-of-names fallback
+  visibly fenced inside signature's compatibility implementation.
+- Follow-up 2026-08-28: two stale unit expectations that still said id-less
+  compatibility should fall back by name were revised to match the current
+  fail-closed policy. A name-only fact remains usable only when there is no
+  same-name resolver-bound history and no stale missing binding id.
+- Follow-up 2026-08-28: the same scoped identity hole was visible in clone
+  recovery for a method or class type parameter whose source name collides with
+  a concrete source class. `scoped_type_param_does_not_collide_with_same_named_source_class`
+  now rejects `Rc<ELEM>`/`Arc<ELEM>` and unnecessary `.clone()` recovery for the
+  scoped type-parameter slots. Class type-parameter impl bounds are also no
+  longer added just because a field contains `T` and some callable mentions
+  `T`; `T: Clone` is kept for concrete owned recovery from collection/map
+  fields, preserving the `Map<String,T>.get(...).cloned()` case.
 
 Dimension: phase architecture / information lost between passes.
 
@@ -892,3 +910,102 @@ analysis will not let it hide a same-name field. `all_binding_facts` also skips
 the ambiguous id-less fact instead of reporting it beside the authoritative
 id-backed facts. Regression:
 `usage::tests::ambiguous_id_less_name_map_entry_is_not_current_or_aggregated`.
+
+Follow-up 2026-08-28: the public block/name signature helper is now explicitly
+local-only. `source_binding_nullability_constraints(block, name)` fails closed
+unless the block declares that local name itself, so resolver-bound parameters
+can no longer be accidentally queried through the compatibility surface with
+`params = []`. The declaration-aware helper is public for callers that have the
+actual `Binding`; focused regressions cover parameter nullability through
+`source_binding_nullability_constraints_for_declaration` and the old helper's
+empty result for resolver-bound parameters. This is a fence, not a deletion of
+the remaining id-less compatibility surface.
+
+Follow-up 2026-08-28: the local-only fence is now direct-block-only, not
+recursive. A nested `Object value = null` inside an `if`/loop/try body no longer
+enables `source_binding_nullability_constraints(outer_body, "value")` for the
+outer block/name query. The duplicate-name scanner remains recursive where it is
+used for whole-block local-plan disambiguation, but the public compatibility
+helper now uses a narrower direct declaration predicate. Regression:
+`slot_shape_design::source_binding_nullability_constraints_do_not_use_nested_only_local_name`.
+
+Follow-up 2026-08-28: facade ABI receiver matching now routes its id-less
+fallback through the same static-owner pseudo-receiver policy as receiver-type
+recovery. A missing binding can still match an explicit static owner such as
+`StringUtils`, but an arbitrary local-looking spelling such as `string_utils`
+is no longer promoted to the ABI owner by a broad canonical name comparison.
+This fences one compatibility edge without deleting the remaining static-owner
+escape hatch. Regression:
+`usage::tests::facade_abi_receiver_match_restricts_idless_fallback_to_static_owners`.
+
+Follow-up 2026-08-28: the public block/name nullability compatibility helper no
+longer treats enhanced-for variables as direct declarations of the enclosing
+block. The loop variable remains scoped to the enhanced-for body, so
+`source_binding_nullability_constraints(outer_body, "item")` cannot borrow
+nullability state from `for (Object item : values) { item = null; }`. Direct
+id-less locals in the same block remain available through the compatibility
+path. Regression:
+`slot_shape_design::source_binding_nullability_constraints_do_not_expose_enhanced_for_variable`.
+
+Follow-up 2026-08-28: imported static-owner support discovery no longer uses a
+whole-method shadow set. The collector now walks statements in lexical order:
+local initializers are scanned before their declared name is added, nested block
+shadows do not leak outward, enhanced-for/catch names are scoped to their
+bodies, and `for` initializers scope only to that `for` statement. This prevents
+a later `Object StaticUtility = ...` from suppressing an earlier
+`StaticUtility.readValue(...)` owner-support requirement. Regressions:
+`stdlib::external_facade_support_tests::imported_static_owner_call_before_shadowing_local_is_collected`,
+`stdlib::external_facade_support_tests::imported_static_owner_shadow_does_not_escape_nested_block`,
+and the existing imported-static collector/source guards.
+
+Follow-up 2026-08-28: compatibility name-map entries that point at a live
+`BindingId` now also have to agree on the queried source name. Previously a
+stale/manual `bindings["value"]` entry could point at an existing
+`BindingId(Local, "other", ...)` and still be treated as current because the id
+existed. `visible_binding_id_for_name`,
+`binding_for_declaration_with_name_fallback`, and
+`binding_use_facts_are_current` now require `binding_id.name() == name`, so the
+remaining name-map compatibility path cannot rejoin one visible name to an
+unrelated live binding id. Regression:
+`usage::tests::name_map_binding_id_must_match_the_queried_name`.
+
+Follow-up 2026-08-28: source return-nullability scoping now binds enhanced-for
+loop variables before walking the loop body. The return walker previously opened
+a child scope for `for (T item : values)` but grouped it with `while`/`do`
+loops, so `return item` inside the body could miss the resolver `BindingId` and
+fall back to name-based or field-based evidence. The enhanced-for arm now
+inserts `var_name -> BindingId` into that child scope, matching the binding
+nullability collector. Regression:
+`signature::tests::source_return_nullability_scopes_enhanced_for_binding`.
+
+Follow-up 2026-08-28: `ShapeEnv` access-name aliases for resolver-bound locals,
+parameters, and enhanced-for variables now preserve the same `BindingId` as the
+source declaration name. The previous bound insertors stored the id under
+`name` but left a renamed emitted spelling such as `self__`, `r#type`, or
+`crate__` id-less, reopening the compatibility surface after keyword escaping
+or other access-name rewrites. Regressions:
+`expr_shape::tests::bound_local_env_insert_preserves_resolver_binding_id_for_access_name`,
+`expr_shape::tests::bound_param_env_insert_preserves_resolver_binding_id_for_access_name`,
+and
+`expr_shape::tests::bound_loop_variable_env_insert_preserves_resolver_binding_id_for_access_name`.
+
+Follow-up 2026-08-28: catch parameters now carry the same source/emitted-name
+split as params, locals, and enhanced-for variables. `CatchClause` records an
+unescaped `source_name` beside the rendered Rust `name`; semantic, usage,
+resolve, liveness, signature, stdlib-support, and benchmark scopes use the
+source identity, while lowering registers a catch-param access-name alias for
+the emitted binding. A Rust-keyword catch variable such as
+`catch (RuntimeException crate)` therefore resolves body reads through `crate`
+without rejoining by name, while the generated Rust pattern still uses
+`crate__`. Regressions:
+`parser_tree_sitter::catch_params_preserve_unescaped_source_name` and
+`expr_shape::tests::bound_catch_param_env_insert_preserves_resolver_binding_id_for_access_name`.
+
+Follow-up 2026-08-28: call-site carrier refinement no longer lets a bound
+local's missing exact constraint fall back to a same-name local constraint when
+computing the actual Java type. `effective_method_binding_java_type` now uses
+`local_by_binding` for resolver-bound facts and reserves `local(name)` for
+id-less compatibility facts. A stale `BindingId(Local, "value", 0)` constraint
+therefore cannot override usage for `BindingId(Local, "value", 1)`.
+Regression:
+`signature::tests::effective_method_binding_java_type_for_bound_local_does_not_fall_back_by_name`.

@@ -494,6 +494,7 @@ pub struct MethodConstraintSet {
     pub public_api: bool,
     pub param_names: Vec<String>,
     pub param_index_by_name: HashMap<String, usize>,
+    pub param_java_types: Vec<JavaType>,
     pub params: Vec<Vec<SignatureConstraint>>,
     pub return_constraints: Vec<SignatureConstraint>,
     pub locals: Vec<LocalConstraintSet>,
@@ -586,6 +587,7 @@ impl PartialEq for MethodConstraintSet {
     fn eq(&self, other: &Self) -> bool {
         self.public_api == other.public_api
             && self.param_names == other.param_names
+            && self.param_java_types == other.param_java_types
             && self.params == other.params
             && self.return_constraints == other.return_constraints
             && self.locals == other.locals
@@ -2707,6 +2709,16 @@ fn apply_signature_propagation_sweep_with_stats(
             propagate_call_argument_constraints_to_callees(constraints, usage, scope)
         }) | record_signature_propagation_arm(
             &mut stats,
+            "call_argument_collection_carrier_to_callee",
+            || {
+                propagate_call_argument_collection_carrier_java_types_to_callees(
+                    constraints,
+                    usage,
+                    scope,
+                )
+            },
+        ) | record_signature_propagation_arm(
+            &mut stats,
             "constructor_call_argument_to_callee",
             || {
                 propagate_constructor_call_argument_constraints_to_callees(
@@ -3476,6 +3488,133 @@ fn propagate_call_argument_constraints_to_callees(
         }
     }
     changed
+}
+
+fn propagate_call_argument_collection_carrier_java_types_to_callees(
+    constraints: &mut SignatureConstraintState,
+    usage: &UsageFacts,
+    scope: Option<SignatureMutationScope<'_>>,
+) -> bool {
+    if scope.is_some_and(|scope| !scope.has_method_binding_target()) {
+        return false;
+    }
+    let mut pending = Vec::new();
+    for (usage_key, method_usage) in &usage.methods {
+        let Some(caller_key) = method_key_for_usage(constraints, usage_key) else {
+            continue;
+        };
+        let Some(caller_constraints) = constraints.methods.get(&caller_key) else {
+            continue;
+        };
+        for call_site in &method_usage.call_sites {
+            let Some(resolved) = &call_site.resolved else {
+                continue;
+            };
+            if !resolved_source_call_propagates_signature_constraints(call_site.boundary) {
+                continue;
+            }
+            let callee_key = MethodKey {
+                type_name: resolved.declaring_type.clone(),
+                rust_name: resolved.rust_name.clone(),
+            };
+            let Some(callee_constraints) = constraints.methods.get(&callee_key) else {
+                continue;
+            };
+            if callee_constraints.public_api {
+                continue;
+            }
+            for binding in method_usage.all_binding_facts() {
+                for binding_use in &binding.uses {
+                    let BindingUse::PassedToCall {
+                        name,
+                        arg_index,
+                        boundary,
+                        ..
+                    } = binding_use
+                    else {
+                        continue;
+                    };
+                    if name != &call_site.name
+                        || *boundary != call_site.boundary
+                        || *arg_index >= callee_constraints.param_java_types.len()
+                    {
+                        continue;
+                    }
+                    let actual = effective_method_binding_java_type(caller_constraints, binding);
+                    let target = &callee_constraints.param_java_types[*arg_index];
+                    if let Some(refined) =
+                        refined_collection_carrier_java_type_for_slot(&actual, target)
+                    {
+                        pending.push((callee_key.clone(), *arg_index, refined));
+                    }
+                }
+            }
+        }
+    }
+    let mut changed = false;
+    for (callee_key, arg_index, refined) in unique_unambiguous_param_java_type_refinements(pending)
+    {
+        let Some(callee_constraints) = constraints.methods.get_mut(&callee_key) else {
+            continue;
+        };
+        let Some(current) = callee_constraints.param_java_types.get_mut(arg_index) else {
+            continue;
+        };
+        if *current == refined {
+            continue;
+        }
+        if refined_collection_carrier_java_type_for_slot(&refined, current).is_none() {
+            continue;
+        }
+        *current = refined;
+        changed = true;
+    }
+    changed
+}
+
+fn effective_method_binding_java_type(
+    method_constraints: &MethodConstraintSet,
+    binding: &BindingUseFacts,
+) -> JavaType {
+    if let Some(binding_id) = binding.binding.as_ref() {
+        if let Some(local) = method_constraints.local_by_binding(binding_id) {
+            return local.java_ty.clone();
+        }
+    } else if let Some(local) = method_constraints.local(&binding.name) {
+        return local.java_ty.clone();
+    }
+    if let Some(index) = method_constraints.param_index(&binding.name)
+        && let Some(java_ty) = method_constraints.param_java_types.get(index)
+    {
+        return java_ty.clone();
+    }
+    binding.java_ty.clone()
+}
+
+fn unique_unambiguous_param_java_type_refinements(
+    pending: Vec<(MethodKey, usize, JavaType)>,
+) -> Vec<(MethodKey, usize, JavaType)> {
+    let mut grouped: Vec<(MethodKey, usize, Vec<JavaType>)> = Vec::new();
+    for (key, index, java_ty) in pending {
+        if let Some((_, _, types)) = grouped
+            .iter_mut()
+            .find(|(existing_key, existing_index, _)| {
+                existing_key == &key && *existing_index == index
+            })
+        {
+            if !types.contains(&java_ty) {
+                types.push(java_ty);
+            }
+        } else {
+            grouped.push((key, index, vec![java_ty]));
+        }
+    }
+    grouped
+        .into_iter()
+        .filter_map(|(key, index, mut types)| {
+            (types.len() == 1).then(|| (key, index, types.remove(0)))
+        })
+        .collect()
 }
 
 fn propagate_constructor_call_argument_constraints_to_callees(
@@ -6610,8 +6749,12 @@ fn collect_type_signatures(
                                 .and_then(|constraints| constraints.params.get(index))
                                 .cloned()
                                 .unwrap_or_default();
+                            let java_ty = method_constraints
+                                .and_then(|constraints| constraints.param_java_types.get(index))
+                                .unwrap_or(&param.ty);
                             constrained_param_plan(
                                 param,
+                                java_ty,
                                 representations,
                                 &constraints,
                                 facts,
@@ -6681,6 +6824,7 @@ fn collect_type_signatures(
                                     .unwrap_or_default();
                                 constrained_param_plan(
                                     param,
+                                    &param.ty,
                                     representations,
                                     &constraints,
                                     facts,
@@ -6858,8 +7002,12 @@ fn inherited_source_method_signature(
                     .and_then(|constraints| constraints.params.get(index))
                     .cloned()
                     .unwrap_or_default();
+                let java_ty = method_constraints
+                    .and_then(|constraints| constraints.param_java_types.get(index))
+                    .unwrap_or(&param.ty);
                 constrained_param_plan(
                     param,
+                    java_ty,
                     representations,
                     &constraints,
                     facts,
@@ -7016,6 +7164,18 @@ fn method_param_shape_constraints_with_declared_source_types(
     {
         boundary_kind = None;
     }
+    let type_env = signature_type_param_env_for_method(ty, method);
+    let binding_has_mutating_external_receiver = binding.is_some_and(|binding| {
+        binding_has_mutating_external_receiver_call(
+            binding,
+            facts,
+            &type_env,
+            declared_source_types,
+        )
+    });
+    if binding_has_mutating_external_receiver {
+        boundary_kind = None;
+    }
     let public_readonly_receiver_read_product = boundary_kind
         == Some(SignatureBoundaryKind::PublicApi)
         && !java_types_have_same_signature_boundary_identity(&method.return_type, &param.ty)
@@ -7054,7 +7214,6 @@ fn method_param_shape_constraints_with_declared_source_types(
         &signature_object_representation_fact_constraints(&param.ty, facts),
     );
     if let Some(binding) = binding {
-        let type_env = signature_type_param_env_for_method(ty, method);
         push_unique_signature_constraints(
             &mut constraints,
             &external_receiver_binding_constraints_with_declared_source_types(
@@ -7120,7 +7279,9 @@ fn method_param_shape_constraints_with_declared_source_types(
                     SignatureConstraint::MutableBinding,
                 ],
             );
-        } else if collect_mutated_local_names(body).contains(&param.name) {
+        } else if collect_mutated_local_names(body).contains(&param.name)
+            && !binding_has_mutating_external_receiver
+        {
             push_unique_signature_constraints(
                 &mut constraints,
                 &[SignatureConstraint::MutableBinding],
@@ -7498,6 +7659,7 @@ fn signature_erased_object_boundary_constraints_with_effective_facts(
         signature_boundary_representation_fact_policy_with_effective_facts(java_ty, facts);
     if !is_declared_java_object_type(java_ty)
         || signature_declared_type_has_parsed_source_capability(java_ty, facts)
+        || java_type_is_map_entry_tuple_carrier(java_ty)
         || fact_policy.object_representation_facts
     {
         return Vec::new();
@@ -7506,6 +7668,22 @@ fn signature_erased_object_boundary_constraints_with_effective_facts(
         SignatureConstraint::RequiredDispatch(DispatchShape::ErasedObject),
         SignatureConstraint::RequiredView(ViewShape::ErasedObjectView),
     ]
+}
+
+fn java_type_is_map_entry_tuple_carrier(java_ty: &JavaType) -> bool {
+    let JavaType::Named { name, args } = java_ty else {
+        return false;
+    };
+    !args.is_empty()
+        && matches!(
+            name.rsplit('.')
+                .next()
+                .unwrap_or(name)
+                .rsplit('$')
+                .next()
+                .unwrap_or(name),
+            "Entry"
+        )
 }
 
 fn signature_object_representation_fact_constraints(
@@ -7733,6 +7911,11 @@ pub fn signature_slot_dispatch_requirement_policy_with_effective_facts_in_scope(
     type_param_scope: TypeParamScope<'_>,
 ) -> SignatureSlotDispatchRequirementPolicy {
     if crate::stdlib::java_collection_kind_for_type(java_ty).is_some() {
+        return SignatureSlotDispatchRequirementPolicy {
+            constraints: Vec::new(),
+        };
+    }
+    if java_type_is_map_entry_tuple_carrier(java_ty) {
         return SignatureSlotDispatchRequirementPolicy {
             constraints: Vec::new(),
         };
@@ -8107,6 +8290,7 @@ fn constructor_param_shape_constraints_with_declared_source_types(
 
 fn constrained_param_plan(
     param: &Param,
+    java_ty: &JavaType,
     representations: &RepresentationPlan,
     constraints: &[SignatureConstraint],
     facts: &FactSet,
@@ -8117,7 +8301,7 @@ fn constrained_param_plan(
     let shape = solve_signature_shape_with_facts(
         representations,
         SignatureShapeRequest {
-            java_ty: param.ty.clone(),
+            java_ty: java_ty.clone(),
             role: SignatureSlotRole::Param {
                 is_varargs: param.is_varargs,
             },
@@ -8129,7 +8313,7 @@ fn constrained_param_plan(
     .expect("parameter signature shape is always present");
     ParamPlan {
         name: param.name.clone(),
-        java_ty: param.ty.clone(),
+        java_ty: java_ty.clone(),
         is_varargs: param.is_varargs,
         shape,
         binding_mutable: signature_constraints_require_mutable_binding(&constraints),
@@ -9331,6 +9515,11 @@ fn collect_type_signature_constraints(
                         public_api: signature_member_api_boundary_policy(&method.modifiers)
                             .public_api,
                         param_index_by_name: index_names(&param_names),
+                        param_java_types: method
+                            .params
+                            .iter()
+                            .map(|param| param.ty.clone())
+                            .collect(),
                         local_index_by_name: index_local_constraints(&locals),
                         local_index_by_binding: index_local_constraints_by_binding(&locals),
                         param_names,
@@ -9516,10 +9705,13 @@ pub fn source_binding_nullability_constraints(
     block: &Block,
     name: &str,
 ) -> Vec<SignatureConstraint> {
+    if !block_directly_declares_local_name(block, name) {
+        return Vec::new();
+    }
     collect_binding_nullability_state_map(block).constraints_for_name(name)
 }
 
-fn source_binding_nullability_constraints_for_declaration(
+pub fn source_binding_nullability_constraints_for_declaration(
     block: &Block,
     name: &str,
     binding: Option<&BindingId>,
@@ -9966,16 +10158,11 @@ impl<'a> SourceReturnNullabilityContext<'a> {
         let bound = self.type_param_bound_for_receiver(receiver)?;
         if let Some(resolved) = resolved {
             return java_type_name_for_signature_dispatch(bound).and_then(|bound_name| {
-                crate::facts::external_type_name_matches(bound_name, &resolved.declaring_type).then(
-                    || {
-                        crate::stdlib::source_summary_method_return_nullability(
-                            &resolved.return_type,
-                        )
-                    },
-                )
+                crate::facts::external_type_name_matches(bound_name, &resolved.declaring_type)
+                    .then(|| type_param_bound_method_return_nullability(&resolved.return_type))
             });
         }
-        Some(crate::stdlib::source_summary_method_return_nullability(
+        Some(type_param_bound_method_return_nullability(
             self.declared_return_type,
         ))
     }
@@ -9989,6 +10176,17 @@ impl<'a> SourceReturnNullabilityContext<'a> {
             _ => return None,
         };
         self.type_param_bounds.get(&type_param)
+    }
+}
+
+fn type_param_bound_method_return_nullability(java_ty: &JavaType) -> NullabilityState {
+    match java_ty {
+        JavaType::Void | JavaType::Primitive(_) => NullabilityState::DefinitelyNonNull,
+        JavaType::String
+        | JavaType::Named { .. }
+        | JavaType::Array(_)
+        | JavaType::Wildcard(_)
+        | JavaType::Unknown(_) => NullabilityState::MaybeNull,
     }
 }
 
@@ -10131,8 +10329,28 @@ fn collect_source_return_nullability_states_from_stmt(
                 scopes.pop();
             }
         }
-        Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::EnhancedFor { body, .. } => {
+        Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => {
             scopes.push(HashMap::new());
+            collect_source_return_nullability_states_from_stmts_with_refinements(
+                &body.statements,
+                source_nullability,
+                ctx,
+                scopes,
+                &mut refinements.clone(),
+                states,
+            );
+            scopes.pop();
+        }
+        Stmt::EnhancedFor {
+            var_name,
+            binding,
+            body,
+            ..
+        } => {
+            scopes.push(HashMap::new());
+            if let Some(binding) = binding {
+                insert_scoped_binding(scopes, var_name, binding.clone());
+            }
             collect_source_return_nullability_states_from_stmts_with_refinements(
                 &body.statements,
                 source_nullability,
@@ -10216,7 +10434,7 @@ fn collect_source_return_nullability_states_from_stmt(
             for catch in catches {
                 scopes.push(HashMap::new());
                 if let Some(binding) = &catch.binding {
-                    insert_scoped_binding(scopes, &catch.name, binding.clone());
+                    insert_scoped_binding(scopes, &catch.source_name, binding.clone());
                 }
                 collect_source_return_nullability_states_from_stmts_with_refinements(
                     &catch.body.statements,
@@ -10448,7 +10666,7 @@ fn remove_resolver_bound_nullability_names_from_stmt(
             remove_resolver_bound_nullability_names_from_stmts(by_name, &body.statements);
             for catch in catches {
                 if catch.binding.is_some() {
-                    remove_nullability_name_aliases(by_name, &catch.name);
+                    remove_nullability_name_aliases(by_name, &catch.source_name);
                 }
                 remove_resolver_bound_nullability_names_from_stmts(by_name, &catch.body.statements);
             }
@@ -11140,7 +11358,7 @@ fn collect_binding_nullability_states_by_binding_from_stmt(
             for catch in catches {
                 scopes.push(HashMap::new());
                 if let Some(binding) = &catch.binding {
-                    insert_scoped_binding(scopes, &catch.name, binding.clone());
+                    insert_scoped_binding(scopes, &catch.source_name, binding.clone());
                 }
                 collect_binding_nullability_states_by_binding_from_stmts(
                     &catch.body.statements,
@@ -11448,6 +11666,18 @@ fn collect_duplicate_declared_local_names(block: &crate::java_ir::Block) -> Hash
         .collect()
 }
 
+fn block_directly_declares_local_name(block: &crate::java_ir::Block, name: &str) -> bool {
+    block.statements.iter().any(|stmt| {
+        match stmt {
+        crate::java_ir::Stmt::VarDecl { name: local, .. } => local == name,
+        crate::java_ir::Stmt::For { init, .. } => init.iter().any(|stmt| {
+            matches!(stmt, crate::java_ir::Stmt::VarDecl { name: local, .. } if local == name)
+        }),
+        _ => false,
+    }
+    })
+}
+
 fn collect_declared_local_name_counts(
     statements: &[crate::java_ir::Stmt],
     counts: &mut HashMap<String, usize>,
@@ -11496,7 +11726,7 @@ fn collect_declared_local_name_counts(
                 collect_declared_local_name_counts(resources, counts);
                 collect_declared_local_name_counts(&body.statements, counts);
                 for catch in catches {
-                    *counts.entry(catch.name.clone()).or_default() += 1;
+                    *counts.entry(catch.source_name.clone()).or_default() += 1;
                     collect_declared_local_name_counts(&catch.body.statements, counts);
                 }
                 if let Some(finally_block) = finally_block {
@@ -11577,13 +11807,19 @@ fn collect_local_constraint_sets_from_stmts(
                     push_unique_signature_constraints(&mut constraints, &source_constraints);
                 }
                 apply_capture_constraints(&mut constraints, captured, name, ty, facts);
+                let java_ty = initializer
+                    .as_ref()
+                    .and_then(|initializer| {
+                        initializer_collection_carrier_java_type_for_declared_type(ty, initializer)
+                    })
+                    .unwrap_or_else(|| ty.clone());
                 locals.push(LocalConstraintSet {
                     binding,
                     name: name.clone(),
-                    java_ty: ty.clone(),
+                    java_ty: java_ty.clone(),
                     constraints,
                 });
-                local_types.insert(name.clone(), ty.clone());
+                local_types.insert(name.clone(), java_ty);
             }
             Stmt::For { init, body, .. } => {
                 let mut for_types = local_types.clone();
@@ -11778,7 +12014,7 @@ fn collect_local_constraint_sets_from_stmts(
                 for catch in catches {
                     let mut catch_types = local_types.clone();
                     if let Some(catch_ty) = catch.types.first() {
-                        catch_types.insert(catch.name.clone(), catch_ty.clone());
+                        catch_types.insert(catch.source_name.clone(), catch_ty.clone());
                     }
                     collect_local_constraint_sets_from_stmts(
                         &catch.body.statements,
@@ -12469,8 +12705,37 @@ mod tests {
             .bindings
             .insert("value".to_string(), binding_fact("value", None));
         assert!(
-            binding_usage_for_local(Some(&usage), None, "value", true).is_some(),
-            "id-less compatibility callers keep the legacy name-only fallback"
+            binding_usage_for_local(Some(&usage), None, "value", true).is_none(),
+            "id-less compatibility callers must reject same-name bound history"
+        );
+    }
+
+    #[test]
+    fn effective_method_binding_java_type_for_bound_local_does_not_fall_back_by_name() {
+        let stale_binding = BindingId::new(BindingKind::Local, "value", 0);
+        let queried_binding = BindingId::new(BindingKind::Local, "value", 1);
+        let stale_local_ty = JavaType::Named {
+            name: "List".to_string(),
+            args: vec![JavaType::String],
+        };
+        let locals = vec![LocalConstraintSet {
+            binding: stale_binding.clone(),
+            name: "value".to_string(),
+            java_ty: stale_local_ty,
+            constraints: Vec::new(),
+        }];
+        let method_constraints = MethodConstraintSet {
+            local_index_by_name: index_local_constraints(&locals),
+            local_index_by_binding: index_local_constraints_by_binding(&locals),
+            locals,
+            ..MethodConstraintSet::default()
+        };
+        let queried = binding_fact("value", Some(queried_binding));
+
+        assert_eq!(
+            effective_method_binding_java_type(&method_constraints, &queried),
+            JavaType::String,
+            "a bound local with no exact constraint must use its own usage type, not same-name constraints"
         );
     }
 
@@ -12608,6 +12873,48 @@ mod tests {
                         statements: vec![Stmt::Return(Some(Expr::Var("value".to_string())))],
                     },
                     label: None,
+                }],
+            }),
+            span: Span::default(),
+        };
+
+        assert_eq!(
+            source_method_return_nullability_constraints(&method),
+            vec![SignatureConstraint::RequiredStorageNullability(
+                NullabilityState::DefinitelyNull
+            )]
+        );
+    }
+
+    #[test]
+    fn source_return_nullability_scopes_enhanced_for_binding() {
+        let binding = BindingId::new(BindingKind::LoopVariable, "item", 0);
+        let method = MethodDecl {
+            name: "first".to_string(),
+            rust_name: None,
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            return_type: JavaType::Unknown("Object".to_string()),
+            throws: Vec::new(),
+            params: Vec::new(),
+            modifiers: Vec::new(),
+            body: Some(Block {
+                statements: vec![Stmt::EnhancedFor {
+                    var_type: JavaType::Unknown("Object".to_string()),
+                    var_name: "item".to_string(),
+                    source_var_name: "item".to_string(),
+                    iterable: Expr::Var("values".to_string()),
+                    body: Block {
+                        statements: vec![
+                            Stmt::Assign {
+                                target: Expr::Var("item".to_string()),
+                                value: Expr::Literal(Literal::Null),
+                            },
+                            Stmt::Return(Some(Expr::Var("item".to_string()))),
+                        ],
+                    },
+                    label: None,
+                    binding: Some(binding),
                 }],
             }),
             span: Span::default(),
@@ -12818,7 +13125,10 @@ mod tests {
     }
 }
 
-pub fn local_shape_constraints(name: &str, mutated: &HashSet<String>) -> Vec<SignatureConstraint> {
+fn legacy_name_set_local_mutability_constraints(
+    name: &str,
+    mutated: &HashSet<String>,
+) -> Vec<SignatureConstraint> {
     if mutated.contains(name) {
         vec![SignatureConstraint::MutableBinding]
     } else {
@@ -12892,7 +13202,7 @@ fn local_shape_constraints_with_usage_and_effective_facts(
     declared_source_types: &HashSet<String>,
     effective_facts: &EffectiveFacts<'_>,
 ) -> Vec<SignatureConstraint> {
-    let mut constraints = local_shape_constraints(name, mutated);
+    let mut constraints = legacy_name_set_local_mutability_constraints(name, mutated);
     constraints.extend(
         signature_capability_policy_with_effective_facts(java_ty, effective_facts).constraints,
     );
@@ -13209,6 +13519,35 @@ pub fn external_receiver_binding_constraints(
     )
 }
 
+fn binding_has_mutating_external_receiver_call(
+    binding: &BindingUseFacts,
+    facts: &FactSet,
+    types: &TypeEnv,
+    declared_source_types: &HashSet<String>,
+) -> bool {
+    if source_declared_type_name_shadows_external_receiver(&binding.java_ty, declared_source_types)
+    {
+        return false;
+    }
+    binding.uses.iter().any(|usage| {
+        let BindingUse::ReceiverForCall {
+            name,
+            boundary: CallArgumentBoundary::Unknown,
+            ..
+        } = usage
+        else {
+            return false;
+        };
+        let receiver_type =
+            external_api_receiver_type_key_for_method_receiver(&binding.java_ty, types, name);
+        facts
+            .external_api_effect_for_receiver(receiver_type.as_deref(), name)
+            .is_some_and(|effect| {
+                effect.receiver_mutability == ReceiverMutabilityFact::MutatesReceiver
+            })
+    })
+}
+
 fn external_receiver_binding_constraints_with_declared_source_types(
     binding: &BindingUseFacts,
     facts: &FactSet,
@@ -13512,6 +13851,15 @@ pub fn external_argument_binding_constraints(
         if *boundary == CallArgumentBoundary::InternalSameType {
             continue;
         }
+        if map_entry_set_structural_argument_is_handled_by_lowering(
+            receiver_type.as_ref(),
+            name,
+            *arg_count,
+            *arg_index,
+            &binding.java_ty,
+        ) {
+            continue;
+        }
         let effect = external_api_argument_effect_for_call_arg(
             receiver_type.as_ref(),
             name,
@@ -13586,6 +13934,28 @@ pub fn external_argument_binding_constraints(
         }
     }
     constraints
+}
+
+fn map_entry_set_structural_argument_is_handled_by_lowering(
+    receiver_type: Option<&JavaType>,
+    name: &str,
+    arg_count: usize,
+    arg_index: usize,
+    binding_java_ty: &JavaType,
+) -> bool {
+    if !matches!((name, arg_count, arg_index), ("contains" | "remove", 1, 0)) {
+        return false;
+    }
+    if !java_type_is_map_entry_tuple_carrier(binding_java_ty) {
+        return false;
+    }
+    let Some(JavaType::Named { args, .. }) = receiver_type else {
+        return false;
+    };
+    let Some(element_ty) = args.first() else {
+        return false;
+    };
+    java_type_is_map_entry_tuple_carrier(element_ty)
 }
 
 fn native_collection_argument_constraints_for_binding(
@@ -14388,6 +14758,63 @@ fn declared_typed_initializer_should_anchor_local_type(
         .is_some_and(|return_ty| return_type_can_initialize_declared_type(return_ty, declared_ty))
 }
 
+fn initializer_collection_carrier_java_type_for_declared_type(
+    declared_ty: &JavaType,
+    initializer: &Expr,
+) -> Option<JavaType> {
+    let Expr::New { ty, .. } = initializer else {
+        return None;
+    };
+    refined_collection_carrier_java_type_for_slot(ty, declared_ty)
+}
+
+fn refined_collection_carrier_java_type_for_slot(
+    actual: &JavaType,
+    target: &JavaType,
+) -> Option<JavaType> {
+    let actual_kind = crate::stdlib::java_collection_kind_for_type(actual)?;
+    let target_kind = crate::stdlib::java_collection_kind_for_type(target)?;
+    if actual_kind == target_kind
+        || !collection_kinds_share_carrier_family(actual_kind, target_kind)
+    {
+        return None;
+    }
+    collection_java_type_with_target_args(actual, target)
+}
+
+fn collection_kinds_share_carrier_family(
+    actual: crate::stdlib::JavaCollectionKind,
+    target: crate::stdlib::JavaCollectionKind,
+) -> bool {
+    (actual.is_map_like() && target.is_map_like()) || (actual.is_set_like() && target.is_set_like())
+}
+
+fn collection_java_type_with_target_args(
+    carrier: &JavaType,
+    target: &JavaType,
+) -> Option<JavaType> {
+    match (carrier, target) {
+        (
+            JavaType::Named {
+                args: carrier_args, ..
+            },
+            JavaType::Named {
+                args: target_args, ..
+            },
+        ) if carrier_args == target_args => Some(carrier.clone()),
+        (
+            JavaType::Named { name, .. },
+            JavaType::Named {
+                args: target_args, ..
+            },
+        ) => Some(JavaType::Named {
+            name: name.clone(),
+            args: target_args.clone(),
+        }),
+        _ => None,
+    }
+}
+
 fn local_constraints_select_concrete_borrowed_value(
     java_ty: &JavaType,
     constraints: &[SignatureConstraint],
@@ -14645,7 +15072,7 @@ fn collect_facade_mut_borrow_argument_names_from_stmts(
                 for catch in catches {
                     let mut catch_types = try_types.clone();
                     if let Some(catch_ty) = catch.types.first() {
-                        catch_types.insert(catch.name.clone(), catch_ty.clone());
+                        catch_types.insert(catch.source_name.clone(), catch_ty.clone());
                     }
                     collect_facade_mut_borrow_argument_names_from_stmts(
                         &catch.body.statements,
@@ -15239,6 +15666,9 @@ fn collect_field_receiver_mutated_names_from_expr(expr: &Expr, mutated: &mut Has
             }
         }
         Expr::Call { receiver, args, .. } => {
+            if let Some(name) = collection_view_mutating_receiver_name(receiver.as_deref(), expr) {
+                mutated.insert(name);
+            }
             if let Some(receiver) = receiver {
                 collect_field_receiver_mutated_names_from_expr(receiver, mutated);
             }
@@ -15261,6 +15691,37 @@ fn collect_field_receiver_mutated_names_from_expr(expr: &Expr, mutated: &mut Has
         | Expr::Raw(_)
         | Expr::Unsupported { .. } => {}
     }
+}
+
+fn collection_view_mutating_receiver_name(receiver: Option<&Expr>, call: &Expr) -> Option<String> {
+    let Expr::Call { name, args, .. } = call else {
+        return None;
+    };
+    let Expr::Call {
+        receiver: Some(map_receiver),
+        name: view_name,
+        args: view_args,
+        ..
+    } = receiver?
+    else {
+        return None;
+    };
+    if !view_args.is_empty() {
+        return None;
+    }
+    let mutates_view = match (view_name.as_str(), name.as_str(), args.len()) {
+        ("keySet" | "key_set", "remove", 1) | ("keySet" | "key_set", "clear", 0) => true,
+        ("values", "remove", 1) | ("values", "clear", 0) => true,
+        ("entrySet" | "entry_set", "remove", 1) | ("entrySet" | "entry_set", "clear", 0) => true,
+        _ => false,
+    };
+    if !mutates_view {
+        return None;
+    }
+    let Expr::Var(name) = map_receiver.as_ref() else {
+        return None;
+    };
+    Some(name.clone())
 }
 
 fn collect_field_receiver_assignment_target_name(expr: &Expr, mutated: &mut HashSet<String>) {

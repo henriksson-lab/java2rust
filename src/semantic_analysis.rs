@@ -1690,7 +1690,7 @@ fn collect_external_api_effects_from_stmt_with_env(
             for catch in catches {
                 let mut catch_env = env.clone();
                 for catch_type in &catch.types {
-                    catch_env.insert_local(catch.name.clone(), catch_type.clone());
+                    catch_env.insert_local(catch.source_name.clone(), catch_type.clone());
                 }
                 collect_external_api_effects_from_block_with_env(
                     &catch.body,
@@ -3716,7 +3716,7 @@ fn collect_thrown_exception_types_from_stmt(
                     .types
                     .first()
                     .cloned()
-                    .and_then(|ty| exception_env.insert(catch.name.clone(), ty));
+                    .and_then(|ty| exception_env.insert(catch.source_name.clone(), ty));
                 collect_thrown_exception_types_from_block(
                     &catch.body,
                     exception_env,
@@ -3724,9 +3724,9 @@ fn collect_thrown_exception_types_from_stmt(
                     thrown,
                 );
                 if let Some(previous) = previous {
-                    exception_env.insert(catch.name.clone(), previous);
+                    exception_env.insert(catch.source_name.clone(), previous);
                 } else {
-                    exception_env.remove(&catch.name);
+                    exception_env.remove(&catch.source_name);
                 }
             }
             if let Some(finally_block) = finally_block {
@@ -4676,7 +4676,7 @@ fn collect_stmt_declared_locals(stmt: &Stmt, env: &mut TypeEnv) {
             collect_block_declared_locals(body, env);
             for catch in catches {
                 env.insert_local(
-                    catch.name.clone(),
+                    catch.source_name.clone(),
                     catch
                         .types
                         .first()
@@ -5810,7 +5810,7 @@ fn collect_field_assignments_from_stmts(
                 );
                 for catch in catches {
                     let mut catch_shadows = local_shadows.clone();
-                    catch_shadows.insert(catch.name.clone());
+                    catch_shadows.insert(catch.source_name.clone());
                     collect_field_assignments_from_stmts(
                         &catch.body.statements,
                         ty,

@@ -561,6 +561,11 @@ impl<'a> ExternalFactLookupIndex<'a> {
         field_name: &str,
         direct_match_only: bool,
     ) -> Option<&'a ExternalFieldFact> {
+        if !direct_match_only
+            && self.external_field_simple_owner_alias_is_ambiguous(type_name, field_name)
+        {
+            return None;
+        }
         for index in self.external_field_candidate_indices(field_name) {
             let fact = &self.facts.external_field_facts[index];
             let type_matches = if direct_match_only {
@@ -573,6 +578,30 @@ impl<'a> ExternalFactLookupIndex<'a> {
             }
         }
         None
+    }
+
+    fn external_field_simple_owner_alias_is_ambiguous(
+        &self,
+        type_name: &str,
+        field_name: &str,
+    ) -> bool {
+        let mut package_owners = HashSet::new();
+        for index in self.external_field_candidate_indices(field_name) {
+            let fact = &self.facts.external_field_facts[index];
+            if !external_field_name_matches(&fact.field.field_name, field_name) {
+                continue;
+            }
+            let Some(simple_owner) = package_qualified_simple_alias(&fact.field.type_name) else {
+                continue;
+            };
+            if external_type_name_directly_matches(simple_owner, type_name) {
+                package_owners.insert(fact.field.type_name.as_str());
+                if package_owners.len() > 1 {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     fn find_exact_external_field_for(
@@ -1855,15 +1884,44 @@ impl FactSet {
         type_name: &str,
         field_name: &str,
     ) -> Option<NullabilityState> {
+        let direct = |fact: &&FieldNullabilityFact| {
+            external_type_name_directly_matches(&fact.field.type_name, type_name)
+                && external_field_name_matches(&fact.field.field_name, field_name)
+        };
         self.field_nullability_facts
             .iter()
             .rev()
             .find(|fact| {
-                external_type_name_matches(&fact.field.type_name, type_name)
-                    && external_field_name_matches(&fact.field.field_name, field_name)
-                    && fact.provenance == FieldNullabilityProvenance::ExternalOverride
+                direct(fact) && fact.provenance == FieldNullabilityProvenance::ExternalOverride
             })
             .or_else(|| {
+                self.field_nullability_facts
+                    .iter()
+                    .rev()
+                    .find(|fact| direct(fact))
+            })
+            .or_else(|| {
+                if field_nullability_simple_owner_alias_is_ambiguous(
+                    &self.field_nullability_facts,
+                    type_name,
+                    field_name,
+                ) {
+                    return None;
+                }
+                self.field_nullability_facts.iter().rev().find(|fact| {
+                    external_type_name_matches(&fact.field.type_name, type_name)
+                        && external_field_name_matches(&fact.field.field_name, field_name)
+                        && fact.provenance == FieldNullabilityProvenance::ExternalOverride
+                })
+            })
+            .or_else(|| {
+                if field_nullability_simple_owner_alias_is_ambiguous(
+                    &self.field_nullability_facts,
+                    type_name,
+                    field_name,
+                ) {
+                    return None;
+                }
                 self.field_nullability_facts.iter().rev().find(|fact| {
                     external_type_name_matches(&fact.field.type_name, type_name)
                         && external_field_name_matches(&fact.field.field_name, field_name)
@@ -1880,7 +1938,20 @@ impl FactSet {
         self.trivial_accessor_facts
             .iter()
             .rev()
-            .find(|fact| method_key_matches(&fact.method, type_name, method_name))
+            .find(|fact| method_key_directly_matches(&fact.method, type_name, method_name))
+            .or_else(|| {
+                if trivial_accessor_simple_owner_alias_is_ambiguous(
+                    &self.trivial_accessor_facts,
+                    type_name,
+                    method_name,
+                ) {
+                    return None;
+                }
+                self.trivial_accessor_facts
+                    .iter()
+                    .rev()
+                    .find(|fact| method_key_matches(&fact.method, type_name, method_name))
+            })
     }
 
     pub fn trivial_getter_field_for(
@@ -2686,6 +2757,13 @@ impl FactSet {
                 })
             })
             .or_else(|| {
+                if external_field_value_simple_owner_alias_is_ambiguous(
+                    &self.external_field_value_facts,
+                    type_name,
+                    field_name,
+                ) {
+                    return None;
+                }
                 self.external_field_value_facts.iter().rev().find(|fact| {
                     external_type_name_matches(&fact.field.type_name, type_name)
                         && external_field_name_matches(&fact.field.field_name, field_name)
@@ -2713,6 +2791,15 @@ impl FactSet {
         arg_types: &[JavaType],
         direct_match_only: bool,
     ) -> Option<&ExternalConstructorFact> {
+        if !direct_match_only
+            && external_constructor_simple_owner_alias_is_ambiguous(
+                &self.external_constructor_facts,
+                type_name,
+                arg_types,
+            )
+        {
+            return None;
+        }
         self.external_constructor_facts.iter().rev().find(|fact| {
             let type_matches = if direct_match_only {
                 external_type_name_directly_matches(&fact.type_name, type_name)
@@ -3492,10 +3579,95 @@ fn external_field_name_aliases(field_name: &str) -> Vec<String> {
     aliases
 }
 
+fn method_key_directly_matches(method: &MethodKey, type_name: &str, method_name: &str) -> bool {
+    external_type_name_directly_matches(&method.type_name, type_name)
+        && (method.method_name == method_name
+            || crate::parser::to_snake_case(&method.method_name) == method_name)
+}
+
 fn method_key_matches(method: &MethodKey, type_name: &str, method_name: &str) -> bool {
     external_type_name_matches(&method.type_name, type_name)
         && (method.method_name == method_name
             || crate::parser::to_snake_case(&method.method_name) == method_name)
+}
+
+fn field_nullability_simple_owner_alias_is_ambiguous(
+    facts: &[FieldNullabilityFact],
+    type_name: &str,
+    field_name: &str,
+) -> bool {
+    package_simple_owner_alias_is_ambiguous(
+        facts.iter().filter_map(|fact| {
+            external_field_name_matches(&fact.field.field_name, field_name)
+                .then_some(fact.field.type_name.as_str())
+        }),
+        type_name,
+    )
+}
+
+fn trivial_accessor_simple_owner_alias_is_ambiguous(
+    facts: &[TrivialAccessorFact],
+    type_name: &str,
+    method_name: &str,
+) -> bool {
+    package_simple_owner_alias_is_ambiguous(
+        facts.iter().filter_map(|fact| {
+            (fact.method.method_name == method_name
+                || crate::parser::to_snake_case(&fact.method.method_name) == method_name)
+                .then_some(fact.method.type_name.as_str())
+        }),
+        type_name,
+    )
+}
+
+fn external_field_value_simple_owner_alias_is_ambiguous(
+    facts: &[ExternalFieldValueFact],
+    type_name: &str,
+    field_name: &str,
+) -> bool {
+    package_simple_owner_alias_is_ambiguous(
+        facts.iter().filter_map(|fact| {
+            external_field_name_matches(&fact.field.field_name, field_name)
+                .then_some(fact.field.type_name.as_str())
+        }),
+        type_name,
+    )
+}
+
+fn external_constructor_simple_owner_alias_is_ambiguous(
+    facts: &[ExternalConstructorFact],
+    type_name: &str,
+    arg_types: &[JavaType],
+) -> bool {
+    package_simple_owner_alias_is_ambiguous(
+        facts.iter().filter_map(|fact| {
+            (fact.arg_types == arg_types
+                || fact.provenance == FactProvenance::UserOverride
+                || (fact.provenance == FactProvenance::ExternalLibraryPack
+                    && fact.arg_types.len() == arg_types.len()))
+            .then_some(fact.type_name.as_str())
+        }),
+        type_name,
+    )
+}
+
+fn package_simple_owner_alias_is_ambiguous<'a>(
+    owners: impl Iterator<Item = &'a str>,
+    type_name: &str,
+) -> bool {
+    let mut package_owners = HashSet::new();
+    for owner in owners {
+        let Some(simple_owner) = package_qualified_simple_alias(owner) else {
+            continue;
+        };
+        if external_type_name_directly_matches(simple_owner, type_name) {
+            package_owners.insert(owner);
+            if package_owners.len() > 1 {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn capability_type_name(java_ty: &JavaType) -> Option<&str> {

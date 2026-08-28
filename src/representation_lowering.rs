@@ -508,13 +508,22 @@ pub fn source_class_bound_trait_item_for_type(
         .iter()
         .filter_map(|member| match member {
             Member::Method(method) if !method.modifiers.contains(&Modifier::Static) => {
-                Some(source_class_bound_trait_method_signature(
+                let candidates =
+                    source_class_bound_trait_method_implementation_candidates(program, ty, method);
+                let return_shape = source_class_bound_trait_method_return_shape_plan(
+                    ty,
+                    method,
+                    candidates.as_slice(),
+                    signatures,
+                );
+                Some(source_class_bound_trait_method_signature_with_return_shape(
                     ty,
                     method,
                     program,
                     signatures,
                     facts,
                     exceptions.method_plan(ty, method),
+                    return_shape,
                 ))
             }
             _ => None,
@@ -573,13 +582,14 @@ pub fn source_class_bound_trait_impl_emissions_for_type(
         .collect()
 }
 
-fn source_class_bound_trait_method_signature(
+fn source_class_bound_trait_method_signature_with_return_shape(
     ty: &TypeDecl,
     method: &MethodDecl,
     program: &Program,
     signatures: &SignaturePlan,
     facts: &FactSet,
     exceptions: MethodExceptionPlan,
+    return_shape_override: Option<RustSlotShape>,
 ) -> String {
     let signature = signatures.required_method_signature(ty, method);
     let mut params = Vec::new();
@@ -596,9 +606,14 @@ fn source_class_bound_trait_method_signature(
             emit_type(&rust_type_for_slot_with_facts(shape, facts))
         )
     }));
-    let return_type = source_class_bound_trait_method_return_type(method, facts, exceptions)
-        .map(|ty| format!(" -> {}", emit_type(&ty)))
-        .unwrap_or_default();
+    let return_type = source_class_bound_trait_method_return_type_with_shape(
+        method,
+        facts,
+        exceptions,
+        return_shape_override.as_ref(),
+    )
+    .map(|ty| format!(" -> {}", emit_type(&ty)))
+    .unwrap_or_default();
     let rust_name = method
         .rust_name
         .clone()
@@ -611,10 +626,11 @@ fn source_class_bound_trait_method_signature(
     )
 }
 
-fn source_class_bound_trait_method_return_type(
+fn source_class_bound_trait_method_return_type_with_shape(
     method: &MethodDecl,
     facts: &FactSet,
     exceptions: MethodExceptionPlan,
+    return_shape_override: Option<&RustSlotShape>,
 ) -> Option<RustType> {
     if method.return_type == JavaType::Void {
         if exceptions.wrap_returns_in_result {
@@ -622,7 +638,9 @@ fn source_class_bound_trait_method_return_type(
         }
         return None;
     }
-    let rust_return = rust_type_for_java_type_with_facts(&method.return_type, facts);
+    let rust_return = return_shape_override
+        .map(|shape| rust_type_for_slot_with_facts(shape, facts))
+        .unwrap_or_else(|| rust_type_for_java_type_with_facts(&method.return_type, facts));
     if exceptions.wrap_returns_in_result {
         Some(exception_result_type(rust_return))
     } else {
@@ -639,15 +657,23 @@ fn source_class_bound_trait_impl_method(
     facts: &FactSet,
     exceptions: MethodExceptionPlan,
 ) -> String {
-    let signature = source_class_bound_trait_method_signature(
+    let candidates = implementing_method_candidates_in_hierarchy(ty, bound_method, program);
+    let trait_return_shape = source_class_bound_trait_method_return_shape_plan(
+        bound,
+        bound_method,
+        candidates.as_slice(),
+        signatures,
+    );
+    let trait_return_shape_for_body = trait_return_shape.clone();
+    let signature = source_class_bound_trait_method_signature_with_return_shape(
         bound,
         bound_method,
         program,
         signatures,
         facts,
         exceptions,
+        trait_return_shape,
     );
-    let candidates = implementing_method_candidates_in_hierarchy(ty, bound_method, program);
     if candidates.is_empty() {
         return trait_impl_method_message_policy(
             ty,
@@ -720,27 +746,101 @@ fn source_class_bound_trait_impl_method(
     let call = format!("{implementing_owner_name}::{rust_name}({receiver_arg})");
     let call = adapt_source_class_bound_trait_impl_return(
         call,
-        bound_method,
+        trait_return_shape_for_body
+            .as_ref()
+            .or(bound_signature.return_shape.as_ref()),
         &implementation_signature.return_shape,
+        exceptions,
     );
-    let body =
-        if source_class_bound_trait_method_return_type(bound_method, facts, exceptions).is_some() {
-            call
-        } else {
-            format!("{call};")
-        };
+    let body = if source_class_bound_trait_method_return_type_with_shape(
+        bound_method,
+        facts,
+        exceptions,
+        trait_return_shape_for_body.as_ref(),
+    )
+    .is_some()
+    {
+        call
+    } else {
+        format!("{call};")
+    };
     format!("{} {{ {body} }}", signature.trim_end_matches(';'))
+}
+
+fn source_class_bound_trait_method_return_shape_plan(
+    bound: &TypeDecl,
+    bound_method: &MethodDecl,
+    candidates: &[(&TypeDecl, &MethodDecl)],
+    signatures: &SignaturePlan,
+) -> Option<RustSlotShape> {
+    let bound_shape = signatures
+        .required_method_signature(bound, bound_method)
+        .return_shape
+        .clone()?;
+    for (implementation_owner, implementation_method) in candidates {
+        if trait_impl_method_compatibility_error(bound_method, implementation_method).is_some() {
+            continue;
+        }
+        let Some(implementation_shape) = signatures
+            .method_signature(implementation_owner, implementation_method)
+            .unwrap_or_else(|| {
+                signatures.required_method_signature(implementation_owner, implementation_method)
+            })
+            .return_shape
+            .clone()
+        else {
+            continue;
+        };
+        if trait_return_shape_should_widen_to_implementation(&bound_shape, &implementation_shape) {
+            return Some(implementation_shape);
+        }
+    }
+    Some(bound_shape)
+}
+
+fn source_class_bound_trait_method_implementation_candidates<'a>(
+    program: &'a Program,
+    bound: &'a TypeDecl,
+    bound_method: &MethodDecl,
+) -> Vec<(&'a TypeDecl, &'a MethodDecl)> {
+    program
+        .types
+        .iter()
+        .filter(|ty| {
+            matches!(ty.kind, TypeKind::Class | TypeKind::Enum)
+                && source_class_bounds_for_type(program, ty)
+                    .into_iter()
+                    .any(|candidate_bound| candidate_bound.name == bound.name)
+        })
+        .filter_map(|ty| {
+            implementing_method_candidates_in_hierarchy(ty, bound_method, program)
+                .into_iter()
+                .find(|candidate| {
+                    trait_impl_method_compatibility_error(bound_method, candidate.1).is_none()
+                })
+        })
+        .collect()
 }
 
 fn adapt_source_class_bound_trait_impl_return(
     call: String,
-    bound_method: &MethodDecl,
+    trait_return_shape: Option<&RustSlotShape>,
     implementation_return_shape: &Option<RustSlotShape>,
+    exceptions: MethodExceptionPlan,
 ) -> String {
+    if exceptions.wrap_returns_in_result {
+        return call;
+    }
+    let Some(trait_shape) = trait_return_shape else {
+        return call;
+    };
+    if trait_shape.optional_element_type().is_some() {
+        return call;
+    }
     if let Some(shape) = implementation_return_shape
         && shape
             .optional_element_type()
-            .is_some_and(|element_ty| element_ty == bound_method.return_type)
+            .is_some_and(|element_ty| element_ty == trait_shape.java_ty)
     {
         return format!("{call}.expect(\"Java null receiver\")");
     }

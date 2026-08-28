@@ -238,6 +238,7 @@ pub enum SwitchLabel {
 pub struct CatchClause {
     pub types: Vec<JavaType>,
     pub name: String,
+    pub source_name: String,
     pub body: Block,
     pub binding: Option<BindingId>,
 }

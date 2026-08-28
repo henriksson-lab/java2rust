@@ -555,7 +555,7 @@ fn collect_catch_reference_identity_equality_diagnostics(
         .first()
         .cloned()
         .unwrap_or_else(|| JavaType::Unknown("Throwable".to_string()));
-    catch_env.insert_local(catch.name.clone(), catch_ty);
+    catch_env.insert_local(catch.source_name.clone(), catch_ty);
     collect_block_reference_identity_equality_diagnostics(
         &catch.body,
         &mut catch_env,

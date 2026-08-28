@@ -1,7 +1,8 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::coercion::{
-    function_call_projection, owner_associated_path_projection, rust_string_literal_projection,
+    function_call_projection, owner_associated_path_projection,
+    recover_parseable_raw_operand_projection, rust_string_literal_projection,
     self_associated_path_projection,
 };
 use crate::exception_lowering::exception_result_type;
@@ -218,12 +219,11 @@ fn rust_impl_params_for_source_type(ty: &TypeDecl, support_program: &Program) ->
 
 fn source_type_param_into_supertype_bounds(bound: &str, support_program: &Program) -> Vec<String> {
     let mut bounds = Vec::new();
-    let mut current = find_type_decl_by_name_or_rust_name(support_program, bound)
-        .and_then(|ty| ty.extends.as_deref());
+    let mut current =
+        source_type_bound_decl(bound, &[support_program]).and_then(|ty| ty.extends.as_deref());
     let mut visited = HashSet::new();
     while let Some(super_name) = current {
-        let Some(super_ty) = find_type_decl_by_name_or_rust_name(support_program, super_name)
-        else {
+        let Some(super_ty) = source_type_bound_decl(super_name, &[support_program]) else {
             break;
         };
         if !visited.insert(super_ty.name.clone()) {
@@ -238,34 +238,6 @@ fn source_type_param_into_supertype_bounds(bound: &str, support_program: &Progra
         current = super_ty.extends.as_deref();
     }
     bounds
-}
-
-fn find_type_decl_by_name_or_rust_name<'a>(
-    program: &'a Program,
-    name: &str,
-) -> Option<&'a TypeDecl> {
-    program
-        .types
-        .iter()
-        .find_map(|ty| find_type_decl_by_name_or_rust_name_in_type(ty, name))
-}
-
-fn find_type_decl_by_name_or_rust_name_in_type<'a>(
-    ty: &'a TypeDecl,
-    name: &str,
-) -> Option<&'a TypeDecl> {
-    let simple_name = ty.name.rsplit('.').next().unwrap_or(&ty.name);
-    if ty.name == name
-        || simple_name == name
-        || rust_name_for_java_named_type(&ty.name) == name
-        || rust_name_for_java_named_type(simple_name) == name
-    {
-        return Some(ty);
-    }
-    ty.members.iter().find_map(|member| match member {
-        Member::Type(nested) => find_type_decl_by_name_or_rust_name_in_type(nested, name),
-        _ => None,
-    })
 }
 
 /// Whether a *method or constructor* type parameter needs a `Clone` bound.
@@ -475,21 +447,16 @@ fn expr_is_type_param_sequence_get(
 }
 
 fn source_type_param_needs_clone_bound(ty: &TypeDecl, type_param: &str) -> bool {
-    type_has_field_containing_type_param(ty, type_param)
-        && ty.members.iter().any(|member| match member {
-            Member::Method(method) => {
-                java_type_contains_type_param(&method.return_type, type_param)
-                    || method
-                        .params
-                        .iter()
-                        .any(|param| java_type_contains_type_param(&param.ty, type_param))
-            }
-            Member::Constructor(constructor) => constructor
-                .params
-                .iter()
-                .any(|param| java_type_contains_type_param(&param.ty, type_param)),
-            _ => false,
-        })
+    if !type_has_field_containing_type_param(ty, type_param) {
+        return false;
+    }
+    let fields = source_field_types(ty);
+    ty.members.iter().any(|member| match member {
+        Member::Method(method) => {
+            source_method_needs_class_type_param_clone_bound(method, type_param, &fields)
+        }
+        _ => false,
+    })
 }
 
 fn type_has_field_containing_type_param(ty: &TypeDecl, type_param: &str) -> bool {
@@ -497,6 +464,82 @@ fn type_has_field_containing_type_param(ty: &TypeDecl, type_param: &str) -> bool
         Member::Field(field) => java_type_contains_type_param(&field.ty, type_param),
         _ => false,
     })
+}
+
+fn source_field_types(ty: &TypeDecl) -> HashMap<String, JavaType> {
+    ty.members
+        .iter()
+        .filter_map(|member| match member {
+            Member::Field(field) => Some((field.name.clone(), field.ty.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+fn source_method_needs_class_type_param_clone_bound(
+    method: &MethodDecl,
+    type_param: &str,
+    fields: &HashMap<String, JavaType>,
+) -> bool {
+    if !java_type_contains_type_param(&method.return_type, type_param) {
+        return false;
+    }
+    let Some(body) = &method.body else {
+        return false;
+    };
+    body.statements.iter().any(|stmt| {
+        method_return_expr(stmt).is_some_and(|expr| {
+            expr_recovers_owned_class_type_param_from_field(expr, type_param, fields)
+        })
+    })
+}
+
+fn method_return_expr(stmt: &Stmt) -> Option<&Expr> {
+    match stmt {
+        Stmt::Return(Some(expr)) => Some(expr),
+        _ => None,
+    }
+}
+
+fn expr_recovers_owned_class_type_param_from_field(
+    expr: &Expr,
+    type_param: &str,
+    fields: &HashMap<String, JavaType>,
+) -> bool {
+    match expr {
+        Expr::Call {
+            receiver: Some(receiver),
+            name,
+            args,
+            ..
+        } if name == "get" && args.len() == 1 => {
+            expr_java_type(receiver, fields).is_some_and(|receiver_ty| {
+                collection_lookup_value_type(&receiver_ty)
+                    .is_some_and(|value_ty| java_type_contains_type_param(&value_ty, type_param))
+            })
+        }
+        Expr::Cast { expr, .. } => {
+            expr_recovers_owned_class_type_param_from_field(expr, type_param, fields)
+        }
+        _ => false,
+    }
+}
+
+fn expr_java_type(expr: &Expr, fields: &HashMap<String, JavaType>) -> Option<JavaType> {
+    match expr {
+        Expr::Var(name) => fields.get(name).cloned(),
+        Expr::FieldAccess(receiver, field) if matches!(receiver.as_ref(), Expr::This) => {
+            fields.get(field).cloned()
+        }
+        _ => None,
+    }
+}
+
+fn collection_lookup_value_type(java_ty: &JavaType) -> Option<JavaType> {
+    if let Some((_, value_ty)) = crate::stdlib::java_map_type_args(java_ty) {
+        return Some(value_ty.clone());
+    }
+    sequence_element_type(java_ty)
 }
 
 fn java_type_contains_type_param(ty: &JavaType, type_param: &str) -> bool {
@@ -525,9 +568,115 @@ fn source_type_bound_decl<'a>(
     bound: &str,
     support_programs: &[&'a Program],
 ) -> Option<&'a TypeDecl> {
+    source_type_bound_decl_by_match_kind(bound, support_programs, SourceTypeBoundMatch::Exact)
+        .or_else(|| {
+            unique_source_type_bound_decl_by_match_kind(
+                bound,
+                support_programs,
+                SourceTypeBoundMatch::RustAlias,
+            )
+        })
+        .or_else(|| {
+            unique_source_type_bound_decl_by_match_kind(
+                bound,
+                support_programs,
+                SourceTypeBoundMatch::Simple,
+            )
+        })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceTypeBoundMatch {
+    Exact,
+    RustAlias,
+    Simple,
+}
+
+fn source_type_bound_decl_by_match_kind<'a>(
+    bound: &str,
+    support_programs: &[&'a Program],
+    kind: SourceTypeBoundMatch,
+) -> Option<&'a TypeDecl> {
     support_programs
         .iter()
-        .find_map(|program| find_type_decl_by_name_or_rust_name(program, bound))
+        .find_map(|program| source_type_bound_decl_in_program_by_match_kind(bound, program, kind))
+}
+
+fn unique_source_type_bound_decl_by_match_kind<'a>(
+    bound: &str,
+    support_programs: &[&'a Program],
+    kind: SourceTypeBoundMatch,
+) -> Option<&'a TypeDecl> {
+    let mut found = None;
+    let mut ambiguous = false;
+    for program in support_programs {
+        collect_source_type_bound_decls_in_program_by_match_kind(bound, program, kind, &mut |ty| {
+            if found.is_some() {
+                ambiguous = true;
+                return false;
+            }
+            found = Some(ty);
+            true
+        });
+        if ambiguous {
+            return None;
+        }
+    }
+    found
+}
+
+fn source_type_bound_decl_in_program_by_match_kind<'a>(
+    bound: &str,
+    program: &'a Program,
+    kind: SourceTypeBoundMatch,
+) -> Option<&'a TypeDecl> {
+    let mut found = None;
+    collect_source_type_bound_decls_in_program_by_match_kind(bound, program, kind, &mut |ty| {
+        found = Some(ty);
+        false
+    });
+    found
+}
+
+fn collect_source_type_bound_decls_in_program_by_match_kind<'a>(
+    bound: &str,
+    program: &'a Program,
+    kind: SourceTypeBoundMatch,
+    visit: &mut impl FnMut(&'a TypeDecl) -> bool,
+) {
+    for ty in &program.types {
+        if !collect_source_type_bound_decls_in_type_by_match_kind(bound, ty, kind, visit) {
+            break;
+        }
+    }
+}
+
+fn collect_source_type_bound_decls_in_type_by_match_kind<'a>(
+    bound: &str,
+    ty: &'a TypeDecl,
+    kind: SourceTypeBoundMatch,
+    visit: &mut impl FnMut(&'a TypeDecl) -> bool,
+) -> bool {
+    if source_type_bound_matches(ty, bound, kind) && !visit(ty) {
+        return false;
+    }
+    ty.members.iter().all(|member| match member {
+        Member::Type(nested) => {
+            collect_source_type_bound_decls_in_type_by_match_kind(bound, nested, kind, visit)
+        }
+        _ => true,
+    })
+}
+
+fn source_type_bound_matches(ty: &TypeDecl, bound: &str, kind: SourceTypeBoundMatch) -> bool {
+    let simple_name = ty.name.rsplit('.').next().unwrap_or(&ty.name);
+    match kind {
+        SourceTypeBoundMatch::Exact => ty.name == bound,
+        SourceTypeBoundMatch::RustAlias => rust_name_for_java_named_type(&ty.name) == bound,
+        SourceTypeBoundMatch::Simple => {
+            simple_name == bound || rust_name_for_java_named_type(simple_name) == bound
+        }
+    }
 }
 
 fn source_type_bound_is_trait_like(bound: &str, support_programs: &[&Program]) -> bool {
@@ -706,10 +855,21 @@ fn reorder_struct_literal_moves_after_reads(
 
 fn rust_expr_direct_move_var(expr: &RustExpr) -> Option<String> {
     match expr {
-        RustExpr::Var(name) => Some(name.clone()),
-        RustExpr::Raw(text) if valid_raw_move_identifier(text) => Some(text.clone()),
+        RustExpr::Var(name) if movable_local_identifier(name) => Some(name.clone()),
+        RustExpr::Raw(_) => {
+            let recovered = recover_parseable_raw_operand_projection(expr.clone());
+            if matches!(recovered, RustExpr::Raw(_)) {
+                None
+            } else {
+                rust_expr_direct_move_var(&recovered)
+            }
+        }
         _ => None,
     }
+}
+
+fn movable_local_identifier(name: &str) -> bool {
+    !matches!(name, "self" | "super" | "crate" | "Self")
 }
 
 fn rust_expr_reads_var(expr: &RustExpr, var_name: &str) -> bool {
@@ -793,7 +953,10 @@ fn rust_expr_reads_var(expr: &RustExpr, var_name: &str) -> bool {
                     .as_ref()
                     .is_some_and(|tail| rust_expr_reads_var(tail, var_name))
         }
-        RustExpr::Raw(text) => raw_rust_expr_mentions_identifier(text, var_name),
+        RustExpr::Raw(_) => {
+            let recovered = recover_parseable_raw_operand_projection(expr.clone());
+            !matches!(recovered, RustExpr::Raw(_)) && rust_expr_reads_var(&recovered, var_name)
+        }
         RustExpr::Path(_)
         | RustExpr::GenericPath { .. }
         | RustExpr::TypeAssociatedPath { .. }
@@ -875,26 +1038,144 @@ fn rust_stmt_reads_var(stmt: &RustStmt, var_name: &str) -> bool {
         }
         RustStmt::Loop { body, .. } => body.iter().any(|stmt| rust_stmt_reads_var(stmt, var_name)),
         RustStmt::BreakValue { value, .. } => rust_expr_reads_var(value, var_name),
-        RustStmt::Raw(text) => raw_rust_expr_mentions_identifier(text, var_name),
+        RustStmt::Raw(text) => raw_structured_stmt_reads_var(text, var_name),
         RustStmt::Return(None) | RustStmt::Break(_) | RustStmt::Continue(_) => false,
     }
 }
 
-fn valid_rust_identifier(text: &str) -> bool {
-    let mut chars = text.chars();
-    chars
-        .next()
-        .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
-        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-}
-
-fn valid_raw_move_identifier(text: &str) -> bool {
-    valid_rust_identifier(text) && !matches!(text, "self" | "super" | "crate" | "Self")
+fn raw_structured_stmt_reads_var(text: &str, var_name: &str) -> bool {
+    let trimmed = text.trim();
+    let expr_text = trimmed
+        .strip_prefix("return ")
+        .and_then(|tail| tail.strip_suffix(';'))
+        .or_else(|| trimmed.strip_suffix(';'))
+        .unwrap_or(trimmed);
+    let recovered = recover_parseable_raw_operand_projection(RustExpr::raw_leaf(expr_text));
+    !matches!(recovered, RustExpr::Raw(_)) && rust_expr_reads_var(&recovered, var_name)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_type_decl(name: &str, kind: TypeKind, extends: Option<&str>) -> TypeDecl {
+        TypeDecl {
+            kind,
+            name: name.to_string(),
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            modifiers: Vec::new(),
+            extends: extends.map(str::to_string),
+            implements: Vec::new(),
+            permits: Vec::new(),
+            members: Vec::new(),
+            static_init_blocks: Vec::new(),
+            span: crate::diagnostics::Span::default(),
+        }
+    }
+
+    fn support_program(types: Vec<TypeDecl>) -> Program {
+        Program {
+            types,
+            ..Program::default()
+        }
+    }
+
+    #[test]
+    fn source_type_bound_decl_refuses_ambiguous_simple_package_peer() {
+        let support = support_program(vec![
+            test_type_decl("a.Base", TypeKind::Interface, None),
+            test_type_decl("b.Base", TypeKind::Class, None),
+        ]);
+        let bound = JavaType::Named {
+            name: "Base".to_string(),
+            args: Vec::new(),
+        };
+
+        assert_eq!(
+            rust_bounds_for_java_type_param(&bound, &[&support]),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            rust_bounds_for_java_type_param(
+                &JavaType::Named {
+                    name: "a.Base".to_string(),
+                    args: Vec::new(),
+                },
+                &[&support],
+            ),
+            vec![rust_name_for_java_named_type("a.Base")]
+        );
+
+        let support = support_program(vec![
+            test_type_decl("a.B.C", TypeKind::Interface, None),
+            test_type_decl("AB.C", TypeKind::Class, None),
+        ]);
+        let rust_alias = rust_name_for_java_named_type("a.B.C");
+        assert_eq!(rust_alias, rust_name_for_java_named_type("AB.C"));
+        assert_eq!(
+            rust_bounds_for_java_type_param(
+                &JavaType::Named {
+                    name: rust_alias,
+                    args: Vec::new(),
+                },
+                &[&support],
+            ),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn source_type_param_into_supertype_bounds_refuses_ambiguous_simple_package_peer() {
+        let support = support_program(vec![
+            test_type_decl("a.Parent", TypeKind::Class, None),
+            test_type_decl("a.Base", TypeKind::Class, Some("a.Parent")),
+            test_type_decl("b.Parent", TypeKind::Class, None),
+            test_type_decl("b.Base", TypeKind::Class, Some("b.Parent")),
+        ]);
+
+        assert!(source_type_param_into_supertype_bounds("Base", &support).is_empty());
+        assert_eq!(
+            source_type_param_into_supertype_bounds("a.Base", &support),
+            vec![format!(
+                "Into<{}>",
+                rust_name_for_java_named_type("a.Parent")
+            )]
+        );
+
+        let support = support_program(vec![
+            test_type_decl("a.Parent", TypeKind::Class, None),
+            test_type_decl("a.B.C", TypeKind::Class, Some("a.Parent")),
+            test_type_decl("AB.Parent", TypeKind::Class, None),
+            test_type_decl("AB.C", TypeKind::Class, Some("AB.Parent")),
+        ]);
+        let rust_alias = rust_name_for_java_named_type("a.B.C");
+        assert_eq!(rust_alias, rust_name_for_java_named_type("AB.C"));
+        assert!(source_type_param_into_supertype_bounds(&rust_alias, &support).is_empty());
+    }
+
+    #[test]
+    fn derive_support_type_lookup_refuses_ambiguous_emitted_rust_name() {
+        let support = support_program(vec![
+            test_type_decl("a.B.C", TypeKind::Class, None),
+            test_type_decl("AB.C", TypeKind::Interface, None),
+        ]);
+        let rust_alias = rust_name_for_java_named_type("a.B.C");
+        assert_eq!(rust_alias, rust_name_for_java_named_type("AB.C"));
+
+        assert!(
+            find_type_decl_by_rust_name(&support, &rust_alias).is_none(),
+            "derive support must not recover a Java owner from a colliding emitted Rust name"
+        );
+        assert!(!rust_named_type_supports_struct_derive_default(
+            &rust_alias,
+            &HashSet::new(),
+            &SignaturePlan::default(),
+            &FactSet::default(),
+            &support,
+            &mut HashSet::new()
+        ));
+    }
 
     #[test]
     fn structured_method_calls_count_method_name_reads() {
@@ -912,7 +1193,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_pseudo_identifiers_are_not_direct_move_vars() {
+    fn raw_direct_move_vars_require_structured_recovery() {
         assert_eq!(
             rust_expr_direct_move_var(&RustExpr::Raw("value".to_string())),
             Some("value".to_string())
@@ -923,12 +1204,35 @@ mod tests {
                 None
             );
         }
+        assert_eq!(
+            rust_expr_direct_move_var(&RustExpr::Raw("value +".to_string())),
+            None
+        );
     }
-}
 
-fn raw_rust_expr_mentions_identifier(text: &str, ident: &str) -> bool {
-    text.split(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
-        .any(|token| token == ident)
+    #[test]
+    fn raw_reads_require_structured_recovery() {
+        assert!(rust_expr_reads_var(
+            &RustExpr::Raw("left + right".to_string()),
+            "left"
+        ));
+        assert!(!rust_expr_reads_var(
+            &RustExpr::Raw("\"left\"".to_string()),
+            "left"
+        ));
+        assert!(!rust_expr_reads_var(
+            &RustExpr::Raw("left +".to_string()),
+            "left"
+        ));
+        assert!(rust_stmt_reads_var(
+            &RustStmt::Raw("return left + right;".to_string()),
+            "right"
+        ));
+        assert!(!rust_stmt_reads_var(
+            &RustStmt::Raw("return left +;".to_string()),
+            "left"
+        ));
+    }
 }
 
 pub fn constructor_default_field_value_with_facts(
@@ -1838,23 +2142,35 @@ fn rust_named_type_supports_struct_derive_clone(
 }
 
 fn find_type_decl_by_rust_name<'a>(program: &'a Program, rust_name: &str) -> Option<&'a TypeDecl> {
-    program
-        .types
-        .iter()
-        .find_map(|ty| find_type_decl_by_rust_name_in_type(ty, rust_name))
+    let mut matches = Vec::new();
+    for ty in &program.types {
+        collect_type_decls_by_rust_name(ty, rust_name, &mut matches);
+    }
+    unique_type_decl_match(&matches)
 }
 
-fn find_type_decl_by_rust_name_in_type<'a>(
+fn collect_type_decls_by_rust_name<'a>(
     ty: &'a TypeDecl,
     rust_name: &str,
-) -> Option<&'a TypeDecl> {
+    out: &mut Vec<&'a TypeDecl>,
+) {
     if rust_name_for_java_named_type(&ty.name) == rust_name {
-        return Some(ty);
+        out.push(ty);
     }
-    ty.members.iter().find_map(|member| match member {
-        Member::Type(nested) => find_type_decl_by_rust_name_in_type(nested, rust_name),
-        _ => None,
-    })
+    for member in &ty.members {
+        if let Member::Type(nested) = member {
+            collect_type_decls_by_rust_name(nested, rust_name, out);
+        }
+    }
+}
+
+fn unique_type_decl_match<'a>(matches: &[&'a TypeDecl]) -> Option<&'a TypeDecl> {
+    let first = *matches.first()?;
+    if matches.iter().all(|ty| ty.name == first.name) {
+        Some(first)
+    } else {
+        None
+    }
 }
 
 fn rust_type_supports_struct_derive_partial_eq(ty: &RustType) -> bool {

@@ -224,6 +224,9 @@ fn rust_get_projection_counts_as_existing_optional_carrier() {
         "values.get(index).copied()".to_string()
     )));
     assert!(rust_expr_is_constructed_optional_value(&RustExpr::Raw(
+        "fields.get(&\"ID\".to_string()).cloned()".to_string()
+    )));
+    assert!(rust_expr_is_constructed_optional_value(&RustExpr::Raw(
         "fields.get(r#\"ID \" )\"#).cloned()".to_string()
     )));
     assert!(rust_expr_is_constructed_optional_value(
@@ -262,6 +265,15 @@ fn chained_get_projection_does_not_count_as_existing_optional_carrier() {
         "values.get(index).iter().copied()".to_string()
     )));
     assert!(!rust_expr_is_constructed_optional_value(&RustExpr::Raw(
+        "left + values.get(index).copied()".to_string()
+    )));
+    assert!(!rust_expr_is_constructed_optional_value(&RustExpr::Raw(
+        "left + fields.get(&\"ID\".to_string()).cloned()".to_string()
+    )));
+    assert!(!rust_expr_is_constructed_optional_value(&RustExpr::Raw(
+        "values.get(index).copied() trailing".to_string()
+    )));
+    assert!(!rust_expr_is_constructed_optional_value(&RustExpr::Raw(
         "format!(r#\"values.get(index)\"#).cloned()".to_string()
     )));
 }
@@ -291,6 +303,9 @@ fn raw_if_optional_construction_detection_ignores_literal_text() {
     )));
     assert!(!rust_expr_is_constructed_optional_value(&RustExpr::Raw(
         "if ready { r#\"{ Some(value)\"# } else { None }".to_string()
+    )));
+    assert!(!rust_expr_is_constructed_optional_value(&RustExpr::Raw(
+        "if ready { Some(value) } trailing".to_string()
     )));
 }
 
@@ -1864,7 +1879,17 @@ fn syntax_slot_coercion_policy_owns_index_condition_and_concat_segments() {
     );
     assert_eq!(
         parenthesize_borrowed_method_receiver(RustExpr::Raw("(&reader.field)".to_string())),
-        RustExpr::Raw("(&reader.field)".to_string())
+        RustExpr::Grouped(Box::new(RustExpr::Unary {
+            op: "&".to_string(),
+            expr: Box::new(RustExpr::Field(
+                Box::new(RustExpr::Var("reader".to_string())),
+                "field".to_string(),
+            )),
+        }))
+    );
+    assert_eq!(
+        parenthesize_borrowed_method_receiver(RustExpr::Raw("&reader.field trailing".to_string())),
+        RustExpr::Raw("&reader.field trailing".to_string())
     );
     assert_eq!(
         apply_coercions(

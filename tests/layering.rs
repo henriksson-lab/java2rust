@@ -311,6 +311,9 @@ fn item_assembly_return_type_wrappers_delegate_to_fact_aware_rendering() {
     assert!(source.contains("pub fn method_return_type_with_facts"));
     assert!(!source.contains("pub fn method_return_type("));
     assert!(!source.contains("rust_type_for_slot(&shape)"));
+    assert!(!source.contains("fn raw_rust_expr_mentions_identifier"));
+    assert!(!source.contains("fn valid_raw_move_identifier"));
+    assert!(source.contains("recover_parseable_raw_operand_projection"));
 }
 
 #[test]
@@ -1252,25 +1255,31 @@ fn exception_lowering_keeps_exception_paths_structured() {
             && !throw_policy_source.contains("emit_expr(&exception)"),
         "non-result throw lowering should keep the exception expression structured"
     );
-    let exception_method_receiver_source = source
-        .split("fn parenthesize_raw_method_receiver")
+    assert!(
+        source.contains("parenthesize_raw_postfix_receiver(message)")
+            && source.contains("parenthesize_raw_postfix_receiver(wrapper)")
+            && !source.contains("fn raw_needs_method_receiver_parentheses")
+            && !source.contains("RustExpr::Raw(format!(\"({trimmed})\""),
+        "exception method receivers should delegate Raw recovery to the central coercion helper"
+    );
+    let postfix_receiver_source = coercion_source
+        .split("pub(crate) fn parenthesize_raw_postfix_receiver")
         .nth(1)
         .and_then(|tail| {
-            tail.split("fn raw_needs_method_receiver_parentheses")
+            tail.split("pub fn recover_parseable_raw_operand_projection")
                 .next()
         })
-        .expect("exception method receiver helper should remain discoverable");
+        .expect("central raw postfix receiver helper should remain discoverable");
     assert!(
-        exception_method_receiver_source
-            .contains("raw_receiver_projection(expr, raw_needs_method_receiver_parentheses)")
-            && !exception_method_receiver_source.contains("RustExpr::Raw(format!(\"({trimmed})\""),
-        "exception method receivers should delegate Raw recovery to the central coercion helper"
+        postfix_receiver_source
+            .contains("raw_receiver_projection(expr, raw_needs_postfix_receiver_parentheses)"),
+        "postfix receiver parenthesizing should share the central raw receiver projection"
     );
     let raw_receiver_projection_source = coercion_source
         .split("pub(crate) fn raw_receiver_projection")
         .nth(1)
         .and_then(|tail| {
-            tail.split("pub fn recover_parseable_raw_operand_projection")
+            tail.split("pub(crate) fn parenthesize_raw_postfix_receiver")
                 .next()
         })
         .expect("central raw receiver projection should remain discoverable");
@@ -1370,12 +1379,21 @@ fn stream_nullable_map_carrier_rendering_stays_behind_projection_helpers() {
 #[test]
 fn coercion_production_does_not_build_raw_expression_with_format() {
     let coercion_source = include_str!("../src/coercion.rs")
-        .split("#[cfg(test)]")
+        .split("#[cfg(test)]\nmod tests")
         .next()
         .expect("production coercion source should be present");
 
     assert!(
         !coercion_source.contains("RustExpr::Raw(format!"),
         "production coercions should compose RustExpr nodes or use centralized raw-leaf recovery"
+    );
+    let unresolved_static_call_detector = coercion_source
+        .split("fn expr_is_unresolved_static_owner_value_call")
+        .nth(1)
+        .and_then(|tail| tail.split("fn normalize_emitted_java_type_name").next())
+        .expect("unresolved static-owner detector should remain discoverable");
+    assert!(
+        !unresolved_static_call_detector.contains("RustExpr::Raw("),
+        "unresolved static-owner detection should use the structured macro expression, not raw text"
     );
 }

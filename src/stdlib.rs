@@ -1443,14 +1443,6 @@ fn add_jdk_collection_abi_facts(facts: &mut FactSet) {
             ),
             rust_stdlib_method_abi(
                 owner,
-                "addAll",
-                1,
-                "Vec::extend_from_slice",
-                vec![FacadeSlot::Slice(Box::new(FacadeSlot::Borrowed))],
-                FacadeSlot::Owned,
-            ),
-            rust_stdlib_method_abi(
-                owner,
                 "get",
                 1,
                 "slice::get",
@@ -1466,6 +1458,16 @@ fn add_jdk_collection_abi_facts(facts: &mut FactSet) {
                 FacadeSlot::Owned,
             ),
         ]);
+        let mut add_all_abi = rust_stdlib_method_abi(
+            owner,
+            "addAll",
+            1,
+            "Vec::extend_from_slice",
+            vec![FacadeSlot::Slice(Box::new(FacadeSlot::Borrowed))],
+            FacadeSlot::Owned,
+        );
+        add_all_abi.receiver = ReceiverAbi::MutBorrowedSelf;
+        facts.facade_abi_facts.push(add_all_abi);
     }
     for owner in ["Set", "java.util.Set", "HashSet", "java.util.HashSet"] {
         facts.facade_abi_facts.extend([
@@ -1502,6 +1504,16 @@ fn add_jdk_collection_abi_facts(facts: &mut FactSet) {
                 FacadeSlot::Owned,
             ),
         ]);
+        let mut add_all_abi = rust_stdlib_method_abi(
+            owner,
+            "addAll",
+            1,
+            "HashSet::extend",
+            vec![FacadeSlot::Slice(Box::new(FacadeSlot::Borrowed))],
+            FacadeSlot::Owned,
+        );
+        add_all_abi.receiver = ReceiverAbi::MutBorrowedSelf;
+        facts.facade_abi_facts.push(add_all_abi);
     }
     for owner in [
         "Map",
@@ -3333,6 +3345,12 @@ pub fn known_external_method_return_type(
             "getMessage" | "get_message" | "getLocalizedMessage" | "get_localized_message",
             0,
         ) if is_known_throwable_type(owner) => Some(JavaType::String),
+        (Some(owner), "getSuppressed" | "get_suppressed", 0) if is_known_throwable_type(owner) => {
+            Some(JavaType::Array(Box::new(JavaType::Named {
+                name: "Throwable".to_string(),
+                args: Vec::new(),
+            })))
+        }
         (Some(owner), "make", 0) => {
             external_builder_product_type(owner).map(|name| JavaType::Named {
                 name,
@@ -3348,7 +3366,7 @@ pub fn known_external_method_return_type(
         {
             Some(JavaType::Primitive(PrimitiveType::Int))
         }
-        (Some(_), "toPath", 0) => Some(JavaType::Named {
+        (Some(_), "toPath" | "to_path", 0) => Some(JavaType::Named {
             name: "Path".to_string(),
             args: Vec::new(),
         }),
@@ -5463,18 +5481,24 @@ pub struct URL {
     value: String,
 }
 
-impl URL {
-    pub fn new<S: Into<String>>(value: S) -> URL {
-        URL { value: value.into() }
-    }
+	impl URL {
+	    pub fn new<S: Into<String>>(value: S) -> URL {
+	        URL { value: value.into() }
+	    }
 
-    pub fn get_file(&self) -> String {
-        self.value.clone()
-    }
-}
+	    pub fn get_file(&self) -> String {
+	        self.value.clone()
+	    }
+	}
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
-pub struct ClassLoader;
+	impl std::fmt::Display for URL {
+	    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+	        write!(f, "{}", self.value)
+	    }
+	}
+
+	#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+	pub struct ClassLoader;
 
 impl ClassLoader {
     pub fn get_system_resource<S: Into<String>>(path: S) -> URL {
@@ -5604,21 +5628,27 @@ pub struct URL {
     value: String,
 }
 
-impl URL {
-    pub fn new<S: Into<String>>(value: S) -> URL {
-        URL { value: value.into() }
-    }
+	impl URL {
+	    pub fn new<S: Into<String>>(value: S) -> URL {
+	        URL { value: value.into() }
+	    }
 
-    pub fn get_file(&self) -> String {
-        self.value.clone()
-    }
+	    pub fn get_file(&self) -> String {
+	        self.value.clone()
+	    }
 
-    pub fn open_connection(&self) -> Result<URLConnection, JavaException> {
-        Ok(URLConnection)
-    }
-}
+	    pub fn open_connection(&self) -> Result<URLConnection, JavaException> {
+	        Ok(URLConnection)
+	    }
+	}
 
-pub trait JavaAppendValue {
+	impl std::fmt::Display for URL {
+	    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+	        write!(f, "{}", self.value)
+	    }
+	}
+
+	pub trait JavaAppendValue {
     fn into_java_append_string(self) -> String;
 }
 
@@ -7427,44 +7457,88 @@ impl JavaPathArg for &File {
     }
 }
 
-pub fn java_math_floor_div_i32(left: i32, right: i32) -> i32 {
+pub fn java_math_floor_div_i32_result(left: i32, right: i32) -> Result<i32, JavaException> {
+    if right == 0 {
+        return Err(JavaException::new(
+            "ArithmeticException",
+            "/ by zero".to_string(),
+        ));
+    }
     if left == i32::MIN && right == -1 {
-        return i32::MIN;
+        return Ok(i32::MIN);
     }
     let quotient = left / right;
     let remainder = left % right;
-    if remainder != 0 && ((left < 0) != (right < 0)) {
+    Ok(if remainder != 0 && ((left < 0) != (right < 0)) {
         quotient - 1
     } else {
         quotient
+    })
+}
+
+pub fn java_math_floor_div_i32(left: i32, right: i32) -> i32 {
+    java_math_floor_div_i32_result(left, right)
+        .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
+}
+
+pub fn java_math_floor_mod_i32_result(left: i32, right: i32) -> Result<i32, JavaException> {
+    if right == 0 {
+        return Err(JavaException::new(
+            "ArithmeticException",
+            "/ by zero".to_string(),
+        ));
     }
+    if left == i32::MIN && right == -1 {
+        return Ok(0);
+    }
+    Ok(left - java_math_floor_div_i32_result(left, right)? * right)
 }
 
 pub fn java_math_floor_mod_i32(left: i32, right: i32) -> i32 {
-    if left == i32::MIN && right == -1 {
-        return 0;
-    }
-    left - java_math_floor_div_i32(left, right) * right
+    java_math_floor_mod_i32_result(left, right)
+        .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
 }
 
-pub fn java_math_floor_div_i64(left: i64, right: i64) -> i64 {
+pub fn java_math_floor_div_i64_result(left: i64, right: i64) -> Result<i64, JavaException> {
+    if right == 0 {
+        return Err(JavaException::new(
+            "ArithmeticException",
+            "/ by zero".to_string(),
+        ));
+    }
     if left == i64::MIN && right == -1 {
-        return i64::MIN;
+        return Ok(i64::MIN);
     }
     let quotient = left / right;
     let remainder = left % right;
-    if remainder != 0 && ((left < 0) != (right < 0)) {
+    Ok(if remainder != 0 && ((left < 0) != (right < 0)) {
         quotient - 1
     } else {
         quotient
+    })
+}
+
+pub fn java_math_floor_div_i64(left: i64, right: i64) -> i64 {
+    java_math_floor_div_i64_result(left, right)
+        .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
+}
+
+pub fn java_math_floor_mod_i64_result(left: i64, right: i64) -> Result<i64, JavaException> {
+    if right == 0 {
+        return Err(JavaException::new(
+            "ArithmeticException",
+            "/ by zero".to_string(),
+        ));
     }
+    if left == i64::MIN && right == -1 {
+        return Ok(0);
+    }
+    Ok(left - java_math_floor_div_i64_result(left, right)? * right)
 }
 
 pub fn java_math_floor_mod_i64(left: i64, right: i64) -> i64 {
-    if left == i64::MIN && right == -1 {
-        return 0;
-    }
-    left - java_math_floor_div_i64(left, right) * right
+    java_math_floor_mod_i64_result(left, right)
+        .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
 }
 
 pub fn java_math_round_f32(value: f32) -> i32 {
@@ -7602,8 +7676,22 @@ pub fn java_erased_object_runtime_support_item_with_source_programs_and_facts(
     source_downcast_programs: &[&Program],
     facts: &FactSet,
 ) -> crate::rust_ir::RustItem {
+    java_erased_object_runtime_support_item_with_source_programs_facts_and_representations(
+        programs,
+        source_downcast_programs,
+        facts,
+        None,
+    )
+}
+
+pub fn java_erased_object_runtime_support_item_with_source_programs_facts_and_representations(
+    programs: &[&Program],
+    source_downcast_programs: &[&Program],
+    facts: &FactSet,
+    representations: Option<&RepresentationPlan>,
+) -> crate::rust_ir::RustItem {
     let source_to_string_downcasts =
-        source_erased_object_to_string_downcasts(source_downcast_programs);
+        source_erased_object_to_string_downcasts(source_downcast_programs, representations);
     let platform_to_string_downcasts = platform_erased_object_to_string_downcasts(programs);
     let external_to_string_downcasts = external_erased_object_to_string_downcasts(programs, facts);
     crate::rust_ir::RustItem::Raw(format!(
@@ -7619,6 +7707,15 @@ pub fn java_clone_erased_object_vec_ref(
     _value: &Vec<std::boxed::Box<dyn std::any::Any>>,
 ) -> Vec<std::boxed::Box<dyn std::any::Any>> {{
     Vec::new()
+}}
+
+pub fn java_clone_optional_erased_object_vec_ref(
+    value: &Vec<std::boxed::Box<dyn std::any::Any>>,
+) -> Vec<Option<std::boxed::Box<dyn std::any::Any>>> {{
+    value
+        .iter()
+        .map(|value| Some(java_clone_erased_object_ref(value)))
+        .collect()
 }}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
@@ -7637,6 +7734,12 @@ pub fn java_erased_object_to_string<T: std::any::Any>(value: &T) -> String {{
 pub fn java_erased_any_to_string(value: &dyn std::any::Any) -> String {{
     if let Some(value) = value.downcast_ref::<std::boxed::Box<dyn std::any::Any>>() {{
         return java_erased_any_to_string(value.as_ref());
+    }}
+    if let Some(value) = value.downcast_ref::<std::rc::Rc<std::boxed::Box<dyn std::any::Any>>>() {{
+        return java_erased_any_to_string(value.as_ref().as_ref());
+    }}
+    if let Some(value) = value.downcast_ref::<std::sync::Arc<std::boxed::Box<dyn std::any::Any>>>() {{
+        return java_erased_any_to_string(value.as_ref().as_ref());
     }}
     if let Some(value) = value.downcast_ref::<String>() {{
         return value.clone();
@@ -7678,10 +7781,19 @@ pub fn java_erased_any_to_string(value: &dyn std::any::Any) -> String {{
 
 fn platform_erased_object_to_string_downcasts(programs: &[&Program]) -> String {
     let mut arms = BTreeSet::new();
-    for platform_type in ["File", "StringBuilder", "StringBuffer", "URI"] {
+    for platform_type in [
+        "File",
+        "InputStream",
+        "Path",
+        "Random",
+        "StringBuilder",
+        "StringBuffer",
+        "URI",
+        "URL",
+    ] {
         if programs
             .iter()
-            .any(|program| program_mentions_java_type(program, platform_type))
+            .any(|program| program_mentions_platform_erased_display_type(program, platform_type))
         {
             arms.insert(format!(
                 "    if let Some(value) = value.downcast_ref::<{platform_type}>() {{\n        return value.to_string();\n    }}\n    if let Some(value) = value.downcast_ref::<std::rc::Rc<{platform_type}>>() {{\n        return value.to_string();\n    }}\n    if let Some(value) = value.downcast_ref::<std::sync::Arc<{platform_type}>>() {{\n        return value.to_string();\n    }}"
@@ -7689,6 +7801,12 @@ fn platform_erased_object_to_string_downcasts(programs: &[&Program]) -> String {
         }
     }
     arms.into_iter().collect::<Vec<_>>().join("\n")
+}
+
+fn program_mentions_platform_erased_display_type(program: &Program, platform_type: &str) -> bool {
+    program_mentions_java_type(program, platform_type)
+        || (platform_type == "InputStream" && program_mentions_java_type(program, "System"))
+        || (platform_type == "Path" && program_mentions_java_type(program, "File"))
 }
 
 fn external_erased_object_to_string_downcasts(programs: &[&Program], facts: &FactSet) -> String {
@@ -8081,11 +8199,19 @@ fn external_receiver_name_matches_simple(name: &str, target_simple_name: &str) -
     canonical.rsplit('.').next().unwrap_or(&canonical) == target_simple_name
 }
 
-fn source_erased_object_to_string_downcasts(programs: &[&Program]) -> String {
+fn source_erased_object_to_string_downcasts(
+    programs: &[&Program],
+    representations: Option<&RepresentationPlan>,
+) -> String {
     let mut arms = BTreeSet::new();
     for program in programs {
         for ty in &program.types {
-            collect_source_erased_object_to_string_downcasts(ty, program, &mut arms);
+            collect_source_erased_object_to_string_downcasts(
+                ty,
+                program,
+                representations,
+                &mut arms,
+            );
         }
     }
     arms.into_iter().collect::<Vec<_>>().join("\n")
@@ -8094,9 +8220,13 @@ fn source_erased_object_to_string_downcasts(programs: &[&Program]) -> String {
 fn collect_source_erased_object_to_string_downcasts(
     ty: &TypeDecl,
     program: &Program,
+    representations: Option<&RepresentationPlan>,
     arms: &mut BTreeSet<String>,
 ) {
-    if ty.type_params.is_empty() && source_type_has_java_object_stringification(ty, program) {
+    if ty.type_params.is_empty()
+        && !source_type_is_erased_alias(ty, representations)
+        && source_type_has_java_object_stringification(ty, program)
+    {
         let rust_name = rust_name_for_java_named_type(&ty.name);
         arms.insert(format!(
             "    if let Some(value) = value.downcast_ref::<{rust_name}>() {{\n        return value.to_string();\n    }}\n    if let Some(value) = value.downcast_ref::<&{rust_name}>() {{\n        return (*value).to_string();\n    }}\n    if let Some(value) = value.downcast_ref::<std::rc::Rc<{rust_name}>>() {{\n        return value.to_string();\n    }}\n    if let Some(value) = value.downcast_ref::<std::sync::Arc<{rust_name}>>() {{\n        return value.to_string();\n    }}"
@@ -8104,9 +8234,28 @@ fn collect_source_erased_object_to_string_downcasts(
     }
     for member in &ty.members {
         if let Member::Type(nested) = member {
-            collect_source_erased_object_to_string_downcasts(nested, program, arms);
+            collect_source_erased_object_to_string_downcasts(
+                nested,
+                program,
+                representations,
+                arms,
+            );
         }
     }
+}
+
+fn source_type_is_erased_alias(
+    ty: &TypeDecl,
+    representations: Option<&RepresentationPlan>,
+) -> bool {
+    representations
+        .and_then(|representations| representations.type_representation(&ty.name))
+        .is_some_and(|representation| {
+            matches!(
+                representation.representation,
+                ObjectRepresentation::ErasedObject
+            )
+        })
 }
 
 fn source_type_has_java_object_stringification(ty: &TypeDecl, program: &Program) -> bool {
@@ -8194,6 +8343,56 @@ pub fn java_collection_to_string<T: JavaArraysDeepToStringElement, V: AsRef<[T]>
     values: V,
 ) -> String {
     java_arrays_deep_to_string(values)
+}
+
+pub fn java_collection_sort_by_result<T, F>(
+    values: &mut [T],
+    mut compare: F,
+) -> Result<(), JavaException>
+where
+    F: FnMut(&T, &T) -> Result<i32, JavaException>,
+{
+    for sorted_until in 1..values.len() {
+        let mut index = sorted_until;
+        while index > 0 && compare(&values[index - 1], &values[index])? > 0 {
+            values.swap(index - 1, index);
+            index -= 1;
+        }
+    }
+    Ok(())
+}
+
+pub fn java_collection_iter_to_string<'a, T, I>(values: I) -> String
+where
+    T: JavaArraysDeepToStringElement + 'a,
+    I: IntoIterator<Item = &'a T>,
+{
+    let body = values
+        .into_iter()
+        .map(JavaArraysDeepToStringElement::java_arrays_deep_to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{body}]")
+}
+
+pub fn java_map_to_string<'a, K, V, I>(entries: I) -> String
+where
+    K: JavaArraysDeepToStringElement + 'a,
+    V: JavaArraysDeepToStringElement + 'a,
+    I: IntoIterator<Item = (&'a K, &'a V)>,
+{
+    let body = entries
+        .into_iter()
+        .map(|(key, value)| {
+            format!(
+                "{}={}",
+                key.java_arrays_deep_to_string(),
+                value.java_arrays_deep_to_string()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{{{body}}}")
 }
 
 macro_rules! impl_java_arrays_deep_to_string_display {
@@ -9281,13 +9480,25 @@ fn collect_emitted_java_enum_rust_type_names(
 }
 
 fn find_program_type_by_key<'a>(program: &'a Program, type_key: &str) -> Option<&'a TypeDecl> {
-    program
+    let exact = program
         .types
         .iter()
-        .find_map(|ty| find_type_by_key_in_type(ty, type_key))
+        .find_map(|ty| find_type_by_key_in_type(ty, type_key, SourceTypeDeclMatch::Exact));
+    if exact.is_some() {
+        return exact;
+    }
+    let mut matches = program.types.iter().filter_map(|ty| {
+        find_type_by_key_in_type(ty, type_key, SourceTypeDeclMatch::Compatibility)
+    });
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
 }
 
-fn find_type_by_key_in_type<'a>(ty: &'a TypeDecl, type_key: &str) -> Option<&'a TypeDecl> {
+fn find_type_by_key_in_type<'a>(
+    ty: &'a TypeDecl,
+    type_key: &str,
+    match_kind: SourceTypeDeclMatch,
+) -> Option<&'a TypeDecl> {
     let key = canonical_external_receiver_type_key(&ty.name);
     // Simple names too: a nested type is stored qualified (`Outer.Inner`) while
     // source, and therefore any recorded fact, names it simply (`Inner`).
@@ -9295,11 +9506,15 @@ fn find_type_by_key_in_type<'a>(ty: &'a TypeDecl, type_key: &str) -> Option<&'a 
     // invisible to callers asking "is this type declared here?", which is how
     // facade shells were synthesised for types already emitted.
     let simple = key.rsplit(['.', '$']).next().unwrap_or(&key);
-    if key == type_key || simple == type_key {
+    let matches = match match_kind {
+        SourceTypeDeclMatch::Exact => key == type_key,
+        SourceTypeDeclMatch::Compatibility => simple == type_key,
+    };
+    if matches {
         return Some(ty);
     }
     ty.members.iter().find_map(|member| match member {
-        Member::Type(nested) => find_type_by_key_in_type(nested, type_key),
+        Member::Type(nested) => find_type_by_key_in_type(nested, type_key, match_kind),
         _ => None,
     })
 }
@@ -9754,23 +9969,58 @@ fn collect_source_method_signatures_for_type_name(
 }
 
 fn find_source_type_decl<'a>(program: &'a Program, type_name: &str) -> Option<&'a TypeDecl> {
-    program
+    let exact = program
         .types
         .iter()
-        .find_map(|ty| find_source_type_decl_in_type(ty, type_name))
+        .find_map(|ty| find_source_type_decl_in_type(ty, type_name, SourceTypeDeclMatch::Exact));
+    if exact.is_some() {
+        return exact;
+    }
+    let mut matches = program.types.iter().filter_map(|ty| {
+        find_source_type_decl_in_type(ty, type_name, SourceTypeDeclMatch::Compatibility)
+    });
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
 }
 
-fn find_source_type_decl_in_type<'a>(ty: &'a TypeDecl, type_name: &str) -> Option<&'a TypeDecl> {
-    let canonical = canonical_external_receiver_type_key(type_name);
-    if ty.name == type_name
-        || canonical_external_receiver_type_key(&ty.name) == canonical
-        || ty.name.rsplit('.').next() == Some(type_name)
-        || rust_name_for_java_named_type(&ty.name) == rust_name_for_java_named_type(type_name)
-    {
+fn find_source_summary_owner_decl<'a>(
+    program: &'a Program,
+    owner_key: &str,
+) -> Option<&'a TypeDecl> {
+    if let Some(ty) = find_source_type_decl(program, owner_key) {
+        return Some(ty);
+    }
+    let (owner_package, owner_simple) = owner_key.rsplit_once('.')?;
+    if program.package.as_deref() != Some(owner_package) {
+        return None;
+    }
+    find_source_type_decl(program, owner_simple)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SourceTypeDeclMatch {
+    Exact,
+    Compatibility,
+}
+
+fn find_source_type_decl_in_type<'a>(
+    ty: &'a TypeDecl,
+    type_name: &str,
+    match_kind: SourceTypeDeclMatch,
+) -> Option<&'a TypeDecl> {
+    let matches = match match_kind {
+        SourceTypeDeclMatch::Exact => ty.name == type_name,
+        SourceTypeDeclMatch::Compatibility => {
+            ty.name.rsplit('.').next() == Some(type_name)
+                || rust_name_for_java_named_type(&ty.name)
+                    == rust_name_for_java_named_type(type_name)
+        }
+    };
+    if matches {
         return Some(ty);
     }
     ty.members.iter().find_map(|member| match member {
-        Member::Type(nested) => find_source_type_decl_in_type(nested, type_name),
+        Member::Type(nested) => find_source_type_decl_in_type(nested, type_name, match_kind),
         _ => None,
     })
 }
@@ -14117,84 +14367,6 @@ fn add_imported_static_shadow_name(shadows: &mut BTreeSet<String>, name: &str) {
     shadows.insert(crate::parser::to_snake_case(name));
 }
 
-fn collect_block_imported_static_shadows(block: &Block, shadows: &mut BTreeSet<String>) {
-    for stmt in &block.statements {
-        collect_stmt_imported_static_shadows(stmt, shadows);
-    }
-}
-
-fn collect_stmt_imported_static_shadows(stmt: &Stmt, shadows: &mut BTreeSet<String>) {
-    match stmt {
-        Stmt::VarDecl { name, .. } => add_imported_static_shadow_name(shadows, name),
-        Stmt::For { init, body, .. } => {
-            for stmt in init {
-                collect_stmt_imported_static_shadows(stmt, shadows);
-            }
-            collect_block_imported_static_shadows(body, shadows);
-        }
-        Stmt::EnhancedFor { var_name, body, .. } => {
-            add_imported_static_shadow_name(shadows, var_name);
-            collect_block_imported_static_shadows(body, shadows);
-        }
-        Stmt::If {
-            then_block,
-            else_block,
-            ..
-        } => {
-            collect_block_imported_static_shadows(then_block, shadows);
-            if let Some(else_block) = else_block {
-                collect_block_imported_static_shadows(else_block, shadows);
-            }
-        }
-        Stmt::While { body, .. }
-        | Stmt::DoWhile { body, .. }
-        | Stmt::Block(body)
-        | Stmt::LabeledBlock { body, .. } => {
-            collect_block_imported_static_shadows(body, shadows);
-        }
-        Stmt::Switch { cases, .. } => {
-            for case in cases {
-                for stmt in &case.statements {
-                    collect_stmt_imported_static_shadows(stmt, shadows);
-                }
-            }
-        }
-        Stmt::Try {
-            resources,
-            body,
-            catches,
-            finally_block,
-        } => {
-            for resource in resources {
-                collect_stmt_imported_static_shadows(resource, shadows);
-            }
-            collect_block_imported_static_shadows(body, shadows);
-            for catch in catches {
-                add_imported_static_shadow_name(shadows, &catch.name);
-                collect_block_imported_static_shadows(&catch.body, shadows);
-            }
-            if let Some(finally_block) = finally_block {
-                collect_block_imported_static_shadows(finally_block, shadows);
-            }
-        }
-        Stmt::LocalType(ty) => {
-            for member in &ty.members {
-                if let Member::Field(field) = member {
-                    add_imported_static_shadow_name(shadows, &field.name);
-                }
-            }
-        }
-        Stmt::Assign { .. }
-        | Stmt::Expr(_)
-        | Stmt::Return(_)
-        | Stmt::Throw(_)
-        | Stmt::ConstructorInvocation { .. }
-        | Stmt::Break(_)
-        | Stmt::Continue(_)
-        | Stmt::Unsupported(_) => {}
-    }
-}
-
 fn collect_type_imported_static_owner_calls(
     ty: &crate::java_ir::TypeDecl,
     aliases: &BTreeMap<String, String>,
@@ -14226,12 +14398,11 @@ fn collect_type_imported_static_owner_calls(
                     for param in &method.params {
                         add_imported_static_shadow_name(&mut shadows, &param.name);
                     }
-                    collect_block_imported_static_shadows(body, &mut shadows);
                     collect_block_imported_static_owner_calls(
                         body,
                         aliases,
                         static_members,
-                        &shadows,
+                        &mut shadows,
                         calls,
                     );
                 }
@@ -14242,12 +14413,11 @@ fn collect_type_imported_static_owner_calls(
                     for param in &constructor.params {
                         add_imported_static_shadow_name(&mut shadows, &param.name);
                     }
-                    collect_block_imported_static_shadows(body, &mut shadows);
                     collect_block_imported_static_owner_calls(
                         body,
                         aliases,
                         static_members,
-                        &shadows,
+                        &mut shadows,
                         calls,
                     );
                 }
@@ -14264,11 +14434,18 @@ fn collect_block_imported_static_owner_calls(
     block: &Block,
     aliases: &BTreeMap<String, String>,
     static_members: &BTreeMap<String, String>,
-    shadows: &BTreeSet<String>,
+    shadows: &mut BTreeSet<String>,
     calls: &mut BTreeMap<(String, String), BTreeSet<usize>>,
 ) {
+    let mut block_shadows = shadows.clone();
     for stmt in &block.statements {
-        collect_stmt_imported_static_owner_calls(stmt, aliases, static_members, shadows, calls);
+        collect_stmt_imported_static_owner_calls(
+            stmt,
+            aliases,
+            static_members,
+            &mut block_shadows,
+            calls,
+        );
     }
 }
 
@@ -14276,17 +14453,19 @@ fn collect_stmt_imported_static_owner_calls(
     stmt: &Stmt,
     aliases: &BTreeMap<String, String>,
     static_members: &BTreeMap<String, String>,
-    shadows: &BTreeSet<String>,
+    shadows: &mut BTreeSet<String>,
     calls: &mut BTreeMap<(String, String), BTreeSet<usize>>,
 ) {
     match stmt {
         Stmt::VarDecl {
             initializer: Some(expr),
+            name,
             ..
+        } => {
+            collect_expr_imported_static_owner_calls(expr, aliases, static_members, shadows, calls);
+            add_imported_static_shadow_name(shadows, name);
         }
-        | Stmt::Expr(expr)
-        | Stmt::Throw(expr)
-        | Stmt::Return(Some(expr)) => {
+        Stmt::Expr(expr) | Stmt::Throw(expr) | Stmt::Return(Some(expr)) => {
             collect_expr_imported_static_owner_calls(expr, aliases, static_members, shadows, calls)
         }
         Stmt::Assign { target, value } => {
@@ -14362,12 +14541,13 @@ fn collect_stmt_imported_static_owner_calls(
             body,
             ..
         } => {
+            let mut for_shadows = shadows.clone();
             for stmt in init {
                 collect_stmt_imported_static_owner_calls(
                     stmt,
                     aliases,
                     static_members,
-                    shadows,
+                    &mut for_shadows,
                     calls,
                 );
             }
@@ -14376,7 +14556,7 @@ fn collect_stmt_imported_static_owner_calls(
                     condition,
                     aliases,
                     static_members,
-                    shadows,
+                    &for_shadows,
                     calls,
                 );
             }
@@ -14385,7 +14565,7 @@ fn collect_stmt_imported_static_owner_calls(
                     expr,
                     aliases,
                     static_members,
-                    shadows,
+                    &for_shadows,
                     calls,
                 );
             }
@@ -14393,11 +14573,16 @@ fn collect_stmt_imported_static_owner_calls(
                 body,
                 aliases,
                 static_members,
-                shadows,
+                &mut for_shadows,
                 calls,
             );
         }
-        Stmt::EnhancedFor { iterable, body, .. } => {
+        Stmt::EnhancedFor {
+            var_name,
+            iterable,
+            body,
+            ..
+        } => {
             collect_expr_imported_static_owner_calls(
                 iterable,
                 aliases,
@@ -14405,11 +14590,13 @@ fn collect_stmt_imported_static_owner_calls(
                 shadows,
                 calls,
             );
+            let mut body_shadows = shadows.clone();
+            add_imported_static_shadow_name(&mut body_shadows, var_name);
             collect_block_imported_static_owner_calls(
                 body,
                 aliases,
                 static_members,
-                shadows,
+                &mut body_shadows,
                 calls,
             );
         }
@@ -14421,13 +14608,14 @@ fn collect_stmt_imported_static_owner_calls(
                 shadows,
                 calls,
             );
+            let mut switch_shadows = shadows.clone();
             for case in cases {
                 for stmt in &case.statements {
                     collect_stmt_imported_static_owner_calls(
                         stmt,
                         aliases,
                         static_members,
-                        shadows,
+                        &mut switch_shadows,
                         calls,
                     );
                 }
@@ -14439,12 +14627,13 @@ fn collect_stmt_imported_static_owner_calls(
             catches,
             finally_block,
         } => {
+            let mut resource_shadows = shadows.clone();
             for resource in resources {
                 collect_stmt_imported_static_owner_calls(
                     resource,
                     aliases,
                     static_members,
-                    shadows,
+                    &mut resource_shadows,
                     calls,
                 );
             }
@@ -14452,24 +14641,27 @@ fn collect_stmt_imported_static_owner_calls(
                 body,
                 aliases,
                 static_members,
-                shadows,
+                &mut resource_shadows,
                 calls,
             );
             for catch in catches {
+                let mut catch_shadows = shadows.clone();
+                add_imported_static_shadow_name(&mut catch_shadows, &catch.source_name);
                 collect_block_imported_static_owner_calls(
                     &catch.body,
                     aliases,
                     static_members,
-                    shadows,
+                    &mut catch_shadows,
                     calls,
                 );
             }
             if let Some(finally_block) = finally_block {
+                let mut finally_shadows = shadows.clone();
                 collect_block_imported_static_owner_calls(
                     finally_block,
                     aliases,
                     static_members,
-                    shadows,
+                    &mut finally_shadows,
                     calls,
                 );
             }
@@ -14489,21 +14681,21 @@ fn collect_stmt_imported_static_owner_calls(
             collect_type_imported_static_owner_calls(ty, aliases, static_members, calls)
         }
         Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            let mut block_shadows = shadows.clone();
             collect_block_imported_static_owner_calls(
                 block,
                 aliases,
                 static_members,
-                shadows,
+                &mut block_shadows,
                 calls,
             )
         }
         Stmt::VarDecl {
-            initializer: None, ..
-        }
-        | Stmt::Return(None)
-        | Stmt::Break(_)
-        | Stmt::Continue(_)
-        | Stmt::Unsupported(_) => {}
+            initializer: None,
+            name,
+            ..
+        } => add_imported_static_shadow_name(shadows, name),
+        Stmt::Return(None) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => {}
     }
 }
 
@@ -14756,22 +14948,24 @@ fn collect_expr_imported_static_owner_calls(
                         }
                         Member::Method(method) => {
                             if let Some(body) = &method.body {
+                                let mut body_shadows = shadows.clone();
                                 collect_block_imported_static_owner_calls(
                                     body,
                                     aliases,
                                     static_members,
-                                    shadows,
+                                    &mut body_shadows,
                                     calls,
                                 );
                             }
                         }
                         Member::Constructor(constructor) => {
                             if let Some(body) = &constructor.body {
+                                let mut body_shadows = shadows.clone();
                                 collect_block_imported_static_owner_calls(
                                     body,
                                     aliases,
                                     static_members,
-                                    shadows,
+                                    &mut body_shadows,
                                     calls,
                                 );
                             }
@@ -14801,13 +14995,16 @@ fn collect_expr_imported_static_owner_calls(
                 shadows,
                 calls,
             ),
-            crate::java_ir::LambdaBody::Block(block) => collect_block_imported_static_owner_calls(
-                block,
-                aliases,
-                static_members,
-                shadows,
-                calls,
-            ),
+            crate::java_ir::LambdaBody::Block(block) => {
+                let mut body_shadows = shadows.clone();
+                collect_block_imported_static_owner_calls(
+                    block,
+                    aliases,
+                    static_members,
+                    &mut body_shadows,
+                    calls,
+                )
+            }
         },
         Expr::Literal(_)
         | Expr::Var(_)
@@ -15178,7 +15375,7 @@ fn collect_stmt_display_return_hints(
             for catch in catches {
                 let mut catch_ctx = ctx.clone();
                 if let Some(catch_ty) = catch.types.first() {
-                    catch_ctx.insert_local(&catch.name, catch_ty);
+                    catch_ctx.insert_local(&catch.source_name, catch_ty);
                 }
                 collect_block_display_return_hints(&catch.body, &mut catch_ctx, hints);
             }
@@ -15523,6 +15720,67 @@ mod external_facade_support_tests {
     use super::*;
 
     #[test]
+    fn imported_static_owner_call_before_shadowing_local_is_collected() {
+        let program = crate::parser::parse_java_source(
+            r#"
+import external.lib.StaticUtility;
+
+class ImportedOwnerShadowScope {
+    Object run(String path) {
+        Object first = StaticUtility.readValue(path);
+        Object StaticUtility = path;
+        return first;
+    }
+}
+"#,
+        )
+        .program;
+
+        let calls = collect_imported_static_owner_calls(&program);
+
+        assert!(
+            calls
+                .get(&(
+                    "external.lib.StaticUtility".to_string(),
+                    "read_value".to_string()
+                ))
+                .is_some_and(|arities| arities.contains(&1)),
+            "{calls:?}"
+        );
+    }
+
+    #[test]
+    fn imported_static_owner_shadow_does_not_escape_nested_block() {
+        let program = crate::parser::parse_java_source(
+            r#"
+import external.lib.StaticUtility;
+
+class ImportedOwnerNestedShadowScope {
+    Object run(String path) {
+        {
+            Object StaticUtility = path;
+        }
+        return StaticUtility.readValue(path);
+    }
+}
+"#,
+        )
+        .program;
+
+        let calls = collect_imported_static_owner_calls(&program);
+
+        assert!(
+            calls
+                .get(&(
+                    "external.lib.StaticUtility".to_string(),
+                    "read_value".to_string()
+                ))
+                .is_some_and(|arities| arities.contains(&1)),
+            "{calls:?}"
+        );
+    }
+
+    #[test]
     fn external_constructor_support_suppresses_ambiguous_simple_alias() {
         let program = crate::parser::parse_java_source(
             r#"
@@ -15569,6 +15827,42 @@ import java.util.List;
 class ListDisplay {
     String run(List<String> xs) {
         return "xs=" + xs;
+    }
+}
+"#,
+        )
+        .program;
+
+        assert!(program_uses_java_string_runtime_helpers(&program));
+    }
+
+    #[test]
+    fn map_in_string_concat_emits_collection_display_support() {
+        let program = crate::parser::parse_java_source(
+            r#"
+import java.util.Map;
+
+class MapDisplay {
+    String run(Map<String, Integer> values) {
+        return "values=" + values;
+    }
+}
+"#,
+        )
+        .program;
+
+        assert!(program_uses_java_string_runtime_helpers(&program));
+    }
+
+    #[test]
+    fn set_in_string_concat_emits_collection_display_support() {
+        let program = crate::parser::parse_java_source(
+            r#"
+import java.util.Set;
+
+class SetDisplay {
+    String run(Set<String> values) {
+        return "values=" + values;
     }
 }
 "#,
@@ -16916,10 +17210,7 @@ fn source_summary_constructor_methods(
     rust_name: &str,
     arg_count: usize,
 ) -> Vec<String> {
-    let type_simple = type_key.rsplit('.').next().unwrap_or(type_key);
-    let Some(ty) = find_source_type_decl(source_summary_program, type_key)
-        .or_else(|| find_source_type_decl(source_summary_program, type_simple))
-    else {
+    let Some(ty) = find_source_summary_owner_decl(source_summary_program, type_key) else {
         return Vec::new();
     };
     ty.members
@@ -17123,6 +17414,8 @@ fn display_capable_external_facade_types(facts: &FactSet) -> BTreeSet<String> {
 fn external_facade_display_impl(ty: &str, use_to_string_method: bool) -> String {
     let body = if use_to_string_method {
         "write!(f, \"{}\", self.to_string())".to_string()
+    } else if let Some(display_name) = java_platform_object_display_name(ty) {
+        format!("write!(f, \"{display_name}@0\")")
     } else {
         format!("panic!(\"unsupported Java external facade display: {ty}\")")
     };
@@ -17135,6 +17428,14 @@ fn external_facade_display_impl(ty: &str, use_to_string_method: bool) -> String 
     format!(
         "impl std::fmt::Display for {ty} {{\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{ {body} }}\n}}"
     )
+}
+
+fn java_platform_object_display_name(ty: &str) -> Option<&'static str> {
+    match canonical_external_receiver_type_key(ty).as_str() {
+        "InputStream" | "JavaIoInputStream" => Some("java.io.InputStream"),
+        "Random" | "JavaUtilRandom" => Some("java.util.Random"),
+        _ => None,
+    }
 }
 
 fn external_facade_type_is_generic_carrier(ty: &str) -> bool {
@@ -17583,9 +17884,7 @@ fn source_summary_imported_static_methods(
     arg_count: usize,
 ) -> Vec<String> {
     let owner_simple = owner_key.rsplit('.').next().unwrap_or(owner_key);
-    let Some(ty) = find_source_type_decl(source_summary_program, owner_key)
-        .or_else(|| find_source_type_decl(source_summary_program, owner_simple))
-    else {
+    let Some(ty) = find_source_summary_owner_decl(source_summary_program, owner_key) else {
         return Vec::new();
     };
     source_summary_method_hierarchy(ty, source_summary_program)
@@ -21999,7 +22298,8 @@ fn expr_uses_java_string_runtime_helpers(expr: &Expr) -> bool {
             expr_uses_java_string_runtime_helpers(expr)
         }
         Expr::Binary { left, right, .. } => {
-            expr_uses_java_string_runtime_helpers(left)
+            (expr_is_string_literal(left) || expr_is_string_literal(right))
+                || expr_uses_java_string_runtime_helpers(left)
                 || expr_uses_java_string_runtime_helpers(right)
         }
         Expr::Ternary {
@@ -22545,7 +22845,7 @@ fn is_known_jdk_utility_constructor(type_name: &str, arg_types: &[JavaType]) -> 
         "Manifest" => arg_types.len() == 1,
         "Properties" => arg_types.is_empty(),
         "ProcessBuilder" => arg_types.len() == 1,
-        "SimpleEntry" => arg_types.len() == 2,
+        "SimpleEntry" | "SimpleImmutableEntry" => arg_types.len() == 2,
         "StringJoiner" => matches!(arg_types.len(), 1 | 2 | 3),
         "StringTokenizer" => matches!(arg_types.len(), 1 | 2 | 3),
         "URL" => arg_types.len() == 1,
@@ -23034,6 +23334,9 @@ pub fn external_api_return_nullability(
             "getMessage" | "get_message" | "getLocalizedMessage" | "get_localized_message",
             0,
         ) if is_known_throwable_type(owner) => NullabilityState::MaybeNull,
+        (Some(owner), "getSuppressed" | "get_suppressed", 0) if is_known_throwable_type(owner) => {
+            NullabilityState::DefinitelyNonNull
+        }
         (Some(owner), "name", 0) if is_known_external_enum_type(owner) => {
             NullabilityState::DefinitelyNonNull
         }
@@ -23517,6 +23820,200 @@ mod source_summary_method_identity_tests {
         assert_eq!(
             external_api_method_receiver_owner_key(&optional_widget, &types, "label"),
             Some("Widget".to_string())
+        );
+    }
+
+    #[test]
+    fn find_source_type_decl_refuses_ambiguous_simple_package_peer() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+package a;
+class Item {}
+class Named {}
+"#,
+        );
+        let mut left = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        left.program.types[0].name = "a.Item".to_string();
+        left.program.types[1].name = "a.Named".to_string();
+        let parsed = crate::parser::parse_java_source(
+            r#"
+package b;
+class Item {}
+"#,
+        );
+        let mut right = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        right.program.types[0].name = "b.Item".to_string();
+        let mut program = left.program;
+        program.types.extend(right.program.types);
+
+        assert!(
+            find_source_type_decl(&program, "Item").is_none(),
+            "ambiguous simple owner lookup must fail closed"
+        );
+        assert_eq!(
+            find_source_type_decl(&program, "a.Item").map(|ty| ty.name.as_str()),
+            Some("a.Item")
+        );
+        assert_eq!(
+            find_source_type_decl(&program, "b.Item").map(|ty| ty.name.as_str()),
+            Some("b.Item")
+        );
+        assert_eq!(
+            find_source_type_decl(&program, "Named").map(|ty| ty.name.as_str()),
+            Some("a.Named"),
+            "unique simple owner fallback remains available"
+        );
+    }
+
+    #[test]
+    fn source_summary_constructor_lookup_does_not_borrow_other_package_simple_owner() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+package a;
+class Item {
+    Item() {}
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+
+        assert!(
+            source_summary_constructor_methods(&resolved.program, "b.Item", "new", 0).is_empty(),
+            "qualified source-summary owner lookup must not retry against a different package's simple peer"
+        );
+        assert_eq!(
+            source_summary_constructor_methods(&resolved.program, "a.Item", "new", 0).len(),
+            1,
+            "same-package qualified lookup may use the simple declaration in a package-local summary"
+        );
+    }
+
+    #[test]
+    fn source_summary_imported_static_lookup_does_not_borrow_other_package_simple_owner() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+package a;
+class Item {
+    static int make() { return 1; }
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+
+        assert!(
+            source_summary_imported_static_methods(
+                &FactSet::default(),
+                &resolved.program,
+                "b.Item",
+                "make",
+                0,
+            )
+            .is_empty(),
+            "qualified source-summary static lookup must not retry against a different package's simple peer"
+        );
+        assert_eq!(
+            source_summary_imported_static_methods(
+                &FactSet::default(),
+                &resolved.program,
+                "a.Item",
+                "make",
+                0,
+            )
+            .len(),
+            1,
+            "same-package qualified static lookup may use the simple declaration in a package-local summary"
+        );
+    }
+
+    #[test]
+    fn find_program_type_by_key_refuses_ambiguous_simple_package_peer() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+package a;
+class Item {}
+class Named {}
+"#,
+        );
+        let mut left = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        left.program.types[0].name = "a.Item".to_string();
+        left.program.types[1].name = "a.Named".to_string();
+        let parsed = crate::parser::parse_java_source(
+            r#"
+package b;
+class Item {}
+"#,
+        );
+        let mut right = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        right.program.types[0].name = "b.Item".to_string();
+        let mut program = left.program;
+        program.types.extend(right.program.types);
+
+        assert!(
+            find_program_type_by_key(&program, "Item").is_none(),
+            "ambiguous simple owner lookup must fail closed"
+        );
+        assert_eq!(
+            find_program_type_by_key(&program, "a.Item").map(|ty| ty.name.as_str()),
+            Some("a.Item")
+        );
+        assert_eq!(
+            find_program_type_by_key(&program, "b.Item").map(|ty| ty.name.as_str()),
+            Some("b.Item")
+        );
+        assert_eq!(
+            find_program_type_by_key(&program, "Named").map(|ty| ty.name.as_str()),
+            Some("a.Named"),
+            "unique simple owner fallback remains available"
+        );
+    }
+
+    #[test]
+    fn source_summary_method_hierarchy_refuses_ambiguous_simple_super_owner() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+package a;
+class Base {
+    int f() { return 1; }
+}
+"#,
+        );
+        let mut left = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        left.program.types[0].name = "a.Base".to_string();
+        let parsed = crate::parser::parse_java_source(
+            r#"
+package b;
+class Base {
+    int g() { return 2; }
+}
+"#,
+        );
+        let mut right = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        right.program.types[0].name = "b.Base".to_string();
+        let parsed = crate::parser::parse_java_source(
+            r#"
+package c;
+class Child extends Base {
+    int own() { return 3; }
+}
+"#,
+        );
+        let mut child_program =
+            crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        child_program.program.types[0].name = "c.Child".to_string();
+        let mut program = child_program.program;
+        program.types.extend(left.program.types);
+        program.types.extend(right.program.types);
+        let child = find_program_type_by_key(&program, "c.Child").expect("c.Child");
+
+        let inherited: Vec<_> = source_summary_method_hierarchy(child, &program)
+            .into_iter()
+            .map(|method| method.name.as_str())
+            .collect();
+
+        assert_eq!(
+            inherited,
+            vec!["own"],
+            "ambiguous simple superclass owner must not borrow the first package peer"
         );
     }
 

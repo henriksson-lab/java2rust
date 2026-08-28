@@ -3660,7 +3660,7 @@ fn collect_stmt_source_dependency_resolution_counts(
             for catch in catches {
                 let mut catch_env = env.clone();
                 for ty in &catch.types {
-                    catch_env.insert_local(catch.name.clone(), ty.clone());
+                    catch_env.insert_local(catch.source_name.clone(), ty.clone());
                 }
                 collect_block_source_dependency_resolution_counts(
                     &catch.body,
@@ -4564,7 +4564,7 @@ fn collect_stmt_resolved_external_pack_field_access_counts(
             for catch in catches {
                 let mut catch_env = env.clone();
                 for ty in &catch.types {
-                    catch_env.insert_local(catch.name.clone(), ty.clone());
+                    catch_env.insert_local(catch.source_name.clone(), ty.clone());
                 }
                 collect_block_resolved_external_pack_field_access_counts(
                     &catch.body,

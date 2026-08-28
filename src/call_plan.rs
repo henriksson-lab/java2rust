@@ -481,6 +481,8 @@ pub enum NativeCollectionMethod {
     SetHashCode,
     SetInsert,
     SetRemove,
+    AddAll,
+    RemoveAll,
     Extend,
     MapHashCode,
     MapInsert,
@@ -679,6 +681,9 @@ pub fn native_collection_lowered_type(
         NativeCollectionMethod::ListAdd => Some(LoweredType::from_java(JavaType::Primitive(
             PrimitiveType::Boolean,
         ))),
+        NativeCollectionMethod::AddAll | NativeCollectionMethod::RemoveAll => Some(
+            LoweredType::from_java(JavaType::Primitive(PrimitiveType::Boolean)),
+        ),
         NativeCollectionMethod::ListSet => {
             let element_ty = crate::types::sequence_element_type(&receiver_ty)?;
             Some(LoweredType::from_java(element_ty.clone()))
@@ -3504,8 +3509,14 @@ fn plan_native_collection_receiver_call<'a>(
         (kind, "contains") if kind.is_set_like() => NativeCollectionMethod::Contains,
         (kind, "add") if kind.is_set_like() => NativeCollectionMethod::SetInsert,
         (kind, "remove") if kind.is_set_like() => NativeCollectionMethod::SetRemove,
-        (crate::stdlib::JavaCollectionKind::List, "addAll") => NativeCollectionMethod::Extend,
-        (kind, "addAll") if kind.is_set_like() => NativeCollectionMethod::Extend,
+        (crate::stdlib::JavaCollectionKind::List, "addAll") => NativeCollectionMethod::AddAll,
+        (crate::stdlib::JavaCollectionKind::List, "removeAll" | "remove_all") => {
+            NativeCollectionMethod::RemoveAll
+        }
+        (kind, "addAll") if kind.is_set_like() => NativeCollectionMethod::AddAll,
+        (kind, "removeAll" | "remove_all") if kind.is_set_like() => {
+            NativeCollectionMethod::RemoveAll
+        }
         (kind, "hashCode" | "hash_code") if kind.is_map_like() => {
             NativeCollectionMethod::MapHashCode
         }
@@ -3941,6 +3952,15 @@ fn static_type_alias_shadows_native_owner(
 }
 
 fn native_static_owner_matches(owner: &str, native_owner: &str) -> bool {
+    let owner_key = crate::stdlib::canonical_external_receiver_type_key(owner);
+    let owner_key =
+        crate::javalibs::native_java_static_owner_alias(&owner_key).unwrap_or(owner_key.as_str());
+    let native_owner_key = crate::stdlib::canonical_external_receiver_type_key(native_owner);
+    let native_owner_key = crate::javalibs::native_java_static_owner_alias(&native_owner_key)
+        .unwrap_or(native_owner_key.as_str());
+    if owner_key == native_owner_key {
+        return true;
+    }
     if owner == native_owner {
         return true;
     }
@@ -3977,7 +3997,9 @@ fn native_static_owner_qualified_names(native_owner: &str) -> &'static [&'static
 
 fn receiver_is_native_static_owner(receiver_name: &str, types: &TypeEnv) -> bool {
     let canonical = crate::stdlib::canonical_external_receiver_type_key(receiver_name);
-    let receiver_simple = canonical.rsplit('.').next().unwrap_or(&canonical);
+    let receiver_key =
+        crate::javalibs::native_java_static_owner_alias(&canonical).unwrap_or(canonical.as_str());
+    let receiver_simple = receiver_key.rsplit('.').next().unwrap_or(receiver_key);
     types.static_type_alias(receiver_name).is_some()
         || receiver_name
             .chars()
@@ -5108,7 +5130,11 @@ pub fn native_collection_method_arg_shapes(
                 collection_element_arg_shape_with_effective_facts(&receiver_ty, &effective_facts)?,
             ]
         }
-        NativeCollectionMethod::Extend if arg_count == 1 => {
+        NativeCollectionMethod::AddAll
+        | NativeCollectionMethod::RemoveAll
+        | NativeCollectionMethod::Extend
+            if arg_count == 1 =>
+        {
             vec![storage_arg_shape_with_effective_facts(
                 receiver_ty.clone(),
                 &effective_facts,
@@ -5608,7 +5634,13 @@ fn facade_abi_native_collection_arg_java_types(
             crate::types::sequence_mutation_element_type(&receiver_ty)
                 .map(|element_ty| vec![JavaType::Primitive(PrimitiveType::Int), element_ty])
         }
-        NativeCollectionMethod::Extend if arg_count == 1 => None,
+        NativeCollectionMethod::AddAll
+        | NativeCollectionMethod::RemoveAll
+        | NativeCollectionMethod::Extend
+            if arg_count == 1 =>
+        {
+            None
+        }
         NativeCollectionMethod::ListHashCode
         | NativeCollectionMethod::SetHashCode
         | NativeCollectionMethod::MapHashCode

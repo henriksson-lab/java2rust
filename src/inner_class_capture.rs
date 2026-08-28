@@ -21,7 +21,8 @@
 
 use crate::diagnostics::DiagnosticBag;
 use crate::facts::FactSet;
-use crate::java_ir::{Member, Program, TypeDecl};
+use crate::java_ir::{Block, Expr, JavaType, LambdaBody, Member, Program, Stmt, TypeDecl};
+use std::collections::HashSet;
 
 /// A non-static inner class whose constructor cannot produce its outer handle.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,9 +38,10 @@ pub fn unconstructable_inner_classes(
     program: &Program,
     facts: &FactSet,
 ) -> Vec<UnconstructableInnerClass> {
+    let constructed = constructed_type_names(program);
     let mut found = Vec::new();
     for ty in &program.types {
-        collect_in_type(ty, facts, &mut found);
+        collect_in_type(ty, facts, &constructed, &mut found);
     }
     found
 }
@@ -67,9 +69,16 @@ pub fn report_unconstructable_inner_classes(
     }
 }
 
-fn collect_in_type(ty: &TypeDecl, facts: &FactSet, found: &mut Vec<UnconstructableInnerClass>) {
+fn collect_in_type(
+    ty: &TypeDecl,
+    facts: &FactSet,
+    constructed: &HashSet<String>,
+    found: &mut Vec<UnconstructableInnerClass>,
+) {
     if let Some(outer_type) = facts.captures.outer_this_type_for_type(&ty.name) {
-        if !outer_this_constructor_handle_is_implemented(outer_type, facts) {
+        if constructed_type_names_include(constructed, &ty.name)
+            && !outer_this_constructor_handle_is_implemented(outer_type, facts)
+        {
             found.push(UnconstructableInnerClass {
                 inner_type: ty.name.clone(),
                 outer_type: outer_type.to_string(),
@@ -78,8 +87,280 @@ fn collect_in_type(ty: &TypeDecl, facts: &FactSet, found: &mut Vec<Unconstructab
     }
     for member in &ty.members {
         if let Member::Type(nested) = member {
-            collect_in_type(nested, facts, found);
+            collect_in_type(nested, facts, constructed, found);
         }
+    }
+}
+
+fn constructed_type_names(program: &Program) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for ty in &program.types {
+        collect_constructed_type_names_from_type(ty, &mut names);
+    }
+    names
+}
+
+fn collect_constructed_type_names_from_type(ty: &TypeDecl, names: &mut HashSet<String>) {
+    for member in &ty.members {
+        collect_constructed_type_names_from_member(member, names);
+    }
+    for block in &ty.static_init_blocks {
+        collect_constructed_type_names_from_block(&block.block, names);
+    }
+}
+
+fn collect_constructed_type_names_from_member(member: &Member, names: &mut HashSet<String>) {
+    match member {
+        Member::Field(field) => {
+            if let Some(initializer) = &field.initializer {
+                collect_constructed_type_names_from_expr(initializer, names);
+            }
+        }
+        Member::Method(method) => {
+            if let Some(body) = &method.body {
+                collect_constructed_type_names_from_block(body, names);
+            }
+        }
+        Member::Constructor(constructor) => {
+            if let Some(body) = &constructor.body {
+                collect_constructed_type_names_from_block(body, names);
+            }
+        }
+        Member::Type(ty) => collect_constructed_type_names_from_type(ty, names),
+        Member::Unsupported { .. } => {}
+    }
+}
+
+fn collect_constructed_type_names_from_block(block: &Block, names: &mut HashSet<String>) {
+    for stmt in &block.statements {
+        collect_constructed_type_names_from_stmt(stmt, names);
+    }
+}
+
+fn collect_constructed_type_names_from_stmt(stmt: &Stmt, names: &mut HashSet<String>) {
+    match stmt {
+        Stmt::VarDecl { initializer, .. } | Stmt::Return(initializer) => {
+            if let Some(expr) = initializer {
+                collect_constructed_type_names_from_expr(expr, names);
+            }
+        }
+        Stmt::Assign { target, value } => {
+            collect_constructed_type_names_from_expr(target, names);
+            collect_constructed_type_names_from_expr(value, names);
+        }
+        Stmt::Expr(expr) | Stmt::Throw(expr) => {
+            collect_constructed_type_names_from_expr(expr, names)
+        }
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            collect_constructed_type_names_from_expr(condition, names);
+            collect_constructed_type_names_from_block(then_block, names);
+            if let Some(else_block) = else_block {
+                collect_constructed_type_names_from_block(else_block, names);
+            }
+        }
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
+            collect_constructed_type_names_from_expr(condition, names);
+            collect_constructed_type_names_from_block(body, names);
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            for stmt in init {
+                collect_constructed_type_names_from_stmt(stmt, names);
+            }
+            if let Some(condition) = condition {
+                collect_constructed_type_names_from_expr(condition, names);
+            }
+            for expr in update {
+                collect_constructed_type_names_from_expr(expr, names);
+            }
+            collect_constructed_type_names_from_block(body, names);
+        }
+        Stmt::EnhancedFor { iterable, body, .. } => {
+            collect_constructed_type_names_from_expr(iterable, names);
+            collect_constructed_type_names_from_block(body, names);
+        }
+        Stmt::Switch { selector, cases } => {
+            collect_constructed_type_names_from_expr(selector, names);
+            for case in cases {
+                for label in &case.labels {
+                    if let crate::java_ir::SwitchLabel::Expr(expr) = label {
+                        collect_constructed_type_names_from_expr(expr, names);
+                    }
+                }
+                for stmt in &case.statements {
+                    collect_constructed_type_names_from_stmt(stmt, names);
+                }
+            }
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            for resource in resources {
+                collect_constructed_type_names_from_stmt(resource, names);
+            }
+            collect_constructed_type_names_from_block(body, names);
+            for catch in catches {
+                collect_constructed_type_names_from_block(&catch.body, names);
+            }
+            if let Some(finally_block) = finally_block {
+                collect_constructed_type_names_from_block(finally_block, names);
+            }
+        }
+        Stmt::ConstructorInvocation { args, .. } => {
+            for arg in args {
+                collect_constructed_type_names_from_expr(arg, names);
+            }
+        }
+        Stmt::LocalType(ty) => collect_constructed_type_names_from_type(ty, names),
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            collect_constructed_type_names_from_block(block, names);
+        }
+        Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => {}
+    }
+}
+
+fn collect_constructed_type_names_from_expr(expr: &Expr, names: &mut HashSet<String>) {
+    match expr {
+        Expr::New {
+            ty,
+            args,
+            body,
+            resolved,
+        } => {
+            if let Some(name) = java_type_name(ty) {
+                insert_constructed_type_name(names, name);
+            }
+            if let Some(resolved) = resolved
+                && let Some(name) = java_type_name(&resolved.constructed_type)
+            {
+                insert_constructed_type_name(names, name);
+            }
+            for arg in args {
+                collect_constructed_type_names_from_expr(arg, names);
+            }
+            if let Some(body) = body {
+                for member in body {
+                    collect_constructed_type_names_from_member(member, names);
+                }
+            }
+        }
+        Expr::FieldAccess(receiver, _)
+        | Expr::Unary { expr: receiver, .. }
+        | Expr::Cast { expr: receiver, .. }
+        | Expr::InstanceOf { expr: receiver, .. } => {
+            collect_constructed_type_names_from_expr(receiver, names);
+        }
+        Expr::ArrayAccess(array, index)
+        | Expr::Binary {
+            left: array,
+            right: index,
+            ..
+        } => {
+            collect_constructed_type_names_from_expr(array, names);
+            collect_constructed_type_names_from_expr(index, names);
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            for dimension in dimensions {
+                collect_constructed_type_names_from_expr(dimension, names);
+            }
+            if let Some(initializer) = initializer {
+                for item in initializer {
+                    collect_constructed_type_names_from_expr(item, names);
+                }
+            }
+        }
+        Expr::ArrayInitializer(items) => {
+            for item in items {
+                collect_constructed_type_names_from_expr(item, names);
+            }
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_constructed_type_names_from_expr(condition, names);
+            collect_constructed_type_names_from_expr(then_expr, names);
+            collect_constructed_type_names_from_expr(else_expr, names);
+        }
+        Expr::Switch { selector, cases } => {
+            collect_constructed_type_names_from_expr(selector, names);
+            for case in cases {
+                for label in &case.labels {
+                    if let crate::java_ir::SwitchLabel::Expr(expr) = label {
+                        collect_constructed_type_names_from_expr(expr, names);
+                    }
+                }
+                collect_constructed_type_names_from_expr(&case.value, names);
+            }
+        }
+        Expr::Call { receiver, args, .. } => {
+            if let Some(receiver) = receiver {
+                collect_constructed_type_names_from_expr(receiver, names);
+            }
+            for arg in args {
+                collect_constructed_type_names_from_expr(arg, names);
+            }
+        }
+        Expr::Lambda { body, .. } => match body {
+            LambdaBody::Expr(expr) => collect_constructed_type_names_from_expr(expr, names),
+            LambdaBody::Block(block) => collect_constructed_type_names_from_block(block, names),
+        },
+        Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::MethodReference { .. }
+        | Expr::ClassLiteral(_)
+        | Expr::Unsupported { .. }
+        | Expr::Raw(_) => {}
+    }
+}
+
+fn insert_constructed_type_name(names: &mut HashSet<String>, name: &str) {
+    names.insert(name.to_string());
+    if let Some(simple) = name.rsplit(['.', '$']).next() {
+        names.insert(simple.to_string());
+    }
+}
+
+fn constructed_type_names_include(names: &HashSet<String>, ty_name: &str) -> bool {
+    names.contains(ty_name)
+        || ty_name
+            .rsplit(['.', '$'])
+            .next()
+            .is_some_and(|simple| names.contains(simple))
+}
+
+fn java_type_name(ty: &JavaType) -> Option<&str> {
+    match ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(name),
+        JavaType::Void
+        | JavaType::Primitive(_)
+        | JavaType::String
+        | JavaType::Array(_)
+        | JavaType::Wildcard(_) => None,
     }
 }
 

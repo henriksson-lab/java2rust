@@ -1,7 +1,7 @@
 use crate::array_plan::ArrayExprPlan;
 use crate::coercion::{
     BorrowProjectionUse, ensure_borrow_projection, function_call_projection,
-    raw_receiver_projection, receiver_method_call_projection_exact,
+    parenthesize_raw_postfix_receiver, receiver_method_call_projection_exact,
     recover_parseable_raw_operand_projection,
 };
 use crate::java_ir::{JavaType, PrimitiveType};
@@ -221,66 +221,6 @@ pub fn array2_index_projection(array: RustExpr, row: RustExpr, col: RustExpr) ->
     )
 }
 
-fn parenthesize_raw_postfix_receiver(expr: RustExpr) -> RustExpr {
-    raw_receiver_projection(expr, raw_needs_postfix_receiver_parentheses)
-}
-
-fn raw_needs_postfix_receiver_parentheses(raw: &str) -> bool {
-    if raw.starts_with('(') && raw.ends_with(')') {
-        return false;
-    }
-    let mut paren_depth = 0usize;
-    let mut bracket_depth = 0usize;
-    let mut brace_depth = 0usize;
-    let mut chars = raw.char_indices().peekable();
-    while let Some((idx, ch)) = chars.next() {
-        match ch {
-            '(' => paren_depth += 1,
-            ')' => paren_depth = paren_depth.saturating_sub(1),
-            '[' => bracket_depth += 1,
-            ']' => bracket_depth = bracket_depth.saturating_sub(1),
-            '{' => brace_depth += 1,
-            '}' => brace_depth = brace_depth.saturating_sub(1),
-            '"' | '\'' => {
-                let quote = ch;
-                let mut escaped = false;
-                for (_, inner) in chars.by_ref() {
-                    if escaped {
-                        escaped = false;
-                    } else if inner == '\\' {
-                        escaped = true;
-                    } else if inner == quote {
-                        break;
-                    }
-                }
-            }
-            '+' | '-' | '*' | '/' | '%' | '^' | '&' | '|' | '=' | '<' | '>'
-                if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 =>
-            {
-                return true;
-            }
-            '!' if paren_depth == 0
-                && bracket_depth == 0
-                && brace_depth == 0
-                && (idx == 0 || raw[idx + 1..].starts_with('=')) =>
-            {
-                return true;
-            }
-            'a' if paren_depth == 0
-                && bracket_depth == 0
-                && brace_depth == 0
-                && raw[idx..].starts_with("as")
-                && raw[..idx].ends_with(char::is_whitespace)
-                && raw[idx + 2..].starts_with(char::is_whitespace) =>
-            {
-                return true;
-            }
-            _ => {}
-        }
-    }
-    false
-}
-
 pub fn array2_row_mut_assign_stmt(array: RustExpr, index: RustExpr, value: RustExpr) -> RustStmt {
     let row = receiver_method_call_projection_exact(
         parenthesize_raw_postfix_receiver(array),
@@ -319,7 +259,7 @@ fn array_dimension_len_projection(expr: RustExpr) -> RustExpr {
 }
 
 fn parenthesize_raw_array_dimension_cast_operand(expr: RustExpr) -> RustExpr {
-    raw_receiver_projection(expr, raw_needs_postfix_receiver_parentheses)
+    parenthesize_raw_postfix_receiver(expr)
 }
 
 fn array_initializer_projection(children: Vec<RustExpr>) -> RustExpr {

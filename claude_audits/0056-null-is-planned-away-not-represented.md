@@ -7,6 +7,45 @@ to compile or panic instead of reaching translated control flow, and unknown
 erased-object display still has no dynamic Java `toString` recovery.
 Kind: semantics / lowering.
 
+Follow-up 2026-08-28 nullable OutputStream receiver pass:
+nullable JDK facade receivers for result-returning calls now use the fallible
+optional receiver projection when the current context can propagate
+`JavaException`. `OutputStream out = null; out.write(decoded);` in a throwing
+method now lowers through `ok_or_else(|| JavaException::new("NullPointerException", ...))?`
+before calling the selected byte-slice overload, instead of panicking through
+`.expect("Java null receiver")`. Regression:
+`tests/idiom_gaps.rs::optional_output_stream_write_byte_array_uses_slice_overload`.
+Broader non-argument catchable null coercions remain open.
+
+Follow-up 2026-08-28 source-class-bound return pass:
+`T extends SourceClass` trait surfaces no longer force declared reference
+returns back to non-null. The class-bound trait declaration now widens its
+return shape from valid implementations, forwarding impls skip the old
+`.expect("Java null receiver")` when the trait return is already optional, and
+type-parameter-bound call shape/nullability lookup now trusts the solved bound
+method signature instead of injecting a definitely-non-null policy. Regression:
+`tests/idiom_gaps.rs::source_generic_class_bound_method_call_uses_bound_surface`;
+the nearby display path remains covered by
+`tests/idiom_gaps.rs::optional_type_param_bound_call_display_uses_bound_return_shape`.
+This closes the concrete source-bound trait unwrap found by the 0056 audit;
+broader non-argument catchable null coercions and unknown erased display remain
+open.
+
+Follow-up 2026-08-28 erased `Path` display pass: platform erased-object display
+support now includes the built-in `java.nio.file.Path` facade. The support
+emitter also treats `File` mentions as sufficient to include the `Path` downcast
+because `File.toPath()` can produce an erased `Path` without a declared `Path`
+slot. Covered by `tests/differential/ErasedPathDisplay.java` (`xabc`). Unknown
+external erased display without source/platform/downcast evidence remains open.
+
+Follow-up 2026-08-28: assignment clone recovery now includes nullable owned
+values whose optional element is clone-recoverable. A constructor can assign a
+nullable `String` parameter into one field and still read/assign it later
+without moving the `Option<String>` out of the parameter. Regression:
+`tests/idiom_gaps.rs::source_nullable_field_getter_returns_optional_string`.
+This narrows a compile failure in nullable constructor/body lowering; it does
+not close the broader null representation or unknown erased-display model work.
+
 Follow-up 2026-08-26: catchable Java-null rewriting now covers more structured
 expression positions that could still preserve `.expect("Java null receiver")`
 inside a fallible context: the function operand of a structured call,
@@ -285,15 +324,19 @@ the nullable carrier is preserved until a later Java dereference. The sibling
 support facade shape, returning `Option<URL>` without an outer `Some(...)`
 wrapper. Regression: `class_literal_get_class_loader_uses_platform_facade`.
 
-Updated 2026-08-25 nullable-field receiver follow-up: the previously
-rendered-only `MapEntrySetFirstKeyFromNullableField` shape is now behaviourally
-covered in a catchable context. `tests/differential/NullableFieldReceiverCatch.java`
-stores a default-null source field, dereferences it through
-`holder.getValues().entrySet().iterator().next().getKey()`, and catches
-`NullPointerException`; Java and translated Rust both return `npe`. This keeps
-the plain uncaught `.unwrap()` shape visible in the existing idiom assertion
-while gating the propagated `try/catch` path with the Java oracle. The
-translated-output differential suite passes with 131 fixtures.
+Updated 2026-08-25 nullable-field receiver follow-up, revised 2026-08-28:
+the previously rendered-only `MapEntrySetFirstKeyFromNullableField` shape is
+now behaviourally covered in a catchable context, and the idiom shape itself no
+longer leaves the map receiver as an uncaught Rust panic. The specialized
+`entrySet().iterator().next().getKey()` lowering now runs its final accessor
+projection through the existing catchable-null rewrite in propagating contexts,
+so `values().entrySet()` and `holder.getValues().entrySet()` lower through
+`ok_or_else(|| JavaException::new("NullPointerException", ...))?` rather than
+`.expect("Java null receiver")`. Regressions:
+`tests/idiom_gaps.rs::map_entry_set_iterator_next_get_key_uses_native_iterator_shape`
+and
+`tests/idiom_gaps.rs::map_entry_set_iterator_next_get_key_uses_receiver_signature_shape`;
+the latter is promoted out of the idiom-gaps failure baseline.
 
 Method: differential testing against `javac`/`java` as oracle, per the recipe in
 `tests/differential.rs`. Every claim below is a *verified* Java-output vs.
@@ -821,6 +864,24 @@ In priority order:
    `representation_lowering::trait_return_shape_tests::trait_return_shape_does_not_widen_to_unrelated_optional_return`,
    and
    `slot_shape_design::trait_impl_forwarding_keeps_nullable_implementation_return_shape`.
+   Follow-up 2026-08-28: required receivers produced by nullable sequence
+   storage now keep the Java null boundary after any collection bounds check.
+   `List<String> values; values.add(null); values.get(0).length()` used to
+   compile as `Option<String>::len()` and return `0` instead of raising a
+   catchable `NullPointerException`. Nullable array `.length` in a propagating
+   `try/catch` also now rewrites the receiver unwrap through `ok_or_else(...)?`
+   instead of leaving `.expect("Java null receiver")`. Covered by
+   `lower::tests::nullable_list_get_receiver_unwrap_is_catchable_after_bounds_check`,
+   `lower::tests::nullable_array_length_unwrap_is_catchable_in_propagating_context`,
+   `tests/differential/ListElementReceiverNullCatch.java` (`npe`), and
+   `tests/differential/NullableArrayLengthCatch.java` (`npe`).
+   Follow-up 2026-08-28: primitive arithmetic operands produced by `Map.get`
+   now use the same catchable null-unboxing rewrite in propagating contexts.
+   An empty map `totals.get("x") / 2` inside
+   `try/catch (NullPointerException)` now raises
+   `JavaException::new("NullPointerException", ...)` instead of panicking
+   through `.copied().expect("Java null receiver")`. Covered by
+   `tests/differential/MapGetArithmeticNullCatch.java` (`npe`).
 2. **Handle nullable constructor/method parameters explicitly** instead of
    forcing `.expect` when a call site passes `null`.
 3. **Finish unknown/external erased object display capabilities.**
@@ -833,3 +894,72 @@ In priority order:
    external API fact identifies a Java `toString()` surface.
 5. Promote each remaining repro as it becomes loud-or-correct. Do not add a
    passing assertion that only checks rendered Rust text.
+
+Follow-up 2026-08-28: `String.join` now keeps explicit null elements
+represented through the join value path instead of leaving the collection or
+varargs vector as mixed `String`/`None` Rust. A null-bearing literal collection
+or varargs vector is normalized to `Option<String>` elements, mapped through
+Java's display policy (`null` renders as `"null"`), then joined. Promoted
+differential fixtures: `StringJoinNullElement` and
+`StringJoinVarargsNullElement`, both checking Java and translated output produce
+`a,null,b`.
+
+Follow-up 2026-08-28: `Object value = System.in; "x" + value` now uses the
+platform erased-display path instead of panicking at runtime. The built-in
+`InputStream` shim has a Java-object-style `Display` fallback, and the erased
+object runtime emits an `InputStream` downcast when `System`/`InputStream` is in
+the source surface. Promoted differential fixture: `ErasedInputStreamDisplay`,
+which checks the translated output matches Java's stable `xjava.io.` prefix.
+This is still a platform-carrier mitigation; arbitrary unknown erased display
+without source/platform/fact evidence remains open.
+
+Follow-up 2026-08-28: `Object value = new Random(1); "x" + value` now follows
+the same platform erased-display route. `Random` is included in the generated
+platform downcast table when it appears in the source surface, and the generated
+external facade `Display` fallback emits Java-object-style
+`java.util.Random@0` instead of panicking. Promoted differential fixture:
+`ErasedRandomDisplay`, which compares Java and translated output through the
+stable `xjava.util.Random@` prefix. This remains a platform-carrier mitigation;
+arbitrary unknown erased display without source/platform/fact evidence remains
+open.
+
+Follow-up 2026-08-28: `Object value = new URL("http://example.com/a"); "x" +
+value` now uses the platform erased-display route. Both generated `URL` support
+shims implement `Display` as the URL string value, and `URL` is included in the
+generated platform downcast table when it appears in the source surface.
+Promoted differential fixture: `ErasedUrlDisplay`, which checks Java and
+translated output both produce `xhttp://example.com/a`. This remains a
+platform-carrier mitigation; arbitrary unknown erased display without
+source/platform/fact evidence remains open.
+
+Follow-up 2026-08-28: `String.valueOf(Object)` now preserves Java's nullable
+erased-object display when the argument is a solved nullable source parameter.
+The string-slot `valueOf` path and the display-call path share the same
+optional-erased predicate, so `Object value = null; String.valueOf(value)`
+lowers through `as_ref().map(...).unwrap_or_else(|| "null".to_string())`
+instead of calling `java_erased_object_to_string(&value)` on the `Option`
+carrier. Promoted differential fixture: `StringValueOfNullObject`, which
+matches Java's `null` oracle. The differential suite is now at 193 fixtures.
+
+Follow-up 2026-08-28: the fully-qualified optional
+`java.io.ByteArrayOutputStream` path is no longer baseline-listed. The generated
+local remains typed as `Option<JavaIoByteArrayOutputStream>` and no longer
+falls back to `Option<Box<dyn Any>>` or a downcast; nullable receiver uses of
+`close()` and `toByteArray()` now go through the catchable
+`NullPointerException` projection instead of `unwrap()`. Regression:
+`tests/idiom_gaps.rs::fully_qualified_optional_byte_array_output_stream_stays_typed`.
+
+Follow-up 2026-08-28: the catchable-null rewrite now recovers parseable raw
+expressions before walking them. A compatibility raw expression such as
+`helper(value.expect("Java null receiver"))` is recovered to structured IR and
+rewritten through `ok_or_else(|| JavaException::new("NullPointerException",
+...))?` instead of keeping the uncaught `.expect(...)` inside the call.
+Regression:
+`lower::tests::make_java_null_expect_catchable_recovers_parseable_raw_expression`.
+
+Follow-up 2026-08-28: `String.valueOf(String)` now preserves Java's `"null"`
+spelling for nullable string carriers. Planned/native `String.valueOf` calls
+route through a shared valueOf display helper, and the final call lowering
+recovers terminal `expect("Java null receiver")` chains before applying the
+optional-string display projection. Regression:
+`tests/idiom_gaps.rs::string_value_of_nullable_string_preserves_java_null_spelling`.

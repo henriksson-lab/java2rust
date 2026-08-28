@@ -1053,6 +1053,7 @@ fn parses_multi_catch_types() {
         .unwrap();
 
     assert_eq!(try_stmt.name, "ex");
+    assert_eq!(try_stmt.source_name, "ex");
     assert_eq!(
         try_stmt.types,
         vec![
@@ -1066,6 +1067,39 @@ fn parses_multi_catch_types() {
             }
         ]
     );
+}
+
+#[test]
+fn catch_params_preserve_unescaped_source_name() {
+    let parsed = parse_java_source(
+        r#"
+        class CatchKeywordParam {
+            String run() {
+                try {
+                    return "ok";
+                } catch (RuntimeException crate) {
+                    return crate.toString();
+                }
+            }
+        }
+        "#,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let method = first_method(&parsed.program.types[0]);
+    let catch = method
+        .body
+        .as_ref()
+        .unwrap()
+        .statements
+        .iter()
+        .find_map(|stmt| match stmt {
+            Stmt::Try { catches, .. } => catches.first(),
+            _ => None,
+        })
+        .unwrap();
+
+    assert_eq!(catch.name, "crate__");
+    assert_eq!(catch.source_name, "crate");
 }
 
 #[test]

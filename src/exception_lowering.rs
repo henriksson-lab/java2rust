@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use crate::coercion::{
-    function_call_projection, macro_call_projection, raw_receiver_projection,
+    function_call_projection, macro_call_projection, parenthesize_raw_postfix_receiver,
     receiver_method_call_projection_exact,
 };
 use crate::facts::{ExternalLibraryMode, FactSet};
@@ -28,16 +28,23 @@ pub fn java_exception_support_item_with_facts(facts: &FactSet) -> RustItem {
     let mut item = r#"#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct InputStream;
 
+impl std::fmt::Display for InputStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "java.io.InputStream@0")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JavaException {
     pub class_name: &'static str,
     pub message: String,
     pub cause: Option<std::boxed::Box<JavaException>>,
+    pub suppressed: Vec<JavaException>,
 }
 
 impl JavaException {
     pub fn new(class_name: &'static str, message: String) -> JavaException {
-        JavaException { class_name, message, cause: None }
+        JavaException { class_name, message, cause: None, suppressed: Vec::new() }
     }
 
     pub fn with_cause(
@@ -45,11 +52,16 @@ impl JavaException {
         message: String,
         cause: JavaException,
     ) -> JavaException {
-        JavaException { class_name, message, cause: Some(std::boxed::Box::new(cause)) }
+        JavaException {
+            class_name,
+            message,
+            cause: Some(std::boxed::Box::new(cause)),
+            suppressed: Vec::new(),
+        }
     }
 
     pub fn from_display(class_name: &'static str, err: impl std::fmt::Display) -> JavaException {
-        JavaException { class_name, message: err.to_string(), cause: None }
+        JavaException { class_name, message: err.to_string(), cause: None, suppressed: Vec::new() }
     }
 
     pub fn is_instance(&self, class_names: &[&str]) -> bool {
@@ -72,6 +84,14 @@ impl JavaException {
 
     pub fn get_localized_message(&self) -> Option<String> {
         self.get_message()
+    }
+
+    pub fn add_suppressed(&mut self, exception: JavaException) {
+        self.suppressed.push(exception);
+    }
+
+    pub fn get_suppressed(&self) -> Vec<Option<JavaException>> {
+        self.suppressed.iter().cloned().map(Some).collect()
     }
 }
 
@@ -493,6 +513,118 @@ fn propagate_result_stmt(result_name: &str) -> RustStmt {
     ))))
 }
 
+fn primary_result_then_cleanup_result_expr(
+    body_result_name: &str,
+    cleanup_result_name: &str,
+    body_terminates_with_value: bool,
+) -> RustExpr {
+    let ok_pattern = if body_terminates_with_value {
+        "value"
+    } else {
+        "()"
+    };
+    let ok_expr = if body_terminates_with_value {
+        RustExpr::Var("value".to_string())
+    } else {
+        unit_expr()
+    };
+    RustExpr::Match {
+        expr: Box::new(RustExpr::Tuple(vec![
+            RustExpr::Var(body_result_name.to_string()),
+            RustExpr::Var(cleanup_result_name.to_string()),
+        ])),
+        arms: vec![
+            RustMatchArm {
+                pattern: "(Err(mut ex), Err(cleanup_ex))".to_string(),
+                body: RustExpr::Block {
+                    stmts: vec![RustStmt::Expr(RustExpr::MethodCall {
+                        receiver: Box::new(RustExpr::Var("ex".to_string())),
+                        method: "add_suppressed".to_string(),
+                        args: vec![RustExpr::Var("cleanup_ex".to_string())],
+                    })],
+                    tail: Some(Box::new(RustExpr::Call {
+                        function: Box::new(RustExpr::path(["Err"])),
+                        args: vec![RustExpr::Var("ex".to_string())],
+                    })),
+                },
+            },
+            RustMatchArm {
+                pattern: "(Err(ex), _)".to_string(),
+                body: RustExpr::Call {
+                    function: Box::new(RustExpr::path(["Err"])),
+                    args: vec![RustExpr::Var("ex".to_string())],
+                },
+            },
+            RustMatchArm {
+                pattern: format!("(Ok({ok_pattern}), Err(ex))"),
+                body: RustExpr::Call {
+                    function: Box::new(RustExpr::path(["Err"])),
+                    args: vec![RustExpr::Var("ex".to_string())],
+                },
+            },
+            RustMatchArm {
+                pattern: format!("(Ok({ok_pattern}), Ok(()))"),
+                body: RustExpr::Call {
+                    function: Box::new(RustExpr::path(["Ok"])),
+                    args: vec![ok_expr],
+                },
+            },
+        ],
+    }
+}
+
+fn return_primary_result_then_cleanup_result_stmt(
+    body_result_name: &str,
+    cleanup_result_name: &str,
+    body_terminates_with_value: bool,
+) -> RustStmt {
+    RustStmt::Return(Some(primary_result_then_cleanup_result_expr(
+        body_result_name,
+        cleanup_result_name,
+        body_terminates_with_value,
+    )))
+}
+
+fn propagate_primary_result_then_cleanup_result_stmt(
+    body_result_name: &str,
+    cleanup_result_name: &str,
+    body_terminates_with_value: bool,
+) -> RustStmt {
+    RustStmt::Expr(RustExpr::Try(Box::new(
+        primary_result_then_cleanup_result_expr(
+            body_result_name,
+            cleanup_result_name,
+            body_terminates_with_value,
+        ),
+    )))
+}
+
+fn panic_if_primary_result_then_cleanup_result_err_stmt(
+    body_result_name: &str,
+    cleanup_result_name: &str,
+    body_terminates_with_value: bool,
+) -> RustStmt {
+    RustStmt::Expr(RustExpr::MethodCall {
+        receiver: Box::new(primary_result_then_cleanup_result_expr(
+            body_result_name,
+            cleanup_result_name,
+            body_terminates_with_value,
+        )),
+        method: "unwrap_or_else".to_string(),
+        args: vec![RustExpr::Closure {
+            is_move: false,
+            return_type: None,
+            params: vec![RustClosureParam {
+                pattern: "ex".to_string(),
+                ty: None,
+            }],
+            body: RustClosureBody::Expr(Box::new(uncaught_java_exception_panic_expr(
+                RustExpr::Var("ex".to_string()),
+            ))),
+        }],
+    })
+}
+
 fn result_scope_call_let_stmt(
     result_name: &str,
     ok_type: RustType,
@@ -539,19 +671,53 @@ pub fn try_with_resources_scope_stmt(
         ok_type,
         body_with_ok,
     ));
-    for cleanup_stmt in resource_cleanup_stmts.into_iter().rev() {
-        scope_body.push(cleanup_stmt);
-    }
+    let mut cleanup_body = resource_cleanup_stmts.into_iter().rev().collect::<Vec<_>>();
+    cleanup_body.push(return_stmt(None, true));
+    scope_body.push(result_scope_call_let_stmt(
+        "__java_twr_cleanup_result",
+        RustType::Unit,
+        cleanup_body,
+    ));
     if body_terminates_with_value {
         if outer_returns_result {
-            scope_body.push(return_result_var_stmt("__java_twr_result"));
+            scope_body.push(return_primary_result_then_cleanup_result_stmt(
+                "__java_twr_result",
+                "__java_twr_cleanup_result",
+                true,
+            ));
         } else {
-            scope_body.push(return_result_or_panic_stmt("__java_twr_result"));
+            scope_body.push(RustStmt::Return(Some(RustExpr::MethodCall {
+                receiver: Box::new(primary_result_then_cleanup_result_expr(
+                    "__java_twr_result",
+                    "__java_twr_cleanup_result",
+                    true,
+                )),
+                method: "unwrap_or_else".to_string(),
+                args: vec![RustExpr::Closure {
+                    is_move: false,
+                    return_type: None,
+                    params: vec![RustClosureParam {
+                        pattern: "ex".to_string(),
+                        ty: None,
+                    }],
+                    body: RustClosureBody::Expr(Box::new(uncaught_java_exception_panic_expr(
+                        RustExpr::Var("ex".to_string()),
+                    ))),
+                }],
+            })));
         }
     } else if outer_returns_result {
-        scope_body.push(propagate_result_stmt("__java_twr_result"));
+        scope_body.push(propagate_primary_result_then_cleanup_result_stmt(
+            "__java_twr_result",
+            "__java_twr_cleanup_result",
+            false,
+        ));
     } else {
-        scope_body.push(panic_if_result_err_stmt("__java_twr_result"));
+        scope_body.push(panic_if_primary_result_then_cleanup_result_err_stmt(
+            "__java_twr_result",
+            "__java_twr_cleanup_result",
+            false,
+        ));
     }
     RustStmt::Expr(RustExpr::Block {
         stmts: scope_body,
@@ -578,20 +744,54 @@ pub fn try_with_resources_finally_scope_stmt(
         ok_type,
         body_with_ok,
     ));
-    for cleanup_stmt in resource_cleanup_stmts.into_iter().rev() {
-        scope_body.push(cleanup_stmt);
-    }
+    let mut cleanup_body = resource_cleanup_stmts.into_iter().rev().collect::<Vec<_>>();
+    cleanup_body.push(return_stmt(None, true));
+    scope_body.push(result_scope_call_let_stmt(
+        "__java_twr_cleanup_result",
+        RustType::Unit,
+        cleanup_body,
+    ));
     scope_body.extend(finally_body);
     if body_terminates_with_value {
         if outer_returns_result {
-            scope_body.push(return_result_var_stmt("__java_twr_result"));
+            scope_body.push(return_primary_result_then_cleanup_result_stmt(
+                "__java_twr_result",
+                "__java_twr_cleanup_result",
+                true,
+            ));
         } else {
-            scope_body.push(return_result_or_panic_stmt("__java_twr_result"));
+            scope_body.push(RustStmt::Return(Some(RustExpr::MethodCall {
+                receiver: Box::new(primary_result_then_cleanup_result_expr(
+                    "__java_twr_result",
+                    "__java_twr_cleanup_result",
+                    true,
+                )),
+                method: "unwrap_or_else".to_string(),
+                args: vec![RustExpr::Closure {
+                    is_move: false,
+                    return_type: None,
+                    params: vec![RustClosureParam {
+                        pattern: "ex".to_string(),
+                        ty: None,
+                    }],
+                    body: RustClosureBody::Expr(Box::new(uncaught_java_exception_panic_expr(
+                        RustExpr::Var("ex".to_string()),
+                    ))),
+                }],
+            })));
         }
     } else if outer_returns_result {
-        scope_body.push(propagate_result_stmt("__java_twr_result"));
+        scope_body.push(propagate_primary_result_then_cleanup_result_stmt(
+            "__java_twr_result",
+            "__java_twr_cleanup_result",
+            false,
+        ));
     } else {
-        scope_body.push(panic_if_result_err_stmt("__java_twr_result"));
+        scope_body.push(panic_if_primary_result_then_cleanup_result_err_stmt(
+            "__java_twr_result",
+            "__java_twr_cleanup_result",
+            false,
+        ));
     }
     RustStmt::Expr(RustExpr::Block {
         stmts: scope_body,
@@ -741,7 +941,7 @@ fn java_exception_with_cause_projection(
 
 fn exception_message_expr(message: RustExpr) -> RustExpr {
     receiver_method_call_projection_exact(
-        parenthesize_raw_method_receiver(message),
+        parenthesize_raw_postfix_receiver(message),
         "to_string",
         Vec::new(),
     )
@@ -767,73 +967,13 @@ pub fn exception_cause_or_self_if_instance_expr(
         .map(|name| RustExpr::Literal(format!("{name:?}")))
         .collect();
     RustExpr::MethodCall {
-        receiver: Box::new(parenthesize_raw_method_receiver(wrapper)),
+        receiver: Box::new(parenthesize_raw_postfix_receiver(wrapper)),
         method: "cause_or_self_if_instance".to_string(),
         args: vec![RustExpr::Unary {
             op: "&".to_string(),
             expr: Box::new(RustExpr::ArrayLiteral(class_names)),
         }],
     }
-}
-
-fn parenthesize_raw_method_receiver(expr: RustExpr) -> RustExpr {
-    raw_receiver_projection(expr, raw_needs_method_receiver_parentheses)
-}
-
-fn raw_needs_method_receiver_parentheses(raw: &str) -> bool {
-    if raw.starts_with('(') && raw.ends_with(')') {
-        return false;
-    }
-    let mut paren_depth = 0usize;
-    let mut bracket_depth = 0usize;
-    let mut brace_depth = 0usize;
-    let mut chars = raw.char_indices().peekable();
-    while let Some((idx, ch)) = chars.next() {
-        match ch {
-            '(' => paren_depth += 1,
-            ')' => paren_depth = paren_depth.saturating_sub(1),
-            '[' => bracket_depth += 1,
-            ']' => bracket_depth = bracket_depth.saturating_sub(1),
-            '{' => brace_depth += 1,
-            '}' => brace_depth = brace_depth.saturating_sub(1),
-            '"' | '\'' => {
-                let quote = ch;
-                let mut escaped = false;
-                for (_, inner) in chars.by_ref() {
-                    if escaped {
-                        escaped = false;
-                    } else if inner == '\\' {
-                        escaped = true;
-                    } else if inner == quote {
-                        break;
-                    }
-                }
-            }
-            '+' | '-' | '*' | '/' | '%' | '^' | '&' | '|' | '=' | '<' | '>'
-                if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 =>
-            {
-                return true;
-            }
-            '!' if paren_depth == 0
-                && bracket_depth == 0
-                && brace_depth == 0
-                && (idx == 0 || raw[idx + 1..].starts_with('=')) =>
-            {
-                return true;
-            }
-            'a' if paren_depth == 0
-                && bracket_depth == 0
-                && brace_depth == 0
-                && raw[idx..].starts_with("as")
-                && raw[..idx].ends_with(char::is_whitespace)
-                && raw[idx + 2..].starts_with(char::is_whitespace) =>
-            {
-                return true;
-            }
-            _ => {}
-        }
-    }
-    false
 }
 
 pub fn exception_expr_from_new(class_name: &str, args: Vec<RustExpr>) -> RustExpr {

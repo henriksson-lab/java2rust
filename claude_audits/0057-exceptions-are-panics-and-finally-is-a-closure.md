@@ -2,6 +2,16 @@
 
 Recorded 2026-08-23.
 Status: **open**.
+
+Follow-up 2026-08-28: `make_java_null_expect_catchable` now handles the raw
+expression compatibility surface that was left behind after structured
+expression and raw-statement rewrites. Parseable raw expressions are recovered,
+then recursively rewritten, so embedded Java-null receiver unwraps can become
+catchable `NullPointerException` propagation. Opaque raw text is preserved
+through the centralized raw-leaf constructor instead of open-coded
+`RustExpr::Raw` construction.
+Regression:
+`lower::tests::make_java_null_expect_catchable_recovers_parseable_raw_expression`.
 Severity: **high** — no silent wrong answers in this group (that is 0056's
 half). The original `StringBuilder.append(intLocal)` and several built-in JDK
 exception cases are fixed; the active risk is the remaining panic-based
@@ -10,6 +20,19 @@ Kind: semantics / lowering.
 
 Method and evidence discipline as 0056: `javac`/`java` oracle vs. compiled
 translation, per `tests/differential.rs`. Repros in `repro/`.
+
+Follow-up 2026-08-28: `Collections.sort(values, comparator)` can now carry
+catchable comparator exceptions when the comparator is a throwing source method
+reference or a fallible comparator object. The lowering detects method-reference
+fallibility through the same callable result table used by ordinary calls,
+routes fallible sort bodies through `java_collection_sort_by_result`, annotates
+method-reference callback parameters from the target collection element type,
+and emits the runtime helper for native comparator-sort sites after the facade
+call is lowered away. `tests/differential/CollectionsSortComparatorThrowCatch.java`
+pins the Java oracle, and
+`slot_shape_design::collections_sort_throwing_method_reference_comparator_propagates_result`
+checks the generated Rust compiles without falling back to `.cmp(&0)` on a
+`Result`.
 
 Follow-up 2026-08-27: one-dimensional array element writes in propagated
 `try/catch` contexts now use a checked mutable slot instead of direct Rust
@@ -1014,6 +1037,14 @@ for an uncaught `IllegalArgumentException`, not the old `millis as u64` cast tha
 could turn `-1` into a huge sleep. The propagated helper still calls one
 internal unchecked sleep leaf after validating the signed value.
 
+Follow-up 2026-08-28: the two-argument `Thread.sleep(long millis, int nanos)`
+path now preserves and validates the nanos argument. Both ordinary and
+propagated lowering route through the same result projection, which raises
+`IllegalArgumentException` when `nanos < 0 || nanos > 999999` before sleeping.
+`tests/differential/ThreadSleepNanosCatch.java` verifies the Java oracle
+(`iae`) against the translated Rust output; the differential suite is now
+expected at 195 fixtures.
+
 Follow-up 2026-08-25: ordinary primitive parse projections now share the
 `NumberFormatException` result chain and then apply the existing uncaught
 Java-exception panic adapter, instead of spelling `.parse::<T>().unwrap()`
@@ -1169,3 +1200,131 @@ body rather than across a closure boundary. Covered by
 `tests/differential/FinallyBreakOverridesReturn.java` (`after`). Conditional
 finally completion, throwing return expressions, and the full nested/labeled
 completion carrier remain open.
+
+Follow-up 2026-08-28: the same loop-body fast path now covers the adjacent
+`try/catch/finally` shape where `finally { break; }` overrides a pending catch
+`return`. The accepted subset is deliberately narrow: no resources, a
+catch/finally plan, no value return in the try body, no loop-abrupt completion
+inside catch bodies, simple finally body, and catch return values whose
+expressions can be evaluated then discarded. The discard helper also unwraps
+fallible `return Ok(value)` lowering back to `value;`, avoiding an ambiguous
+discarded `Ok(...)` expression. Covered by
+`lower::tests::finally_break_overrides_catch_return_translation` and
+`tests/differential/FinallyBreakOverridesCatchReturn.java` (`after`); the full
+differential suite passes 189 fixtures. Catch/resource/finally combinations,
+conditional finally completion, throwing return expressions, and the full
+nested/labeled completion carrier remain open.
+
+Follow-up 2026-08-28: `Math.floorDiv`/`Math.floorMod` now have catchable
+`ArithmeticException` result helpers for zero divisors. Ordinary callers keep
+the existing value-returning API through the shared uncaught-Java-exception
+panic adapter; propagating `try`/`catch` scopes use the `*_result` helpers and
+`?`. The same projection path covers `int`, `long`, and the Java
+`floorMod(long,int): int` narrowing overload. This also exposed a native-owner
+alias bug: `StrictMath` could be treated as a Rust-form alias shadowing native
+`Math`, so `StrictMath.floorDiv`/`floorMod` fell back to unresolved external
+calls. Native static-owner matching now canonicalizes aliases before the shadow
+check. Covered by `tests/differential/MathFloorDivModCatch.java`,
+`coercion::tests::jdk_math_and_objects_projections_own_expression_shapes`,
+`idiom_gaps::jdk_numeric_and_decimal_format_facades_keep_precise_return_shapes`,
+and `idiom_gaps::strict_math_common_calls_use_native_math_alias`. Broader
+panic-only helper surfaces and the general finally completion carrier remain
+open.
+
+Follow-up 2026-08-28: the no-catch try-with-resources/finally scope now stores
+resource cleanup in its own `Result<(), JavaException>` scope before running
+the user `finally` body. A throwing `close()` can no longer skip a fall-through
+user `finally`; if cleanup fails, that failure is propagated only after the
+finally body runs. Covered by
+`tests/differential/TryWithResourcesCloseThrowFinally.java` (`tcf:close`); the
+rebuilt differential suite is now 191 fixtures. Suppressed exception attachment,
+throwing `finally`, and the general nested/labeled completion carrier remain
+open.
+
+Follow-up 2026-08-28: resource stream reads inside while-assignment conditions
+now compile through the typed `InputStream.read(byte[])` facade path. The
+specialized source `InputStream.read` byte-array lowering adapts nullable
+receivers before calling `read_3`, so an `InputStream` proven non-null by an
+earlier guard is not left as `Option<InputStream>`. Local assignment expression
+blocks also preserve the existing `ResultPropagated` marker when the assigned
+value already contains `?`, preventing the while condition from applying `?` to
+the plain assigned `i32` tail. Covered by
+`tests/idiom_gaps.rs::resource_input_stream_read_and_close_have_typed_facade_support`,
+which is promoted out of the idiom-gaps failure baseline. The adjacent source
+subclass bridge is also pinned: one-argument `read(byte[])` on a source
+`GZIPInputStream` subclass now preempts external return-call lowering and
+routes through `read_3(buffer, 0, buffer.len())` instead of the inherited
+one-argument facade stub. Covered by
+`tests/idiom_gaps.rs::input_stream_read_byte_array_uses_three_arg_overload_with_full_buffer`.
+Broader panic-only helper surfaces and the general finally completion carrier
+remain open.
+
+Follow-up 2026-08-28: try-with-resources cleanup no longer replaces an already
+thrown body exception with a later throwing `close()`. TWR lowering now captures
+cleanup in its own `Result<(), JavaException>` and combines
+`(__java_twr_result, __java_twr_cleanup_result)` so body `Err` remains primary;
+cleanup `Err` is propagated only when the body completed normally. The
+no-catch/finally path still runs user `finally` before replaying that combined
+result, so fall-through `finally` order is preserved. This does not yet attach
+suppressed exceptions. Covered by
+`tests/differential/TryWithResourcesPrimaryExceptionCatchFinally.java`
+(`trc:body:f`) plus the existing try-with-resources fixture checks.
+
+Follow-up 2026-08-28: try-with-resources cleanup exceptions are now attached
+as suppressed exceptions when the guarded body has already thrown. The shared
+`JavaException` carrier stores suppressed exceptions, exposes
+`get_suppressed()` with the nullable Java array carrier
+`Vec<Option<JavaException>>`, and the TWR result combiner mutates the primary
+exception before replaying it. This also fixed a resource-body result-type
+conflation: a body that only throws terminates, but it does not terminate with
+a value, so TWR body result scopes now use the existing value-return predicate
+instead of treating every terminating body as `Ok<T>`. Covered by
+`tests/differential/TryWithResourcesSuppressedPrimary.java` (`body:1:close`)
+plus `slot_render::tests::exception_like_java_types_render_to_java_exception_carrier`;
+the full differential suite passes 200 fixtures. Broader panic-only exception
+surfaces and the general nested/labeled `finally` completion carrier remain
+open.
+
+Follow-up 2026-08-28: one-dimensional primitive array compound assignments in
+propagating `try` scopes now use the same checked `get_mut(...).ok_or_else`
+write path as plain array stores. The checked slot is bound first, the old
+element value is read from that slot, and only then is the computed value
+assigned, so both high and negative indices raise catchable
+`ArrayIndexOutOfBoundsException` instead of panicking. Covered by
+`lower::tests::fallible_array_index_compound_write_reads_checked_slot_before_assigning`
+and `tests/differential/ArrayCompoundWriteException.java`; the full
+differential suite passes 202 fixtures. Broader panic-only exception surfaces
+and the general nested/labeled `finally` completion carrier remain open.
+
+Follow-up 2026-08-28: simple loop bodies now have a bounded fast path for
+try-with-resources with both `catch` and fall-through `finally` when a catch
+body exits the loop with `break` or `continue`. The lowering captures the TWR
+body result, runs resource cleanup, dispatches catches, prepends the user
+`finally` body before catch-owned loop exits, and runs the same `finally` body
+after fall-through catch/normal completion. Covered by
+`tests/idiom_gaps.rs::try_with_resources_catch_finally_break_runs_cleanup_and_finally_before_break`
+(`trcfd`). Broader throwing-`finally`, nested/labeled completion, and
+panic-only Java exception surfaces remain open.
+
+Follow-up 2026-08-28 `Arrays.equals` range result pass:
+six-argument `Arrays.equals(left, from, to, right, from, to)` now uses the same
+result-propagating dual-range helper as `Arrays.compare` and
+`Arrays.mismatch` when lowered inside a catchable/result-propagating context.
+Bad range order returns `Err(JavaException::new("IllegalArgumentException", ...))`
+and bad bounds returns
+`Err(JavaException::new("ArrayIndexOutOfBoundsException", ...))` instead of
+panicking before translated Java catches can observe the exception. Covered by
+the extended generated-crate test
+`idiom_gaps::java_arrays_compare_and_mismatch_ranges_in_try_lower_to_java_exception_results`.
+
+Follow-up 2026-08-28 `ObjectInputStream.readObject()` downcast pass:
+direct assignment of `readObject()` into a concrete local no longer composes a
+second result propagation around the erased-object downcast. The lowered value
+keeps `read_object()?` at the deserialization call, then downcasts the payload
+without applying `?` to the recovered concrete value. The downcast diagnostic
+rewrite now walks unary and `Try` wrappers, so deserialization casts consistently
+report `Java deserialization type mismatch`. Exception-like Java runtime
+targets (`Throwable`, `Exception`, `*Exception`, `*Error`) now downcast to the
+`JavaException` carrier, matching slot rendering and field storage. Covered by
+`tests/idiom_gaps.rs::object_input_stream_read_object_recovers_string_target_slot`
+and the existing `object_input_stream_read_object_*` generated-crate cluster.

@@ -103,10 +103,9 @@ pub const UNSUPPORTED_INNER_CLASS_OUTER_CAPTURE: &str =
 
 /// Introduces the `From` impl synthesised for a Java upcast that has no model.
 ///
-/// Its body is `Default::default()`, so a widened value silently becomes a
-/// fresh empty one. That is erasure, and 0018's argument is that erasure has to
-/// be *visible as a cost*; before this constant existed the conversions were
-/// counted as `noop_facade_methods`, where they were 78 of 80 on a program
+/// Its body panics with this marker so a widened value fails loudly instead of
+/// becoming a fresh empty one. Before this constant existed the conversions
+/// were counted as `noop_facade_methods`, where they were 78 of 80 on a program
 /// whose only Java API use was `StringBuilder`.
 pub const UNMODELLED_JAVA_UPCAST_PREFIX: &str = "Unmodelled Java upcast: ";
 

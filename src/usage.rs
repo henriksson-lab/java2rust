@@ -168,7 +168,7 @@ impl MethodUsageFacts {
             Some(binding) => self.bindings_by_id.get(binding),
             None if allow_name_fallback => self.bindings.get(name).filter(|binding| {
                 if let Some(id) = &binding.binding {
-                    return self.bindings_by_id.contains_key(id);
+                    return id.name() == name && self.bindings_by_id.contains_key(id);
                 }
                 self.id_less_binding_name_is_unambiguous(name)
             }),
@@ -180,7 +180,8 @@ impl MethodUsageFacts {
         let binding_id = self
             .bindings
             .get(name)
-            .and_then(|binding| binding.binding.clone())?;
+            .and_then(|binding| binding.binding.clone())
+            .filter(|binding| binding.name() == name)?;
         self.bindings_by_id
             .contains_key(&binding_id)
             .then_some(binding_id)
@@ -275,7 +276,9 @@ impl MethodUsageFacts {
         binding
             .binding
             .as_ref()
-            .map(|binding_id| self.bindings_by_id.contains_key(binding_id))
+            .map(|binding_id| {
+                binding_id.name() == name && self.bindings_by_id.contains_key(binding_id)
+            })
             .unwrap_or_else(|| self.id_less_binding_name_is_unambiguous(name))
     }
 }
@@ -1822,11 +1825,11 @@ fn analyze_stmt(
                     .first()
                     .cloned()
                     .unwrap_or_else(|| JavaType::Unknown("Throwable".to_string()));
-                catch_env.insert_local(catch.name.clone(), catch_ty);
-                let saved_catch_binding = facts.hide_visible_binding_for_scope(&catch.name);
+                catch_env.insert_local(catch.source_name.clone(), catch_ty);
+                let saved_catch_binding = facts.hide_visible_binding_for_scope(&catch.source_name);
                 insert_binding_use_facts(
                     facts,
-                    catch.name.clone(),
+                    catch.source_name.clone(),
                     catch.binding.clone(),
                     catch
                         .types
@@ -1845,7 +1848,7 @@ fn analyze_stmt(
                     &mut catch_env,
                     source_return_nullability,
                 );
-                restore_binding_use_facts(facts, catch.name.clone(), saved_catch_binding);
+                restore_binding_use_facts(facts, catch.source_name.clone(), saved_catch_binding);
             }
             if let Some(finally_block) = finally_block {
                 let mut finally_env = type_env.clone();
@@ -2897,8 +2900,10 @@ fn facade_abi_matches_call_receiver(
         return crate::stdlib::canonical_external_receiver_type_key(receiver_type_name)
             == crate::stdlib::canonical_external_receiver_type_key(owner);
     }
-    crate::stdlib::canonical_external_receiver_type_key(receiver_name)
-        == crate::stdlib::canonical_external_receiver_type_key(owner)
+    static_owner_receiver_name(receiver_name).is_some_and(|static_owner| {
+        crate::stdlib::canonical_external_receiver_type_key(static_owner)
+            == crate::stdlib::canonical_external_receiver_type_key(owner)
+    })
 }
 
 fn expr_targets_self_field(
@@ -3508,8 +3513,8 @@ mod tests {
             "a resolver-assigned declaration id must not silently rejoin by name"
         );
         assert!(
-            facts.binding_for_declaration(None, "value").is_some(),
-            "id-less compatibility callers keep the legacy name fallback"
+            facts.binding_for_declaration(None, "value").is_none(),
+            "id-less compatibility callers must reject stale name facts that point at a missing binding id"
         );
     }
 
@@ -3622,6 +3627,31 @@ mod tests {
         );
         assert!(facts.binding_for_declaration(None, "value").is_none());
         assert!(facts.all_binding_facts().is_empty());
+    }
+
+    #[test]
+    fn name_map_binding_id_must_match_the_queried_name() {
+        let other = BindingId::new(BindingKind::Local, "other", 1);
+        let mut facts = MethodUsageFacts::default();
+        facts
+            .bindings_by_id
+            .insert(other.clone(), binding_fact("other", Some(other.clone())));
+        facts
+            .bindings
+            .insert("value".to_string(), binding_fact("value", Some(other)));
+
+        assert_eq!(facts.visible_binding_id_for_name("value"), None);
+        assert!(!facts.name_binding_is_current("value"));
+        assert!(
+            facts
+                .binding_for_declaration_with_name_fallback(None, "value", true)
+                .is_none(),
+            "name-map compatibility must not rejoin value to an unrelated live binding id"
+        );
+        assert!(
+            facts.snapshot_visible_binding_for_scope("value").is_none(),
+            "scope snapshots must not preserve a name entry whose binding id belongs to another name"
+        );
     }
 
     #[test]
@@ -3768,7 +3798,10 @@ mod tests {
             .expect("save_direct_var_decl_bindings source should be discoverable");
 
         assert!(analyze_stmt_source.contains("facts.hide_visible_binding_for_scope(var_name)"));
-        assert!(analyze_stmt_source.contains("facts.hide_visible_binding_for_scope(&catch.name)"));
+        assert!(
+            analyze_stmt_source
+                .contains("facts.hide_visible_binding_for_scope(&catch.source_name)")
+        );
         assert!(
             analyze_lambda_source.contains("facts.hide_visible_binding_for_scope(&param.name)")
         );
@@ -4067,6 +4100,28 @@ class ScopedFieldReturn {
                 &facts,
             ),
             "receiver ABI matching must not recover a type from non-visible same-name history"
+        );
+    }
+
+    #[test]
+    fn facade_abi_receiver_match_restricts_idless_fallback_to_static_owners() {
+        let usage = MethodUsageFacts::default();
+
+        assert!(
+            !facade_abi_matches_call_receiver(
+                "StringUtils",
+                Some(&Expr::Var("string_utils".to_string())),
+                &usage,
+            ),
+            "id-less facade ABI matching must not promote arbitrary local-looking names to owners"
+        );
+        assert!(
+            facade_abi_matches_call_receiver(
+                "StringUtils",
+                Some(&Expr::Var("StringUtils".to_string())),
+                &usage,
+            ),
+            "explicit static-owner pseudo receivers remain valid id-less compatibility input"
         );
     }
 }

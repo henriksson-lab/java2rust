@@ -43,6 +43,9 @@ pub struct ShapeEnv {
     binding_occurrences: HashMap<(BindingKind, String), usize>,
     map_key_set_view_receivers: HashMap<String, Expr>,
     map_values_view_receivers: HashMap<String, Expr>,
+    map_entry_set_view_receivers: HashMap<String, Expr>,
+    map_entry_value_receivers: HashMap<String, Expr>,
+    simple_map_entry_values: HashMap<String, (Expr, Expr)>,
 }
 
 impl ShapeEnv {
@@ -63,9 +66,39 @@ impl ShapeEnv {
         self.map_values_view_receivers.insert(name.into(), receiver);
     }
 
+    pub fn insert_map_entry_set_view_receiver(&mut self, name: impl Into<String>, receiver: Expr) {
+        self.map_entry_set_view_receivers
+            .insert(name.into(), receiver);
+    }
+
+    pub fn insert_map_entry_value_receiver(&mut self, name: impl Into<String>, receiver: Expr) {
+        self.map_entry_value_receivers.insert(name.into(), receiver);
+    }
+
+    pub fn insert_simple_map_entry_value(
+        &mut self,
+        name: impl Into<String>,
+        key: Expr,
+        value: Expr,
+    ) {
+        self.simple_map_entry_values
+            .insert(name.into(), (key, value));
+    }
+
+    pub fn forget_simple_map_entry_value(&mut self, name: &str) {
+        self.simple_map_entry_values.remove(name);
+    }
+
+    pub fn forget_map_entry_value_receiver(&mut self, name: &str) {
+        self.map_entry_value_receivers.remove(name);
+    }
+
     fn clear_map_view_receivers(&mut self, name: &str) {
         self.map_key_set_view_receivers.remove(name);
         self.map_values_view_receivers.remove(name);
+        self.map_entry_set_view_receivers.remove(name);
+        self.map_entry_value_receivers.remove(name);
+        self.simple_map_entry_values.remove(name);
     }
 
     pub fn map_key_set_view_receiver(&self, name: &str) -> Option<&Expr> {
@@ -74,6 +107,20 @@ impl ShapeEnv {
 
     pub fn map_values_view_receiver(&self, name: &str) -> Option<&Expr> {
         self.map_values_view_receivers.get(name)
+    }
+
+    pub fn map_entry_set_view_receiver(&self, name: &str) -> Option<&Expr> {
+        self.map_entry_set_view_receivers.get(name)
+    }
+
+    pub fn map_entry_value_receiver(&self, name: &str) -> Option<&Expr> {
+        self.map_entry_value_receivers.get(name)
+    }
+
+    pub fn simple_map_entry_value(&self, name: &str) -> Option<(&Expr, &Expr)> {
+        self.simple_map_entry_values
+            .get(name)
+            .map(|(key, value)| (key, value))
     }
 
     pub fn insert_local(&mut self, name: impl Into<String>, ty: JavaType) {
@@ -162,7 +209,13 @@ impl ShapeEnv {
         let name = name.into();
         let access_name = access_name.into();
         self.clear_map_view_receivers(&access_name);
-        self.insert_local_shape_with_java_type_and_binding(name.clone(), shape, java_ty, binding);
+        self.insert_local_shape_with_java_type_and_binding(
+            name.clone(),
+            shape,
+            java_ty,
+            binding.clone(),
+        );
+        self.bind_access_name_alias(&name, &access_name, binding);
         self.binding_access_names
             .insert(name.clone(), access_name.clone());
         self.binding_access_names
@@ -224,7 +277,13 @@ impl ShapeEnv {
     ) {
         let name = name.into();
         let access_name = access_name.into();
-        self.insert_param_shape_with_java_type_and_binding(name.clone(), shape, java_ty, binding);
+        self.insert_param_shape_with_java_type_and_binding(
+            name.clone(),
+            shape,
+            java_ty,
+            binding.clone(),
+        );
+        self.bind_access_name_alias(&name, &access_name, binding);
         self.binding_access_names
             .insert(name.clone(), access_name.clone());
         self.binding_access_names
@@ -265,7 +324,8 @@ impl ShapeEnv {
         self.types.insert_local(name.clone(), shape.java_ty.clone());
         self.local_shapes.insert(name.clone(), shape);
         if let Some(binding) = binding {
-            self.binding_ids.insert(name.clone(), binding);
+            self.binding_ids.insert(name.clone(), binding.clone());
+            self.bind_access_name_alias(&name, &access_name, Some(binding));
         } else {
             self.bind_name(BindingKind::LoopVariable, name.clone());
         }
@@ -273,6 +333,19 @@ impl ShapeEnv {
             .insert(name.clone(), access_name.clone());
         self.binding_access_names
             .insert(access_name.clone(), access_name);
+    }
+
+    fn bind_access_name_alias(
+        &mut self,
+        name: &str,
+        access_name: &str,
+        binding: Option<BindingId>,
+    ) {
+        if name != access_name
+            && let Some(binding) = binding
+        {
+            self.binding_ids.insert(access_name.to_string(), binding);
+        }
     }
 
     pub fn insert_catch_param(&mut self, name: impl Into<String>, ty: JavaType) {
@@ -298,6 +371,23 @@ impl ShapeEnv {
         } else {
             self.bind_name(BindingKind::CatchParam, name);
         }
+    }
+
+    pub fn insert_catch_param_with_access_name_and_binding(
+        &mut self,
+        name: impl Into<String>,
+        access_name: impl Into<String>,
+        ty: JavaType,
+        binding: Option<BindingId>,
+    ) {
+        let name = name.into();
+        let access_name = access_name.into();
+        self.insert_catch_param_with_binding(name.clone(), ty, binding.clone());
+        self.bind_access_name_alias(&name, &access_name, binding);
+        self.binding_access_names
+            .insert(name.clone(), access_name.clone());
+        self.binding_access_names
+            .insert(access_name.clone(), access_name);
     }
 
     pub fn insert_catch_param_shape(&mut self, name: impl Into<String>, shape: RustSlotShape) {
@@ -1263,6 +1353,12 @@ pub fn learn_stmt_shapes(
                     env.insert_map_values_view_receiver(source_name.clone(), receiver.clone());
                 }
             }
+            if let Some(receiver) = map_entry_set_view_initializer_receiver(initializer.as_ref()) {
+                env.insert_map_entry_set_view_receiver(name.clone(), receiver.clone());
+                if source_name != name {
+                    env.insert_map_entry_set_view_receiver(source_name.clone(), receiver.clone());
+                }
+            }
         }
         Stmt::For { init, .. } => {
             for stmt in init {
@@ -1333,6 +1429,20 @@ fn map_values_view_initializer_receiver(initializer: Option<&Expr>) -> Option<&E
         return None;
     };
     (args.is_empty() && name == "values").then_some(receiver.as_ref())
+}
+
+fn map_entry_set_view_initializer_receiver(initializer: Option<&Expr>) -> Option<&Expr> {
+    let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        ..
+    } = initializer?
+    else {
+        return None;
+    };
+    (args.is_empty() && matches!(name.as_str(), "entrySet" | "entry_set"))
+        .then_some(receiver.as_ref())
 }
 
 fn local_plan_for_declaration_shape<'a>(
@@ -1881,6 +1991,22 @@ mod tests {
     }
 
     #[test]
+    fn bound_local_env_insert_preserves_resolver_binding_id_for_access_name() {
+        let mut env = ShapeEnv::new();
+        let binding = BindingId::new(BindingKind::Local, "self".to_string(), 1);
+        env.insert_local_shape_with_access_name_java_type_and_binding(
+            "self",
+            "self__",
+            RustSlotShape::for_storage(JavaType::String),
+            JavaType::String,
+            Some(binding.clone()),
+        );
+
+        assert_eq!(env.binding_id("self"), Some(&binding));
+        assert_eq!(env.binding_id("self__"), Some(&binding));
+    }
+
+    #[test]
     fn bound_param_env_insert_preserves_resolver_binding_id() {
         let mut env = ShapeEnv::new();
         let binding = BindingId::new(BindingKind::Param, "value".to_string(), 1);
@@ -1893,6 +2019,22 @@ mod tests {
         );
 
         assert_eq!(env.binding_id("value"), Some(&binding));
+    }
+
+    #[test]
+    fn bound_param_env_insert_preserves_resolver_binding_id_for_access_name() {
+        let mut env = ShapeEnv::new();
+        let binding = BindingId::new(BindingKind::Param, "type".to_string(), 1);
+        env.insert_param_shape_with_access_name_java_type_and_binding(
+            "type",
+            "r#type",
+            RustSlotShape::for_storage(JavaType::String),
+            JavaType::String,
+            Some(binding.clone()),
+        );
+
+        assert_eq!(env.binding_id("type"), Some(&binding));
+        assert_eq!(env.binding_id("r#type"), Some(&binding));
     }
 
     #[test]
@@ -1910,6 +2052,21 @@ mod tests {
     }
 
     #[test]
+    fn bound_loop_variable_env_insert_preserves_resolver_binding_id_for_access_name() {
+        let mut env = ShapeEnv::new();
+        let binding = BindingId::new(BindingKind::LoopVariable, "crate".to_string(), 1);
+        env.insert_loop_variable_shape_with_access_name_and_binding(
+            "crate",
+            "crate__",
+            RustSlotShape::for_storage(JavaType::String),
+            Some(binding.clone()),
+        );
+
+        assert_eq!(env.binding_id("crate"), Some(&binding));
+        assert_eq!(env.binding_id("crate__"), Some(&binding));
+    }
+
+    #[test]
     fn bound_catch_param_env_insert_preserves_resolver_binding_id() {
         let mut env = ShapeEnv::new();
         let binding = BindingId::new(BindingKind::CatchParam, "ex".to_string(), 1);
@@ -1923,5 +2080,24 @@ mod tests {
         );
 
         assert_eq!(env.binding_id("ex"), Some(&binding));
+    }
+
+    #[test]
+    fn bound_catch_param_env_insert_preserves_resolver_binding_id_for_access_name() {
+        let mut env = ShapeEnv::new();
+        let binding = BindingId::new(BindingKind::CatchParam, "type".to_string(), 1);
+        env.insert_catch_param_with_access_name_and_binding(
+            "type",
+            "type__",
+            JavaType::Named {
+                name: "JavaException".to_string(),
+                args: Vec::new(),
+            },
+            Some(binding.clone()),
+        );
+
+        assert_eq!(env.binding_id("type"), Some(&binding));
+        assert_eq!(env.binding_id("type__"), Some(&binding));
+        assert_eq!(env.binding_access_name("type"), Some("type__"));
     }
 }

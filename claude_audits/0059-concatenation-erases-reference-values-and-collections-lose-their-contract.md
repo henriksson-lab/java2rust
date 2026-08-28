@@ -3,12 +3,24 @@
 Recorded 2026-08-23.
 Status: **open, concrete repros mitigated**.
 Severity: **medium/high** — the original broad concat, collection-order,
-collection-mutation, enum-body, and modeled display divergences are now covered
-by differential fixtures. The remaining semantic risk is narrower but still real:
-an arbitrary external value erased behind `Object` cannot recover Java dynamic
-`toString()` unless source downcast evidence, platform support, or an explicit
-external display-capability fact is available.
+collection-mutation, enum-body, modeled display, and internal collection-carrier
+divergences are now covered by differential or generated-crate fixtures. The
+remaining semantic risk is narrower but still real: an arbitrary external value
+erased behind `Object` cannot recover Java dynamic `toString()` unless source
+downcast evidence, platform support, or an explicit external display-capability
+fact is available.
 Kind: behavioural (differential), JDK facades / collections / enums.
+
+Updated 2026-08-28: native map carriers now have an explicit Java display
+coercion for string concatenation/display slots. `HashMap`, `BTreeMap`, and the
+insertion-ordered `JavaLinkedHashMap` path render through `java_map_to_string`
+over borrowed entries, producing Java map syntax (`{key=value, ...}`) without
+moving the map. Regression:
+`tests/idiom_gaps.rs::tree_map_string_concat_uses_java_map_display`; the helper
+emission detector is covered by
+`stdlib::java_string_runtime_support_tests::map_in_string_concat_emits_collection_display_support`.
+Unknown erased external display and live collection-view mutation residues
+remain open.
 
 Updated 2026-08-26 again: modeled external `toString(): String` display support
 is broader than the single `VCFHeader` case. VCF header-line classes and
@@ -781,8 +793,8 @@ previous value that must exist for a live entry. Covered by
 `lower::tests::map_entry_set_value_mutates_backing_map_and_returns_previous_value`,
 `lower::tests::map_entry_set_value_translation_mutates_backing_map`, and
 `tests/differential/MapEntrySetSetValue.java` (`1,2`). The broader aliased or
-enhanced-for `Map.Entry.setValue` live-view carrier remains open because current
-`entrySet` iteration still uses borrowed tuple reads.
+enhanced-for `Map.Entry.setValue` live-view carrier was still open at this
+point; the later enhanced-for pass below closes that concrete shape.
 
 Follow-up 2026-08-27 values-view contains pass: aliased and direct
 `Map.values()` receivers now route `contains(value)` through the backing map
@@ -792,3 +804,221 @@ instead of asking a materialized values snapshot. The lowering mirrors
 Covered by `lower::tests::map_values_alias_contains_uses_backing_map` and
 `tests/differential/MapValuesContains.java` (`false,true,true`). The full
 differential oracle passed with 164 fixtures.
+
+Follow-up 2026-08-28 entry-set clear/size pass: aliased and direct
+`Map.entrySet()` receivers now route `clear()`, `size()`, and `isEmpty()`
+through the backing map instead of materializing an invalid or stale entry-set
+snapshot. `Set<Map.Entry<K,V>>` locals use the tuple carrier already used by
+enhanced-for entry iteration, and `entrySet()` set-slot initialization now
+collects cloned `(key, value)` tuples when a real snapshot is needed. Covered by
+`lower::tests::map_entry_set_alias_clear_and_size_use_backing_map`,
+`lower::tests::map_entry_set_alias_clear_translation_mutates_backing_map`, and
+`tests/differential/MapEntrySetClear.java` (`0,0,false`). Entry `remove` and
+`contains` were still outside this narrow slice; the later same-map iterator and
+`SimpleEntry` passes below cover the concrete entry-equality shapes found so
+far.
+
+Follow-up 2026-08-28 entry-set remove-next pass: direct
+`values.entrySet().remove(values.entrySet().iterator().next())` now removes the
+selected key from the backing map and returns whether the removal happened
+instead of lowering to invalid `values.iter().remove(...)`. Covered by
+`lower::tests::map_entry_set_remove_next_translation_mutates_backing_map` and
+`tests/differential/MapEntrySetRemove.java` (`true,0,false`). This is
+intentionally limited to an entry proven to come from the same map iterator;
+`AbstractMap.SimpleEntry` equality and enhanced-for `entry.setValue(...)` were
+still separate concrete shapes at this point and are covered by later passes.
+Arbitrary entry values whose key/value cannot yet be extracted structurally
+remain open.
+
+Follow-up 2026-08-28 entry-set SimpleEntry equality pass:
+`values.entrySet().contains(new AbstractMap.SimpleEntry<>(key, value))` now
+checks the backing map value for `key`, and
+`values.entrySet().remove(new AbstractMap.SimpleEntry<>(key, value))` removes
+the key only when the stored value is equal. Both paths avoid the invalid
+`values.iter().contains/remove(...)` iterator calls and preserve the backing
+map's live-view semantics for constructor entries with extractable key/value
+operands. Covered by
+`lower::tests::map_entry_set_contains_simple_entry_uses_backing_map`,
+`lower::tests::map_entry_set_remove_simple_entry_mutates_backing_map`,
+`tests/differential/MapEntrySetContainsSimpleEntry.java` (`true,false,2`), and
+`tests/differential/MapEntrySetRemoveSimpleEntry.java` (`false,true,1,false`).
+Enhanced-for `entry.setValue(...)` is covered by the next pass. Remaining
+entry-set residue is arbitrary `Map.Entry` values whose key/value cannot yet be
+extracted structurally.
+
+Follow-up 2026-08-28 entry-set enhanced-for `setValue` pass:
+`for (Map.Entry<K,V> entry : values.entrySet()) { entry.setValue(v); }` now
+uses the backing map's mutable iterator when the loop body syntactically
+contains `entry.setValue(...)`. The loop remains the existing borrowed tuple
+path for read-only entry loops, but switches to `values.iter_mut()` for the
+mutating shape and lowers `setValue` to clone the old value, assign through the
+mutable tuple value, and return the old value. Covered by
+`lower::tests::map_entry_set_enhanced_for_set_value_uses_mutable_backing_iterator`
+and `tests/differential/MapEntrySetEnhancedForSetValue.java` (`1,2`). The full
+differential oracle passed with 178 fixtures. Remaining entry-set residue is
+arbitrary `Map.Entry` values whose key/value cannot yet be extracted
+structurally.
+
+Follow-up 2026-08-28 entry-set contains-next pass:
+`values.entrySet().contains(values.entrySet().iterator().next())` now recognizes
+that the probed entry comes from the same backing map. The lowering evaluates
+the map receiver once as an immutable borrow, extracts the iterator entry's key,
+and checks `contains_key(&key)` instead of trying to call `contains` on a Rust
+hash-map iterator. Covered by
+`lower::tests::map_entry_set_contains_next_translation_reads_backing_map` and
+`tests/differential/MapEntrySetContainsNext.java` (`true,1`). Remaining
+entry-set residue is arbitrary `Map.Entry` values whose key/value cannot yet be
+extracted structurally.
+
+Follow-up 2026-08-28 entry-set SimpleEntry local pass:
+`Map.Entry<K,V> entry = new AbstractMap.SimpleEntry<>(key, value)` is now
+tracked as a decomposable local value, so
+`values.entrySet().contains(entry)` and `values.entrySet().remove(entry)` use
+the backing map instead of iterator collection methods. Assignment to the entry
+local updates the recorded key/value pair when the new value is another
+`SimpleEntry`, and clears it otherwise to avoid stale decomposition. Covered by
+`lower::tests::map_entry_set_contains_simple_entry_local_uses_backing_map`,
+`lower::tests::map_entry_set_remove_simple_entry_local_mutates_backing_map`,
+`lower::tests::map_entry_set_contains_simple_entry_local_reassignment_updates_backing_map_args`,
+`tests/differential/MapEntrySetContainsEntryLocal.java` (`true,1`), and
+`tests/differential/MapEntrySetRemoveEntryLocal.java` (`true,0,false`).
+Remaining entry-set residue is opaque `Map.Entry` values whose key/value cannot
+yet be extracted structurally.
+
+Follow-up 2026-08-28 entry-set iterator-entry local pass:
+`Map.Entry<K,V> entry = values.entrySet().iterator().next()` is now tracked as a
+local entry value tied to its backing map. Same-map
+`values.entrySet().contains(entry)` checks the backing map key directly, and
+same-map `values.entrySet().remove(entry)` clones the entry key before mutating
+the backing map. Assignment refreshes this backing-map fact when the new value
+is another map-entry iterator result and clears it otherwise. Covered by
+`lower::tests::map_entry_set_contains_next_local_translation_reads_backing_map`,
+`lower::tests::map_entry_set_remove_next_local_translation_mutates_backing_map`,
+`tests/differential/MapEntrySetContainsNextLocal.java` (`true,1`), and
+`tests/differential/MapEntrySetRemoveNextLocal.java` (`true,0,false`).
+Remaining entry-set residue is opaque `Map.Entry` values whose key/value or
+backing map cannot yet be extracted structurally.
+
+Follow-up 2026-08-28 SimpleEntry display pass:
+`Map.Entry<K,V> entry = new AbstractMap.SimpleEntry<>(key, value)` now reuses
+the tracked constructor operands when the entry is lowered as a string concat or
+display segment. That preserves Java's `key=value` entry display for the
+decomposable local case instead of falling through to erased-object display,
+where an external `SimpleEntry` facade has no stored key/value state. Covered by
+`lower::tests::simple_map_entry_local_display_uses_tracked_key_value_pair` and
+`tests/differential/MapEntryDisplay.java` (`xa=1`). Remaining entry residue is
+arbitrary opaque `Map.Entry` values whose key/value or backing map cannot yet be
+extracted structurally.
+
+Follow-up 2026-08-28 entry-set iterator display pass:
+`values.entrySet().iterator().next()` now uses the same backing-map recognition
+as the entry-set mutation/contains/remove paths when it is lowered as a string
+concat or display segment. The lowering evaluates the backing map once, binds
+one borrowed iterator entry, and formats `key=value` instead of displaying the
+Rust tuple carrier. Covered by
+`lower::tests::map_entry_next_display_uses_backing_key_value_pair` and
+`tests/differential/MapEntryNextDisplay.java` (`xa=1`). Remaining entry residue
+is arbitrary opaque `Map.Entry` values whose key/value or backing map cannot yet
+be extracted structurally.
+
+Follow-up 2026-08-28 Map.Entry field-carrier pass:
+`Map.Entry<K,V>` fields now use the same tuple carrier consistently at
+construction and accessor sites. A field initialized from
+`new AbstractMap.SimpleEntry<>(key, value)` lowers the constructor into the
+target entry tuple instead of the external `SimpleEntry` facade, and
+`entry.getKey()` / `entry.getValue()` on a typed entry receiver project tuple
+fields rather than calling missing facade methods. Covered by
+`lower::tests::map_entry_field_accessors_use_tuple_fields` and
+`tests/differential/MapEntryFieldDisplay.java` (`a=1`). Remaining entry residue
+is arbitrary opaque `Map.Entry` values whose key/value or backing map cannot yet
+be extracted structurally.
+
+Follow-up 2026-08-28 `Collection.addAll` return pass:
+`List.addAll` and set-like `addAll` now plan separately from void `putAll` /
+Rust `extend`. Expression-valued `addAll` lowers to a structural block that
+records the collection length, performs the extend, and returns whether the
+length changed; expression statements still lower as plain mutation. The JDK
+facade ABI now marks list/set `addAll` receivers as `&mut self`, and the
+signature boundary rule no longer lets the default owned facade parameter shape
+override a known mutating receiver call. Covered by
+`tests/differential/CollectionAddAllReturn.java`
+(`true,false,2,true,false,1`),
+`slot_shape_design::native_collection_add_all_argument_boundary_borrows_source_content`,
+and `slot_shape_design::stdlib_signature_facts_include_jdk_collection_rust_abi_slots`.
+The differential suite is now at 195 fixtures.
+
+Follow-up 2026-08-28 typed `Map.Entry` parameter pass:
+`values.entrySet().contains(entry)` and `values.entrySet().remove(entry)` now
+decompose a stable typed `Map.Entry<K,V>` argument by projecting its tuple
+carrier key/value fields. This covers parameter and other known stable
+projections with an inferred entry shape, while still leaving arbitrary opaque
+entry values without a recoverable key/value carrier open. The erased-return
+lowering path now gives map views the same precedence as ordinary expression
+and slot lowering, avoiding the previous fallback to invalid Rust iterator
+`contains`/`remove` with `&Entry`. Covered by
+`lower::tests::map_entry_set_contains_typed_entry_param_uses_key_value_projection`,
+`lower::tests::map_entry_set_remove_typed_entry_param_uses_key_value_projection`,
+`tests/differential/MapEntrySetContainsParam.java` (`true,false,1`), and
+`tests/differential/MapEntrySetRemoveParam.java` (`false,true,0,false`).
+The differential suite is now at 199 fixtures.
+
+Follow-up 2026-08-28 `SimpleImmutableEntry` pass:
+`AbstractMap.SimpleImmutableEntry<K,V>` now follows the same tuple key/value
+carrier as `AbstractMap.SimpleEntry<K,V>` for construction, display, and
+entry-set equality checks. This covers the immutable JDK pair shape without
+adding a separate opaque facade or erased-object display fallback. Covered by
+`lower::tests::simple_immutable_map_entry_uses_same_key_value_pair_path` and
+`tests/differential/MapEntrySimpleImmutableEntry.java` (`xa=1,true,false`).
+The differential suite is now at 201 fixtures.
+
+Follow-up 2026-08-28 internal `Map` carrier pass:
+private source methods declared against broad collection interfaces can now
+specialize their emitted Rust parameter carrier from unambiguous internal
+call-site evidence. A local such as
+`Map<String,Object> map = new LinkedHashMap<String,Object>()` records the
+constructor-refined `LinkedHashMap` carrier in signature metadata, and a
+callee `Map<String, ? extends Object>` parameter adopts that carrier only when
+all observed source call sites agree. Public API methods stay on their declared
+surface type. Covered by
+`tests/idiom_gaps.rs::map_entry_enhanced_for_uses_planned_iterator_and_tuple_fields`,
+which now pins `values: &JavaLinkedHashMap<...>` and generated-crate
+compilation.
+
+Follow-up 2026-08-28 aliased entry-set iteration pass:
+enhanced-for over a tracked `Set<Map.Entry<K,V>>` local initialized from
+`map.entrySet()` now uses the same live backing-map iterator as the direct
+`for (... : map.entrySet())` form. The alias no longer falls through to the
+ordinary set value, which would snapshot the entry view and miss later backing
+map mutations. Covered by
+`lower::tests::map_entry_set_alias_iteration_uses_live_backing_map`.
+Remaining entry residue is still arbitrary opaque `Map.Entry` values whose
+key/value or backing map cannot yet be extracted structurally.
+
+Follow-up 2026-08-28 `Collection.removeAll` return pass:
+`List.removeAll` and set-like `removeAll` now have an expression-valued native
+collection plan instead of only a statement-lowering special case. The
+expression path mirrors the existing statement semantics by binding the source
+collection, retaining values not contained in it, and returning whether the
+receiver length changed. Covered by
+`tests/idiom_gaps.rs::collection_remove_all_return_uses_boolean_collection_contract`
+with generated-crate compilation. The receiver/source self-alias shape is also
+handled before argument-slot adaptation: `values.removeAll(values)` lowers to
+`clear()` and expression position returns whether the collection had any
+elements. Covered by
+`tests/idiom_gaps.rs::collection_remove_all_self_alias_clears_and_returns_changed`.
+
+Follow-up 2026-08-28 `Map.values().remove` mutable-borrow pass:
+values-view removal now uses the same backing-map mutable borrow adapter as the
+entry-set mutation paths. A backing map that is already a mutable-borrowed
+local lowers through `&mut *values` instead of layering a raw `&mut values`
+borrow on top of the reference. Covered by
+`lower::tests::map_values_remove_borrows_mutable_backing_map_without_double_reference`.
+
+Follow-up 2026-08-28 `HashSet<>(map.entrySet())` constructor pass:
+the native collection constructor bridge now recognizes `entrySet()` when the
+target constructor is set-like and lowers it through the existing owned
+map-entry set projection. `new HashSet<Map.Entry<K,V>>(map.entrySet())`
+therefore collects `(K, V)` tuples from the backing map instead of falling
+through to an unresolved facade call. Covered by
+`tests/idiom_gaps.rs::map_entry_set_constructor_collects_hashset_for_set_slot`
+with generated-crate compilation.

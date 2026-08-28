@@ -1352,44 +1352,145 @@ fn qualify_duplicate_program_type_names(programs: &mut [&mut Program]) {
         .into_iter()
         .filter_map(|(name, packages)| (packages.len() > 1).then_some(name))
         .collect::<BTreeSet<_>>();
-    if duplicate_names.is_empty() {
+
+    #[derive(Debug, Clone)]
+    struct TypeNamePlan {
+        program_index: usize,
+        type_index: usize,
+        package: String,
+        old_name: String,
+        source_name: String,
+        planned_name: String,
+    }
+
+    let mut plans = Vec::new();
+    for (program_index, program) in programs.iter().enumerate() {
+        let package = program.package.clone().unwrap_or_default();
+        for (type_index, ty) in program.types.iter().enumerate() {
+            let source_name = source_type_qualified_name(program.package.as_deref(), &ty.name);
+            let planned_name = if !package.is_empty()
+                && duplicate_names.contains(&ty.name)
+                && let Some(qualified) = qualified_merge_type_name(&package, &ty.name)
+            {
+                qualified
+            } else {
+                ty.name.clone()
+            };
+            plans.push(TypeNamePlan {
+                program_index,
+                type_index,
+                package: package.clone(),
+                old_name: ty.name.clone(),
+                source_name,
+                planned_name,
+            });
+        }
+    }
+
+    let mut order = (0..plans.len()).collect::<Vec<_>>();
+    order.sort_by_key(|index| {
+        !plans[*index].package.is_empty() && !plans[*index].old_name.contains('.')
+    });
+    let mut occupied_rust_names: BTreeMap<String, String> = BTreeMap::new();
+    for index in order {
+        let mut attempt = 0;
+        loop {
+            let rust_name =
+                crate::java_naming::rust_name_for_java_named_type(&plans[index].planned_name);
+            if occupied_rust_names
+                .get(&rust_name)
+                .is_none_or(|source_name| source_name == &plans[index].source_name)
+            {
+                occupied_rust_names.insert(rust_name, plans[index].source_name.clone());
+                break;
+            }
+            if let Some(disambiguated) = disambiguated_merge_type_name(
+                &plans[index].package,
+                &plans[index].old_name,
+                attempt,
+            ) {
+                plans[index].planned_name = disambiguated;
+                attempt += 1;
+            } else {
+                break;
+            }
+        }
+    }
+
+    let changes = plans
+        .into_iter()
+        .filter(|plan| plan.old_name != plan.planned_name)
+        .collect::<Vec<_>>();
+    if changes.is_empty() {
         return;
     }
 
-    for program in programs.iter_mut() {
-        let Some(package) = program.package.as_deref() else {
-            continue;
-        };
-        if package.is_empty() {
-            continue;
+    for change in &changes {
+        let ty = &mut programs[change.program_index].types[change.type_index];
+        ty.name = change.planned_name.clone();
+    }
+    for change in changes {
+        let old_source_name = source_type_qualified_name(Some(&change.package), &change.old_name);
+        for program in programs.iter_mut() {
+            rewrite_type_references_in_program(program, &old_source_name, &change.planned_name);
         }
-        for ty in &mut program.types {
-            if duplicate_names.contains(&ty.name)
-                && let Some(qualified) = qualified_merge_type_name(package, &ty.name)
-            {
-                let old_name = ty.name.clone();
-                ty.name = qualified;
-                qualify_type_references_in_type(ty, &old_name);
-            }
+        if !change.package.is_empty() && !change.old_name.contains('.') {
+            rewrite_type_references_in_program(
+                programs[change.program_index],
+                &change.old_name,
+                &change.planned_name,
+            );
         }
+    }
+}
+
+fn source_type_qualified_name(package: Option<&str>, name: &str) -> String {
+    if name.contains('.') {
+        return name.to_string();
+    }
+    package
+        .filter(|package| !package.is_empty())
+        .map(|package| format!("{package}.{name}"))
+        .unwrap_or_else(|| name.to_string())
+}
+
+fn disambiguated_merge_type_name(package: &str, type_name: &str, attempt: usize) -> Option<String> {
+    if package.is_empty() || type_name.contains('.') {
+        return None;
+    }
+    let marker = if attempt == 0 {
+        "JavaType".to_string()
+    } else {
+        format!("JavaType{attempt}")
+    };
+    Some(format!("{package}.{marker}.{type_name}"))
+}
+
+fn rewrite_type_references_in_program(program: &mut Program, old_name: &str, new_name: &str) {
+    for ty in &mut program.types {
+        qualify_type_references_in_type_with_name(ty, old_name, new_name);
+    }
+}
+
+fn qualify_type_references_in_type_with_name(ty: &mut TypeDecl, old_name: &str, new_name: &str) {
+    rewrite_type_name_in_string_option(&mut ty.extends, old_name, new_name);
+    for implemented in &mut ty.implements {
+        rewrite_type_name_in_string(implemented, old_name, new_name);
+    }
+    for bound in &mut ty.type_param_bounds {
+        rewrite_type_name_in_java_type_option(bound, old_name, new_name);
+    }
+    for block in &mut ty.static_init_blocks {
+        rewrite_type_name_in_block(&mut block.block, old_name, new_name);
+    }
+    for member in &mut ty.members {
+        rewrite_type_name_in_member(member, old_name, new_name);
     }
 }
 
 fn qualify_type_references_in_type(ty: &mut TypeDecl, old_name: &str) {
     let new_name = ty.name.clone();
-    rewrite_type_name_in_string_option(&mut ty.extends, old_name, &new_name);
-    for implemented in &mut ty.implements {
-        rewrite_type_name_in_string(implemented, old_name, &new_name);
-    }
-    for bound in &mut ty.type_param_bounds {
-        rewrite_type_name_in_java_type_option(bound, old_name, &new_name);
-    }
-    for block in &mut ty.static_init_blocks {
-        rewrite_type_name_in_block(&mut block.block, old_name, &new_name);
-    }
-    for member in &mut ty.members {
-        rewrite_type_name_in_member(member, old_name, &new_name);
-    }
+    qualify_type_references_in_type_with_name(ty, old_name, &new_name);
 }
 
 fn rewrite_type_name_in_member(member: &mut Member, old_name: &str, new_name: &str) {
@@ -2156,7 +2257,7 @@ fn strip_summary_bodies_from_type(ty: &mut java_ir::TypeDecl) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::java_ir::Member;
+    use crate::java_ir::{JavaType, Member};
     use crate::java_signature::JavaCallableKey;
 
     #[test]
@@ -2247,6 +2348,110 @@ public class Item {
                     |key| matches!(key.owner.as_str(), "AItem" | "BItem") && key.java_name == "who"
                 ),
             "analysis identity should stay in Java owner space, not emitted Rust spelling"
+        );
+    }
+
+    #[test]
+    fn duplicate_program_prepass_avoids_projected_rust_type_name_collisions() {
+        let mut root = parser::parse_java_source(
+            r#"
+public class ABC {
+    public int id() { return 0; }
+}
+"#,
+        );
+        let mut ab = parser::parse_java_source(
+            r#"
+package a.b;
+
+public class C {
+    public C self() { return new C(); }
+}
+"#,
+        );
+        let mut x = parser::parse_java_source(
+            r#"
+package x;
+
+public class C {
+    public int id() { return 1; }
+}
+"#,
+        );
+        let mut use_ab = parser::parse_java_source(
+            r#"
+package usecase;
+
+public class UseAB {
+    public a.b.C make() { return new a.b.C(); }
+}
+"#,
+        );
+
+        qualify_duplicate_program_type_names(&mut [
+            &mut root.program,
+            &mut ab.program,
+            &mut x.program,
+            &mut use_ab.program,
+        ]);
+
+        let java_names = [
+            root.program.types[0].name.as_str(),
+            ab.program.types[0].name.as_str(),
+            x.program.types[0].name.as_str(),
+        ];
+        let rust_names = java_names
+            .iter()
+            .map(|name| crate::java_naming::rust_name_for_java_named_type(name))
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(
+            rust_names.len(),
+            java_names.len(),
+            "projected Rust declaration names should remain injective: {java_names:?}"
+        );
+        assert_eq!(root.program.types[0].name, "ABC");
+        assert_eq!(ab.program.types[0].name, "a.b.JavaType.C");
+        assert_eq!(x.program.types[0].name, "x.C");
+        assert_eq!(
+            rust_names,
+            BTreeSet::from([
+                "ABC".to_string(),
+                "ABJavaType_C".to_string(),
+                "XC".to_string()
+            ])
+        );
+
+        let self_method = ab.program.types[0]
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) if method.name == "self" => Some(method),
+                _ => None,
+            })
+            .expect("self method should be parsed");
+        assert_eq!(
+            self_method.return_type,
+            JavaType::Named {
+                name: "a.b.JavaType.C".to_string(),
+                args: Vec::new(),
+            }
+        );
+
+        let make_method = use_ab.program.types[0]
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) if method.name == "make" => Some(method),
+                _ => None,
+            })
+            .expect("make method should be parsed");
+        assert_eq!(
+            make_method.return_type,
+            JavaType::Named {
+                name: "a.b.JavaType.C".to_string(),
+                args: Vec::new(),
+            }
         );
     }
 }

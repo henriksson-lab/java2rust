@@ -275,7 +275,7 @@ impl LivenessAnalysis {
                 self.record_scopes_block(body, &mut inner);
                 for catch in catches {
                     let mut catch_scope = scope.clone();
-                    catch_scope.insert(catch.name.clone(), stmt_id(stmt));
+                    catch_scope.insert(catch.source_name.clone(), stmt_id(stmt));
                     self.record_scopes_block(&catch.body, &mut catch_scope);
                 }
                 if let Some(finally_block) = finally_block {
@@ -569,7 +569,7 @@ impl LivenessAnalysis {
                 let after_body = live.clone();
                 for catch in catches {
                     let mut catch_live = self.block_live_in(&catch.body, &after_body, loop_live);
-                    catch_live.retain(|binding| binding.name != catch.name);
+                    catch_live.retain(|binding| binding.name != catch.source_name);
                     live.extend(catch_live);
                 }
                 // Everything a catch reads must stay live across the whole
@@ -581,7 +581,7 @@ impl LivenessAnalysis {
                 let mut guarded_floor = HashSet::new();
                 for catch in catches {
                     let mut reads = self.block_live_in(&catch.body, &after_body, loop_live);
-                    reads.retain(|binding| binding.name != catch.name);
+                    reads.retain(|binding| binding.name != catch.source_name);
                     guarded_floor.extend(reads);
                 }
                 if let Some(finally_block) = finally_block {

@@ -54,7 +54,7 @@ pub struct CallableFallibility {
 pub enum FallibilityReason {
     /// Integer `/` or `%` can throw ArithmeticException on a zero divisor.
     IntegerDivRemThrow,
-    /// `Math.toIntExact(long)` can throw ArithmeticException on overflow.
+    /// Math integer helpers can throw ArithmeticException.
     MathToIntExactThrow,
     /// A nullable Java reference was dereferenced as a receiver and can throw
     /// NullPointerException.
@@ -995,8 +995,8 @@ fn expr_has_math_to_int_exact_call(expr: &Expr) -> bool {
 }
 
 fn call_is_math_to_int_exact(receiver: Option<&Expr>, name: &str, arg_count: usize) -> bool {
-    matches!(name, "toIntExact" | "to_int_exact")
-        && arg_count == 1
+    (matches!(name, "toIntExact" | "to_int_exact") && arg_count == 1
+        || matches!(name, "floorDiv" | "floor_div" | "floorMod" | "floor_mod") && arg_count == 2)
         && receiver.is_none_or(expr_is_math_static_owner)
 }
 

@@ -13,6 +13,28 @@ one level below it
 
 Current tree update:
 
+* Generic source type-bound lookup no longer accepts the first emitted Rust
+  alias match when multiple Java owners collapse to the same Rust name. Exact
+  Java-owner lookup still wins, but the Rust-alias tier now requires uniqueness
+  like the simple-name tier, so an emitted alias such as `AB_C` cannot silently
+  select whichever of `a.B.C` or `AB.C` appears first. Regressions:
+  `item_assembly::tests::source_type_bound_decl_refuses_ambiguous_simple_package_peer`
+  and
+  `item_assembly::tests::source_type_param_into_supertype_bounds_refuses_ambiguous_simple_package_peer`.
+* FactSet lookup fallbacks for field nullability, trivial accessors, external
+  static field values, and external constructors now refuse ambiguous
+  package-simple owner aliases, matching the earlier `external_field_for`
+  behavior. Exact/direct owners still resolve, but querying `Item` no longer
+  selects the last matching fact when both `a.Item` and `b.Item` publish the
+  same member/constructor shape. Regression:
+  `semantic_facts::fact_lookup_refuses_ambiguous_simple_package_owner_aliases`.
+* Resolved anonymous interface constructors now resolve the declaring interface
+  owner through the local import/static-alias table and combined context lookup
+  before rendering the trait object constructor. `import a.I; new I() { ... }`
+  no longer falls back to `<dyn I>::anonymous()` when `a.I`/`b.I` peers are
+  both visible; it renders the declaration-backed trait name such as
+  `<dyn AI>::anonymous()`. Regression:
+  `lower::tests::resolved_anonymous_interface_constructor_uses_import_alias_owner`.
 * §4 and §5 are fixed for declarations in one generated `impl`: after the
   normal overload name is computed, declared methods are allocated in the Rust
   inherent namespace with constructor names pre-occupied. Regressions:
@@ -115,6 +137,11 @@ Current tree update:
   `rendered_string_heuristics_have_centralization_guardrails`,
   `lower::tests::static_storage_reference_uses_resolved_context_owner_identity`,
   and `source_static_final_byte_constants_preserve_declared_slot_type`.
+  Follow-up 2026-08-28: the byte-constant regression was still listed in the
+  `idiom_gaps` expected-failure baseline even though the current lowering
+  preserves `i8` constants and emits owner-qualified constant reads. The stale
+  `Self::` assertion was updated to `ByteConstantOwner::`, and the test was
+  removed from the baseline after the focused check passed.
 * Exact source static field names now outrank alias fallback in the static
   semantic/access-name/owner maps. The previous maps let an earlier alias claim
   a later exact field spelling, so `static int self; static int self__;` could
@@ -1178,3 +1205,111 @@ closed. This prevents a `b.Holder` field declared as bare `Item` from charging
 static reachability or storage escape to `a.Item` merely because `a.Item` sorts
 first. Regression:
 `storage_strategy::tests::storage_strategy_simple_owner_uses_same_package_before_first_simple_match`.
+
+Follow-up 2026-08-28: the duplicate-program type pre-pass now checks the Rust
+declaration names produced by its planned Java-owner rewrites, not only the
+source simple names. If ordinary package qualification would still collide with
+another emitted declaration, such as default-package `ABC` versus package peer
+`a.b.C` projected as `ABC`, the pre-pass assigns a collision-safe internal owner
+like `a.b.JavaType.C` and rewrites same-file bare references plus cross-file
+fully-qualified references to match. This is still a local generated-name guard,
+not the first-class package-aware owner model described above. Regression:
+`lib::tests::duplicate_program_prepass_avoids_projected_rust_type_name_collisions`.
+
+Follow-up 2026-08-28: `signature_field_shape_for_type_aliases` no longer lets a
+package-qualified owner miss fall through to its simple-name peer. A lookup for
+`a.Item::value` must not borrow `Item::value` just because the final segment
+matches; simple-owner compatibility remains for unqualified owner text only.
+Regression:
+`lower::tests::signature_field_shape_for_type_aliases_does_not_borrow_simple_package_peer`.
+
+Follow-up 2026-08-28: nested simple type aliases are now suppressed against the
+Rust names of emitted method-local capture types, not only against source
+program type declarations. A source nested type and a capturing local class can
+both be named `Inner`; the generated module now keeps the real emitted structs
+and avoids adding a colliding `pub type Inner = Outer_Inner` alias. This is a
+local emitted-name collision guard, not the first-class Java owner identity
+model this audit still asks for. Regression:
+`slot_shape_design::nested_simple_alias_is_suppressed_by_emitted_local_capture_type`.
+
+Follow-up 2026-08-28: the adjacent local-class shadowing constructor path is
+fixed for the same `Inner`/`Outer.Inner` shape. When a method-local capturing
+class shadows a nested member class, the local declaration refinement now keeps
+the initializer's local-capture type instead of the pre-qualified member slot,
+and the source-constructor-for-slot fast path passes capture constructor
+arguments just like the ordinary `Expr::New` lowering path. The generated code
+therefore emits `let local: Inner = Inner::new(base);` instead of a
+`compile_error!` upcast from `Inner` to `Outer.Inner`. Regression:
+`slot_shape_design::local_class_constructor_shadows_nested_member_class`.
+
+Follow-up 2026-08-28: `stdlib` source-summary type lookup no longer returns the
+first package peer for a bare simple owner. `find_source_type_decl` now tries
+exact Java owner text first and only accepts simple-name/Rust-alias
+compatibility when it is unique; ambiguous `a.Item`/`b.Item` queried as `Item`
+returns `None`. Constructor facade and imported-static summary lookups also go
+through `find_source_summary_owner_decl`, which accepts a package-qualified miss
+through the owner's simple name only when the summary program is for that same
+package. This fences inherited source-summary method signatures, source-summary
+constructor facade methods, and imported static summary methods without
+introducing the broader first-class owner key. Regressions:
+`stdlib::source_summary_method_identity_tests::find_source_type_decl_refuses_ambiguous_simple_package_peer`,
+`stdlib::source_summary_method_identity_tests::source_summary_constructor_lookup_does_not_borrow_other_package_simple_owner`,
+and
+`stdlib::source_summary_method_identity_tests::source_summary_imported_static_lookup_does_not_borrow_other_package_simple_owner`.
+
+Follow-up 2026-08-28: the adjacent `stdlib` program-type lookup helper now
+uses the same exact-or-unique policy instead of returning the first simple-name
+package peer. `find_program_type_by_key` tries exact canonical owner text first,
+then accepts simple-name compatibility only when there is one match. This keeps
+source-summary hierarchy traversal from inheriting methods or static-final
+fields through an arbitrary `a.Base`/`b.Base` peer when a child only says
+`extends Base` and the owner cannot be disambiguated locally. Regressions:
+`stdlib::source_summary_method_identity_tests::find_program_type_by_key_refuses_ambiguous_simple_package_peer`
+and
+`stdlib::source_summary_method_identity_tests::source_summary_method_hierarchy_refuses_ambiguous_simple_super_owner`.
+
+Follow-up 2026-08-28: imported static-owner support discovery now respects
+lexical shadowing instead of computing one lossy method-wide name set before
+owner collection. A later local with the same spelling as an imported owner no
+longer suppresses an earlier owner call, and a nested-block local no longer
+suppresses a call after the block. This is still a scoped collector fix rather
+than the first-class Java owner identity model, but it removes one more place
+where pure spelling decided whether an external owner existed. Regressions:
+`stdlib::external_facade_support_tests::imported_static_owner_call_before_shadowing_local_is_collected`
+and
+`stdlib::external_facade_support_tests::imported_static_owner_shadow_does_not_escape_nested_block`.
+
+Follow-up 2026-08-28: generic source type-bound lookup in `item_assembly.rs`
+no longer picks the first package peer for a bare simple bound. Type-parameter
+bound projection now tries exact Java owner text, then emitted Rust alias, and
+only then accepts a simple-name/Rust-simple-name match when it is unique across
+the support programs. The same ambiguity-aware helper drives `Into<...>`
+supertype bounds for source class bounds, so `T extends Base` does not borrow
+`a.Base` or `b.Base` by support-program order when both exist. Regressions:
+`item_assembly::tests::source_type_bound_decl_refuses_ambiguous_simple_package_peer`,
+`item_assembly::tests::source_type_param_into_supertype_bounds_refuses_ambiguous_simple_package_peer`,
+and the existing generated-crate check
+`idiom_gaps::source_generic_class_bound_overload_call_uses_bound_rust_name`.
+
+Follow-up 2026-08-28: external field fact lookup now also fails closed for an
+ambiguous package-qualified simple-owner alias. Exact package owners still
+resolve (`a.Item.KIND`, `b.Item.KIND`), but a bare `Item.KIND` query no longer
+returns whichever package peer happens to win candidate ordering when both
+`a.Item` and `b.Item` expose `KIND`. This fixes the same owner-key shape at the
+fact lookup boundary used by static constant/member-access planning. Regression:
+`semantic_facts::external_field_lookup_refuses_ambiguous_simple_package_owner`.
+
+Follow-up 2026-08-28: in-scope type-parameter detection in lowering now uses
+the combined context owner lookup instead of checking only the primary source
+program. A support-local current type such as `a.Box<T>` is recognized when the
+source program is empty, while a bare ambiguous `Box` owner still fails closed
+when support and summary programs contain package peers. Regression:
+`lower::tests::in_scope_type_parameter_lookup_uses_combined_context_and_refuses_ambiguous_owner`.
+
+Follow-up 2026-08-28: derive-support checks in `item_assembly.rs` no longer
+recover a source declaration by taking the first Java owner whose emitted Rust
+name matches a rendered `RustType::Named`. The reverse lookup now returns a
+declaration only when the emitted Rust name maps to one distinct Java owner, so
+collisions like `a.B.C` and `AB.C` both rendering as `AB_C` fail closed instead
+of letting traversal order decide `Default`/field-walk behavior. Regression:
+`item_assembly::tests::derive_support_type_lookup_refuses_ambiguous_emitted_rust_name`.

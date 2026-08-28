@@ -6,11 +6,13 @@ use std::path::Path;
 
 use common::{GeneratedCrateModule, cargo_check_generated_modules};
 use new_java2rust::facts::{
-    ControlFlowFactKind, DispatchRequirementKind, ExceptionKind, ExternalApiArgumentEffectFact,
-    ExternalApiCoverage, ExternalApiEffectFact, ExternalApiRole, ExternalArgumentAliasPolicy,
-    ExternalFieldFact, ExternalFieldKind, ExternalLibraryMode, ExternalLibraryPackFact,
-    FactProvenance, FactSet, FieldKey, NullabilityState, ReceiverMutabilityFact, RecursionKind,
-    TrivialAccessorKind, TypeCapabilityOverride, UnresolvedTargetFact, UnresolvedTargetKind,
+    AccessorInlinePolicy, ControlFlowFactKind, DispatchRequirementKind, ExceptionKind,
+    ExternalApiArgumentEffectFact, ExternalApiCoverage, ExternalApiEffectFact, ExternalApiRole,
+    ExternalArgumentAliasPolicy, ExternalConstructorFact, ExternalFieldFact, ExternalFieldKind,
+    ExternalFieldValueFact, ExternalLibraryMode, ExternalLibraryPackFact, FactProvenance, FactSet,
+    FieldKey, FieldNullabilityFact, FieldNullabilityProvenance, MethodKey, NullabilityState,
+    ReceiverMutabilityFact, RecursionKind, TrivialAccessorFact, TrivialAccessorKind,
+    TypeCapabilityOverride, UnresolvedTargetFact, UnresolvedTargetKind,
 };
 use new_java2rust::java_ir::{JavaType, PrimitiveType};
 use new_java2rust::object_model::plan_object_model_with_effective_facts;
@@ -1651,6 +1653,146 @@ fn indexed_external_field_lookup_preserves_direct_then_alias_precedence() {
         indexed_field.field_type,
         Some(JavaType::Primitive(PrimitiveType::Int))
     );
+}
+
+#[test]
+fn external_field_lookup_refuses_ambiguous_simple_package_owner() {
+    let mut facts = FactSet::default();
+    facts.external_field_facts.push(ExternalFieldFact {
+        field: FieldKey {
+            type_name: "a.Item".to_string(),
+            field_name: "KIND".to_string(),
+        },
+        field_type: Some(JavaType::String),
+        field_kind: ExternalFieldKind::StaticFinal,
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts.external_field_facts.push(ExternalFieldFact {
+        field: FieldKey {
+            type_name: "b.Item".to_string(),
+            field_name: "KIND".to_string(),
+        },
+        field_type: Some(JavaType::Primitive(PrimitiveType::Int)),
+        field_kind: ExternalFieldKind::StaticFinal,
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+
+    let indexed = facts.external_lookup_index();
+    assert_eq!(
+        indexed
+            .external_field_for("a.Item", "KIND")
+            .and_then(|field| field.field_type.as_ref()),
+        Some(&JavaType::String)
+    );
+    assert_eq!(
+        indexed
+            .external_field_for("b.Item", "KIND")
+            .and_then(|field| field.field_type.as_ref()),
+        Some(&JavaType::Primitive(PrimitiveType::Int))
+    );
+    assert!(indexed.external_field_for("Item", "KIND").is_none());
+    assert!(facts.external_field_for("Item", "KIND").is_none());
+}
+
+#[test]
+fn fact_lookup_refuses_ambiguous_simple_package_owner_aliases() {
+    let mut facts = FactSet::default();
+    for (owner, nullability, value) in [
+        ("a.Item", NullabilityState::MaybeNull, "A_KIND"),
+        ("b.Item", NullabilityState::DefinitelyNonNull, "B_KIND"),
+    ] {
+        facts.field_nullability_facts.push(FieldNullabilityFact {
+            field: FieldKey {
+                type_name: owner.to_string(),
+                field_name: "kind".to_string(),
+            },
+            state: nullability,
+            provenance: FieldNullabilityProvenance::ExternalLibraryPack,
+        });
+        facts.trivial_accessor_facts.push(TrivialAccessorFact {
+            method: MethodKey {
+                type_name: owner.to_string(),
+                method_name: "getKind".to_string(),
+            },
+            kind: TrivialAccessorKind::Getter {
+                field: FieldKey {
+                    type_name: owner.to_string(),
+                    field_name: "kind".to_string(),
+                },
+            },
+            inline_policy: AccessorInlinePolicy::InlineCandidate,
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+        facts
+            .external_field_value_facts
+            .push(ExternalFieldValueFact {
+                field: FieldKey {
+                    type_name: owner.to_string(),
+                    field_name: "KIND".to_string(),
+                },
+                rust_value: value.to_string(),
+                provenance: FactProvenance::ExternalLibraryPack,
+            });
+        facts
+            .external_constructor_facts
+            .push(ExternalConstructorFact {
+                type_name: owner.to_string(),
+                arg_types: Vec::new(),
+                provenance: FactProvenance::ExternalLibraryPack,
+            });
+    }
+
+    assert_eq!(
+        facts.field_nullability_for("a.Item", "kind"),
+        Some(NullabilityState::MaybeNull)
+    );
+    assert_eq!(
+        facts.field_nullability_for("b.Item", "kind"),
+        Some(NullabilityState::DefinitelyNonNull)
+    );
+    assert!(facts.field_nullability_for("Item", "kind").is_none());
+
+    assert_eq!(
+        facts
+            .trivial_accessor_for("a.Item", "getKind")
+            .map(|fact| &fact.method.type_name),
+        Some(&"a.Item".to_string())
+    );
+    assert_eq!(
+        facts
+            .trivial_accessor_for("b.Item", "getKind")
+            .map(|fact| &fact.method.type_name),
+        Some(&"b.Item".to_string())
+    );
+    assert!(facts.trivial_accessor_for("Item", "getKind").is_none());
+
+    assert_eq!(
+        facts
+            .external_field_value_for("a.Item", "KIND")
+            .map(|fact| fact.rust_value.as_str()),
+        Some("A_KIND")
+    );
+    assert_eq!(
+        facts
+            .external_field_value_for("b.Item", "KIND")
+            .map(|fact| fact.rust_value.as_str()),
+        Some("B_KIND")
+    );
+    assert!(facts.external_field_value_for("Item", "KIND").is_none());
+
+    assert_eq!(
+        facts
+            .external_constructor_for("a.Item", &[])
+            .map(|fact| fact.type_name.as_str()),
+        Some("a.Item")
+    );
+    assert_eq!(
+        facts
+            .external_constructor_for("b.Item", &[])
+            .map(|fact| fact.type_name.as_str()),
+        Some("b.Item")
+    );
+    assert!(facts.external_constructor_for("Item", &[]).is_none());
 }
 
 #[test]

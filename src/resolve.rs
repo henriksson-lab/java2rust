@@ -359,7 +359,7 @@ fn assign_local_binding_ids_for_stmt(
             for catch in catches {
                 catch.binding = Some(next_binding_id(
                     BindingKind::CatchParam,
-                    &catch.name,
+                    &catch.source_name,
                     occurrences,
                 ));
                 assign_local_binding_ids_for_block(&mut catch.body, occurrences);
@@ -2688,7 +2688,7 @@ fn resolve_stmt_calls(
             for catch in catches {
                 let mut catch_env = env.clone();
                 for ty in &catch.types {
-                    catch_env.insert_local(catch.name.clone(), ty.clone());
+                    catch_env.insert_local(catch.source_name.clone(), ty.clone());
                 }
                 resolve_block_calls(
                     &mut catch.body,
@@ -6959,8 +6959,14 @@ impl CaptureAnalyzer {
                         .types
                         .first()
                         .cloned()
-                        .unwrap_or_else(|| JavaType::Unknown(catch.name.clone()));
-                    add_symbol(&mut catch_ctx, &catch.name, ty, CaptureSource::Local, false);
+                        .unwrap_or_else(|| JavaType::Unknown(catch.source_name.clone()));
+                    add_symbol(
+                        &mut catch_ctx,
+                        &catch.source_name,
+                        ty,
+                        CaptureSource::Local,
+                        false,
+                    );
                     self.analyze_block(&catch.body, &mut catch_ctx, None);
                 }
                 if let Some(block) = finally_block {

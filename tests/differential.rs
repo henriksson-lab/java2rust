@@ -20,7 +20,7 @@ use std::process::Command;
 
 use new_java2rust::translate_source;
 
-const EXPECTED_DIFFERENTIAL_FIXTURES: usize = 167;
+const EXPECTED_DIFFERENTIAL_FIXTURES: usize = 202;
 const EXPECTED_KNOWN_GAP_FIXTURES: usize = 6;
 
 #[test]

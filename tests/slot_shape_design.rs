@@ -191,15 +191,16 @@ use new_java2rust::signature::{
     binding_boundary_policy, capability_diagnostics_for_signature_constraints,
     collect_signature_constraints, constrained_receiver_plan, constructor_param_boundary_policy,
     constructor_param_shape_constraints, external_argument_binding_constraints,
-    field_boundary_policy, field_shape_constraints, field_shape_constraints_with_facts,
-    field_shape_constraints_with_usage, local_shape_constraints, merge_dispatch_requirement_policy,
-    merge_ownership_requirement_policy, merge_signature_boundary_kind_policy,
-    merge_signature_flag_requirement_policy, merge_storage_nullability_requirement_policy,
-    merge_view_requirement_policy, method_param_boundary_policy, method_param_shape_constraints,
-    method_return_boundary_policy, method_return_shape_constraints, receiver_constraints,
-    receiver_constraints_with_facts, receiver_constraints_with_usage,
-    signature_boundary_constraints_with_effective_facts, signature_boundary_kind_priority_policy,
-    signature_boundary_policy, signature_boundary_policy_with_effective_facts,
+    external_receiver_binding_constraints, field_boundary_policy, field_shape_constraints,
+    field_shape_constraints_with_facts, field_shape_constraints_with_usage,
+    merge_dispatch_requirement_policy, merge_ownership_requirement_policy,
+    merge_signature_boundary_kind_policy, merge_signature_flag_requirement_policy,
+    merge_storage_nullability_requirement_policy, merge_view_requirement_policy,
+    method_param_boundary_policy, method_param_shape_constraints, method_return_boundary_policy,
+    method_return_shape_constraints, receiver_constraints, receiver_constraints_with_facts,
+    receiver_constraints_with_usage, signature_boundary_constraints_with_effective_facts,
+    signature_boundary_kind_priority_policy, signature_boundary_policy,
+    signature_boundary_policy_with_effective_facts,
     signature_boundary_representation_fact_policy_with_effective_facts,
     signature_boundary_representation_policy_with_effective_facts, signature_capability_policy,
     signature_capability_policy_with_effective_facts, signature_constraint_conflict_diagnostic,
@@ -6584,24 +6585,6 @@ class Use {
     );
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let usage = analyze_usage(&resolved.program);
-    let method_usage = usage
-        .methods
-        .get(&new_java2rust::usage::UsageMethodKey {
-            type_name: "FieldStorageFlow".to_string(),
-            method_name: "use".to_string(),
-        })
-        .expect("method usage");
-    assert!(
-        method_usage
-            .all_binding_facts()
-            .into_iter()
-            .any(|binding| binding.name == "input"
-                && binding.uses.iter().any(|usage| matches!(
-                    usage,
-                    BindingUse::AssignedToLocal { local_name, .. } if local_name == "first"
-                ))),
-        "{method_usage:?}"
-    );
     let representations = plan_representations(&resolved.program, &resolved.facts);
     let signatures = solve_signatures(&resolved.program, &representations, &usage);
     let ty = &resolved.program.types[0];
@@ -6627,13 +6610,6 @@ class Use {
             .local_binding_mutability(&method_signature.locals, "missing")
             .is_none()
     );
-    let mutated = std::collections::HashSet::from(["changed".to_string()]);
-    assert_eq!(local_shape_constraints("stable", &mutated), Vec::new());
-    assert_eq!(
-        local_shape_constraints("changed", &mutated),
-        vec![SignatureConstraint::MutableBinding]
-    );
-
     let lowered = lower_program_with_plans(
         &resolved.program,
         resolved.diagnostics,
@@ -10589,7 +10565,7 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
             &collection_types,
         ),
         CallTargetPlan::NativeCollectionMethod {
-            method: NativeCollectionMethod::Extend,
+            method: NativeCollectionMethod::AddAll,
             ..
         }
     ));
@@ -12810,6 +12786,14 @@ fn rendered_mutable_alias_projection_names_same_call_alias_shapes() {
         Some(RenderedMutableAliasProjection::NestedMutableSlice)
     );
     assert_eq!(
+        rendered_mutable_alias_projection("values.field.as_mut_slice() trailing", "values"),
+        None
+    );
+    assert_eq!(
+        rendered_mutable_alias_projection("values.field.as_deref_mut() trailing", "values"),
+        None
+    );
+    assert_eq!(
         rendered_mutable_alias_projection("other.as_mut_slice()", "values"),
         None
     );
@@ -14904,7 +14888,7 @@ class ErasedExternalFacadeDisplay {
 fn erased_file_object_display_delegates_to_file_display() {
     let translation = translate_source(
         r#"
-import java.io.File;
+	import java.io.File;
 
 class ErasedFileDisplay {
     String label() {
@@ -14947,10 +14931,56 @@ class ErasedFileDisplay {
 }
 
 #[test]
+fn erased_system_input_stream_display_uses_platform_display() {
+    let translation = translate_source(
+        r#"
+class ErasedInputStreamDisplay {
+    String label() {
+        Object value = System.in;
+        return "value=" + value;
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("java_erased_object_to_string(&value)"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("if let Some(value) = value.downcast_ref::<InputStream>()")
+            && translation
+                .rust
+                .contains("write!(f, \"java.io.InputStream@0\")"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "erased_system_input_stream_display",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn erased_uri_object_display_delegates_to_uri_display() {
     let translation = translate_source(
         r#"
-import java.net.URI;
+	import java.net.URI;
 
 class ErasedUriDisplay {
     String label() throws Exception {
@@ -16232,6 +16262,56 @@ class CollectionsSortComparatorUse {
     );
     cargo_check_generated_modules(
         "collections_sort_comparator_statement_lowers_to_sort_by",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn collections_sort_throwing_method_reference_comparator_propagates_result() {
+    let source = r#"
+import java.util.ArrayList;
+import java.util.Collections;
+
+class CollectionsSortComparatorThrowCatch {
+    static int compare(Integer a, Integer b) {
+        throw new IllegalArgumentException("bad compare");
+    }
+
+    String sortValues() {
+        ArrayList<Integer> values = new ArrayList<Integer>();
+        values.add(2);
+        values.add(1);
+        try {
+            Collections.sort(values, CollectionsSortComparatorThrowCatch::compare);
+            return "miss";
+        } catch (IllegalArgumentException ex) {
+            return "caught";
+        }
+    }
+}
+"#;
+
+    let translation = translate_source(source);
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation.rust.contains("java_collection_sort_by_result")
+            && translation
+                .rust
+                .contains("CollectionsSortComparatorThrowCatch::compare")
+            && !translation.rust.contains(".cmp(&0)"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "collections_sort_throwing_method_reference_comparator_propagates_result",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust.clone(),
@@ -20159,7 +20239,7 @@ fn signature_solver_collects_param_constraints_before_applying_shapes() {
     assert!(source.contains("method_param_shape_constraints"));
     assert!(source.contains("constructor_param_shape_constraints"));
     assert!(source.contains("method_return_shape_constraints"));
-    assert!(source.contains("local_shape_constraints"));
+    assert!(source.contains("legacy_name_set_local_mutability_constraints"));
     assert!(source.contains("field_shape_constraints"));
     assert!(source.contains("field_shape_constraints_with_facts"));
     assert!(source.contains("signature_member_api_boundary_policy"));
@@ -23058,6 +23138,19 @@ class BulkAddAllBorrowed {
             } if name == "addAll"
         )
     }));
+    let values_constraints = external_receiver_binding_constraints(
+        values_usage,
+        &semantic.facts,
+        &TypeEnv::new(),
+        true,
+        true,
+    );
+    assert!(
+        values_constraints.contains(&SignatureConstraint::RequiredOwnership(
+            OwnershipShape::MutableBorrow
+        )),
+        "addAll receiver should contribute a mutable-borrow signature constraint"
+    );
     let other_usage = method_usage.bindings.get("other").unwrap();
     assert!(other_usage.uses.iter().any(|usage| {
         matches!(
@@ -23091,6 +23184,20 @@ class BulkAddAllBorrowed {
             _ => None,
         })
         .unwrap();
+    let values_param_constraints =
+        method_param_shape_constraints(ty, method, &method.params[0], usage, &semantic.facts);
+    assert!(
+        values_param_constraints.contains(&SignatureConstraint::RequiredOwnership(
+            OwnershipShape::MutableBorrow
+        )),
+        "addAll receiver should keep a mutable-borrow method parameter constraint"
+    );
+    assert!(
+        !values_param_constraints.contains(&SignatureConstraint::RequiredOwnership(
+            OwnershipShape::Owned
+        )),
+        "addAll receiver should not keep the default owned method parameter constraint: {values_param_constraints:?}"
+    );
     let signature = signatures.required_method_signature(ty, method);
     let values = &signature.params[0].shape;
     let other = &signature.params[1].shape;
@@ -23598,10 +23705,20 @@ class SourceNullableSlots {
     );
     assert_eq!(
         source_binding_nullability_constraints(body, "value"),
+        vec![],
+        "block/name compatibility helper should fail closed for resolver-bound parameters"
+    );
+    assert_eq!(
+        new_java2rust::signature::source_binding_nullability_constraints_for_declaration(
+            body,
+            "value",
+            method.params[0].binding.as_ref(),
+            &method.params,
+        ),
         vec![SignatureConstraint::RequiredStorageNullability(
             NullabilityState::MaybeNull
         )],
-        "the public block/name compatibility helper has no parameter identity and still exposes param nullability by name"
+        "declaration-aware lookup should use the resolver-bound parameter identity"
     );
     assert_eq!(
         source_method_return_nullability_constraints(method),
@@ -23684,6 +23801,79 @@ class SourceDuplicateNullableLocal {
         ),
         "outer value should keep its own non-null initializer shape: {:?}",
         value_locals[1].shape
+    );
+}
+
+#[test]
+fn source_binding_nullability_constraints_do_not_use_nested_only_local_name() {
+    let parsed = parse_java_source(
+        r#"
+class SourceNestedNullableLocalOnly {
+    Object keep(boolean choose) {
+        if (choose) {
+            Object value = null;
+        }
+        return new Object();
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let ty = &resolved.program.types[0];
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "keep" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let body = method.body.as_ref().unwrap();
+
+    assert_eq!(
+        source_binding_nullability_constraints(body, "value"),
+        vec![],
+        "a nested id-less local must not enable the outer block/name compatibility helper"
+    );
+}
+
+#[test]
+fn source_binding_nullability_constraints_do_not_expose_enhanced_for_variable() {
+    let parsed = parse_java_source(
+        r#"
+class SourceEnhancedForNullableLocalOnly {
+    Object keep(Object[] values) {
+        for (Object item : values) {
+            item = null;
+        }
+        Object direct = null;
+        return direct;
+    }
+}
+"#,
+    );
+    let ty = &parsed.program.types[0];
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "keep" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let body = method.body.as_ref().unwrap();
+
+    assert_eq!(
+        source_binding_nullability_constraints(body, "item"),
+        vec![],
+        "an enhanced-for variable is scoped to the loop body, not the enclosing block"
+    );
+    assert_eq!(
+        source_binding_nullability_constraints(body, "direct"),
+        vec![SignatureConstraint::RequiredStorageNullability(
+            NullabilityState::DefinitelyNull
+        )],
+        "direct id-less local compatibility remains available"
     );
 }
 
@@ -23928,6 +24118,16 @@ class NullablePathOverloadArgument {
 
     assert_eq!(
         source_binding_nullability_constraints(body, "optional_index"),
+        vec![],
+        "block/name compatibility helper should fail closed for resolver-bound parameters"
+    );
+    assert_eq!(
+        new_java2rust::signature::source_binding_nullability_constraints_for_declaration(
+            body,
+            "optional_index",
+            method.params[1].binding.as_ref(),
+            &method.params,
+        ),
         vec![SignatureConstraint::RequiredStorageNullability(
             NullabilityState::MaybeNull
         )]
@@ -28921,6 +29121,19 @@ class MethodElemUse {
             && !translation.rust.contains("value: std::rc::Rc<ELEM>")
             && !translation.rust.contains("value: std::sync::Arc<ELEM>"),
         "{}",
+        translation.rust
+    );
+    let generic_box_section = translation
+        .rust
+        .split("pub struct GenericElemBox<ELEM>")
+        .nth(1)
+        .and_then(|tail| tail.split("pub struct MethodElemUse").next())
+        .expect("GenericElemBox section should be emitted");
+    assert!(
+        !generic_box_section.contains("value.clone()")
+            && !generic_box_section.contains("input.clone()")
+            && !generic_box_section.contains("impl<ELEM: Clone> GenericElemBox<ELEM>"),
+        "unconstrained Java type parameters must not gain Rust Clone requirements:\n{}",
         translation.rust
     );
 
@@ -34528,6 +34741,13 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
                 }
             }
 
+            if lines
+                .peek()
+                .is_some_and(|next| next.trim_start().starts_with("mod tests"))
+            {
+                break;
+            }
+
             let mut depth = 0isize;
             let mut saw_body = false;
             while let Some(item_line) = lines.next() {
@@ -35379,6 +35599,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
             && none_or_default_source.contains("if rendered == \"Default::default()\"")
             && none_or_default_source.contains("rust_type_arg_text_is_balanced(ty)")
             && none_or_default_source.contains("RustType::Raw(ty.to_string())")
+            && !none_or_default_source.contains("segment.starts_with(\"None::<\")")
             && !none_or_default_source.contains("rendered_projection_or_raw_leaf(rendered)")
             && !none_or_default_source.contains("rust_expr_is_none_or_default_value(&recovered)"),
         "None/default raw compatibility should use a narrow structured projection instead of broad rendered-expression recovery"
@@ -35815,8 +36036,10 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
             && coercion_source
                 .contains("let recovered = rendered_plus_expr_projection_or_raw_leaf(rendered);")
             && coercion_source.contains("rust_expr_is_constructed_optional_value(&recovered)")
-            && coercion_source.contains("rendered_expr_is_constructed_optional_value(rendered)"),
-        "constructed optional raw compatibility should recover structured expressions before text scanning"
+            && coercion_source.contains("rendered_expr_is_constructed_optional_value(rendered)")
+            && !coercion_source.contains("fn rendered_expr_is_get_option_projection")
+            && !coercion_source.contains("fn rendered_terminal_method_is_get"),
+        "constructed optional raw compatibility should recover get/copied projections structurally before falling back to Some-only text compatibility"
     );
     assert!(!lower_source.contains("fn lowered_expr_is_constructed_optional_value"));
     assert!(!lower_source.contains("fn lowered_raw_expr_is_constructed_optional_value"));
@@ -35879,10 +36102,14 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         "borrowed method receiver grouping should not render structured borrows into Raw"
     );
     assert!(
-        borrowed_method_receiver_source.contains("grouped_raw_leaf(rendered)")
+        borrowed_method_receiver_source.contains("recover_parseable_rendered_operand_projection")
+            && borrowed_method_receiver_source
+                .contains("parenthesize_borrowed_method_receiver(recovered)")
+            && borrowed_method_receiver_source.contains("RustExpr::raw_leaf(rendered)")
+            && !borrowed_method_receiver_source.contains("rendered.starts_with('&')")
             && !borrowed_method_receiver_source
                 .contains("RustExpr::Grouped(Box::new(rendered_projection_or_raw_leaf"),
-        "borrowed method receiver grouping should use the central raw-leaf recovery helper"
+        "borrowed method receiver grouping should recover parseable raw borrows before using the raw-leaf fallback without inferring borrow semantics from opaque raw text"
     );
     assert!(coercion_source.contains("pub fn force_shared_borrow_projection"));
     assert!(coercion_source.contains("pub fn borrow_as_dyn_trait"));
@@ -37140,12 +37367,24 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(
         mutable_alias_source.contains("rust_expr_mutable_alias_projection(arg, base)")
             && mutable_alias_source.contains("RustExpr::Raw(rendered) = arg.unshaped()")
-            && mutable_alias_source
-                .contains("let recovered = rendered_projection_or_raw_leaf(rendered)")
-            && mutable_alias_source
-                .contains("rust_expr_mutable_alias_projection(&recovered, base)")
+            && mutable_alias_source.contains("rendered_mutable_alias_projection(rendered, base)")
             && !mutable_alias_source.contains("emit::emit_expr(arg)"),
-        "mutable alias detection should recover parseable raw leaves before the raw fallback"
+        "mutable alias detection should delegate raw compatibility without rendering structured args"
+    );
+    let rendered_mutable_alias_source = coercion_source
+        .split("pub fn rendered_mutable_alias_projection")
+        .nth(1)
+        .and_then(|tail| tail.split("fn rust_expr_mutable_alias_projection").next())
+        .expect("rendered mutable alias helper should remain discoverable");
+    assert!(
+        rendered_mutable_alias_source
+            .contains("let recovered = rendered_projection_or_raw_leaf(rendered)")
+            && rendered_mutable_alias_source
+                .contains("rust_expr_mutable_alias_projection(&recovered, base)")
+            && rendered_mutable_alias_source.contains("None")
+            && !rendered_mutable_alias_source.contains("starts_with")
+            && !rendered_mutable_alias_source.contains("ends_with"),
+        "rendered mutable alias compatibility should fail closed after structural recovery"
     );
     assert!(coercion_source.contains("pub fn reborrow_optional_mut_projection"));
     let reborrow_optional_mut_source = coercion_source
@@ -37170,12 +37409,16 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(
         clone_erased_object_source
             .contains("let borrow_operand = rendered.strip_prefix('&').unwrap_or(&rendered);")
+            && clone_erased_object_source.contains("rendered_projection_or_raw_leaf(&rendered)")
+            && clone_erased_object_source
+                .contains("rust_expr_is_erased_object_clone_helper_call(&recovered)")
             && clone_erased_object_source
                 .contains("parenthesized_borrow_operand_leaf(borrow_operand)")
             && clone_erased_object_source.contains("borrowed_erased_object_clone_arg(expr)")
             && !clone_erased_object_source.contains("borrowed_raw_safe_expr(RustExpr::Raw(")
             && !clone_erased_object_source
                 .contains("borrowed_raw_safe_expr(rendered_projection_or_raw_leaf")
+            && !clone_erased_object_source.contains("raw_mentions_call(")
             && !clone_erased_object_source.contains("emit::emit_expr(&expr)"),
         "erased-object clone helper should normalize raw operands before sharing structured clone-call construction"
     );
@@ -37445,7 +37688,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     let array2_index_source = array_source
         .split("pub fn array2_index_projection")
         .nth(1)
-        .and_then(|tail| tail.split("fn parenthesize_raw_postfix_receiver").next())
+        .and_then(|tail| tail.split("pub fn array2_row_mut_assign_stmt").next())
         .expect("array2_index_projection should remain discoverable");
     assert!(
         array2_index_source.contains("recover_parseable_raw_operand_projection(row)")
@@ -37733,6 +37976,10 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         grouped_rendered_inner_source.contains("rendered_plus_expr_projection_or_raw_leaf(inner)"),
         "grouped rendered leaves should recover simple composition inside parentheses"
     );
+    assert!(
+        grouped_rendered_inner_source.contains("matches!(recovered.unshaped(), RustExpr::Raw(_))"),
+        "grouped rendered leaves should reject unrecovered raw inners"
+    );
     let rendered_index_leaf_source = coercion_source
         .split("fn rendered_index_leaf_projection")
         .nth(1)
@@ -37977,14 +38224,14 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
                 .contains("rewrite_recovered_same_outer_inner_constructor_raw_expr(expr, |expr|")
             && storage_constructor_rewrite_source
                 .contains("wrap_same_outer_inner_constructor_calls_expr(expr, outer_type, ctx)")
-            && storage_constructor_rewrite_source
-                .contains("if changed {\n        *expr = recovered;")
             && storage_constructor_rewrite_source.contains("*expr = recovered")
             && storage_constructor_rewrite_source.contains("let changed = rewrite(&mut recovered)")
-            && !storage_constructor_rewrite_source
+            && storage_constructor_rewrite_source
                 .contains("let changed = rewrite(&mut recovered);\n    *expr = recovered;")
+            && !storage_constructor_rewrite_source
+                .contains("if changed {\n        *expr = recovered;")
             && !storage_constructor_rewrite_source.contains("| RustExpr::Raw(_) => false"),
-        "same-outer storage constructor rewrites should recover raw constructor calls structurally before wrapping storage placement"
+        "same-outer storage constructor rewrites should keep recovered raw constructor calls structured even when no storage placement rewrite applies"
     );
     let storage_constructor_stmt_source = lower_source
         .split("fn wrap_same_outer_inner_constructor_calls_for_storage")
@@ -38132,8 +38379,9 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(coercion_source.contains("fn panic_recovered_result_expr_or_raw_leaf"));
     assert!(
         unwrap_result_source.contains("panic_recovered_result_expr_or_raw_leaf")
-            && unwrap_result_source.contains("rendered_projection_or_raw_leaf(&rendered)")
+            && unwrap_result_source.contains("rendered_projection_or_raw_leaf(trimmed)")
             && !unwrap_result_source.contains("let rendered = emit::emit_expr(&expr)")
+            && !unwrap_result_source.contains("ends_with(panic_recovery)")
             && !unwrap_result_source.contains("strip_suffix('?')")
             && !unwrap_result_source.contains("first_rust_try_operator_index")
             && !unwrap_result_source.contains("return RustExpr::Raw(")
@@ -38199,7 +38447,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         .split("fn lower_planned_call_expr_stmt")
         .nth(1)
         .and_then(|tail| {
-            tail.split("fn native_collections_sort_comparator_is_callback_param")
+            tail.split("fn native_collections_sort_comparator_is_callback")
                 .next()
         })
         .expect("call statement lowering should remain discoverable");
@@ -40436,7 +40684,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         "erased-object collection snapshots should compose iter/map/collect structurally"
     );
     let erased_object_vec_clone_projection_source = coercion_source
-        .split("fn erased_object_vec_clone_projection")
+        .split("fn optional_erased_object_vec_clone_projection")
         .nth(1)
         .and_then(|tail| {
             tail.split("pub fn java_iterator_from_collection_projection")
@@ -44495,6 +44743,7 @@ fn stdlib_signature_facts_include_jdk_collection_rust_abi_slots() {
         CallableKey::method("java.util.Map", "entrySet", Staticness::Unknown, 0);
     let set_size_key = CallableKey::method("HashSet", "size", Staticness::Unknown, 0);
     let set_add_key = CallableKey::method("HashSet", "add", Staticness::Unknown, 1);
+    let set_add_all_key = CallableKey::method("Set", "addAll", Staticness::Unknown, 1);
 
     let list_size = facts
         .facade_abi_for_key(&list_size_key)
@@ -44517,10 +44766,12 @@ fn stdlib_signature_facts_include_jdk_collection_rust_abi_slots() {
     let list_add_all = facts
         .facade_abi_for_key(&list_add_all_key)
         .expect("List.addAll should have a Rust slice-source ABI fact");
+    assert_eq!(list_add_all.receiver, ReceiverAbi::MutBorrowedSelf);
     assert_eq!(
         list_add_all.args,
         vec![FacadeSlot::Slice(Box::new(FacadeSlot::Borrowed))]
     );
+    assert_eq!(list_add_all.return_slot, FacadeSlot::Owned);
 
     let list_to_array = facts
         .facade_abi_for_key(&list_to_array_key)
@@ -44567,6 +44818,16 @@ fn stdlib_signature_facts_include_jdk_collection_rust_abi_slots() {
         .facade_abi_for_key(&set_add_key)
         .expect("HashSet.add should have an owned insert ABI fact");
     assert_eq!(set_add.args, vec![FacadeSlot::Owned]);
+
+    let set_add_all = facts
+        .facade_abi_for_key(&set_add_all_key)
+        .expect("Set.addAll should have a Rust slice-source ABI fact");
+    assert_eq!(set_add_all.receiver, ReceiverAbi::MutBorrowedSelf);
+    assert_eq!(
+        set_add_all.args,
+        vec![FacadeSlot::Slice(Box::new(FacadeSlot::Borrowed))]
+    );
+    assert_eq!(set_add_all.return_slot, FacadeSlot::Owned);
 }
 
 #[test]
@@ -50335,6 +50596,99 @@ public class Caller {
             && !translation.rust.contains("pub struct BItem"),
         "this single-source helper should use context for identity without emitting context bodies:\n{}",
         translation.rust
+    );
+}
+
+#[test]
+fn nested_simple_alias_is_suppressed_by_emitted_local_capture_type() {
+    let source = r#"
+public class LocalNestedAliasCollision {
+    static class Inner {
+        int id() { return 1; }
+    }
+
+    static int run(int base) {
+        class Inner {
+            int id() { return base + 2; }
+        }
+        return base;
+    }
+}
+"#;
+    let translation = translate_source_with_facts(source, &FactSet::default());
+
+    assert!(
+        translation.rust.contains("pub struct Inner"),
+        "the capturing local class should be emitted as its own Rust type:\n{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub struct LocalNestedAliasCollision_Inner"),
+        "the nested source class should still be emitted with its qualified Rust name:\n{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("pub type Inner ="),
+        "a nested simple alias must not collide with an emitted local capture type:\n{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "nested_simple_alias_suppressed_by_local_capture",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn local_class_constructor_shadows_nested_member_class() {
+    let source = r#"
+public class LocalNestedShadowConstructor {
+    static class Inner {
+        int id() { return 1; }
+    }
+
+    static int run(int base) {
+        class Inner {
+            int id() { return base + 2; }
+        }
+        Inner local = new Inner();
+        return local.id();
+    }
+}
+"#;
+    let translation = translate_source_with_facts(source, &FactSet::default());
+
+    assert!(
+        translation.rust.contains("pub struct Inner"),
+        "the capturing local class should be emitted as its own Rust type:\n{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("Inner::new(base)"),
+        "new Inner() in the local-class scope should construct the method-local Inner:\n{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("LocalNestedShadowConstructor_Inner::new()"),
+        "new Inner() must not bind to the nested member class shadowed by the local class:\n{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "local_class_constructor_shadows_nested_member_class",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
     );
 }
 

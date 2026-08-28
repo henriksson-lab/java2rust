@@ -146,12 +146,11 @@ pub fn storage_arg_shape_with_effective_facts(
         );
         return shape;
     }
-    if java_type_is_erased_object_storage(&java_ty)
-        || matches!(
-            facts.object_representation_override_strategy_for(&java_ty),
-            Some(HierarchyStrategy::ErasedObject)
-        ) && !facts.is_final_type(&java_ty)
-            && !crate::javalibs::generic_facade_interface_erases_to_named_rust_type(&java_ty)
+    if matches!(
+        facts.object_representation_override_strategy_for(&java_ty),
+        Some(HierarchyStrategy::ErasedObject)
+    ) && !crate::javalibs::generic_facade_interface_erases_to_named_rust_type(&java_ty)
+        || java_type_is_erased_object_storage(&java_ty) && !facts.is_final_type(&java_ty)
     {
         apply_required_dispatch(&mut shape, DispatchShape::ErasedObject);
     }

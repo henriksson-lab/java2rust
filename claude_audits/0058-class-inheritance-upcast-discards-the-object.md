@@ -513,3 +513,24 @@ object-slicing expectation from re-entering the suite.
 Regression:
 
 - `source_subclass_constructor_flows_to_flattened_superclass_slot`
+
+## Codex follow-up 2026-08-28 — optional source-supertype present values are loud
+
+The ordinary assignment and argument guards were still bypassed when a fresh
+source subtype was placed into an optional source-supertype slot. Nullable field
+storage and constructor-argument storage could lower `Child -> Option<Base>` as
+`Some(Child::new())`, letting the optional wrapper hide the missing class
+hierarchy carrier.
+
+`lower_present_expr_for_optional_target` now checks the actual present value
+against the optional element type before the optional construction plan rewrites
+owned elements to the target element shape. If the present value is a source
+class subtype of the optional element supertype, it emits the same unsupported
+class-upcast `compile_error!` used by the non-optional paths.
+
+Pinned by:
+
+- `optional_source_supertype_field_assignment_is_loud_not_subtype_some`
+- `optional_source_supertype_constructor_arg_is_loud_not_subtype_some`
+
+The audit remains open for the real subtype carrier and dynamic dispatch model.

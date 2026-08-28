@@ -446,3 +446,26 @@ would only give `Rc<Outer>`, while captured inners need
 `Rc<RefCell<Outer>>`, and the `RefCell`/`Mutex` rungs remain unimplemented.
 When `SharedLocal`/`SharedSync` and shared receivers land, this diagnostic has a
 single predicate to relax instead of remaining as a stale unconditional warning.
+
+### Codex follow-up 2026-08-28 — diagnostic is gated on construction sites
+
+The warning was still emitted once per captured inner class, even when the class
+was only declared and never constructed. That overstated the current runtime
+panic surface: a captured inner type can require an outer handle, but no program
+path can hit the panic constructor until a `new Inner(...)` expression exists.
+
+`inner_class_capture` now first collects constructed type names from field
+initializers, static blocks, method and constructor bodies, local types,
+lambdas, switches, try resources, and nested expression bodies. A captured
+inner class is reported only if that constructed-name set includes the inner
+type and the enclosing type still lacks an implemented mutable shared placement.
+
+Pinned by:
+
+- `unused_inner_class_outer_capture_is_not_reported_as_construction_panic`
+- `unsupported_inner_class_outer_capture_is_reported_as_a_translation_warning`
+- `batch_translation_reports_inner_class_constructor_panics`
+
+The real construction fix is unchanged: ordinary outer methods still need
+shared receivers and the mutable shared representation tier before they can call
+the non-panicking outer-handle companion.

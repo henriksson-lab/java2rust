@@ -970,6 +970,19 @@ pub fn native_java_rust_type_policy_with_effective_facts(
                 ),
             }
         }
+        JavaType::Named { name, args }
+            if matches!(
+                crate::stdlib::canonical_external_receiver_type_key(name).as_str(),
+                "Entry" | "Map.Entry" | "java.util.Map.Entry"
+            ) && args.len() == 2 =>
+        {
+            NativeJavaRustTypePolicy::Direct {
+                ty: RustType::Tuple(vec![
+                    rust_type_for_java_generic_arg_with_effective_facts(&args[0], facts),
+                    rust_type_for_java_generic_arg_with_effective_facts(&args[1], facts),
+                ]),
+            }
+        }
         JavaType::Named { name, args } if !args.is_empty() => NativeJavaRustTypePolicy::Direct {
             ty: rust_generic_type(
                 rust_name_for_java_named_type(name),
@@ -1059,6 +1072,9 @@ pub fn native_named_java_rust_type_policy(name: &str) -> NativeNamedJavaRustType
         "Object" => NativeJavaRustTypePolicy::Direct {
             ty: erased_object_rust_type(),
         },
+        name if java_exception_like_type_name(name) => NativeJavaRustTypePolicy::Direct {
+            ty: RustType::Named("JavaException".to_string()),
+        },
         "Properties" => NativeJavaRustTypePolicy::Direct {
             ty: rust_generic_type(
                 "std::collections::HashMap",
@@ -1073,6 +1089,13 @@ pub fn native_named_java_rust_type_policy(name: &str) -> NativeNamedJavaRustType
         name: name.to_string(),
         policy,
     }
+}
+
+fn java_exception_like_type_name(name: &str) -> bool {
+    let simple = name.rsplit('.').next().unwrap_or(name);
+    matches!(simple, "Throwable" | "Exception" | "Error")
+        || simple.ends_with("Exception")
+        || simple.ends_with("Error")
 }
 
 fn erased_object_java_type() -> JavaType {
@@ -1187,6 +1210,18 @@ fn rust_type_for_java_generic_arg_with_effective_facts(
 fn rust_type_for_java_generic_arg_unwrapped(ty: &JavaType, facts: &EffectiveFacts<'_>) -> RustType {
     if let JavaType::Wildcard(Some(WildcardBound::Extends(bound))) = ty {
         return rust_type_for_java_generic_arg_unwrapped(bound, facts);
+    }
+    if let JavaType::Named { name, args } = ty
+        && matches!(
+            crate::stdlib::canonical_external_receiver_type_key(name).as_str(),
+            "Entry" | "Map.Entry" | "java.util.Map.Entry"
+        )
+        && args.len() == 2
+    {
+        return RustType::Tuple(vec![
+            rust_type_for_java_generic_arg_with_effective_facts(&args[0], facts),
+            rust_type_for_java_generic_arg_with_effective_facts(&args[1], facts),
+        ]);
     }
     if let JavaType::Array(element_ty) = ty {
         return RustType::Vec(Box::new(
@@ -1619,6 +1654,33 @@ mod tests {
                     vec![RustType::Named("Value".to_string())]
                 )]
             )
+        );
+    }
+
+    #[test]
+    fn exception_like_java_types_render_to_java_exception_carrier() {
+        assert_eq!(
+            rust_type_for_java_type(&JavaType::Named {
+                name: "Throwable".to_string(),
+                args: Vec::new(),
+            }),
+            RustType::Named("JavaException".to_string())
+        );
+        assert_eq!(
+            rust_type_for_java_type(&JavaType::Named {
+                name: "RuntimeException".to_string(),
+                args: Vec::new(),
+            }),
+            RustType::Named("JavaException".to_string())
+        );
+        assert_eq!(
+            rust_type_for_java_type(&JavaType::Array(Box::new(JavaType::Named {
+                name: "java.lang.Throwable".to_string(),
+                args: Vec::new(),
+            }))),
+            RustType::Vec(Box::new(RustType::Option(Box::new(RustType::Named(
+                "JavaException".to_string()
+            )))))
         );
     }
 }

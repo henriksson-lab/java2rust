@@ -47,8 +47,8 @@ use crate::coercion::{
     string_literal_from_rust_char_literal_expr, string_matches_projection,
     string_replace_all_projection, string_replace_first_projection, string_split_projection,
     string_substring_projection, string_to_char_array_projection,
-    strip_redundant_java_null_expect_after_unwrap, system_exit_projection,
-    thread_sleep_millis_projection, unwrap_result_or_panic_uncaught_java_exception,
+    strip_redundant_java_null_expect_after_unwrap, system_exit_projection, thread_sleep_projection,
+    unwrap_result_or_panic_uncaught_java_exception,
 };
 use crate::facts::FactSet;
 use crate::facts::ReceiverAbi;
@@ -74,9 +74,11 @@ pub fn apply_call_target(
                 && matches!(rust_name.as_str(), "valueOf" | "value_of")
                 && args.len() == 1 =>
         {
-            args.into_iter()
-                .next()
-                .expect("String.valueOf target checked one argument")
+            string_value_of_lowered_arg_to_string(
+                args.into_iter()
+                    .next()
+                    .expect("String.valueOf target checked one argument"),
+            )
         }
         CallTargetPlan::StaticOwner { owner, rust_name }
             if matches!(rust_name.as_str(), "valueOf" | "value_of")
@@ -265,6 +267,43 @@ fn default_trait_expr() -> RustExpr {
 
 fn compile_error_call(message: &str) -> RustExpr {
     crate::unsupported::compile_error_expr(message)
+}
+
+fn string_value_of_lowered_arg_to_string(value: RustExpr) -> RustExpr {
+    apply_java_display_plan(
+        string_value_of_lowered_arg_for_display(value),
+        JavaDisplayPlan::FormatValue,
+    )
+}
+
+fn string_value_of_lowered_arg_for_display(value: RustExpr) -> RustExpr {
+    strip_terminal_java_null_receiver_expect_chain(value.clone())
+        .map(|optional| apply_java_display_plan(optional, JavaDisplayPlan::OptionalString))
+        .unwrap_or(value)
+}
+
+fn strip_terminal_java_null_receiver_expect_chain(expr: RustExpr) -> Option<RustExpr> {
+    match expr {
+        RustExpr::MethodCall {
+            receiver,
+            method,
+            args,
+        } if method == "expect"
+            && matches!(
+                args.as_slice(),
+                [RustExpr::Literal(message)] if message == "\"Java null receiver\""
+            ) =>
+        {
+            let receiver = *receiver;
+            Some(
+                strip_terminal_java_null_receiver_expect_chain(receiver.clone())
+                    .unwrap_or(receiver),
+            )
+        }
+        RustExpr::Shaped { expr, .. } => strip_terminal_java_null_receiver_expect_chain(*expr),
+        RustExpr::Grouped(expr) => strip_terminal_java_null_receiver_expect_chain(*expr),
+        _ => None,
+    }
 }
 
 fn math_arity_error(java_name: &str, expected: &str) -> RustExpr {
@@ -740,10 +779,14 @@ fn apply_native_java_static_method(
             system_exit_projection(status)
         }
         NativeJavaStaticMethod::ThreadSleep => {
-            let Some(millis) = args.into_iter().next() else {
+            if args.len() != 1 && args.len() != 2 {
+                return compile_error_call("Thread.sleep requires one or two arguments");
+            }
+            let mut args = args.into_iter();
+            let Some(millis) = args.next() else {
                 return compile_error_call("Thread.sleep requires one argument");
             };
-            thread_sleep_millis_projection(millis)
+            thread_sleep_projection(millis, args.next())
         }
         NativeJavaStaticMethod::StringFormat => string_format_projection(args),
         NativeJavaStaticMethod::StringJoin => apply_string_join(args),
@@ -751,7 +794,7 @@ fn apply_native_java_static_method(
             let Some(value) = args.into_iter().next() else {
                 return compile_error_call("String.valueOf requires one argument");
             };
-            apply_java_display_plan(value, JavaDisplayPlan::FormatValue)
+            string_value_of_lowered_arg_to_string(value)
         }
         NativeJavaStaticMethod::OptionalEmpty => {
             if !args.is_empty() {
@@ -1087,6 +1130,12 @@ fn apply_native_collection_method(
         }
         NativeCollectionMethod::SetInsert => "insert",
         NativeCollectionMethod::SetRemove => "remove",
+        NativeCollectionMethod::AddAll => {
+            return apply_native_collection_add_all(receiver, args);
+        }
+        NativeCollectionMethod::RemoveAll => {
+            return apply_native_collection_remove_all(receiver, args);
+        }
         NativeCollectionMethod::Extend => "extend",
         NativeCollectionMethod::MapHashCode => {
             return java_map_hash_code_projection(receiver);
@@ -1862,6 +1911,124 @@ fn apply_map_put_if_absent(receiver: RustExpr, mut args: Vec<RustExpr>) -> RustE
 
 pub fn apply_native_collection_extend(receiver: RustExpr, arg: RustExpr) -> RustExpr {
     receiver_method_call_projection_exact(receiver, "extend", vec![arg])
+}
+
+fn apply_native_collection_add_all(receiver: RustExpr, mut args: Vec<RustExpr>) -> RustExpr {
+    if args.len() != 1 {
+        return compile_error_call("Java Collection.addAll(source) requires one source argument");
+    }
+    let source = args.remove(0);
+    let before = "__java_add_all_before";
+    RustExpr::Block {
+        stmts: vec![
+            RustStmt::Let {
+                mutable: false,
+                name: before.to_string(),
+                ty: None,
+                value: Some(receiver_method_call_projection_exact(
+                    receiver.clone(),
+                    "len",
+                    Vec::new(),
+                )),
+            },
+            RustStmt::Expr(apply_native_collection_extend(receiver.clone(), source)),
+        ],
+        tail: Some(Box::new(RustExpr::Binary {
+            op: "!=".to_string(),
+            left: Box::new(receiver_method_call_projection_exact(
+                receiver,
+                "len",
+                Vec::new(),
+            )),
+            right: Box::new(RustExpr::Var(before.to_string())),
+        })),
+    }
+}
+
+fn apply_native_collection_remove_all(receiver: RustExpr, mut args: Vec<RustExpr>) -> RustExpr {
+    if args.len() != 1 {
+        return compile_error_call(
+            "Java Collection.removeAll(source) requires one source argument",
+        );
+    }
+    let source = args.remove(0);
+    let values = "__java_remove_all_values";
+    let before = "__java_remove_all_before";
+    if source == receiver {
+        return RustExpr::Block {
+            stmts: vec![
+                RustStmt::Let {
+                    mutable: false,
+                    name: before.to_string(),
+                    ty: None,
+                    value: Some(receiver_method_call_projection_exact(
+                        receiver.clone(),
+                        "len",
+                        Vec::new(),
+                    )),
+                },
+                RustStmt::Expr(receiver_method_call_projection_exact(
+                    receiver.clone(),
+                    "clear",
+                    Vec::new(),
+                )),
+            ],
+            tail: Some(Box::new(RustExpr::Binary {
+                op: "!=".to_string(),
+                left: Box::new(RustExpr::Var(before.to_string())),
+                right: Box::new(RustExpr::Literal("0".to_string())),
+            })),
+        };
+    }
+    RustExpr::Block {
+        stmts: vec![
+            RustStmt::Let {
+                mutable: false,
+                name: values.to_string(),
+                ty: None,
+                value: Some(source),
+            },
+            RustStmt::Let {
+                mutable: false,
+                name: before.to_string(),
+                ty: None,
+                value: Some(receiver_method_call_projection_exact(
+                    receiver.clone(),
+                    "len",
+                    Vec::new(),
+                )),
+            },
+            RustStmt::Expr(receiver_method_call_projection_exact(
+                receiver.clone(),
+                "retain",
+                vec![RustExpr::Closure {
+                    is_move: false,
+                    params: vec![RustClosureParam {
+                        pattern: "value".to_string(),
+                        ty: None,
+                    }],
+                    return_type: None,
+                    body: RustClosureBody::Expr(Box::new(RustExpr::Unary {
+                        op: "!".to_string(),
+                        expr: Box::new(receiver_method_call_projection_exact(
+                            RustExpr::Var(values.to_string()),
+                            "contains",
+                            vec![RustExpr::Var("value".to_string())],
+                        )),
+                    })),
+                }],
+            )),
+        ],
+        tail: Some(Box::new(RustExpr::Binary {
+            op: "!=".to_string(),
+            left: Box::new(receiver_method_call_projection_exact(
+                receiver,
+                "len",
+                Vec::new(),
+            )),
+            right: Box::new(RustExpr::Var(before.to_string())),
+        })),
+    }
 }
 
 pub fn apply_class_literal_token(ty: &JavaType, facts: &FactSet) -> RustExpr {

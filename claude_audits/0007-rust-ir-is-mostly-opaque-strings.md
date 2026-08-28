@@ -72,10 +72,15 @@ Partial progress 2026-08-24:
 - Follow-up 2026-08-26: optional mutable reborrow detection no longer asks raw
   text first. `expr_is_optional_mut_reborrow` now accepts structured
   zero-argument `as_deref_mut` calls directly, recovers parseable raw renderings
-  through the central rendered-expression helper, and leaves the old
-  `ends_with(".as_deref_mut()")` test behind a named raw compatibility helper
-  only for unrecoverable leaves. Regression:
-  `coercion::tests::optional_mut_reborrow_recovers_parseable_raw_projection_before_text_fallback`.
+  through the central rendered-expression helper, and keeps any remaining raw
+  compatibility behind a named helper rather than inline suffix checks.
+  Regression was updated in the 2026-08-28 follow-up below.
+- Follow-up 2026-08-28: the last optional mutable reborrow suffix fallback is
+  gone. The raw compatibility helper now only accepts expressions recovered by
+  the central rendered-expression helper as structured zero-argument
+  `as_deref_mut` method calls; malformed opaque raw text ending in that suffix
+  is rejected instead of being treated as semantic evidence. Regression:
+  `coercion::tests::optional_mut_reborrow_recovers_parseable_raw_projection_without_suffix_fallback`.
 - Follow-up 2026-08-26: optional-construction detection now keeps the structured
   and Raw paths aligned on `Some` arity. Structured calls must be single-segment
   `Some` with exactly one argument, and the rendered Raw fallback rejects
@@ -97,6 +102,79 @@ Partial progress 2026-08-24:
   and also lets surrounding binary expressions like `[left, right] + tail`
   recover without preserving the array side as a raw leaf. Regression:
   `coercion::tests::rendered_projection_recovers_borrowed_leaf_expressions`.
+- Follow-up 2026-08-28: stream-lambda index-to-`usize` projection no longer
+  treats unrecovered raw text as a simple cast operand merely because it has no
+  spaces. Raw operands still get one conservative recovery pass first, so
+  parseable identifiers, calls, fields, indexes, and binaries keep their
+  structured behavior; only opaque raw leaves now fall back to explicit
+  grouping. Regression:
+  `coercion::tests::cast_operand_parenthesization_prefers_expression_structure`.
+- Follow-up 2026-08-28: mutable-alias detection no longer has a final
+  prefix/suffix parser for unrecovered raw text. Rendered compatibility inputs
+  get one pass through the central rendered-expression recovery helper and must
+  then match the structured alias shapes; malformed raw text such as
+  `values.field.as_mut_slice() trailing` now fails closed instead of proving a
+  mutable alias from a suffix. Regression:
+  `slot_shape_design::rendered_mutable_alias_projection_names_same_call_alias_shapes`.
+- Follow-up 2026-08-28: optional-carrier detection no longer treats an
+  unrecovered raw `if ... { Some(...) } ...` substring as semantic evidence.
+  The rendered-expression recovery helper now rebuilds complete expression-form
+  `if <expr> { <expr> } else { <expr> }` leaves as `RustExpr::If` when the
+  condition and both arms recover structurally; malformed raw text with trailing
+  content now remains opaque and fails closed. Regressions:
+  `coercion::tests::rendered_if_projection_requires_complete_structured_expression`
+  and
+  `type_coercion::raw_if_optional_construction_detection_ignores_literal_text`.
+- Follow-up 2026-08-28: text-only string-view detection no longer accepts any
+  raw fragment merely because it ends with `.as_str()`. The public rendered
+  predicate now routes through central expression recovery and requires the
+  whole fragment to recover as a zero-arg `as_str()` projection, a narrow
+  `*<string-view>` compatibility spelling, or a complete Rust string literal.
+  Malformed suffix text such as `name.as_str() trailing` and compound text such
+  as `prefix + name.as_str()` now fail closed. Regressions:
+  `coercion::tests::an_untagged_string_view_still_falls_back_to_the_text` and
+  `type_coercion::borrowed_string_view_projection_owns_rendered_view_compatibility`.
+- Follow-up 2026-08-28: borrowed map-key detection now shares that string-view
+  rendered predicate instead of carrying its own `.as_str()` suffix check.
+  Structured map-key helper calls still answer through the structural call
+  predicate, and complete string literals remain borrowed keys; malformed raw
+  suffix text no longer proves the key is already borrowed. Regression:
+  `coercion::tests::borrowed_map_key_literal_fallback_requires_complete_literal`.
+- Follow-up 2026-08-28: owned-string recovery no longer preserves an
+  unrecovered raw leaf merely because it ends with `.to_string()`. The legacy
+  helper now requires whole-fragment structural recovery to a zero-argument
+  `to_string` call, and malformed raw receivers with whitespace are grouped
+  before a new method suffix is attached. Regression:
+  `coercion::tests::owned_string_recovery_idempotence_prefers_structure_and_shape`.
+- Follow-up 2026-08-28: clone-recovery idempotence no longer trusts raw text
+  just because it ends with `.clone()`, `.clone_box()`, `.cloned()`, or a
+  nullable `.cloned().expect(...)` suffix. Rendered compatibility now strips
+  block comments, requires whole-fragment structural recovery to one of the
+  clone-recovery projections, and groups malformed raw receivers before
+  appending a new clone. Regression:
+  `coercion::tests::clone_recovery_requires_complete_structural_projection`.
+- Follow-up 2026-08-28: result panic-recovery idempotence no longer uses the
+  raw `.unwrap_or_else(|ex| panic!(...))` suffix as proof that a result has
+  already been adapted. The raw compatibility branch now requires
+  whole-fragment recovery to the structured panic-adapter method call before it
+  suppresses a second adapter; malformed suffix text and literal text mentioning
+  the adapter are treated as ordinary receivers. Regression:
+  `coercion::tests::jdk_math_and_objects_projections_own_expression_shapes`.
+- Follow-up 2026-08-28: optional-carrier detection for `Map::get`/sequence
+  `get` followed by `.cloned()` or `.copied()` no longer has a raw suffix
+  parser. Raw compatibility first recovers the whole expression, then accepts
+  only structured zero-argument `cloned`/`copied` calls whose receiver is a
+  one-argument `get` call; `Some(...)` remains the only text fallback for
+  unrecovered raw leaves. Regressions:
+  `coercion::tests::option_wrap_records_constructed_optional_shape` and
+  `type_coercion::rust_get_projection_counts_as_existing_optional_carrier`.
+- Follow-up 2026-08-28: erased-object clone idempotence no longer treats a raw
+  expression that merely mentions `java_clone_erased_object_ref(...)` as already
+  recovered. Raw compatibility now recovers the whole expression first and only
+  accepts a structured clone-helper call; nested helper mentions are wrapped
+  again instead of being returned with an `OwnedRecovery` tag. Regressions:
+  `coercion::tests::erased_object_clone_recovery_records_recovery_shape` and
+  `slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`.
 
 ## Observation
 
@@ -3353,3 +3431,125 @@ so those production projections keep the precise recorded element slot shape.
 The ownership-only helper remains only as a documented compatibility surface
 with direct unit coverage; no production caller depends on its imprecise
 `OptionalProjected` tag.
+
+Follow-up 2026-08-28: erased-object downcast suppression for unresolved static
+owner calls no longer treats raw text containing
+`unimplemented!("unresolved Java static call ...")` as semantic evidence. The
+detector now accepts only the structured `RustExpr::MacroCall` shape produced by
+lowering, while literals or opaque raw leaves that merely contain the message are
+not exempted from normal downcast adaptation. Regression:
+`coercion::tests::unresolved_static_owner_detection_is_structural_not_raw_text`;
+the production source guard
+`layering::coercion_production_does_not_build_raw_expression_with_format` now
+also pins this detector against reintroducing a `RustExpr::Raw` branch.
+
+Follow-up 2026-08-28: the same-outer inner-constructor compatibility path no
+longer discards successful structured recovery when no storage wrapping or
+outer-companion retargeting is needed. Whole raw constructor calls such as
+`OuterB::new_1(value)` now become structured `RustExpr::Call` nodes even when
+the helper returns `false` for "no semantic rewrite"; opaque or non-call raw
+text remains untouched. Statement recovery follows the same rule for simple
+recoverable raw statements. Regressions:
+`lower::tests::same_outer_inner_constructor_noop_rewrite_recovers_raw_constructor_call`,
+`lower::tests::same_outer_inner_constructor_raw_stmt_rewrite_recovers_without_semantic_change`,
+and `slot_shape_design::constructor_delegation_uses_structured_paths_without_raw_scanning`.
+
+Follow-up 2026-08-28: Java `String.format(Locale, ...)` overload detection no
+longer treats raw text prefixes such as `Locale::` or `Locale::US + fallback`
+as semantic locale arguments. Raw inputs first go through the central rendered
+expression recovery, and only recovered `Var`/`Path` forms headed by `Locale` or
+`JavaUtilLocale` are accepted. Regression:
+`coercion::tests::string_format_arg_projection_owns_display_to_string_spelling`.
+
+Follow-up 2026-08-28: struct-literal field reordering in `item_assembly.rs` no
+longer treats raw text tokens as move/read evidence. Raw expression and simple
+raw-statement compatibility inputs first go through the central parseable-raw
+recovery helper; only recovered structured IR can prove a direct move or a
+read of another field source. Opaque raw text such as `left +` or marker text
+inside a string literal no longer influences field ordering. Regressions:
+`item_assembly::tests::raw_direct_move_vars_require_structured_recovery`,
+`item_assembly::tests::raw_reads_require_structured_recovery`, and
+`layering::item_assembly_return_type_wrappers_delegate_to_fact_aware_rendering`.
+
+Follow-up 2026-08-28: borrowed method receiver parenthesizing now attempts
+parseable raw recovery before deciding from rendered text. `&reader.field` and
+`(&reader.field)` both normalize to structured grouped unary-borrow IR; only
+unrecoverable raw borrow text remains an opaque raw leaf instead of being
+grouped from a `starts_with('&')` text predicate. Regression:
+`type_coercion::parenthesizes_borrowed_method_receiver` and the source guard
+`slot_shape_design::slot_rendering_owns_rust_type_rendering_boundaries`.
+
+Follow-up 2026-08-28: optional default detection no longer accepts a rendered
+typed `None` as a single path segment. `RustExpr::Path(["None::<T>"])` is now
+rejected; the valid structured form is `RustExpr::GenericPath { base: ["None"],
+args: [T], member: None }`, and raw compatibility for rendered `None::<T>`
+continues to recover into that shape through the narrow `None`/`Default`
+projection helper. Regression:
+`lower::tests::none_or_default_detection_uses_structured_raw_recovery_only`.
+The source guard
+`slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`
+also strips the `#[cfg(test)] mod tests` tail module directly, so braces inside
+test fixture strings no longer make test-only `RustExpr::Raw` constructors look
+like production sites.
+
+Follow-up 2026-08-28: rendered range recovery is now fail-closed at the endpoint
+boundary. A raw `a..b` compatibility leaf is recovered only when both endpoints
+recover to structured Rust IR and neither endpoint is the reserved `self`
+pseudo-identifier. This keeps valid generated range shapes structured, while
+leaving opaque fragments such as `self..broken` raw so assignment recovery,
+source-raw expression lowering, and borrowed-string temporary hoisting do not
+infer semantics from invalid compatibility text. Regression coverage:
+`lower::tests::source_raw_expr_lowering_recovers_parseable_projection_before_raw_leaf`,
+`lower::tests::borrowed_string_temporary_hoist_keeps_parseable_raw_structured_without_hoist`,
+`lower::tests::raw_assignment_projection_recovers_bitwise_and_shift_compound_ops`,
+and the broad `cargo test raw_ --lib` slice.
+
+Follow-up 2026-08-28: integral-parse nullable argument recovery no longer
+recognizes `.as_ref().expect("Java null receiver").as_str()` by stripping that
+suffix from opaque raw text. The compatibility helper now recovers the whole
+rendered expression first and requires the structured
+`as_str(expect(as_ref(receiver)))` chain with a non-raw receiver before applying
+Java's `"null"` `NumberFormatException` input policy. Malformed raw text such
+as `self..broken.as_ref().expect("Java null receiver").as_str()` remains a raw
+leaf instead of being treated as semantic nullable-string evidence. Regression:
+`lower::tests::integral_parse_nullable_raw_null_expect_requires_structured_receiver_recovery`.
+
+Follow-up 2026-08-28: `strip_redundant_java_null_expect_after_unwrap` no
+longer runs literal-blind global replacements over `RustExpr::Raw` text. Raw
+inputs first go through central rendered-expression recovery; only recovered
+structured method-call chains can collapse redundant `.expect("Java null
+receiver")` layers. Opaque text, including format-string literals containing
+the same token sequence, is preserved. Regression:
+`coercion::tests::redundant_java_null_expect_strip_does_not_rewrite_raw_literals`.
+
+Follow-up 2026-08-28: `strip_terminal_unwrap_projection` no longer strips a
+`.unwrap()` suffix directly from opaque raw text. Raw inputs are recovered
+first, and only a structured zero-argument terminal `unwrap` call is removed;
+literal text such as `format!("value.unwrap()")` is preserved. Regression:
+`coercion::tests::strip_terminal_unwrap_projection_requires_structured_raw_recovery`.
+The unrecovered fallback now goes through `RustExpr::raw_leaf`, as does the
+matching opaque fallback in `strip_redundant_java_null_expect_after_unwrap`, so
+these consumers no longer open-code production `RustExpr::Raw` construction.
+
+Follow-up 2026-08-28: optional string-view construction's raw element
+compatibility no longer manufactures a `StringView` from any text matching
+`&...as_str()`. The helper still accepts string-literal spellings and parseable
+receivers, but an unrecovered raw receiver such as `&name trailing.as_str()`
+now stays opaque instead of becoming semantic evidence. Regression:
+`coercion::tests::optional_string_view_construction_normalizes_structured_borrow_by_tag`.
+
+Follow-up 2026-08-28: arithmetic display conversion no longer treats a raw
+receiver with an arithmetic-looking token as redundant when rendered recovery
+failed. `left +` inside a structured `.to_string()` receiver now keeps the
+conversion instead of being returned as an arithmetic display operand.
+Regression: `coercion::tests::java_display_operand_removes_redundant_arithmetic_to_string`.
+The same pass tightened grouped rendered recovery: `(left +)` now remains a raw
+compatibility leaf instead of becoming `Grouped(Raw(...))`, so callers cannot
+mistake a parenthesized malformed fragment for structured IR.
+
+Follow-up 2026-08-28: `lower.rs` catchable-null expression rewriting now keeps
+the unrecovered raw fallback behind `RustExpr::raw_leaf` instead of rebuilding
+`RustExpr::Raw(rendered)` directly. Parseable raw expressions still recover and
+rewrite embedded Java-null expects; opaque malformed raw text is preserved as an
+opaque compatibility leaf. Regression:
+`lower::tests::make_java_null_expect_catchable_recovers_parseable_raw_expression`.

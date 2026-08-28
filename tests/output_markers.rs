@@ -217,6 +217,29 @@ fn unsupported_inner_class_outer_capture_is_reported_as_a_translation_warning() 
 }
 
 #[test]
+fn unused_inner_class_outer_capture_is_not_reported_as_construction_panic() {
+    let translation = translate_source(
+        r#"
+        public class UnusedInnerCapture {
+            private int base = 1;
+            class Inner {
+                int get() { return base; }
+            }
+            public int run() { return base; }
+        }
+        "#,
+    );
+
+    assert!(
+        !translation
+            .diagnostics
+            .has_code("inner_class_construction_panics"),
+        "unused captured inner class should not be reported as a construction-site panic:\n{:?}",
+        translation.diagnostics.iter().collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn unmodelled_static_constant_is_counted() {
     // The only marker whose emitter needs an external fact rather than only
     // Java source: a declared external constant with no modelled value.

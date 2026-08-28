@@ -1,15 +1,20 @@
 # 0002 — Java object aliasing has no representation; aliases become clones
 
-Status: **validated** (rustc-confirmed compile error + demonstrable semantic divergence)
+Status: **open, partially implemented** (`SharedImmutable`/`Rc<T>` plus
+reference-identity lowering have landed; mutable aliasing still lacks
+`SharedLocal`/`Rc<RefCell<T>>` lowering)
 Severity: high — silently changes program meaning
 Kind: missing representation in the object model
 
 ## Symptom
 
-Java reference assignment (`Node b = a;`) is translated as a deep copy
-(`a.clone()`), so subsequent mutation through one reference is not observed
-through the other. In addition, the `clone()` call is emitted against structs
-that do not derive `Clone`, so the output often does not compile either.
+Java reference assignment that requires mutable sharing still cannot be
+represented as one object with two live mutable handles. The historical repro
+below was originally translated as a deep copy (`a.clone()`), so subsequent
+mutation through one reference was not observed through the other. The
+`SharedImmutable` tier now covers aliased source values that are not mutated
+after sharing, but this mutable `Node` shape still requires the unimplemented
+`SharedLocal` tier.
 
 ## Minimal repro
 
@@ -65,8 +70,8 @@ distinct sites in `src/lower.rs` — the fallback is load-bearing, not rare.
 
 ## Root cause
 
-`ObjectRepresentation` (`src/object_model.rs:151`) can only express value-like
-or trait-object representations:
+Historically, `ObjectRepresentation` (`src/object_model.rs:151`) could only
+express value-like or trait-object representations:
 
 ```rust
 pub enum ObjectRepresentation {
@@ -78,20 +83,23 @@ pub enum ObjectRepresentation {
 }
 ```
 
-There is **no shared/aliased variant** — no `Rc<RefCell<T>>`, no arena index,
-no borrowed `&'a T`. Java is a reference-semantics language for every
-non-primitive type, so the representation lattice is missing the case that
-Java's object model actually is.
+The current tree has a storage-strategy lattice and implements the immutable
+handle tier (`SharedImmutable`, rendered as `Rc<T>` or `Arc<T>` depending on
+reachability). It still does **not** implement the mutable shared tier for this
+repro: no general `Rc<RefCell<T>>`/`Arc<Mutex<T>>` receiver and field lowering,
+so Java's mutable reference semantics remain missing for aliased objects that
+are written after sharing.
 
 The only `Rc<RefCell<…>>` in the whole emitter is the `__outer` field for
 inner-class captures (`src/item_assembly.rs:525`). It is a one-off, not a
 representation the planner can choose.
 
-Because there is no way to represent sharing, every place that needs a second
-handle to an object must either move it or copy it. `clone()` is the only
-available answer, so clone insertion became a pervasive repair mechanism —
-which is also why clone/borrow recovery is one of the largest rule clusters in
-`src/lower.rs` (see [0006](done/0006-move-analysis-is-five-approximations-of-one-relation.md)).
+For the mutable aliasing tier, every place that needs a second handle to a
+mutable object must still either move it, copy it, or emit a loud unsupported
+path. Clone insertion remains a pervasive compatibility mechanism for value
+and recovery paths, which is why clone/borrow recovery is still one of the
+largest rule clusters in `src/lower.rs` (see
+[0006](done/0006-move-analysis-is-five-approximations-of-one-relation.md)).
 
 ## Why this is a machinery gap
 
@@ -307,3 +315,20 @@ The regression also pins the inverse: declaring the callback without invoking it
 does not report a mutation.
 
 This still does not repair representation.
+
+## Update 2026-08-28 — current state after the SharedImmutable rollout
+
+This audit no longer means "there is no shared representation at all."
+`StorageStrategy::SharedImmutable` is implemented and the identity fixtures now
+exercise `Rc::ptr_eq` for shared immutable source values. The still-open part is
+the mutable Java aliasing case from this file: aliased values that are mutated
+after sharing need `SharedLocal` (`Rc<RefCell<T>>`) or `SharedSync`
+(`Arc<Mutex<T>>`) throughout slots, receivers, field access, assignment, and
+method calls.
+
+That distinction matters for handoff. A value-object alias may now be correct
+through `Rc<T>`; the `Node b = a; a.v = 5; return b.v;` repro is not, because
+the observable write requires a mutable shared carrier. The implementation
+direction is therefore the remaining mutable-handle tiers described in
+[0002b](0002b-shared-representation-design.md), not another clone-recovery
+patch.

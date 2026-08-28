@@ -1589,10 +1589,10 @@ fn parse_catch_clause(
                 .collect()
         })
         .unwrap_or_default();
-    let name = parameter
+    let (name, source_name) = parameter
         .and_then(|param| field_text(param, "name", source))
-        .map(|name| to_snake_case(&name))
-        .unwrap_or_else(|| "ex".to_string());
+        .map(|name| (to_snake_case(&name), to_snake_case_unescaped(&name)))
+        .unwrap_or_else(|| ("ex".to_string(), "ex".to_string()));
     let body = node
         .child_by_field_name("body")
         .map(|body| parse_block_like(body, source, diagnostics))
@@ -1600,6 +1600,7 @@ fn parse_catch_clause(
     CatchClause {
         types,
         name,
+        source_name,
         body,
         binding: None,
     }

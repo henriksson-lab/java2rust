@@ -133,6 +133,8 @@ pub enum SyntaxSlotCoercionPolicy {
     IndexToUsize,
     ToStringForConcat,
     CollectionToJavaDisplayString,
+    SetToJavaDisplayString,
+    MapToJavaDisplayString,
     ErasedObjectToJavaDisplayString,
     OptionalErasedObjectToJavaDisplayString,
     OptionalToJavaDisplayString,
@@ -170,6 +172,7 @@ pub enum OwnershipCoercionPolicy {
     RecoverOwnedCopyValue,
     RecoverErasedObjectClone {
         sequence: bool,
+        optional_sequence: bool,
     },
     RecoverOwnedSequenceWithToVec {
         policy: CloneRecoveryPolicy,
@@ -901,9 +904,13 @@ pub fn rust_nominal_type_name_policy(java_ty: &JavaType) -> RustNominalTypeNameP
         }
         JavaType::Named { name, .. } | JavaType::Unknown(name) => {
             let canonical = crate::stdlib::canonical_external_receiver_type_key(name);
-            crate::stdlib::boxed_primitive_type(&canonical)
-                .map(boxed_primitive_runtime_rust_type)
-                .or_else(|| Some(crate::slot_render::rust_name_for_java_named_type(name)))
+            if java_exception_like_runtime_type_name(&canonical) {
+                Some("JavaException".to_string())
+            } else {
+                crate::stdlib::boxed_primitive_type(&canonical)
+                    .map(boxed_primitive_runtime_rust_type)
+                    .or_else(|| Some(crate::slot_render::rust_name_for_java_named_type(name)))
+            }
         }
         JavaType::String => Some("String".to_string()),
         _ => None,
@@ -912,6 +919,13 @@ pub fn rust_nominal_type_name_policy(java_ty: &JavaType) -> RustNominalTypeNameP
         java_ty: java_ty.clone(),
         target_type,
     }
+}
+
+fn java_exception_like_runtime_type_name(name: &str) -> bool {
+    let simple = name.rsplit('.').next().unwrap_or(name);
+    matches!(simple, "Throwable" | "Exception" | "Error")
+        || simple.ends_with("Exception")
+        || simple.ends_with("Error")
 }
 
 fn reifiable_raw_collection_runtime_target(java_ty: &JavaType) -> Option<String> {
@@ -1226,8 +1240,13 @@ pub fn ownership_coercion_policy_with_effective_facts(
         && actual.ownership == OwnershipShape::SharedBorrow
         && target.ownership == OwnershipShape::Owned
     {
-        if let Some(sequence) = erased_object_clone_recovery_sequence(actual, target) {
-            return OwnershipCoercionPolicy::RecoverErasedObjectClone { sequence };
+        if let Some((sequence, optional_sequence)) =
+            erased_object_clone_recovery_sequence(actual, target)
+        {
+            return OwnershipCoercionPolicy::RecoverErasedObjectClone {
+                sequence,
+                optional_sequence,
+            };
         }
         let capability =
             coercion_owned_recovery_capability_policy_with_effective_facts(&actual.java_ty, facts);
@@ -1254,8 +1273,13 @@ pub fn ownership_coercion_policy_with_effective_facts(
         && matches!(target.dispatch, DispatchShape::ErasedObject)
         && !matches!(actual.java_ty, JavaType::Primitive(_) | JavaType::Void)
     {
-        if let Some(sequence) = erased_object_clone_recovery_sequence(actual, target) {
-            return OwnershipCoercionPolicy::RecoverErasedObjectClone { sequence };
+        if let Some((sequence, optional_sequence)) =
+            erased_object_clone_recovery_sequence(actual, target)
+        {
+            return OwnershipCoercionPolicy::RecoverErasedObjectClone {
+                sequence,
+                optional_sequence,
+            };
         }
         let capability =
             coercion_owned_recovery_capability_policy_with_effective_facts(&actual.java_ty, facts);
@@ -2234,7 +2258,18 @@ fn syntax_slot_coercion_policy_from_content(
         }
         Slot::StringConcatSegment | Slot::DisplaySegment
             if crate::stdlib::java_collection_kind_for_type(actual)
-                == Some(crate::stdlib::JavaCollectionKind::List) =>
+                .is_some_and(|kind| kind.is_map_like()) =>
+        {
+            SyntaxSlotCoercionPolicy::MapToJavaDisplayString
+        }
+        Slot::StringConcatSegment | Slot::DisplaySegment
+            if crate::stdlib::java_collection_kind_for_type(actual)
+                .is_some_and(|kind| kind.is_set_like()) =>
+        {
+            SyntaxSlotCoercionPolicy::SetToJavaDisplayString
+        }
+        Slot::StringConcatSegment | Slot::DisplaySegment
+            if crate::stdlib::java_collection_kind_for_type(actual).is_some() =>
         {
             SyntaxSlotCoercionPolicy::CollectionToJavaDisplayString
         }
@@ -3279,7 +3314,7 @@ fn target_expects_java_byte_array_or_option(target: &RustSlotShape) -> bool {
 fn erased_object_clone_recovery_sequence(
     actual: &RustSlotShape,
     target: &RustSlotShape,
-) -> Option<bool> {
+) -> Option<(bool, bool)> {
     if !matches!(
         (actual.ownership, target.ownership),
         (OwnershipShape::SharedBorrow, OwnershipShape::Owned)
@@ -3287,12 +3322,24 @@ fn erased_object_clone_recovery_sequence(
         return None;
     }
     if java_type_is_erased_object_sequence_like(&actual.java_ty) {
-        return Some(true);
+        return Some((
+            true,
+            target_erased_object_sequence_elements_are_optional(target),
+        ));
     }
     if java_type_is_erased_object_like(&actual.java_ty) {
-        return Some(false);
+        return Some((false, false));
     }
     None
+}
+
+fn target_erased_object_sequence_elements_are_optional(target: &RustSlotShape) -> bool {
+    matches!(
+        &target.java_ty,
+        JavaType::Array(element)
+            if !matches!(element.as_ref(), JavaType::Primitive(_) | JavaType::Void)
+                && crate::types::optional_element_type(element).is_none()
+    )
 }
 
 fn java_type_is_erased_object_display_like(java_ty: &JavaType) -> bool {
@@ -3421,6 +3468,40 @@ mod tests {
             plan.conversion,
             SlotConversionPlan::Syntax(SyntaxCoercionPlan {
                 policy: SyntaxSlotCoercionPolicy::CollectionToJavaDisplayString,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn map_string_concat_uses_java_map_display_policy() {
+        let actual = RustSlotShape::for_storage(JavaType::Named {
+            name: "TreeMap".to_string(),
+            args: vec![JavaType::String, JavaType::Primitive(PrimitiveType::Int)],
+        });
+        let plan = plan_slot_conversion(actual, Slot::StringConcatSegment, &FactSet::default());
+
+        assert!(matches!(
+            plan.conversion,
+            SlotConversionPlan::Syntax(SyntaxCoercionPlan {
+                policy: SyntaxSlotCoercionPolicy::MapToJavaDisplayString,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn set_string_concat_uses_java_set_display_policy() {
+        let actual = RustSlotShape::for_storage(JavaType::Named {
+            name: "TreeSet".to_string(),
+            args: vec![JavaType::String],
+        });
+        let plan = plan_slot_conversion(actual, Slot::StringConcatSegment, &FactSet::default());
+
+        assert!(matches!(
+            plan.conversion,
+            SlotConversionPlan::Syntax(SyntaxCoercionPlan {
+                policy: SyntaxSlotCoercionPolicy::SetToJavaDisplayString,
                 ..
             })
         ));
