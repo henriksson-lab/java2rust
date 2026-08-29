@@ -1710,6 +1710,9 @@ fn trait_param_shape_should_widen_to_implementation(
     {
         return false;
     }
+    if matches!(interface_shape.java_ty, JavaType::Array(_)) {
+        return false;
+    }
     if implementation_shape.ownership == OwnershipShape::Owned {
         return true;
     }

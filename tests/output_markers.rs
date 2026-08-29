@@ -46,8 +46,9 @@ struct MarkerFixture {
 const FIXTURES: &[MarkerFixture] = &[
     MarkerFixture {
         marker: "compile_error",
-        // A local (method-scoped) type declaration is refused by lowering.
-        java: "public class MarkerCompileError { public void m() { class Inner { int x; } Inner i = new Inner(); } }",
+        // String reference identity is intentionally loud until string identity
+        // representation exists.
+        java: "public class MarkerCompileError { public boolean m(String a, String b) { return a == b; } }",
         counters: &["invalid_patterns", "compile_error_markers"],
     },
     MarkerFixture {
@@ -57,8 +58,8 @@ const FIXTURES: &[MarkerFixture] = &[
     },
     MarkerFixture {
         marker: "unsupported_java_array_creation",
-        // Unknown external reference elements still take the loud fallback.
-        java: "import com.unmodelled.Node;\npublic class MarkerObjectArray { public int m() { Node[] ns = new Node[1]; return ns.length; } }",
+        // Three-dimensional array creation still takes the loud fallback.
+        java: "public class MarkerUnsupportedArray { public int m() { int[][][] ns = new int[1][1][1]; return ns.length; } }",
         counters: &["invalid_patterns"],
     },
     MarkerFixture {
@@ -74,7 +75,7 @@ const FIXTURES: &[MarkerFixture] = &[
     MarkerFixture {
         marker: "unsupported_inner_class_outer_capture",
         // A non-static inner class: its constructor cannot obtain a shared
-        // handle to the enclosing instance, so it is emitted as a `panic!`.
+        // handle to the enclosing instance, so it is emitted as `compile_error!`.
         // The mutate-after-construction step is the semantic reason a copy
         // would not be a valid repair: Java must observe base = 20 here.
         java: "public class MarkerInnerCapture { private int base = 10; class Adder { int add(int x) { return base + x; } } public int run() { Adder a = new Adder(); base = 20; return a.add(1); } }",
@@ -214,6 +215,13 @@ fn unsupported_inner_class_outer_capture_is_reported_as_a_translation_warning() 
          left as a runtime panic marker:\n{:?}",
         translation.diagnostics.iter().collect::<Vec<_>>()
     );
+    assert!(
+        translation
+            .rust
+            .contains("unsupported Java inner-class outer capture construction"),
+        "{}",
+        translation.rust
+    );
 }
 
 #[test]
@@ -235,6 +243,34 @@ fn unused_inner_class_outer_capture_is_not_reported_as_construction_panic() {
             .diagnostics
             .has_code("inner_class_construction_panics"),
         "unused captured inner class should not be reported as a construction-site panic:\n{:?}",
+        translation.diagnostics.iter().collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn top_level_constructor_does_not_report_same_simple_inner_capture_panic() {
+    let translation = translate_source(
+        r#"
+        class B {}
+
+        class UsesB {
+            B make() { return new B(); }
+        }
+
+        class Outer {
+            int value = 1;
+            class B {
+                int get() { return value; }
+            }
+        }
+        "#,
+    );
+
+    assert!(
+        !translation
+            .diagnostics
+            .has_code("inner_class_construction_panics"),
+        "top-level B construction must not be treated as Outer.B construction:\n{:?}",
         translation.diagnostics.iter().collect::<Vec<_>>()
     );
 }
@@ -605,15 +641,20 @@ fn unmodelled_upcasts_are_not_counted_as_noop_facade_methods() {
          conversions ({upcasts}); that is the counter this split exists to fix\n{rust}"
     );
 
-    // And the reason it is not a fixture entry: the surface is unconditional,
-    // so a program that touches no Java API at all emits the same conversions.
+    // And the reason it is not a fixture entry: the support surface is mostly
+    // generated outside the Java use site, so it is not a per-file API-use
+    // signal. The exact count can move when additional modelled facade support
+    // is pulled in; it must remain separate from no-op facade methods.
     let clean =
         translate_source("public class UpcastClean { public int m(int a) { return a + 1; } }").rust;
-    assert_eq!(
-        count_unmodelled_upcast_conversions(&clean),
-        upcasts,
-        "the upcast surface is emitted regardless of what the program uses, so it \
-         cannot be a per-file cost signal; it is a constant offset"
+    let clean_upcasts = count_unmodelled_upcast_conversions(&clean);
+    assert!(
+        clean_upcasts > 10,
+        "expected the baseline support upcast surface to remain visible: {clean_upcasts}\n{clean}"
+    );
+    assert!(
+        count_noop_facade_methods(&clean) < clean_upcasts / 4,
+        "baseline no-op facade methods must not be dominated by upcast conversions\n{clean}"
     );
 }
 

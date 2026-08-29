@@ -302,6 +302,26 @@ use new_java2rust::{
     translate_source_with_context_summary_sources, translate_source_with_facts,
 };
 
+fn test_local_plan_by_name<'a>(locals: &'a [LocalPlan], name: &str) -> Option<&'a LocalPlan> {
+    let mut matches = locals.iter().filter(|local| local.name == name);
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
+}
+
+fn test_local_shape_by_name<'a>(locals: &'a [LocalPlan], name: &str) -> Option<&'a RustSlotShape> {
+    test_local_plan_by_name(locals, name).map(|local| &local.shape)
+}
+
+fn test_required_local_shape(locals: &[LocalPlan], name: &str) -> RustSlotShape {
+    test_local_shape_by_name(locals, name)
+        .cloned()
+        .expect("test local should have a solved shape")
+}
+
+fn test_local_binding_mutability(locals: &[LocalPlan], name: &str) -> Option<bool> {
+    test_local_plan_by_name(locals, name).map(|local| local.binding_mutable)
+}
+
 fn boxed_dyn_type(trait_name: &str) -> RustType {
     RustType::Generic {
         base: "Box".to_string(),
@@ -1578,7 +1598,7 @@ fn slot_render_projects_erased_object_facts_inside_native_generic_containers() {
             base: "std::collections::HashMap".to_string(),
             args: vec![
                 RustType::String,
-                RustType::Named("ExternalOwnerPayload".to_string()),
+                RustType::Named("ExternalOwner_Payload".to_string()),
             ],
         }
     );
@@ -1589,7 +1609,7 @@ fn slot_render_projects_erased_object_facts_inside_native_generic_containers() {
     assert_eq!(
         rust_type_for_java_type_with_facts(&final_payload_list_ty, &facts),
         RustType::Vec(Box::new(RustType::Named(
-            "ExternalOwnerPayload".to_string()
+            "ExternalOwner_Payload".to_string()
         )))
     );
     assert_eq!(
@@ -1657,7 +1677,7 @@ class NativeMapFinalFacadeValueUse {
         Member::Method(method) => method,
         _ => panic!("expected method"),
     };
-    let local_shape = signatures.required_local_shape(
+    let local_shape = test_required_local_shape(
         signatures.method_local_shapes_or_empty(ty, method),
         "payload",
     );
@@ -1674,7 +1694,7 @@ class NativeMapFinalFacadeValueUse {
     );
     assert!(
         translation.rust.contains(
-            "let payload: &ExternalOwnerPayload = payloads.get(name.as_str()).expect(\"Java null receiver\");"
+            "let payload: &ExternalOwner_Payload = payloads.get(name.as_str()).expect(\"Java null receiver\");"
         ) && translation.rust.contains("return payload.get_name();")
             && !translation
                 .rust
@@ -4643,7 +4663,7 @@ abstract class VCFCompoundHeaderLine {
     String name;
 
     boolean sameLineTypeAndName(VCFCompoundHeaderLine other) {
-        return name == other.name;
+        return name.length() == other.name.length();
     }
 }
 "#;
@@ -5920,14 +5940,12 @@ class GenericStandards<T extends Mid> {
         "{}",
         translation.rust
     );
-
-    cargo_check_generated_modules(
-        "generic_source_supertype_into_bound_gets_static_for_erased_b",
-        vec![GeneratedCrateModule {
-            name: "fixture",
-            rust: translation.rust.clone(),
-            tests: "",
-        }],
+    assert!(
+        translation
+            .rust
+            .contains("compile_error!(\"unsupported Java class upcast: Mid to Base requires class hierarchy lowering\")"),
+        "{}",
+        translation.rust
     );
 }
 
@@ -6524,8 +6542,7 @@ class Use {
         })
         .unwrap();
     let method_signature = signatures.method_signature(use_ty, method).unwrap();
-    let expr_shape = signatures
-        .local_shape(&method_signature.locals, "expr")
+    let expr_shape = test_local_shape_by_name(&method_signature.locals, "expr")
         .expect("expr local should have a solved shape");
 
     assert_eq!(
@@ -6541,11 +6558,7 @@ class Use {
             enum_name: "ExprValue".to_string()
         }
     );
-    assert!(
-        signatures
-            .local_shape(&method_signature.locals, "missing")
-            .is_none()
-    );
+    assert!(test_local_shape_by_name(&method_signature.locals, "missing").is_none());
 
     let lowered = lower_program_with_plans(
         &resolved.program,
@@ -6597,19 +6610,12 @@ class Use {
         })
         .unwrap();
     let method_signature = signatures.method_signature(ty, method).unwrap();
-    let local_mutability = |name: &str| {
-        signatures
-            .local_binding_mutability(&method_signature.locals, name)
-            .unwrap()
-    };
+    let local_mutability =
+        |name: &str| test_local_binding_mutability(&method_signature.locals, name).unwrap();
 
     assert!(!local_mutability("stable"));
     assert!(local_mutability("changed"));
-    assert!(
-        signatures
-            .local_binding_mutability(&method_signature.locals, "missing")
-            .is_none()
-    );
+    assert!(test_local_binding_mutability(&method_signature.locals, "missing").is_none());
     let lowered = lower_program_with_plans(
         &resolved.program,
         resolved.diagnostics,
@@ -6815,7 +6821,7 @@ class Use {
     let method_signature = signatures.method_signature(ty, method).unwrap();
 
     assert_eq!(
-        signatures.local_binding_mutability(&method_signature.locals, "sample_to_reader_map"),
+        test_local_binding_mutability(&method_signature.locals, "sample_to_reader_map"),
         Some(true)
     );
 }
@@ -6861,7 +6867,7 @@ class Use {
     let method_signature = signatures.method_signature(ty, method).unwrap();
 
     assert_eq!(
-        signatures.local_binding_mutability(&method_signature.locals, "i"),
+        test_local_binding_mutability(&method_signature.locals, "i"),
         Some(true)
     );
 }
@@ -6897,7 +6903,7 @@ class Use {
     let method_signature = signatures.method_signature(ty, method).unwrap();
 
     assert_eq!(
-        signatures.local_binding_mutability(&method_signature.locals, "values"),
+        test_local_binding_mutability(&method_signature.locals, "values"),
         Some(true)
     );
 
@@ -6978,6 +6984,17 @@ class Use {
         return row;
     }
 }
+
+class Cursor {
+    int index;
+    Row read() {
+        index++;
+        return null;
+    }
+    void advance() {
+        index++;
+    }
+}
 "#,
     );
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
@@ -6999,12 +7016,18 @@ class Use {
         .iter()
         .find(|local| local.name == "row")
         .unwrap();
+    let cursor = method_signature
+        .params
+        .iter()
+        .find(|param| param.name == "cursor")
+        .unwrap();
 
     assert!(row.binding_mutable);
     assert!(matches!(
         &row.shape.java_ty,
         JavaType::Named { name, args } if name == "Optional" && args.len() == 1
     ));
+    assert_eq!(cursor.shape.ownership, OwnershipShape::MutableBorrow);
     assert_eq!(
         source_method_return_nullability_constraints(method),
         vec![SignatureConstraint::RequiredStorageNullability(
@@ -7299,7 +7322,7 @@ class Helper {
     let signatures =
         solve_signatures_with_facts(&resolved.program, &representations, &usage, &resolved.facts);
     let locals = signatures.method_local_shapes_or_empty(ty, method);
-    let value_shape = signatures.required_local_shape(locals, "value");
+    let value_shape = test_required_local_shape(locals, "value");
 
     assert_eq!(value_shape.ownership, OwnershipShape::Owned);
     assert_eq!(value_shape.view, ViewShape::Native);
@@ -12291,7 +12314,7 @@ class PlatformMutableExternalArgument {
     let locals = signatures.method_local_shapes_or_empty(ty, method);
 
     assert_eq!(
-        signatures.local_binding_mutability(locals, "buffer"),
+        test_local_binding_mutability(locals, "buffer"),
         Some(true),
         "{:#?}",
         semantic
@@ -12350,7 +12373,7 @@ class InternalMutableArrayArgument {
     let locals = signatures.method_local_shapes_or_empty(ty, method);
 
     assert_eq!(
-        signatures.local_binding_mutability(locals, "values"),
+        test_local_binding_mutability(locals, "values"),
         Some(true),
         "{:#?}",
         semantic
@@ -14885,6 +14908,121 @@ class ErasedExternalFacadeDisplay {
 }
 
 #[test]
+fn erased_external_object_display_without_modeled_to_string_stays_loud() {
+    let translation = translate_source(
+        r#"
+class ErasedExternalFacadeDisplayUnmodeled {
+    String label(ExternalToken token) {
+        Object value = token;
+        return "value=" + value;
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("java_erased_object_to_string(&value)")
+            && !translation
+                .rust
+                .contains("if let Some(value) = value.downcast_ref::<ExternalToken>()")
+            && translation
+                .rust
+                .contains("unsupported Java erased object display: runtime target is erased"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "erased_external_object_display_unmodeled_to_string",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn erased_external_object_display_keeps_package_qualified_to_string_capability_distinct() {
+    let mut facts = FactSet::default();
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "toString".to_string(),
+        receiver_type: Some("a.ExternalToken".to_string()),
+        arg_count: Some(0),
+        parameter_patterns: None,
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::String),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+
+    let translation = translate_source_with_facts(
+        r#"
+import a.ExternalToken;
+
+class ErasedExternalFacadeDisplayQualified {
+    String imported(ExternalToken token) {
+        Object value = token;
+        return "value=" + value;
+    }
+
+    String modeled(a.ExternalToken token) {
+        Object value = token;
+        return "value=" + value;
+    }
+
+    String peer(b.ExternalToken token) {
+        Object value = token;
+        return "value=" + value;
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("if let Some(value) = value.downcast_ref::<AExternalToken>()"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("if let Some(value) = value.downcast_ref::<ExternalToken>()")
+            && !translation
+                .rust
+                .contains("if let Some(value) = value.downcast_ref::<BExternalToken>()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "erased_external_object_display_qualified_to_string",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn erased_file_object_display_delegates_to_file_display() {
     let translation = translate_source(
         r#"
@@ -15014,6 +15152,290 @@ class ErasedUriDisplay {
 
     cargo_check_generated_modules(
         "erased_uri_object_display",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn erased_path_object_display_delegates_to_path_display() {
+    let translation = translate_source(
+        r#"
+	import java.io.File;
+
+class ErasedPathDisplay {
+    String label() {
+        Object value = new File("abc.txt").toPath();
+        return "value=" + value;
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("java_erased_object_to_string(&value)"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("if let Some(value) = value.downcast_ref::<Path>()")
+            && translation.rust.contains("return value.to_string();"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "erased_path_object_display",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn erased_url_object_display_delegates_to_url_display() {
+    let translation = translate_source(
+        r#"
+	import java.net.URL;
+
+class ErasedUrlDisplay {
+    String label() throws Exception {
+        Object value = new URL("http://example.com/a");
+        return "value=" + value;
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("java_erased_object_to_string(&value)"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("if let Some(value) = value.downcast_ref::<URL>()")
+            && translation.rust.contains("return value.to_string();"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "erased_url_object_display",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn erased_random_object_display_uses_platform_identity_display() {
+    let translation = translate_source(
+        r#"
+	import java.util.Random;
+
+class ErasedRandomDisplay {
+    String label() {
+        Object value = new Random(1);
+        return "value=" + value;
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("java_erased_object_to_string(&value)"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("if let Some(value) = value.downcast_ref::<Random>()")
+            && translation
+                .rust
+                .contains("write!(f, \"java.util.Random@0\")"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "erased_random_object_display",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn erased_atomic_integer_object_display_delegates_to_atomic_display() {
+    let translation = translate_source(
+        r#"
+	import java.util.concurrent.atomic.AtomicInteger;
+
+class ErasedAtomicIntegerDisplay {
+    String label() {
+        Object value = new AtomicInteger(3);
+        return "value=" + value;
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("java_erased_object_to_string(&value)"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("if let Some(value) = value.downcast_ref::<AtomicInteger>()")
+            && translation
+                .rust
+                .contains("impl std::fmt::Display for AtomicInteger"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "erased_atomic_integer_object_display",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn erased_atomic_long_object_display_delegates_to_atomic_display() {
+    let translation = translate_source(
+        r#"
+	import java.util.concurrent.atomic.AtomicLong;
+
+class ErasedAtomicLongDisplay {
+    String label() {
+        Object value = new AtomicLong(3L);
+        return "value=" + value;
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("java_erased_object_to_string(&value)"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("if let Some(value) = value.downcast_ref::<AtomicLong>()")
+            && translation
+                .rust
+                .contains("impl std::fmt::Display for AtomicLong"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "erased_atomic_long_object_display",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn erased_atomic_boolean_object_display_delegates_to_atomic_display() {
+    let translation = translate_source(
+        r#"
+	import java.util.concurrent.atomic.AtomicBoolean;
+
+class ErasedAtomicBooleanDisplay {
+    String label() {
+        Object value = new AtomicBoolean(false);
+        return "value=" + value;
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("java_erased_object_to_string(&value)"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("if let Some(value) = value.downcast_ref::<AtomicBoolean>()")
+            && translation
+                .rust
+                .contains("impl std::fmt::Display for AtomicBoolean"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "erased_atomic_boolean_object_display",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust.clone(),
@@ -17578,29 +18000,25 @@ class Holder {
     assert!(
         translation
             .rust
-            .contains("self.value = Box::new(dog) as Box<dyn std::any::Any>;"),
+            .contains("pub fn store(&mut self, dog: Box<dyn std::any::Any>)")
+            && translation.rust.contains("self.value = Some(dog);"),
         "{}",
         translation.rust
     );
     assert!(
         translation
             .rust
-            .contains("pub fn get(&self) -> Box<dyn std::any::Any>")
+            .contains("pub fn get(&self) -> Option<Box<dyn std::any::Any>>")
             || translation
                 .rust
-                .contains("fn get(&self) -> Box<dyn std::any::Any>"),
+                .contains("fn get(&self) -> Option<Box<dyn std::any::Any>>"),
         "{}",
         translation.rust
     );
     assert!(
-        translation.rust.contains("helper.consume(self.value);")
-            || translation.rust.contains("helper.consume(&self.value);")
-            || translation
-                .rust
-                .contains("helper.consume(self.value.clone()")
-            || translation
-                .rust
-                .contains("helper.consume(java_clone_erased_object_ref(&self.value));"),
+        translation
+            .rust
+            .contains("helper.consume(self.value.as_ref().map(|value| java_clone_erased_object_ref(value)).ok_or_else(|| JavaException::new(\"NullPointerException\", \"Java null receiver\".to_string()))?);"),
         "{}",
         translation.rust
     );
@@ -23362,8 +23780,7 @@ class DeferredExternalStorage {
         })
         .unwrap();
     let method_signature = signatures.method_signature(ty, method).unwrap();
-    let importer_shape = signatures
-        .local_shape(&method_signature.locals, "importer")
+    let importer_shape = test_local_shape_by_name(&method_signature.locals, "importer")
         .expect("constructor-assigned local should have a solved shape");
 
     assert_eq!(importer_shape.ownership, OwnershipShape::Owned);
@@ -23481,9 +23898,9 @@ external-api executeImport Importer side-effect unknown
     let helper_method_signature = helper_signatures
         .method_signature(helper_ty, helper_method)
         .unwrap();
-    let helper_importer_shape = helper_signatures
-        .local_shape(&helper_method_signature.locals, "importer")
-        .expect("constructor-assigned helper local should have a solved shape");
+    let helper_importer_shape =
+        test_local_shape_by_name(&helper_method_signature.locals, "importer")
+            .expect("constructor-assigned helper local should have a solved shape");
 
     assert_eq!(helper_importer_shape.ownership, OwnershipShape::Owned);
 
@@ -23646,8 +24063,7 @@ class VariantAttributeOptionPlanning {
         })
         .unwrap();
     let method_signature = signatures.method_signature(ty, method).unwrap();
-    let value_shape = signatures
-        .local_shape(&method_signature.locals, "value")
+    let value_shape = test_local_shape_by_name(&method_signature.locals, "value")
         .expect("external nullable attribute local should have a solved shape");
 
     assert_eq!(
@@ -23731,11 +24147,7 @@ class SourceNullableSlots {
     let signatures = solve_signatures(&resolved.program, &representations, &usage);
     let method_signature = signatures.method_signature(ty, method).unwrap();
     assert!(matches!(
-        rust_type_for_slot(
-            signatures
-                .local_shape(&method_signature.locals, "current")
-                .unwrap()
-        ),
+        rust_type_for_slot(test_local_shape_by_name(&method_signature.locals, "current").unwrap()),
         RustType::Option(_)
     ));
     assert!(matches!(
@@ -24444,8 +24856,7 @@ external-api consumeGenotypes VariantBoundary side-effect read-only definitely-n
         Some(genotypes_ty.clone())
     );
     assert_eq!(
-        signatures
-            .local_shape(&method_signature.locals, "copy")
+        test_local_shape_by_name(&method_signature.locals, "copy")
             .unwrap()
             .java_ty,
         variant_ty.clone()
@@ -24480,8 +24891,7 @@ external-api consumeGenotypes VariantBoundary side-effect read-only definitely-n
             .unwrap();
         let method_signature = signatures.method_signature(ty, method).unwrap();
         assert_eq!(
-            signatures
-                .local_shape(&method_signature.locals, "copy")
+            test_local_shape_by_name(&method_signature.locals, "copy")
                 .unwrap()
                 .java_ty,
             expected_ty.clone()
@@ -30292,7 +30702,7 @@ class ErasedAliasCaller {
         representations
             .type_representation("ErasedBase")
             .map(|representation| &representation.representation),
-        Some(ObjectRepresentation::ErasedObject)
+        Some(ObjectRepresentation::ConcreteStruct)
     ));
 
     let items = new_java2rust::stdlib::external_api_facade_support_items_with_local_type_program(
@@ -31328,7 +31738,7 @@ class ObjectBoundary {
     assert!(
         translation
             .rust
-            .contains("Box::new(()) as Box<dyn std::any::Any>"),
+            .contains("Box::new(JavaPlainObject::new()) as Box<dyn std::any::Any>"),
         "{}",
         translation.rust
     );
@@ -31909,7 +32319,7 @@ class EnvUse {
 
     assert_eq!(
         env.local_shape("local"),
-        signatures.local_shape(&method_signature.locals, "local")
+        test_local_shape_by_name(&method_signature.locals, "local")
     );
     assert_eq!(
         env.binding_id("local").map(|binding| binding.kind),
@@ -34194,7 +34604,7 @@ public class SourceGetterForErasedObjectRepresentation {
 }
 
 #[test]
-fn nullable_external_dyn_trait_return_constraints_use_erased_owned_carrier() {
+fn nullable_external_dyn_trait_return_constraints_keep_trait_owned_carrier() {
     let facts = parse_external_pack_manifest(
         r#"
 external-pack dep Locatable rust-crate-mapping mapped target=dep_facade
@@ -34249,12 +34659,20 @@ class NullableExternalDynTraitReturn {
     );
     assert!(
         constraints.contains(&SignatureConstraint::RequiredDispatch(
-            DispatchShape::ErasedObject
+            DispatchShape::DynTrait {
+                trait_name: "Locatable".to_string(),
+            }
+        )) && constraints.contains(&SignatureConstraint::RequiredDispatch(
+            DispatchShape::BoxedDynTrait {
+                trait_name: "Locatable".to_string(),
+            }
         )),
         "{constraints:?}"
     );
     assert!(
-        constraints.contains(&SignatureConstraint::RequiredView(
+        !constraints.contains(&SignatureConstraint::RequiredDispatch(
+            DispatchShape::ErasedObject
+        )) && !constraints.contains(&SignatureConstraint::RequiredView(
             ViewShape::ErasedObjectView
         )),
         "{constraints:?}"
@@ -34326,7 +34744,7 @@ class BorrowedArrowGetterReturn {
             .all(|local| matches!(local.java_ty, JavaType::Named { ref name, .. } if name == "Object")),
         "{local_plans:?}"
     );
-    let vector_shape = signatures.required_local_shape(local_plans, "vector");
+    let vector_shape = test_required_local_shape(local_plans, "vector");
     assert_eq!(vector_shape.dispatch, DispatchShape::ErasedObject);
     assert_eq!(vector_shape.view, ViewShape::ErasedObjectView);
     assert!(
@@ -35039,7 +35457,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     let static_storage_accessors_source = lower_source
         .split("fn static_storage_accessors_for_field")
         .nth(1)
-        .and_then(|tail| tail.split("fn static_storage_initial_value_expr").next())
+        .and_then(|tail| tail.split("fn static_storage_rust_type_for_field").next())
         .expect("static storage accessor helper should remain discoverable");
     assert!(
         static_storage_accessors_source.contains("source_static_field_rust_name")
@@ -35594,11 +36012,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
             && none_or_default_source
                 .contains("recover_rendered_none_or_default_value(raw).is_some()")
             && none_or_default_source
-                .contains("fn rendered_none_or_default_value_projection(rendered: &str)")
-            && none_or_default_source.contains("if rendered == \"None\"")
-            && none_or_default_source.contains("if rendered == \"Default::default()\"")
-            && none_or_default_source.contains("rust_type_arg_text_is_balanced(ty)")
-            && none_or_default_source.contains("RustType::Raw(ty.to_string())")
+                .contains("crate::coercion::rendered_none_or_default_projection(rendered)")
             && !none_or_default_source.contains("segment.starts_with(\"None::<\")")
             && !none_or_default_source.contains("rendered_projection_or_raw_leaf(rendered)")
             && !none_or_default_source.contains("rust_expr_is_none_or_default_value(&recovered)"),
@@ -35917,13 +36331,14 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
             && coercion_source.contains("arithmetic_display_conversion_receiver_expr(&recovered)")
             && !coercion_source.contains("fn raw_arithmetic_display_conversion_receiver")
             && arithmetic_display_receiver_expr_source
-                .contains("grouped_rendered_inner_projection(rendered.trim())")
-            && arithmetic_display_receiver_expr_source
                 .contains("recover_rendered_arithmetic_display_receiver(rendered)")
             && arithmetic_display_receiver_expr_source
                 .contains("fn recover_rendered_arithmetic_display_receiver")
             && arithmetic_display_receiver_expr_source
                 .contains("rendered_plus_expr_projection_or_raw_leaf(rendered.trim())")
+            && arithmetic_display_receiver_expr_source
+                .contains("arithmetic_display_receiver_expr(&recovered)")
+            && !coercion_source.contains("fn raw_contains_top_level_arithmetic_operator")
             && !arithmetic_display_receiver_expr_source.contains("emit::emit_expr"),
         "arithmetic display expression recovery should use composition-aware structured arithmetic"
     );
@@ -36252,7 +36667,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         .expect("parse receiver projection should remain discoverable");
     assert!(
         parse_receiver_projection_source
-            .contains("recover_rendered_parse_receiver_projection(stripped)")
+            .contains("recover_rendered_parse_receiver_projection(raw.trim())")
             && parse_receiver_projection_source
                 .contains("fn recover_rendered_parse_receiver_projection(rendered: &str)")
             && parse_receiver_projection_source
@@ -36322,7 +36737,8 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         coercion_source.contains("#[cfg(test)]\npub fn render_string_join_vararg_value"),
         "String.join vararg string render bridge should stay test-only; production uses string_join_varargs_projection"
     );
-    assert!(coercion_source.contains("pub fn render_string_view_argument"));
+    assert!(coercion_source.contains("#[cfg(test)]\npub fn render_string_view_argument"));
+    assert!(coercion_source.contains("#[cfg(test)]\npub fn ensure_borrow_projection_rendered"));
     assert!(coercion_source.contains("pub fn string_join_delimiter_projection"));
     assert!(coercion_source.contains("pub fn string_join_collection_projection"));
     assert!(coercion_source.contains("pub fn string_join_varargs_projection"));
@@ -36372,6 +36788,24 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(
         coercion_source.contains(".map(string_join_vararg_value_projection)"),
         "string_join_varargs_projection should adapt varargs as RustExpr values"
+    );
+    let string_join_null_source = coercion_source
+        .split("fn rust_expr_is_null_join_item")
+        .nth(1)
+        .and_then(|tail| tail.split("fn rust_expr_is_some_call").next())
+        .expect("string join null-item helper should remain discoverable");
+    assert!(
+        string_join_null_source
+            .contains("RustExpr::Raw(raw) => raw_join_null_item_projection(raw).is_some()")
+            && string_join_null_source.contains("fn raw_join_null_item_projection(raw: &str)")
+            && string_join_null_source
+                .contains("fn rendered_none_or_default_projection(rendered: &str)")
+            && string_join_null_source.contains("if rendered == \"None\"")
+            && string_join_null_source.contains("if rendered == \"Default::default()\"")
+            && string_join_null_source.contains("rust_type_arg_text_is_balanced(ty)")
+            && !string_join_null_source.contains("raw.trim() == \"None\"")
+            && !string_join_null_source.contains("raw.trim() == \"Default::default()\""),
+        "String.join null-item raw compatibility should recover only complete None/default projections"
     );
     assert!(
         !coercion_source.contains(".map(render_string_join_vararg_value)"),
@@ -36705,7 +37139,9 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(
         borrow_projection_satisfied_source.contains("rust_expr_is_raw_borrow_leaf(expr)")
             && borrow_projection_satisfied_source.contains("rust_expr_is_simple_local_path(expr)")
-            && !borrow_projection_satisfied_source.contains("emit::emit_expr(expr)"),
+            && !borrow_projection_satisfied_source.contains("emit::emit_expr(expr)")
+            && !coercion_source.contains("fn rendered_expr_is_simple_local_path")
+            && !coercion_source.contains("rendered.trim_start().starts_with('&')"),
         "borrow projection idempotence should use structured evidence and raw-leaf fallback without rendering the full expression"
     );
     let already_borrowed_map_key_source = coercion_source
@@ -36784,7 +37220,12 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
             && borrowed_string_view_projection_expr_source.contains("zero_arg_method_projection")
             && borrowed_string_view_projection_expr_source.contains("string_view_expr")
             && borrowed_string_view_projection_expr_source
-                .contains("rendered_projection_or_raw_leaf(rendered.trim_start_matches('*'))")
+                .contains("already_borrowed_string_view_expr_projection(rendered)")
+            && borrowed_string_view_projection_expr_source
+                .contains("rendered_deref_string_view_inner_projection(trimmed)")
+            && borrowed_string_view_projection_expr_source
+                .contains("rust_expr_is_string_view_projection(&recovered)")
+            && !borrowed_string_view_projection_expr_source.contains("trim_start_matches('*')")
             && !borrowed_string_view_projection_expr_source
                 .contains("format!(\"{rust_name}.as_str()\")"),
         "borrowed string view projection should compose string views structurally without a rendered compatibility wrapper"
@@ -36801,10 +37242,11 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         "anonymous dyn trait constructors should be recognized structurally before raw compatibility"
     );
     assert!(
-        coercion_source.contains("fn rendered_anonymous_dyn_trait_constructor_trait")
+        !coercion_source.contains("fn rendered_anonymous_dyn_trait_constructor_trait")
+            && coercion_source.contains("rendered_projection_or_raw_leaf(rendered)")
             && coercion_source.contains("anonymous_dyn_trait_projection(trait_name)")
             && !coercion_source.contains("} else if rendered_expr_is_anonymous_dyn_trait_constructor(&rendered) {\n                RustExpr::Raw(rendered)"),
-        "anonymous dyn trait constructor compatibility should extract the trait and recover a structured projection"
+        "anonymous dyn trait constructor compatibility should recover the raw expression before extracting the trait"
     );
     assert!(coercion_source.contains("pub fn unwrap_java_null_receiver_projection"));
     assert!(coercion_source.contains("pub fn typed_none_projection"));
@@ -36926,8 +37368,10 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
             .matches("RustExpr::shaped(")
             .count()
             == 1
-            && apply_clone_projection_source.contains("let receiver = if let RustExpr::Raw")
+            && apply_clone_projection_source
+                .contains("let receiver = if matches!(expr.unshaped(), RustExpr::Raw(_))")
             && apply_clone_projection_source.contains("clone_method_receiver(")
+            && apply_clone_projection_source.contains("parenthesize_method_receiver(expr)")
             && apply_clone_projection_source.contains("RustExpr::MethodCall")
             && !apply_clone_projection_source.contains("} else {\n        RustExpr::shaped("),
         "clone projection should select a receiver first, then build one structured clone call"
@@ -36935,12 +37379,14 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(
         clone_method_receiver_source.contains("let RustExpr::Raw(raw) = &expr")
             && clone_method_receiver_source.contains("RustExpr::Literal(raw.clone())")
-            && clone_method_receiver_source.contains("rendered_projection_or_raw_leaf(trimmed)")
+            && clone_method_receiver_source.contains("parenthesize_raw_method_receiver(expr)")
+            && !clone_method_receiver_source.contains("raw_contains_as_token_outside_literals")
+            && !clone_method_receiver_source.contains("raw_contains_top_level_as_cast")
             && !clone_method_receiver_source
                 .contains("} else {\n            RustExpr::Raw(raw)\n        }")
             && !clone_method_receiver_source
                 .contains("} else {\n        RustExpr::Raw(raw)\n    }"),
-        "clone receiver helper should recover simple raw leaves after literal/grouping checks without rebuilding Raw fallbacks"
+        "clone receiver helper should preserve literal policy and delegate grouping to the recovery-first method receiver helper"
     );
     assert!(coercion_source.contains("pub fn java_update_expression_projection"));
     assert!(coercion_source.contains("pub fn into_projection"));
@@ -37407,14 +37853,12 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         })
         .expect("erased-object clone helper should remain discoverable");
     assert!(
-        clone_erased_object_source
-            .contains("let borrow_operand = rendered.strip_prefix('&').unwrap_or(&rendered);")
-            && clone_erased_object_source.contains("rendered_projection_or_raw_leaf(&rendered)")
+        clone_erased_object_source.contains("rendered_projection_or_raw_leaf(rendered.trim())")
             && clone_erased_object_source
                 .contains("rust_expr_is_erased_object_clone_helper_call(&recovered)")
-            && clone_erased_object_source
-                .contains("parenthesized_borrow_operand_leaf(borrow_operand)")
+            && clone_erased_object_source.contains("parenthesized_borrow_operand_leaf(&rendered)")
             && clone_erased_object_source.contains("borrowed_erased_object_clone_arg(expr)")
+            && !clone_erased_object_source.contains("strip_prefix('&')")
             && !clone_erased_object_source.contains("borrowed_raw_safe_expr(RustExpr::Raw(")
             && !clone_erased_object_source
                 .contains("borrowed_raw_safe_expr(rendered_projection_or_raw_leaf")
@@ -38001,6 +38445,10 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(
         rendered_top_level_plus_source.contains("split_rendered_top_level_plus_terms(rendered)")
             && rendered_top_level_plus_source.contains("for term in terms")
+            && rendered_top_level_plus_source
+                .contains("matches!(expr.unshaped(), RustExpr::Raw(_))")
+            && rendered_top_level_plus_source
+                .contains("matches!(right.unshaped(), RustExpr::Raw(_))")
             && !lower_source.contains("fn split_top_level_plus(text: &str)"),
         "top-level plus projection should handle multi-term expressions structurally in coercion"
     );
@@ -38014,8 +38462,12 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
             && rendered_simple_binary_source.contains("\">>\"")
             && rendered_simple_binary_source.contains("\"&\"")
             && rendered_simple_binary_source.contains("\"^\"")
-            && rendered_simple_binary_source.contains("\"|\""),
-        "simple binary recovery should include bitwise and shift operators used by recovered index expressions"
+            && rendered_simple_binary_source.contains("\"|\"")
+            && rendered_simple_binary_source
+                .contains("matches!(left.unshaped(), RustExpr::Raw(_))")
+            && rendered_simple_binary_source
+                .contains("matches!(right.unshaped(), RustExpr::Raw(_))"),
+        "simple binary recovery should include bitwise/shift operators but reject opaque raw operands"
     );
     let raw_constructor_call_source = lower_source
         .split("fn raw_constructor_call_expr_projection")
@@ -38161,6 +38613,9 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
                 .contains("fn rewrite_same_outer_inner_constructor_calls_text_with_resolver")
             && lower_source.contains("fn raw_constructor_call_expr_projection")
             && lower_source.contains("fn recover_same_outer_inner_constructor_compat_expr")
+            && lower_source.contains("fn recover_same_outer_inner_constructor_compat_stmt")
+            && lower_source.contains("fn rust_stmt_has_constructor_call")
+            && lower_source.contains("fn rust_expr_has_constructor_call")
             && !lower_source.contains("fn recover_same_outer_inner_constructor_scan_expr")
             && !lower_source.contains("fn rust_expr_contains_bare_constructor_call")
             && !lower_source.contains("fn rust_stmt_contains_bare_constructor_call")
@@ -38254,6 +38709,9 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
             .contains("rewrite_recovered_same_outer_inner_constructor_raw_stmt(stmt, |stmt|")
             && companion_constructor_stmt_source
                 .contains("rewrite_recovered_same_outer_inner_constructor_raw_stmt(stmt, |stmt|")
+            && lower_source.contains("recover_same_outer_inner_constructor_compat_stmt(raw)")
+            && !lower_source
+                .contains("let Some(mut recovered) = raw_structured_stmt_projection(raw)")
             && !storage_constructor_stmt_source.contains("raw_structured_stmt_projection")
             && !companion_constructor_stmt_source.contains("raw_structured_stmt_projection")
             && !storage_constructor_stmt_source.contains("| RustStmt::Raw(_) => false")
@@ -39161,10 +39619,12 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(
         apply_clone_recovery_source.contains("clone_recovery_postfix_marker_expr")
             && apply_clone_recovery_source.contains("zero_arg_method_projection")
-            && apply_clone_recovery_source.contains("clone_recovery_method_receiver")
+            && apply_clone_recovery_source
+                .contains("recover_parseable_raw_operand_projection(expr)")
+            && apply_clone_recovery_source.contains("clone_method_receiver(expr, false)")
             && !apply_clone_recovery_source.contains("let rendered = emit::emit_expr(&expr)")
             && !apply_clone_recovery_source.contains("RustExpr::Raw(render_clone_recovery_expr"),
-        "clone recovery should compose clone markers structurally and keep raw inputs as receiver leaves"
+        "clone recovery should recover parseable raw operands before composing clone markers structurally"
     );
     let borrowed_option_slice_clone_source = coercion_source
         .split("fn apply_borrowed_option_slice_clone_adapter")
@@ -39219,16 +39679,16 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
             && coercion_source.contains("fn rendered_path_leaf_projection")
             && coercion_source.contains("fn borrowed_rendered_leaf_projection")
             && coercion_source.contains("fn borrowed_collect_clone_compat_projection")
-            && coercion_source.contains("fn raw_borrowed_collect_clone_compat_projection")
+            && !coercion_source.contains("fn raw_borrowed_collect_clone_compat_projection")
             && !borrowed_collect_clone_source.contains("RustExpr::Raw(format!")
             && !borrowed_vec_clone_adapter_source.contains("emit::emit_expr(&expr)")
             && !borrowed_set_clone_adapter_source.contains("emit::emit_expr(&expr)")
             && !borrowed_vec_clone_adapter_source.contains("cloned_collect_suffix")
             && !borrowed_set_clone_adapter_source.contains("cloned_collect_suffix")
             && borrowed_collect_clone_compat_source
-                .contains("raw_borrowed_collect_clone_compat_projection")
-            && borrowed_collect_clone_compat_source.contains("cloned_collect_suffix")
-            && borrowed_collect_clone_compat_source.contains("strip_suffix")
+                .contains("rendered_projection_or_raw_leaf(rendered)")
+            && !borrowed_collect_clone_compat_source.contains("cloned_collect_suffix")
+            && !borrowed_collect_clone_compat_source.contains("strip_suffix")
             && borrowed_collect_clone_compat_source.contains("match expr.unshaped()")
             && borrowed_collect_clone_compat_source.contains("RustExpr::Raw(rendered)")
             && borrowed_collect_clone_compat_source
@@ -39277,6 +39737,14 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
                 .contains("recover_rendered_to_owned_sequence_expr(&rendered)")
             && to_owned_sequence_projection_source
                 .contains("rust_expr_is_to_vec_call(&recovered).then_some(recovered)")
+            && to_owned_sequence_projection_source
+                .contains("to_owned_sequence_method_receiver(expr)")
+            && to_owned_sequence_projection_source
+                .contains("fn rust_owned_sequence_receiver_needs_parentheses(expr: &RustExpr)")
+            && to_owned_sequence_projection_source.contains("RustExpr::Raw(_) => false")
+            && !to_owned_sequence_projection_source.contains("rendered: Option<&str>")
+            && !to_owned_sequence_projection_source
+                .contains("raw_contains_as_token_outside_literals(rendered.trim())")
             && !to_owned_sequence_projection_source
                 .contains("let rendered = emit::emit_expr(&expr)")
             && !to_owned_sequence_projection_source.contains("RustExpr::Raw(format!")
@@ -39708,11 +40176,12 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(
         abstract_method_stub_source.contains("panic_message_projection")
             && abstract_interface_stub_source.contains("panic_message_projection")
-            && unsupported_outer_capture_constructor_source.contains("panic_message_projection")
+            && unsupported_outer_capture_constructor_source
+                .contains("crate::unsupported::compile_error_expr")
             && !abstract_method_stub_source.contains("RustExpr::Raw(format!")
             && !abstract_interface_stub_source.contains("RustExpr::Raw(format!")
             && !unsupported_outer_capture_constructor_source.contains("RustExpr::Raw(format!"),
-        "abstract/unsupported panic helpers should compose panic macros structurally"
+        "abstract/unsupported helpers should compose diagnostic macros structurally"
     );
     let unsupported_constructor_call_handoff_source = coercion_source
         .split("pub fn unsupported_constructor_call_handoff_projection")
@@ -40093,6 +40562,23 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
             && !operator_source.contains("let RustExpr::Raw(raw) = expr else"),
         "operator raw operand grouping should delegate parseable Raw recovery to the central coercion helper and preserve opaque raw leaves"
     );
+    let raw_method_receiver_source = coercion_source
+        .split("fn parenthesize_raw_method_receiver")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn raw_method_receiver_text_needs_opaque_parentheses")
+                .next()
+        })
+        .expect("raw method receiver helper should remain discoverable");
+    assert!(
+        raw_method_receiver_source.contains("rendered_plus_expr_projection_or_raw_leaf(trimmed)")
+            && raw_method_receiver_source.contains("structured_method_receiver_needs_parentheses")
+            && raw_method_receiver_source.contains("RustExpr::Grouped(Box::new(recovered))")
+            && raw_method_receiver_source.contains("RustExpr::raw_leaf(trimmed)")
+            && !raw_method_receiver_source.contains("raw_leaf_or_grouped")
+            && !coercion_source.contains("fn raw_method_receiver_needs_parentheses"),
+        "raw method receiver grouping should recover parseable expressions before falling back to opaque raw grouping"
+    );
     assert!(
         !operator_source.contains("RustExpr::Raw(format!(\"({trimmed})\"))"),
         "operator raw operand grouping should use RustExpr::Grouped"
@@ -40121,11 +40607,11 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         !lower_source.contains("_ => RustExpr::Raw(rendered),"),
         "static storage array primitive constants should use Literal leaves, not Raw rendered values"
     );
-    let integral_parse_null_arg_source = lower_source
+    let integral_parse_null_arg_source = coercion_source
         .split("fn java_integral_parse_null_argument_as_number_format")
         .nth(1)
         .and_then(|tail| {
-            tail.split("fn java_integral_parse_raw_null_argument_as_number_format")
+            tail.split("fn nullable_string_parse_display_projection")
                 .next()
         })
         .expect("integral parse null argument helper should remain discoverable");
@@ -40380,7 +40866,8 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         "sequence index position predicate should use closure IR rather than formatted Raw"
     );
     assert!(!lower_source.contains(".next().expect(\"Java iterator exhausted\")"));
-    assert!(lower_source.contains("iterator_next_expect_projection(iter_expr)"));
+    assert!(lower_source.contains("iterator_next_result_projection(iterator)"));
+    assert!(lower_source.contains("iterator_next_expect_projection(iterator)"));
     assert!(lower_source.contains("tuple_field_projection(next_expr, field_index)"));
     assert!(!coercion_source.contains("pub fn render_sequence_iteration_source"));
     assert!(coercion_source.contains("pub fn sequence_iteration_source_projection"));
@@ -45142,6 +45629,27 @@ fn stream_lambda_emission_uses_structured_operator_rendering() {
         RustExpr::Path(segments)
             if segments == vec!["Owner".to_string(), "VALUE".to_string()]
     ));
+    let qualified_static_constant = emit_stream_lambda_body_expr(
+        &parse_expr("a.Item.KIND"),
+        "value",
+        StreamLambdaValue::OwnedItem,
+    )
+    .unwrap();
+    assert_eq!(emit_expr(&qualified_static_constant), "AItem::KIND");
+    let raw_qualified_static_constant = emit_stream_lambda_body_expr(
+        &Expr::Raw("a.Item.KIND".to_string()),
+        "value",
+        StreamLambdaValue::OwnedItem,
+    )
+    .unwrap();
+    assert_eq!(emit_expr(&raw_qualified_static_constant), "AItem::KIND");
+    let raw_b_qualified_static_constant = emit_stream_lambda_body_expr(
+        &Expr::Raw("b.Item.KIND".to_string()),
+        "value",
+        StreamLambdaValue::OwnedItem,
+    )
+    .unwrap();
+    assert_eq!(emit_expr(&raw_b_qualified_static_constant), "BItem::KIND");
     let raw_instance_field = emit_stream_lambda_body_expr(
         &Expr::Raw("owner.value".to_string()),
         "value",
@@ -49339,6 +49847,46 @@ fn stream_lambda_lowers_split_length_and_integer_parse_in_nullable_map() {
         ),
         Some("Constants::DELIMITER".to_string())
     );
+    let mut alias_env = ShapeEnv::new();
+    alias_env.insert_static_type_alias("Cfg", "AB.C");
+    alias_env.insert_static_type_alias("cfg", "AB.C");
+    assert_eq!(alias_env.type_env().static_type_alias("Cfg"), Some("AB.C"));
+    assert_eq!(
+        emit_stream_lambda_body_with_context(
+            &Expr::FieldAccess(Box::new(Expr::Var("Cfg".to_string())), "N".to_string()),
+            "partition",
+            StreamLambdaValue::BorrowedItem,
+            StreamRenderContext::new(&alias_env),
+        ),
+        Some("AB_C::N".to_string())
+    );
+    assert_eq!(
+        emit_stream_lambda_body_with_context(
+            &Expr::Raw("Cfg.N".to_string()),
+            "partition",
+            StreamLambdaValue::BorrowedItem,
+            StreamRenderContext::new(&alias_env),
+        ),
+        Some("AB_C::N".to_string())
+    );
+    assert_eq!(
+        emit_stream_lambda_body_with_context(
+            &Expr::Raw("Math.PI".to_string()),
+            "partition",
+            StreamLambdaValue::BorrowedItem,
+            StreamRenderContext::new(&ShapeEnv::new()),
+        ),
+        Some("Math::PI".to_string())
+    );
+    assert_eq!(
+        emit_stream_lambda_body_with_context(
+            &Expr::Raw("Item.VALUE".to_string()),
+            "partition",
+            StreamLambdaValue::BorrowedItem,
+            StreamRenderContext::new(&ShapeEnv::new()),
+        ),
+        Some("Item.VALUE".to_string())
+    );
     let stream_lowering_source = include_str!("../src/stream_lowering.rs");
     let field_access_branch = stream_lowering_source
         .split("Expr::FieldAccess(receiver, field) =>")
@@ -49380,11 +49928,13 @@ fn stream_lambda_lowers_split_length_and_integer_parse_in_nullable_map() {
         .and_then(|tail| tail.split("pub fn render_stream_plan_with_context").next())
         .expect("stream raw expression helper should remain discoverable");
     assert!(
-        stream_lowering_source.contains("let expr = stream_raw_expr(raw);")
+        stream_lowering_source.contains("let expr = stream_raw_expr(raw, ctx);")
             && stream_lowering_source.contains("crate::emit::expr_precedence(&expr)")
             && stream_raw_expr_source.contains("raw_java_static_member_access(raw)")
-            && stream_raw_expr_source.contains("owner_associated_path_projection(owner, member)")
+            && stream_raw_expr_source.contains("stream_known_static_raw_owner_name(owner, ctx)")
+            && stream_raw_expr_source.contains("owner_associated_path_projection(&owner, member)")
             && stream_raw_expr_source.contains("java_static_owner_ident(owner)")
+            && stream_raw_expr_source.contains("is_known_builtin_static_owner(&canonical)")
             && stream_raw_expr_source.contains("rendered_plus_expr_projection_or_raw_leaf(raw)")
             && !stream_raw_expr_source.contains("RustExpr::Raw(raw.to_string())")
             && !stream_raw_expr_source.contains("matches!(recovered.unshaped(), RustExpr::Raw(_))")
@@ -50148,10 +50698,10 @@ public class Order {
 /// before either index is evaluated
 /// ([0026](../claude_audits/done/0026-assignment-evaluation-order-differs-from-java.md)).
 ///
-/// Pinned textually rather than against the Java oracle because the output for
-/// this shape does not compile for an unrelated reason — the declared type, the
-/// initialiser and the read projection pick three different carriers
-/// ([0038](../claude_audits/done/0038-two-dimensional-object-array-carrier-disagrees.md)).
+/// This also compiles the generated Rust so the declared ragged carrier agrees
+/// with nullable object row allocations (`Vec<Vec<Option<T>>>`), the residual
+/// shape from
+/// [0038](../claude_audits/done/0038-two-dimensional-object-array-carrier-disagrees.md).
 #[test]
 fn ragged_two_dimensional_assignment_hoists_both_indices() {
     let translation = translate_source(

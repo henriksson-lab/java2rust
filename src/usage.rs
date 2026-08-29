@@ -6,7 +6,7 @@ use crate::java_ir::{
     Block, ConstructorInvocationKind, Expr, JavaType, LambdaBody, Member, Modifier, Program,
     ResolvedCall, ResolvedConstructor, Stmt, SwitchLabel, TypeDecl,
 };
-use crate::java_signature::{JavaCallableKey, source_method_rust_name};
+use crate::java_signature::{JavaCallableKey, JavaOwnerKey, source_method_rust_name};
 use crate::stdlib::is_content_read_method;
 use crate::types::TypeEnv;
 
@@ -144,20 +144,20 @@ impl UsageFacts {
         ty: &TypeDecl,
         method: &crate::java_ir::MethodDecl,
     ) -> Option<&MethodUsageFacts> {
+        self.source_method_usage_for_owner(JavaOwnerKey::source_type(ty), method)
+    }
+
+    pub fn source_method_usage_for_owner(
+        &self,
+        owner: JavaOwnerKey,
+        method: &crate::java_ir::MethodDecl,
+    ) -> Option<&MethodUsageFacts> {
         self.methods_by_java_key
-            .get(&JavaCallableKey::source_method_for_type(ty, method))
+            .get(&JavaCallableKey::source_method_for_owner(owner, method))
     }
 }
 
 impl MethodUsageFacts {
-    pub fn binding_for_declaration(
-        &self,
-        binding: Option<&BindingId>,
-        name: &str,
-    ) -> Option<&BindingUseFacts> {
-        self.binding_for_declaration_with_name_fallback(binding, name, true)
-    }
-
     pub fn binding_for_declaration_with_name_fallback(
         &self,
         binding: Option<&BindingId>,
@@ -166,12 +166,16 @@ impl MethodUsageFacts {
     ) -> Option<&BindingUseFacts> {
         match binding {
             Some(binding) => self.bindings_by_id.get(binding),
-            None if allow_name_fallback => self.bindings.get(name).filter(|binding| {
-                if let Some(id) = &binding.binding {
-                    return id.name() == name && self.bindings_by_id.contains_key(id);
+            None if allow_name_fallback => {
+                let name_binding = self.bindings.get(name)?;
+                if let Some(id) = &name_binding.binding {
+                    return (id.name() == name)
+                        .then(|| self.bindings_by_id.get(id))
+                        .flatten();
                 }
                 self.id_less_binding_name_is_unambiguous(name)
-            }),
+                    .then_some(name_binding)
+            }
             None => None,
         }
     }
@@ -185,6 +189,13 @@ impl MethodUsageFacts {
         self.bindings_by_id
             .contains_key(&binding_id)
             .then_some(binding_id)
+    }
+
+    pub fn visible_binding_java_type_for_name(&self, name: &str) -> Option<&JavaType> {
+        let binding_id = self.visible_binding_id_for_name(name)?;
+        self.bindings_by_id
+            .get(&binding_id)
+            .map(|binding| &binding.java_ty)
     }
 
     pub fn name_binding_is_current(&self, name: &str) -> bool {
@@ -427,7 +438,12 @@ pub fn analyze_usage_with_facts(program: &Program, semantic_facts: &FactSet) -> 
 
 fn propagate_self_mutability_through_self_calls(facts: &mut UsageFacts) {
     loop {
-        let mut mutating_methods = facts
+        let mutating_source_methods = facts
+            .methods_by_java_key
+            .iter()
+            .filter_map(|(key, usage)| usage.mutates_self.then(|| key.clone()))
+            .collect::<HashSet<_>>();
+        let mut mutating_compat_methods = facts
             .methods
             .iter()
             .chain(facts.methods_by_rust_name.iter())
@@ -437,11 +453,13 @@ fn propagate_self_mutability_through_self_calls(facts: &mut UsageFacts) {
                     .then(|| (key.type_name.clone(), key.method_name.clone()))
             })
             .collect::<HashSet<_>>();
-        mutating_methods.extend(facts.methods_by_java_key.iter().filter_map(|(key, usage)| {
-            usage
-                .mutates_self
-                .then(|| (key.owner.clone(), key.java_name.clone()))
-        }));
+        mutating_compat_methods.extend(facts.methods_by_java_key.iter().filter_map(
+            |(key, usage)| {
+                usage
+                    .mutates_self
+                    .then(|| (key.owner.clone(), key.java_name.clone()))
+            },
+        ));
         let mut changed = false;
         // The owner type is carried by each map's key, so an *unqualified* self
         // call can be identified without a resolved callee. That matters:
@@ -458,20 +476,21 @@ fn propagate_self_mutability_through_self_calls(facts: &mut UsageFacts) {
                 if !(call_site.receiver_is_self || call_site.receiver_targets_self_field) {
                     return false;
                 }
-                if call_site.resolved.as_ref().is_some_and(|resolved| {
-                    mutating_methods
-                        .contains(&(resolved.declaring_type.clone(), resolved.rust_name.clone()))
-                        || mutating_methods
-                            .contains(&(resolved.declaring_type.clone(), call_site.name.clone()))
-                }) {
-                    return true;
+                if let Some(resolved) = &call_site.resolved {
+                    let key = JavaCallableKey::resolved_source_method(
+                        JavaOwnerKey::resolved_source(resolved.declaring_type.clone()),
+                        call_site.name.clone(),
+                        &resolved.arg_target_types,
+                        resolved.kind,
+                    );
+                    return mutating_source_methods.contains(&key);
                 }
                 if call_site
                     .receiver_type
                     .as_ref()
                     .is_some_and(|receiver_type| {
                         java_type_name_for_usage(receiver_type).is_some_and(|receiver_name| {
-                            mutating_methods
+                            mutating_compat_methods
                                 .contains(&(receiver_name.to_string(), call_site.name.clone()))
                         })
                     })
@@ -481,7 +500,8 @@ fn propagate_self_mutability_through_self_calls(facts: &mut UsageFacts) {
                 // Unqualified call naming a mutating method of the enclosing
                 // type. This is what an unresolved `take(v)` is.
                 call_site.receiver_is_self
-                    && mutating_methods.contains(&(owner.to_string(), call_site.name.clone()))
+                    && mutating_compat_methods
+                        .contains(&(owner.to_string(), call_site.name.clone()))
             }) {
                 usage.mutates_self = true;
                 changed = true;
@@ -2278,6 +2298,11 @@ fn analyze_expr_with_context(
                 semantic_facts,
                 type_env,
             );
+            let call_boundary = source_receiver_call_boundary(
+                call_boundary,
+                receiver_type.as_ref(),
+                semantic_facts,
+            );
             record_trivial_accessor_call_use(
                 facts,
                 current_type,
@@ -3355,6 +3380,30 @@ fn modeled_receiver_call_boundary(
     boundary
 }
 
+fn source_receiver_call_boundary(
+    boundary: CallArgumentBoundary,
+    receiver_type: Option<&JavaType>,
+    semantic_facts: &FactSet,
+) -> CallArgumentBoundary {
+    if boundary != CallArgumentBoundary::Unknown {
+        return boundary;
+    }
+    let Some(receiver_name) = receiver_type.and_then(usage_java_type_name) else {
+        return boundary;
+    };
+    if semantic_facts
+        .type_capability_overrides
+        .iter()
+        .any(|capability| {
+            capability.provenance == crate::facts::FactProvenance::ParsedSource
+                && crate::facts::external_type_name_matches(&capability.type_name, receiver_name)
+        })
+    {
+        return CallArgumentBoundary::KnownContentRead;
+    }
+    boundary
+}
+
 fn receiver_static_type_matches_declaring_type(
     receiver_type: Option<&JavaType>,
     declaring_type: &str,
@@ -3363,8 +3412,6 @@ fn receiver_static_type_matches_declaring_type(
         return false;
     };
     name == declaring_type
-        || name.rsplit('.').next() == Some(declaring_type)
-        || declaring_type.rsplit('.').next() == Some(name)
 }
 
 pub fn call_argument_use_boundary_policy(
@@ -3426,6 +3473,67 @@ mod tests {
             java_ty: JavaType::String,
             uses: Vec::new(),
         }
+    }
+
+    fn resolved_instance_call(declaring_type: &str) -> ResolvedCall {
+        ResolvedCall {
+            declaring_type: declaring_type.to_string(),
+            rust_name: "read".to_string(),
+            kind: crate::java_ir::CallKind::Instance,
+            return_type: JavaType::Void,
+            arg_target_types: Vec::new(),
+            arg_coercions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn receiver_static_type_match_fails_closed_for_package_qualified_simple_name() {
+        assert!(receiver_static_type_matches_declaring_type(
+            Some(&JavaType::Named {
+                name: "a.Item".to_string(),
+                args: Vec::new(),
+            }),
+            "a.Item",
+        ));
+        assert!(receiver_static_type_matches_declaring_type(
+            Some(&JavaType::Named {
+                name: "Item".to_string(),
+                args: Vec::new(),
+            }),
+            "Item",
+        ));
+        assert!(!receiver_static_type_matches_declaring_type(
+            Some(&JavaType::Named {
+                name: "Item".to_string(),
+                args: Vec::new(),
+            }),
+            "a.Item",
+        ));
+        assert!(!receiver_static_type_matches_declaring_type(
+            Some(&JavaType::Named {
+                name: "a.Item".to_string(),
+                args: Vec::new(),
+            }),
+            "Item",
+        ));
+    }
+
+    #[test]
+    fn resolved_receiver_boundary_refuses_package_qualified_simple_name_match() {
+        let resolved = resolved_instance_call("a.Item");
+        let bare_item = JavaType::Named {
+            name: "Item".to_string(),
+            args: Vec::new(),
+        };
+
+        assert_eq!(
+            resolved_receiver_call_boundary(
+                CallArgumentBoundary::Unknown,
+                Some(&bare_item),
+                Some(&resolved),
+            ),
+            CallArgumentBoundary::Unknown
+        );
     }
 
     #[test]
@@ -3508,12 +3616,14 @@ mod tests {
 
         assert!(
             facts
-                .binding_for_declaration(Some(&second), "value")
+                .binding_for_declaration_with_name_fallback(Some(&second), "value", false)
                 .is_none(),
             "a resolver-assigned declaration id must not silently rejoin by name"
         );
         assert!(
-            facts.binding_for_declaration(None, "value").is_none(),
+            facts
+                .binding_for_declaration_with_name_fallback(None, "value", true)
+                .is_none(),
             "id-less compatibility callers must reject stale name facts that point at a missing binding id"
         );
     }
@@ -3607,7 +3717,12 @@ mod tests {
         );
 
         assert_eq!(facts.visible_binding_id_for_name("value"), Some(binding));
+        assert_eq!(
+            facts.visible_binding_java_type_for_name("value"),
+            Some(&JavaType::String)
+        );
         assert_eq!(facts.visible_binding_id_for_name("missing"), None);
+        assert_eq!(facts.visible_binding_java_type_for_name("missing"), None);
     }
 
     #[test]
@@ -3625,8 +3740,36 @@ mod tests {
                 .binding_for_declaration_with_name_fallback(None, "value", true)
                 .is_none()
         );
-        assert!(facts.binding_for_declaration(None, "value").is_none());
         assert!(facts.all_binding_facts().is_empty());
+    }
+
+    #[test]
+    fn binding_name_fallback_returns_authoritative_live_id_fact() {
+        let binding = BindingId::new(BindingKind::Local, "value", 1);
+        let mut facts = MethodUsageFacts::default();
+        facts.bindings_by_id.insert(
+            binding.clone(),
+            BindingUseFacts {
+                java_ty: JavaType::String,
+                uses: vec![BindingUse::Returned],
+                ..binding_fact("value", Some(binding.clone()))
+            },
+        );
+        facts.bindings.insert(
+            "value".to_string(),
+            BindingUseFacts {
+                java_ty: JavaType::Primitive(PrimitiveType::Int),
+                uses: Vec::new(),
+                ..binding_fact("value", Some(binding))
+            },
+        );
+
+        let selected = facts
+            .binding_for_declaration_with_name_fallback(None, "value", true)
+            .expect("live binding-id fallback should resolve through bindings_by_id");
+
+        assert_eq!(selected.java_ty, JavaType::String);
+        assert_eq!(selected.uses, vec![BindingUse::Returned]);
     }
 
     #[test]

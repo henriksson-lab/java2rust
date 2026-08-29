@@ -8,6 +8,79 @@ fn parser_gap(path: &str) -> String {
 }
 
 #[test]
+fn parses_interface_super_method_receiver_with_interface_owner() {
+    let expr = new_java2rust::parser::parse_expr("Greeter.super.greet()");
+    let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        ..
+    } = expr
+    else {
+        panic!("expected method call");
+    };
+
+    assert_eq!(name, "greet");
+    assert!(args.is_empty());
+    assert!(matches!(
+        receiver.as_ref(),
+        Expr::FieldAccess(owner, field)
+            if field == "super" && matches!(owner.as_ref(), Expr::Var(owner) if owner == "Greeter")
+    ));
+}
+
+#[test]
+fn parses_nested_interface_super_method_receiver_with_interface_owner() {
+    let parsed = parse_java_source(
+        r#"
+class InterfaceDefaults {
+    interface Greeter {
+        default String greet() { return "hi"; }
+    }
+    static class E implements Greeter {
+        public String greet() {
+            return Greeter.super.greet();
+        }
+    }
+}
+"#,
+    );
+    let class_e = parsed.program.types[0]
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Type(ty) if ty.name == "E" || ty.name == "InterfaceDefaults.E" => Some(ty),
+            _ => None,
+        })
+        .unwrap();
+    let method = class_e
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "greet" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let Stmt::Return(Some(Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        ..
+    })) = &method.body.as_ref().unwrap().statements[0]
+    else {
+        panic!("expected return of interface-super method call");
+    };
+
+    assert_eq!(name, "greet");
+    assert!(args.is_empty());
+    assert!(matches!(
+        receiver.as_ref(),
+        Expr::FieldAccess(owner, field)
+            if field == "super" && matches!(owner.as_ref(), Expr::Var(owner) if owner == "Greeter")
+    ));
+}
+
+#[test]
 fn parses_array_initializer_literals_without_raw_fallbacks() {
     let parsed = parse_java_source(&parser_gap("ArrayInitializerLiteral.java"));
     assert!(collect_program_fallbacks(&parsed.program).is_empty());

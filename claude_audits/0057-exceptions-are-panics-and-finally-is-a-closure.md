@@ -3,6 +3,34 @@
 Recorded 2026-08-23.
 Status: **open**.
 
+Follow-up 2026-08-29 baseline pass: six exception/finally fixtures were still
+listed in `tests/baselines/idiom-gaps-failures.txt` even though current
+lowering covers them. Two assertions were stale after newer result/cleanup
+rendering: the plain fallthrough `try` value carrier now emits braced match
+arms, and try-with-resources return lowering now uses the cleanup-result
+combiner with suppression handling instead of the older direct `reader.close()?`
+tail. Verified and removed from the baseline:
+`corpus_genomicsdb_file_load_constructor_delegation_exposes_exception_type_gap`,
+`external_standard_exception_super_with_trailing_body_lowers_subclass_state`,
+`plain_fallthrough_try_with_value_returns_uses_optional_result_carrier`,
+`simple_rethrow_catch_generated_rust_compiles`,
+`translates_return_bearing_try_with_resources_without_placeholder`, and
+`try_with_resources_external_type_gets_implicit_close_surface`. The audit
+remains open for the general completion carrier and remaining panic-only
+exception surfaces.
+
+Follow-up 2026-08-29 baseline pass: three more 0057 fallibility rows were
+verified passing and removed from `tests/baselines/idiom-gaps-failures.txt`.
+Optional `PrintStream.println` through a throwing argument now keeps the arity
+specific support method and catchable null propagation, overloaded static calls
+carry exception facts on the emitted Rust name, and source-interface trait
+surfaces use fallible implementation signatures. Verified:
+`optional_print_stream_field_println_with_throwing_arg_keeps_arity_name`,
+`overloaded_static_caller_gets_exception_fact_on_emitted_rust_name`, and
+`source_interface_trait_uses_fallible_implementation_signature`. The audit
+remains open for the general completion carrier and remaining panic-only
+exception surfaces.
+
 Follow-up 2026-08-28: `make_java_null_expect_catchable` now handles the raw
 expression compatibility surface that was left behind after structured
 expression and raw-statement rewrites. Parseable raw expressions are recovered,
@@ -1043,7 +1071,7 @@ propagated lowering route through the same result projection, which raises
 `IllegalArgumentException` when `nanos < 0 || nanos > 999999` before sleeping.
 `tests/differential/ThreadSleepNanosCatch.java` verifies the Java oracle
 (`iae`) against the translated Rust output; the differential suite is now
-expected at 195 fixtures.
+at 218 fixtures.
 
 Follow-up 2026-08-25: ordinary primitive parse projections now share the
 `NumberFormatException` result chain and then apply the existing uncaught
@@ -1281,7 +1309,7 @@ a value, so TWR body result scopes now use the existing value-return predicate
 instead of treating every terminating body as `Ok<T>`. Covered by
 `tests/differential/TryWithResourcesSuppressedPrimary.java` (`body:1:close`)
 plus `slot_render::tests::exception_like_java_types_render_to_java_exception_carrier`;
-the full differential suite passes 200 fixtures. Broader panic-only exception
+the full differential suite has 218 fixtures. Broader panic-only exception
 surfaces and the general nested/labeled `finally` completion carrier remain
 open.
 
@@ -1293,7 +1321,7 @@ assigned, so both high and negative indices raise catchable
 `ArrayIndexOutOfBoundsException` instead of panicking. Covered by
 `lower::tests::fallible_array_index_compound_write_reads_checked_slot_before_assigning`
 and `tests/differential/ArrayCompoundWriteException.java`; the full
-differential suite passes 202 fixtures. Broader panic-only exception surfaces
+differential suite has 218 fixtures. Broader panic-only exception surfaces
 and the general nested/labeled `finally` completion carrier remain open.
 
 Follow-up 2026-08-28: simple loop bodies now have a bounded fast path for
@@ -1328,3 +1356,169 @@ targets (`Throwable`, `Exception`, `*Exception`, `*Error`) now downcast to the
 `JavaException` carrier, matching slot rendering and field storage. Covered by
 `tests/idiom_gaps.rs::object_input_stream_read_object_recovers_string_target_slot`
 and the existing `object_input_stream_read_object_*` generated-crate cluster.
+
+Follow-up 2026-08-29 try-with-resources catch/finally guarded-body pass:
+the simple loop-body fast path now also covers try-with-resources with one or
+more catches and a fall-through `finally` when the guarded try body exits the
+loop with `break` or `continue`. The lowering keeps resource declarations in
+the same scope, emits resource cleanup followed by the user `finally` before
+the loop exit, and still injects classic-for updates before `continue`. This is
+deliberately still a loop-local fast path; the general `TryStmtPlan` abrupt
+completion model remains open. Covered by
+`try_with_resources_catch_finally_body_break_runs_cleanup_and_finally_before_break`,
+`try_with_resources_catch_finally_body_continue_runs_cleanup_finally_and_update`,
+and the existing catch-body try-with-resources/finally loop-exit fixture.
+
+Follow-up 2026-08-29 nullable stream source pass:
+owned iteration over a nullable stream source now uses the result-propagating
+Java null receiver projection inside catchable contexts. A `try` around
+`maybe().stream().map(...).collect(...)` therefore receives
+`NullPointerException` through `ok_or_else(...)?` instead of panicking through
+`unwrap()` or iterating the `Option` carrier. Covered by
+`nullable_stream_source_call_in_try_lowers_to_catchable_npe`.
+
+Follow-up 2026-08-29 negative array size pass:
+array creation inside a result-propagating/catchable context now guards every
+Java dimension before casting to `usize`. Negative lengths return
+`Err(JavaException::new("NegativeArraySizeException", ...))`, so
+`try { int[] a = new int[n]; } catch (NegativeArraySizeException ex) { ... }`
+and the corresponding multi-dimensional cases reach the translated catch
+instead of falling into a Rust allocation panic. Non-catch contexts still use
+the existing panic-oriented lowering. Covered by
+`array_creation_negative_size_in_try_lowers_to_java_exception_result` and
+`array2_creation_negative_dimension_in_try_lowers_to_java_exception_result`.
+
+Follow-up 2026-08-29 try-with-resources finally-abrupt pass:
+the loop-local try-with-resources/catch/finally fast path now covers the narrow
+shape where a definitely abrupt `finally { break; }` or
+`finally { continue; }` overrides a pending catch return. Lowering evaluates
+the try/catch side effects, closes declared resources, discards the catch return
+value, then runs the user finally body directly in the loop so the `break` or
+`continue` is legal Rust; classic-for updates still run before an unlabeled
+continue. Covered by
+`try_with_resources_finally_break_overrides_catch_return_after_cleanup` and
+`try_with_resources_finally_continue_overrides_catch_return_and_runs_update`.
+Throwing cleanup/finally and the full nested/labeled completion carrier remain
+open.
+
+Follow-up 2026-08-29 map-entry iterator-next pass:
+direct synthetic `Map.Entry` iterator projections now use
+`Iterator.next().ok_or_else(...)?` in result-propagating/catchable contexts
+instead of always rendering `iter().next().expect("Java iterator exhausted")`.
+Empty `entrySet().iterator().next().getKey()` can therefore be caught as
+`NoSuchElementException` when lowered through the map-entry shortcut. Ordinary
+non-catch contexts keep the existing direct `expect` projection. Covered by
+`tests/differential/MapEntryIteratorNextCatch.java`. General panic-only helper
+surfaces and the full nested/labeled completion carrier remain open.
+
+Follow-up 2026-08-29 two-dimensional array read pass:
+ndarray-backed `values[row][col]` element reads and `values[row]` row reads now
+emit explicit bounds checks in result-propagating/catchable contexts before
+indexing or projecting the row. Bad positive or negative indices return
+`ArrayIndexOutOfBoundsException` through the translated Java catch instead of
+panicking through Rust's `Index<[usize; 2]>` or ndarray row slicing. Non-catch
+contexts keep the direct indexing/projection path. Covered by
+`tests/idiom_gaps.rs::array2_index_read_in_try_lowers_to_java_exception_result`
+and
+`tests/idiom_gaps.rs::array2_row_read_in_try_lowers_to_java_exception_result`.
+Follow-up 2026-08-29 ragged primitive array creation pass:
+`new int[n][]` inside a `try`/`catch (NegativeArraySizeException)` now keeps the
+ragged nested-`Vec` carrier instead of trying to initialize an
+`ndarray::Array2<i32>` slot. The local declaration records a binding-aware
+nested-array side fact, the initializer uses the same negative-size
+`Err(JavaException::new("NegativeArraySizeException", ...))` guard as ordinary
+array creation, and later `values.length` lowers as `values.len()` rather than
+`values.nrows()`. Covered by
+`tests/idiom_gaps.rs::ragged_array_creation_negative_size_in_try_lowers_to_java_exception_result`.
+The broader remaining work is still the real exception/completion carrier for
+the remaining panic paths and general/nested/labeled `finally` completion
+semantics.
+
+Follow-up 2026-08-29 source exception parent support pass:
+generated `JavaException::is_instance` now includes parent links for source
+exception classes whose `extends` relation is present in the fact set. The JDK
+parent table remains the baseline, but source/custom exception hierarchy facts
+are no longer represented only by expanding every catch arm's class-name list.
+Covered by
+`exception_lowering::tests::java_exception_support_includes_source_exception_parent_edges`.
+
+Follow-up 2026-08-29 fallthrough source-call propagation pass:
+the `try_return_with_fallthrough_catch_uses_outer_fallback_return` fixture no
+longer fails for the unrelated local `URL`/platform `URL` name collision, and
+the generated crate now compiles. Promoting it exposed the real lowering bug:
+after `let connection = url.open_connection()?`, the follow-up source call
+`connection.get_manifest()` returned `Result<Manifest, JavaException>` but was
+not being propagated inside the same catchable try closure. The fallback
+result-return check now consults the original source receiver's `ShapeEnv` type
+before falling back to recovering an owner from the lowered Rust receiver, so
+local receiver calls declared `throws` consistently get `?`. The fixture was
+removed from `tests/baselines/idiom-gaps-failures.txt`. The general completion
+carrier and remaining panic paths are still open.
+
+Follow-up 2026-08-29 loop-finally block-expression pass:
+the simple loop-body `try/finally` fast path now rewrites unlabeled
+`continue`/`break` statements inside lowered statement-level block expressions.
+That closes the shape where Java `{ continue; }` inside a try body ran before
+the `finally` body and skipped the classic-for update in emitted Rust. The
+rewrite still does not recurse into nested Rust loop bodies, because those
+abrupt exits target the nested loop. Covered by
+`lower::tests::prepend_finally_to_loop_abrupts_recurses_into_block_expr_stmt`
+and `tests/differential/FinallyBlockContinue.java` (`tftf`). The broader
+completion carrier and remaining panic paths remain open.
+
+Follow-up 2026-08-29 do/while loop-finally continue pass:
+`do/while` bodies now use the same loop-body lowering hook as `while`/`for`, so
+a `continue` inside a simple `try/finally` no longer lands inside the old
+closure-based exception carrier. Because Java `continue` in a do/while loop
+must still evaluate the trailing condition, lowered do/while bodies also rewrite
+continues that target the current loop to run the condition break-check before
+continuing. Covered by
+`lower::tests::do_while_finally_continue_runs_finally_then_condition_check` and
+`tests/differential/FinallyDoWhileContinue.java` (`0f1xf2xf`). The general
+completion carrier remains open.
+
+Follow-up 2026-08-29 do/while catch-dispatch match-arm pass:
+the same do/while trailing-condition replay now recurses into statement-level
+`match` expressions whose arms contain lowered block bodies. This closes the
+bounded shape where a simple `try/catch/finally` catch dispatch lowered to a
+`RustExpr::Match`, leaving an arm-local `continue` without the do/while
+condition break-check. Covered by
+`lower::tests::do_while_condition_replay_recurses_into_match_arm_blocks`. The
+general nested/labeled completion carrier remains open.
+
+Follow-up 2026-08-29 nested-block return-discard pass:
+the simple loop-body `try/finally` fast path now rewrites pending returns inside
+lowered statement-level block expressions before appending an overriding
+`finally { break; }` / `finally { continue; }` abrupt completion. The detector
+already accepted source `Stmt::Block`; the rewrite now sees the matching
+`RustExpr::Block` carrier. Covered by
+`lower::tests::finally_break_overrides_loop_body_return_translation`. The
+general nested/labeled completion carrier remains open.
+
+Follow-up 2026-08-29 multi-resource cleanup suppression pass:
+try-with-resources cleanup closures now close every resource in reverse
+declaration order even after an earlier close fails. The first cleanup exception
+becomes the cleanup result and later close failures are attached with
+`add_suppressed`, matching Java's resource-close rule instead of short-circuiting
+on the first `close()?`. Covered by
+`exception_lowering::tests::try_with_resources_cleanup_accumulates_multiple_close_failures`
+and `tests/differential/TryWithResourcesMultipleCloseSuppressed.java`; both Java
+and translated Rust print `b:1:a`.
+
+Follow-up 2026-08-29 throwing-finally regression:
+the existing non-loop `try/finally` carrier already preserves the Java rule that
+a throwing `finally` overrides a pending try return. This is now pinned by
+`tests/differential/FinallyThrowOverride.java`, where both Java and translated
+Rust return `finally`. The exception-lowering helpers also now stop appending
+saved try-result propagation after a definitely terminating lowered `finally`
+body, removing the unreachable `return __java_try_result` tail from that shape.
+Covered by
+`exception_lowering::tests::terminating_finally_body_suppresses_post_finally_try_result_use`.
+
+Follow-up 2026-08-29 optional PrintStream baseline pass:
+the optional `PrintStream.println` fixture rows now pass in the current tree.
+Both the arity-named support path and the mutating optional argument receiver
+path compile with generated-crate checks, so
+`optional_print_stream_field_println_uses_arity_named_support` and
+`optional_print_stream_field_println_with_mutating_optional_arg_uses_mut_receiver`
+were removed from `tests/baselines/idiom-gaps-failures.txt`.

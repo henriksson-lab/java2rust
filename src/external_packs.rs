@@ -29985,6 +29985,9 @@ fn java_platform_api_effects_for_method_arity(
         "Closeable",
         "java.util.Enumeration",
         "Enumeration",
+        "java.util.concurrent.ExecutorService",
+        "ExecutorService",
+        "JavaUtilConcurrentExecutorService",
         "java.util.zip.ZipEntry",
         "ZipEntry",
         "javax.xml.stream.XMLOutputFactory",
@@ -31257,6 +31260,19 @@ fn java_platform_concurrent_api_effect(
             ExternalApiRole::Getter,
             JavaType::Named {
                 name: "ExecutorService".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        (
+            "ExecutorService"
+            | "JavaUtilConcurrentExecutorService"
+            | "java.util.concurrent.ExecutorService",
+            "submit",
+        ) if matches_arg_count(1) => (
+            1,
+            ExternalApiRole::Getter,
+            JavaType::Named {
+                name: "Future".to_string(),
                 args: Vec::new(),
             },
         ),

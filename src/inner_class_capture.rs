@@ -48,9 +48,9 @@ pub fn unconstructable_inner_classes(
 
 /// Reports each as `inner_class_construction_panics`.
 ///
-/// A warning, not an error: the output is what it always was, and refusing to
-/// emit would hide the rest of a file behind a feature gap. Naming it is what
-/// stops a corpus reporting zero problems for a program guaranteed to abort.
+/// A warning accompanies the generated runtime-loud handoff so corpus
+/// diagnostics can still count the feature gap even when callers do not execute
+/// the unsupported path.
 pub fn report_unconstructable_inner_classes(
     program: &Program,
     facts: &FactSet,
@@ -61,8 +61,8 @@ pub fn report_unconstructable_inner_classes(
             "inner_class_construction_panics",
             format!(
                 "{} captures an enclosing {} instance, but its constructor cannot obtain a \
-                 shared handle to it, so `new {}(…)` panics at runtime. Needs the shared \
-                 object representation (0002b); the generated code compiles either way.",
+                 shared handle to it, so `new {}(…)` lowers to a runtime-loud unsupported \
+                 feature. Needs the shared object representation (0002b).",
                 inner.inner_type, inner.outer_type, inner.inner_type,
             ),
         );
@@ -340,17 +340,10 @@ fn collect_constructed_type_names_from_expr(expr: &Expr, names: &mut HashSet<Str
 
 fn insert_constructed_type_name(names: &mut HashSet<String>, name: &str) {
     names.insert(name.to_string());
-    if let Some(simple) = name.rsplit(['.', '$']).next() {
-        names.insert(simple.to_string());
-    }
 }
 
 fn constructed_type_names_include(names: &HashSet<String>, ty_name: &str) -> bool {
     names.contains(ty_name)
-        || ty_name
-            .rsplit(['.', '$'])
-            .next()
-            .is_some_and(|simple| names.contains(simple))
 }
 
 fn java_type_name(ty: &JavaType) -> Option<&str> {

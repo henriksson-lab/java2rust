@@ -9,9 +9,9 @@ use crate::coercion::{
     optional_non_null_filter_map_projection, owner_associated_path_projection,
     receiver_method_call_projection, receiver_method_call_projection_exact,
     rust_string_literal_projection, self_associated_path_projection,
-    sequence_iteration_source_projection, stream_collect_to_map_projection,
-    stream_filter_op_projection, stream_flat_map_op_projection, stream_join_terminal_projection,
-    stream_lambda_argument_slot_plan, stream_lambda_param_expr,
+    sequence_iteration_source_projection, sequence_iteration_source_projection_with_result_context,
+    stream_collect_to_map_projection, stream_filter_op_projection, stream_flat_map_op_projection,
+    stream_join_terminal_projection, stream_lambda_argument_slot_plan, stream_lambda_param_expr,
     stream_map_op_projection_with_param, stream_match_terminal_projection,
     stream_prefixed_flat_map_op_projection, stream_reduce_terminal_projection,
     unwrap_java_null_receiver_projection,
@@ -92,6 +92,7 @@ pub struct StreamRenderContext<'a> {
     signatures: Option<&'a SignaturePlan>,
     current_type: Option<&'a str>,
     self_receiver_available: bool,
+    propagate_java_exceptions: bool,
 }
 
 impl<'a> StreamRenderContext<'a> {
@@ -103,6 +104,7 @@ impl<'a> StreamRenderContext<'a> {
             signatures: None,
             current_type: None,
             self_receiver_available: false,
+            propagate_java_exceptions: false,
         }
     }
 
@@ -114,6 +116,7 @@ impl<'a> StreamRenderContext<'a> {
             signatures: None,
             current_type: None,
             self_receiver_available: false,
+            propagate_java_exceptions: false,
         }
     }
 
@@ -124,6 +127,7 @@ impl<'a> StreamRenderContext<'a> {
         external_index: &'a ExternalFactLookupIndex<'a>,
         current_type: Option<&'a str>,
         self_receiver_available: bool,
+        propagate_java_exceptions: bool,
     ) -> Self {
         Self {
             env: Some(env),
@@ -132,6 +136,7 @@ impl<'a> StreamRenderContext<'a> {
             signatures: Some(signatures),
             current_type,
             self_receiver_available,
+            propagate_java_exceptions,
         }
     }
 
@@ -143,6 +148,7 @@ impl<'a> StreamRenderContext<'a> {
             signatures: None,
             current_type: None,
             self_receiver_available: false,
+            propagate_java_exceptions: false,
         }
     }
 
@@ -157,6 +163,7 @@ impl<'a> StreamRenderContext<'a> {
             signatures: self.signatures,
             current_type: self.current_type,
             self_receiver_available: self.self_receiver_available,
+            propagate_java_exceptions: self.propagate_java_exceptions,
         }
     }
 
@@ -164,18 +171,14 @@ impl<'a> StreamRenderContext<'a> {
         if let Some((owner, member)) = name.rsplit_once('.')
             && is_static_constant_member(member)
         {
-            return owner_associated_path_projection(
-                &stream_static_owner_segment_name(owner),
-                member,
-            );
+            let owner = stream_static_raw_owner_name(owner, self);
+            return owner_associated_path_projection(&owner, member);
         }
         if let Some((owner, member)) = name.rsplit_once("::")
             && is_static_constant_member(member)
         {
-            return owner_associated_path_projection(
-                &stream_static_owner_segment_name(owner),
-                member,
-            );
+            let owner = stream_static_raw_owner_name(owner, self);
+            return owner_associated_path_projection(&owner, member);
         }
         if locals.iter().any(|local| *local == name) {
             if let Some(access_name) = self.env.and_then(|env| env.binding_access_name(name)) {
@@ -413,7 +416,7 @@ fn emit_stream_lambda_body_with_locals_prec(
     let lowered = match expr {
         Expr::Literal(lit) => stream_lambda_expr(RustExpr::Literal(literal_to_rust(lit)), 12),
         Expr::Raw(raw) => {
-            let expr = stream_raw_expr(raw);
+            let expr = stream_raw_expr(raw, ctx);
             let precedence = crate::emit::expr_precedence(&expr);
             stream_lambda_expr(expr, precedence)
         }
@@ -469,6 +472,17 @@ fn emit_stream_lambda_body_with_locals_prec(
             stream_lambda_expr(stream_unary_expr_projection(op, expr), 10)
         }
         Expr::FieldAccess(receiver, field) => {
+            if is_static_constant_member(field)
+                && let Some(owner) = stream_static_owner_expr_type_name(receiver, locals, ctx)
+                    .or_else(|| stream_static_constant_owner_name(receiver, locals, ctx))
+            {
+                return parenthesize_stream_expr_if_needed(
+                    stream_lambda_expr(owner_associated_path_projection(&owner, field), 12),
+                    parent_prec,
+                    right_child,
+                    None,
+                );
+            }
             if let Some((expr, own_prec)) = emit_stream_lambda_member_access_through_plan_expr(
                 receiver,
                 field,
@@ -498,17 +512,6 @@ fn emit_stream_lambda_body_with_locals_prec(
                 )?;
                 return parenthesize_stream_expr_if_needed(
                     stream_lambda_expr(len_i32_projection(receiver), 6),
-                    parent_prec,
-                    right_child,
-                    None,
-                );
-            }
-            if is_static_constant_member(field)
-                && let Some(owner) = stream_static_owner_expr_type_name(receiver, locals, ctx)
-                    .or_else(|| stream_static_constant_owner_name(receiver, locals, ctx))
-            {
-                return parenthesize_stream_expr_if_needed(
-                    stream_lambda_expr(owner_associated_path_projection(&owner, field), 12),
                     parent_prec,
                     right_child,
                     None,
@@ -831,19 +834,73 @@ fn emit_stream_lambda_member_access_through_plan_expr(
     ))
 }
 
-fn stream_raw_expr(raw: &str) -> RustExpr {
+fn stream_raw_expr(raw: &str, ctx: StreamRenderContext<'_>) -> RustExpr {
     if let Some((owner, member)) = raw_java_static_member_access(raw) {
-        return owner_associated_path_projection(owner, member);
+        if let Some(owner) = stream_known_static_raw_owner_name(owner, ctx) {
+            return owner_associated_path_projection(&owner, member);
+        }
     }
     crate::coercion::rendered_plus_expr_projection_or_raw_leaf(raw)
 }
 
+fn stream_known_static_raw_owner_name(owner: &str, ctx: StreamRenderContext<'_>) -> Option<String> {
+    if let Some(alias) = ctx
+        .env
+        .and_then(|env| env.type_env().static_type_alias(owner))
+    {
+        return Some(stream_static_owner_type_name_with_context(alias, ctx));
+    }
+
+    let canonical = crate::stdlib::canonical_external_receiver_type_key(owner);
+    if canonical != owner || is_known_builtin_static_owner(&canonical) {
+        return Some(stream_static_owner_type_name_with_context(owner, ctx));
+    }
+
+    None
+}
+
+fn stream_static_raw_owner_name(owner: &str, ctx: StreamRenderContext<'_>) -> String {
+    if let Some(alias) = ctx
+        .env
+        .and_then(|env| env.type_env().static_type_alias(owner))
+    {
+        stream_static_owner_type_name_with_context(alias, ctx)
+    } else {
+        stream_static_owner_type_name_with_context(owner, ctx)
+    }
+}
+
 fn raw_java_static_member_access(raw: &str) -> Option<(&str, &str)> {
-    let (owner, member) = raw.split_once('.')?;
-    if member.contains('.') || !java_static_owner_ident(owner) || !rust_identifier_part(member) {
+    let (owner, member) = raw.rsplit_once('.')?;
+    if !java_static_owner_path(owner) || !rust_identifier_part(member) {
         return None;
     }
     Some((owner, member))
+}
+
+fn is_known_builtin_static_owner(owner: &str) -> bool {
+    matches!(
+        owner,
+        "Arrays"
+            | "Collections"
+            | "Collectors"
+            | "Constants"
+            | "Files"
+            | "Integer"
+            | "Math"
+            | "Objects"
+            | "StrictMath"
+            | "System"
+            | "Thread"
+    )
+}
+
+fn java_static_owner_path(owner: &str) -> bool {
+    owner
+        .rsplit('.')
+        .next()
+        .is_some_and(java_static_owner_ident)
+        && owner.split('.').all(rust_identifier_part)
 }
 
 fn java_static_owner_ident(owner: &str) -> bool {
@@ -868,10 +925,28 @@ pub fn render_stream_plan_with_context(
     lowered_source: RustExpr,
     ctx: StreamRenderContext<'_>,
 ) -> Option<LoweredExpr> {
-    if let Some(lowered) = render_stream_plan_structured(plan, lowered_source.clone(), ctx) {
+    render_stream_plan_with_optional_sequence_context(
+        plan,
+        lowered_source,
+        ctx,
+        plan.source.optional_sequence,
+    )
+}
+
+pub fn render_stream_plan_with_optional_sequence_context(
+    plan: &StreamPlan<'_>,
+    lowered_source: RustExpr,
+    ctx: StreamRenderContext<'_>,
+    source_optional_sequence: bool,
+) -> Option<LoweredExpr> {
+    if let Some(lowered) =
+        render_stream_plan_structured(plan, lowered_source.clone(), ctx, source_optional_sequence)
+    {
         return Some(lowered);
     }
-    if let Some(lowered) = render_no_op_stream_plan_structured(plan, lowered_source.clone()) {
+    if let Some(lowered) =
+        render_no_op_stream_plan_structured(plan, lowered_source.clone(), source_optional_sequence)
+    {
         return Some(lowered);
     }
     None
@@ -881,12 +956,14 @@ fn render_stream_plan_structured(
     plan: &StreamPlan<'_>,
     lowered_source: RustExpr,
     ctx: StreamRenderContext<'_>,
+    source_optional_sequence: bool,
 ) -> Option<LoweredExpr> {
     let source = stream_source_range_projection(lowered_source, plan.source.range, ctx);
-    let mut expr = sequence_iteration_source_projection(
+    let mut expr = sequence_iteration_source_projection_with_result_context(
         source,
-        plan.source.optional_sequence,
+        source_optional_sequence,
         sequence_iteration_projection(plan.source.iteration),
+        ctx.propagate_java_exceptions,
     );
     let (next_expr, item_is_borrowed, item_shape) = apply_stream_ops_structured(
         expr,
@@ -1172,8 +1249,9 @@ fn render_stream_terminal_expr(
 fn render_no_op_stream_plan_structured(
     plan: &StreamPlan<'_>,
     lowered_source: RustExpr,
+    source_optional_sequence: bool,
 ) -> Option<LoweredExpr> {
-    if !plan.ops.is_empty() || plan.source.range.is_some() || plan.source.optional_sequence {
+    if !plan.ops.is_empty() || plan.source.range.is_some() || source_optional_sequence {
         return None;
     }
     let terminal_method = no_op_stream_terminal_method(&plan.terminal)?;
@@ -1392,8 +1470,12 @@ fn render_stream_sub_pipeline_expr(
     } else {
         SequenceIterationProjection::OwnedValue
     };
-    let expr =
-        sequence_iteration_source_projection(source, pipeline.source.optional_sequence, iteration);
+    let expr = sequence_iteration_source_projection_with_result_context(
+        source,
+        pipeline.source.optional_sequence,
+        iteration,
+        ctx.propagate_java_exceptions,
+    );
     let item_is_borrowed = source_is_lambda_param
         && matches!(pipeline.source.iteration, StreamSourceIteration::Borrowed);
     let item_shape = effective_stream_item_shape(&pipeline.source_element.shape, item_is_borrowed);
@@ -3192,7 +3274,7 @@ fn stream_static_constant_owner_name(
     {
         return None;
     }
-    Some(stream_static_owner_segment_name(name))
+    Some(stream_static_raw_owner_name(name, ctx))
 }
 
 fn stream_static_owner_segment_name(owner: &str) -> String {
@@ -3259,6 +3341,9 @@ fn stream_static_owner_expr_segment(
             Some(stream_static_owner_type_name_with_context(name, ctx))
         }
         Expr::FieldAccess(inner, field) => {
+            if let Some(owner) = crate::stdlib::qualified_static_owner_java_name(receiver) {
+                return Some(stream_static_owner_type_name_with_context(&owner, ctx));
+            }
             let _ = stream_static_owner_expr_segment(inner, locals, ctx)?;
             Some(stream_static_owner_type_name_with_context(field, ctx))
         }

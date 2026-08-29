@@ -97,7 +97,7 @@ pub const UNTRANSLATED_SOURCE_SUMMARY_PREFIX: &str = "source-summary method ";
 pub const UNTRANSLATED_SOURCE_SUMMARY_SUFFIX: &str = " is not translated";
 
 /// Emitted where a non-static inner class's constructor cannot build its outer
-/// handle. The program compiles and aborts on first construction.
+/// handle. The generated file refuses to compile at the unsupported construction.
 pub const UNSUPPORTED_INNER_CLASS_OUTER_CAPTURE: &str =
     "unsupported Java inner-class outer capture construction";
 

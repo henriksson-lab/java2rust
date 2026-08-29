@@ -7484,6 +7484,34 @@ fn java_platform_concurrent_static_factory_declares_precise_return_type() {
         .unwrap_or_else(|| panic!("{receiver}.new_fixed_thread_pool/2 should be platform-modeled"));
         assert_eq!(snake_effect.return_type, effect.return_type);
     }
+
+    for receiver in [
+        "ExecutorService",
+        "java.util.concurrent.ExecutorService",
+        "JavaUtilConcurrentExecutorService",
+    ] {
+        let effect = external_api_effect_for_receiver_with_arity(Some(receiver), "submit", Some(1))
+            .unwrap_or_else(|| panic!("{receiver}.submit/1 should be platform-modeled"));
+        assert_eq!(effect.provenance, FactProvenance::BuiltinExternalModel);
+        assert_eq!(
+            effect.return_type,
+            Some(JavaType::Named {
+                name: "Future".to_string(),
+                args: Vec::new(),
+            })
+        );
+        assert_eq!(
+            effect.return_nullability,
+            NullabilityState::DefinitelyNonNull
+        );
+    }
+
+    assert!(
+        new_java2rust::external_packs::external_api_effects_for_method_arity("submit", 1)
+            .iter()
+            .any(|effect| effect.receiver_type.as_deref() == Some("ExecutorService")),
+        "ExecutorService.submit/1 should be discoverable from a used call name"
+    );
 }
 
 #[test]

@@ -63,11 +63,13 @@ class hierarchy lowering preserves dynamic dispatch for source classes.
 Java non-static inner-class construction captures the enclosing instance by
 reference. The current translation emits the captured `__outer` field and
 non-panicking `_with_outer` companions, but ordinary `new Inner()` from an outer
-instance method still has no shared outer receiver handle and panics at runtime.
+instance method still has no shared outer receiver handle, so the missing
+constructor path is reported as a runtime-loud unsupported feature while the
+translator still emits the `inner_class_construction_panics` diagnostic.
 
 ```
 java: 21
-translation: panic containing "unsupported Java inner-class outer capture construction"
+translation: runtime panic containing "unsupported Java inner-class outer capture construction"
 diagnostic: inner_class_construction_panics
 ```
 

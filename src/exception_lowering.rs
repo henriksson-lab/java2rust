@@ -5,6 +5,7 @@ use crate::coercion::{
     receiver_method_call_projection_exact,
 };
 use crate::facts::{ExternalLibraryMode, FactSet};
+use crate::java_ir::JavaType;
 use crate::rust_ir::{
     RustClosureBody, RustClosureParam, RustExpr, RustItem, RustMatchArm, RustStmt, RustType,
 };
@@ -25,6 +26,7 @@ pub struct ExternalExceptionConversion {
 
 pub fn java_exception_support_item_with_facts(facts: &FactSet) -> RustItem {
     let conversions = external_exception_conversions(facts);
+    let source_parent_arms = source_exception_parent_match_arms(facts);
     let mut item = r#"#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct InputStream;
 
@@ -163,6 +165,14 @@ impl std::fmt::Display for JavaException {
     }
 }"#
     .to_string();
+    if !source_parent_arms.is_empty() {
+        item = item.replace(
+            "        \"RuntimeException\" => Some(\"Exception\"),\n        _ => None,",
+            &format!(
+                "        \"RuntimeException\" => Some(\"Exception\"),\n{source_parent_arms}        _ => None,"
+            ),
+        );
+    }
     for conversion in conversions {
         item.push_str("\n\n");
         item.push_str(&format!(
@@ -171,6 +181,66 @@ impl std::fmt::Display for JavaException {
         ));
     }
     RustItem::Raw(item)
+}
+
+fn source_exception_parent_match_arms(facts: &FactSet) -> String {
+    let built_in_children = BTreeSet::from([
+        "ArrayIndexOutOfBoundsException",
+        "ArrayStoreException",
+        "ArithmeticException",
+        "ClassCastException",
+        "ConcurrentModificationException",
+        "IllegalArgumentException",
+        "IllegalMonitorStateException",
+        "IllegalStateException",
+        "IndexOutOfBoundsException",
+        "InputMismatchException",
+        "NegativeArraySizeException",
+        "NoSuchElementException",
+        "NullPointerException",
+        "NumberFormatException",
+        "StringIndexOutOfBoundsException",
+        "UncheckedIOException",
+        "UnsupportedOperationException",
+        "RuntimeException",
+    ]);
+    let mut arms = BTreeSet::new();
+    for exception in &facts.exception_facts {
+        let sub_name = exception
+            .type_name
+            .rsplit('.')
+            .next()
+            .unwrap_or(&exception.type_name);
+        if built_in_children.contains(sub_name) {
+            continue;
+        }
+        let exception_ty = JavaType::Named {
+            name: exception.type_name.clone(),
+            args: Vec::new(),
+        };
+        let Some(parent_ty) = facts.extends_type_for(&exception_ty) else {
+            continue;
+        };
+        let Some(parent_name) = java_type_name(&parent_ty) else {
+            continue;
+        };
+        let parent_simple = parent_name.rsplit('.').next().unwrap_or(parent_name);
+        if parent_simple == sub_name || parent_simple.is_empty() {
+            continue;
+        }
+        arms.insert(format!(
+            "        {sub_name:?} => Some({parent_simple:?}),\n"
+        ));
+    }
+    arms.into_iter().collect()
+}
+
+fn java_type_name(java_ty: &JavaType) -> Option<&str> {
+    match java_ty {
+        JavaType::String => Some("String"),
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(name),
+        _ => None,
+    }
 }
 
 pub fn external_exception_conversions(facts: &FactSet) -> Vec<ExternalExceptionConversion> {
@@ -671,8 +741,7 @@ pub fn try_with_resources_scope_stmt(
         ok_type,
         body_with_ok,
     ));
-    let mut cleanup_body = resource_cleanup_stmts.into_iter().rev().collect::<Vec<_>>();
-    cleanup_body.push(return_stmt(None, true));
+    let cleanup_body = try_resource_accumulating_cleanup_body(resource_cleanup_stmts);
     scope_body.push(result_scope_call_let_stmt(
         "__java_twr_cleanup_result",
         RustType::Unit,
@@ -744,14 +813,19 @@ pub fn try_with_resources_finally_scope_stmt(
         ok_type,
         body_with_ok,
     ));
-    let mut cleanup_body = resource_cleanup_stmts.into_iter().rev().collect::<Vec<_>>();
-    cleanup_body.push(return_stmt(None, true));
+    let cleanup_body = try_resource_accumulating_cleanup_body(resource_cleanup_stmts);
     scope_body.push(result_scope_call_let_stmt(
         "__java_twr_cleanup_result",
         RustType::Unit,
         cleanup_body,
     ));
     scope_body.extend(finally_body);
+    if rust_stmts_definitely_terminate(&scope_body) {
+        return RustStmt::Expr(RustExpr::Block {
+            stmts: scope_body,
+            tail: None,
+        });
+    }
     if body_terminates_with_value {
         if outer_returns_result {
             scope_body.push(return_primary_result_then_cleanup_result_stmt(
@@ -799,6 +873,87 @@ pub fn try_with_resources_finally_scope_stmt(
     })
 }
 
+fn try_resource_accumulating_cleanup_body(resource_cleanup_stmts: Vec<RustStmt>) -> Vec<RustStmt> {
+    let mut body = vec![RustStmt::Let {
+        mutable: true,
+        name: "__java_twr_cleanup_error".to_string(),
+        ty: Some(RustType::Option(Box::new(RustType::Named(
+            "JavaException".to_string(),
+        )))),
+        value: Some(RustExpr::Var("None".to_string())),
+    }];
+    for stmt in resource_cleanup_stmts.into_iter().rev() {
+        if let Some(result_expr) = try_resource_cleanup_result_expr(&stmt) {
+            body.push(RustStmt::Expr(RustExpr::Match {
+                expr: Box::new(result_expr),
+                arms: vec![
+                    RustMatchArm {
+                        pattern: "Ok(())".to_string(),
+                        body: RustExpr::Block {
+                            stmts: Vec::new(),
+                            tail: None,
+                        },
+                    },
+                    RustMatchArm {
+                        pattern: "Err(ex)".to_string(),
+                        body: RustExpr::Block {
+                            stmts: vec![RustStmt::IfLet {
+                                pattern: "Some(primary)".to_string(),
+                                expr: RustExpr::MethodCall {
+                                    receiver: Box::new(RustExpr::Var(
+                                        "__java_twr_cleanup_error".to_string(),
+                                    )),
+                                    method: "as_mut".to_string(),
+                                    args: Vec::new(),
+                                },
+                                then_body: vec![RustStmt::Expr(RustExpr::MethodCall {
+                                    receiver: Box::new(RustExpr::Var("primary".to_string())),
+                                    method: "add_suppressed".to_string(),
+                                    args: vec![RustExpr::Var("ex".to_string())],
+                                })],
+                                else_body: vec![RustStmt::Assign {
+                                    target: RustExpr::Var("__java_twr_cleanup_error".to_string()),
+                                    value: some_expr(RustExpr::Var("ex".to_string())),
+                                }],
+                            }],
+                            tail: None,
+                        },
+                    },
+                ],
+            }));
+        } else {
+            body.push(stmt);
+        }
+    }
+    body.push(RustStmt::Return(Some(RustExpr::Match {
+        expr: Box::new(RustExpr::Var("__java_twr_cleanup_error".to_string())),
+        arms: vec![
+            RustMatchArm {
+                pattern: "Some(ex)".to_string(),
+                body: RustExpr::Call {
+                    function: Box::new(RustExpr::path(["Err"])),
+                    args: vec![RustExpr::Var("ex".to_string())],
+                },
+            },
+            RustMatchArm {
+                pattern: "None".to_string(),
+                body: ok_expr(unit_expr()),
+            },
+        ],
+    })));
+    body
+}
+
+fn try_resource_cleanup_result_expr(stmt: &RustStmt) -> Option<RustExpr> {
+    match stmt {
+        RustStmt::Expr(expr) => match expr.unshaped() {
+            RustExpr::Try(inner) => Some((**inner).clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 pub fn try_finally_scope_stmt(
     ok_type: RustType,
     body: Vec<RustStmt>,
@@ -817,6 +972,12 @@ pub fn try_finally_scope_stmt(
         body_with_ok,
     ));
     scope_body.extend(finally_body);
+    if rust_stmts_definitely_terminate(&scope_body) {
+        return RustStmt::Expr(RustExpr::Block {
+            stmts: scope_body,
+            tail: None,
+        });
+    }
     if body_terminates_with_value {
         if outer_returns_result {
             scope_body.push(return_result_var_stmt("__java_try_result"));
@@ -891,6 +1052,12 @@ pub fn try_catch_finally_scope_stmt(
         }),
     });
     scope_body.extend(finally_body);
+    if rust_stmts_definitely_terminate(&scope_body) {
+        return RustStmt::Expr(RustExpr::Block {
+            stmts: scope_body,
+            tail: None,
+        });
+    }
     let post_finally_stmt = if body_terminates_with_value {
         if outer_returns_result {
             return_result_var_stmt("__java_try_result")
@@ -907,6 +1074,13 @@ pub fn try_catch_finally_scope_stmt(
         stmts: scope_body,
         tail: None,
     })
+}
+
+fn rust_stmts_definitely_terminate(stmts: &[RustStmt]) -> bool {
+    matches!(
+        stmts.last(),
+        Some(RustStmt::Return(_) | RustStmt::Break(_) | RustStmt::Continue(_))
+    )
 }
 
 pub fn new_exception_expr(class_name: &str, message: RustExpr) -> RustExpr {
@@ -1042,6 +1216,7 @@ fn unit_expr() -> RustExpr {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::facts::{ExceptionFact, ExceptionKind, FactProvenance, TypeCapabilityOverride};
 
     #[test]
     fn plain_return_catch_rewrites_returned_err_to_panic() {
@@ -1088,6 +1263,225 @@ mod tests {
             rendered.contains(
                 "panic!(\"uncaught Java exception: {:?}\", JavaException::new(\"WrappedProblem\", e.to_string()));"
             ) && !rendered.contains("return Err(JavaException::new(\"WrappedProblem\""),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn java_exception_support_includes_source_exception_parent_edges() {
+        let mut facts = FactSet::default();
+        facts.exception_facts.push(ExceptionFact {
+            type_name: "BaseProblem".to_string(),
+            kind: ExceptionKind::Checked,
+            provenance: FactProvenance::ParsedSource,
+        });
+        facts.exception_facts.push(ExceptionFact {
+            type_name: "SpecificProblem".to_string(),
+            kind: ExceptionKind::Checked,
+            provenance: FactProvenance::ParsedSource,
+        });
+        facts
+            .type_capability_overrides
+            .push(TypeCapabilityOverride {
+                type_name: "BaseProblem".to_string(),
+                copy: None,
+                clone: None,
+                string_like: None,
+                sequence_like: None,
+                implements: Vec::new(),
+                extends: Some(JavaType::Named {
+                    name: "Exception".to_string(),
+                    args: Vec::new(),
+                }),
+                final_type: None,
+                object_safe_trait: None,
+                provenance: FactProvenance::ParsedSource,
+            });
+        facts
+            .type_capability_overrides
+            .push(TypeCapabilityOverride {
+                type_name: "SpecificProblem".to_string(),
+                copy: None,
+                clone: None,
+                string_like: None,
+                sequence_like: None,
+                implements: Vec::new(),
+                extends: Some(JavaType::Named {
+                    name: "BaseProblem".to_string(),
+                    args: Vec::new(),
+                }),
+                final_type: None,
+                object_safe_trait: None,
+                provenance: FactProvenance::ParsedSource,
+            });
+
+        let RustItem::Raw(rendered) = java_exception_support_item_with_facts(&facts) else {
+            panic!("Java exception support should render as a raw support item");
+        };
+
+        assert!(
+            rendered.contains("\"BaseProblem\" => Some(\"Exception\")")
+                && rendered.contains("\"SpecificProblem\" => Some(\"BaseProblem\")"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn try_with_resources_cleanup_accumulates_multiple_close_failures() {
+        let stmt = try_with_resources_scope_stmt(
+            RustType::Unit,
+            Vec::new(),
+            Vec::new(),
+            vec![
+                RustStmt::Expr(RustExpr::shaped(
+                    crate::rust_ir::RustExprShape::ResultPropagated,
+                    RustExpr::Try(Box::new(RustExpr::MethodCall {
+                        receiver: Box::new(RustExpr::Var("a".to_string())),
+                        method: "close".to_string(),
+                        args: Vec::new(),
+                    })),
+                )),
+                RustStmt::Expr(RustExpr::shaped(
+                    crate::rust_ir::RustExprShape::ResultPropagated,
+                    RustExpr::Try(Box::new(RustExpr::MethodCall {
+                        receiver: Box::new(RustExpr::Var("b".to_string())),
+                        method: "close".to_string(),
+                        args: Vec::new(),
+                    })),
+                )),
+            ],
+            false,
+            true,
+        );
+        let rendered = crate::emit::emit_statements(&[stmt], 0);
+
+        assert!(
+            rendered.contains("let mut __java_twr_cleanup_error: Option<JavaException> = None;"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("match b.close()")
+                && rendered.contains("match a.close()")
+                && !rendered.contains("b.close()?")
+                && !rendered.contains("a.close()?"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("primary.add_suppressed(ex);")
+                && rendered.contains("__java_twr_cleanup_error = Some(ex);"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn terminating_finally_body_suppresses_post_finally_try_result_use() {
+        let stmt = try_finally_scope_stmt(
+            RustType::String,
+            vec![RustStmt::Return(Some(ok_expr(RustExpr::Literal(
+                "\"try\".to_string()".to_string(),
+            ))))],
+            vec![RustStmt::Return(Some(RustExpr::Call {
+                function: Box::new(RustExpr::path(["Err"])),
+                args: vec![new_exception_expr(
+                    "RuntimeException",
+                    RustExpr::Literal("\"finally\".to_string()".to_string()),
+                )],
+            }))],
+            true,
+            true,
+        );
+        let rendered = crate::emit::emit_statements(&[stmt], 0);
+
+        assert!(rendered.contains("let __java_try_result ="), "{rendered}");
+        assert!(
+            rendered.contains("return Err(JavaException::new(\"RuntimeException\""),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("return __java_try_result;")
+                && !rendered.contains("__java_try_result?;"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn terminating_catch_finally_body_suppresses_post_finally_try_result_use() {
+        let stmt = try_catch_finally_scope_stmt(
+            RustType::String,
+            vec![RustStmt::Return(Some(ok_expr(RustExpr::Literal(
+                "\"try\".to_string()".to_string(),
+            ))))],
+            vec![CatchRenderArm {
+                variable_name: "ex".to_string(),
+                class_names: vec!["RuntimeException".to_string()],
+                body: vec![RustStmt::Return(Some(ok_expr(RustExpr::Literal(
+                    "\"catch\".to_string()".to_string(),
+                ))))],
+            }],
+            vec![RustStmt::Return(Some(RustExpr::Call {
+                function: Box::new(RustExpr::path(["Err"])),
+                args: vec![new_exception_expr(
+                    "RuntimeException",
+                    RustExpr::Literal("\"finally\".to_string()".to_string()),
+                )],
+            }))],
+            true,
+            true,
+            false,
+        );
+        let rendered = crate::emit::emit_statements(&[stmt], 0);
+
+        assert!(rendered.contains("let __java_try_result ="), "{rendered}");
+        assert!(
+            rendered.contains("return Err(JavaException::new(\"RuntimeException\""),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("return __java_try_result;"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn terminating_try_with_resources_finally_body_suppresses_post_finally_twr_result_use() {
+        let stmt = try_with_resources_finally_scope_stmt(
+            RustType::String,
+            Vec::new(),
+            vec![RustStmt::Return(Some(ok_expr(RustExpr::Literal(
+                "\"try\".to_string()".to_string(),
+            ))))],
+            vec![RustStmt::Expr(RustExpr::shaped(
+                crate::rust_ir::RustExprShape::ResultPropagated,
+                RustExpr::Try(Box::new(RustExpr::MethodCall {
+                    receiver: Box::new(RustExpr::Var("resource".to_string())),
+                    method: "close".to_string(),
+                    args: Vec::new(),
+                })),
+            ))],
+            vec![RustStmt::Return(Some(RustExpr::Call {
+                function: Box::new(RustExpr::path(["Err"])),
+                args: vec![new_exception_expr(
+                    "RuntimeException",
+                    RustExpr::Literal("\"finally\".to_string()".to_string()),
+                )],
+            }))],
+            true,
+            true,
+        );
+        let rendered = crate::emit::emit_statements(&[stmt], 0);
+
+        assert!(rendered.contains("let __java_twr_result ="), "{rendered}");
+        assert!(
+            rendered.contains("let __java_twr_cleanup_result ="),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("return Err(JavaException::new(\"RuntimeException\""),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("return match (__java_twr_result, __java_twr_cleanup_result)")
+                && !rendered.contains("__java_twr_result, __java_twr_cleanup_result"),
             "{rendered}"
         );
     }

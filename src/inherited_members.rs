@@ -578,20 +578,41 @@ fn rust_field_name(name: &str) -> String {
 }
 
 fn find_type_decl<'a>(program: &'a Program, type_name: &str) -> Option<&'a TypeDecl> {
-    program
-        .types
-        .iter()
-        .find_map(|ty| find_type_decl_in_type(ty, type_name))
+    let query = type_name_without_args(type_name);
+    let mut exact_matches = Vec::new();
+    for ty in &program.types {
+        collect_type_decl_matches(ty, query, &mut exact_matches, |candidate, query| {
+            type_name_without_args(candidate) == query
+        });
+    }
+    if exact_matches.len() == 1 {
+        return exact_matches.into_iter().next();
+    }
+
+    let mut alias_matches = Vec::new();
+    for ty in &program.types {
+        collect_type_decl_matches(ty, type_name, &mut alias_matches, type_name_matches);
+    }
+    if alias_matches.len() == 1 {
+        return alias_matches.into_iter().next();
+    }
+    None
 }
 
-fn find_type_decl_in_type<'a>(ty: &'a TypeDecl, type_name: &str) -> Option<&'a TypeDecl> {
-    if type_name_matches(&ty.name, type_name) {
-        return Some(ty);
+fn collect_type_decl_matches<'a>(
+    ty: &'a TypeDecl,
+    type_name: &str,
+    matches: &mut Vec<&'a TypeDecl>,
+    predicate: fn(&str, &str) -> bool,
+) {
+    if predicate(&ty.name, type_name) {
+        matches.push(ty);
     }
-    ty.members.iter().find_map(|member| match member {
-        Member::Type(nested) => find_type_decl_in_type(nested, type_name),
-        _ => None,
-    })
+    for member in &ty.members {
+        if let Member::Type(nested) = member {
+            collect_type_decl_matches(nested, type_name, matches, predicate);
+        }
+    }
 }
 
 fn type_name_matches(candidate: &str, query: &str) -> bool {
@@ -616,8 +637,12 @@ fn external_field_fact_matches_super_type(
     type_name_matches(fact_type_name, super_name)
 }
 
+fn type_name_without_args(type_name: &str) -> &str {
+    type_name.split('<').next().unwrap_or(type_name).trim()
+}
+
 fn type_name_aliases(type_name: &str) -> Vec<String> {
-    let without_args = type_name.split('<').next().unwrap_or(type_name).trim();
+    let without_args = type_name_without_args(type_name);
     let simple = without_args
         .rsplit('.')
         .next()
@@ -715,6 +740,31 @@ mod tests {
         assert_eq!(inherited[0].method.name, "f");
         assert_eq!(inherited[0].method.params.len(), 2);
         assert_eq!(inherited[0].rust_name, "f_int_int");
+    }
+
+    #[test]
+    fn inherited_source_methods_refuse_ambiguous_simple_package_super() {
+        let program = Program {
+            package: None,
+            imports: Vec::new(),
+            types: vec![
+                class("a.Base", None, vec![method("v", Vec::new(), "v")]),
+                class("b.Base", None, vec![method("v", Vec::new(), "v")]),
+                class("AmbiguousChild", Some("Base"), Vec::new()),
+                class("ExactChild", Some("b.Base"), Vec::new()),
+            ],
+        };
+        let ambiguous_child = find_type_decl(&program, "AmbiguousChild").unwrap();
+        let exact_child = find_type_decl(&program, "ExactChild").unwrap();
+
+        assert!(
+            inherited_instance_method_refs_for_type(ambiguous_child, &program).is_empty(),
+            "bare same-simple package super lookup must fail closed"
+        );
+        let inherited = inherited_instance_method_refs_for_type(exact_child, &program);
+        assert_eq!(inherited.len(), 1);
+        assert_eq!(inherited[0].declaring_type, "b.Base");
+        assert_eq!(inherited[0].method.name, "v");
     }
 
     #[test]

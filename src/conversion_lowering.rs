@@ -8,7 +8,7 @@ use crate::conversion_plan::{
     ReusedOptionalUnwrapProjection, Slot, SlotConversionPlan, SlotExprConversionPlan,
 };
 use crate::java_ir::PrimitiveType;
-use crate::rust_ir::RustExpr;
+use crate::rust_ir::{RustExpr, RustExprShape};
 use crate::slot_shape::RustSlotShape;
 
 pub fn apply_cast_conversion(expr: RustExpr, plan: &CastConversionPlan) -> RustExpr {
@@ -41,7 +41,25 @@ pub fn apply_lowered_slot_expr_conversion(
     lowered: LoweredExpr,
     plan: &LoweredSlotExprConversionPlan,
 ) -> RustExpr {
-    apply_slot_conversion_plan(lowered.expr, &plan.conversion)
+    apply_slot_conversion_plan(
+        normalize_lowered_expr_for_conversion(lowered),
+        &plan.conversion,
+    )
+}
+
+fn normalize_lowered_expr_for_conversion(lowered: LoweredExpr) -> RustExpr {
+    let LoweredExpr { expr, actual } = lowered;
+    if expr.recorded_shape() == Some(RustExprShape::OptionalProjected) {
+        return expr;
+    }
+    let LoweredType::OptionalElementBorrow { element_shape, .. } = actual else {
+        return expr;
+    };
+    crate::coercion::project_optional_element_borrow_carrier_with_shape(
+        expr.clone(),
+        &element_shape,
+    )
+    .unwrap_or(expr)
 }
 
 pub fn apply_lowered_slot_conversion_to_expr(

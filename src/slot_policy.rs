@@ -11,7 +11,7 @@ use crate::shape_projection::{
     value_shape_for_java_type,
 };
 use crate::slot_shape::RustSlotShape;
-use crate::usage::{BindingUse, MethodUsageFacts, UsageConstructorKey, UsageFacts, UsageMethodKey};
+use crate::usage::{BindingUse, MethodUsageFacts, UsageConstructorKey, UsageFacts};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BorrowedContentKind {
@@ -256,10 +256,7 @@ fn method_param_allows_borrowed_content(
     {
         return false;
     }
-    let Some(method_usage) = usage.methods.get(&UsageMethodKey {
-        type_name: ty.name.clone(),
-        method_name: method.name.clone(),
-    }) else {
+    let Some(method_usage) = usage.source_method_usage(ty, method) else {
         return false;
     };
     usage_allows_borrowed_content(method_usage, param)
@@ -283,21 +280,31 @@ fn method_return_allows_borrowed_param_content(
     {
         return false;
     }
-    let Some(method_usage) = usage.methods.get(&UsageMethodKey {
-        type_name: ty.name.clone(),
-        method_name: method.name.clone(),
-    }) else {
+    let Some(method_usage) = usage.source_method_usage(ty, method) else {
         return false;
     };
-    let Some(binding) = method_usage.binding_for_declaration(param.binding.as_ref(), &param.name)
-    else {
+    let Some(binding) = method_usage.binding_for_declaration_with_name_fallback(
+        param.binding.as_ref(),
+        &param.name,
+        param.binding.is_none(),
+    ) else {
         return false;
     };
-    if !method_exactly_returns_param(method, &param.name) {
-        return false;
-    }
-    if param.binding.is_none() && method_assigns_to_binding(method, &param.name) {
-        return false;
+    if param.binding.is_some() {
+        if !binding
+            .uses
+            .iter()
+            .any(|usage| matches!(usage, BindingUse::Returned))
+        {
+            return false;
+        }
+    } else {
+        if !method_exactly_returns_param(method, &param.name) {
+            return false;
+        }
+        if method_assigns_to_binding(method, &param.name) {
+            return false;
+        }
     }
     !binding.uses.is_empty()
         && binding
@@ -447,7 +454,11 @@ fn collect_exact_returned_var_names_from_stmts<'a>(
 }
 
 fn usage_allows_borrowed_content(usage: &MethodUsageFacts, param: &Param) -> bool {
-    let Some(binding) = usage.binding_for_declaration(param.binding.as_ref(), &param.name) else {
+    let Some(binding) = usage.binding_for_declaration_with_name_fallback(
+        param.binding.as_ref(),
+        &param.name,
+        param.binding.is_none(),
+    ) else {
         return false;
     };
     !binding.uses.is_empty()
@@ -534,6 +545,8 @@ mod tests {
     fn usage_with_param_facts(binding: BindingId, uses: Vec<BindingUse>) -> UsageFacts {
         let mut usage = UsageFacts::default();
         let mut method_usage = MethodUsageFacts::default();
+        let ty = owner_type();
+        let method = private_static_returning_param_method(string_param(binding.clone()));
         method_usage.bindings_by_id.insert(
             binding.clone(),
             BindingUseFacts {
@@ -543,11 +556,13 @@ mod tests {
                 uses,
             },
         );
-        usage.methods.insert(
-            UsageMethodKey {
-                type_name: "Owner".to_string(),
-                method_name: "borrow".to_string(),
-            },
+        let legacy_key = UsageMethodKey {
+            type_name: "Owner".to_string(),
+            method_name: "borrow".to_string(),
+        };
+        usage.methods.insert(legacy_key, method_usage.clone());
+        usage.methods_by_java_key.insert(
+            crate::java_signature::JavaCallableKey::source_method_for_type(&ty, &method),
             method_usage,
         );
         usage
@@ -585,6 +600,28 @@ mod tests {
                 &effective_facts
             ),
             "mutation of the exact parameter binding still rejects borrowed return policy"
+        );
+    }
+
+    #[test]
+    fn borrowed_return_param_content_requires_exact_returned_binding_when_param_bound() {
+        let binding = BindingId::new(BindingKind::Param, "value", 0);
+        let param = string_param(binding.clone());
+        let method = private_static_returning_param_method(param.clone());
+        let ty = owner_type();
+        let facts = FactSet::default();
+        let effective_facts = EffectiveFacts::new(&facts);
+        let content_read_only = usage_with_param_facts(binding, vec![BindingUse::ContentRead]);
+
+        assert!(
+            !method_return_allows_borrowed_param_content(
+                &ty,
+                &method,
+                &param,
+                &content_read_only,
+                &effective_facts
+            ),
+            "resolver-bound params must prove the exact binding is returned instead of trusting the name-only return scan"
         );
     }
 }

@@ -534,3 +534,89 @@ Pinned by:
 - `optional_source_supertype_constructor_arg_is_loud_not_subtype_some`
 
 The audit remains open for the real subtype carrier and dynamic dispatch model.
+
+## Codex follow-up 2026-08-29 — stale passing repair test removed from failure baseline
+
+`source_hierarchy_instanceof_repair_keeps_supertype_slot_adapted` now passes in
+the current tree and was removed from `tests/baselines/idiom-gaps-failures.txt`.
+The sealed hierarchy carrier repair remains listed and still represents the
+open runtime-carrier gap; this is only baseline cleanup, not closure of 0058.
+
+## Codex follow-up 2026-08-29 — source alias facade test matches current representation policy
+
+`erased_source_alias_owner_suppresses_external_facade_inherent_impl` now asserts
+the behavior it was meant to guard: a parsed source type that aliases an
+external facade name must not receive generated external facade inherent impls.
+Its representation assertion was stale after the object model began keeping
+parsed source structs concrete unless an erased fallback is actually required.
+
+## Codex follow-up 2026-08-29 — peer-param fixture no longer depends on string identity
+
+`parsed_source_declared_peer_param_keeps_concrete_signature_under_erased_pressure`
+now avoids Java `String` reference identity in its fixture body. The test still
+verifies that conflicting erased external pressure is filtered for parsed
+source classes and that peer parameters stay concrete, but generated-crate
+checking no longer fails on the separate string-identity representation gap.
+
+## Codex follow-up 2026-08-29 — generic source-supertype fixture is explicitly loud
+
+`generic_source_supertype_into_bound_gets_static_for_erased_boxing` still checks
+that the generic bound includes the source-supertype conversion surface, but no
+longer asks generated-crate checking to compile the intentional
+`compile_error!`. The fixture now pins the current 0058 policy directly:
+`Mid -> Base` remains a loud class-hierarchy lowering gap until the source
+hierarchy carrier exists.
+
+## Codex follow-up 2026-08-29 — external upcasts use explicit adapter surfaces
+
+The previous local note claiming `ExternalInto` coercions should be compile-loud
+at every use site was superseded by the adapter-backed conversion pass recorded
+in 0052. When an explicit external conversion adapter or built-in JDK stream
+adapter exists, the call site now lowers through the ordinary Rust `.into()`
+projection and the generated support owns the corresponding `From<X> for Y`
+surface. Unsupported source-class upcasts remain loud; adapter-backed external
+facade conversions are no longer part of this audit's open class-hierarchy
+carrier gap. The
+`external_upcast_coercion_uses_adapter_into_projection_at_use_site` fixture now
+expects the structured `zip.into()` projection.
+
+Follow-up 2026-08-29: the optional resource/facade-upcast fixture now pins the
+same current policy. It still verifies that a nullable resource local is cloned
+before the null unwrap so later `finally` cleanup can read it, but the
+`ByteArrayOutputStream -> JavaIoOutputStream` constructor argument upcast lowers
+through the adapter-backed `.into()` projection rather than being counted as a
+source-class hierarchy gap. The fixture was removed from the idiom-gaps
+expected failure baseline.
+
+## Codex follow-up 2026-08-29 — summary super equals no longer fabricates false
+
+`negated_boolean_super_boundary_call_uses_loud_summary_method_not_default` now
+pins the current source-summary boundary policy. A `super.equals(o)` call that
+resolves only to a summary superclass lowers to a local runtime-loud expression
+with
+`unimplemented!("source-summary method SummaryEqualsBase.equals is not translated")`.
+It no longer asks for the old fabricated `if !false` fallback or emits a call to
+the non-emitted summary owner.
+
+## Codex follow-up 2026-08-29 — sealed carrier upcasts use the carrier conversion
+
+The sealed source hierarchy repair fixture now compiles. The assignment path
+was still rejecting every source class upcast before it reached the
+representation-aware conversion, so `FormatLine -> HeaderLine` and
+`InfoLine -> HeaderLine` emitted the old hierarchy `compile_error!` even though
+`HeaderLine` is represented by `HeaderLineValue`.
+
+`lower_source_subtype_to_supertype_slot` and the reused-argument adapter now
+let closed-enum carrier targets use the existing `From<Subtype> for
+CarrierValue` conversion instead of the loud fallback. Erased-object display
+support also skips source hierarchy carrier roots by dispatch policy, avoiding
+invalid `downcast_ref::<HeaderLine>` arms for roots that only have a carrier
+enum at runtime.
+
+Pinned by:
+
+- `sealed_source_hierarchy_instanceof_repair_uses_closed_enum_runtime_carrier`
+- `sealed_source_hierarchy_instanceof_pattern_binds_closed_enum_payload`
+
+The audit remains open for non-carrier inheritance and wider dynamic dispatch
+lowering; this closes the sealed carrier repair path only.

@@ -20,12 +20,12 @@ use crate::coercion::{
     external_crate_path_projection, external_facade_rust_path_projection, facade_method_name,
     file_exists_projection, free_function_path_projection, function_call_projection,
     index_to_usize_projection, java_class_literal_path_projection,
-    java_class_static_path_projection, java_iterator_from_collection_projection,
-    java_list_hash_code_projection, java_map_hash_code_projection,
-    java_plain_object_constructor_projection, java_set_hash_code_projection,
-    java_value_hash_code_projection, len_i32_projection, math_abs_projection,
-    math_floor_div_projection, math_floor_mod_projection, math_max_projection, math_min_projection,
-    math_pow_projection, math_round_projection, math_to_int_exact_projection,
+    java_class_static_path_projection, java_integral_parse_null_argument_as_number_format,
+    java_iterator_from_collection_projection, java_list_hash_code_projection,
+    java_map_hash_code_projection, java_plain_object_constructor_projection,
+    java_set_hash_code_projection, java_value_hash_code_projection, len_i32_projection,
+    math_abs_projection, math_floor_div_projection, math_floor_mod_projection, math_max_projection,
+    math_min_projection, math_pow_projection, math_round_projection, math_to_int_exact_projection,
     native_collection_default_constructor_projection, native_collection_empty_new_projection,
     native_collection_from_source_projection, native_collection_with_capacity_projection,
     objects_equals_projection, objects_is_null_projection, objects_non_null_projection,
@@ -705,6 +705,7 @@ fn apply_native_java_static_method(
             let Some(arg) = args.next() else {
                 return compile_error_call("Integer.parseInt requires at least one argument");
             };
+            let arg = java_integral_parse_null_argument_as_number_format(arg);
             match args.next() {
                 Some(radix) => primitive_parse_radix_projection(arg, radix, PrimitiveType::Int),
                 None => primitive_parse_projection(arg, PrimitiveType::Int),
@@ -715,6 +716,7 @@ fn apply_native_java_static_method(
             let Some(arg) = args.next() else {
                 return compile_error_call("Byte.parseByte requires at least one argument");
             };
+            let arg = java_integral_parse_null_argument_as_number_format(arg);
             match args.next() {
                 Some(radix) => primitive_parse_radix_projection(arg, radix, PrimitiveType::Byte),
                 None => primitive_parse_projection(arg, PrimitiveType::Byte),
@@ -725,6 +727,7 @@ fn apply_native_java_static_method(
             let Some(arg) = args.next() else {
                 return compile_error_call("Short.parseShort requires at least one argument");
             };
+            let arg = java_integral_parse_null_argument_as_number_format(arg);
             match args.next() {
                 Some(radix) => primitive_parse_radix_projection(arg, radix, PrimitiveType::Short),
                 None => primitive_parse_projection(arg, PrimitiveType::Short),
@@ -735,6 +738,7 @@ fn apply_native_java_static_method(
             let Some(arg) = args.next() else {
                 return compile_error_call("Long.parseLong requires at least one argument");
             };
+            let arg = java_integral_parse_null_argument_as_number_format(arg);
             match args.next() {
                 Some(radix) => primitive_parse_radix_projection(arg, radix, PrimitiveType::Long),
                 None => primitive_parse_projection(arg, PrimitiveType::Long),
@@ -823,6 +827,18 @@ fn apply_native_java_static_method(
                 return compile_error_call("Objects.equals requires two arguments");
             };
             objects_equals_projection(left, right)
+        }
+        NativeJavaStaticMethod::ObjectsToString => {
+            let mut args = args.into_iter();
+            let Some(value) = args.next() else {
+                return compile_error_call("Objects.toString requires one or two arguments");
+            };
+            if args.next().is_some() {
+                return compile_error_call(
+                    "Objects.toString with a default requires shaped lowering",
+                );
+            }
+            string_value_of_lowered_arg_to_string(value)
         }
         NativeJavaStaticMethod::ObjectsNonNull => {
             let Some(arg) = args.into_iter().next() else {
@@ -2311,6 +2327,27 @@ mod tests {
         assert_eq!(
             emit::emit_expr(&lowered),
             "value.chars().nth((index) as usize).ok_or_else(|| JavaException::new(\"StringIndexOutOfBoundsException\", \"Java string index out of bounds\".to_string())).unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))"
+        );
+    }
+
+    #[test]
+    fn integral_parse_native_fallback_maps_optional_string_arg_to_number_format_input() {
+        let target = CallTargetPlan::NativeJavaStatic {
+            method: NativeJavaStaticMethod::IntegerParseInt,
+        };
+        let lowered = apply_call_target(
+            &target,
+            None,
+            vec![RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Var("s".to_string())),
+                method: "as_ref".to_string(),
+                args: Vec::new(),
+            }],
+        );
+
+        assert_eq!(
+            emit::emit_expr(&lowered),
+            "s.as_ref().map(|value| std::convert::AsRef::<str>::as_ref(value)).unwrap_or(\"null\").parse::<i32>().map_err(|err| JavaException::from_display(\"NumberFormatException\", err)).unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))"
         );
     }
 

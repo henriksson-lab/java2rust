@@ -1313,3 +1313,160 @@ declaration only when the emitted Rust name maps to one distinct Java owner, so
 collisions like `a.B.C` and `AB.C` both rendering as `AB_C` fail closed instead
 of letting traversal order decide `Default`/field-walk behavior. Regression:
 `item_assembly::tests::derive_support_type_lookup_refuses_ambiguous_emitted_rust_name`.
+
+Follow-up 2026-08-29: inherited source member lookup no longer walks support
+types with first-match simple-owner aliasing. `find_type_decl` now prefers
+exact Java owner text and otherwise accepts alias/simple-name matches only when
+they are unique, so `extends Base` with both `a.Base` and `b.Base` visible does
+not inherit whichever package peer appears first. Package-qualified `extends
+b.Base` still resolves. This also fences interface default traversal because it
+shares the same lookup helper. Regression:
+`inherited_members::tests::inherited_source_methods_refuse_ambiguous_simple_package_super`.
+
+Follow-up 2026-08-29: slot-policy source-method usage lookups now use the
+resolver-backed Java callable key via `UsageFacts::source_method_usage(ty,
+method)` instead of reconstructing `UsageMethodKey { type_name, method_name }`
+from plain strings. This migrates borrowed-content parameter policy off one
+more non-injective owner/method spelling path. Regressions:
+`slot_policy::tests::borrowed_return_param_policy_uses_binding_facts_not_name_assignment_scan`
+and `layering::slot_policy_uses_java_keyed_source_method_usage_lookup`.
+
+Follow-up 2026-08-29: anonymous declared-return dyn-trait constraint planning
+no longer reaches through `slot_render` just to render a Java owner name.
+`signature.rs` now uses `java_naming::rust_name_for_java_named_type`, keeping
+source analysis and signature planning independent of slot rendering for this
+path. Regression:
+`layering::plan_layers_keep_rust_rendering_out_of_source_analysis`.
+
+Follow-up 2026-08-29: declaration-scoped usage lookups moved another step away
+from `UsageMethodKey { type_name, method_name }` string reconstruction.
+`UsageFacts` now exposes `source_method_usage_for_owner(JavaOwnerKey, method)`;
+`storage_strategy`, `semantic_analysis`, and `signature` use Java-callable keys
+when they already have `TypeDecl`/`MethodDecl` context. `aliasing` now uses
+`JavaCallableKey::resolved_source_method` for resolved receiver-mutating calls,
+so overload identity, erased argument types, and staticness decide whether the
+call mutates its receiver. This fixes the live case where a read-only overload
+could inherit mutability from a same-name mutating overload via the legacy
+Java-name map. Regressions:
+`aliasing::tests::receiver_mutation_lookup_uses_resolved_overload_identity`,
+`storage_strategy::handle_forwardable_surface_tests::camel_case_mutating_interface_method_blocks_forwarding`,
+and `layering::declaration_context_usage_lookups_use_java_callable_keys`.
+
+Follow-up 2026-08-29: semantic unresolved-target external-effect guessing now
+distinguishes "not a source owner" from "ambiguous source owner". The receiver
+owner lookup used before synthesizing an external API effect fact accepts exact
+source owners, emitted Rust owner names, and simple names only when the tier is
+unique; a bare `Item` with both `a.Item` and `b.Item` visible now fails closed
+instead of seeding an external `Item.transform` guess from traversal order.
+Regression:
+`semantic_facts::external_api_effect_guess_refuses_ambiguous_source_simple_owner`.
+
+Follow-up 2026-08-29: signature inherited-field owner lookup no longer returns
+the first support declaration whose external alias matches a rendered type
+name. `find_signature_type_decl` now prefers exact Java owner text and accepts
+alias/simple-name matches only when the match is unique, so a bare `Base`
+cannot borrow constructor-field constraints or type parameters from whichever
+of `a.Base` / `b.Base` appears first. Regression:
+`signature::tests::signature_type_lookup_refuses_ambiguous_simple_package_peer`.
+
+Follow-up 2026-08-29: external display-capability facts no longer grant their
+simple-name capability to every package peer. A modeled
+`a.ExternalToken.toString(): String` now records `a.ExternalToken` and its Rust
+surface `AExternalToken`, but not bare `ExternalToken`; erased-object
+stringification can still detect the qualified source mention and emit the
+`AExternalToken` downcast. Regressions:
+`functional_interface_shape_tests::package_qualified_to_string_fact_does_not_mark_simple_peer_display_capable`
+and
+`tests/slot_shape_design.rs::erased_external_object_display_keeps_package_qualified_to_string_capability_distinct`.
+
+Follow-up 2026-08-29: source supertype conversion field flattening now uses
+the combined inherited-field lookup across support and source-summary programs
+instead of asking each program separately and merging both answers. A child with
+`extends Base` no longer inherits fields from both `a.Base` and `b.Base` when
+the bare owner is ambiguous; package-qualified `extends b.Base` still inherits
+the intended field. Regression:
+`lower::tests::source_instance_field_names_for_conversion_refuses_cross_program_ambiguous_simple_super`.
+
+Follow-up 2026-08-29: optional current-method display shape recovery no longer
+consults signature return shapes with an unresolved owner spelling. The display
+slot path now resolves `current_type` / resolved declaring-type candidates
+through the ambiguity-aware lower-context type lookup before asking
+`SignaturePlan::method_return_shape_by_rust_name`, so a stale simple-owner
+signature entry for `Item.name()` is ignored when the visible context contains
+both `a.Item` and `b.Item`. Exact package owners still recover optional display
+shape. Regression:
+`lower::tests::optional_current_method_display_shape_refuses_ambiguous_current_owner`.
+
+Follow-up 2026-08-29: stream-lambda raw static-member recovery now resolves
+`Owner.member` through the active `StreamRenderContext` before rendering the
+Rust associated path. A raw compatibility leaf such as `Cfg.N` therefore sees
+the same static type aliases as parsed `Expr::FieldAccess`, so an import alias
+for `AB.C` emits `AB_C::N` instead of treating bare `Cfg` as already-resolved
+Rust owner text. Regression:
+`tests/slot_shape_design.rs::stream_pipeline_chain_uses_string_and_optional_shapes`.
+
+Follow-up 2026-08-29: package-qualified stream static constants and external
+constant support discovery now preserve the full owner key. The stream lambda
+path lowers parsed and raw `a.Item.KIND` through owner `a.Item`, producing
+`AItem::KIND`; the support collector asks `qualified_static_owner_java_name`
+before falling back to a final field segment, so the same expression no longer
+emits bogus external stubs such as `pub struct Item; pub const KIND: KIND =
+KIND;`. Regressions:
+`tests/slot_shape_design.rs::stream_lambda_emission_uses_structured_operator_rendering`
+and
+`tests/batch_translation.rs::stream_static_constant_support_keeps_package_qualified_owner_identity`.
+
+Follow-up 2026-08-29: array-allocation defaultability now resolves the Java
+element owner through the ambiguity-aware lower-context lookup before asking
+item assembly whether the source type can derive `Default`. It no longer
+renders `a.B.C`/`AB.C` to the shared emitted alias `AB_C` and probes each
+program independently, so `new AB.C[n]` cannot borrow `a.B.C`'s derive answer
+when the exact `AB.C` owner is a non-defaultable interface. Regression:
+`lower::tests::array_element_default_lookup_refuses_cross_program_emitted_owner_collision`.
+
+Follow-up 2026-08-29: erased-object source-supertype `instanceof` and cast
+guards now scan subtype reachability through the combined lower context instead
+of asking each visible program independently. The combined subtype walk refuses
+ambiguous bare source names before applying simple-name equality, and skips the
+stdlib subtype shortcut when the target is a visible source type. This closes
+the case where `a.Child extends Base` could be treated as reaching `a.Base`
+even though another visible `b.Base` made that bare edge ambiguous.
+Regressions:
+`lower::tests::erased_instanceof_hierarchy_guard_refuses_ambiguous_bare_super_edge`
+and
+`lower::tests::erased_cast_hierarchy_guard_refuses_ambiguous_bare_super_edge`.
+
+Follow-up 2026-08-29: `context_type_key_is_in_source_summary` now asks the
+combined lower-context owner lookup which program owns a type key, instead of
+probing only the summary program and accepting a bare simple-name hit. A bare
+`Item` is now rejected when support and summary programs both expose distinct
+`Item` owners, while exact summary names and unambiguous emitted aliases still
+classify as source-summary. Regression:
+`lower::tests::context_type_key_is_in_source_summary_refuses_ambiguous_simple_owner`.
+
+Follow-up 2026-08-29: explicit static receiver matching no longer accepts a
+static type alias by asking the raw `SourceContextOwnerKey` simple-name matcher.
+Aliases now resolve through the combined lower-context lookup and compare the
+resolved owner declaration, so `Alias -> Item` fails closed when `a.Item` and
+`b.Item` are both visible, while `Exact -> a.Item` still matches. Regression:
+`lower::tests::explicit_static_receiver_refuses_ambiguous_simple_package_peer`.
+
+Follow-up 2026-08-29: static-owner emitted/current-program predicates now share
+an emitted context lookup that returns both the resolved type and the owning
+`Program`. `static_owner_key_is_non_program_emitted_context` and
+`static_owner_receiver_is_emitted_program_type` now classify by program pointer
+identity instead of composing separate emitted/current-program string lookups.
+Regressions:
+`lower::tests::non_program_emitted_context_owner_check_is_combined_but_current_program_aware`
+and
+`lower::tests::static_owner_receiver_program_type_check_uses_emitted_owner_lookup`.
+
+Follow-up 2026-08-29: usage-side resolved receiver boundary classification no
+longer treats a bare static receiver type as matching a package-qualified
+resolved declaring type by simple name. `receiver_static_type_matches_declaring_type`
+now accepts exact matches and legacy bare-vs-bare matches, but fails closed for
+`Item` vs `a.Item` in either direction unless an upstream package-aware layer
+has already resolved the owner. Regressions:
+`usage::tests::receiver_static_type_match_fails_closed_for_package_qualified_simple_name`
+and
+`usage::tests::resolved_receiver_boundary_refuses_package_qualified_simple_name_match`.

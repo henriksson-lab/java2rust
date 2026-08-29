@@ -6410,17 +6410,6 @@ impl SignaturePlan {
             .unwrap_or(&[])
     }
 
-    pub fn local_shape<'a>(
-        &self,
-        locals: &'a [LocalPlan],
-        local_name: &str,
-    ) -> Option<&'a RustSlotShape> {
-        locals
-            .iter()
-            .find(|local| local.name == local_name)
-            .map(|local| &local.shape)
-    }
-
     pub fn local_plan_by_binding<'a>(
         &self,
         locals: &'a [LocalPlan],
@@ -6447,27 +6436,22 @@ impl SignaturePlan {
             .expect("signature solver must plan every lowered local binding")
     }
 
-    pub fn required_local_plan<'a>(
+    pub fn required_local_shape_by_binding(
         &self,
-        locals: &'a [LocalPlan],
-        local_name: &str,
-    ) -> &'a LocalPlan {
-        locals
-            .iter()
-            .find(|local| local.name == local_name)
-            .expect("signature solver must plan every lowered local")
-    }
-
-    pub fn required_local_shape(&self, locals: &[LocalPlan], local_name: &str) -> RustSlotShape {
-        self.local_shape(locals, local_name)
+        locals: &[LocalPlan],
+        binding: &BindingId,
+    ) -> RustSlotShape {
+        self.local_shape_by_binding(locals, binding)
             .cloned()
-            .expect("signature solver must plan every lowered local")
+            .expect("signature solver must plan every lowered local binding")
     }
 
-    pub fn local_binding_mutability(&self, locals: &[LocalPlan], local_name: &str) -> Option<bool> {
-        locals
-            .iter()
-            .find(|local| local.name == local_name)
+    pub fn local_binding_mutability_by_binding(
+        &self,
+        locals: &[LocalPlan],
+        binding: &BindingId,
+    ) -> Option<bool> {
+        self.local_plan_by_binding(locals, binding)
             .map(|local| local.binding_mutable)
     }
 }
@@ -7128,7 +7112,11 @@ fn method_param_shape_constraints_with_declared_source_types(
 ) -> Vec<SignatureConstraint> {
     let method_usage = usage.source_method_usage(ty, method);
     let binding = method_usage.and_then(|method_usage| {
-        method_usage.binding_for_declaration(param.binding.as_ref(), &param.name)
+        method_usage.binding_for_declaration_with_name_fallback(
+            param.binding.as_ref(),
+            &param.name,
+            param.binding.is_none(),
+        )
     });
     let field_receiver_mutated_names = method
         .body
@@ -7237,6 +7225,10 @@ fn method_param_shape_constraints_with_declared_source_types(
         push_unique_signature_constraints(
             &mut constraints,
             &facade_abi_argument_binding_constraints(binding, facts),
+        );
+        push_unique_signature_constraints(
+            &mut constraints,
+            &source_receiver_binding_constraints(binding, usage),
         );
         if method_param_borrowed_content_policy_with_facts(ty, method, param, usage, facts)
             .is_none()
@@ -8069,13 +8061,13 @@ pub fn method_param_boundary_policy(
         Some(SignatureBoundaryKind::PublicApi)
     } else {
         usage
-            .methods
-            .get(&UsageMethodKey {
-                type_name: ty.name.clone(),
-                method_name: method.name.clone(),
-            })
+            .source_method_usage(ty, method)
             .and_then(|method_usage| {
-                method_usage.binding_for_declaration(param.binding.as_ref(), &param.name)
+                method_usage.binding_for_declaration_with_name_fallback(
+                    param.binding.as_ref(),
+                    &param.name,
+                    param.binding.is_none(),
+                )
             })
             .and_then(|binding| binding_boundary_policy(binding).kind)
     };
@@ -8104,7 +8096,11 @@ pub fn constructor_param_boundary_policy(
                 rust_name: constructor_name.clone(),
             })
             .and_then(|ctor_usage| {
-                ctor_usage.binding_for_declaration(param.binding.as_ref(), &param.name)
+                ctor_usage.binding_for_declaration_with_name_fallback(
+                    param.binding.as_ref(),
+                    &param.name,
+                    param.binding.is_none(),
+                )
             })
             .and_then(|binding| binding_boundary_policy(binding).kind)
     };
@@ -8216,7 +8212,11 @@ fn constructor_param_shape_constraints_with_declared_source_types(
         rust_name: constructor_rust_name(ctor),
     });
     let binding = ctor_usage.and_then(|ctor_usage| {
-        ctor_usage.binding_for_declaration(param.binding.as_ref(), &param.name)
+        ctor_usage.binding_for_declaration_with_name_fallback(
+            param.binding.as_ref(),
+            &param.name,
+            param.binding.is_none(),
+        )
     });
     let mut boundary_kind = constructor_param_boundary_policy(ty, ctor, param, usage).kind;
     if boundary_kind == Some(SignatureBoundaryKind::PublicApi)
@@ -9259,20 +9259,47 @@ fn constructor_assignment_targets_field(expr: &Expr, field_name: &str) -> bool {
 }
 
 fn find_signature_type_decl<'a>(program: &'a Program, type_name: &str) -> Option<&'a TypeDecl> {
-    program
-        .types
-        .iter()
-        .find_map(|ty| find_signature_type_decl_in_type(ty, type_name))
+    unique_signature_type_decl_match(collect_signature_type_decl_matches(program, |ty| {
+        ty.name == type_name
+    }))
+    .or_else(|| {
+        unique_signature_type_decl_match(collect_signature_type_decl_matches(program, |ty| {
+            ty.name != type_name && crate::facts::external_type_name_matches(&ty.name, type_name)
+        }))
+    })
 }
 
-fn find_signature_type_decl_in_type<'a>(ty: &'a TypeDecl, type_name: &str) -> Option<&'a TypeDecl> {
-    if ty.name == type_name || crate::facts::external_type_name_matches(&ty.name, type_name) {
-        return Some(ty);
+fn collect_signature_type_decl_matches<'a>(
+    program: &'a Program,
+    matches_query: impl Fn(&TypeDecl) -> bool,
+) -> Vec<&'a TypeDecl> {
+    let mut matches = Vec::new();
+    for ty in &program.types {
+        collect_signature_type_decl_matches_in_type(ty, &matches_query, &mut matches);
     }
-    ty.members.iter().find_map(|member| match member {
-        crate::java_ir::Member::Type(nested) => find_signature_type_decl_in_type(nested, type_name),
+    matches
+}
+
+fn collect_signature_type_decl_matches_in_type<'a>(
+    ty: &'a TypeDecl,
+    matches_query: &impl Fn(&TypeDecl) -> bool,
+    matches: &mut Vec<&'a TypeDecl>,
+) {
+    if matches_query(ty) {
+        matches.push(ty);
+    }
+    for member in &ty.members {
+        if let crate::java_ir::Member::Type(nested) = member {
+            collect_signature_type_decl_matches_in_type(nested, matches_query, matches);
+        }
+    }
+}
+
+fn unique_signature_type_decl_match(matches: Vec<&TypeDecl>) -> Option<&TypeDecl> {
+    match matches.as_slice() {
+        [ty] => Some(*ty),
         _ => None,
-    })
+    }
 }
 
 pub fn external_call_return_field_constraints(
@@ -9854,22 +9881,30 @@ fn collect_returned_local_initializer_call_states_from_stmts(
     for stmt in statements {
         match stmt {
             Stmt::VarDecl {
-                name,
-                initializer: Some(initializer),
-                ..
+                name, initializer, ..
             } => {
-                if let Some(state) =
+                match initializer.as_ref().and_then(|initializer| {
                     same_type_source_call_nullability_state(ty, current_method, initializer, facts)
-                {
-                    merge_binding_nullability_state(local_states, name, state);
+                }) {
+                    Some(state) => {
+                        local_states.insert(name.clone(), state);
+                    }
+                    None => {
+                        local_states.remove(name);
+                    }
                 }
             }
             Stmt::Assign { target, value } => {
-                if let Expr::Var(name) = target
-                    && let Some(state) =
-                        same_type_source_call_nullability_state(ty, current_method, value, facts)
-                {
-                    merge_binding_nullability_state(local_states, name, state);
+                if let Expr::Var(name) = target {
+                    match same_type_source_call_nullability_state(ty, current_method, value, facts)
+                    {
+                        Some(state) => {
+                            local_states.insert(name.clone(), state);
+                        }
+                        None => {
+                            local_states.remove(name);
+                        }
+                    }
                 }
             }
             Stmt::Return(Some(Expr::Var(name))) => {
@@ -12365,6 +12400,28 @@ mod tests {
         }
     }
 
+    fn named_test_type(name: &str) -> TypeDecl {
+        TypeDecl {
+            name: name.to_string(),
+            ..test_owner_type()
+        }
+    }
+
+    #[test]
+    fn signature_type_lookup_refuses_ambiguous_simple_package_peer() {
+        let program = Program {
+            package: None,
+            imports: Vec::new(),
+            types: vec![named_test_type("a.Base"), named_test_type("b.Base")],
+        };
+
+        assert!(find_signature_type_decl(&program, "Base").is_none());
+        assert_eq!(
+            find_signature_type_decl(&program, "a.Base").map(|ty| ty.name.as_str()),
+            Some("a.Base")
+        );
+    }
+
     fn string_param(binding: BindingId) -> Param {
         Param {
             name: "value".to_string(),
@@ -12407,6 +12464,128 @@ mod tests {
             }),
             span: Span::default(),
         }
+    }
+
+    fn return_string_method(statements: Vec<Stmt>) -> MethodDecl {
+        MethodDecl {
+            name: "make".to_string(),
+            rust_name: None,
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            return_type: JavaType::String,
+            throws: Vec::new(),
+            params: Vec::new(),
+            modifiers: Vec::new(),
+            body: Some(Block { statements }),
+            span: Span::default(),
+        }
+    }
+
+    fn helper_call_expr() -> Expr {
+        Expr::Call {
+            receiver: None,
+            name: "helper".to_string(),
+            args: Vec::new(),
+            resolved: None,
+        }
+    }
+
+    #[test]
+    fn call_result_alias_for_visible_local_still_detected() {
+        let method = return_string_method(vec![
+            Stmt::VarDecl {
+                ty: JavaType::String,
+                name: "value".to_string(),
+                source_name: "value".to_string(),
+                initializer: Some(helper_call_expr()),
+                binding: Some(BindingId::new(BindingKind::Local, "value", 0)),
+            },
+            Stmt::Return(Some(Expr::Var("value".to_string()))),
+        ]);
+
+        assert!(method_returns_local_initialized_from_call(&method));
+    }
+
+    #[test]
+    fn call_result_alias_from_inner_shadow_does_not_leak_by_name() {
+        let method = return_string_method(vec![
+            Stmt::VarDecl {
+                ty: JavaType::String,
+                name: "value".to_string(),
+                source_name: "value".to_string(),
+                initializer: Some(Expr::Literal(Literal::String("outer".to_string()))),
+                binding: Some(BindingId::new(BindingKind::Local, "value", 0)),
+            },
+            Stmt::Block(Block {
+                statements: vec![Stmt::VarDecl {
+                    ty: JavaType::String,
+                    name: "value".to_string(),
+                    source_name: "value".to_string(),
+                    initializer: Some(helper_call_expr()),
+                    binding: Some(BindingId::new(BindingKind::Local, "value", 1)),
+                }],
+            }),
+            Stmt::Return(Some(Expr::Var("value".to_string()))),
+        ]);
+
+        assert!(!method_returns_local_initialized_from_call(&method));
+    }
+
+    #[test]
+    fn call_result_alias_is_cleared_by_visible_reassignment() {
+        let method = return_string_method(vec![
+            Stmt::VarDecl {
+                ty: JavaType::String,
+                name: "value".to_string(),
+                source_name: "value".to_string(),
+                initializer: Some(helper_call_expr()),
+                binding: Some(BindingId::new(BindingKind::Local, "value", 0)),
+            },
+            Stmt::Assign {
+                target: Expr::Var("value".to_string()),
+                value: Expr::Literal(Literal::String("literal".to_string())),
+            },
+            Stmt::Return(Some(Expr::Var("value".to_string()))),
+        ]);
+
+        assert!(!method_returns_local_initialized_from_call(&method));
+    }
+
+    #[test]
+    fn returned_local_initializer_call_nullability_clears_visible_reassignment() {
+        let mut helper = return_string_method(vec![Stmt::Return(Some(Expr::Literal(
+            Literal::String("nonnull".to_string()),
+        )))]);
+        helper.name = "helper".to_string();
+        let caller = return_string_method(vec![
+            Stmt::VarDecl {
+                ty: JavaType::String,
+                name: "value".to_string(),
+                source_name: "value".to_string(),
+                initializer: Some(helper_call_expr()),
+                binding: Some(BindingId::new(BindingKind::Local, "value", 0)),
+            },
+            Stmt::Assign {
+                target: Expr::Var("value".to_string()),
+                value: Expr::Literal(Literal::String("literal".to_string())),
+            },
+            Stmt::Return(Some(Expr::Var("value".to_string()))),
+        ]);
+        let mut ty = test_owner_type();
+        ty.members = vec![
+            crate::java_ir::Member::Method(helper),
+            crate::java_ir::Member::Method(caller.clone()),
+        ];
+
+        assert!(
+            returned_local_initializer_source_call_nullability_constraints(
+                &ty,
+                &caller,
+                &FactSet::default()
+            )
+            .is_empty(),
+            "a source-call initializer must not keep controlling returned local nullability after visible reassignment"
+        );
     }
 
     fn usage_with_param_and_shadow_facts(
@@ -12498,6 +12677,54 @@ mod tests {
                 &BindingId::new(BindingKind::Local, "value", 2)
             )
             .is_empty()
+        );
+    }
+
+    #[test]
+    fn duplicate_local_name_signature_plan_lookup_uses_binding_id() {
+        let java_ty = JavaType::Primitive(PrimitiveType::Int);
+        let first_binding = BindingId::new(BindingKind::Local, "value", 0);
+        let second_binding = BindingId::new(BindingKind::Local, "value", 1);
+        let first_shape = RustSlotShape::conservative(java_ty.clone());
+        let mut second_shape = RustSlotShape::conservative(java_ty.clone());
+        second_shape.ownership = OwnershipShape::SharedBorrow;
+        let locals = vec![
+            LocalPlan {
+                binding: first_binding.clone(),
+                name: "value".to_string(),
+                java_ty: java_ty.clone(),
+                shape: first_shape.clone(),
+                binding_mutable: false,
+            },
+            LocalPlan {
+                binding: second_binding.clone(),
+                name: "value".to_string(),
+                java_ty,
+                shape: second_shape.clone(),
+                binding_mutable: true,
+            },
+        ];
+        let plan = SignaturePlan::default();
+
+        assert_eq!(
+            plan.local_shape_by_binding(&locals, &first_binding),
+            Some(&first_shape)
+        );
+        assert_eq!(
+            plan.local_shape_by_binding(&locals, &second_binding),
+            Some(&second_shape)
+        );
+        assert_eq!(
+            plan.required_local_shape_by_binding(&locals, &second_binding),
+            second_shape
+        );
+        assert_eq!(
+            plan.local_binding_mutability_by_binding(&locals, &first_binding),
+            Some(false)
+        );
+        assert_eq!(
+            plan.local_binding_mutability_by_binding(&locals, &second_binding),
+            Some(true)
         );
     }
 
@@ -13629,6 +13856,44 @@ fn external_receiver_binding_constraints_with_declared_source_types(
         }
     }
     constraints
+}
+
+fn source_receiver_binding_constraints(
+    binding: &BindingUseFacts,
+    usage: &UsageFacts,
+) -> Vec<SignatureConstraint> {
+    let Some(receiver_type) = java_type_name(&binding.java_ty) else {
+        return Vec::new();
+    };
+    let mut constraints = Vec::new();
+    for binding_use in &binding.uses {
+        let BindingUse::ReceiverForCall { name, .. } = binding_use else {
+            continue;
+        };
+        if source_method_usage_mutates_receiver(usage, receiver_type, name) {
+            push_unique_signature_constraints(
+                &mut constraints,
+                &[
+                    SignatureConstraint::RequiredOwnership(OwnershipShape::MutableBorrow),
+                    SignatureConstraint::MutableBinding,
+                ],
+            );
+        }
+    }
+    constraints
+}
+
+fn source_method_usage_mutates_receiver(
+    usage: &UsageFacts,
+    receiver_type: &str,
+    method_name: &str,
+) -> bool {
+    let canonical_method = crate::parser::to_snake_case(method_name);
+    usage.methods.iter().any(|(key, method_usage)| {
+        crate::facts::external_type_name_matches(&key.type_name, receiver_type)
+            && (key.method_name == method_name || key.method_name == canonical_method)
+            && method_usage.mutates_self
+    })
 }
 
 fn source_declared_type_name_shadows_external_receiver(
@@ -16091,8 +16356,15 @@ fn collect_mutated_local_names_from_expr(expr: &Expr, mutated: &mut HashSet<Stri
             args,
             ..
         } => {
-            if is_arrays_sort_call(receiver.as_deref(), name, args) {
-                collect_assignment_target_name(&args[0], mutated);
+            for (arg_index, arg) in args.iter().enumerate() {
+                if crate::stdlib::static_collection_argument_mutates(
+                    receiver.as_deref().and_then(static_receiver_name),
+                    name,
+                    args.len(),
+                    arg_index,
+                ) {
+                    collect_assignment_target_name(arg, mutated);
+                }
             }
             if let Some(receiver) = receiver {
                 if crate::stdlib::native_collection_method_name_mutates_receiver(name)
@@ -16137,15 +16409,6 @@ fn collect_mutated_local_names_from_expr(expr: &Expr, mutated: &mut HashSet<Stri
     }
 }
 
-fn is_arrays_sort_call(receiver: Option<&Expr>, name: &str, args: &[Expr]) -> bool {
-    let Some(Expr::Var(receiver_name)) = receiver else {
-        return false;
-    };
-    crate::stdlib::canonical_external_receiver_type_key(receiver_name) == "Arrays"
-        && name == "sort"
-        && matches!(args.len(), 1 | 3)
-}
-
 fn collect_assignment_target_name(expr: &Expr, mutated: &mut HashSet<String>) {
     match expr {
         Expr::Var(name) => {
@@ -16172,6 +16435,13 @@ fn array_access_root_name(expr: &Expr) -> Option<&str> {
     match expr {
         Expr::Var(name) => Some(name),
         Expr::ArrayAccess(array, _) => array_access_root_name(array),
+        _ => None,
+    }
+}
+
+fn static_receiver_name(receiver: &Expr) -> Option<&str> {
+    match receiver {
+        Expr::Var(name) => Some(name),
         _ => None,
     }
 }
@@ -16729,15 +16999,15 @@ fn method_returns_local_initialized_from_call(method: &MethodDecl) -> bool {
     let Some(body) = &method.body else {
         return false;
     };
-    block_returns_local_initialized_from_call(body, &mut HashSet::new())
+    block_returns_local_initialized_from_call(body, &mut HashMap::new())
 }
 
 fn block_returns_local_initialized_from_call(
     block: &Block,
-    call_locals: &mut HashSet<String>,
+    visible_call_aliases: &mut HashMap<String, bool>,
 ) -> bool {
     for stmt in &block.statements {
-        if stmt_returns_local_initialized_from_call(stmt, call_locals) {
+        if stmt_returns_local_initialized_from_call(stmt, visible_call_aliases) {
             return true;
         }
     }
@@ -16746,50 +17016,54 @@ fn block_returns_local_initialized_from_call(
 
 fn stmt_returns_local_initialized_from_call(
     stmt: &Stmt,
-    call_locals: &mut HashSet<String>,
+    visible_call_aliases: &mut HashMap<String, bool>,
 ) -> bool {
     match stmt {
         Stmt::VarDecl {
-            name,
-            initializer: Some(initializer),
-            ..
+            name, initializer, ..
         } => {
-            if expr_is_call_result_or_call_alias(initializer, call_locals) {
-                call_locals.insert(name.clone());
-            }
+            let is_call_alias = initializer.as_ref().is_some_and(|initializer| {
+                expr_is_call_result_or_call_alias(initializer, visible_call_aliases)
+            });
+            visible_call_aliases.insert(name.clone(), is_call_alias);
             false
         }
         Stmt::Assign { target, value } => {
-            if let Expr::Var(name) = target
-                && expr_is_call_result_or_call_alias(value, call_locals)
-            {
-                call_locals.insert(name.clone());
+            if let Expr::Var(name) = target {
+                let is_call_alias = expr_is_call_result_or_call_alias(value, visible_call_aliases);
+                visible_call_aliases.insert(name.clone(), is_call_alias);
             }
             false
         }
-        Stmt::Return(Some(Expr::Var(name))) => call_locals.contains(name),
+        Stmt::Return(Some(Expr::Var(name))) => visible_call_aliases.get(name) == Some(&true),
         Stmt::If {
             then_block,
             else_block,
             ..
         } => {
-            block_returns_local_initialized_from_call(then_block, &mut call_locals.clone())
+            block_returns_local_initialized_from_call(then_block, &mut visible_call_aliases.clone())
                 || else_block.as_ref().is_some_and(|block| {
-                    block_returns_local_initialized_from_call(block, &mut call_locals.clone())
+                    block_returns_local_initialized_from_call(
+                        block,
+                        &mut visible_call_aliases.clone(),
+                    )
                 })
         }
         Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
-            block_returns_local_initialized_from_call(block, call_locals)
+            block_returns_local_initialized_from_call(block, &mut visible_call_aliases.clone())
         }
         _ => false,
     }
 }
 
-fn expr_is_call_result_or_call_alias(expr: &Expr, call_locals: &HashSet<String>) -> bool {
+fn expr_is_call_result_or_call_alias(
+    expr: &Expr,
+    visible_call_aliases: &HashMap<String, bool>,
+) -> bool {
     match expr {
         Expr::Call { .. } | Expr::New { .. } => true,
-        Expr::Var(name) => call_locals.contains(name),
-        Expr::Cast { expr, .. } => expr_is_call_result_or_call_alias(expr, call_locals),
+        Expr::Var(name) => visible_call_aliases.get(name) == Some(&true),
+        Expr::Cast { expr, .. } => expr_is_call_result_or_call_alias(expr, visible_call_aliases),
         _ => false,
     }
 }
@@ -16976,7 +17250,7 @@ fn anonymous_declared_return_boxed_dyn_trait_name(
         return None;
     };
     (args.is_empty() && facts.object_safe_trait_fact_for_name(name) == Some(true))
-        .then(|| crate::slot_render::rust_name_for_java_named_type(name))
+        .then(|| crate::java_naming::rust_name_for_java_named_type(name))
 }
 
 fn internal_exact_final_erased_facade_constraints(
@@ -17024,9 +17298,11 @@ fn internal_returned_object_alias_borrow_constraints(
         return Vec::new();
     };
     let returned_borrow_safe_alias = method.params.iter().any(|param| {
-        let Some(binding) =
-            method_usage.binding_for_declaration(param.binding.as_ref(), &param.name)
-        else {
+        let Some(binding) = method_usage.binding_for_declaration_with_name_fallback(
+            param.binding.as_ref(),
+            &param.name,
+            param.binding.is_none(),
+        ) else {
             return false;
         };
         let returned_by_exact_binding = binding

@@ -176,6 +176,55 @@ fn aliasing_uses_binding_fact_view_instead_of_legacy_name_map() {
 }
 
 #[test]
+fn legacy_usage_binding_name_map_is_owned_by_usage_module() {
+    for (module, source) in [
+        (
+            "aliasing",
+            include_str!("../src/aliasing.rs")
+                .split("#[cfg(test)]")
+                .next()
+                .expect("production aliasing source should be present"),
+        ),
+        (
+            "lower",
+            include_str!("../src/lower.rs")
+                .split("#[cfg(test)]")
+                .next()
+                .expect("production lower source should be present"),
+        ),
+        (
+            "object_model",
+            include_str!("../src/object_model.rs")
+                .split("#[cfg(test)]")
+                .next()
+                .expect("production object_model source should be present"),
+        ),
+        (
+            "signature",
+            include_str!("../src/signature.rs")
+                .split("#[cfg(test)]")
+                .next()
+                .expect("production signature source should be present"),
+        ),
+        (
+            "slot_policy",
+            include_str!("../src/slot_policy.rs")
+                .split("#[cfg(test)]")
+                .next()
+                .expect("production slot_policy source should be present"),
+        ),
+    ] {
+        assert!(
+            !source.contains(".bindings.get(")
+                && !source.contains(".bindings.get_mut(")
+                && !source.contains(".bindings.insert(")
+                && !source.contains(".bindings.remove("),
+            "{module} must use MethodUsageFacts accessors or binding ids instead of touching the legacy name map"
+        );
+    }
+}
+
+#[test]
 fn usage_receiver_type_fallback_does_not_scan_all_binding_history_by_name() {
     let source = include_str!("../src/usage.rs")
         .split("fn usage_java_type_name")
@@ -222,14 +271,38 @@ fn switch_plan_keeps_rust_rendering_out_of_plan_layer() {
 #[test]
 fn shape_axis_free_lowering_layers_do_not_choose_shape_axes() {
     let lowering_sources = [
-        include_str!("../src/access_lowering.rs"),
-        include_str!("../src/call_lowering.rs"),
-        include_str!("../src/conversion_lowering.rs"),
-        include_str!("../src/exception_lowering.rs"),
-        include_str!("../src/literal_lowering.rs"),
-        include_str!("../src/loop_lowering.rs"),
-        include_str!("../src/string_concat_render.rs"),
-        include_str!("../src/switch_lowering.rs"),
+        include_str!("../src/access_lowering.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production access_lowering source should be present"),
+        include_str!("../src/call_lowering.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production call_lowering source should be present"),
+        include_str!("../src/conversion_lowering.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production conversion_lowering source should be present"),
+        include_str!("../src/exception_lowering.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production exception_lowering source should be present"),
+        include_str!("../src/literal_lowering.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production literal_lowering source should be present"),
+        include_str!("../src/loop_lowering.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production loop_lowering source should be present"),
+        include_str!("../src/string_concat_render.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production string_concat_render source should be present"),
+        include_str!("../src/switch_lowering.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production switch_lowering source should be present"),
     ];
 
     for source in lowering_sources {
@@ -438,6 +511,45 @@ fn idless_local_binding_compatibility_surface_stays_explicit() {
         !signature_source
             .contains("let duplicate_names = collect_duplicate_declared_local_names(block);")
     );
+    assert!(
+        !signature_source.contains("pub fn local_shape<")
+            && !signature_source.contains("pub fn required_local_plan<")
+            && !signature_source.contains("pub fn required_local_shape(")
+            && !signature_source.contains("pub fn local_binding_mutability("),
+        "SignaturePlan local lookup should expose binding-keyed APIs, not reusable name-only accessors"
+    );
+    assert!(signature_source.contains("pub fn local_shape_by_binding"));
+    assert!(signature_source.contains("pub fn required_local_shape_by_binding"));
+    assert!(signature_source.contains("pub fn local_binding_mutability_by_binding"));
+}
+
+#[test]
+fn constructor_delegation_name_substitution_stays_fenced() {
+    let lower_source = include_str!("../src/lower.rs");
+    let constructor_delegation_start = lower_source
+        .find("fn source_super_constructor_with_trailing_fields")
+        .expect("constructor delegation section should be present");
+    let constructor_delegation_end = lower_source
+        .find("fn delegated_constructor_with_trailing_body")
+        .expect("constructor delegation section should end before lowering body emission");
+
+    for forbidden in [
+        "fn substitute_expr_vars",
+        "fn substitute_stmt_vars",
+        "fn substitute_block_vars",
+    ] {
+        assert!(
+            !lower_source.contains(forbidden),
+            "name-based substitution helpers must advertise their constructor-delegation compatibility scope"
+        );
+    }
+
+    for (idx, _) in lower_source.match_indices("substitute_source_constructor_param_") {
+        assert!(
+            idx >= constructor_delegation_start && idx < constructor_delegation_end,
+            "constructor parameter name-substitution compatibility must not grow callers outside constructor delegation"
+        );
+    }
 }
 
 #[test]
@@ -447,6 +559,10 @@ fn signature_uses_usage_binding_policy_for_legacy_name_fallback() {
         .split("#[cfg(test)]")
         .next()
         .expect("production usage source should be present");
+    let slot_policy_source = include_str!("../src/slot_policy.rs")
+        .split("#[cfg(test)]")
+        .next()
+        .expect("production slot_policy source should be present");
 
     assert!(
         !signature_source.contains(".bindings.get("),
@@ -457,8 +573,88 @@ fn signature_uses_usage_binding_policy_for_legacy_name_fallback() {
         "signature's id-less fallback should route through the centralized MethodUsageFacts policy"
     );
     assert!(
+        !signature_source.contains("binding_for_declaration(param.binding.as_ref(), &param.name)"),
+        "signature must make parameter name-fallback compatibility explicit at each call site"
+    );
+    assert!(
+        !slot_policy_source
+            .contains("binding_for_declaration(param.binding.as_ref(), &param.name)"),
+        "slot policy must make parameter name-fallback compatibility explicit at each call site"
+    );
+    assert!(
         usage_source.contains("pub fn binding_for_declaration_with_name_fallback"),
         "MethodUsageFacts should own the explicit legacy-name fallback policy"
+    );
+    assert!(
+        !usage_source.contains("pub fn binding_for_declaration("),
+        "the broad implicit-fallback binding lookup wrapper should not exist"
+    );
+}
+
+#[test]
+fn slot_policy_uses_java_keyed_source_method_usage_lookup() {
+    let source = include_str!("../src/slot_policy.rs")
+        .split("#[cfg(test)]")
+        .next()
+        .expect("production slot_policy source should be present");
+
+    assert!(
+        source.contains("usage.source_method_usage(ty, method)")
+            && !source.contains("usage.methods.get(&UsageMethodKey"),
+        "slot policy has TypeDecl/MethodDecl context and should not re-key source method usage by plain strings"
+    );
+}
+
+#[test]
+fn declaration_context_usage_lookups_use_java_callable_keys() {
+    for (module, source, required) in [
+        (
+            "aliasing",
+            include_str!("../src/aliasing.rs"),
+            "JavaCallableKey::resolved_source_method",
+        ),
+        (
+            "storage_strategy",
+            include_str!("../src/storage_strategy.rs"),
+            "source_method_usage_for_owner",
+        ),
+        (
+            "semantic_analysis",
+            include_str!("../src/semantic_analysis.rs"),
+            ".source_method_usage(ty, method)",
+        ),
+        (
+            "signature",
+            include_str!("../src/signature.rs"),
+            ".source_method_usage(ty, method)",
+        ),
+    ] {
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source should be present");
+        assert!(
+            production.contains(required),
+            "{module} should route declaration-scoped usage lookups through Java callable keys"
+        );
+    }
+
+    let storage_source = include_str!("../src/storage_strategy.rs")
+        .split("#[cfg(test)]")
+        .next()
+        .expect("production storage_strategy source should be present");
+    assert!(
+        !storage_source.contains(".methods\n                .get(&crate::usage::UsageMethodKey"),
+        "storage strategy has TypeDecl/MethodDecl context and should not re-key usage by plain strings"
+    );
+
+    let aliasing_source = include_str!("../src/aliasing.rs")
+        .split("#[cfg(test)]")
+        .next()
+        .expect("production aliasing source should be present");
+    assert!(
+        !aliasing_source.contains(".methods\n            .get(&UsageMethodKey"),
+        "aliasing has ResolvedCall identity and should not re-key receiver mutation by plain strings"
     );
 }
 
@@ -521,7 +717,10 @@ fn statement_render_renders_local_types_with_facts() {
 
 #[test]
 fn stdlib_does_not_grow_non_jdk_domain_package_knowledge() {
-    let stdlib_source = include_str!("../src/stdlib.rs");
+    let stdlib_source = include_str!("../src/stdlib.rs")
+        .split("#[cfg(test)]")
+        .next()
+        .expect("production stdlib source should be present");
     for forbidden in [
         "htsjdk",
         "gatk",
@@ -1195,7 +1394,10 @@ fn slot_render_default_policy_symbols_stay_effective_fact_aware() {
 
 #[test]
 fn call_target_lowering_uses_shared_projection_helpers() {
-    let call_lowering_source = include_str!("../src/call_lowering.rs");
+    let call_lowering_source = include_str!("../src/call_lowering.rs")
+        .split("#[cfg(test)]")
+        .next()
+        .expect("production call_lowering source should be present");
     let apply_call_target_source = call_lowering_source
         .split("pub fn apply_call_target")
         .nth(1)

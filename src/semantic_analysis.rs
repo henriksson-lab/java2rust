@@ -22,7 +22,7 @@ use crate::rewrite::{
     MethodControlFlowPlan, NullTestKind, TailRecursiveLoopPlan, TailRecursiveNormalizedShape,
 };
 use crate::types::{TypeEnv, infer_expr_type};
-use crate::usage::{self, CallGraphEdgeKind, CallableKey, UsageFacts, UsageMethodKey};
+use crate::usage::{self, CallGraphEdgeKind, CallableKey, UsageFacts};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SemanticFacts {
@@ -1050,16 +1050,17 @@ fn collect_external_api_effect_facts_from_unresolved_targets(
         {
             continue;
         }
-        if let Some(receiver_type) = receiver_type_key.as_deref()
-            && source_declares_method(
-                program,
-                receiver_type,
-                &fact.target_name,
-                fact.arg_types.len(),
-            )
-            && !external_superclasses.contains_key(receiver_type)
-        {
-            continue;
+        if let Some(receiver_type) = receiver_type_key.as_deref() {
+            match source_type_decl_lookup(program, receiver_type) {
+                SourceTypeDeclLookup::Unique(ty)
+                    if type_decl_declares_method(ty, &fact.target_name, fact.arg_types.len())
+                        && !external_superclasses.contains_key(receiver_type) =>
+                {
+                    continue;
+                }
+                SourceTypeDeclLookup::Ambiguous => continue,
+                SourceTypeDeclLookup::Unique(_) | SourceTypeDeclLookup::Missing => {}
+            }
         }
         push_external_api_effect_guess(
             facts,
@@ -1161,21 +1162,76 @@ fn find_type_decl_in_type<'a>(ty: &'a TypeDecl, type_name: &str) -> Option<&'a T
     })
 }
 
-fn source_declares_method(
-    program: &Program,
-    type_name: &str,
-    method_name: &str,
-    arg_count: usize,
-) -> bool {
-    find_type_decl(program, type_name).is_some_and(|ty| {
-        ty.members.iter().any(|member| {
-            matches!(
-                member,
-                Member::Method(method)
-                    if source_method_name_matches(&method.name, method_name)
-                        && method.params.len() == arg_count
-            )
-        })
+enum SourceTypeDeclLookup<'a> {
+    Unique(&'a TypeDecl),
+    Ambiguous,
+    Missing,
+}
+
+fn source_type_decl_lookup<'a>(program: &'a Program, type_name: &str) -> SourceTypeDeclLookup<'a> {
+    let exact = source_type_decl_matches(program, |ty| ty.name == type_name);
+    match unique_source_type_decl_match(exact) {
+        SourceTypeDeclLookup::Missing => {}
+        lookup => return lookup,
+    }
+    let emitted = source_type_decl_matches(program, |ty| {
+        crate::java_naming::rust_name_for_java_named_type(&ty.name) == type_name
+    });
+    match unique_source_type_decl_match(emitted) {
+        SourceTypeDeclLookup::Missing => {}
+        lookup => return lookup,
+    }
+    let simple =
+        source_type_decl_matches(program, |ty| source_type_simple_name(&ty.name) == type_name);
+    unique_source_type_decl_match(simple)
+}
+
+fn source_type_decl_matches<'a>(
+    program: &'a Program,
+    mut matches_type: impl FnMut(&TypeDecl) -> bool,
+) -> Vec<&'a TypeDecl> {
+    let mut matches = Vec::new();
+    for ty in &program.types {
+        collect_source_type_decl_matches(ty, &mut matches_type, &mut matches);
+    }
+    matches
+}
+
+fn collect_source_type_decl_matches<'a>(
+    ty: &'a TypeDecl,
+    matches_type: &mut impl FnMut(&TypeDecl) -> bool,
+    matches: &mut Vec<&'a TypeDecl>,
+) {
+    if matches_type(ty) {
+        matches.push(ty);
+    }
+    for member in &ty.members {
+        if let Member::Type(nested) = member {
+            collect_source_type_decl_matches(nested, matches_type, matches);
+        }
+    }
+}
+
+fn unique_source_type_decl_match(matches: Vec<&TypeDecl>) -> SourceTypeDeclLookup<'_> {
+    match matches.as_slice() {
+        [] => SourceTypeDeclLookup::Missing,
+        [ty] => SourceTypeDeclLookup::Unique(ty),
+        _ => SourceTypeDeclLookup::Ambiguous,
+    }
+}
+
+fn source_type_simple_name(type_name: &str) -> &str {
+    type_name.rsplit('.').next().unwrap_or(type_name)
+}
+
+fn type_decl_declares_method(ty: &TypeDecl, method_name: &str, arg_count: usize) -> bool {
+    ty.members.iter().any(|member| {
+        matches!(
+            member,
+            Member::Method(method)
+                if source_method_name_matches(&method.name, method_name)
+                    && method.params.len() == arg_count
+        )
     })
 }
 
@@ -3491,11 +3547,7 @@ fn method_receiver_mutability_effect(
         return ReceiverMutabilityFact::Unknown;
     }
     usage
-        .methods
-        .get(&UsageMethodKey {
-            type_name: ty.name.clone(),
-            method_name: method.name.clone(),
-        })
+        .source_method_usage(ty, method)
         .map(|usage| {
             if usage.mutates_self {
                 ReceiverMutabilityFact::MutatesReceiver

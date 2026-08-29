@@ -1179,6 +1179,74 @@ class SelfMutabilityPropagation {
 }
 
 #[test]
+fn usage_self_mutability_propagation_uses_resolved_overload_identity() {
+    let parsed = parse_java_source(
+        r#"
+class SelfMutabilityOverloadPropagation {
+    int count;
+
+    void outer() {
+        this.touch("");
+    }
+
+    void touch(int value) {
+        count = value;
+    }
+
+    void touch(String value) {
+        value.length();
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let usage = analyze_usage(&resolved.program);
+    let ty = resolved
+        .program
+        .types
+        .iter()
+        .find(|ty| ty.name == "SelfMutabilityOverloadPropagation")
+        .unwrap();
+
+    let method_usage = |name: &str, param: Option<&JavaType>| {
+        ty.members
+            .iter()
+            .filter_map(|member| match member {
+                new_java2rust::java_ir::Member::Method(method)
+                    if method.name == name
+                        && param
+                            .map(|param| method.params.first().is_some_and(|p| p.ty == *param))
+                            .unwrap_or(true) =>
+                {
+                    usage.source_method_usage(ty, method)
+                }
+                _ => None,
+            })
+            .next()
+            .unwrap()
+    };
+
+    assert!(
+        !method_usage("outer", None).mutates_self,
+        "outer calls the String overload, which is read-only"
+    );
+    assert!(
+        method_usage(
+            "touch",
+            Some(&JavaType::Primitive(
+                new_java2rust::java_ir::PrimitiveType::Int
+            ))
+        )
+        .mutates_self,
+        "the int overload still mutates"
+    );
+    assert!(
+        !method_usage("touch", Some(&JavaType::String)).mutates_self,
+        "the String overload must not inherit mutation from the int overload"
+    );
+}
+
+#[test]
 fn method_throw_effects_propagate_through_source_call_graph() {
     let semantic = analyze(&idiom_gap("ThrowingCallChainResultShell.java"));
 
@@ -1892,6 +1960,82 @@ class EntryApiFactSeed {
         .unwrap();
     assert_eq!(value.role, ExternalApiRole::Getter);
     assert_eq!(value.return_nullability, NullabilityState::Unknown);
+}
+
+#[test]
+fn external_api_effect_guess_refuses_ambiguous_source_simple_owner() {
+    let parsed = parser::parse_java_source(
+        r#"
+class AmbiguousOwnerProbe {
+    void run() {}
+}
+class Item {
+    void transform() {}
+}
+"#,
+    );
+    let resolved = resolve::resolve_program(&parsed.program, parsed.diagnostics);
+    let mut program = resolved.program.clone();
+    let item = program
+        .types
+        .iter_mut()
+        .find(|ty| ty.name == "Item")
+        .expect("fixture Item class should parse");
+    item.name = "a.Item".to_string();
+    let mut other_item = item.clone();
+    other_item.name = "b.Item".to_string();
+    program.types.push(other_item);
+
+    let mut resolved_facts = resolved.facts.clone();
+    resolved_facts
+        .unresolved_target_facts
+        .push(UnresolvedTargetFact {
+            enclosing_type: "AmbiguousOwnerProbe".to_string(),
+            enclosing_member: Some("run".to_string()),
+            kind: UnresolvedTargetKind::MethodCall,
+            target_name: "transform".to_string(),
+            receiver_type: Some(JavaType::Named {
+                name: "Item".to_string(),
+                args: Vec::new(),
+            }),
+            arg_types: Vec::new(),
+            is_anonymous_class: false,
+            provenance: FactProvenance::ParsedSource,
+        });
+    resolved_facts
+        .unresolved_target_facts
+        .push(UnresolvedTargetFact {
+            enclosing_type: "AmbiguousOwnerProbe".to_string(),
+            enclosing_member: Some("run".to_string()),
+            kind: UnresolvedTargetKind::MethodCall,
+            target_name: "transform".to_string(),
+            receiver_type: Some(JavaType::Named {
+                name: "a.Item".to_string(),
+                args: Vec::new(),
+            }),
+            arg_types: Vec::new(),
+            is_anonymous_class: false,
+            provenance: FactProvenance::ParsedSource,
+        });
+
+    let semantic = semantic_analysis::analyze_program(
+        &program,
+        &resolved_facts,
+        &new_java2rust::facts::FactSet::default(),
+    );
+
+    assert!(
+        semantic
+            .facts
+            .external_api_effect_for_receiver(Some("Item"), "transform")
+            .is_none()
+    );
+    assert!(
+        semantic
+            .facts
+            .external_api_effect_for_receiver(Some("a.Item"), "transform")
+            .is_none()
+    );
 }
 
 #[test]
@@ -7925,15 +8069,14 @@ class ExternalLocalReceiverMutability {
         })
         .unwrap();
     let method_signature = signatures.method_signature(ty, method).unwrap();
-    let local = signatures
-        .local_shape(&method_signature.locals, "counter")
+    let local = method_signature
+        .locals
+        .iter()
+        .find(|local| local.name == "counter")
         .expect("counter local should have a solved shape");
 
-    assert_eq!(local.ownership, OwnershipShape::Owned);
-    assert_eq!(
-        signatures.local_binding_mutability(&method_signature.locals, "counter"),
-        Some(true)
-    );
+    assert_eq!(local.shape.ownership, OwnershipShape::Owned);
+    assert!(local.binding_mutable);
 }
 
 #[test]

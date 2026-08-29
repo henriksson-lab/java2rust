@@ -1412,7 +1412,7 @@ pub fn render_native_java_rust_type_policy_with_effective_facts(
             }
         }
         NativeJavaRustTypePolicy::Optional { element_ty } => RustType::Option(Box::new(
-            rust_type_for_java_type_with_effective_facts(element_ty, facts),
+            rust_type_for_java_generic_arg_with_effective_facts(element_ty, facts),
         )),
         NativeJavaRustTypePolicy::Direct { ty } => ty.clone(),
         NativeJavaRustTypePolicy::Named { name } => RustType::Named(name.clone()),
@@ -1654,6 +1654,31 @@ mod tests {
                     vec![RustType::Named("Value".to_string())]
                 )]
             )
+        );
+    }
+
+    #[test]
+    fn map_entry_renders_as_tuple_at_slot_and_generic_positions() {
+        let entry = JavaType::Named {
+            name: "java.util.Map.Entry".to_string(),
+            args: vec![
+                JavaType::String,
+                JavaType::Primitive(crate::java_ir::PrimitiveType::Int),
+            ],
+        };
+
+        assert_eq!(
+            crate::emit::emit_type(&rust_type_for_java_type(&entry)),
+            "(String, i32)"
+        );
+
+        let values = JavaType::Named {
+            name: "java.util.List".to_string(),
+            args: vec![entry],
+        };
+        assert_eq!(
+            crate::emit::emit_type(&rust_type_for_java_type(&values)),
+            "Vec<(String, i32)>"
         );
     }
 

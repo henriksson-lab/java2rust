@@ -2071,6 +2071,171 @@ The compile-visibility work that belongs to this issue has landed. Future
 coverage work should keep these rules in place rather than reopening the old
 silent-rendered-Rust pattern.
 
+Follow-up 2026-08-29: the tracked plan row in
+`docs/claude-audit-refactoring-plan.md` now agrees with this file's `done/`
+location. `tests/output_markers.rs::tracked_plan_status_agrees_with_the_audit_directory`
+was correct to reject the old `open` row because it made the status table and
+audit directory disagree.
+
+Follow-up 2026-08-29: a focused failure-baseline pass removed stale
+`idiom_gaps` failure names for already compile-backed rows:
+`for_each_lambda_side_effect_generated_rust_compiles`,
+`method_reference_flat_map_generated_rust_preserves_behavior`,
+`system_arraycopy_mutable_optional_local_dest_does_not_clone_slice`, and
+`uppercase_utility_receiver_shadowed_by_local_stays_instance_receiver` all pass
+when run directly. This is failure-name cleanup only; the aggregate
+`neutral_idiom_fixtures_generated_crate_cargo_checks` row still exposes
+remaining generated-crate errors.
+
+The same focused pass also removed stale baseline rows that this audit already
+described as compile-backed/current:
+`current_self_concrete_static_argument_clones_without_downcast`,
+`optional_argument_wrap_reused_value_clones_before_some`,
+`source_enum_constructor_payload_fields_emit_match_backed_accessors`, and
+`summary_context_translation_resolves_sibling_symbols_without_lowering_bodies`.
+
+A stale assertion batch was also repaired for current generated Rust spelling:
+constructor field read-after-assignment uses wrapping arithmetic, decimal-format
+concat keeps the grouped numeric expression, comparator/string helper calls use
+the current borrowed/fallible helper forms, optional string-array element access
+uses checked indexing before `Option<&str>` projection, and htsjdk integer
+facade constants use wrapping addition. The corresponding focused tests now
+pass and their failure names were removed.
+
+The middle baseline slice had the same pattern. Focused passing rows were
+removed, including the expected-compile-failure-backed
+`resolved_static_helper_call_uses_fallback_signature_arg_shapes`. Additional
+assertions were updated for checked string-array indexing, fallible/null-aware
+File/ObjectOutputStream/array-length lowering, checked primitive-array
+allocation, and fallible owned-string return signatures.
+
+The tail baseline slice followed the same rule. Regex helper generated tests now
+call the current fallible `&str` API; string-pattern, source-signature,
+readonly-array alias, shared-self nullable recovery, source static string
+constants, and static mutable storage assertions now match the current
+fallible/checked/storage-backed output. Focused tests passed for those rows, and
+their stale failure names were removed. The remaining `idiom_gaps` baseline rows
+are implementation/modeling gaps or still-useful expected-failure guardrails, not
+known rendered-Rust-only assertions.
+
+Follow-up 2026-08-29: the two source-super constructor guardrails were still
+expected-compile-failure-backed, but their pinned rustc diagnostic substrings had
+drifted. They now assert the current unresolved object-model diagnostics for the
+optional context receiver and missing `ExceptionContext::new` support, so their
+failure names were removed. The JDK numeric facade row also moved from a stale
+plan note to an implementation fix: `BigInteger.ZERO` and `BigInteger.ONE` now
+use the known JDK static constant value table and emit value-object constants
+instead of `compile_error!` stubs.
+
+Follow-up 2026-08-29: adapter-backed `ExternalInto` coercions now render the
+ordinary Rust `.into()` projection instead of replacing the value expression with
+an unsupported-upcast `compile_error!`. This clears the URLConnection to
+JarURLConnection factory-slot fixture and the optional GZIPInputStream
+constructor path; the latter now compiles through the current checked-null
+cleanup spelling. The sampled source-varargs WriteOption and JPanel to Component
+rows remain in the baseline because they still expose signature/erasure shape
+gaps rather than stale unsupported-upcast assertions.
+
+Follow-up 2026-08-29: owned native sequence temporaries passed into borrowed
+slice argument slots now use the existing `AsSlice` coercion instead of being
+handed to the facade unchanged. This clears the File/FileOutputStream string
+convenience fixture where `text.getBytes("US-ASCII")` feeds
+`OutputStream::write_1(&[i8])`. The receiverless optional-string overload row
+still remains because its failing path is a source return-slot mismatch, not
+argument slice borrowing.
+
+Follow-up 2026-08-29: the generated `File::list` support surface now returns
+`Vec<Option<String>>`, matching the compiler's nullable reference-array
+representation for Java `String[]`. This clears the common File instance facade
+fixture after its assertion was updated to the current nullable element shape.
+
+Follow-up 2026-08-29: inferred omitted-context support returns now treat `String`
+as a direct slot, alongside primitives and primitive arrays. `NamedInputStream`
+getter support therefore emits `get_name(&self) -> String` instead of allocating
+an opaque result shim, and the constructor-argument fixture compiles.
+
+Follow-up 2026-08-29: modeled JDK value-object constants now include the
+`java.awt.Color` static color singletons, and fully qualified static constant
+support also emits the simple-owner alias used by lowering. This clears the
+static owner/instance field-name collision fixture and keeps the fully qualified
+`java.util.zip.GZIPInputStream.GZIP_MAGIC` guardrail compiling.
+
+Follow-up 2026-08-29: solved borrowed return slots now remain authoritative for
+direct parameter returns during body lowering. The previous return-body fallback
+treated a solved borrowed sequence return as the declared owned array shape, so
+the receiverless source overload fixture emitted a `&[i8]` signature with a
+`source.to_vec()` body. The direct-parameter case now lowers to the borrowed
+slot, while constructed/local returns still use the declared owned fallback.
+
+Follow-up 2026-08-29: the indexed string-array ownership fixture's assertion now
+matches the current nullable element model for Java `String[]`. The generated
+crate already compiles with checked indexing, `Vec<Option<String>>`, borrowed
+`Option<&str>` arguments, and borrowed formatting of the selected element, so the
+stale clone-only assertion row was removed from the baseline.
+
+Follow-up 2026-08-29: blank `static final` array fields no longer become empty
+associated consts. They are storage-backed so assignments from static
+initializers lower through the existing static getter/setter path. This clears
+the one-dimensional nested static-table overload fixture: the field access still
+selects the `double[]` overload, and the call now receives a borrowed slice from
+the initialized static storage.
+
+Follow-up 2026-08-29: the nested static-table fixture now also compiles for the
+ragged `double[][]` case. Blank static storage recognizes `TABLE = new
+double[N][]` through the parser's assignment-target alias, preserves the
+nullable static carrier as `Option<Vec<Vec<f64>>>`, and lets optional-wrapped
+ragged array creation use the same nested-`Vec` value path as local ragged
+arrays. The row was removed from `idiom-gaps-failures.txt` after a focused
+generated-crate check passed.
+
+Follow-up 2026-08-29: array parameters no longer force an interface trait method
+from borrowed-slice ABI back to the concrete implementor's owned storage shape.
+The trait implementation adapter already owns the conversion point, so
+`fn accept(&mut self, values: &[f64])` can forward to an inherent
+`accept(Vec<f64>)` with `values.to_vec()`. This clears the trait-array
+forwarding fixture and keeps the interface boundary reusable for callers that
+only have a slice.
+
+Follow-up 2026-08-29: Swing/AWT component facade types are now classified as
+Java platform facades, matching the built-in conversion facts that already knew
+`JPanel`/`JComponent` can convert into `Component`. This keeps `JPanel`
+parameters concrete instead of erasing them to `Box<dyn Any>`, so the
+`SVGImageSaver.saveImage(Component, OutputStream)` fixture lowers to
+`panel.into()` and compiles.
+
+Follow-up 2026-08-29: structured generic type rendering now preserves
+cloneability for nested `Box<dyn Trait>` fields. `Option<Vec<Option<Box<dyn
+CloneableModule>>>>` can derive `Clone` because the generated trait support
+already emits the clone-box adapter, and top-level raw `Option`/`Vec` clone
+checks now recurse the same way nested generic arguments do. The dyn-trait
+vector-holder fixture is compile-backed and removed from the idiom-gap failure
+baseline.
+
+Follow-up 2026-08-29: expanded source varargs now treat Java reference-array
+elements as nullable storage elements. The varargs packer lowers
+`WriteOption...` spread arguments as `Some(concrete.into())` when the Rust
+callee slot is `&[Option<WriteOption>]`, including reused borrowed source
+arguments that need a clone before the external `Into` adapter. The stale local
+`Path` stub was removed from the focused generated-crate check because built-in
+`GATKPath.toPath()` support now emits the real JDK `Path` surface. The
+reused-optional borrowed source argument row was removed from the failure
+baseline, and the nearby borrowed-varargs fixture is compile-backed.
+
+Follow-up 2026-08-29: unresolved receiver calls on parsed source receiver types
+no longer impose an external/unknown runtime-object boundary. This keeps a
+source interface as a dyn trait when the call is written through the interface
+but resolution has not attached a concrete method, as in `Distribution d;
+d.value()`. The inherited-implements `this` argument fixture now emits
+`impl Distribution for ConcreteDistribution`, lowers `sampler.sample(self)`, and
+passes its generated-crate check.
+
+Follow-up 2026-08-29: the aggregate neutral idiom generated-crate check now
+passes. The remaining errors were stale generated test harnesses rather than
+translator output: borrowed-slice calls needed a borrowed `Vec`, fallible helper
+returns needed unwrapping, and nested enum tests needed the actual emitted enum
+names. `tests/baselines/idiom-gaps-failures.txt` is now empty apart from its
+header.
+
 1. **Keep the corpus compile test strict.** A single `#[test]` translates every file
    under `examples/` and `rustc --crate-type lib --emit=metadata`s the output,
    with an allow-list checked in at `tests/baselines/corpus-compile-failures.txt`

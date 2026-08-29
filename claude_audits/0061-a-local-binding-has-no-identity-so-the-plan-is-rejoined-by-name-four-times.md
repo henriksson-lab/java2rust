@@ -173,6 +173,14 @@ guards both the single caller and the absence of the old cursor symbols. The
   longer added just because a field contains `T` and some callable mentions
   `T`; `T: Clone` is kept for concrete owned recovery from collection/map
   fields, preserving the `Map<String,T>.get(...).cloned()` case.
+- Follow-up 2026-08-29: source-super/`this(...)` constructor compatibility
+  substitution no longer looks like a general local-binding primitive. The
+  remaining by-name substitution helpers are private and explicitly named
+  `substitute_source_constructor_param_*_by_name_compat`, and
+  `tests/layering.rs::constructor_delegation_name_substitution_stays_fenced`
+  guards that every use remains inside the constructor-delegation section. This
+  preserves existing constructor-flattening behavior while making the name-based
+  residue visible and bounded.
 
 Dimension: phase architecture / information lost between passes.
 
@@ -1009,3 +1017,103 @@ id-less compatibility facts. A stale `BindingId(Local, "value", 0)` constraint
 therefore cannot override usage for `BindingId(Local, "value", 1)`.
 Regression:
 `signature::tests::effective_method_binding_java_type_for_bound_local_does_not_fall_back_by_name`.
+
+Follow-up 2026-08-29: the reusable `SignaturePlan` local lookup surface is now
+binding-keyed. The public name-only helpers for local shape, required local
+shape/plan, and binding mutability were removed; tests that need by-name
+inspection now use test-local unique-name helpers instead of production APIs.
+Duplicate same-name locals remain individually queryable through exact
+`BindingId`s. Regressions:
+`signature::tests::duplicate_local_name_signature_plan_lookup_uses_binding_id`
+and `layering::idless_local_binding_compatibility_surface_stays_explicit`.
+
+Follow-up 2026-08-29: `ShapeEnv`'s collection-view side facts are now bound to
+local identity when resolver `BindingId`s are available. The `keySet()`,
+`values()`, `entrySet()`, mutable entry-value receiver, and `SimpleEntry`
+constructor-value tables still keep a name-keyed compatibility path for id-less
+synthetic inputs, but bound lookups no longer fall back from a current
+same-name declaration to an earlier view fact. Regression:
+`expr_shape::tests::bound_map_view_facts_do_not_fall_back_to_same_name_local`.
+
+Follow-up 2026-08-29: direct production access to the legacy
+`MethodUsageFacts.bindings` name map is now fenced to `usage.rs`, the module
+that owns the scoped compatibility policy. Main consumers (`aliasing`,
+`lower`, `object_model`, `signature`, and `slot_policy`) must use
+`MethodUsageFacts` accessors, `bindings_by_id`, or aggregate binding views
+instead of reaching into `.bindings` directly. Regression:
+`layering::legacy_usage_binding_name_map_is_owned_by_usage_module`.
+
+Follow-up 2026-08-29: aliasing's unresolved handle receiver type lookup now
+asks `MethodUsageFacts::visible_binding_java_type_for_name` for the current
+visible binding instead of scanning whole-method same-name binding history with
+`all_binding_facts()`. A hidden earlier `String handle` can no longer make the
+current `Record handle` look ambiguous and suppress receiver-specific external
+mutation facts. Regression:
+`aliasing::tests::receiver_java_type_for_handle_uses_visible_binding_over_same_name_history`.
+
+Follow-up 2026-08-29: self-mutability propagation now uses exact
+`JavaCallableKey` identity for resolved self-calls instead of rejoining every
+resolved call to a `(declaring_type, name)` pair. The compatibility name path is
+still present for unresolved lambda-body calls, but a read-only overload no
+longer inherits `&mut self` pressure just because another overload with the same
+Java name mutates the receiver. Regression:
+`semantic_facts::usage_self_mutability_propagation_uses_resolved_overload_identity`.
+
+Follow-up 2026-08-29: pre-lowering map-view shape learning now records
+`keySet()`, `values()`, and `entrySet()` receiver facts under the declaration's
+registered access-name alias as well as the source/name spellings. A Java local
+whose source spelling is rewritten for Rust access can therefore still find the
+same live-view side fact later by emitted binding name. Regression:
+`expr_shape::tests::map_view_shape_learning_preserves_access_name_alias`.
+
+Follow-up 2026-08-29: pre-lowering `Map.Entry` shape learning now records the
+same binding-aware side facts as lowering for entries produced by
+`map.entrySet().iterator().next()` or by `new AbstractMap.SimpleEntry(k, v)`.
+The entry-value receiver and simple-entry key/value tables are stored under the
+resolver binding when available, and under the source/access-name spellings for
+compatibility. Regression:
+`expr_shape::tests::map_entry_shape_learning_preserves_access_name_alias`.
+
+Follow-up 2026-08-29: the broad
+`MethodUsageFacts::binding_for_declaration` compatibility wrapper is gone.
+Signature and slot-policy parameter paths now call
+`binding_for_declaration_with_name_fallback(..., param.binding.is_none())`
+directly, so resolver-bound parameters stay exact and the remaining name
+fallback is explicit at the id-less compatibility boundary. Regression:
+`layering::signature_uses_usage_binding_policy_for_legacy_name_fallback`.
+
+Follow-up 2026-08-29: id-less compatibility lookups that find a live
+`BindingId` in the legacy name map now return the authoritative
+`bindings_by_id` fact instead of the name-map payload. The name map can still
+admit genuine id-less facts behind the existing ambiguity gate, but a stale
+name entry can no longer carry a different Java type or use list after it has
+validated against a live binding id. Regression:
+`usage::tests::binding_name_fallback_returns_authoritative_live_id_fact`.
+
+Follow-up 2026-08-29: the signature heuristic for "returns a local initialized
+from a call" no longer stores a flat set of call-derived local names. It now
+tracks a scoped visible alias map, so an inner block declaration named like an
+outer local cannot leak a call-result fact into the outer return, and assigning a
+non-call value back into the visible local clears the alias. This leaves the
+remaining name-only compatibility surface explicit while removing one more
+shadowing-sensitive silent signature input. Regressions:
+`signature::tests::call_result_alias_for_visible_local_still_detected`,
+`signature::tests::call_result_alias_from_inner_shadow_does_not_leak_by_name`,
+and
+`signature::tests::call_result_alias_is_cleared_by_visible_reassignment`.
+
+Follow-up 2026-08-29: the returned-local source-call nullability helper no
+longer keeps a stale call-derived state after a visible declaration or
+assignment changes the local to a non-source-call value. Declarations and
+assignments now replace the current visible state, or clear it when the new
+value is not a same-type source call, so `value = "literal"; return value;`
+cannot inherit the nullability of an earlier `value = helper()` by name.
+Regression:
+`signature::tests::returned_local_initializer_call_nullability_clears_visible_reassignment`.
+
+Follow-up 2026-08-29: borrowed-return parameter content policy no longer lets a
+resolver-bound parameter satisfy the return precondition through
+`method_exactly_returns_param`, which only scans returned names. Bound
+parameters must now carry an exact `BindingUse::Returned`; the name-only return
+scan is reserved for id-less compatibility. Regression:
+`slot_policy::tests::borrowed_return_param_content_requires_exact_returned_binding_when_param_bound`.

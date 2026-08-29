@@ -576,11 +576,7 @@ pub fn interface_surface_is_handle_forwardable(
     while let Some(class) = current {
         let mutates = class.members.iter().any(|member| match member {
             Member::Method(method) if !method.modifiers.contains(&Modifier::Static) => usage
-                .methods
-                .get(&crate::usage::UsageMethodKey {
-                    type_name: class.name.clone(),
-                    method_name: method.name.clone(),
-                })
+                .source_method_usage(class, method)
                 .is_some_and(|facts| facts.mutates_self),
             _ => false,
         });
@@ -615,11 +611,10 @@ pub fn interface_surface_is_handle_forwardable(
                     .iter()
                     .any(|name| name == interface_name)
                     && usage
-                        .methods
-                        .get(&crate::usage::UsageMethodKey {
-                            type_name: implementor.name.clone(),
-                            method_name: method.name.clone(),
-                        })
+                        .source_method_usage_for_owner(
+                            crate::java_signature::JavaOwnerKey::source_type(implementor),
+                            method,
+                        )
                         .is_some_and(|facts| facts.mutates_self)
             })
         })
@@ -1913,6 +1908,18 @@ class Growing implements Shape {
 "#;
         assert!(!forwardable(source, "Fixed"));
         assert!(!forwardable(source, "Growing"));
+    }
+
+    #[test]
+    fn camel_case_mutating_interface_method_blocks_forwarding() {
+        let source = r#"
+interface Shape { void resetSize(); }
+class Fixed implements Shape {
+    private int s;
+    public void resetSize() { s = 0; }
+}
+"#;
+        assert!(!forwardable(source, "Fixed"));
     }
 
     /// A type implementing nothing of ours has no surface to forward through.

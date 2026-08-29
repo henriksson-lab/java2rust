@@ -651,6 +651,7 @@ pub enum NativeJavaStaticMethod {
     OptionalOf,
     OptionalOfNullable,
     ObjectsEquals,
+    ObjectsToString,
     ObjectsNonNull,
     ObjectsIsNull,
 }
@@ -928,7 +929,8 @@ pub fn native_java_call_lowered_type(target: &CallTargetPlan<'_>) -> Option<Lowe
             method:
                 NativeJavaStaticMethod::StringFormat
                 | NativeJavaStaticMethod::StringJoin
-                | NativeJavaStaticMethod::StringValueOf,
+                | NativeJavaStaticMethod::StringValueOf
+                | NativeJavaStaticMethod::ObjectsToString,
         } => Some(LoweredType::Slot(Box::new(
             crate::shape_projection::owned_string_value_shape(),
         ))),
@@ -4091,6 +4093,7 @@ fn plan_native_java_static_owner_call<'a>(
             NativeJavaStaticMethod::OptionalOfNullable
         }
         ("Objects", "equals") => NativeJavaStaticMethod::ObjectsEquals,
+        ("Objects", "toString" | "to_string") => NativeJavaStaticMethod::ObjectsToString,
         ("Objects", "nonNull" | "non_null") => NativeJavaStaticMethod::ObjectsNonNull,
         ("Objects", "isNull" | "is_null") => NativeJavaStaticMethod::ObjectsIsNull,
         _ => return None,

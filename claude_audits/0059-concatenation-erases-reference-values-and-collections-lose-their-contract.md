@@ -11,6 +11,32 @@ downcast evidence, platform support, or an explicit external display-capability
 fact is available.
 Kind: behavioural (differential), JDK facades / collections / enums.
 
+Follow-up 2026-08-29 entry-set unsupported mutation pass:
+`Map.entrySet().add(...)` and `Map.entrySet().addAll(...)` now follow Java's
+live-view contract by raising `UnsupportedOperationException` instead of
+falling through to an unmodelled collection call. The lowering mirrors the
+existing `keySet`/`values` unsupported mutation paths and evaluates the backing
+map plus arguments before returning the Java exception result. Promoted
+differential fixtures:
+`tests/differential/MapEntrySetAddUnsupported.java` and
+`tests/differential/MapEntrySetAddAllUnsupported.java`.
+
+Follow-up 2026-08-29 baseline pass: six collection/view/value-carrier rows were
+verified passing and removed from `tests/baselines/idiom-gaps-failures.txt`.
+The current tree now covers borrowed array slice argument views, `Map.put/get`
+API shape, optional sequence `get` unwrapping into concrete slots,
+`SimpleInterval` list element adaptation to `Locatable`, boxed dyn trait
+collection elements, and `TwoBitReference` reference-sequence getter shape.
+Verified:
+`array_arguments_use_borrowed_slice_views`,
+`documents_map_put_get_java_api_gap`,
+`optional_sequence_get_unwraps_receiver_for_concrete_slot`,
+`sequence_get_adapts_simple_interval_to_locatable_slot`,
+`source_interface_collection_elements_use_boxed_dyn_trait`, and
+`two_bit_reference_get_reference_bases_returns_reference_sequence`. The audit
+remains open for genuinely unknown erased external display and any remaining
+live-view mutation residues.
+
 Updated 2026-08-28: native map carriers now have an explicit Java display
 coercion for string concatenation/display slots. `HashMap`, `BTreeMap`, and the
 insertion-ordered `JavaLinkedHashMap` path render through `java_map_to_string`
@@ -945,7 +971,7 @@ override a known mutating receiver call. Covered by
 (`true,false,2,true,false,1`),
 `slot_shape_design::native_collection_add_all_argument_boundary_borrows_source_content`,
 and `slot_shape_design::stdlib_signature_facts_include_jdk_collection_rust_abi_slots`.
-The differential suite is now at 195 fixtures.
+The differential suite is now at 218 fixtures.
 
 Follow-up 2026-08-28 typed `Map.Entry` parameter pass:
 `values.entrySet().contains(entry)` and `values.entrySet().remove(entry)` now
@@ -960,7 +986,7 @@ and slot lowering, avoiding the previous fallback to invalid Rust iterator
 `lower::tests::map_entry_set_remove_typed_entry_param_uses_key_value_projection`,
 `tests/differential/MapEntrySetContainsParam.java` (`true,false,1`), and
 `tests/differential/MapEntrySetRemoveParam.java` (`false,true,0,false`).
-The differential suite is now at 199 fixtures.
+The differential suite is now at 218 fixtures.
 
 Follow-up 2026-08-28 `SimpleImmutableEntry` pass:
 `AbstractMap.SimpleImmutableEntry<K,V>` now follows the same tuple key/value
@@ -969,7 +995,7 @@ entry-set equality checks. This covers the immutable JDK pair shape without
 adding a separate opaque facade or erased-object display fallback. Covered by
 `lower::tests::simple_immutable_map_entry_uses_same_key_value_pair_path` and
 `tests/differential/MapEntrySimpleImmutableEntry.java` (`xa=1,true,false`).
-The differential suite is now at 201 fixtures.
+The differential suite is now at 218 fixtures.
 
 Follow-up 2026-08-28 internal `Map` carrier pass:
 private source methods declared against broad collection interfaces can now
@@ -1022,3 +1048,195 @@ therefore collects `(K, V)` tuples from the backing map instead of falling
 through to an unresolved facade call. Covered by
 `tests/idiom_gaps.rs::map_entry_set_constructor_collects_hashset_for_set_slot`
 with generated-crate compilation.
+
+Follow-up 2026-08-29 typed `Map.Entry` display pass:
+map-entry display now reuses the stable typed entry key/value projection that
+already backs `entrySet().contains(entry)` and `entrySet().remove(entry)`.
+Tracked `SimpleEntry` locals still use their recorded constructor key/value
+expressions, but a typed parameter or field with a recoverable tuple carrier
+formats as `key=value` instead of falling back to erased-object display.
+Covered by
+`lower::tests::typed_map_entry_parameter_display_uses_key_value_projection`.
+
+Follow-up 2026-08-29 non-stable `Map.Entry` display pass:
+call expressions and other non-stable expressions with a recoverable
+`Map.Entry<K,V>` tuple carrier now lower once into a temporary before
+formatting `.0` and `.1` as `key=value`. This closes the method-return shape
+that could not use the stable var/field projection path and otherwise fell
+through to tuple display. Covered by
+`lower::tests::map_entry_return_call_display_uses_single_tuple_projection`.
+Remaining entry residue is still arbitrary opaque `Map.Entry` values whose
+carrier cannot be decomposed structurally.
+
+Follow-up 2026-08-29 map-view identity pass:
+tracked `keySet()`, `values()`, `entrySet()`, `Map.Entry` value receivers, and
+`SimpleEntry` constructor values are now stored by resolver `BindingId` when the
+view local is bound. Id-less compatibility locals still use the legacy name map,
+but a same-name redeclaration no longer inherits a stale backing map or
+constructor key/value pair from an earlier local. Covered by
+`expr_shape::tests::bound_map_view_facts_do_not_fall_back_to_same_name_local`.
+
+Follow-up 2026-08-29 `Map.Entry` carrier audit:
+the suspected opaque typed-entry display residue is not valid against the
+current slot renderer. `java.util.Map.Entry<K,V>` is intentionally represented
+as `(K,V)` both at top-level slot positions and nested generic-argument
+positions, so the typed display helper's `.0`/`.1` projection is backed by the
+same carrier invariant as `entrySet().contains(entry)` and `setValue` lowering.
+Covered by
+`slot_render::tests::map_entry_renders_as_tuple_at_slot_and_generic_positions`.
+The remaining entry residue is limited to expressions that are not typed as
+`Map.Entry<K,V>` or cannot otherwise expose a key/value pair.
+
+Follow-up 2026-08-29 platform erased-display coverage:
+the platform erased-object display table already includes the modeled JDK
+carriers used by current corpus fixtures. Added generated-crate checks for
+`File.toPath()`/`Path`, `URL`, and `Random` erased through `Object`; together
+with the existing `File`, `URI`, and `System.in`/`InputStream` checks, this
+keeps the loud erased fallback limited to unsupported runtime carriers.
+Covered by
+`tests/slot_shape_design.rs::erased_path_object_display_delegates_to_path_display`,
+`tests/slot_shape_design.rs::erased_url_object_display_delegates_to_url_display`,
+and
+`tests/slot_shape_design.rs::erased_random_object_display_uses_platform_identity_display`.
+
+Follow-up 2026-08-29 plain `Object` erased boundary check:
+the `Object` constructor fixture now asserts the current runtime carrier:
+`new Object()` erases to `Box::new(JavaPlainObject::new())` rather than the old
+unit placeholder. This keeps default object display/identity support observable
+through the erased boundary. Covered by
+`tests/slot_shape_design.rs::java_object_return_type_lowers_to_erased_any_boundary`.
+
+Follow-up 2026-08-29 live `Map.values()` view mutation pass:
+`Collection.removeAll` on a tracked `Map.values()` view now mutates the backing
+map rather than a materialized values snapshot. The lowering stores the removal
+collection once, borrows the backing map once, retains entries whose values are
+not in the removal collection, and returns whether the backing map length
+changed. `JavaLinkedHashMap` gained the same `retain` support method so native
+and insertion-ordered map carriers share the expression shape. Covered by
+`lower::tests::map_values_alias_remove_all_mutates_backing_map` and
+`tests/differential/MapValuesRemoveAll.java` (`true,false,1,1,false,true` on
+both Java and generated Rust).
+
+Follow-up 2026-08-29 live `Map.values()` unsupported mutator pass:
+`Collection.add` and `Collection.addAll` on a tracked `Map.values()` view now
+raise `UnsupportedOperationException` instead of falling through to native
+collection mutation on a materialized values snapshot. The lowering evaluates
+the backing map and arguments, then emits a Java exception result in catchable
+contexts or the existing uncaught-exception panic recovery outside them.
+Covered by
+`lower::tests::map_values_alias_add_throws_unsupported_operation_exception` and
+`tests/differential/MapValuesAddUnsupported.java`
+(`add-unsupported,1,false,addAll-unsupported,1,false` on both Java and
+generated Rust).
+
+Follow-up 2026-08-29 display-sink baseline cleanup:
+the display-sink inferred method surface tests now both pass in the current
+tree. `sequenceFile.name()` and `record.sequenceFile.name()` used as
+`StringBuffer.append(...)` arguments both emit a `SequenceFile::name() ->
+String` facade surface rather than a unit-returning stub. The stale
+`omitted_context_receiver_method_used_in_display_sink_gets_string_stub` entry
+was removed from `tests/baselines/idiom-gaps-failures.txt`; no code change was
+needed for this subcase. The audit remains open for erased/unknown display
+capability and collection contract residue recorded above.
+
+Follow-up 2026-08-29 package-qualified external display pass:
+modeled external `toString(): String` display capability is now scoped to the
+fact owner rather than the owner's simple name. This keeps erased-object display
+support for the modeled package-qualified carrier while preventing a same-simple
+package peer from inheriting a downcast arm it cannot satisfy. Covered by
+`tests/slot_shape_design.rs::erased_external_object_display_keeps_package_qualified_to_string_capability_distinct`.
+The remaining erased-display residue is still unsupported runtime carriers with
+no source/platform/model fact evidence.
+
+Follow-up 2026-08-29 live `Map.keySet()` `removeAll` pass:
+`Collection.removeAll` on a tracked `Map.keySet()` view now mutates the backing
+map rather than a materialized key snapshot. The lowering stores the removal
+collection once, borrows the backing map once, retains entries whose keys are
+not in the removal collection, and returns whether the backing map length
+changed. Covered by
+`lower::tests::map_key_set_alias_remove_all_mutates_backing_map` and
+`tests/differential/MapKeySetRemoveAll.java` (`true,false,1,1,false,true` on
+both Java and generated Rust).
+
+Follow-up 2026-08-29 external display capability query pass:
+external facade `Display` delegation now asks
+`external_type_has_display_to_string_capability(facts, ty)` directly instead of
+testing membership in a pre-expanded display-capable set. The derived set still
+feeds erased-object downcast generation, but both paths now share one predicate
+over explicit `toString`/`to_string`, arity-0, `String`-returning facts. The
+query preserves exact/package-qualified and emitted Rust owner aliases while
+refusing same-simple package peers. Covered by
+`stdlib::functional_interface_shape_tests::external_display_capability_query_keeps_package_peers_distinct`,
+`tests/slot_shape_design.rs::erased_external_object_display_without_modeled_to_string_stays_loud`,
+`tests/slot_shape_design.rs::erased_external_object_display_delegates_to_modeled_to_string_surface`,
+and
+`tests/slot_shape_design.rs::erased_external_object_display_keeps_package_qualified_to_string_capability_distinct`.
+
+Follow-up 2026-08-29 platform erased-display policy cleanup:
+the remaining platform erased-display table is now named as
+`PLATFORM_ERASED_DISPLAY_TYPES` and queried through
+`platform_type_has_erased_display_support`, with the special mention rules
+(`System` implies `InputStream`, `File` implies `Path`) separated into
+`platform_erased_display_supporting_type_mentions`. This preserves the current
+JDK carrier behavior while making the platform exception policy explicit
+instead of embedding it in the downcast loop. Covered by
+`stdlib::functional_interface_shape_tests::platform_erased_display_support_is_explicit`
+and the existing platform erased-display generated-crate tests.
+
+Follow-up 2026-08-29 atomic erased-display parity:
+`java.util.concurrent.atomic.AtomicLong` and `AtomicBoolean` now have the same
+platform facade and erased-object display path as `AtomicInteger`: imports
+activate the support type, state access/update methods lower to cell-backed
+facades, and erased `Object` display emits downcast arms for atomic handles.
+Covered by
+`tests/idiom_gaps.rs::java_atomic_long_uses_platform_facade_methods`,
+`tests/idiom_gaps.rs::java_atomic_boolean_uses_platform_facade_methods`,
+`tests/slot_shape_design.rs::erased_atomic_long_object_display_delegates_to_atomic_display`,
+`tests/slot_shape_design.rs::erased_atomic_boolean_object_display_delegates_to_atomic_display`,
+`tests/differential/ErasedAtomicLongDisplay.java` (`x4`), and
+`tests/differential/ErasedAtomicBooleanDisplay.java` (`xfalse`).
+
+Follow-up 2026-08-29 imported package-qualified display capability pass:
+erased-object display downcast generation now keeps the original modeled
+external fact owner while deciding whether a Java source mentions that runtime
+carrier. A fact for `a.ExternalToken.toString(): String` therefore activates the
+`AExternalToken` downcast when source code imports `a.ExternalToken` and refers
+to `ExternalToken` by its simple name, while the capability table still does
+not grant bare `ExternalToken` to every package peer. Covered by the strengthened
+`tests/slot_shape_design.rs::erased_external_object_display_keeps_package_qualified_to_string_capability_distinct`.
+
+Follow-up 2026-08-29 live `Map.keySet()` unsupported mutator pass:
+`Set.add` and `Set.addAll` on a tracked `Map.keySet()` view now raise
+`UnsupportedOperationException` instead of falling through to ordinary
+`HashSet` mutation on a materialized key snapshot. The lowering evaluates the
+backing map and arguments for Java order/side effects, then emits the Java
+exception result in catchable contexts or the existing uncaught-exception panic
+outside them. Covered by
+`lower::tests::map_key_set_alias_add_throws_unsupported_operation_exception`,
+`tests/differential/MapKeySetAddUnsupported.java` (`unsupported,false,1`), and
+`tests/differential/MapKeySetAddAllUnsupported.java` (`unsupported,false,1`).
+
+Follow-up 2026-08-29 typed external collection getter pass:
+body lowering no longer treats a native collection carrier change as an
+erased-object return boundary. In particular, a fact-only `Box<dyn Any>` fallback
+for a modeled external `Set<T>` getter and a representation-aware
+`HashSet<T>` return now keep the body slot typed, so
+`header.get_meta_data_in_input_order()` is returned as a
+`std::collections::HashSet<VCFHeaderLine>` instead of being boxed. The borrowed
+facade return recovery helper also now honors the same erased-target predicate:
+concrete targets recover with `clone()`/`to_path_buf()`, while only erased
+targets box into `Box<dyn Any>`. Covered by
+`tests/idiom_gaps.rs::external_pack_typed_set_and_dictionary_getters_shape_facade_returns`
+and the existing coercion erased-object unit coverage.
+
+Follow-up 2026-08-29 nullable trivial generic getter display pass:
+string concat/display lowering now prefers a storage-aware trivial accessor
+shape before the declared method-return shape for display slots. This matters
+for generic getters such as `Box<T>.get()`: the source return type is `T`, but
+the lowered field carrier can still be `Option<T>`. The conversion path now
+projects that optional carrier before Java display conversion instead of
+rendering `Option<i32>.to_string()`. Covered by
+`tests/type_coercion.rs::optional_element_borrow_display_projects_the_option_carrier`
+and by direct generated-crate checks for `tests/differential/Generics.java`;
+`tests/differential/LambdaMutation.java` was also rechecked to keep the recent
+single-`.as_slice()` cleanup pinned.

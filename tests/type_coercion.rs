@@ -79,7 +79,8 @@ use new_java2rust::member_access_plan::{
 };
 use new_java2rust::parser::{parse_expr, parse_type};
 use new_java2rust::rust_ir::{
-    RustClosureBody, RustClosureParam, RustExpr, RustExprShape, RustMatchArm, RustPattern, RustStmt,
+    RustClosureBody, RustClosureParam, RustExpr, RustExprShape, RustMatchArm, RustPattern,
+    RustStmt, RustType,
 };
 use new_java2rust::slot_shape::{DispatchShape, OwnershipShape, RustSlotShape, ViewShape};
 use new_java2rust::storage_strategy::{Escape, StoragePlan, TypeStorageFacts};
@@ -1493,6 +1494,13 @@ fn borrowed_string_view_projection_owns_rendered_view_compatibility() {
             args: Vec::new(),
         }
     );
+    assert_eq!(
+        apply_borrowed_string_view_projection_expr(
+            "*value.as_str() trailing",
+            &BorrowedStringViewProjection::AlreadyStringView
+        ),
+        RustExpr::Raw("*value.as_str() trailing".to_string())
+    );
 
     let local = borrowed_string_view_projection("*value", Some("value")).unwrap();
     assert_eq!(
@@ -2078,6 +2086,8 @@ fn conversion_plan_wraps_slot_conversion_decisions_before_application() {
             },
         }
     );
+    let mut optional_element_shape = RustSlotShape::conservative(JavaType::String);
+    optional_element_shape.ownership = OwnershipShape::SharedBorrow;
     assert_eq!(
         apply_lowered_slot_expr_conversion(
             LoweredExpr {
@@ -2086,7 +2096,15 @@ fn conversion_plan_wraps_slot_conversion_decisions_before_application() {
             },
             &lowered_plan,
         ),
-        RustExpr::Var("value".to_string())
+        RustExpr::shaped_as(
+            RustExprShape::OptionalProjected,
+            Some(optional_element_shape),
+            RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Var("value".to_string())),
+                method: "as_ref".to_string(),
+                args: Vec::new(),
+            },
+        )
     );
 }
 
@@ -2213,6 +2231,37 @@ fn borrowed_whole_optional_string_recovery_uses_borrowed_carrier_policy() {
             ..
         })
     ));
+}
+
+#[test]
+fn optional_element_borrow_display_projects_the_option_carrier() {
+    let option_shape =
+        RustSlotShape::conservative(optional_java_type(JavaType::Primitive(PrimitiveType::Int)));
+    let mut element_shape = RustSlotShape::conservative(JavaType::Primitive(PrimitiveType::Int));
+    element_shape.ownership = OwnershipShape::SharedBorrow;
+    let actual = LoweredType::OptionalElementBorrow {
+        option_shape: Box::new(option_shape),
+        element_shape: Box::new(element_shape),
+        recovery: None,
+    };
+    let plan =
+        plan_lowered_slot_conversion(&actual, Slot::StringConcatSegment, &FactSet::default());
+
+    let converted = apply_lowered_slot_expr_conversion(
+        LoweredExpr {
+            expr: RustExpr::Field(
+                Box::new(RustExpr::Var("box_value".to_string())),
+                "value".to_string(),
+            ),
+            actual,
+        },
+        &plan,
+    );
+
+    assert_eq!(
+        emit_expr(&converted),
+        "box_value.value.as_ref().map(|value| value.to_string()).unwrap_or_else(|| \"null\".to_string())"
+    );
 }
 
 #[test]
@@ -3717,6 +3766,26 @@ fn java_platform_zip_output_stream_converts_to_output_stream_slot() {
 }
 
 #[test]
+fn external_upcast_coercion_uses_adapter_into_projection_at_use_site() {
+    let rendered = apply_coercions(
+        RustExpr::Var("zip".to_string()),
+        &[Coercion::ExternalInto {
+            from_type: JavaType::Named {
+                name: "ZipOutputStream".to_string(),
+                args: Vec::new(),
+            },
+            to_type: JavaType::Named {
+                name: "OutputStream".to_string(),
+                args: Vec::new(),
+            },
+        }],
+    );
+
+    assert_eq!(emit_expr(&rendered), "zip.into()");
+    assert!(!matches!(rendered.into_unshaped(), RustExpr::Raw(_)));
+}
+
+#[test]
 fn java_platform_file_input_stream_converts_to_input_stream_slot() {
     let actual = RustSlotShape::conservative(JavaType::Named {
         name: "FileInputStream".to_string(),
@@ -3895,9 +3964,15 @@ fn optional_display_segments_use_java_null_string_policy_before_rendering() {
                     }],
                     return_type: None,
                     body: RustClosureBody::Expr(Box::new(RustExpr::Call {
-                        function: Box::new(RustExpr::Raw(
-                            "std::convert::AsRef::<str>::as_ref".to_string(),
-                        )),
+                        function: Box::new(RustExpr::GenericPath {
+                            base: vec![
+                                "std".to_string(),
+                                "convert".to_string(),
+                                "AsRef".to_string(),
+                            ],
+                            args: vec![RustType::Named("str".to_string())],
+                            member: Some("as_ref".to_string()),
+                        }),
                         args: vec![RustExpr::Var("value".to_string())],
                     })),
                 }],
@@ -4486,7 +4561,7 @@ fn map_view_owned_snapshots_record_recovery_shape() {
     );
     assert_eq!(
         emit_expr(&erased_object_snapshot),
-        "values.iter().map(|value| java_clone_erased_object_ref(value)).collect::<Vec<_>>()"
+        "values.iter().map(|value| Some(java_clone_erased_object_ref(value))).collect::<Vec<_>>()"
     );
     assert_eq!(
         erased_object_snapshot.clone().into_unshaped(),
@@ -4506,10 +4581,13 @@ fn map_view_owned_snapshots_record_recovery_shape() {
                         ty: None,
                     }],
                     body: RustClosureBody::Expr(Box::new(RustExpr::Call {
-                        function: Box::new(RustExpr::Var(
-                            "java_clone_erased_object_ref".to_string(),
-                        )),
-                        args: vec![RustExpr::Var("value".to_string())],
+                        function: Box::new(RustExpr::Var("Some".to_string())),
+                        args: vec![RustExpr::Call {
+                            function: Box::new(RustExpr::Var(
+                                "java_clone_erased_object_ref".to_string(),
+                            )),
+                            args: vec![RustExpr::Var("value".to_string())],
+                        }],
                     })),
                 }],
             }),

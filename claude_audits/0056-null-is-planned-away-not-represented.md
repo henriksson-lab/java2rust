@@ -7,6 +7,87 @@ to compile or panic instead of reaching translated control flow, and unknown
 erased-object display still has no dynamic Java `toString` recovery.
 Kind: semantics / lowering.
 
+Follow-up 2026-08-29 nullable array/out-parameter pass:
+nullable array argument fixtures now match the checked-array/`Result` lowering
+instead of stale unchecked expectations, and the two remaining known gaps in
+this cluster were removed from the `idiom-gaps` failure baseline. Static
+mutating-argument analysis now treats `System.arraycopy` argument 2 as the
+destination write through the same shared predicate used for `Arrays` and
+`Collections`; signature analysis no longer has its narrower `Arrays.sort`
+duplicate. Fallible array indexing also recognizes nullable sequence receivers
+through shaped/grouped/`?` wrappers, avoiding the invalid
+`&input.as_ref().as_ref().ok_or_else(...)?` borrow for `Option<&[T]>`.
+Regressions:
+`tests/idiom_gaps.rs::local_array_argument_to_nullable_out_parameter_stays_owned_vec`,
+`tests/idiom_gaps.rs::nullable_mutable_array_helper_return_count_keeps_caller_storage_owned`,
+`tests/idiom_gaps.rs::nullable_borrowed_array_param_passes_to_slice_helper_without_extra_as_slice`,
+`tests/idiom_gaps.rs::nullable_read_only_array_parameters_lower_as_optional_borrowed_slices`,
+`tests/idiom_gaps.rs::nullable_out_parameter_reborrows_for_recursive_call_before_reuse`,
+and
+`lower::tests::fallible_array_index_read_collapses_redundant_catchable_optional_sequence_as_ref`.
+The audit remains open for broader non-argument null representation and unknown
+erased display.
+
+Follow-up 2026-08-29 write-side nullable array receiver pass:
+optional mutable sequence receivers now use the same catchable Java-null
+projection as optional read receivers when lowering inside a propagating
+`try/catch` context. A write such as `values[0] = 1` where `values` is a null
+array now emits `values.as_mut().ok_or_else(...NullPointerException...)?`
+instead of panicking through `.expect("Java null receiver")`, while
+non-propagating contexts keep the existing local unwrap. Regression:
+`tests/idiom_gaps.rs::nullable_array_write_null_receiver_in_try_is_catchable`.
+
+Follow-up 2026-08-29 source receiver mutability in while-assignment pass:
+signature planning now applies parsed source-method receiver mutability to
+parameters used as method receivers, not only external receiver effects. A
+parameter `Cursor cursor` passed to `cursor.read()`/`cursor.advance()` now
+becomes `&mut Cursor` when those source methods mutate `self`, including when
+the receiver call is nested inside a while-condition assignment. This removes
+the generated `cannot borrow *cursor as mutable, as it is behind a & reference`
+failure from `tests/differential/WhileAssignmentNullVariantsRuntime.java`.
+Regressions:
+`tests/slot_shape_design.rs::signature_plan_refines_assignment_null_loop_return_to_non_optional`
+and `tests/idiom_gaps.rs::documents_while_assignment_null_variants_gap`; the
+runtime fixture was also regenerated and compiled as a Rust library.
+
+Follow-up 2026-08-29 primitive parse nullable receiver pass:
+primitive parse lowering now distinguishes Java's two null contracts. Integral
+`Byte`/`Short`/`Integer`/`Long` parse calls route nullable string receivers
+through the Java `"null"` input spelling so null is caught as
+`NumberFormatException`; `Float`/`Double` parse calls keep Java's
+`NullPointerException` behavior by lowering optional receivers through a
+catchable `ok_or_else(...NullPointerException...)?` in propagating contexts.
+The nullable integral rewrite was consolidated in `coercion` and reused by both
+native-call lowering paths, removing the previous `lower.rs` duplicate.
+Regressions:
+`call_lowering::tests::integral_parse_native_fallback_maps_optional_string_arg_to_number_format_input`,
+`coercion::tests::primitive_parse_projection_owns_parse_call_spelling`, and the
+full `tests/differential.rs::translated_output_matches_java_output` suite
+covering `IntegerParseNull`, `LongParseNull`, `NarrowParseNull`,
+`FloatingParseNull`, and `IntegralParseRadix`.
+
+Follow-up 2026-08-29 `Objects.nonNull`/`Objects.isNull` pass:
+native `java.util.Objects` null predicates now avoid the nullable-argument ABI
+when the source argument already has a Rust `Option` carrier. Already-lowered
+`Some(value)` arguments fold to constants, shaped `value.as_ref()` arguments are
+normalized back to `value.is_some()`/`value.is_none()`, and definitely non-null
+borrowed parameters fold to `true`/`false`. Regression:
+`tests/idiom_gaps.rs::java_objects_null_predicates_lower_from_rust_option_shape`.
+Broader non-argument catchable null coercions and unknown erased display remain
+open.
+
+Follow-up 2026-08-29 primitive `Map.get` required-slot pass:
+primitive values read from optional borrowed map entries now use the same
+catchable null rewrite in propagating ternary/required-slot contexts as the
+arithmetic path. `values.containsKey(k) ? values.get(k) : 0` inside a
+`try/catch (NullPointerException)` lowers the `.copied().expect("Java null
+receiver")` branch through `ok_or_else(...NullPointerException...)?`, so the
+catch block can observe the Java null unboxing failure. Regressions:
+`tests/idiom_gaps.rs::map_get_in_ternary_primitive_slot_unwraps_and_copies_value`,
+`tests/idiom_gaps.rs::map_get_in_ternary_primitive_slot_null_unwrap_is_catchable`,
+and
+`tests/idiom_gaps.rs::map_get_primitive_value_in_arithmetic_unboxes_optional_borrow`.
+
 Follow-up 2026-08-28 nullable OutputStream receiver pass:
 nullable JDK facade receivers for result-returning calls now use the fallible
 optional receiver projection when the current context can propagate
@@ -45,6 +126,15 @@ without moving the `Option<String>` out of the parameter. Regression:
 `tests/idiom_gaps.rs::source_nullable_field_getter_returns_optional_string`.
 This narrows a compile failure in nullable constructor/body lowering; it does
 not close the broader null representation or unknown erased-display model work.
+
+Follow-up 2026-08-29: the matching context-source nullable getter fixture now
+passes with the same optional field shape and no longer belongs in the
+`idiom-gaps` failure baseline. Removed the stale
+`context_source_nullable_field_getter_keeps_optional_field_shape` baseline entry
+after verifying it alongside
+`source_nullable_field_getter_returns_optional_string`. This is baseline
+hygiene for the existing nullable getter mitigation; broader non-argument
+catchable null coercions and unknown erased display remain open.
 
 Follow-up 2026-08-26: catchable Java-null rewriting now covers more structured
 expression positions that could still preserve `.expect("Java null receiver")`
@@ -288,6 +378,16 @@ receiver unwrap. The focused `integer_parse_int_unwraps_sequence_get_argument`
 fixture and `lower::tests::integral_parse_nullable_arg_maps_raw_optional_string_expect_null_to_number_format_input`
 pin the field/list-get shape.
 
+Updated 2026-08-29 structured parse follow-up: integral parse lowering now also
+looks through structured `.as_str()` wrappers around nullable string carriers.
+That keeps `List<String>.get(...)` and `Map<String, String>.get(...)` parse
+arguments on Java's `Integer.parseInt(null)` path: the nullable input becomes
+the display string `"null"` and parsing reports `NumberFormatException`, rather
+than lowering through a synthetic null-receiver `NullPointerException`.
+`integer_parse_int_nullable_sequence_element_is_number_format_exception`,
+`integer_parse_int_unwraps_sequence_get_argument`, and
+`optional_map_string_get_flows_into_string_value_contexts` pin the fixed shapes.
+
 Updated 2026-08-25 enum `valueOf` follow-up: source enum `valueOf` now gets
 the first slot-lowering opportunity before the generic static-call fallback,
 and unresolved static-owner value placeholders no longer preempt one-argument
@@ -298,6 +398,25 @@ static call or an `Option<&String>: AsRef<str>` type error.
 `optional_map_string_get_flows_into_source_enum_value_of_inside_try_assignment`,
 `optional_map_string_get_flows_into_top_level_source_enum_value_of`, and
 `documents_enum_name_value_of_java_api_gap` pin the fixed paths.
+
+Follow-up 2026-08-29 baseline pass: five more now-passing 0056 fixtures were
+removed from `tests/baselines/idiom-gaps-failures.txt`:
+`guarded_nullable_copy_constructor_reads_source_fields_after_unwrap`,
+`integer_parse_int_unwraps_sequence_get_argument`,
+`optional_map_string_get_flows_into_source_enum_value_of_inside_try_assignment`,
+`optional_map_string_get_flows_into_top_level_source_enum_value_of`, and
+`same_class_nullable_string_field_hash_code_method_uses_runtime_helper`. This is
+baseline hygiene for already-fixed shapes, not closure of the remaining null
+representation audit.
+
+Follow-up 2026-08-29 baseline pass: three more nullable receiver/branch fixtures
+were confirmed passing and removed from the idiom-gaps expected-failure
+baseline: `map_get_optional_receiver_to_string_uses_java_null_receiver_policy`,
+`null_guarded_ternary_append_argument_uses_refined_local_once`, and
+`borrowed_nullable_trim_equals_original_uses_optional_string_view_policy`. This
+keeps the baseline from hiding already-fixed catchable/display/nullability
+paths; the broader null representation and unknown erased-display work remain
+open.
 
 Updated 2026-08-25 while-assignment follow-up: the runtime form of
 `while ((row = cursor.read()) == null) { ... } return row;` now compiles and
@@ -337,6 +456,44 @@ so `values().entrySet()` and `holder.getValues().entrySet()` lower through
 and
 `tests/idiom_gaps.rs::map_entry_set_iterator_next_get_key_uses_receiver_signature_shape`;
 the latter is promoted out of the idiom-gaps failure baseline.
+
+Follow-up 2026-08-29: source-summary nullable method returns now keep their
+optional local carrier when initialized from a summary-only receiver call.
+The body lowering gives source-summary declared return nullability priority over
+the concrete signature fallback, and return-slot selection no longer throws away
+a solved optional return just because the declared Java return is a
+source-summary type. Regressions:
+`tests/idiom_gaps.rs::source_summary_nullable_return_into_optional_local_does_not_double_wrap`,
+`tests/idiom_gaps.rs::source_summary_nullable_return_into_concrete_local_unwraps_once`,
+`tests/idiom_gaps.rs::nullable_source_call_through_field_receiver_stays_optional_without_double_wrap`,
+and
+`lower::tests::source_summary_nullable_receiver_call_shape_is_optional`.
+
+Follow-up 2026-08-29 baseline pass: two more nullable tests were stale rather
+than active failures. Reference-array default null elements now allocate through
+`repeat_with(|| None)` rather than the old `vec![None; n]` spelling while
+preserving the same nullable element semantics. Parsed source-call local
+initializers with nullable return shapes now return the optional local directly
+instead of unwrapping at the method boundary. Verified:
+`tests/idiom_gaps.rs::reference_array_element_null_comparison_reads_nullable_element`
+and
+`tests/idiom_gaps.rs::solved_local_plan_inherits_nullable_source_call_initializer`;
+the latter was removed from the idiom-gaps expected-failure baseline.
+
+Follow-up 2026-08-29 baseline pass: nullable source-interface forwarding was
+also a stale assertion. The generated trait surface now widens `String getID()`
+to `fn get_i_d(&self) -> Option<String>`, and the concrete impl forwards the
+optional value without injecting an eager `expect("Java null receiver")` at the
+trait boundary. Verified:
+`tests/idiom_gaps.rs::source_interface_trait_impl_unwraps_nullable_implementation_return`.
+
+Follow-up 2026-08-29 baseline pass: nullable source-enum switch fixtures were
+also stale assertions after enum type rendering preserved the owner/member path
+boundary with an underscore. The generated code still keeps nullable enum
+storage and compares/matches through `Some(Enum::VALUE)`. Verified:
+`tests/idiom_gaps.rs::nullable_source_enum_field_switch_keeps_concrete_enum_storage`
+and
+`tests/idiom_gaps.rs::nullable_source_enum_fallthrough_switch_labels_wrap_some`.
 
 Method: differential testing against `javac`/`java` as oracle, per the recipe in
 `tests/differential.rs`. Every claim below is a *verified* Java-output vs.
@@ -939,7 +1096,7 @@ optional-erased predicate, so `Object value = null; String.valueOf(value)`
 lowers through `as_ref().map(...).unwrap_or_else(|| "null".to_string())`
 instead of calling `java_erased_object_to_string(&value)` on the `Option`
 carrier. Promoted differential fixture: `StringValueOfNullObject`, which
-matches Java's `null` oracle. The differential suite is now at 193 fixtures.
+matches Java's `null` oracle. The differential suite is now at 218 fixtures.
 
 Follow-up 2026-08-28: the fully-qualified optional
 `java.io.ByteArrayOutputStream` path is no longer baseline-listed. The generated
@@ -963,3 +1120,171 @@ route through a shared valueOf display helper, and the final call lowering
 recovers terminal `expect("Java null receiver")` chains before applying the
 optional-string display projection. Regression:
 `tests/idiom_gaps.rs::string_value_of_nullable_string_preserves_java_null_spelling`.
+
+Follow-up 2026-08-29: stream source calls whose return shape is nullable now
+carry that optional sequence evidence into stream rendering. A source such as
+`maybe().stream()` where `maybe()` returns `null` no longer lowers as
+`Self::maybe().into_iter()` over the `Option` carrier. Regression:
+`tests/idiom_gaps.rs::nullable_stream_source_call_in_try_lowers_to_catchable_npe`.
+
+Follow-up 2026-08-29: optional borrowed and mutable-borrowed sequence sources
+now use the same catchable null receiver policy as owned optional sequence
+sources when Java exception propagation is active. The propagated forms lower
+through `as_ref().ok_or_else(...)? .iter()` and
+`as_mut().ok_or_else(...)? .iter_mut()` instead of panicking with
+`expect("Java null receiver")` inside a `try` translation. Regression:
+`coercion::tests::jdk_collection_static_projections_own_expression_shapes`.
+
+Follow-up 2026-08-29: erased `Object` display now covers the existing
+`AtomicInteger` platform facade. `AtomicInteger` implements `Display` by
+reading its current cell value, and the erased-object display table emits
+`AtomicInteger`/`Rc<AtomicInteger>`/`Arc<AtomicInteger>` downcast arms when the
+platform type appears in the source surface. Promoted differential fixture:
+`ErasedAtomicIntegerDisplay`, which matches Java after mutating through
+`incrementAndGet` (`x4`). This is still a platform-carrier mitigation;
+arbitrary unknown erased display without source/platform/fact evidence remains
+open.
+
+Follow-up 2026-08-29: erased `Object` display now has parity for
+`AtomicLong`. The platform facade mirrors `AtomicInteger` with an `i64` cell,
+state-changing `incrementAndGet`/`getAndIncrement`, and `Display` over the
+current value. The platform erased-display table emits `AtomicLong`,
+`Rc<AtomicLong>`, and `Arc<AtomicLong>` downcast arms when the type appears in
+the source surface. Promoted differential fixture: `ErasedAtomicLongDisplay`
+(`x4`). This remains a platform-carrier mitigation; arbitrary unknown erased
+display without source/platform/fact evidence remains open.
+
+Follow-up 2026-08-29: erased `Object` display also has parity for
+`AtomicBoolean`. The platform facade uses a `bool` cell and covers `get`,
+`set`, `getAndSet`, `compareAndSet`, and `Display` over the current Java
+boolean spelling. The platform erased-display table emits `AtomicBoolean`,
+`Rc<AtomicBoolean>`, and `Arc<AtomicBoolean>` downcast arms when the type
+appears in the source surface. Promoted differential fixture:
+`ErasedAtomicBooleanDisplay` (`xfalse`). This remains a platform-carrier
+mitigation; arbitrary unknown erased display without source/platform/fact
+evidence remains open.
+
+Follow-up 2026-08-29: `java.util.Objects.toString` now has native call
+planning/lowering instead of falling through to unmodelled facade stubs.
+The one-argument overload reuses `String.valueOf` display semantics. The
+two-argument overload lowers in a shaped path so the default expression is
+evaluated and nullable values choose the default instead of Java's `"null"`
+spelling. Emitted `Objects.toString` facade support methods are arity-suffixed
+when both overloads are present, avoiding duplicate Rust method definitions in
+fixtures that import `java.util.Objects`. Promoted differential fixture:
+`ObjectsToStringNullDefault`, which matches Java (`x,1,d2,2,null`). The audit
+remains open for the broader null representation and unknown erased-display
+cases above.
+
+Follow-up 2026-08-29: collection `toArray` lowering now preserves nullable
+reference-array carriers when the collection expression is recovered through a
+map view or map lookup. `keySet().toArray(new String[0])` carries the backing
+map key type into the native collection plan and wraps elements as `Some`.
+`map.get(key).toArray(new File[0])` compares the map value's storage element
+against the target array element, then wraps the recovered owned sequence into
+`Vec<Option<_>>` when the Java array slot stores nullable references. The
+map-lookup special case also lowers its key against the declared map-key slot,
+so indexing a nullable `String[]` key unwraps before the map borrow instead of
+moving an `Option<String>` out of a shared array read. Regression:
+`tests/idiom_gaps.rs::ragged_object_two_dimensional_arrays_stay_nested_vecs`;
+companion assertion:
+`tests/idiom_gaps.rs::collection_to_array_empty_string_array_lowers_to_owned_vec`.
+
+Follow-up 2026-08-29 baseline pass: six map/null collection fixtures were
+confirmed passing and removed from the idiom-gaps expected-failure baseline:
+`map_get_in_ternary_primitive_slot_unwraps_and_copies_value`,
+`map_get_into_optional_borrowed_arg_uses_optional_carrier_plan`,
+`map_get_primitive_value_in_arithmetic_unboxes_optional_borrow`,
+`map_get_return_uses_nullable_signature_and_optional_carrier`,
+`map_get_string_display_segment_unwraps_optional_borrow`, and
+`map_key_set_int_loop_casts_len_for_java_int_comparison`. This is baseline
+hygiene for already-landed nullable map handling; the broader null
+representation and unknown erased-display work remain open.
+
+Follow-up 2026-08-29 baseline pass: three nullable display/refinement fixtures
+were also verified passing and removed from the idiom-gaps expected-failure
+baseline: `nullable_string_format_and_concat_use_java_null_display_policy`,
+`nullable_ternary_branches_consume_branch_refinements_and_slot_shape`, and
+`nullable_trim_equals_original_uses_optional_string_view_policy`. The borrowed
+trim companion also passes but was already absent from the baseline.
+
+Follow-up 2026-08-29 baseline pass: two more nullable fixtures were verified
+and removed from the idiom-gaps expected-failure baseline. The boolean ternary
+fixture now emits the intended optional string arms; only the assertion was
+stale after structured condition rendering added parentheses around the erased
+boolean downcast. The outer graphics fixture now keeps its concrete optional
+facade receiver shape. Verified:
+`nullable_boolean_ternary_assignment_preserves_optional_string_slot` and
+`nullable_outer_graphics_field_call_uses_concrete_optional_facade_receiver`.
+
+Follow-up 2026-08-29 executor callback pass: `ExecutorService.submit` is now a
+discoverable platform effect and generated external facade support emits a
+concrete `ExecutorService::submit` shim when the erased-object method table has
+the matching `submit/1 -> Future` fact. The shim returns `Future<T>` so a
+`Future<Reader>` destination slot can infer the callback payload type instead
+of falling back to `Future<Box<dyn Any>>`. `JavaLinkedHashMap` now implements
+consuming `IntoIterator`, allowing already-emitted map conversion expressions
+to compile. Verified and removed from the baseline:
+`nullable_method_result_in_callback_local_stays_optional_for_optional_arg_slot`
+and `executor_submit_future_slot_shapes_block_lambda_result`.
+
+Follow-up 2026-08-29 baseline pass: four now-passing facade/map fixtures were
+removed from the idiom-gaps expected-failure baseline:
+`selected_opaque_future_get_is_generic_instance_surface`,
+`selected_opaque_support_type_gets_used_known_method_surfaces_by_arity`,
+`selected_opaque_support_type_gets_used_typed_void_surface`, and
+`typed_map_get_redundant_cast_uses_generic_value_shape`.
+
+Follow-up 2026-08-29 baseline pass: the inherited source-summary opaque method
+surface fixture was also verified passing and removed from the idiom-gaps
+expected-failure baseline:
+`source_summary_opaque_type_gets_used_inherited_method_surface`.
+
+Follow-up 2026-08-29 baseline pass: two more checked fixtures were removed
+after narrow assertion updates rather than lowering changes.
+`external_pack_typed_string_list_getter_supports_indexed_sample_access` now
+unwraps its generated `Result<String, JavaException>` test call, matching the
+fallible translated method signature. `source_static_final_facade_fields_emit_associated_defaults_not_storage`
+now accepts the generated owner-qualified static access
+`UsesStaticFinalPattern::LINE_PATTERN`, which is equivalent inside the static
+method and compiles. The nearby
+`source_summary_method_surface_can_be_added_after_external_return_selects_type`
+row was left in place because it was a real failure: an external fact returning
+`Header` selected a source-summary type without seeding its summary method
+surfaces, then the nullable `Header.samHeader()` result was sent through
+source-subtype boxing as `Optional<SAMFileHeader> -> SAMFileHeader`. External
+fact return types now seed source-summary facades before the second saturation
+pass, erased-return lowering only runs for slots that are actually erased, and
+source-subtype conversion refuses optional carriers so the normal optional
+unwrap plan handles required return slots. The fixture now cargo-checks its
+generated crate and was removed from the idiom-gaps expected-failure baseline.
+
+Follow-up 2026-08-29 baseline pass: five additional nullable/fallible-shape
+fixtures now pass and were removed from the idiom-gaps expected-failure
+baseline. `BufferedReader.readLine()` assignment/initializer/external-effect
+cases preserve optional read-line state across null checks and fallible reader
+effects; nullable `Path` overload dispatch keeps the optional argument slot
+while resolving the non-optional sibling; and optional array receiver indexing
+and length reads unwrap through the current nullable array path. Verified:
+`buffered_reader_read_line_assignment_condition_with_and_does_not_move_optional`,
+`buffered_reader_read_line_initializer_is_optional_when_rechecked_for_null`,
+`buffered_reader_read_line_uses_reader_external_effect`,
+`nullable_path_overload_argument_uses_option_param_and_non_optional_resolve_sibling`,
+and `optional_array_receivers_unwrap_for_read_indexing_and_length`.
+
+Follow-up 2026-08-29 baseline pass: two more stale nullable/string-shape rows
+were removed after focused verification. `bare_final_instance_field_read_does_not_become_static_constant`
+now compiles with the instance nullable field read preserved, and
+`constructed_string_return_stays_owned_not_borrowed_alias` now returns the
+constructed owned `String` directly without borrowing through `&str`. The latter
+needed only a narrower assertion because unrelated generated support can contain
+other borrowed-string spellings.
+
+Follow-up 2026-08-29 baseline pass: four more focused idiom rows were verified
+passing and removed from the expected-failure baseline. Context translation now
+uses the sibling overload signature for call-target slots, constructed external
+arguments borrow correctly for borrowed source slots, executor-submitted lambdas
+can call receiverless helpers through the current receiver, and explicit
+primitive casts now apply to the whole shift/bitwise expression while using the
+current Java-integer-safe `wrapping_shr`/`wrapping_sub` spelling. The primitive
+fixture only needed assertion text updated to the current lowering form.

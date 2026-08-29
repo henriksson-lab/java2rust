@@ -29,9 +29,10 @@ use std::collections::HashMap;
 use crate::diagnostics::{DiagnosticBag, Severity};
 use crate::facts::{FactSet, ReceiverMutabilityFact};
 use crate::java_ir::{Block, Expr, JavaType, Member, Program, Stmt, TypeDecl, UnaryOp};
+use crate::java_signature::{JavaCallableKey, JavaOwnerKey};
 use crate::liveness::LivenessAnalysis;
 use crate::types::TypeEnv;
-use crate::usage::{MethodUsageFacts, UsageConstructorKey, UsageFacts, UsageMethodKey};
+use crate::usage::{MethodUsageFacts, UsageConstructorKey, UsageFacts};
 
 /// A clone that Java would not have made, where the difference is observable.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -719,12 +720,15 @@ fn call_writes_through_receiver(
     type_env: &TypeEnv,
 ) -> bool {
     if let Some(resolved) = resolved
+        && let key = JavaCallableKey::resolved_source_method(
+            JavaOwnerKey::resolved_source(resolved.declaring_type.clone()),
+            name,
+            &resolved.arg_target_types,
+            resolved.kind,
+        )
         && usage
-            .methods
-            .get(&UsageMethodKey {
-                type_name: resolved.declaring_type.clone(),
-                method_name: name.to_string(),
-            })
+            .methods_by_java_key
+            .get(&key)
             .is_some_and(|facts| facts.mutates_self)
     {
         return true;
@@ -745,15 +749,9 @@ fn receiver_java_type_for_handle(
     handle: &str,
     method_usage: Option<&MethodUsageFacts>,
 ) -> Option<JavaType> {
-    let usage = method_usage?;
-    let mut matches = usage
-        .all_binding_facts()
-        .into_iter()
-        .filter(|binding| binding.name == handle);
-    let java_ty = matches.next()?.java_ty.clone();
-    matches
-        .all(|binding| binding.java_ty == java_ty)
-        .then_some(java_ty)
+    method_usage?
+        .visible_binding_java_type_for_name(handle)
+        .cloned()
 }
 
 fn collect_statements<'a>(block: &'a Block, out: &mut Vec<&'a Stmt>) {
@@ -1096,7 +1094,7 @@ mod tests {
     }
 
     #[test]
-    fn receiver_java_type_for_handle_rejects_same_name_type_disagreement() {
+    fn receiver_java_type_for_handle_uses_visible_binding_over_same_name_history() {
         let first = crate::binding_id::BindingId::new(
             crate::binding_id::BindingKind::Local,
             "handle".to_string(),
@@ -1121,7 +1119,19 @@ mod tests {
             second.clone(),
             crate::usage::BindingUseFacts {
                 name: "handle".to_string(),
-                binding: Some(second),
+                binding: Some(second.clone()),
+                java_ty: JavaType::Named {
+                    name: "Record".to_string(),
+                    args: Vec::new(),
+                },
+                uses: Vec::new(),
+            },
+        );
+        usage.bindings.insert(
+            "handle".to_string(),
+            crate::usage::BindingUseFacts {
+                name: "handle".to_string(),
+                binding: Some(second.clone()),
                 java_ty: JavaType::Named {
                     name: "Record".to_string(),
                     args: Vec::new(),
@@ -1130,7 +1140,13 @@ mod tests {
             },
         );
 
-        assert_eq!(receiver_java_type_for_handle("handle", Some(&usage)), None);
+        assert_eq!(
+            receiver_java_type_for_handle("handle", Some(&usage)),
+            Some(JavaType::Named {
+                name: "Record".to_string(),
+                args: Vec::new(),
+            })
+        );
     }
 
     /// The archetype from audit 0002. Java prints 5; a copy prints 0.
@@ -1437,6 +1453,32 @@ mod tests {
             found[0].mutation,
             MutationKind::MutatingCall { .. }
         ));
+    }
+
+    #[test]
+    fn receiver_mutation_lookup_uses_resolved_overload_identity() {
+        let found = aliases_in(
+            r#"
+            public class Shared {
+                static class Counter {
+                    int v;
+                    int bump(int n) { return this.v + n; }
+                    int bump(String text) { this.v = text.length(); return this.v; }
+                    int get() { return this.v; }
+                }
+                public int run() {
+                    Counter a = new Counter();
+                    Counter b = a;
+                    a.bump(0);
+                    return b.get();
+                }
+            }
+            "#,
+        );
+        assert!(
+            found.is_empty(),
+            "the read-only int overload must not inherit mutability from the String overload: {found:?}"
+        );
     }
 
     #[test]

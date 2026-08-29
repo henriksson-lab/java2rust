@@ -758,8 +758,8 @@ pub fn constructor_function_shell_with_facts_and_support_contexts(
 pub fn constructor_return_body(ty: &TypeDecl, fields: Vec<(String, RustExpr)>) -> Vec<RustStmt> {
     vec![RustStmt::Return(Some(RustExpr::StructLit {
         name: rust_use_name_for_source_type(ty),
-        fields: reorder_struct_literal_moves_after_reads(with_type_param_marker_field_values(
-            ty, fields,
+        fields: reorder_struct_literal_moves_after_reads(recover_struct_literal_field_exprs(
+            with_type_param_marker_field_values(ty, fields),
         )),
     }))]
 }
@@ -853,17 +853,105 @@ fn reorder_struct_literal_moves_after_reads(
     ordered
 }
 
+fn recover_struct_literal_field_exprs(fields: Vec<(String, RustExpr)>) -> Vec<(String, RustExpr)> {
+    fields
+        .into_iter()
+        .map(|(name, expr)| (name, recover_struct_literal_field_expr(expr)))
+        .collect()
+}
+
+fn recover_struct_literal_field_expr(expr: RustExpr) -> RustExpr {
+    match expr {
+        RustExpr::Raw(_) => recover_parseable_raw_operand_projection(expr),
+        RustExpr::Block { stmts, tail } => RustExpr::Block {
+            stmts: stmts
+                .into_iter()
+                .map(recover_struct_literal_field_stmt)
+                .collect(),
+            tail: tail.map(|tail| Box::new(recover_struct_literal_field_expr(*tail))),
+        },
+        RustExpr::Grouped(expr) => {
+            RustExpr::Grouped(Box::new(recover_struct_literal_field_expr(*expr)))
+        }
+        RustExpr::Shaped {
+            shape,
+            actual,
+            expr,
+        } => RustExpr::Shaped {
+            shape,
+            actual,
+            expr: Box::new(recover_struct_literal_field_expr(*expr)),
+        },
+        RustExpr::MarkedBlock { marker, expr } => RustExpr::MarkedBlock {
+            marker,
+            expr: Box::new(recover_struct_literal_field_expr(*expr)),
+        },
+        RustExpr::PostfixComment { expr, comment } => RustExpr::PostfixComment {
+            expr: Box::new(recover_struct_literal_field_expr(*expr)),
+            comment,
+        },
+        other => other,
+    }
+}
+
+fn recover_struct_literal_field_stmt(stmt: RustStmt) -> RustStmt {
+    match stmt {
+        RustStmt::Raw(text) => recover_struct_literal_raw_stmt(text),
+        RustStmt::Let {
+            mutable,
+            name,
+            ty,
+            value,
+        } => RustStmt::Let {
+            mutable,
+            name,
+            ty,
+            value: value.map(recover_struct_literal_field_expr),
+        },
+        RustStmt::Assign { target, value } => RustStmt::Assign {
+            target: recover_struct_literal_field_expr(target),
+            value: recover_struct_literal_field_expr(value),
+        },
+        RustStmt::AssignOp { target, op, value } => RustStmt::AssignOp {
+            target: recover_struct_literal_field_expr(target),
+            op,
+            value: recover_struct_literal_field_expr(value),
+        },
+        RustStmt::Expr(expr) => RustStmt::Expr(recover_struct_literal_field_expr(expr)),
+        RustStmt::Return(Some(expr)) => {
+            RustStmt::Return(Some(recover_struct_literal_field_expr(expr)))
+        }
+        other => other,
+    }
+}
+
+fn recover_struct_literal_raw_stmt(text: String) -> RustStmt {
+    raw_structured_stmt_projection(&text).unwrap_or_else(|| RustStmt::raw_leaf(text))
+}
+
+fn raw_structured_stmt_projection(text: &str) -> Option<RustStmt> {
+    let trimmed = text.trim();
+    let expr_text = trimmed
+        .strip_prefix("return ")
+        .and_then(|tail| tail.strip_suffix(';'));
+    if let Some(expr_text) = expr_text {
+        return recover_structured_raw_stmt_expr(expr_text)
+            .map(|expr| RustStmt::Return(Some(expr)));
+    }
+    trimmed
+        .strip_suffix(';')
+        .and_then(recover_structured_raw_stmt_expr)
+        .map(RustStmt::Expr)
+}
+
+fn recover_structured_raw_stmt_expr(expr_text: &str) -> Option<RustExpr> {
+    let recovered = recover_parseable_raw_operand_projection(RustExpr::raw_leaf(expr_text));
+    (!matches!(recovered, RustExpr::Raw(_))).then_some(recovered)
+}
+
 fn rust_expr_direct_move_var(expr: &RustExpr) -> Option<String> {
     match expr {
         RustExpr::Var(name) if movable_local_identifier(name) => Some(name.clone()),
-        RustExpr::Raw(_) => {
-            let recovered = recover_parseable_raw_operand_projection(expr.clone());
-            if matches!(recovered, RustExpr::Raw(_)) {
-                None
-            } else {
-                rust_expr_direct_move_var(&recovered)
-            }
-        }
         _ => None,
     }
 }
@@ -953,15 +1041,12 @@ fn rust_expr_reads_var(expr: &RustExpr, var_name: &str) -> bool {
                     .as_ref()
                     .is_some_and(|tail| rust_expr_reads_var(tail, var_name))
         }
-        RustExpr::Raw(_) => {
-            let recovered = recover_parseable_raw_operand_projection(expr.clone());
-            !matches!(recovered, RustExpr::Raw(_)) && rust_expr_reads_var(&recovered, var_name)
-        }
         RustExpr::Path(_)
         | RustExpr::GenericPath { .. }
         | RustExpr::TypeAssociatedPath { .. }
         | RustExpr::TraitAssociatedPath { .. }
         | RustExpr::Literal(_)
+        | RustExpr::Raw(_)
         | RustExpr::Pattern(_) => false,
     }
 }
@@ -1038,20 +1123,9 @@ fn rust_stmt_reads_var(stmt: &RustStmt, var_name: &str) -> bool {
         }
         RustStmt::Loop { body, .. } => body.iter().any(|stmt| rust_stmt_reads_var(stmt, var_name)),
         RustStmt::BreakValue { value, .. } => rust_expr_reads_var(value, var_name),
-        RustStmt::Raw(text) => raw_structured_stmt_reads_var(text, var_name),
+        RustStmt::Raw(_) => false,
         RustStmt::Return(None) | RustStmt::Break(_) | RustStmt::Continue(_) => false,
     }
-}
-
-fn raw_structured_stmt_reads_var(text: &str, var_name: &str) -> bool {
-    let trimmed = text.trim();
-    let expr_text = trimmed
-        .strip_prefix("return ")
-        .and_then(|tail| tail.strip_suffix(';'))
-        .or_else(|| trimmed.strip_suffix(';'))
-        .unwrap_or(trimmed);
-    let recovered = recover_parseable_raw_operand_projection(RustExpr::raw_leaf(expr_text));
-    !matches!(recovered, RustExpr::Raw(_)) && rust_expr_reads_var(&recovered, var_name)
 }
 
 #[cfg(test)]
@@ -1195,12 +1269,16 @@ mod tests {
     #[test]
     fn raw_direct_move_vars_require_structured_recovery() {
         assert_eq!(
-            rust_expr_direct_move_var(&RustExpr::Raw("value".to_string())),
+            rust_expr_direct_move_var(&RustExpr::Var("value".to_string())),
             Some("value".to_string())
+        );
+        assert_eq!(
+            rust_expr_direct_move_var(&RustExpr::Raw("value".to_string())),
+            None
         );
         for pseudo in ["self", "super", "crate", "Self"] {
             assert_eq!(
-                rust_expr_direct_move_var(&RustExpr::Raw(pseudo.to_string())),
+                rust_expr_direct_move_var(&RustExpr::Var(pseudo.to_string())),
                 None
             );
         }
@@ -1211,8 +1289,99 @@ mod tests {
     }
 
     #[test]
+    fn constructor_return_field_recovery_happens_before_move_reordering() {
+        let ty = TypeDecl {
+            kind: TypeKind::Class,
+            name: "Owner".to_string(),
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            modifiers: Vec::new(),
+            extends: None,
+            implements: Vec::new(),
+            permits: Vec::new(),
+            members: Vec::new(),
+            static_init_blocks: Vec::new(),
+            span: Default::default(),
+        };
+        let body = constructor_return_body(
+            &ty,
+            vec![
+                ("first".to_string(), RustExpr::Raw("value".to_string())),
+                (
+                    "second".to_string(),
+                    RustExpr::MethodCall {
+                        receiver: Box::new(RustExpr::Var("value".to_string())),
+                        method: "clone".to_string(),
+                        args: Vec::new(),
+                    },
+                ),
+            ],
+        );
+
+        let [RustStmt::Return(Some(RustExpr::StructLit { fields, .. }))] = body.as_slice() else {
+            panic!("constructor return body should be a struct literal return: {body:?}");
+        };
+        assert_eq!(fields[0].0, "second");
+        assert_eq!(fields[1].0, "first");
+        assert!(matches!(fields[1].1, RustExpr::Var(ref name) if name == "value"));
+    }
+
+    #[test]
+    fn constructor_return_block_field_recovery_happens_before_move_reordering() {
+        let ty = TypeDecl {
+            kind: TypeKind::Class,
+            name: "Owner".to_string(),
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            modifiers: Vec::new(),
+            extends: None,
+            implements: Vec::new(),
+            permits: Vec::new(),
+            members: Vec::new(),
+            static_init_blocks: Vec::new(),
+            span: Default::default(),
+        };
+        let body = constructor_return_body(
+            &ty,
+            vec![
+                ("first".to_string(), RustExpr::Var("value".to_string())),
+                (
+                    "second".to_string(),
+                    RustExpr::Block {
+                        stmts: vec![RustStmt::Raw("helper(value);".to_string())],
+                        tail: None,
+                    },
+                ),
+            ],
+        );
+
+        let [RustStmt::Return(Some(RustExpr::StructLit { fields, .. }))] = body.as_slice() else {
+            panic!("constructor return body should be a struct literal return: {body:?}");
+        };
+        assert_eq!(fields[0].0, "second");
+        assert_eq!(fields[1].0, "first");
+        let RustExpr::Block { stmts, .. } = &fields[0].1 else {
+            panic!(
+                "second field should stay block-valued after recovery: {:?}",
+                fields[0].1
+            );
+        };
+        assert!(matches!(
+            stmts.as_slice(),
+            [RustStmt::Expr(RustExpr::Call { args, .. })]
+                if matches!(args.as_slice(), [RustExpr::Var(name)] if name == "value")
+        ));
+    }
+
+    #[test]
     fn raw_reads_require_structured_recovery() {
-        assert!(rust_expr_reads_var(
+        let structured = RustExpr::Binary {
+            op: "+".to_string(),
+            left: Box::new(RustExpr::Var("left".to_string())),
+            right: Box::new(RustExpr::Var("right".to_string())),
+        };
+        assert!(rust_expr_reads_var(&structured, "left"));
+        assert!(!rust_expr_reads_var(
             &RustExpr::Raw("left + right".to_string()),
             "left"
         ));
@@ -1224,7 +1393,7 @@ mod tests {
             &RustExpr::Raw("left +".to_string()),
             "left"
         ));
-        assert!(rust_stmt_reads_var(
+        assert!(!rust_stmt_reads_var(
             &RustStmt::Raw("return left + right;".to_string()),
             "right"
         ));
@@ -1808,6 +1977,27 @@ fn rust_type_supports_struct_derive_clone(
         }),
         RustType::FnPointer { .. } => true,
         RustType::ImplFnTrait { .. } => false,
+        RustType::Generic { base, args } if base == "Box" || base == "std::boxed::Box" => {
+            let Some(inner) = args.first() else {
+                return false;
+            };
+            if args.len() != 1 {
+                return false;
+            }
+            match inner {
+                RustType::DynTrait(trait_name) => {
+                    raw_dyn_trait_supports_box_clone_adapter(trait_name)
+                }
+                other => rust_type_supports_struct_derive_clone(
+                    other,
+                    type_params,
+                    signatures,
+                    facts,
+                    support_program,
+                    visiting,
+                ),
+            }
+        }
         RustType::Generic { args, .. } => args.iter().all(|arg| {
             rust_type_supports_struct_derive_clone(
                 arg,
@@ -1868,6 +2058,26 @@ fn raw_rust_type_supports_derive_clone(
     }
     if raw_rust_box_dyn_trait(raw).is_some_and(raw_dyn_trait_supports_box_clone_adapter) {
         return true;
+    }
+    if let Some(inner) = raw_rust_option_inner(raw) {
+        return raw_type_arg_supports_derive_clone(
+            inner,
+            type_params,
+            signatures,
+            facts,
+            support_program,
+            visiting,
+        );
+    }
+    if let Some(inner) = raw_rust_vec_inner(raw) {
+        return raw_type_arg_supports_derive_clone(
+            inner,
+            type_params,
+            signatures,
+            facts,
+            support_program,
+            visiting,
+        );
     }
     if let Some(inner) = raw_rust_box_sized_inner(raw) {
         return raw_type_arg_supports_derive_clone(
@@ -2076,6 +2286,27 @@ pub fn rust_named_type_supports_struct_derive_default(
         return false;
     };
     if !source_type_is_plain_struct(ty) {
+        return false;
+    }
+    source_type_decl_supports_struct_derive_default(
+        ty,
+        type_params,
+        signatures,
+        facts,
+        support_program,
+        visiting,
+    )
+}
+
+pub fn source_type_decl_supports_struct_derive_default(
+    ty: &TypeDecl,
+    type_params: &HashSet<String>,
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    support_program: &Program,
+    visiting: &mut HashSet<String>,
+) -> bool {
+    if type_params.contains(&ty.name) || !source_type_is_plain_struct(ty) {
         return false;
     }
     // Coinductive: a type reached through its own field graph is assumed to
@@ -2288,7 +2519,6 @@ fn static_final_const_infos(ty: &TypeDecl) -> Vec<StaticFinalConstInfo> {
                 .as_ref()
                 .and_then(|initializer| const_type_and_value(&field.ty, initializer, &infos))
                 .or_else(|| non_literal_static_final_const_type_and_value(field))
-                .or_else(|| static_final_default_const_type_and_value(field))
                 .is_some();
             infos.push(StaticFinalConstInfo {
                 normalized: crate::parser::to_snake_case(&field.name),
@@ -2325,8 +2555,7 @@ fn associated_const_for_field(
         .initializer
         .as_ref()
         .and_then(|initializer| const_type_and_value(&field.ty, initializer, const_infos))
-        .or_else(|| non_literal_static_final_const_type_and_value(field))
-        .or_else(|| static_final_default_const_type_and_value(field))?;
+        .or_else(|| non_literal_static_final_const_type_and_value(field))?;
     Some(RustAssociatedConst {
         name: rust_name.to_string(),
         ty,
@@ -2390,24 +2619,6 @@ fn static_final_pattern_compile_literal(initializer: &Expr) -> Option<String> {
         return None;
     };
     Some(value.clone())
-}
-
-fn static_final_default_const_type_and_value(field: &FieldDecl) -> Option<(RustType, RustExpr)> {
-    if !is_static_final_field(field) || field.initializer.is_some() {
-        return None;
-    }
-    if !matches!(field.ty, JavaType::Array(_)) {
-        return None;
-    }
-    let rust_ty = const_rust_type_for_java_type(&field.ty)?;
-    Some((rust_ty, borrowed_empty_array_literal_expr()))
-}
-
-fn borrowed_empty_array_literal_expr() -> RustExpr {
-    RustExpr::Unary {
-        op: "&".to_string(),
-        expr: Box::new(RustExpr::ArrayLiteral(Vec::new())),
-    }
 }
 
 fn const_type_and_value(

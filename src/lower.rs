@@ -64,8 +64,9 @@ use crate::coercion::{
     force_shared_borrow_projection, function_call_projection,
     if_err_panic_uncaught_java_exception_stmt, instanceof_fallback_message_policy,
     instanceof_pattern_downcast_ref_projection, into_projection, iterator_next_expect_projection,
-    java_char_from_u32_mask_projection, java_class_for_name_path_projection,
-    java_class_literal_path_projection, java_integral_literal_char,
+    iterator_next_result_projection, java_char_from_u32_mask_projection,
+    java_class_for_name_path_projection, java_class_literal_path_projection,
+    java_integral_literal_char, java_integral_parse_null_argument_as_number_format,
     java_primitive_update_expression_projection, java_primitive_updated_value_projection,
     java_update_expression_projection, java_value_hash_code_projection, len_i32_projection,
     literal_slot_plan, logical_not_projection, macro_call_projection, map_get_expect_projection,
@@ -75,10 +76,11 @@ use crate::coercion::{
     optional_clone_recovery_owned_element_projection, optional_copied_expect_projection,
     optional_get_owned_value_result_projection, outer_this_field_mut_projection,
     outer_this_field_projection, owned_map_entries_set_projection, owned_map_keys_set_projection,
-    owner_associated_path_projection, parenthesize_borrowed_method_receiver,
-    primitive_parse_radix_result_projection, primitive_parse_result_projection,
-    print_macro_projection, project_optional_element_borrow_carrier_with_shape,
-    project_optional_receiver, project_optional_sequence_receiver, propagate_result_projection,
+    owned_sequence_elements_to_optional_vec_projection, owner_associated_path_projection,
+    parenthesize_borrowed_method_receiver, primitive_parse_radix_result_projection,
+    primitive_parse_result_projection, print_macro_projection,
+    project_optional_element_borrow_carrier_with_shape, project_optional_receiver,
+    project_optional_sequence_receiver, propagate_result_projection,
     qualified_static_storage_accessor_projection, qualified_static_storage_setter_path_projection,
     reborrow_optional_mut_projection, receiver_method_call_projection,
     receiver_method_call_projection_exact, rendered_expr_is_mutable_alias,
@@ -97,6 +99,7 @@ use crate::coercion::{
     to_owned_sequence_projection, tuple_field_projection, typed_none_projection,
     unsupported_constructor_call_handoff_projection,
     unsupported_deserialization_cast_handoff_projection,
+    unsupported_outer_capture_constructor_handoff_projection,
     unsupported_outer_capture_constructor_projection, unwrap_java_null_receiver_projection,
     unwrap_optional_shared_value, unwrap_result_or_panic_uncaught_java_exception, unwrap_some_expr,
     varargs_packed_vec_projection, varargs_spread_extend_projection,
@@ -221,8 +224,12 @@ use crate::stdlib::{
     program_uses_java_string_runtime_helpers, support_item_declared_type_names,
 };
 use crate::stream::{StreamPlan, build_stream_plan, build_stream_plan_for_slot};
-use crate::stream_lowering::{StreamRenderContext, render_stream_plan_with_context};
-use crate::stream_shape::infer_stream_source_element_shape_with_facts;
+use crate::stream_lowering::{
+    StreamRenderContext, render_stream_plan_with_optional_sequence_context,
+};
+use crate::stream_shape::{
+    infer_stream_source_element_shape_with_facts, stream_source_capability_policy,
+};
 use crate::string_concat_plan::build_string_concat_plan;
 use crate::string_concat_render::string_concat_expr;
 use crate::switch_lowering::{
@@ -2616,7 +2623,7 @@ fn static_storage_field_items_for_type(ty: &TypeDecl, ctx: LowerCtx) -> Vec<Stri
                 return None;
             }
             let shape = ctx.signatures.required_field_shape(&ty.name, &field.name);
-            let rust_ty = crate::slot_render::rust_type_for_slot_with_facts(&shape, ctx.facts);
+            let rust_ty = static_storage_rust_type_for_field(ty, field, &shape, ctx);
             // Process-wide, not thread-local: a Java `static` is one variable
             // shared by all threads (0030). `Mutex::new` is a `const fn`, so
             // this stays a plain `static` with no lazy-init machinery.
@@ -2780,7 +2787,7 @@ fn static_storage_accessors_for_field(
     ctx: LowerCtx,
 ) -> Vec<RustFunction> {
     let shape = ctx.signatures.required_field_shape(&ty.name, &field.name);
-    let rust_ty = crate::slot_render::rust_type_for_slot_with_facts(&shape, ctx.facts);
+    let rust_ty = static_storage_rust_type_for_field(ty, field, &shape, ctx);
     let rust_field_name = crate::java_naming::source_static_field_rust_name(ty, &field.name);
     let getter_name = format!("__static_{rust_field_name}");
     let setter_name = format!("__set_static_{rust_field_name}");
@@ -2817,6 +2824,116 @@ fn static_storage_accessors_for_field(
             receiver: None,
         },
     ]
+}
+
+fn static_storage_rust_type_for_field(
+    ty: &TypeDecl,
+    field: &FieldDecl,
+    shape: &RustSlotShape,
+    ctx: LowerCtx,
+) -> RustType {
+    if static_field_uses_ragged_array_storage(ty, field)
+        && let Some(rust_ty) = ragged_array2_static_storage_rust_type(&field.ty, shape, ctx.facts)
+    {
+        return rust_ty;
+    }
+    crate::slot_render::rust_type_for_slot_with_facts(shape, ctx.facts)
+}
+
+fn static_field_uses_ragged_array_storage(ty: &TypeDecl, field: &FieldDecl) -> bool {
+    let field_names = static_field_assignment_target_aliases(field);
+    matches!(field.ty, JavaType::Array(_))
+        && field.initializer.is_none()
+        && ty.static_init_blocks.iter().any(|block| {
+            block
+                .block
+                .statements
+                .iter()
+                .any(|stmt| stmt_assigns_ragged_array_creation_to_field(stmt, &field_names))
+        })
+}
+
+fn static_field_assignment_target_aliases(field: &FieldDecl) -> Vec<String> {
+    let mut names = vec![field.name.clone()];
+    let snake = crate::parser::to_snake_case(&field.name);
+    if !names.contains(&snake) {
+        names.push(snake);
+    }
+    names
+}
+
+fn stmt_assigns_ragged_array_creation_to_field(stmt: &Stmt, field_names: &[String]) -> bool {
+    match stmt {
+        Stmt::Assign { target, value } => {
+            static_field_assignment_target_matches(target, field_names)
+                && ragged_array_creation_value(value)
+        }
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => block
+            .statements
+            .iter()
+            .any(|stmt| stmt_assigns_ragged_array_creation_to_field(stmt, field_names)),
+        Stmt::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            then_block
+                .statements
+                .iter()
+                .any(|stmt| stmt_assigns_ragged_array_creation_to_field(stmt, field_names))
+                || else_block.as_ref().is_some_and(|block| {
+                    block
+                        .statements
+                        .iter()
+                        .any(|stmt| stmt_assigns_ragged_array_creation_to_field(stmt, field_names))
+                })
+        }
+        _ => false,
+    }
+}
+
+fn static_field_assignment_target_matches(target: &Expr, field_names: &[String]) -> bool {
+    match target {
+        Expr::Var(name) => field_names.iter().any(|field_name| field_name == name),
+        Expr::FieldAccess(receiver, field) => {
+            field_names.iter().any(|field_name| field_name == field)
+                && matches!(receiver.as_ref(), Expr::This | Expr::Var(_))
+        }
+        _ => false,
+    }
+}
+
+fn ragged_array_creation_value(value: &Expr) -> bool {
+    matches!(
+        value,
+        Expr::ArrayCreation {
+            dimensions,
+            initializer: None,
+            ..
+        } if dimensions.len() == 1
+    )
+}
+
+fn ragged_array2_static_storage_rust_type(
+    declared_ty: &JavaType,
+    shape: &RustSlotShape,
+    facts: &FactSet,
+) -> Option<RustType> {
+    let JavaType::Array(row_ty) = declared_ty else {
+        return None;
+    };
+    crate::types::two_dimensional_array_element_type(declared_ty)?;
+    let rust_ty = RustType::Vec(Box::new(
+        crate::slot_render::rust_type_for_java_type_with_effective_facts(
+            row_ty,
+            &crate::effective_facts::EffectiveFacts::new(facts),
+        ),
+    ));
+    if shape.optional_element_type().is_some() {
+        Some(RustType::Option(Box::new(rust_ty)))
+    } else {
+        Some(rust_ty)
+    }
 }
 
 fn static_storage_initial_value_expr(
@@ -3628,14 +3745,12 @@ fn source_instance_field_names_for_conversion(
         _ => None,
     }));
     fields.extend(
-        crate::inherited_members::inherited_instance_fields_for_type(ty, support_program)
-            .into_iter()
-            .map(|inherited| inherited.field.name),
-    );
-    fields.extend(
-        crate::inherited_members::inherited_instance_fields_for_type(ty, source_summary_program)
-            .into_iter()
-            .map(|inherited| inherited.field.name),
+        crate::inherited_members::inherited_instance_field_refs_for_type_in_programs(
+            ty,
+            &[support_program, source_summary_program],
+        )
+        .into_iter()
+        .map(|inherited| inherited.field.name.clone()),
     );
     let mut seen = HashSet::new();
     fields.retain(|field| seen.insert(field.clone()));
@@ -4366,7 +4481,7 @@ fn rewrite_recovered_same_outer_inner_constructor_raw_stmt(
     let RustStmt::Raw(raw) = stmt else {
         return false;
     };
-    let Some(mut recovered) = raw_structured_stmt_projection(raw) else {
+    let Some(mut recovered) = recover_same_outer_inner_constructor_compat_stmt(raw) else {
         return false;
     };
     let changed = rewrite(&mut recovered);
@@ -4438,7 +4553,7 @@ fn same_outer_inner_constructor_storage_placement_for_owner_constructor(
         return None;
     }
     let constructed_ty = same_outer_inner_constructor_owner(owner, outer_type, ctx)?;
-    let placement = ctx.facts.storage_placement_for(&constructed_ty.name);
+    let placement = ctx.facts.storage_placement_for(&constructed_ty);
     (placement.shared && placement.is_implemented()).then_some(placement)
 }
 
@@ -4659,6 +4774,134 @@ fn recover_same_outer_inner_constructor_compat_expr(raw: &str) -> Option<RustExp
     raw_constructor_call_expr_projection(raw)
 }
 
+fn recover_same_outer_inner_constructor_compat_stmt(raw: &str) -> Option<RustStmt> {
+    let recovered = raw_assignment_stmt_projection(raw)
+        .or_else(|| raw_return_stmt_projection(raw))
+        .or_else(|| raw_expr_stmt_projection(raw))?;
+    rust_stmt_has_constructor_call(&recovered).then_some(recovered)
+}
+
+fn rust_stmt_has_constructor_call(stmt: &RustStmt) -> bool {
+    match stmt {
+        RustStmt::Let { value, .. } => value.as_ref().is_some_and(rust_expr_has_constructor_call),
+        RustStmt::Assign { target, value } | RustStmt::AssignOp { target, value, .. } => {
+            rust_expr_has_constructor_call(target) || rust_expr_has_constructor_call(value)
+        }
+        RustStmt::Expr(expr) | RustStmt::Return(Some(expr)) => rust_expr_has_constructor_call(expr),
+        RustStmt::If {
+            condition,
+            then_body,
+            else_body,
+        } => {
+            rust_expr_has_constructor_call(condition)
+                || then_body.iter().any(rust_stmt_has_constructor_call)
+                || else_body.iter().any(rust_stmt_has_constructor_call)
+        }
+        RustStmt::IfLet {
+            expr,
+            then_body,
+            else_body,
+            ..
+        } => {
+            rust_expr_has_constructor_call(expr)
+                || then_body.iter().any(rust_stmt_has_constructor_call)
+                || else_body.iter().any(rust_stmt_has_constructor_call)
+        }
+        RustStmt::While { condition, body } => {
+            rust_expr_has_constructor_call(condition)
+                || body.iter().any(rust_stmt_has_constructor_call)
+        }
+        RustStmt::WhileLet { expr, body, .. } => {
+            rust_expr_has_constructor_call(expr) || body.iter().any(rust_stmt_has_constructor_call)
+        }
+        RustStmt::For { iterable, body, .. } => {
+            rust_expr_has_constructor_call(iterable)
+                || body.iter().any(rust_stmt_has_constructor_call)
+        }
+        RustStmt::Loop { body, .. } => body.iter().any(rust_stmt_has_constructor_call),
+        RustStmt::BreakValue { value, .. } => rust_expr_has_constructor_call(value),
+        RustStmt::Return(None) | RustStmt::Break(_) | RustStmt::Continue(_) | RustStmt::Raw(_) => {
+            false
+        }
+    }
+}
+
+fn rust_expr_has_constructor_call(expr: &RustExpr) -> bool {
+    match expr.unshaped() {
+        RustExpr::Call { function, args } => {
+            constructor_call_function_is_plain_new(function)
+                || rust_expr_has_constructor_call(function)
+                || args.iter().any(rust_expr_has_constructor_call)
+        }
+        RustExpr::MacroCall { args, .. } => args.iter().any(rust_expr_has_constructor_call),
+        RustExpr::StructLit { fields, .. } => fields
+            .iter()
+            .any(|(_, value)| rust_expr_has_constructor_call(value)),
+        RustExpr::Field(receiver, _) | RustExpr::Unary { expr: receiver, .. } => {
+            rust_expr_has_constructor_call(receiver)
+        }
+        RustExpr::Index(target, index) => {
+            rust_expr_has_constructor_call(target) || rust_expr_has_constructor_call(index)
+        }
+        RustExpr::Binary { left, right, .. } => {
+            rust_expr_has_constructor_call(left) || rust_expr_has_constructor_call(right)
+        }
+        RustExpr::Range { start, end, .. } => {
+            rust_expr_has_constructor_call(start) || rust_expr_has_constructor_call(end)
+        }
+        RustExpr::Cast { expr, .. } | RustExpr::Try(expr) => rust_expr_has_constructor_call(expr),
+        RustExpr::If {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            rust_expr_has_constructor_call(condition)
+                || rust_expr_has_constructor_call(then_expr)
+                || rust_expr_has_constructor_call(else_expr)
+        }
+        RustExpr::Tuple(items) | RustExpr::ArrayLiteral(items) | RustExpr::VecLiteral(items) => {
+            items.iter().any(rust_expr_has_constructor_call)
+        }
+        RustExpr::VecRepeat { value, len } => {
+            rust_expr_has_constructor_call(value) || rust_expr_has_constructor_call(len)
+        }
+        RustExpr::UnsupportedJavaArrayCreation { dimensions, .. } => {
+            dimensions.iter().any(rust_expr_has_constructor_call)
+        }
+        RustExpr::MethodCall { receiver, args, .. } => {
+            rust_expr_has_constructor_call(receiver)
+                || args.iter().any(rust_expr_has_constructor_call)
+        }
+        RustExpr::Shaped { expr, .. }
+        | RustExpr::MarkedBlock { expr, .. }
+        | RustExpr::PostfixComment { expr, .. }
+        | RustExpr::Grouped(expr) => rust_expr_has_constructor_call(expr),
+        RustExpr::Closure { body, .. } => match body {
+            crate::rust_ir::RustClosureBody::Expr(expr) => rust_expr_has_constructor_call(expr),
+        },
+        RustExpr::Match { expr, arms } => {
+            rust_expr_has_constructor_call(expr)
+                || arms
+                    .iter()
+                    .any(|arm| rust_expr_has_constructor_call(&arm.body))
+        }
+        RustExpr::Block { stmts, tail } => {
+            stmts.iter().any(rust_stmt_has_constructor_call)
+                || tail
+                    .as_ref()
+                    .is_some_and(|tail| rust_expr_has_constructor_call(tail))
+        }
+        RustExpr::Literal(_)
+        | RustExpr::Var(_)
+        | RustExpr::Path(_)
+        | RustExpr::GenericPath { .. }
+        | RustExpr::TypeAssociatedPath { .. }
+        | RustExpr::TraitAssociatedPath { .. }
+        | RustExpr::Pattern(_)
+        | RustExpr::Raw(_) => false,
+    }
+}
+
 fn raw_constructor_call_expr_projection(raw: &str) -> Option<RustExpr> {
     let raw_head = raw.trim().split_once('(')?.0;
     if raw_head
@@ -4806,22 +5049,74 @@ fn same_outer_inner_constructor_companion_generic_path(
     })
 }
 
-fn same_outer_inner_constructor_owner<'a>(
+fn same_outer_inner_constructor_owner(
     owner: &str,
     outer_type: &str,
-    ctx: LowerCtx<'a>,
-) -> Option<&'a TypeDecl> {
-    let constructed_ty = find_emitted_context_type_by_key_in_lower_ctx(ctx, owner)?;
-    let constructed_outer = ctx
-        .facts
-        .captures
-        .outer_this_type_for_type(&constructed_ty.name)?;
-    if crate::stdlib::canonical_external_receiver_type_key(constructed_outer)
-        != crate::stdlib::canonical_external_receiver_type_key(outer_type)
+    ctx: LowerCtx,
+) -> Option<String> {
+    let mut candidates = Vec::new();
+    if let Some(constructed_ty) = find_emitted_context_type_by_key_in_lower_ctx(ctx, owner)
+        .or_else(|| find_emitted_context_type_by_rust_use_name(ctx, owner))
     {
-        return None;
+        candidates.push(constructed_ty.name.clone());
+        candidates.push(format!("{outer_type}.{}", constructed_ty.name));
     }
-    Some(constructed_ty)
+    candidates.push(owner.to_string());
+    let rust_outer = crate::slot_render::rust_name_for_java_named_type(outer_type);
+    if let Some(nested) = owner.strip_prefix(&format!("{rust_outer}_")) {
+        candidates.push(format!("{outer_type}.{nested}"));
+    }
+    candidates.into_iter().find(|candidate| {
+        let Some(constructed_outer) = ctx.facts.captures.outer_this_type_for_type(candidate) else {
+            return false;
+        };
+        crate::stdlib::canonical_external_receiver_type_key(constructed_outer)
+            == crate::stdlib::canonical_external_receiver_type_key(outer_type)
+    })
+}
+
+fn find_emitted_context_type_by_rust_use_name<'a>(
+    ctx: LowerCtx<'a>,
+    rust_use_name: &str,
+) -> Option<&'a TypeDecl> {
+    let mut matches = Vec::new();
+    for program in [
+        ctx.program,
+        ctx.support_local_type_program,
+        ctx.source_summary_type_program,
+    ] {
+        collect_emitted_context_type_rust_use_name_matches(program, rust_use_name, &mut matches);
+    }
+    if matches.len() == 1 {
+        matches.into_iter().next()
+    } else {
+        None
+    }
+}
+
+fn collect_emitted_context_type_rust_use_name_matches<'a>(
+    program: &'a Program,
+    rust_use_name: &str,
+    matches: &mut Vec<&'a TypeDecl>,
+) {
+    for ty in &program.types {
+        collect_type_rust_use_name_matches(ty, rust_use_name, matches);
+    }
+}
+
+fn collect_type_rust_use_name_matches<'a>(
+    ty: &'a TypeDecl,
+    rust_use_name: &str,
+    matches: &mut Vec<&'a TypeDecl>,
+) {
+    if rust_use_name_for_source_type(ty) == rust_use_name {
+        matches.push(ty);
+    }
+    for member in &ty.members {
+        if let Member::Type(nested) = member {
+            collect_type_rust_use_name_matches(nested, rust_use_name, matches);
+        }
+    }
 }
 
 struct RawConstructorCallHead<'a> {
@@ -5064,6 +5359,175 @@ fn outer_clone_expr() -> RustExpr {
     }
 }
 
+fn replace_outer_this_compile_error_with_handoff(stmt: &mut RustStmt) -> bool {
+    match stmt {
+        RustStmt::Let { value, .. } => value
+            .as_mut()
+            .is_some_and(replace_outer_this_compile_error_expr),
+        RustStmt::Assign { target, value } | RustStmt::AssignOp { target, value, .. } => {
+            replace_outer_this_compile_error_expr(target)
+                | replace_outer_this_compile_error_expr(value)
+        }
+        RustStmt::Expr(expr) | RustStmt::Return(Some(expr)) => {
+            replace_outer_this_compile_error_expr(expr)
+        }
+        RustStmt::If {
+            condition,
+            then_body,
+            else_body,
+        } => {
+            replace_outer_this_compile_error_expr(condition)
+                | then_body
+                    .iter_mut()
+                    .any(replace_outer_this_compile_error_with_handoff)
+                | else_body
+                    .iter_mut()
+                    .any(replace_outer_this_compile_error_with_handoff)
+        }
+        RustStmt::IfLet {
+            expr,
+            then_body,
+            else_body,
+            ..
+        } => {
+            replace_outer_this_compile_error_expr(expr)
+                | then_body
+                    .iter_mut()
+                    .any(replace_outer_this_compile_error_with_handoff)
+                | else_body
+                    .iter_mut()
+                    .any(replace_outer_this_compile_error_with_handoff)
+        }
+        RustStmt::While { condition, body } => {
+            replace_outer_this_compile_error_expr(condition)
+                | body
+                    .iter_mut()
+                    .any(replace_outer_this_compile_error_with_handoff)
+        }
+        RustStmt::WhileLet { expr, body, .. } => {
+            replace_outer_this_compile_error_expr(expr)
+                | body
+                    .iter_mut()
+                    .any(replace_outer_this_compile_error_with_handoff)
+        }
+        RustStmt::For { iterable, body, .. } => {
+            replace_outer_this_compile_error_expr(iterable)
+                | body
+                    .iter_mut()
+                    .any(replace_outer_this_compile_error_with_handoff)
+        }
+        RustStmt::Loop { body, .. } => body
+            .iter_mut()
+            .any(replace_outer_this_compile_error_with_handoff),
+        RustStmt::BreakValue { value, .. } => replace_outer_this_compile_error_expr(value),
+        RustStmt::Return(None) | RustStmt::Break(_) | RustStmt::Continue(_) | RustStmt::Raw(_) => {
+            false
+        }
+    }
+}
+
+fn replace_outer_this_compile_error_expr(expr: &mut RustExpr) -> bool {
+    if let RustExpr::MacroCall { macro_name, args } = expr {
+        if macro_name == "compile_error"
+            && matches!(
+                args.as_slice(),
+                [RustExpr::Literal(message)]
+                    if message
+                        .trim_matches('"')
+                        .starts_with(crate::output_markers::UNSUPPORTED_INNER_CLASS_OUTER_CAPTURE)
+            )
+        {
+            *macro_name = "panic".to_string();
+            return true;
+        }
+    }
+
+    match expr {
+        RustExpr::Field(receiver, _) | RustExpr::Unary { expr: receiver, .. } => {
+            replace_outer_this_compile_error_expr(receiver)
+        }
+        RustExpr::Index(target, index) => {
+            replace_outer_this_compile_error_expr(target)
+                | replace_outer_this_compile_error_expr(index)
+        }
+        RustExpr::Binary { left, right, .. } => {
+            replace_outer_this_compile_error_expr(left)
+                | replace_outer_this_compile_error_expr(right)
+        }
+        RustExpr::Range { start, end, .. } => {
+            replace_outer_this_compile_error_expr(start)
+                | replace_outer_this_compile_error_expr(end)
+        }
+        RustExpr::Cast { expr, .. } | RustExpr::Try(expr) => {
+            replace_outer_this_compile_error_expr(expr)
+        }
+        RustExpr::If {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            replace_outer_this_compile_error_expr(condition)
+                | replace_outer_this_compile_error_expr(then_expr)
+                | replace_outer_this_compile_error_expr(else_expr)
+        }
+        RustExpr::Tuple(items) | RustExpr::ArrayLiteral(items) | RustExpr::VecLiteral(items) => {
+            items.iter_mut().any(replace_outer_this_compile_error_expr)
+        }
+        RustExpr::VecRepeat { value, len } => {
+            replace_outer_this_compile_error_expr(value)
+                | replace_outer_this_compile_error_expr(len)
+        }
+        RustExpr::UnsupportedJavaArrayCreation { dimensions, .. } => dimensions
+            .iter_mut()
+            .any(replace_outer_this_compile_error_expr),
+        RustExpr::Call { function, args } => {
+            replace_outer_this_compile_error_expr(function)
+                | args.iter_mut().any(replace_outer_this_compile_error_expr)
+        }
+        RustExpr::MacroCall { args, .. } => {
+            args.iter_mut().any(replace_outer_this_compile_error_expr)
+        }
+        RustExpr::MethodCall { receiver, args, .. } => {
+            replace_outer_this_compile_error_expr(receiver)
+                | args.iter_mut().any(replace_outer_this_compile_error_expr)
+        }
+        RustExpr::StructLit { fields, .. } => fields
+            .iter_mut()
+            .any(|(_, value)| replace_outer_this_compile_error_expr(value)),
+        RustExpr::Shaped { expr, .. }
+        | RustExpr::MarkedBlock { expr, .. }
+        | RustExpr::PostfixComment { expr, .. }
+        | RustExpr::Grouped(expr) => replace_outer_this_compile_error_expr(expr),
+        RustExpr::Closure { body, .. } => match body {
+            crate::rust_ir::RustClosureBody::Expr(expr) => {
+                replace_outer_this_compile_error_expr(expr)
+            }
+        },
+        RustExpr::Match { expr, arms } => {
+            replace_outer_this_compile_error_expr(expr)
+                | arms
+                    .iter_mut()
+                    .any(|arm| replace_outer_this_compile_error_expr(&mut arm.body))
+        }
+        RustExpr::Block { stmts, tail } => {
+            stmts
+                .iter_mut()
+                .any(replace_outer_this_compile_error_with_handoff)
+                | tail
+                    .as_mut()
+                    .is_some_and(|tail| replace_outer_this_compile_error_expr(tail))
+        }
+        RustExpr::Literal(_)
+        | RustExpr::Var(_)
+        | RustExpr::Path(_)
+        | RustExpr::GenericPath { .. }
+        | RustExpr::TypeAssociatedPath { .. }
+        | RustExpr::TraitAssociatedPath { .. }
+        | RustExpr::Pattern(_)
+        | RustExpr::Raw(_) => false,
+    }
+}
+
 fn lower_implicit_default_constructor(
     program: &Program,
     ty: &TypeDecl,
@@ -5125,7 +5589,7 @@ fn with_outer_this_capture_field(
         0,
         (
             "__outer".to_string(),
-            unsupported_outer_capture_constructor_projection(&ty.name, outer_type),
+            unsupported_outer_capture_constructor_handoff_projection(&ty.name, outer_type),
         ),
     );
     fields
@@ -6833,7 +7297,10 @@ fn source_super_constructor_fields_and_trailing<'a>(
         } else {
             match constructor_field_value_expr(&plan) {
                 Some(value) => {
-                    let substituted = substitute_expr_vars(value, &super_bindings);
+                    let substituted = substitute_source_constructor_param_expr_vars_by_name_compat(
+                        value,
+                        &super_bindings,
+                    );
                     let lowered = lower_constructor_field_value_expr_for_shape(
                         &substituted,
                         shape,
@@ -6969,7 +7436,10 @@ fn recover_reused_super_constructor_local_for_field(
     let mut future_reads = HashSet::new();
     for later in plans.iter().skip(plan_index + 1) {
         if let Some(expr) = constructor_field_value_expr(later) {
-            collect_expr_read_names(&substitute_expr_vars(expr, bindings), &mut future_reads);
+            collect_expr_read_names(
+                &substitute_source_constructor_param_expr_vars_by_name_compat(expr, bindings),
+                &mut future_reads,
+            );
         }
     }
     if future_reads.contains(name) {
@@ -6999,7 +7469,8 @@ fn source_super_constructor_local_prefix(
         .iter()
         .filter(|stmt| source_super_constructor_prefix_stmt_is_supported(stmt))
     {
-        let substituted = substitute_stmt_vars(stmt, super_bindings);
+        let substituted =
+            substitute_source_constructor_param_stmt_vars_by_name_compat(stmt, super_bindings);
         lower_stmt(
             &substituted,
             &mut local_env,
@@ -7152,49 +7623,7 @@ fn raw_expr_is_none_or_default_value(raw: &str) -> bool {
 }
 
 fn recover_rendered_none_or_default_value(rendered: &str) -> Option<RustExpr> {
-    rendered_none_or_default_value_projection(rendered)
-}
-
-fn rendered_none_or_default_value_projection(rendered: &str) -> Option<RustExpr> {
-    let rendered = rendered.trim();
-    if rendered == "None" {
-        return Some(RustExpr::Var("None".to_string()));
-    }
-    if rendered == "Default::default()" {
-        return Some(default_trait_expr());
-    }
-    let ty = rendered
-        .strip_prefix("None::<")
-        .and_then(|ty| ty.strip_suffix('>'))?;
-    (!ty.trim().is_empty() && rust_type_arg_text_is_balanced(ty)).then(|| {
-        RustExpr::generic_path(
-            ["None"],
-            vec![RustType::Raw(ty.to_string())],
-            None::<String>,
-        )
-    })
-}
-
-fn rust_type_arg_text_is_balanced(rendered: &str) -> bool {
-    let mut angle_depth = 0usize;
-    let mut saw_token = false;
-    for ch in rendered.chars() {
-        match ch {
-            '<' => {
-                angle_depth += 1;
-                saw_token = true;
-            }
-            '>' => {
-                let Some(depth) = angle_depth.checked_sub(1) else {
-                    return false;
-                };
-                angle_depth = depth;
-            }
-            _ if ch.is_whitespace() => {}
-            _ => saw_token = true,
-        }
-    }
-    saw_token && angle_depth == 0
+    crate::coercion::rendered_none_or_default_projection(rendered)
 }
 
 fn rust_path_segments_are_none_or_default_value(segments: &[String]) -> bool {
@@ -7347,11 +7776,9 @@ fn delegated_source_constructor_body<'a>(
             .params
             .iter()
             .map(|param| param.name.clone())
-            .zip(
-                delegated_args
-                    .iter()
-                    .map(|arg| substitute_expr_vars(arg, &outer_bindings)),
-            )
+            .zip(delegated_args.iter().map(|arg| {
+                substitute_source_constructor_param_expr_vars_by_name_compat(arg, &outer_bindings)
+            }))
             .collect(),
     ))
 }
@@ -7526,19 +7953,24 @@ fn unsupported_source_constructor_call_expr(
     })
 }
 
-fn substitute_expr_vars(expr: &Expr, bindings: &[(&str, &Expr)]) -> Expr {
+fn substitute_source_constructor_param_expr_vars_by_name_compat(
+    expr: &Expr,
+    bindings: &[(&str, &Expr)],
+) -> Expr {
     match expr {
         Expr::Var(name) => bindings
             .iter()
             .find_map(|(binding, value)| (*binding == name).then(|| (*value).clone()))
             .unwrap_or_else(|| expr.clone()),
         Expr::FieldAccess(receiver, field) => Expr::FieldAccess(
-            Box::new(substitute_expr_vars(receiver, bindings)),
+            Box::new(
+                substitute_source_constructor_param_expr_vars_by_name_compat(receiver, bindings),
+            ),
             field.clone(),
         ),
         Expr::ArrayAccess(array, index) => Expr::ArrayAccess(
-            Box::new(substitute_expr_vars(array, bindings)),
-            Box::new(substitute_expr_vars(index, bindings)),
+            Box::new(substitute_source_constructor_param_expr_vars_by_name_compat(array, bindings)),
+            Box::new(substitute_source_constructor_param_expr_vars_by_name_compat(index, bindings)),
         ),
         Expr::ArrayCreation {
             element_type,
@@ -7548,41 +7980,61 @@ fn substitute_expr_vars(expr: &Expr, bindings: &[(&str, &Expr)]) -> Expr {
             element_type: element_type.clone(),
             dimensions: dimensions
                 .iter()
-                .map(|expr| substitute_expr_vars(expr, bindings))
+                .map(|expr| {
+                    substitute_source_constructor_param_expr_vars_by_name_compat(expr, bindings)
+                })
                 .collect(),
             initializer: initializer.as_ref().map(|initializer| {
                 initializer
                     .iter()
-                    .map(|expr| substitute_expr_vars(expr, bindings))
+                    .map(|expr| {
+                        substitute_source_constructor_param_expr_vars_by_name_compat(expr, bindings)
+                    })
                     .collect()
             }),
         },
         Expr::ArrayInitializer(values) => Expr::ArrayInitializer(
             values
                 .iter()
-                .map(|expr| substitute_expr_vars(expr, bindings))
+                .map(|expr| {
+                    substitute_source_constructor_param_expr_vars_by_name_compat(expr, bindings)
+                })
                 .collect(),
         ),
         Expr::Binary { op, left, right } => Expr::Binary {
             op: *op,
-            left: Box::new(substitute_expr_vars(left, bindings)),
-            right: Box::new(substitute_expr_vars(right, bindings)),
+            left: Box::new(
+                substitute_source_constructor_param_expr_vars_by_name_compat(left, bindings),
+            ),
+            right: Box::new(
+                substitute_source_constructor_param_expr_vars_by_name_compat(right, bindings),
+            ),
         },
         Expr::Unary { op, expr } => Expr::Unary {
             op: *op,
-            expr: Box::new(substitute_expr_vars(expr, bindings)),
+            expr: Box::new(
+                substitute_source_constructor_param_expr_vars_by_name_compat(expr, bindings),
+            ),
         },
         Expr::Ternary {
             condition,
             then_expr,
             else_expr,
         } => Expr::Ternary {
-            condition: Box::new(substitute_expr_vars(condition, bindings)),
-            then_expr: Box::new(substitute_expr_vars(then_expr, bindings)),
-            else_expr: Box::new(substitute_expr_vars(else_expr, bindings)),
+            condition: Box::new(
+                substitute_source_constructor_param_expr_vars_by_name_compat(condition, bindings),
+            ),
+            then_expr: Box::new(
+                substitute_source_constructor_param_expr_vars_by_name_compat(then_expr, bindings),
+            ),
+            else_expr: Box::new(
+                substitute_source_constructor_param_expr_vars_by_name_compat(else_expr, bindings),
+            ),
         },
         Expr::Switch { selector, cases } => Expr::Switch {
-            selector: Box::new(substitute_expr_vars(selector, bindings)),
+            selector: Box::new(
+                substitute_source_constructor_param_expr_vars_by_name_compat(selector, bindings),
+            ),
             cases: cases
                 .iter()
                 .map(|case| SwitchExprCase {
@@ -7590,13 +8042,18 @@ fn substitute_expr_vars(expr: &Expr, bindings: &[(&str, &Expr)]) -> Expr {
                         .labels
                         .iter()
                         .map(|label| match label {
-                            SwitchLabel::Expr(expr) => {
-                                SwitchLabel::Expr(substitute_expr_vars(expr, bindings))
-                            }
+                            SwitchLabel::Expr(expr) => SwitchLabel::Expr(
+                                substitute_source_constructor_param_expr_vars_by_name_compat(
+                                    expr, bindings,
+                                ),
+                            ),
                             SwitchLabel::Default => SwitchLabel::Default,
                         })
                         .collect(),
-                    value: substitute_expr_vars(&case.value, bindings),
+                    value: substitute_source_constructor_param_expr_vars_by_name_compat(
+                        &case.value,
+                        bindings,
+                    ),
                 })
                 .collect(),
         },
@@ -7606,13 +8063,19 @@ fn substitute_expr_vars(expr: &Expr, bindings: &[(&str, &Expr)]) -> Expr {
             args,
             resolved,
         } => Expr::Call {
-            receiver: receiver
-                .as_ref()
-                .map(|receiver| Box::new(substitute_expr_vars(receiver, bindings))),
+            receiver: receiver.as_ref().map(|receiver| {
+                Box::new(
+                    substitute_source_constructor_param_expr_vars_by_name_compat(
+                        receiver, bindings,
+                    ),
+                )
+            }),
             name: name.clone(),
             args: args
                 .iter()
-                .map(|expr| substitute_expr_vars(expr, bindings))
+                .map(|expr| {
+                    substitute_source_constructor_param_expr_vars_by_name_compat(expr, bindings)
+                })
                 .collect(),
             resolved: resolved.clone(),
         },
@@ -7625,17 +8088,23 @@ fn substitute_expr_vars(expr: &Expr, bindings: &[(&str, &Expr)]) -> Expr {
             ty: ty.clone(),
             args: args
                 .iter()
-                .map(|expr| substitute_expr_vars(expr, bindings))
+                .map(|expr| {
+                    substitute_source_constructor_param_expr_vars_by_name_compat(expr, bindings)
+                })
                 .collect(),
             body: body.clone(),
             resolved: resolved.clone(),
         },
         Expr::Cast { ty, expr } => Expr::Cast {
             ty: ty.clone(),
-            expr: Box::new(substitute_expr_vars(expr, bindings)),
+            expr: Box::new(
+                substitute_source_constructor_param_expr_vars_by_name_compat(expr, bindings),
+            ),
         },
         Expr::InstanceOf { expr, ty, binding } => Expr::InstanceOf {
-            expr: Box::new(substitute_expr_vars(expr, bindings)),
+            expr: Box::new(
+                substitute_source_constructor_param_expr_vars_by_name_compat(expr, bindings),
+            ),
             ty: ty.clone(),
             binding: binding.clone(),
         },
@@ -7650,7 +8119,10 @@ fn substitute_expr_vars(expr: &Expr, bindings: &[(&str, &Expr)]) -> Expr {
     }
 }
 
-fn substitute_stmt_vars(stmt: &Stmt, bindings: &[(&str, &Expr)]) -> Stmt {
+fn substitute_source_constructor_param_stmt_vars_by_name_compat(
+    stmt: &Stmt,
+    bindings: &[(&str, &Expr)],
+) -> Stmt {
     match stmt {
         Stmt::VarDecl {
             ty,
@@ -7662,44 +8134,54 @@ fn substitute_stmt_vars(stmt: &Stmt, bindings: &[(&str, &Expr)]) -> Stmt {
             ty: ty.clone(),
             name: name.clone(),
             source_name: source_name.clone(),
-            initializer: initializer
-                .as_ref()
-                .map(|expr| substitute_expr_vars(expr, bindings)),
+            initializer: initializer.as_ref().map(|expr| {
+                substitute_source_constructor_param_expr_vars_by_name_compat(expr, bindings)
+            }),
             binding: binding.clone(),
         },
         Stmt::Assign { target, value } => Stmt::Assign {
-            target: substitute_expr_vars(target, bindings),
-            value: substitute_expr_vars(value, bindings),
+            target: substitute_source_constructor_param_expr_vars_by_name_compat(target, bindings),
+            value: substitute_source_constructor_param_expr_vars_by_name_compat(value, bindings),
         },
-        Stmt::Expr(expr) => Stmt::Expr(substitute_expr_vars(expr, bindings)),
-        Stmt::Return(expr) => Stmt::Return(
-            expr.as_ref()
-                .map(|expr| substitute_expr_vars(expr, bindings)),
-        ),
+        Stmt::Expr(expr) => {
+            Stmt::Expr(substitute_source_constructor_param_expr_vars_by_name_compat(expr, bindings))
+        }
+        Stmt::Return(expr) => Stmt::Return(expr.as_ref().map(|expr| {
+            substitute_source_constructor_param_expr_vars_by_name_compat(expr, bindings)
+        })),
         Stmt::If {
             condition,
             then_block,
             else_block,
         } => Stmt::If {
-            condition: substitute_expr_vars(condition, bindings),
-            then_block: substitute_block_vars(then_block, bindings),
-            else_block: else_block
-                .as_ref()
-                .map(|block| substitute_block_vars(block, bindings)),
+            condition: substitute_source_constructor_param_expr_vars_by_name_compat(
+                condition, bindings,
+            ),
+            then_block: substitute_source_constructor_param_block_vars_by_name_compat(
+                then_block, bindings,
+            ),
+            else_block: else_block.as_ref().map(|block| {
+                substitute_source_constructor_param_block_vars_by_name_compat(block, bindings)
+            }),
         },
-        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
-            Stmt::Block(substitute_block_vars(block, bindings))
-        }
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => Stmt::Block(
+            substitute_source_constructor_param_block_vars_by_name_compat(block, bindings),
+        ),
         _ => stmt.clone(),
     }
 }
 
-fn substitute_block_vars(block: &Block, bindings: &[(&str, &Expr)]) -> Block {
+fn substitute_source_constructor_param_block_vars_by_name_compat(
+    block: &Block,
+    bindings: &[(&str, &Expr)],
+) -> Block {
     Block {
         statements: block
             .statements
             .iter()
-            .map(|stmt| substitute_stmt_vars(stmt, bindings))
+            .map(|stmt| {
+                substitute_source_constructor_param_stmt_vars_by_name_compat(stmt, bindings)
+            })
             .collect(),
     }
 }
@@ -8534,12 +9016,15 @@ fn push_method_with_outer_handle_companion(
     method: &MethodDecl,
     ctx: LowerCtx,
 ) {
-    let function = lower_method(program, ty, method, ctx);
+    let mut function = lower_method(program, ty, method, ctx);
     let Some(companion) = outer_this_handle_method_companion(program, ty, method, &function, ctx)
     else {
         functions.push(function);
         return;
     };
+    for stmt in &mut function.body {
+        replace_outer_this_compile_error_with_handoff(stmt);
+    }
     functions.push(function);
     functions.push(companion);
 }
@@ -9260,22 +9745,27 @@ fn lower_stmt(
                 .binding_access_name(source_name)
                 .map(str::to_string)
                 .unwrap_or_else(|| name.clone());
+            let local_uses_nested_array2 = initializer
+                .as_ref()
+                .is_some_and(|expr| ragged_array_creation_matches_declared_array2(expr, ty));
             let mut emitted_local_plan = local_plan.clone();
             emitted_local_plan.name = access_name.clone();
-            out.push(
-                local_let_stmt_with_facts_representations_and_type_annotation(
-                    &emitted_local_plan,
-                    lowered_initializer,
-                    ctx.facts,
-                    ctx.representations,
-                    local_decl_should_annotate_type(
-                        &local_plan.java_ty,
-                        initializer.as_ref(),
-                        env,
-                        ctx,
-                    ),
+            let mut local_stmt = local_let_stmt_with_facts_representations_and_type_annotation(
+                &emitted_local_plan,
+                lowered_initializer,
+                ctx.facts,
+                ctx.representations,
+                local_decl_should_annotate_type(
+                    &local_plan.java_ty,
+                    initializer.as_ref(),
+                    env,
+                    ctx,
                 ),
             );
+            if local_uses_nested_array2 && let RustStmt::Let { ty, .. } = &mut local_stmt {
+                *ty = ragged_array2_local_rust_type(&local_plan.java_ty, ctx.facts);
+            }
+            out.push(local_stmt);
             let env_shape =
                 local_env_shape_from_initializer(&local_plan.shape, initializer.as_ref(), env, ctx)
                     .unwrap_or_else(|| local_plan.shape.clone());
@@ -9288,6 +9778,10 @@ fn lower_stmt(
                 local_plan.java_ty.clone(),
                 env_binding.clone(),
             );
+            if local_uses_nested_array2 {
+                env.insert_nested_array2_local(source_name.clone());
+                env.insert_nested_array2_local(access_name.clone());
+            }
             if let Some(receiver) = map_key_set_view_initializer_receiver(initializer.as_ref()) {
                 env.insert_map_key_set_view_receiver(source_name.clone(), receiver.clone());
                 env.insert_map_key_set_view_receiver(access_name.clone(), receiver.clone());
@@ -9494,6 +9988,8 @@ fn lower_stmt(
         Stmt::Expr(expr) => {
             if source_null_assertion_call_expr_stmt_is_noop(expr, env, ctx) {
                 return;
+            } else if let Some(stmt) = lower_map_view_call_expr_stmt(expr, env, ctx) {
+                out.push(stmt);
             } else if let Some(stmt) = lower_native_collection_remove_all_expr_stmt(expr, env, ctx)
             {
                 out.push(stmt);
@@ -9702,7 +10198,9 @@ fn lower_stmt(
                 wrap_returns_in_ok,
             );
             let body_ctx = ctx;
-            let mut loop_body = lower_block(body, &mut env.clone(), wrap_returns_in_ok, body_ctx);
+            let mut loop_body =
+                lower_block_for_body(body, &[], &mut env.clone(), wrap_returns_in_ok, body_ctx);
+            prepend_do_while_condition_to_continues(&mut loop_body, &lowered_condition, label);
             loop_body.push(if_stmt(
                 logical_not_projection(lowered_condition),
                 vec![break_stmt(label.clone())],
@@ -12097,6 +12595,12 @@ fn refine_local_plan_from_initializer(
         local_plan.shape = constructor_shape;
         return local_plan;
     }
+    if let Some(optional_shape) =
+        local_optional_shape_from_initializer_shape(&local_plan.shape, &initializer_shape)
+    {
+        local_plan.shape = optional_shape;
+        return local_plan;
+    }
     if shape_is_erased_object_boundary(&local_plan.shape)
         && initializer_shape
             .optional_element_type()
@@ -12138,6 +12642,19 @@ fn refine_local_plan_from_initializer(
     }
     local_plan.shape = initializer_shape;
     local_plan
+}
+
+fn local_optional_shape_from_initializer_shape(
+    local: &RustSlotShape,
+    initializer: &RustSlotShape,
+) -> Option<RustSlotShape> {
+    if shape_is_erased_object_boundary(local) || local.optional_element_type().is_some() {
+        return None;
+    }
+    initializer
+        .optional_element_type()
+        .is_some_and(|element_ty| same_concrete_java_type(&element_ty, &local.java_ty))
+        .then(|| initializer.clone())
 }
 
 fn simple_declared_local_type_is_shadowed_by_local_capture_constructor(
@@ -12372,6 +12889,31 @@ fn local_decl_should_annotate_type(
         })
 }
 
+fn ragged_array_creation_matches_declared_array2(expr: &Expr, declared_ty: &JavaType) -> bool {
+    matches!(
+        expr,
+        Expr::ArrayCreation {
+            dimensions,
+            initializer: None,
+            ..
+        } if dimensions.len() == 1
+            && crate::types::two_dimensional_array_element_type(declared_ty).is_some()
+    )
+}
+
+fn ragged_array2_local_rust_type(declared_ty: &JavaType, facts: &FactSet) -> Option<RustType> {
+    let JavaType::Array(row_ty) = declared_ty else {
+        return None;
+    };
+    crate::types::two_dimensional_array_element_type(declared_ty)?;
+    Some(RustType::Vec(Box::new(
+        crate::slot_render::rust_type_for_java_type_with_effective_facts(
+            row_ty,
+            &crate::effective_facts::EffectiveFacts::new(facts),
+        ),
+    )))
+}
+
 fn planned_external_facade_call_java_type(
     initializer: &Expr,
     env: &ShapeEnv,
@@ -12423,7 +12965,7 @@ fn local_shape_can_inherit_optional_initializer_shape(
         && local.optional_element_type().is_none()
         && initializer
             .optional_element_type()
-            .is_some_and(|element_ty| element_ty == local.java_ty)
+            .is_some_and(|element_ty| same_concrete_java_type(&element_ty, &local.java_ty))
 }
 
 fn initializer_shape_is_more_specific_for_local(
@@ -12535,7 +13077,7 @@ fn fallback_local_shape_from_declared_type_and_initializer(
         });
     if initializer_shape
         .optional_element_type()
-        .is_some_and(|element_ty| element_ty == declared.java_ty)
+        .is_some_and(|element_ty| same_concrete_java_type(&element_ty, &declared.java_ty))
     {
         initializer_shape
     } else if let Some(collection_shape) =
@@ -13886,6 +14428,8 @@ fn lower_return_stmt_with_refinements(
         .filter(|return_ty| !matches!(return_ty, JavaType::Void))
         .map(storage_shape_for_java_type);
     let return_shape = effective_return_shape_for_lowering(
+        ctx,
+        expr,
         ctx.current_return_shape,
         declared_return_shape.as_ref(),
     );
@@ -13980,7 +14524,13 @@ fn lower_external_call_return_for_erased_slot(
     ctx: LowerCtx,
     refinements: &ExprRefinements,
 ) -> Option<RustExpr> {
+    if !slot_targets_erased_object(slot) {
+        return None;
+    }
     if map_get_call_targets_slot(expr, env, slot, ctx) {
+        return None;
+    }
+    if current_method_declares_summary_only_return(ctx) {
         return None;
     }
     let call = match expr {
@@ -13992,6 +14542,12 @@ fn lower_external_call_return_for_erased_slot(
     lowered.expr = apply_result_propagation_policy_from_ctx(lowered.expr, call, env, ctx);
     let plan = plan_lowered_slot_conversion(&lowered.actual, slot.clone(), ctx.facts);
     Some(apply_lowered_slot_expr_conversion(lowered, &plan))
+}
+
+fn current_method_declares_summary_only_return(ctx: LowerCtx) -> bool {
+    ctx.current_method_decl
+        .and_then(|method| concrete_java_type_name(&method.return_type))
+        .is_some_and(|name| context_type_key_is_in_source_summary(ctx, name))
 }
 
 fn map_get_call_targets_slot(expr: &Expr, env: &ShapeEnv, slot: &Slot, ctx: LowerCtx) -> bool {
@@ -14031,9 +14587,12 @@ fn representation_aware_return_shape_for_body_lowering(
             ctx.representations,
         );
     let facts_return = crate::slot_render::rust_type_for_slot_with_facts(shape, ctx.facts);
-    if representation_aware_return == erased_object_rust_type()
-        || facts_return == erased_object_rust_type()
-        || representation_aware_return != facts_return
+    let native_collection_carrier_change = representation_aware_return != facts_return
+        && crate::stdlib::java_collection_kind_for_type(&shape.java_ty).is_some();
+    if !native_collection_carrier_change
+        && (representation_aware_return == erased_object_rust_type()
+            || facts_return == erased_object_rust_type()
+            || representation_aware_return != facts_return)
     {
         if shape.optional_element_type().is_some() {
             lowered.java_ty = crate::types::optional_java_type(erased_object_boundary_java_type());
@@ -14062,17 +14621,29 @@ fn erased_object_boundary_java_type() -> JavaType {
 }
 
 fn effective_return_shape_for_lowering<'a>(
+    ctx: LowerCtx,
+    expr: Option<&Expr>,
     solved: Option<&'a RustSlotShape>,
     declared: Option<&'a RustSlotShape>,
 ) -> Option<&'a RustSlotShape> {
     match (solved, declared) {
+        (Some(solved), Some(declared))
+            if return_shape_is_summary_only_context_type(declared, ctx)
+                && solved.optional_element_type().is_none() =>
+        {
+            Some(declared)
+        }
         (Some(solved), Some(declared))
             if solved.java_ty == declared.java_ty
                 && solved.sequence_element_type().is_some()
                 && matches!(solved.ownership, OwnershipShape::SharedBorrow)
                 && shape_is_owned(declared) =>
         {
-            Some(declared)
+            if return_expr_is_direct_current_method_param(expr, ctx) {
+                Some(solved)
+            } else {
+                Some(declared)
+            }
         }
         (Some(solved), Some(declared))
             if matches!(solved.java_ty, JavaType::String)
@@ -14080,11 +14651,31 @@ fn effective_return_shape_for_lowering<'a>(
                 && matches!(solved.ownership, OwnershipShape::SharedBorrow)
                 && shape_is_owned(declared) =>
         {
-            Some(declared)
+            if return_expr_is_direct_current_method_param(expr, ctx) {
+                Some(solved)
+            } else {
+                Some(declared)
+            }
         }
         (Some(solved), _) => Some(solved),
         (None, declared) => declared,
     }
+}
+
+fn return_expr_is_direct_current_method_param(expr: Option<&Expr>, ctx: LowerCtx) -> bool {
+    let Some(Expr::Var(name)) = expr else {
+        return false;
+    };
+    ctx.current_method_decl
+        .is_some_and(|method| method.params.iter().any(|param| param.name == *name))
+}
+
+fn return_shape_is_summary_only_context_type(shape: &RustSlotShape, ctx: LowerCtx) -> bool {
+    let java_ty = shape
+        .optional_element_type()
+        .unwrap_or_else(|| shape.java_ty.clone());
+    concrete_java_type_name(&java_ty)
+        .is_some_and(|name| context_type_key_is_in_source_summary(ctx, name))
 }
 
 fn apply_result_propagation_policy(
@@ -14167,6 +14758,85 @@ fn apply_result_value_policy_from_ctx(lowered: RustExpr, ctx: LowerCtx) -> RustE
     } else {
         unwrap_result_or_panic_uncaught_java_exception(lowered)
     }
+}
+
+fn lower_array_creation_with_negative_size_result(
+    array_plan: &crate::array_plan::ArrayExprPlan<'_>,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    let crate::array_plan::ArrayExprPlan::Creation { dimensions, .. } = array_plan else {
+        return None;
+    };
+    if dimensions.is_empty() {
+        return None;
+    }
+    let len_names = array_dimension_temp_names(dimensions.len());
+    let stmts = dimensions
+        .iter()
+        .zip(len_names.iter())
+        .map(|(dimension, name)| RustStmt::Let {
+            mutable: false,
+            name: name.clone(),
+            ty: None,
+            value: Some(lower_expr_with_refinements(
+                dimension,
+                env,
+                ctx,
+                refinements,
+            )),
+        })
+        .collect::<Vec<_>>();
+    let array = array_expr_with_object_default(
+        array_plan,
+        len_names
+            .iter()
+            .map(|name| RustExpr::Var(name.clone()))
+            .collect(),
+        array_element_type_has_default(array_plan, ctx),
+    );
+    Some(propagate_result_projection(RustExpr::Block {
+        stmts,
+        tail: Some(Box::new(RustExpr::If {
+            condition: Box::new(array_negative_dimension_condition(&len_names)?),
+            then_expr: Box::new(function_call_projection(
+                RustExpr::path(["Err"]),
+                vec![crate::exception_lowering::new_exception_expr(
+                    "NegativeArraySizeException",
+                    rust_string_literal_projection("Java negative array size"),
+                )],
+            )),
+            else_expr: Box::new(function_call_projection(
+                RustExpr::path(["Ok"]),
+                vec![array],
+            )),
+        })),
+    }))
+}
+
+fn array_dimension_temp_names(len: usize) -> Vec<String> {
+    if len == 1 {
+        return vec!["__java_array_len".to_string()];
+    }
+    (0..len)
+        .map(|index| format!("__java_array_len_{index}"))
+        .collect()
+}
+
+fn array_negative_dimension_condition(names: &[String]) -> Option<RustExpr> {
+    names
+        .iter()
+        .map(|name| RustExpr::Binary {
+            op: "<".to_string(),
+            left: Box::new(RustExpr::Var(name.clone())),
+            right: Box::new(RustExpr::Literal("0".to_string())),
+        })
+        .reduce(|left, right| RustExpr::Binary {
+            op: "||".to_string(),
+            left: Box::new(left),
+            right: Box::new(right),
+        })
 }
 
 fn lower_index_expr(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> RustExpr {
@@ -15451,6 +16121,27 @@ fn collect_expr_read_names(expr: &Expr, names: &mut std::collections::HashSet<St
         | Expr::Raw(_)
         | Expr::Unsupported { .. } => {}
     }
+}
+
+fn lower_map_view_call_expr_stmt(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> Option<RustStmt> {
+    let Expr::Call {
+        receiver,
+        name,
+        args,
+        ..
+    } = expr
+    else {
+        return None;
+    };
+    lower_map_view_remove_call(
+        receiver.as_deref(),
+        name,
+        args,
+        env,
+        ctx,
+        &ExprRefinements::default(),
+    )
+    .map(expr_stmt)
 }
 
 fn lower_native_collection_remove_all_expr_stmt(
@@ -17601,19 +18292,17 @@ fn array_element_type_has_default(
     if !args.is_empty() {
         return false;
     }
-    let rust_name = crate::slot_render::rust_name_for_java_named_type(name);
-    [ctx.program, ctx.support_local_type_program]
-        .iter()
-        .any(|program| {
-            crate::item_assembly::rust_named_type_supports_struct_derive_default(
-                &rust_name,
-                &std::collections::HashSet::new(),
-                ctx.signatures,
-                ctx.facts,
-                program,
-                &mut std::collections::HashSet::new(),
-            )
-        })
+    let Some((ty, program)) = find_context_type_and_program_by_key_in_lower_ctx(ctx, name) else {
+        return false;
+    };
+    crate::item_assembly::source_type_decl_supports_struct_derive_default(
+        ty,
+        &std::collections::HashSet::new(),
+        ctx.signatures,
+        ctx.facts,
+        program,
+        &mut std::collections::HashSet::new(),
+    )
 }
 
 fn lower_expr_with_refinements(
@@ -17633,6 +18322,23 @@ fn lower_expr_with_refinements(
             name,
             args,
             resolved.as_ref(),
+            env,
+            ctx,
+            refinements,
+        )
+    {
+        return expr;
+    }
+    if let Expr::Call {
+        receiver,
+        name,
+        args,
+        ..
+    } = expr
+        && let Some(expr) = lower_java_objects_null_predicate_call_expr(
+            receiver.as_deref(),
+            name,
+            args,
             env,
             ctx,
             refinements,
@@ -17668,16 +18374,19 @@ fn lower_expr_with_refinements(
     {
         return expr;
     }
+    if let Some(map_entry_expr) =
+        lower_map_entry_accessor_expr_for_slot(expr, env, &Slot::Value, ctx, refinements)
+    {
+        return map_entry_expr;
+    }
+    if let Some(iterator_expr) = lower_map_entry_set_iterator_expr(expr, env, ctx, refinements) {
+        return iterator_expr;
+    }
     if let Some(stream_expr) = lower_stream_expr(expr, env, ctx) {
         return stream_expr.expr;
     }
     if let Some(format_expr) = lower_string_concat_with_refinements(expr, env, ctx, refinements) {
         return format_expr;
-    }
-    if let Some(map_entry_expr) =
-        lower_map_entry_accessor_expr_for_slot(expr, env, &Slot::Value, ctx, refinements)
-    {
-        return map_entry_expr;
     }
     if let Expr::Call {
         receiver,
@@ -17708,6 +18417,12 @@ fn lower_expr_with_refinements(
         return expr;
     }
     if let Some(array_plan) = plan_array_expr(expr) {
+        if ctx.result_propagation_mode == ResultPropagationMode::Propagate
+            && let Some(array_creation) =
+                lower_array_creation_with_negative_size_result(&array_plan, env, ctx, refinements)
+        {
+            return array_creation;
+        }
         let children = array_plan
             .child_exprs()
             .iter()
@@ -17872,6 +18587,17 @@ fn lower_expr_with_refinements(
             ) {
                 return expr;
             }
+            if let Some(expr) = lower_java_objects_to_string_call(
+                receiver.as_deref(),
+                name,
+                args,
+                resolved.as_ref(),
+                env,
+                ctx,
+                refinements,
+            ) {
+                return expr;
+            }
             if receiver.is_none() && is_java_get_class_name(name) && args.is_empty() {
                 let current_type = ctx.current_type.unwrap_or("java.lang.Object");
                 let rust_type = crate::slot_render::rust_name_for_java_named_type(current_type);
@@ -17880,9 +18606,14 @@ fn lower_expr_with_refinements(
                     vec![rust_string_literal_projection(current_type)],
                 );
             }
-            if let Some(expr) =
-                lower_interface_super_default_call(receiver.as_deref(), name, args, env, ctx)
-            {
+            if let Some(expr) = lower_interface_super_default_call(
+                receiver.as_deref(),
+                name,
+                args,
+                resolved.as_ref(),
+                env,
+                ctx,
+            ) {
                 return expr;
             }
             if let Some(expr) =
@@ -17907,6 +18638,14 @@ fn lower_expr_with_refinements(
                 env,
                 ctx,
                 refinements,
+            ) {
+                return expr;
+            }
+            if let Some(expr) = lower_resolved_source_summary_super_call(
+                receiver.as_deref(),
+                resolved.as_ref(),
+                name,
+                ctx,
             ) {
                 return expr;
             }
@@ -18107,6 +18846,9 @@ fn lower_expr_with_refinements(
                 }
                 CallExprPlan::Target(target) => target,
             };
+            if let Some(expr) = lower_source_summary_super_boundary_call(&target, name, ctx) {
+                return expr;
+            }
             let target = retarget_static_owner_call_for_instance_field_receiver(
                 target,
                 receiver.as_deref(),
@@ -18165,6 +18907,30 @@ fn lower_expr_with_refinements(
                         refinements,
                     )
                 });
+            }
+            if call_target_is_java_objects_to_string(&target, ctx) && matches!(args.len(), 1 | 2) {
+                return if args.len() == 1 {
+                    lower_string_value_of_arg_to_string(&args[0], env, ctx, refinements)
+                } else {
+                    lower_java_objects_to_string_with_default(
+                        &args[0],
+                        &args[1],
+                        env,
+                        ctx,
+                        refinements,
+                    )
+                };
+            }
+            if let Some(is_non_null) = call_target_is_java_objects_null_predicate(&target, ctx)
+                && args.len() == 1
+            {
+                return lower_java_objects_null_predicate_arg(
+                    is_non_null,
+                    &args[0],
+                    env,
+                    ctx,
+                    refinements,
+                );
             }
             if let Some(expr) = lower_source_summary_super_boundary_call(&target, name, ctx) {
                 return expr;
@@ -18331,8 +19097,10 @@ fn lower_expr_with_refinements(
                 )
             });
             let target_result_fallback = !call_needs_result_propagation
-                && source_call_target_returns_result_with_lowered_receiver(
+                && source_call_target_returns_result(
                     &target,
+                    receiver.as_deref(),
+                    env,
                     lowered_receiver.as_ref(),
                     ctx,
                 );
@@ -18516,6 +19284,13 @@ fn lower_expr_with_refinements(
             };
             let mut rust_args =
                 lower_constructor_args_with_plan(args, env, constructor_arg_plan, ctx);
+            if let Some(unsupported) = unsupported_inner_constructor_outer_this_handle_expr(
+                &target,
+                resolved.as_ref(),
+                ctx,
+            ) {
+                return unsupported;
+            }
             if let Some(outer_arg) =
                 inner_constructor_outer_this_handle_arg(&target, resolved.as_ref(), ctx)
             {
@@ -18711,6 +19486,37 @@ fn inner_constructor_outer_this_handle_arg(
             .map(|name| apply_clone_projection(RustExpr::Var(name.to_string()))),
         OuterThisHandleSource::Unavailable => None,
     }
+}
+
+fn unsupported_inner_constructor_outer_this_handle_expr(
+    target: &NewTargetPlan,
+    resolved: Option<&ResolvedConstructor>,
+    ctx: LowerCtx,
+) -> Option<RustExpr> {
+    if ctx.current_self_handle.is_some() {
+        return None;
+    }
+    if inner_constructor_outer_this_handle_source(
+        target,
+        resolved,
+        ctx.current_type,
+        ctx.current_receiver,
+        ctx.facts,
+    ) != OuterThisHandleSource::CurrentOuterReceiverNeedsSharedHandle
+    {
+        return None;
+    }
+    let constructed_type = resolved
+        .map(|resolved| resolved.declaring_type.as_str())
+        .or_else(|| concrete_java_type_name(&target.owner_shape.java_ty))?;
+    let outer_type = ctx
+        .facts
+        .captures
+        .outer_this_type_for_type(constructed_type)?;
+    Some(unsupported_outer_capture_constructor_projection(
+        constructed_type,
+        outer_type,
+    ))
 }
 
 fn local_capture_constructor_args(
@@ -20269,6 +21075,7 @@ fn lower_ordered_array2_index_assignment_stmt(
             env.type_env(),
         ))
         .is_none()
+        || two_dimensional_array_expr_uses_nested_slice(outer_array, env, ctx)
         || (!expr_has_assignment_order_side_effect(outer_index)
             && !expr_has_assignment_order_side_effect(index))
     {
@@ -20342,11 +21149,12 @@ fn lower_ordered_ragged_array2_index_assignment_stmt(
         return None;
     };
     if !array_assignment_receiver_is_simple(outer_array)
-        || ndarray_element_type_after_optional(&crate::types::infer_expr_type(
+        || (ndarray_element_type_after_optional(&crate::types::infer_expr_type(
             outer_array,
             env.type_env(),
         ))
         .is_some()
+            && !two_dimensional_array_expr_uses_nested_slice(outer_array, env, ctx))
         || (!assignment_order_is_observable(outer_index, value, env)
             && !assignment_order_is_observable(index, value, env))
     {
@@ -20717,6 +21525,7 @@ fn lower_array_assignment_target_expr(
             env.type_env(),
         ))
         .is_some()
+        && !two_dimensional_array_expr_uses_nested_slice(outer_array, env, ctx)
     {
         return array2_index_projection(
             lower_write_sequence_receiver(outer_array, env, ctx, refinements),
@@ -20751,7 +21560,10 @@ fn lower_write_sequence_receiver(
     {
         return lowered;
     }
-    project_optional_sequence_receiver(lowered, OptionalSequenceReceiverProjection::Mutable)
+    make_java_null_expect_catchable_in_propagating_ctx(
+        project_optional_sequence_receiver(lowered, OptionalSequenceReceiverProjection::Mutable),
+        ctx,
+    )
 }
 
 fn lower_source_associated_const_field_access(
@@ -22812,8 +23624,8 @@ fn static_owner_receiver_is_non_program_emitted_context(
 }
 
 fn static_owner_key_is_non_program_emitted_context(owner: &str, ctx: LowerCtx) -> bool {
-    static_context_owner_is_emitted(owner, ctx)
-        && find_context_type_by_key(ctx.program, owner).is_none()
+    find_emitted_context_type_and_program_by_key_in_lower_ctx(ctx, owner)
+        .is_some_and(|(_, program)| !std::ptr::eq(program, ctx.program))
 }
 
 fn static_owner_expr_candidates(receiver: &Expr, env: &ShapeEnv) -> Vec<SourceContextOwnerKey> {
@@ -23132,7 +23944,10 @@ fn static_owner_receiver_is_emitted_program_type(
     };
     static_owner_expr_candidates(receiver, env)
         .iter()
-        .any(|owner| find_emitted_context_type_by_key(ctx.program, owner.as_str()).is_some())
+        .any(|owner| {
+            find_emitted_context_type_and_program_by_key_in_lower_ctx(ctx, owner.as_str())
+                .is_some_and(|(_, program)| std::ptr::eq(program, ctx.program))
+        })
 }
 
 /// Puts a value recovered out of a borrow back behind its shared handle.
@@ -23296,6 +24111,15 @@ fn adapt_owned_native_borrow_argument(
     target_shape: &RustSlotShape,
     actual_shape: &RustSlotShape,
 ) -> RustExpr {
+    if target_shape.ownership == OwnershipShape::SharedBorrow
+        && target_shape.view == ViewShape::Slice
+        && actual_shape.ownership == OwnershipShape::Owned
+        && actual_shape.view == ViewShape::Native
+        && crate::types::two_dimensional_array_element_type(&actual_shape.java_ty).is_none()
+        && same_concrete_java_type(&target_shape.java_ty, &actual_shape.java_ty)
+    {
+        return apply_coercions(lowered, &[Coercion::AsSlice]);
+    }
     if !matches!(
         target_shape.ownership,
         OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
@@ -24080,6 +24904,7 @@ fn current_type_extends_known_exception_target(target_ty: &JavaType, ctx: LowerC
     source_or_jdk_subtype_reaches_in_lower_ctx(current_type, target_name, ctx)
 }
 
+#[cfg(test)]
 fn source_or_jdk_subtype_reaches(actual_name: &str, target_name: &str, program: &Program) -> bool {
     if same_concrete_java_type_name(&JavaType::Unknown(actual_name.to_string()), target_name) {
         return true;
@@ -24108,10 +24933,14 @@ fn source_or_jdk_subtype_reaches_in_lower_ctx(
     target_name: &str,
     ctx: LowerCtx,
 ) -> bool {
-    if same_concrete_java_type_name(&JavaType::Unknown(actual_name.to_string()), target_name) {
+    if context_type_name_matches_target_in_lower_ctx(ctx, actual_name, target_name) {
         return true;
     }
-    if crate::stdlib::is_known_java_subtype(erased_java_simple_name(actual_name), target_name) {
+    let target_is_source_context_type =
+        find_context_type_by_key_in_lower_ctx(ctx, target_name).is_some();
+    if !target_is_source_context_type
+        && crate::stdlib::is_known_java_subtype(erased_java_simple_name(actual_name), target_name)
+    {
         return true;
     }
     let Some(ty) = find_context_type_by_key_in_lower_ctx(ctx, actual_name) else {
@@ -24120,13 +24949,18 @@ fn source_or_jdk_subtype_reaches_in_lower_ctx(
     let Some(super_name) = ty.extends.as_deref() else {
         return false;
     };
-    same_concrete_java_type_name(
-        &crate::parser::parse_hierarchy_type(super_name),
-        target_name,
-    ) || crate::stdlib::is_known_java_subtype(erased_java_simple_name(super_name), target_name)
+    let direct_source_supertype_match =
+        context_type_name_matches_target_in_lower_ctx(ctx, super_name, target_name);
+    direct_source_supertype_match
+        || (!target_is_source_context_type
+            && crate::stdlib::is_known_java_subtype(
+                erased_java_simple_name(super_name),
+                target_name,
+            ))
         || source_or_jdk_subtype_reaches_in_lower_ctx(super_name, target_name, ctx)
 }
 
+#[cfg(test)]
 fn context_type_simple_name_is_ambiguous(program: &Program, type_name: &str) -> bool {
     if type_name.contains('.') || find_context_type_by_key(program, type_name).is_some() {
         return false;
@@ -24139,6 +24973,45 @@ fn context_type_simple_name_is_ambiguous(program: &Program, type_name: &str) -> 
                 matches.insert(candidate.name.clone());
                 if matches.len() > 1 {
                     return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn context_type_name_matches_target_in_lower_ctx(
+    ctx: LowerCtx,
+    candidate_name: &str,
+    target_name: &str,
+) -> bool {
+    if candidate_name.contains('.') && target_name.contains('.') {
+        return candidate_name == target_name;
+    }
+    if context_type_simple_name_is_ambiguous_in_lower_ctx(ctx, candidate_name) {
+        return false;
+    }
+    same_concrete_java_type_name(&JavaType::Unknown(candidate_name.to_string()), target_name)
+}
+
+fn context_type_simple_name_is_ambiguous_in_lower_ctx(ctx: LowerCtx, type_name: &str) -> bool {
+    if type_name.contains('.') || find_context_type_by_key_in_lower_ctx(ctx, type_name).is_some() {
+        return false;
+    }
+    let simple = erased_java_simple_name(type_name);
+    let mut matches = BTreeSet::new();
+    for program in [
+        ctx.program,
+        ctx.support_local_type_program,
+        ctx.source_summary_type_program,
+    ] {
+        for ty in &program.types {
+            for candidate in type_decl_and_nested_types(ty) {
+                if erased_java_simple_name(&candidate.name) == simple {
+                    matches.insert(candidate.name.clone());
+                    if matches.len() > 1 {
+                        return true;
+                    }
                 }
             }
         }
@@ -24421,6 +25294,14 @@ fn lower_args_for_call_target(
         }
         CallTargetPlan::NativeJavaStatic {
             method: crate::call_plan::NativeJavaStaticMethod::StringValueOf,
+        } => args
+            .iter()
+            .map(|arg| {
+                lower_string_value_of_arg_for_display(arg, env, ctx, &ExprRefinements::default())
+            })
+            .collect(),
+        CallTargetPlan::NativeJavaStatic {
+            method: crate::call_plan::NativeJavaStaticMethod::ObjectsToString,
         } => args
             .iter()
             .map(|arg| {
@@ -24849,6 +25730,173 @@ fn lower_planned_string_value_of_call(
     }
 }
 
+fn lower_java_objects_to_string_call(
+    receiver: Option<&Expr>,
+    name: &str,
+    args: &[Expr],
+    resolved: Option<&ResolvedCall>,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    if !matches!(name, "toString" | "to_string") || !matches!(args.len(), 1 | 2) {
+        return None;
+    }
+    if !java_objects_to_string_static_call(receiver, name, args, resolved, env, ctx) {
+        return None;
+    }
+    if args.len() == 1 {
+        return Some(lower_string_value_of_arg_to_string(
+            &args[0],
+            env,
+            ctx,
+            refinements,
+        ));
+    }
+    Some(lower_java_objects_to_string_with_default(
+        &args[0],
+        &args[1],
+        env,
+        ctx,
+        refinements,
+    ))
+}
+
+fn java_objects_to_string_static_call(
+    receiver: Option<&Expr>,
+    name: &str,
+    args: &[Expr],
+    resolved: Option<&ResolvedCall>,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> bool {
+    if !matches!(name, "toString" | "to_string") || !matches!(args.len(), 1 | 2) {
+        return false;
+    }
+    if let Some(Expr::Var(owner)) = receiver {
+        if static_context_owner_is_emitted(owner, ctx) {
+            return false;
+        }
+        if java_objects_to_string_owner_name(owner) {
+            return true;
+        }
+        if env
+            .type_env()
+            .static_type_alias(owner)
+            .is_some_and(java_objects_to_string_owner_name)
+        {
+            return true;
+        }
+    }
+    resolved.is_some_and(|resolved| {
+        resolved.kind == CallKind::Static
+            && !static_context_owner_is_emitted(&resolved.declaring_type, ctx)
+            && java_objects_to_string_owner_name(&resolved.declaring_type)
+    })
+}
+
+fn java_objects_to_string_owner_name(owner: &str) -> bool {
+    let canonical = crate::stdlib::canonical_external_receiver_type_key(owner);
+    matches!(
+        canonical.rsplit('.').next().unwrap_or(&canonical),
+        "Objects" | "JavaUtilObjects"
+    )
+}
+
+fn lower_java_objects_to_string_with_default(
+    value: &Expr,
+    default_value: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> RustExpr {
+    let shape_ctx = ExprShapeContext {
+        signatures: Some(ctx.signatures),
+        representations: Some(ctx.representations),
+        facts: Some(ctx.facts),
+    };
+    let value_shape = infer_expr_shape_with_context(value, env, shape_ctx);
+    if value_shape.optional_element_type().is_none() {
+        let lowered_value = lower_string_value_of_arg_to_string(value, env, ctx, refinements);
+        let lowered_default =
+            lower_string_value_of_arg_to_string(default_value, env, ctx, refinements);
+        return RustExpr::Block {
+            stmts: vec![RustStmt::Let {
+                mutable: false,
+                name: "__java_objects_to_string_default".to_string(),
+                ty: None,
+                value: Some(lowered_default),
+            }],
+            tail: Some(Box::new(lowered_value)),
+        };
+    }
+
+    let value_tmp = "__java_objects_to_string_value";
+    let default_tmp = "__java_objects_to_string_default";
+    let (mut stmts, optional_receiver) = if let Expr::Var(name) = value {
+        (Vec::new(), RustExpr::Var(name.clone()))
+    } else {
+        (
+            vec![RustStmt::Let {
+                mutable: false,
+                name: value_tmp.to_string(),
+                ty: None,
+                value: Some(lower_expr_with_refinements(value, env, ctx, refinements)),
+            }],
+            RustExpr::Var(value_tmp.to_string()),
+        )
+    };
+    stmts.push(RustStmt::Let {
+        mutable: false,
+        name: default_tmp.to_string(),
+        ty: None,
+        value: Some(lower_string_value_of_arg_to_string(
+            default_value,
+            env,
+            ctx,
+            refinements,
+        )),
+    });
+    RustExpr::Block {
+        stmts,
+        tail: Some(Box::new(receiver_method_call_projection_exact(
+            receiver_method_call_projection_exact(
+                receiver_method_call_projection_exact(optional_receiver, "as_ref", Vec::new()),
+                "map",
+                vec![java_objects_to_string_present_value_closure(&value_shape)],
+            ),
+            "unwrap_or",
+            vec![RustExpr::Var(default_tmp.to_string())],
+        ))),
+    }
+}
+
+fn java_objects_to_string_present_value_closure(value_shape: &RustSlotShape) -> RustExpr {
+    let value = RustExpr::Var("value".to_string());
+    let body = if value_shape.optional_element_type().is_some() {
+        function_call_projection(
+            RustExpr::Var("java_erased_object_to_string".to_string()),
+            vec![value],
+        )
+    } else if shape_is_erased_object_boundary(value_shape) {
+        function_call_projection(
+            RustExpr::Var("java_erased_object_to_string".to_string()),
+            vec![value],
+        )
+    } else {
+        apply_java_display_plan(value, JavaDisplayPlan::FormatValue)
+    };
+    RustExpr::Closure {
+        is_move: false,
+        params: vec![RustClosureParam {
+            pattern: "value".to_string(),
+            ty: None,
+        }],
+        return_type: None,
+        body: RustClosureBody::Expr(Box::new(body)),
+    }
+}
+
 fn lower_string_value_of_arg_to_string(
     arg: &Expr,
     env: &ShapeEnv,
@@ -24872,6 +25920,24 @@ fn lower_string_value_of_arg_for_display(
     ctx: LowerCtx,
     refinements: &ExprRefinements,
 ) -> RustExpr {
+    if let Expr::Call {
+        receiver,
+        name,
+        args,
+        resolved,
+    } = arg
+        && let Some(lowered) = lower_java_objects_to_string_call(
+            receiver.as_deref(),
+            name,
+            args,
+            resolved.as_ref(),
+            env,
+            ctx,
+            refinements,
+        )
+    {
+        return lowered;
+    }
     lower_string_value_of_erased_object_display(arg, env, ctx, refinements).unwrap_or_else(|| {
         if expr_shape_is_optional_string(arg, env, ctx) {
             return apply_java_display_plan(
@@ -25480,8 +26546,11 @@ fn lower_varargs_call_args_from_params(
     ctx: LowerCtx,
 ) -> Option<Vec<RustExpr>> {
     let varargs_param = params.last()?;
-    let element_ty = crate::types::sequence_element_type(&varargs_param.java_ty)
-        .or_else(|| varargs_param.shape.sequence_element_type())?;
+    let element_ty = varargs_param
+        .shape
+        .sequence_element_type()
+        .or_else(|| crate::types::sequence_element_type(&varargs_param.java_ty))?;
+    let element_ty = array_storage_element_java_type(&varargs_param.java_ty, element_ty);
     let element_shape = project_java_value_shape(Some(ctx.representations), element_ty);
     let fixed_count = params.len().saturating_sub(1);
     let mut lowered = lower_fixed_varargs_prefix_args(args, env, params, ctx)?;
@@ -26700,6 +27769,26 @@ fn apply_call_target_with_lower_context(
     {
         *first = option_some_projection(first.clone());
     }
+    if let CallTargetPlan::NativeJavaStatic {
+        method:
+            crate::call_plan::NativeJavaStaticMethod::ObjectsNonNull
+            | crate::call_plan::NativeJavaStaticMethod::ObjectsIsNull,
+    } = target
+        && args.len() == 1
+    {
+        let is_non_null = matches!(
+            target,
+            CallTargetPlan::NativeJavaStatic {
+                method: crate::call_plan::NativeJavaStaticMethod::ObjectsNonNull
+            }
+        );
+        return java_objects_null_predicate_lowered_arg(
+            is_non_null,
+            args.into_iter()
+                .next()
+                .expect("Objects null predicate target checked one argument"),
+        );
+    }
     if ctx.result_propagation_mode == ResultPropagationMode::Propagate
         && let CallTargetPlan::NativeCollectionStatic {
             method: crate::call_plan::NativeCollectionStaticMethod::ArraysCopyOf,
@@ -26803,6 +27892,22 @@ fn apply_call_target_with_lower_context(
         ));
     }
     apply_call_target(target, lowered_receiver, args)
+}
+
+fn java_objects_null_predicate_lowered_arg(is_non_null: bool, arg: RustExpr) -> RustExpr {
+    if unwrap_some_expr(&arg).is_some() {
+        return RustExpr::Literal(if is_non_null { "true" } else { "false" }.to_string());
+    }
+    let arg = match arg.unshaped() {
+        RustExpr::MethodCall {
+            receiver,
+            method,
+            args,
+        } if method == "as_ref" && args.is_empty() => receiver.as_ref().clone(),
+        _ => arg.into_unshaped(),
+    };
+    let method = if is_non_null { "is_some" } else { "is_none" };
+    receiver_method_call_projection_exact(arg, method, Vec::new())
 }
 
 fn string_value_of_lowered_arg_for_display(arg: RustExpr) -> RustExpr {
@@ -26925,88 +28030,6 @@ fn source_method_emits_outer_this_handle_companion(
 ) -> bool {
     let function = lower_method(ctx.program, ty, method, ctx);
     outer_this_handle_method_companion(ctx.program, ty, method, &function, ctx).is_some()
-}
-
-fn java_integral_parse_null_argument_as_number_format(arg: RustExpr) -> RustExpr {
-    match arg {
-        RustExpr::Try(inner) => match *inner {
-            RustExpr::MethodCall {
-                receiver,
-                method,
-                args,
-            } if method == "ok_or_else" && args.len() == 1 => {
-                apply_java_display_plan(*receiver, JavaDisplayPlan::OptionalString)
-            }
-            other => RustExpr::Try(Box::new(other)),
-        },
-        RustExpr::MethodCall {
-            receiver,
-            method,
-            args,
-        } if method == "expect"
-            && matches!(
-                args.as_slice(),
-                [RustExpr::Literal(message)] if message == "\"Java null receiver\""
-            ) =>
-        {
-            apply_java_display_plan(*receiver, JavaDisplayPlan::OptionalString)
-        }
-        RustExpr::Shaped { expr, .. } => java_integral_parse_null_argument_as_number_format(*expr),
-        RustExpr::Raw(rendered) => {
-            java_integral_parse_raw_null_argument_as_number_format(&rendered)
-                .unwrap_or_else(|| RustExpr::raw_leaf(rendered))
-        }
-        other => other,
-    }
-}
-
-fn java_integral_parse_raw_null_argument_as_number_format(rendered: &str) -> Option<RustExpr> {
-    let recovered = recover_rewritten_raw_expr_or_simple_plus_projection(rendered.trim());
-    let RustExpr::MethodCall {
-        receiver: as_str_receiver,
-        method: as_str_method,
-        args: as_str_args,
-    } = recovered.unshaped()
-    else {
-        return None;
-    };
-    if as_str_method != "as_str" || !as_str_args.is_empty() {
-        return None;
-    }
-    let RustExpr::MethodCall {
-        receiver: expect_receiver,
-        method: expect_method,
-        args: expect_args,
-    } = as_str_receiver.unshaped()
-    else {
-        return None;
-    };
-    if expect_method != "expect"
-        || !matches!(
-            expect_args.as_slice(),
-            [RustExpr::Literal(message)] if message == "\"Java null receiver\""
-        )
-    {
-        return None;
-    }
-    let RustExpr::MethodCall {
-        receiver: as_ref_receiver,
-        method: as_ref_method,
-        args: as_ref_args,
-    } = expect_receiver.unshaped()
-    else {
-        return None;
-    };
-    if as_ref_method != "as_ref" || !as_ref_args.is_empty() {
-        return None;
-    }
-    if matches!(as_ref_receiver.unshaped(), RustExpr::Raw(_)) {
-        return None;
-    }
-    Some(apply_java_display_plan(
-        as_ref_receiver.as_ref().clone(),
-        JavaDisplayPlan::OptionalString,
-    ))
 }
 
 fn rust_expr_is_java_clone_erased_object_ref_call(expr: &RustExpr) -> bool {
@@ -27146,7 +28169,7 @@ fn retarget_native_collection_to_array_from_shape<'a>(
     if is_java_collection_view_call(receiver) {
         return CallExprPlan::Target(CallTargetPlan::NativeCollectionMethod {
             receiver,
-            receiver_ty: None,
+            receiver_ty: collection_view_call_receiver_type(receiver, env),
             method: NativeCollectionMethod::ToArray,
         });
     }
@@ -27209,6 +28232,27 @@ fn is_java_collection_view_call(receiver: &Expr) -> bool {
         Expr::Call { name, args, .. }
             if args.is_empty() && matches!(name.as_str(), "keySet" | "key_set")
     )
+}
+
+fn collection_view_call_receiver_type(receiver: &Expr, env: &ShapeEnv) -> Option<JavaType> {
+    let Expr::Call {
+        receiver: Some(map_receiver),
+        name,
+        args,
+        ..
+    } = receiver
+    else {
+        return None;
+    };
+    if !args.is_empty() || !matches!(name.as_str(), "keySet" | "key_set") {
+        return None;
+    }
+    let map_ty = crate::types::infer_expr_type(map_receiver, env.type_env());
+    let (key_ty, _) = crate::stdlib::java_map_type_args(&map_ty)?;
+    Some(JavaType::Named {
+        name: "Set".to_string(),
+        args: vec![key_ty.clone()],
+    })
 }
 
 fn slot_shape_renders_as_string_like(shape: &RustSlotShape, ctx: LowerCtx) -> bool {
@@ -28028,8 +29072,9 @@ fn adapt_source_subtype_to_supertype_argument(
     {
         return lowered;
     }
-    if let Some((loud_actual, loud_target)) =
-        source_class_upcast_hierarchy_loud_names(actual_name, target_name, env, ctx)
+    if !source_subtype_target_uses_closed_enum_carrier(target_shape)
+        && let Some((loud_actual, loud_target)) =
+            source_class_upcast_hierarchy_loud_names(actual_name, target_name, env, ctx)
     {
         return crate::unsupported::compile_error_expr_consuming(
             &lowered,
@@ -28152,6 +29197,9 @@ fn java_type_lowers_as_erased_object_alias(java_ty: &JavaType, ctx: LowerCtx) ->
     let Some(name) = concrete_java_type_name(java_ty) else {
         return false;
     };
+    if context_type_key_is_summary_only(ctx, name) {
+        return false;
+    }
     ctx.representations
         .type_representation(name)
         .is_some_and(|entry| {
@@ -29926,7 +30974,7 @@ fn adapt_call_target_receiver_with_signature(
         return lowered;
     }
     let target_returns_result = call_needs_result_propagation
-        || source_call_target_returns_result_with_lowered_receiver(target, Some(&lowered), ctx)
+        || source_call_target_returns_result(target, Some(receiver), env, Some(&lowered), ctx)
         || external_call_target_returns_result(target, receiver, arg_count, env, ctx);
     let can_propagate_receiver_null = context_allows_fallible_receiver_projection(ctx);
     if target.adapts_optional_instance_receiver()
@@ -30606,6 +31654,9 @@ fn retarget_source_declared_overload_name<'a>(
     env: &ShapeEnv,
     ctx: LowerCtx,
 ) -> CallTargetPlan<'a> {
+    if matches!(target, CallTargetPlan::SuperBoundary { .. }) {
+        return target;
+    }
     let owner = match receiver {
         Some(receiver) if is_this_receiver_expr(receiver) => ctx.current_type.map(str::to_string),
         Some(receiver) => source_receiver_type_name(receiver, env, ctx),
@@ -31913,6 +32964,47 @@ fn static_owner_target_is_java_objects_equals(target: &CallTargetPlan<'_>, ctx: 
     }
 }
 
+fn call_target_is_java_objects_to_string(target: &CallTargetPlan<'_>, ctx: LowerCtx) -> bool {
+    match target {
+        CallTargetPlan::NativeJavaStatic {
+            method: crate::call_plan::NativeJavaStaticMethod::ObjectsToString,
+        } => true,
+        CallTargetPlan::StaticOwner { owner, rust_name } => {
+            !static_context_owner_is_emitted(owner, ctx)
+                && matches!(rust_name.as_str(), "toString" | "to_string" | "to_string_2")
+                && java_objects_to_string_owner_name(owner)
+        }
+        _ => false,
+    }
+}
+
+fn call_target_is_java_objects_null_predicate(
+    target: &CallTargetPlan<'_>,
+    ctx: LowerCtx,
+) -> Option<bool> {
+    match target {
+        CallTargetPlan::NativeJavaStatic {
+            method: crate::call_plan::NativeJavaStaticMethod::ObjectsNonNull,
+        } => Some(true),
+        CallTargetPlan::NativeJavaStatic {
+            method: crate::call_plan::NativeJavaStaticMethod::ObjectsIsNull,
+        } => Some(false),
+        CallTargetPlan::StaticOwner { owner, rust_name } => {
+            if static_context_owner_is_emitted(owner, ctx)
+                || crate::stdlib::canonical_external_receiver_type_key(owner) != "Objects"
+            {
+                return None;
+            }
+            match rust_name.as_str() {
+                "nonNull" | "non_null" => Some(true),
+                "isNull" | "is_null" => Some(false),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 fn equality_call_operands_are_both_optional(
     left: &Expr,
     right: &Expr,
@@ -31993,38 +33085,118 @@ fn lower_java_objects_null_predicate_call_expr(
     if args.len() != 1 {
         return None;
     }
-    let target = match plan_call_expr_with_lower_context(receiver, name, args, None, ctx, env) {
-        CallExprPlan::Target(target) => target,
-        CallExprPlan::TrivialAccessorGetter { .. } => return None,
-    };
-    let is_non_null = match target {
-        CallTargetPlan::NativeJavaStatic {
-            method: crate::call_plan::NativeJavaStaticMethod::ObjectsNonNull,
-        } => true,
-        CallTargetPlan::NativeJavaStatic {
-            method: crate::call_plan::NativeJavaStaticMethod::ObjectsIsNull,
-        } => false,
-        _ => return None,
-    };
-    let arg = &args[0];
+    let is_non_null = java_objects_null_predicate_static_call(receiver, name, args, env, ctx)
+        .or_else(|| {
+            let target =
+                match plan_call_expr_with_lower_context(receiver, name, args, None, ctx, env) {
+                    CallExprPlan::Target(target) => target,
+                    CallExprPlan::TrivialAccessorGetter { .. } => return None,
+                };
+            match target {
+                CallTargetPlan::NativeJavaStatic {
+                    method: crate::call_plan::NativeJavaStaticMethod::ObjectsNonNull,
+                } => Some(true),
+                CallTargetPlan::NativeJavaStatic {
+                    method: crate::call_plan::NativeJavaStaticMethod::ObjectsIsNull,
+                } => Some(false),
+                _ => None,
+            }
+        })?;
+    Some(lower_java_objects_null_predicate_arg(
+        is_non_null,
+        &args[0],
+        env,
+        ctx,
+        refinements,
+    ))
+}
+
+fn lower_java_objects_null_predicate_arg(
+    is_non_null: bool,
+    arg: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> RustExpr {
     let shape_ctx = ExprShapeContext {
         signatures: Some(ctx.signatures),
         representations: Some(ctx.representations),
         facts: Some(ctx.facts),
     };
     let arg_shape = infer_expr_shape_with_context(arg, env, shape_ctx);
-    if arg_shape.optional_element_type().is_some() {
-        let lowered = lower_expr_with_refinements(arg, env, ctx, refinements);
+    if rust_slot_shape_is_option_carrier(&arg_shape, ctx) {
+        let lowered = lower_objects_null_predicate_option_carrier_arg(arg, env, ctx)
+            .unwrap_or_else(|| lower_expr_with_refinements(arg, env, ctx, refinements));
         let method = if is_non_null { "is_some" } else { "is_none" };
-        return Some(receiver_method_call_projection_exact(
-            lowered,
-            method,
-            Vec::new(),
-        ));
+        return receiver_method_call_projection_exact(lowered, method, Vec::new());
     }
-    Some(RustExpr::Literal(
-        if is_non_null { "true" } else { "false" }.to_string(),
-    ))
+    RustExpr::Literal(if is_non_null { "true" } else { "false" }.to_string())
+}
+
+fn java_objects_null_predicate_static_call(
+    receiver: Option<&Expr>,
+    name: &str,
+    args: &[Expr],
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<bool> {
+    if args.len() != 1 {
+        return None;
+    }
+    let is_non_null = match name {
+        "nonNull" | "non_null" => true,
+        "isNull" | "is_null" => false,
+        _ => return None,
+    };
+    if let Some(alias_owner) = receiver.and_then(|receiver| match receiver {
+        Expr::Var(owner) => env.type_env().static_type_alias(owner),
+        _ => None,
+    }) {
+        if static_context_owner_is_emitted(alias_owner, ctx) {
+            return None;
+        }
+        return (crate::stdlib::canonical_external_receiver_type_key(alias_owner) == "Objects")
+            .then_some(is_non_null);
+    }
+    match receiver {
+        Some(Expr::Var(owner))
+            if !static_context_owner_is_emitted(owner, ctx)
+                && crate::stdlib::canonical_external_receiver_type_key(owner) == "Objects" =>
+        {
+            Some(is_non_null)
+        }
+        _ => None,
+    }
+}
+
+fn rust_slot_shape_is_option_carrier(shape: &RustSlotShape, ctx: LowerCtx) -> bool {
+    matches!(
+        rust_type_for_slot_with_facts(shape, ctx.facts),
+        crate::rust_ir::RustType::Option(_)
+    )
+}
+
+fn lower_objects_null_predicate_option_carrier_arg(
+    arg: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<RustExpr> {
+    match arg {
+        Expr::Var(name) if env.local_shape(name).is_some() || env.field_shape(name).is_some() => {
+            Some(lower_bare_name(name, env))
+        }
+        Expr::FieldAccess(receiver, field) => {
+            let lowered_receiver = lower_expr(receiver, env, ctx);
+            Some(lower_field_access_with_facts(
+                receiver,
+                field,
+                env.type_env(),
+                lowered_receiver,
+                ctx.facts,
+            ))
+        }
+        _ => None,
+    }
 }
 
 fn lower_stream_expr(
@@ -32080,7 +33252,9 @@ fn lower_stream_plan(
     env: &ShapeEnv,
     ctx: LowerCtx,
 ) -> Option<crate::coercion::LoweredExpr> {
-    render_stream_plan_with_context(
+    let source_optional_sequence = plan.source.optional_sequence
+        || lowered_stream_source_is_optional_sequence(plan.source.expr, env, ctx);
+    render_stream_plan_with_optional_sequence_context(
         plan,
         lower_stream_source_expr(plan.source.expr, env, ctx),
         StreamRenderContext::new_with_facts_and_self_receiver(
@@ -32093,8 +33267,26 @@ fn lower_stream_plan(
                 ctx.current_receiver,
                 Some(ReceiverPlan::Shared | ReceiverPlan::Mutable)
             ),
+            ctx.result_propagation_mode == ResultPropagationMode::Propagate,
         ),
+        source_optional_sequence,
     )
+}
+
+fn lowered_stream_source_is_optional_sequence(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> bool {
+    let shape_ctx = ExprShapeContext {
+        signatures: Some(ctx.signatures),
+        representations: Some(ctx.representations),
+        facts: Some(ctx.facts),
+    };
+    let source_shape = infer_expr_shape_with_context(expr, env, shape_ctx);
+    let Some(element_ty) = source_shape.optional_element_type() else {
+        return false;
+    };
+    crate::types::stream_element_type(&element_ty).is_some()
+        || stream_source_capability_policy(&element_ty, ctx.facts)
+            .capability_element
+            .is_some()
 }
 
 fn lower_stream_source_expr(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> RustExpr {
@@ -32298,6 +33490,23 @@ fn lower_expr_for_slot_with_refinements(
         args,
         ..
     } = expr
+        && let Some(expr) = lower_java_objects_null_predicate_call_expr(
+            receiver.as_deref(),
+            name,
+            args,
+            env,
+            ctx,
+            refinements,
+        )
+    {
+        return expr;
+    }
+    if let Expr::Call {
+        receiver,
+        name,
+        args,
+        ..
+    } = expr
         && let Some(expr) = lower_source_input_stream_read_byte_array_call(
             receiver.as_deref(),
             name,
@@ -32338,6 +33547,9 @@ fn lower_expr_for_slot_with_refinements(
     if let Some(stream_expr) = lower_stream_expr_for_slot(expr, env, &slot, ctx) {
         let plan = plan_lowered_slot_conversion(&stream_expr.actual, slot, ctx.facts);
         return apply_lowered_slot_expr_conversion(stream_expr, &plan);
+    }
+    if let Some(iterator_expr) = lower_map_entry_set_iterator_expr(expr, env, ctx, refinements) {
+        return iterator_expr;
     }
     if let Expr::Var(name) = expr
         && env.static_storage_field_access_name(name).is_some()
@@ -32391,6 +33603,23 @@ fn lower_expr_for_slot_with_refinements(
     }
     if let Some(expr) =
         lower_typed_collection_value_cast_source_for_slot(expr, env, &slot, ctx, refinements)
+    {
+        return expr;
+    }
+    if let Expr::Call {
+        receiver,
+        name,
+        args,
+        resolved,
+    } = expr
+        && let Some(expr) = lower_interface_super_default_call(
+            receiver.as_deref(),
+            name,
+            args,
+            resolved.as_ref(),
+            env,
+            ctx,
+        )
     {
         return expr;
     }
@@ -33081,6 +34310,11 @@ fn lower_source_constructor_expr_for_concrete_slot(
         ctx.facts,
     );
     let mut rust_args = lower_constructor_args_with_plan(args, env, constructor_arg_plan, ctx);
+    if let Some(unsupported) =
+        unsupported_inner_constructor_outer_this_handle_expr(&target, resolved.as_ref(), ctx)
+    {
+        return Some(unsupported);
+    }
     if let Some(outer_arg) =
         inner_constructor_outer_this_handle_arg(&target, resolved.as_ref(), ctx)
     {
@@ -33162,6 +34396,9 @@ fn lower_source_subtype_to_supertype_slot(
     if actual.ownership != OwnershipShape::Owned {
         return None;
     }
+    if actual.optional_element_type().is_some() {
+        return None;
+    }
     let target = slot_target_shape(slot)?;
     if target.ownership != OwnershipShape::Owned {
         return None;
@@ -33196,8 +34433,9 @@ fn lower_source_subtype_to_supertype_slot(
             ty: target_ty,
         });
     }
-    if let Some((loud_actual, loud_target)) =
-        source_class_upcast_hierarchy_loud_names(actual_name, target_name, env, ctx)
+    if !source_subtype_target_uses_closed_enum_carrier(&target)
+        && let Some((loud_actual, loud_target)) =
+            source_class_upcast_hierarchy_loud_names(actual_name, target_name, env, ctx)
     {
         return Some(crate::unsupported::compile_error_expr_consuming(
             lowered_expr,
@@ -33210,8 +34448,9 @@ fn lower_source_subtype_to_supertype_slot(
     if !source_subtype_conversion_available(actual_name, target_name, ctx) {
         return None;
     }
-    if let Some((loud_actual, loud_target)) =
-        source_class_upcast_hierarchy_names(actual_name, target_name, ctx)
+    if !source_subtype_target_uses_closed_enum_carrier(&target)
+        && let Some((loud_actual, loud_target)) =
+            source_class_upcast_hierarchy_names(actual_name, target_name, ctx)
     {
         return Some(crate::unsupported::compile_error_expr_consuming(
             lowered_expr,
@@ -33219,6 +34458,10 @@ fn lower_source_subtype_to_supertype_slot(
         ));
     }
     Some(into_projection(lowered_expr.clone()))
+}
+
+fn source_subtype_target_uses_closed_enum_carrier(target: &RustSlotShape) -> bool {
+    matches!(target.dispatch, DispatchShape::ClosedEnum { .. })
 }
 
 fn source_class_upcast_hierarchy_loud_names(
@@ -33313,15 +34556,7 @@ fn erased_object_source_supertype_instanceof_requires_hierarchy_lowering(
     if !matches!(target_ty.kind, TypeKind::Class | TypeKind::Record) {
         return false;
     }
-    source_program_has_class_subtype_reaching(ctx.program, &target_ty.name)
-        || source_program_has_class_subtype_reaching(
-            ctx.support_local_type_program,
-            &target_ty.name,
-        )
-        || source_program_has_class_subtype_reaching(
-            ctx.source_summary_type_program,
-            &target_ty.name,
-        )
+    source_context_has_class_subtype_reaching(ctx, &target_ty.name)
 }
 
 fn erased_object_source_supertype_cast_requires_hierarchy_lowering(
@@ -33345,22 +34580,21 @@ fn erased_object_source_supertype_cast_requires_hierarchy_lowering(
     if !matches!(target_ty.kind, TypeKind::Class | TypeKind::Record) {
         return false;
     }
-    source_program_has_class_subtype_reaching(ctx.program, &target_ty.name)
-        || source_program_has_class_subtype_reaching(
-            ctx.support_local_type_program,
-            &target_ty.name,
-        )
-        || source_program_has_class_subtype_reaching(
-            ctx.source_summary_type_program,
-            &target_ty.name,
-        )
+    source_context_has_class_subtype_reaching(ctx, &target_ty.name)
 }
 
-fn source_program_has_class_subtype_reaching(program: &Program, target_name: &str) -> bool {
-    program.types.iter().any(|ty| {
+fn source_context_has_class_subtype_reaching(ctx: LowerCtx, target_name: &str) -> bool {
+    [
+        ctx.program,
+        ctx.support_local_type_program,
+        ctx.source_summary_type_program,
+    ]
+    .into_iter()
+    .flat_map(|program| program.types.iter())
+    .any(|ty| {
         ty.name != target_name
             && matches!(ty.kind, TypeKind::Class | TypeKind::Record)
-            && source_or_jdk_subtype_reaches(&ty.name, target_name, program)
+            && source_or_jdk_subtype_reaches_in_lower_ctx(&ty.name, target_name, ctx)
     })
 }
 
@@ -33572,11 +34806,12 @@ fn optional_current_method_display_actual_shape(
     owners.sort_unstable();
     owners.dedup();
     owners.into_iter().find_map(|owner| {
+        let owner = find_context_type_by_key_in_lower_ctx(ctx, owner)?;
         ctx.signatures
-            .method_return_shape_by_rust_name(owner, rust_name)
+            .method_return_shape_by_rust_name(&owner.name, rust_name)
             .or_else(|| {
                 ctx.signatures
-                    .method_return_shape_by_rust_name(owner, &snake_name)
+                    .method_return_shape_by_rust_name(&owner.name, &snake_name)
             })
             .filter(|shape| shape.optional_element_type().is_some())
     })
@@ -34016,32 +35251,41 @@ fn lower_interface_super_default_call(
     receiver: Option<&Expr>,
     name: &str,
     args: &[Expr],
+    resolved: Option<&ResolvedCall>,
     env: &ShapeEnv,
     ctx: LowerCtx,
 ) -> Option<RustExpr> {
-    let Some(Expr::FieldAccess(owner, field)) = receiver else {
-        return None;
+    let (mut interface_name, needs_implemented_name_lookup) = match receiver {
+        Some(Expr::FieldAccess(owner, field)) if field == "super" => {
+            let owner = interface_super_owner_expr(owner.as_ref());
+            (static_value_of_owner_name(owner)?, true)
+        }
+        Some(Expr::Super) => {
+            let resolved = resolved?;
+            let interface_decl =
+                find_context_type_by_key_in_lower_ctx(ctx, &resolved.declaring_type)?;
+            if interface_decl.kind != TypeKind::Interface {
+                return None;
+            }
+            (resolved.declaring_type.clone(), false)
+        }
+        _ => return None,
     };
-    if field != "super" {
-        return None;
+    if let Some(alias) = env.type_env().static_type_alias(&interface_name) {
+        interface_name = alias.to_string();
     }
-    let owner = interface_super_owner_expr(owner.as_ref());
-    let Expr::Var(interface_name) = owner else {
-        return None;
-    };
-    let interface_name = env
-        .type_env()
-        .static_type_alias(interface_name)
-        .unwrap_or(interface_name);
     let current_type = ctx.current_type?;
     let current_decl = find_context_type_by_key_in_lower_ctx(ctx, current_type)?;
-    let interface_name =
-        interface_super_implemented_name(current_decl, interface_name).unwrap_or(interface_name);
+    if needs_implemented_name_lookup
+        && let Some(implemented) = interface_super_implemented_name(current_decl, &interface_name)
+    {
+        interface_name = implemented.to_string();
+    }
     // Erased-name lookup: a nested interface is stored qualified (`Outer.G`)
     // while `G.super.m()` names it simply, so an exact match returned `None`
     // and the call fell through to the static-owner path, emitting
     // `Super::greet()` (`E0433`).
-    let interface_decl = find_context_type_decl_by_erased_name(ctx, interface_name)?;
+    let interface_decl = find_context_type_decl_by_erased_name(ctx, &interface_name)?;
     if interface_decl.kind != TypeKind::Interface
         || !interface_decl.members.iter().any(|member| {
             matches!(member, Member::Method(method) if method.name == name && method.body.is_some())
@@ -34051,9 +35295,9 @@ fn lower_interface_super_default_call(
     }
 
     let rust_name = crate::parser::to_snake_case(name);
-    let trait_name = interface_trait_rust_name(interface_name, ctx)
-        .unwrap_or_else(|| crate::slot_render::rust_name_for_java_named_type(interface_name));
-    let lowered_args = lower_interface_super_call_args(interface_name, &rust_name, args, env, ctx);
+    let trait_name = interface_trait_rust_name(&interface_name, ctx)
+        .unwrap_or_else(|| crate::slot_render::rust_name_for_java_named_type(&interface_name));
+    let lowered_args = lower_interface_super_call_args(&interface_name, &rust_name, args, env, ctx);
     let mut call_args = Vec::with_capacity(lowered_args.len() + 1);
     call_args.push(RustExpr::Var("self".to_string()));
     call_args.extend(lowered_args);
@@ -34390,11 +35634,26 @@ fn lower_array_expr_for_slot(
 ) -> Option<RustExpr> {
     let array_plan = plan_array_expr(expr)?;
     let target = slot_target_shape(slot)?;
-    let element_ty = target.sequence_element_type()?;
+    let element_ty = target.sequence_element_type().or_else(|| {
+        target
+            .optional_element_type()
+            .and_then(|inner_ty| crate::types::sequence_element_type(&inner_ty))
+    })?;
     if matches!(
         array_plan,
         crate::array_plan::ArrayExprPlan::Creation { .. }
     ) {
+        if ctx.result_propagation_mode == ResultPropagationMode::Propagate
+            && let Some(created) = lower_ragged_array_creation_with_negative_size_result(
+                &array_plan,
+                env,
+                target,
+                ctx,
+                refinements,
+            )
+        {
+            return Some(created);
+        }
         if let Some(created) = lower_ragged_array_creation_for_slot(&array_plan, env, target, ctx) {
             return Some(created);
         }
@@ -34455,13 +35714,60 @@ fn lower_ragged_array_creation_for_slot(
     if dimensions.len() != 1 {
         return None;
     }
-    if crate::types::two_dimensional_array_element_type(&target.java_ty).is_none()
-        || crate::types::ndarray_array2_element_type(&target.java_ty).is_some()
-    {
+    if two_dimensional_element_type_after_optional(&target.java_ty).is_none() {
         return None;
     }
     let len = lower_index_expr(&dimensions[0], env, ctx);
     Some(ragged_array_outer_creation_projection(len))
+}
+
+fn lower_ragged_array_creation_with_negative_size_result(
+    array_plan: &crate::array_plan::ArrayExprPlan<'_>,
+    env: &ShapeEnv,
+    target: &RustSlotShape,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    let crate::array_plan::ArrayExprPlan::Creation { dimensions, .. } = array_plan else {
+        return None;
+    };
+    if dimensions.len() != 1
+        || crate::types::two_dimensional_array_element_type(&target.java_ty).is_none()
+    {
+        return None;
+    }
+    let len_name = "__java_array_len".to_string();
+    let len_expr = lower_expr_with_refinements(&dimensions[0], env, ctx, refinements);
+    let array = ragged_array_outer_creation_projection(RustExpr::Cast {
+        expr: Box::new(RustExpr::Var(len_name.clone())),
+        ty: "usize".to_string(),
+    });
+    Some(propagate_result_projection(RustExpr::Block {
+        stmts: vec![RustStmt::Let {
+            mutable: false,
+            name: len_name.clone(),
+            ty: None,
+            value: Some(len_expr),
+        }],
+        tail: Some(Box::new(RustExpr::If {
+            condition: Box::new(RustExpr::Binary {
+                op: "<".to_string(),
+                left: Box::new(RustExpr::Var(len_name)),
+                right: Box::new(RustExpr::Literal("0".to_string())),
+            }),
+            then_expr: Box::new(function_call_projection(
+                RustExpr::path(["Err"]),
+                vec![crate::exception_lowering::new_exception_expr(
+                    "NegativeArraySizeException",
+                    rust_string_literal_projection("Java negative array size"),
+                )],
+            )),
+            else_expr: Box::new(function_call_projection(
+                RustExpr::path(["Ok"]),
+                vec![array],
+            )),
+        })),
+    }))
 }
 
 fn lower_array_access_expr(
@@ -34502,11 +35808,13 @@ fn lower_array_access_expr(
                 lower_index_expr(index, env, ctx),
             );
         }
-        return array2_index_projection(
-            lower_read_sequence_receiver(outer_array, env, ctx, refinements),
-            lower_index_expr(outer_index, env, ctx),
-            lower_index_expr(index, env, ctx),
-        );
+        let lowered_array = lower_read_sequence_receiver(outer_array, env, ctx, refinements);
+        let lowered_row = lower_index_expr(outer_index, env, ctx);
+        let lowered_col = lower_index_expr(index, env, ctx);
+        if ctx.result_propagation_mode == ResultPropagationMode::Propagate {
+            return fallible_array2_index_read_expr(lowered_array, lowered_row, lowered_col);
+        }
+        return array2_index_projection(lowered_array, lowered_row, lowered_col);
     }
 
     if let Some(row_element_ty) =
@@ -34518,11 +35826,13 @@ fn lower_array_access_expr(
                 lower_index_expr(index, env, ctx),
             );
         }
-        let row_expr = receiver_method_call_projection_exact(
-            lower_read_sequence_receiver(array, env, ctx, refinements),
-            "row",
-            vec![lower_index_expr(index, env, ctx)],
-        );
+        let lowered_array = lower_read_sequence_receiver(array, env, ctx, refinements);
+        let lowered_index = lower_index_expr(index, env, ctx);
+        if ctx.result_propagation_mode == ResultPropagationMode::Propagate {
+            return fallible_array2_row_read_expr(lowered_array, lowered_index, row_element_ty);
+        }
+        let row_expr =
+            receiver_method_call_projection_exact(lowered_array, "row", vec![lowered_index]);
         return to_owned_sequence_projection(
             row_expr,
             &CloneRecoveryPolicy::ProvenCloneCapability {
@@ -34611,6 +35921,201 @@ fn fallible_array_index_read_expr(
     }
 }
 
+fn fallible_array2_index_read_expr(array: RustExpr, row: RustExpr, col: RustExpr) -> RustExpr {
+    let original_row = fallible_array_index_original_index_expr(row);
+    let original_col = fallible_array_index_original_index_expr(col);
+    RustExpr::Block {
+        stmts: vec![
+            RustStmt::Let {
+                mutable: false,
+                name: "__java_arrays_source".to_string(),
+                ty: None,
+                value: Some(fallible_array_index_source_expr(array)),
+            },
+            RustStmt::Let {
+                mutable: false,
+                name: "__java_arrays_row".to_string(),
+                ty: None,
+                value: Some(original_row),
+            },
+            RustStmt::Let {
+                mutable: false,
+                name: "__java_arrays_col".to_string(),
+                ty: None,
+                value: Some(original_col),
+            },
+        ],
+        tail: Some(Box::new(RustExpr::If {
+            condition: Box::new(fallible_array2_index_bounds_condition()),
+            then_expr: Box::new(propagate_result_projection(function_call_projection(
+                RustExpr::path(["Err"]),
+                vec![crate::exception_lowering::new_exception_expr(
+                    "ArrayIndexOutOfBoundsException",
+                    RustExpr::MacroCall {
+                        macro_name: "format".to_string(),
+                        args: vec![
+                            RustExpr::Literal(
+                                "\"Index [{}, {}] out of bounds for shape ({}, {})\"".to_string(),
+                            ),
+                            RustExpr::Var("__java_arrays_row".to_string()),
+                            RustExpr::Var("__java_arrays_col".to_string()),
+                            receiver_method_call_projection_exact(
+                                RustExpr::Var("__java_arrays_source".to_string()),
+                                "nrows",
+                                Vec::new(),
+                            ),
+                            receiver_method_call_projection_exact(
+                                RustExpr::Var("__java_arrays_source".to_string()),
+                                "ncols",
+                                Vec::new(),
+                            ),
+                        ],
+                    },
+                )],
+            ))),
+            else_expr: Box::new(array2_index_projection(
+                RustExpr::Var("__java_arrays_source".to_string()),
+                RustExpr::Cast {
+                    expr: Box::new(RustExpr::Var("__java_arrays_row".to_string())),
+                    ty: "usize".to_string(),
+                },
+                RustExpr::Cast {
+                    expr: Box::new(RustExpr::Var("__java_arrays_col".to_string())),
+                    ty: "usize".to_string(),
+                },
+            )),
+        })),
+    }
+}
+
+fn fallible_array2_index_bounds_condition() -> RustExpr {
+    let row_negative = RustExpr::Binary {
+        op: "<".to_string(),
+        left: Box::new(RustExpr::Var("__java_arrays_row".to_string())),
+        right: Box::new(RustExpr::Literal("0".to_string())),
+    };
+    let col_negative = RustExpr::Binary {
+        op: "<".to_string(),
+        left: Box::new(RustExpr::Var("__java_arrays_col".to_string())),
+        right: Box::new(RustExpr::Literal("0".to_string())),
+    };
+    let row_too_high = RustExpr::Binary {
+        op: ">=".to_string(),
+        left: Box::new(RustExpr::Cast {
+            expr: Box::new(RustExpr::Var("__java_arrays_row".to_string())),
+            ty: "usize".to_string(),
+        }),
+        right: Box::new(receiver_method_call_projection_exact(
+            RustExpr::Var("__java_arrays_source".to_string()),
+            "nrows",
+            Vec::new(),
+        )),
+    };
+    let col_too_high = RustExpr::Binary {
+        op: ">=".to_string(),
+        left: Box::new(RustExpr::Cast {
+            expr: Box::new(RustExpr::Var("__java_arrays_col".to_string())),
+            ty: "usize".to_string(),
+        }),
+        right: Box::new(receiver_method_call_projection_exact(
+            RustExpr::Var("__java_arrays_source".to_string()),
+            "ncols",
+            Vec::new(),
+        )),
+    };
+    [row_negative, col_negative, row_too_high, col_too_high]
+        .into_iter()
+        .reduce(|left, right| RustExpr::Binary {
+            op: "||".to_string(),
+            left: Box::new(left),
+            right: Box::new(right),
+        })
+        .expect("array2 bounds condition has terms")
+}
+
+fn fallible_array2_row_read_expr(
+    array: RustExpr,
+    row: RustExpr,
+    row_element_ty: JavaType,
+) -> RustExpr {
+    let original_row = fallible_array_index_original_index_expr(row);
+    RustExpr::Block {
+        stmts: vec![
+            RustStmt::Let {
+                mutable: false,
+                name: "__java_arrays_source".to_string(),
+                ty: None,
+                value: Some(fallible_array_index_source_expr(array)),
+            },
+            RustStmt::Let {
+                mutable: false,
+                name: "__java_arrays_row".to_string(),
+                ty: None,
+                value: Some(original_row),
+            },
+        ],
+        tail: Some(Box::new(RustExpr::If {
+            condition: Box::new(fallible_array2_row_bounds_condition()),
+            then_expr: Box::new(propagate_result_projection(function_call_projection(
+                RustExpr::path(["Err"]),
+                vec![crate::exception_lowering::new_exception_expr(
+                    "ArrayIndexOutOfBoundsException",
+                    RustExpr::MacroCall {
+                        macro_name: "format".to_string(),
+                        args: vec![
+                            RustExpr::Literal(
+                                "\"Index {} out of bounds for length {}\"".to_string(),
+                            ),
+                            RustExpr::Var("__java_arrays_row".to_string()),
+                            receiver_method_call_projection_exact(
+                                RustExpr::Var("__java_arrays_source".to_string()),
+                                "nrows",
+                                Vec::new(),
+                            ),
+                        ],
+                    },
+                )],
+            ))),
+            else_expr: Box::new(to_owned_sequence_projection(
+                receiver_method_call_projection_exact(
+                    RustExpr::Var("__java_arrays_source".to_string()),
+                    "row",
+                    vec![RustExpr::Cast {
+                        expr: Box::new(RustExpr::Var("__java_arrays_row".to_string())),
+                        ty: "usize".to_string(),
+                    }],
+                ),
+                &CloneRecoveryPolicy::ProvenCloneCapability {
+                    java_ty: JavaType::Array(Box::new(row_element_ty)),
+                },
+            )),
+        })),
+    }
+}
+
+fn fallible_array2_row_bounds_condition() -> RustExpr {
+    RustExpr::Binary {
+        op: "||".to_string(),
+        left: Box::new(RustExpr::Binary {
+            op: "<".to_string(),
+            left: Box::new(RustExpr::Var("__java_arrays_row".to_string())),
+            right: Box::new(RustExpr::Literal("0".to_string())),
+        }),
+        right: Box::new(RustExpr::Binary {
+            op: ">=".to_string(),
+            left: Box::new(RustExpr::Cast {
+                expr: Box::new(RustExpr::Var("__java_arrays_row".to_string())),
+                ty: "usize".to_string(),
+            }),
+            right: Box::new(receiver_method_call_projection_exact(
+                RustExpr::Var("__java_arrays_source".to_string()),
+                "nrows",
+                Vec::new(),
+            )),
+        }),
+    }
+}
+
 fn fallible_array_index_write_expr(array: RustExpr, index: RustExpr, value: RustExpr) -> RustExpr {
     fallible_array_index_write_expr_with_slot_stmts(array, index, Vec::new(), value)
 }
@@ -34688,6 +36193,28 @@ fn fallible_array_index_source_expr(array: RustExpr) -> RustExpr {
 }
 
 fn normalize_optional_shared_sequence_source_expr(expr: RustExpr) -> RustExpr {
+    if let RustExpr::Try(expr) = expr {
+        return RustExpr::Try(Box::new(normalize_optional_shared_sequence_source_expr(
+            *expr,
+        )));
+    }
+    if let RustExpr::Grouped(expr) = expr {
+        return RustExpr::Grouped(Box::new(normalize_optional_shared_sequence_source_expr(
+            *expr,
+        )));
+    }
+    if let RustExpr::Shaped {
+        shape,
+        actual,
+        expr,
+    } = expr
+    {
+        return RustExpr::Shaped {
+            shape,
+            actual,
+            expr: Box::new(normalize_optional_shared_sequence_source_expr(*expr)),
+        };
+    }
     let RustExpr::MethodCall {
         receiver,
         method,
@@ -34696,9 +36223,7 @@ fn normalize_optional_shared_sequence_source_expr(expr: RustExpr) -> RustExpr {
     else {
         return expr;
     };
-    if method != "expect"
-        || !matches!(args.as_slice(), [RustExpr::Literal(message)] if message == "\"Java null receiver\"")
-    {
+    if !is_java_null_unwrap_method(&method, &args) {
         return RustExpr::MethodCall {
             receiver,
             method,
@@ -34754,6 +36279,12 @@ fn normalize_optional_shared_sequence_source_expr(expr: RustExpr) -> RustExpr {
     }
 }
 
+fn is_java_null_unwrap_method(method: &str, args: &[RustExpr]) -> bool {
+    method == "ok_or_else"
+        || (method == "expect"
+            && matches!(args, [RustExpr::Literal(message)] if message == "\"Java null receiver\""))
+}
+
 fn fallible_array_index_mut_source_expr(array: RustExpr) -> RustExpr {
     let array = normalize_optional_shared_sequence_source_expr(array);
     if rust_expr_is_optional_sequence_projection(&array, "as_mut") {
@@ -34770,14 +36301,22 @@ fn rust_expr_is_optional_shared_sequence_projection(expr: &RustExpr) -> bool {
 }
 
 fn rust_expr_is_optional_sequence_projection(expr: &RustExpr, as_method: &str) -> bool {
+    if let RustExpr::Try(expr) = expr {
+        return rust_expr_is_optional_sequence_projection(expr, as_method);
+    }
+    if let RustExpr::Grouped(expr) = expr {
+        return rust_expr_is_optional_sequence_projection(expr, as_method);
+    }
+    if let RustExpr::Shaped { expr, .. } = expr {
+        return rust_expr_is_optional_sequence_projection(expr, as_method);
+    }
     matches!(
         expr,
         RustExpr::MethodCall {
             receiver,
             method,
             args,
-        } if method == "expect"
-            && matches!(args.as_slice(), [RustExpr::Literal(message)] if message == "\"Java null receiver\"")
+        } if is_java_null_unwrap_method(method, args)
             && matches!(
                 receiver.as_ref(),
                 RustExpr::MethodCall {
@@ -34902,6 +36441,11 @@ fn two_dimensional_array_expr_uses_nested_slice(
     env: &ShapeEnv,
     ctx: LowerCtx,
 ) -> bool {
+    if let Expr::Var(name) = expr
+        && env.local_uses_nested_array2_slice(name)
+    {
+        return true;
+    }
     static_slice_const_array_expr_type(expr, env, ctx)
         .as_ref()
         .is_some_and(|java_ty| two_dimensional_element_type_after_optional(java_ty).is_some())
@@ -35114,6 +36658,9 @@ fn lower_array2_row_replacement_stmt(
         array,
         env.type_env(),
     ))?;
+    if two_dimensional_array_expr_uses_nested_slice(array, env, ctx) {
+        return None;
+    }
     Some(array2_row_mut_assign_stmt(
         lower_expr(array, env, ctx),
         lower_index_expr(index, env, ctx),
@@ -37087,15 +38634,17 @@ fn source_static_field_receiver_method_candidates(
         .collect()
 }
 
-fn source_call_target_returns_result_with_lowered_receiver(
+fn source_call_target_returns_result(
     target: &CallTargetPlan<'_>,
+    source_receiver: Option<&Expr>,
+    env: &ShapeEnv,
     lowered_receiver: Option<&RustExpr>,
     ctx: LowerCtx,
 ) -> bool {
     let Some(rust_name) = target.rust_method_name() else {
         return false;
     };
-    source_call_target_owner_candidates(target, lowered_receiver, ctx)
+    source_call_target_owner_candidates(target, source_receiver, env, lowered_receiver, ctx)
         .into_iter()
         .any(|type_name| {
             ctx.callable_analysis
@@ -37108,6 +38657,8 @@ fn source_call_target_returns_result_with_lowered_receiver(
 
 fn source_call_target_owner_candidates(
     target: &CallTargetPlan<'_>,
+    source_receiver: Option<&Expr>,
+    env: &ShapeEnv,
     lowered_receiver: Option<&RustExpr>,
     ctx: LowerCtx,
 ) -> Vec<String> {
@@ -37139,6 +38690,14 @@ fn source_call_target_owner_candidates(
             }
         }
         CallTargetPlan::InstanceReceiver { .. } | CallTargetPlan::FallbackReceiver { .. } => {
+            if let Some(receiver) = source_receiver
+                && let Some(receiver_ty) = receiver_shape_java_type(receiver, env)
+                && let Some(type_name) = concrete_java_type_name(
+                    optional_element_type_ref(receiver_ty).unwrap_or(receiver_ty),
+                )
+            {
+                push(type_name.to_string());
+            }
             if let Some(receiver) = lowered_receiver
                 && let Some(type_name) = lowered_source_receiver_type_name(receiver, ctx)
             {
@@ -37174,6 +38733,13 @@ fn receiver_shape_java_type<'a>(receiver: &Expr, env: &'a ShapeEnv) -> Option<&'
             .or_else(|| env.field_shape(name))
             .map(|shape| &shape.java_ty),
         Expr::FieldAccess(_, field) => env.field_shape(field).map(|shape| &shape.java_ty),
+        _ => None,
+    }
+}
+
+fn optional_element_type_ref(java_ty: &JavaType) -> Option<&JavaType> {
+    match java_ty {
+        JavaType::Named { name, args } if name == "Optional" && args.len() == 1 => Some(&args[0]),
         _ => None,
     }
 }
@@ -37453,7 +39019,9 @@ fn lower_map_entry_accessor_expr_for_slot(
             ctx,
         ));
     }
-    if let Some((key_ty, value_ty)) = map_entry_type_args_from_expr_shape(receiver, env, ctx) {
+    if let Some((next_expr, key_ty, value_ty)) =
+        lower_map_entry_next_expr(receiver, env, ctx, refinements)
+    {
         let (field_index, actual_ty) = match name.as_str() {
             "getKey" | "get_key" => (
                 0,
@@ -37464,14 +39032,14 @@ fn lower_map_entry_accessor_expr_for_slot(
             }
             _ => return None,
         };
-        let entry_access = tuple_field_projection(lower_expr(receiver, env, ctx), field_index);
+        let entry_access = tuple_field_projection(next_expr, field_index);
         let actual = crate::shape_projection::borrowed_sequence_element_shape(actual_ty);
         return Some(make_java_null_expect_catchable_in_propagating_ctx(
             apply_expr_to_slot_via_plan(entry_access, actual, slot, ctx.facts),
             ctx,
         ));
     }
-    let (next_expr, key_ty, value_ty) = lower_map_entry_next_expr(receiver, env, ctx, refinements)?;
+    let (key_ty, value_ty) = map_entry_type_args_from_expr_shape(receiver, env, ctx)?;
     let (field_index, actual_ty) = match name.as_str() {
         "getKey" | "get_key" => (
             0,
@@ -37482,7 +39050,7 @@ fn lower_map_entry_accessor_expr_for_slot(
         }
         _ => return None,
     };
-    let entry_access = tuple_field_projection(next_expr, field_index);
+    let entry_access = tuple_field_projection(lower_expr(receiver, env, ctx), field_index);
     let actual = crate::shape_projection::borrowed_sequence_element_shape(actual_ty);
     Some(make_java_null_expect_catchable_in_propagating_ctx(
         apply_expr_to_slot_via_plan(entry_access, actual, slot, ctx.facts),
@@ -37579,7 +39147,19 @@ fn lower_map_entry_next_expr(
     let receiver = receiver.as_deref()?;
     let (iter_expr, key_ty, value_ty) =
         lower_map_entry_iterator_expr(receiver, env, ctx, refinements)?;
-    Some((iterator_next_expect_projection(iter_expr), key_ty, value_ty))
+    Some((
+        iterator_next_projection_for_ctx(iter_expr, ctx),
+        key_ty,
+        value_ty,
+    ))
+}
+
+fn iterator_next_projection_for_ctx(iterator: RustExpr, ctx: LowerCtx) -> RustExpr {
+    if ctx.result_propagation_mode == ResultPropagationMode::Propagate {
+        propagate_result_projection(iterator_next_result_projection(iterator))
+    } else {
+        iterator_next_expect_projection(iterator)
+    }
 }
 
 fn lower_map_entry_iterator_expr(
@@ -37600,6 +39180,28 @@ fn lower_map_entry_iterator_expr(
         return lower_map_entry_set_expr(receiver.as_deref()?, env, ctx, refinements);
     }
     lower_map_entry_set_expr(expr, env, ctx, refinements)
+}
+
+fn lower_map_entry_set_iterator_expr(
+    expr: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    let Expr::Call {
+        receiver,
+        name,
+        args,
+        ..
+    } = expr
+    else {
+        return None;
+    };
+    if name != "iterator" || !args.is_empty() {
+        return None;
+    }
+    let (iter_expr, _, _) = lower_map_entry_set_expr(receiver.as_deref()?, env, ctx, refinements)?;
+    Some(iter_expr)
 }
 
 fn lower_map_entry_set_expr(
@@ -37681,11 +39283,14 @@ fn lower_map_entry_set_value_call(
     let map_name = "__java_map_entry_set_value_map";
     let key_name = "__java_map_entry_set_value_key";
     let value_name = "__java_map_entry_set_value_value";
-    let next_entry = iterator_next_expect_projection(receiver_method_call_projection_exact(
-        RustExpr::Var(map_name.to_string()),
-        "iter",
-        Vec::new(),
-    ));
+    let next_entry = iterator_next_projection_for_ctx(
+        receiver_method_call_projection_exact(
+            RustExpr::Var(map_name.to_string()),
+            "iter",
+            Vec::new(),
+        ),
+        ctx,
+    );
     let key = apply_clone_projection(deref_borrowed_projection(tuple_field_projection(
         next_entry, 0,
     )));
@@ -37910,7 +39515,7 @@ fn method_call_return_shape_from_receiver(
     }
     let arg_types = expr_arg_types(args, env, ctx);
     if let Some(resolved) = resolved
-        && context_type_key_is_summary_only(ctx, &resolved.declaring_type)
+        && context_type_key_is_in_source_summary(ctx, &resolved.declaring_type)
         && let Some(shape) = source_summary_declared_method_return_shape(
             &resolved.declaring_type,
             name,
@@ -37924,7 +39529,7 @@ fn method_call_return_shape_from_receiver(
             ctx,
         ));
     }
-    if context_type_key_is_summary_only(ctx, &receiver_name)
+    if context_type_key_is_in_source_summary(ctx, &receiver_name)
         && let Some(shape) =
             source_summary_declared_method_return_shape(&receiver_name, name, &arg_types, ctx)
     {
@@ -38621,11 +40226,17 @@ fn explicit_static_receiver_matches_resolved_owner(
     }
     env.type_env()
         .static_type_alias(receiver_name)
-        .map(SourceContextOwnerKey::new)
-        .is_some_and(|alias| alias.matches_context_type(owner))
-        || find_context_type_by_key_in_lower_ctx(ctx, receiver_name).is_some_and(|ty| {
-            SourceContextOwnerKey::new(ty.name.as_str()).matches_context_type(owner)
-        })
+        .is_some_and(|alias| context_type_key_resolves_to_owner(ctx, alias, owner))
+}
+
+fn context_type_key_resolves_to_owner(ctx: LowerCtx, type_key: &str, owner: &str) -> bool {
+    let (Some(ty), Some(owner_ty)) = (
+        find_context_type_by_key_in_lower_ctx(ctx, type_key),
+        find_context_type_by_key_in_lower_ctx(ctx, owner),
+    ) else {
+        return false;
+    };
+    ty.name == owner_ty.name
 }
 
 fn non_emitted_static_context_fallback_signature_for_method(
@@ -39022,18 +40633,73 @@ fn lower_source_summary_super_boundary_call(
     }
 }
 
+fn lower_resolved_source_summary_super_call(
+    receiver: Option<&Expr>,
+    resolved: Option<&ResolvedCall>,
+    java_name: &str,
+    ctx: LowerCtx,
+) -> Option<RustExpr> {
+    if !matches!(receiver, Some(Expr::Super)) {
+        return None;
+    }
+    let resolved = resolved?;
+    if resolved.kind != CallKind::Instance
+        || !context_type_key_is_summary_only(ctx, &resolved.declaring_type)
+    {
+        return None;
+    }
+    let gap = if matches!(resolved.return_type, JavaType::Void) {
+        RustExpr::Tuple(Vec::new())
+    } else {
+        source_summary_method_unimplemented_expr(&resolved.declaring_type, java_name)
+    };
+    Some(
+        if ctx
+            .facts
+            .method_has_thrown_exceptions(&resolved.declaring_type, &resolved.rust_name)
+        {
+            function_call_projection(RustExpr::path(["Ok"]), vec![gap])
+        } else {
+            gap
+        },
+    )
+}
+
 fn lower_emitted_source_super_boundary_call(
     target: &CallTargetPlan<'_>,
     java_name: &str,
     lowered_args: &[RustExpr],
     ctx: LowerCtx,
 ) -> Option<RustExpr> {
-    let CallTargetPlan::SuperBoundary { rust_name, .. } = target else {
+    let CallTargetPlan::SuperBoundary {
+        rust_name,
+        return_type,
+        propagates_result,
+        ..
+    } = target
+    else {
         return None;
     };
     let current_type_name = ctx.current_type?;
     let current_ty = find_emitted_context_type_for_super_call(ctx, current_type_name)?;
     let super_ty = direct_emitted_super_type_for_super_call(current_ty, ctx)?;
+    let super_ty_is_summary_context =
+        type_decl_ref_is_from_program(super_ty, ctx.source_summary_type_program)
+            || (!type_decl_ref_is_from_program(super_ty, ctx.program)
+                && find_context_type_by_key(ctx.source_summary_type_program, &super_ty.name)
+                    .is_some());
+    if context_type_key_is_summary_only(ctx, &super_ty.name) || super_ty_is_summary_context {
+        let gap = if matches!(return_type, JavaType::Void) {
+            RustExpr::Tuple(Vec::new())
+        } else {
+            source_summary_method_unimplemented_expr(&super_ty.name, java_name)
+        };
+        return Some(if *propagates_result {
+            function_call_projection(RustExpr::path(["Ok"]), vec![gap])
+        } else {
+            gap
+        });
+    }
     if source_type_lowers_as_erased_object_alias(super_ty, ctx) {
         return lower_erased_alias_inherited_source_super_call(
             current_ty,
@@ -39121,6 +40787,20 @@ fn source_type_has_instance_method(
                     .as_deref()
                     .is_some_and(|method_rust_name| method_rust_name == rust_name))
     })
+}
+
+fn type_decl_ref_is_from_program(candidate: &TypeDecl, program: &Program) -> bool {
+    program
+        .types
+        .iter()
+        .any(|ty| type_decl_ref_matches(candidate, ty))
+}
+
+fn type_decl_ref_matches(candidate: &TypeDecl, ty: &TypeDecl) -> bool {
+    std::ptr::eq(candidate, ty)
+        || ty.members.iter().any(|member| {
+            matches!(member, Member::Type(nested) if type_decl_ref_matches(candidate, nested))
+        })
 }
 
 fn emitted_source_super_receiver_literal(
@@ -39383,6 +41063,81 @@ fn find_context_type_by_key_in_lower_ctx<'a>(
     unique_context_type_key_matches(&exact, &alias, &simple)
 }
 
+fn find_context_type_and_program_by_key_in_lower_ctx<'a>(
+    ctx: LowerCtx<'a>,
+    type_key: &str,
+) -> Option<(&'a TypeDecl, &'a Program)> {
+    let mut exact = Vec::new();
+    let mut alias = Vec::new();
+    let mut simple = Vec::new();
+    for program in [
+        ctx.program,
+        ctx.support_local_type_program,
+        ctx.source_summary_type_program,
+    ] {
+        for ty in &program.types {
+            collect_context_type_key_program_matches(
+                ty,
+                program,
+                type_key,
+                &mut exact,
+                &mut alias,
+                &mut simple,
+            );
+        }
+    }
+    unique_context_type_program_key_matches(&exact, &alias, &simple)
+}
+
+fn collect_context_type_key_program_matches<'a>(
+    ty: &'a TypeDecl,
+    program: &'a Program,
+    type_key: &str,
+    exact: &mut Vec<(&'a TypeDecl, &'a Program)>,
+    alias: &mut Vec<(&'a TypeDecl, &'a Program)>,
+    simple: &mut Vec<(&'a TypeDecl, &'a Program)>,
+) {
+    match context_type_key_match_kind(&ty.name, type_key) {
+        Some(ContextTypeKeyMatch::Exact) => exact.push((ty, program)),
+        Some(ContextTypeKeyMatch::Alias) => alias.push((ty, program)),
+        Some(ContextTypeKeyMatch::Simple) => simple.push((ty, program)),
+        _ => {}
+    }
+    for member in &ty.members {
+        if let Member::Type(nested) = member {
+            collect_context_type_key_program_matches(
+                nested, program, type_key, exact, alias, simple,
+            );
+        }
+    }
+}
+
+fn unique_context_type_program_key_matches<'a>(
+    exact: &[(&'a TypeDecl, &'a Program)],
+    alias: &[(&'a TypeDecl, &'a Program)],
+    simple: &[(&'a TypeDecl, &'a Program)],
+) -> Option<(&'a TypeDecl, &'a Program)> {
+    unique_context_type_program_match(exact).or_else(|| match alias {
+        [ty] => Some(*ty),
+        _ => match simple {
+            [ty] => Some(*ty),
+            _ => None,
+        },
+    })
+}
+
+fn unique_context_type_program_match<'a>(
+    matches: &[(&'a TypeDecl, &'a Program)],
+) -> Option<(&'a TypeDecl, &'a Program)> {
+    let first = *matches.first()?;
+    if matches.iter().all(|(ty, _)| ty.name == first.0.name) {
+        Some(first)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
 fn find_emitted_context_type_by_key<'a>(
     program: &'a Program,
     type_key: &str,
@@ -39421,15 +41176,41 @@ fn find_emitted_context_type_by_key_in_lower_ctx<'a>(
     unique_context_type_key_matches(&exact, &alias, &simple)
 }
 
+fn find_emitted_context_type_and_program_by_key_in_lower_ctx<'a>(
+    ctx: LowerCtx<'a>,
+    type_key: &str,
+) -> Option<(&'a TypeDecl, &'a Program)> {
+    let mut exact = Vec::new();
+    let mut alias = Vec::new();
+    let mut simple = Vec::new();
+    for program in [
+        ctx.program,
+        ctx.support_local_type_program,
+        ctx.source_summary_type_program,
+    ] {
+        for ty in &program.types {
+            collect_emitted_context_type_key_program_matches(
+                ty,
+                program,
+                type_key,
+                &mut exact,
+                &mut alias,
+                &mut simple,
+            );
+        }
+    }
+    unique_context_type_program_key_matches(&exact, &alias, &simple)
+}
+
 fn context_type_key_is_summary_only(ctx: LowerCtx, type_key: &str) -> bool {
-    let Some(summary_ty) = find_context_type_by_key(ctx.source_summary_type_program, type_key)
-    else {
-        return false;
-    };
-    find_context_type_by_key(ctx.program, type_key).is_none()
+    find_context_type_by_key(ctx.source_summary_type_program, type_key).is_some()
+        && find_context_type_by_key(ctx.program, type_key).is_none()
         && find_context_type_by_key(ctx.support_local_type_program, type_key).is_none()
-        && find_context_type_by_key_in_lower_ctx(ctx, type_key)
-            .is_some_and(|ty| ty.name == summary_ty.name)
+}
+
+fn context_type_key_is_in_source_summary(ctx: LowerCtx, type_key: &str) -> bool {
+    find_context_type_and_program_by_key_in_lower_ctx(ctx, type_key)
+        .is_some_and(|(_, program)| std::ptr::eq(program, ctx.source_summary_type_program))
 }
 
 fn collect_emitted_context_type_key_matches<'a>(
@@ -39448,6 +41229,29 @@ fn collect_emitted_context_type_key_matches<'a>(
     for member in &ty.members {
         if let Member::Type(nested) = member {
             collect_emitted_context_type_key_matches(nested, type_key, exact, alias, simple);
+        }
+    }
+}
+
+fn collect_emitted_context_type_key_program_matches<'a>(
+    ty: &'a TypeDecl,
+    program: &'a Program,
+    type_key: &str,
+    exact: &mut Vec<(&'a TypeDecl, &'a Program)>,
+    alias: &mut Vec<(&'a TypeDecl, &'a Program)>,
+    simple: &mut Vec<(&'a TypeDecl, &'a Program)>,
+) {
+    match emitted_context_type_key_match_kind(&ty.name, type_key) {
+        Some(ContextTypeKeyMatch::Exact) => exact.push((ty, program)),
+        Some(ContextTypeKeyMatch::Alias) => alias.push((ty, program)),
+        Some(ContextTypeKeyMatch::Simple) => simple.push((ty, program)),
+        _ => {}
+    }
+    for member in &ty.members {
+        if let Member::Type(nested) = member {
+            collect_emitted_context_type_key_program_matches(
+                nested, program, type_key, exact, alias, simple,
+            );
         }
     }
 }
@@ -39525,14 +41329,6 @@ impl SourceContextOwnerKey {
             .map(Self)
             .collect()
     }
-
-    fn matches_context_type(&self, candidate: &str) -> bool {
-        context_type_key_matches(candidate, self.as_str())
-    }
-}
-
-fn context_type_key_matches(candidate: &str, query: &str) -> bool {
-    context_type_key_match_kind(candidate, query).is_some()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40070,7 +41866,10 @@ fn lower_map_get_call_expr_for_slot(
             && slot_target_shape(slot)
                 .is_some_and(|target| matches!(target.java_ty, JavaType::Primitive(_)))
         {
-            return Some(optional_copied_expect_projection(get_expr));
+            return Some(make_java_null_expect_catchable_in_propagating_ctx(
+                optional_copied_expect_projection(get_expr),
+                ctx,
+            ));
         }
         if let Some(projected) = map_get_erased_object_optional_clone_projection(
             &actual,
@@ -40214,10 +42013,12 @@ fn lower_map_get_to_array_call_expr_for_slot(
         return None;
     }
     let target_element_ty = crate::types::sequence_element_type(&target.java_ty)?;
+    let target_storage_element_ty = crate::types::optional_element_type(&target_element_ty)
+        .unwrap_or_else(|| target_element_ty.clone());
     let map_receiver_ty = types::infer_expr_type(map_receiver, env.type_env());
-    let (_, value_ty, _) = map_type_args_from_java_type(&map_receiver_ty)?;
+    let (key_ty, value_ty, _) = map_type_args_from_java_type(&map_receiver_ty)?;
     let value_element_ty = crate::types::sequence_element_type(&value_ty)?;
-    if target_element_ty != value_element_ty {
+    if target_storage_element_ty != value_element_ty {
         return None;
     }
 
@@ -40229,35 +42030,22 @@ fn lower_map_get_to_array_call_expr_for_slot(
         ctx,
         env,
     );
-    let CallExprPlan::Target(
-        target_plan @ CallTargetPlan::NativeCollectionMethod {
-            method: NativeCollectionMethod::MapGet,
-            ..
-        },
-    ) = map_get_plan
+    let CallExprPlan::Target(CallTargetPlan::NativeCollectionMethod {
+        method: NativeCollectionMethod::MapGet,
+        ..
+    }) = map_get_plan
     else {
         return None;
     };
-    let key_args = lower_args_for_call_target(
-        &target_plan,
-        Some(map_receiver),
-        get_args,
+    let mut key_shape = RustSlotShape::conservative(key_ty);
+    key_shape.ownership = OwnershipShape::SharedBorrow;
+    let key = lower_expr_for_slot_with_refinements(
+        &get_args[0],
         env,
-        plan_call_arguments_with_facts_and_args(
-            Some(map_receiver),
-            get_name,
-            get_resolved.as_ref(),
-            get_args,
-            ctx.signatures,
-            ctx.facts,
-            env.type_env(),
-        ),
-        get_resolved.as_ref(),
+        Slot::Argument(key_shape),
         ctx,
-        None,
+        refinements,
     );
-    let key = key_args.into_iter().next()?;
-    let key = lower_map_key_arg_borrow_projection(key, &get_args[0], env, ctx);
     let lowered_receiver = lower_expr_with_refinements(map_receiver, env, ctx, refinements);
     let get_expr = map_get_projection(lowered_receiver, key);
     let value_shape = RustSlotShape::conservative(value_ty);
@@ -40266,19 +42054,31 @@ fn lower_map_get_to_array_call_expr_for_slot(
     ));
     let recovery_plan =
         plan_lowered_slot_conversion(&actual, Slot::Argument(value_shape.clone()), ctx.facts);
-    let recovered = apply_lowered_slot_expr_conversion(
+    let mut recovered = apply_lowered_slot_expr_conversion(
         crate::coercion::LoweredExpr {
             expr: get_expr,
             actual,
         },
         &recovery_plan,
     );
+    if slot_renders_as_vec_of_option(&target, ctx.facts)
+        && !slot_renders_as_vec_of_option(&value_shape, ctx.facts)
+    {
+        recovered = owned_sequence_elements_to_optional_vec_projection(recovered);
+    }
     Some(apply_expr_to_slot_via_plan(
         recovered,
-        value_shape,
+        target.clone(),
         slot,
         ctx.facts,
     ))
+}
+
+fn slot_renders_as_vec_of_option(shape: &RustSlotShape, facts: &FactSet) -> bool {
+    matches!(
+        rust_type_for_slot_with_facts(shape, facts),
+        RustType::Vec(inner) if matches!(inner.as_ref(), RustType::Option(_))
+    )
 }
 
 fn lower_map_get_collection_mutation_call(
@@ -40481,6 +42281,18 @@ fn lower_map_key_set_call_from_backing_map(
         ("remove", 1) => {
             lower_map_key_set_remove_from_backing_map(map_receiver, args, env, ctx, refinements)
         }
+        ("removeAll" | "remove_all", 1) => {
+            lower_map_key_set_remove_all_from_backing_map(map_receiver, args, env, ctx, refinements)
+        }
+        ("add", 1) | ("addAll" | "add_all", 1) => {
+            lower_map_key_set_unsupported_mutation_from_backing_map(
+                map_receiver,
+                args,
+                env,
+                ctx,
+                refinements,
+            )
+        }
         ("clear", 0) => {
             lower_map_key_set_clear_from_backing_map(map_receiver, env, ctx, refinements)
         }
@@ -40505,6 +42317,48 @@ fn lower_map_key_set_call_from_backing_map(
         ),
         _ => None,
     }
+}
+
+fn lower_map_key_set_unsupported_mutation_from_backing_map(
+    map_receiver: &Expr,
+    args: &[Expr],
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    let receiver_ty = crate::types::infer_expr_type(map_receiver, env.type_env());
+    if !crate::stdlib::java_collection_kind_for_type(&receiver_ty)
+        .is_some_and(|kind| kind.is_map_like())
+    {
+        return None;
+    }
+
+    let lowered_map = lower_expr_with_refinements(map_receiver, env, ctx, refinements);
+    let mut stmts = vec![RustStmt::Let {
+        mutable: false,
+        name: "__java_map_key_set_unsupported_map".to_string(),
+        ty: None,
+        value: Some(mutable_map_view_backing_borrow(
+            map_receiver,
+            lowered_map,
+            env,
+        )),
+    }];
+    for (index, arg) in args.iter().enumerate() {
+        stmts.push(RustStmt::Let {
+            mutable: false,
+            name: format!("__java_map_key_set_unsupported_arg{index}"),
+            ty: None,
+            value: Some(lower_expr_with_refinements(arg, env, ctx, refinements)),
+        });
+    }
+    Some(RustExpr::Block {
+        stmts,
+        tail: Some(Box::new(unsupported_operation_exception_result_expr(
+            ctx,
+            "Java Map.keySet view does not support add",
+        ))),
+    })
 }
 
 fn lower_map_key_set_remove_from_backing_map(
@@ -40548,6 +42402,108 @@ fn lower_map_key_set_remove_from_backing_map(
         }),
         method: "is_some".to_string(),
         args: Vec::new(),
+    })
+}
+
+fn lower_map_key_set_remove_all_from_backing_map(
+    map_receiver: &Expr,
+    args: &[Expr],
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    let receiver_ty = crate::types::infer_expr_type(map_receiver, env.type_env());
+    if !crate::stdlib::java_collection_kind_for_type(&receiver_ty)
+        .is_some_and(|kind| kind.is_map_like())
+    {
+        return None;
+    }
+    let shape_ctx = ExprShapeContext {
+        signatures: Some(ctx.signatures),
+        representations: Some(ctx.representations),
+        facts: Some(ctx.facts),
+    };
+    let arg_shape = infer_expr_shape_with_context(&args[0], env, shape_ctx);
+    if crate::stdlib::java_collection_kind_for_type(&arg_shape.java_ty).is_none()
+        && crate::types::sequence_element_type(&arg_shape.java_ty).is_none()
+    {
+        return None;
+    }
+
+    let lowered_arg = lower_expr_for_slot_with_refinements(
+        &args[0],
+        env,
+        argument_slot(arg_shape),
+        ctx,
+        refinements,
+    );
+    let lowered_map = lower_expr_with_refinements(map_receiver, env, ctx, refinements);
+    let keys_name = "__java_map_key_set_remove_all_keys";
+    let map_name = "__java_map_key_set_remove_all_map";
+    let before_name = "__java_map_key_set_remove_all_before";
+    Some(RustExpr::Block {
+        stmts: vec![
+            RustStmt::Let {
+                mutable: false,
+                name: keys_name.to_string(),
+                ty: None,
+                value: Some(lowered_arg),
+            },
+            RustStmt::Let {
+                mutable: false,
+                name: map_name.to_string(),
+                ty: None,
+                value: Some(mutable_map_view_backing_borrow(
+                    map_receiver,
+                    lowered_map,
+                    env,
+                )),
+            },
+            RustStmt::Let {
+                mutable: false,
+                name: before_name.to_string(),
+                ty: None,
+                value: Some(receiver_method_call_projection_exact(
+                    RustExpr::Var(map_name.to_string()),
+                    "len",
+                    Vec::new(),
+                )),
+            },
+            RustStmt::Expr(receiver_method_call_projection_exact(
+                RustExpr::Var(map_name.to_string()),
+                "retain",
+                vec![RustExpr::Closure {
+                    is_move: false,
+                    return_type: None,
+                    params: vec![
+                        RustClosureParam {
+                            pattern: "key".to_string(),
+                            ty: None,
+                        },
+                        RustClosureParam {
+                            pattern: "_value".to_string(),
+                            ty: None,
+                        },
+                    ],
+                    body: RustClosureBody::Expr(Box::new(logical_not_projection(
+                        receiver_method_call_projection_exact(
+                            RustExpr::Var(keys_name.to_string()),
+                            "contains",
+                            vec![RustExpr::Var("key".to_string())],
+                        ),
+                    ))),
+                }],
+            )),
+        ],
+        tail: Some(Box::new(RustExpr::Binary {
+            op: "!=".to_string(),
+            left: Box::new(receiver_method_call_projection_exact(
+                RustExpr::Var(map_name.to_string()),
+                "len",
+                Vec::new(),
+            )),
+            right: Box::new(RustExpr::Var(before_name.to_string())),
+        })),
     })
 }
 
@@ -40755,8 +42711,59 @@ fn lower_map_entry_set_collection_call(
             ctx,
             refinements,
         ),
+        ("add", 1) | ("addAll" | "add_all", 1) => {
+            lower_map_entry_set_unsupported_mutation_from_backing_map(
+                map_receiver,
+                args,
+                env,
+                ctx,
+                refinements,
+            )
+        }
         _ => None,
     }
+}
+
+fn lower_map_entry_set_unsupported_mutation_from_backing_map(
+    map_receiver: &Expr,
+    args: &[Expr],
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    let receiver_ty = crate::types::infer_expr_type(map_receiver, env.type_env());
+    if !crate::stdlib::java_collection_kind_for_type(&receiver_ty)
+        .is_some_and(|kind| kind.is_map_like())
+    {
+        return None;
+    }
+
+    let lowered_map = lower_expr_with_refinements(map_receiver, env, ctx, refinements);
+    let mut stmts = vec![RustStmt::Let {
+        mutable: false,
+        name: "__java_map_entry_set_unsupported_map".to_string(),
+        ty: None,
+        value: Some(mutable_map_view_backing_borrow(
+            map_receiver,
+            lowered_map,
+            env,
+        )),
+    }];
+    for (index, arg) in args.iter().enumerate() {
+        stmts.push(RustStmt::Let {
+            mutable: false,
+            name: format!("__java_map_entry_set_unsupported_arg{index}"),
+            ty: None,
+            value: Some(lower_expr_with_refinements(arg, env, ctx, refinements)),
+        });
+    }
+    Some(RustExpr::Block {
+        stmts,
+        tail: Some(Box::new(unsupported_operation_exception_result_expr(
+            ctx,
+            "Java Map.entrySet view does not support add",
+        ))),
+    })
 }
 
 fn lower_map_entry_set_contains_from_backing_map(
@@ -40877,11 +42884,14 @@ fn lower_map_entry_set_contains_next_from_backing_map(
     let lowered_map = lower_map_key_set_backing_map(map_receiver, env, ctx, refinements)?;
     let map_name = "__java_map_entry_set_contains_map";
     let key_name = "__java_map_entry_set_contains_key";
-    let next_entry = iterator_next_expect_projection(receiver_method_call_projection_exact(
-        RustExpr::Var(map_name.to_string()),
-        "iter",
-        Vec::new(),
-    ));
+    let next_entry = iterator_next_projection_for_ctx(
+        receiver_method_call_projection_exact(
+            RustExpr::Var(map_name.to_string()),
+            "iter",
+            Vec::new(),
+        ),
+        ctx,
+    );
     let key = apply_clone_projection(deref_borrowed_projection(tuple_field_projection(
         next_entry, 0,
     )));
@@ -40955,11 +42965,14 @@ fn lower_map_entry_set_remove_from_backing_map(
     let lowered_map = lower_map_key_set_backing_map(map_receiver, env, ctx, refinements)?;
     let map_name = "__java_map_entry_set_remove_map";
     let key_name = "__java_map_entry_set_remove_key";
-    let next_entry = iterator_next_expect_projection(receiver_method_call_projection_exact(
-        RustExpr::Var(map_name.to_string()),
-        "iter",
-        Vec::new(),
-    ));
+    let next_entry = iterator_next_projection_for_ctx(
+        receiver_method_call_projection_exact(
+            RustExpr::Var(map_name.to_string()),
+            "iter",
+            Vec::new(),
+        ),
+        ctx,
+    );
     let key = apply_clone_projection(deref_borrowed_projection(tuple_field_projection(
         next_entry, 0,
     )));
@@ -41289,11 +43302,14 @@ fn lower_simple_map_entry_display_for_slot(
                 )
             });
         let lowered_map = lower_map_key_set_backing_map(map_receiver, env, ctx, refinements)?;
-        let entry = iterator_next_expect_projection(sequence_iteration_source_projection(
-            lowered_map,
-            receiver_is_optional_map,
-            SequenceIterationProjection::Borrowed,
-        ));
+        let entry = iterator_next_projection_for_ctx(
+            sequence_iteration_source_projection(
+                lowered_map,
+                receiver_is_optional_map,
+                SequenceIterationProjection::Borrowed,
+            ),
+            ctx,
+        );
         let entry_name = "__java_map_entry_display_entry";
         return Some(RustExpr::Block {
             stmts: vec![RustStmt::Let {
@@ -41312,19 +43328,63 @@ fn lower_simple_map_entry_display_for_slot(
             ))),
         });
     }
-    let (key, value) = map_entry_key_value_args(expr, env)?;
+    if let Some((key, value)) = map_entry_key_value_args(expr, env) {
+        return Some(macro_call_projection(
+            "format",
+            vec![
+                rust_string_literal_projection("{}={}"),
+                lower_expr_for_slot_with_refinements(
+                    &key,
+                    env,
+                    Slot::DisplaySegment,
+                    ctx,
+                    refinements,
+                ),
+                lower_expr_for_slot_with_refinements(
+                    &value,
+                    env,
+                    Slot::DisplaySegment,
+                    ctx,
+                    refinements,
+                ),
+            ],
+        ));
+    }
+    if !expr_is_stable_map_entry_projection(expr)
+        && map_entry_type_args_from_expr_shape(expr, env, ctx).is_some()
+    {
+        let entry_name = "__java_map_entry_display_entry";
+        let lowered = lower_expr_with_refinements(expr, env, ctx, refinements);
+        return Some(RustExpr::Block {
+            stmts: vec![RustStmt::Let {
+                mutable: false,
+                name: entry_name.to_string(),
+                ty: None,
+                value: Some(lowered),
+            }],
+            tail: Some(Box::new(macro_call_projection(
+                "format",
+                vec![
+                    rust_string_literal_projection("{}={}"),
+                    apply_java_display_plan(
+                        tuple_field_projection(RustExpr::Var(entry_name.to_string()), 0),
+                        JavaDisplayPlan::ConcatValue,
+                    ),
+                    apply_java_display_plan(
+                        tuple_field_projection(RustExpr::Var(entry_name.to_string()), 1),
+                        JavaDisplayPlan::ConcatValue,
+                    ),
+                ],
+            ))),
+        });
+    }
+    let (key, value) = map_entry_key_value_projection_args(expr, env, ctx, refinements)?;
     Some(macro_call_projection(
         "format",
         vec![
             rust_string_literal_projection("{}={}"),
-            lower_expr_for_slot_with_refinements(&key, env, Slot::DisplaySegment, ctx, refinements),
-            lower_expr_for_slot_with_refinements(
-                &value,
-                env,
-                Slot::DisplaySegment,
-                ctx,
-                refinements,
-            ),
+            apply_java_display_plan(key, JavaDisplayPlan::ConcatValue),
+            apply_java_display_plan(value, JavaDisplayPlan::ConcatValue),
         ],
     ))
 }
@@ -41498,6 +43558,18 @@ fn lower_map_values_call_from_backing_map(
         ("remove", 1) => {
             lower_map_values_remove_from_backing_map(map_receiver, args, env, ctx, refinements)
         }
+        ("removeAll" | "remove_all", 1) => {
+            lower_map_values_remove_all_from_backing_map(map_receiver, args, env, ctx, refinements)
+        }
+        ("add", 1) | ("addAll" | "add_all", 1) => {
+            lower_map_values_unsupported_mutation_from_backing_map(
+                map_receiver,
+                args,
+                env,
+                ctx,
+                refinements,
+            )
+        }
         ("clear", 0) => {
             lower_map_key_set_clear_from_backing_map(map_receiver, env, ctx, refinements)
         }
@@ -41521,6 +43593,63 @@ fn lower_map_values_call_from_backing_map(
             refinements,
         ),
         _ => None,
+    }
+}
+
+fn lower_map_values_unsupported_mutation_from_backing_map(
+    map_receiver: &Expr,
+    args: &[Expr],
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    let receiver_ty = crate::types::infer_expr_type(map_receiver, env.type_env());
+    if !crate::stdlib::java_collection_kind_for_type(&receiver_ty)
+        .is_some_and(|kind| kind.is_map_like())
+    {
+        return None;
+    }
+
+    let lowered_map = lower_expr_with_refinements(map_receiver, env, ctx, refinements);
+    let mut stmts = vec![RustStmt::Let {
+        mutable: false,
+        name: "__java_map_values_unsupported_map".to_string(),
+        ty: None,
+        value: Some(mutable_map_view_backing_borrow(
+            map_receiver,
+            lowered_map,
+            env,
+        )),
+    }];
+    for (index, arg) in args.iter().enumerate() {
+        stmts.push(RustStmt::Let {
+            mutable: false,
+            name: format!("__java_map_values_unsupported_arg{index}"),
+            ty: None,
+            value: Some(lower_expr_with_refinements(arg, env, ctx, refinements)),
+        });
+    }
+    Some(RustExpr::Block {
+        stmts,
+        tail: Some(Box::new(unsupported_operation_exception_result_expr(
+            ctx,
+            "Java Map.values view does not support add",
+        ))),
+    })
+}
+
+fn unsupported_operation_exception_result_expr(ctx: LowerCtx, message: &str) -> RustExpr {
+    let result = function_call_projection(
+        RustExpr::path(["Err"]),
+        vec![crate::exception_lowering::new_exception_expr(
+            "UnsupportedOperationException",
+            rust_string_literal_projection(message),
+        )],
+    );
+    if ctx.result_propagation_mode == ResultPropagationMode::Propagate {
+        propagate_result_projection(result)
+    } else {
+        unwrap_result_or_panic_uncaught_java_exception(result)
     }
 }
 
@@ -41668,6 +43797,108 @@ fn lower_map_values_remove_from_backing_map(
                     body: RustExpr::Literal("false".to_string()),
                 },
             ],
+        })),
+    })
+}
+
+fn lower_map_values_remove_all_from_backing_map(
+    map_receiver: &Expr,
+    args: &[Expr],
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    let receiver_ty = crate::types::infer_expr_type(map_receiver, env.type_env());
+    if !crate::stdlib::java_collection_kind_for_type(&receiver_ty)
+        .is_some_and(|kind| kind.is_map_like())
+    {
+        return None;
+    }
+    let shape_ctx = ExprShapeContext {
+        signatures: Some(ctx.signatures),
+        representations: Some(ctx.representations),
+        facts: Some(ctx.facts),
+    };
+    let arg_shape = infer_expr_shape_with_context(&args[0], env, shape_ctx);
+    if crate::stdlib::java_collection_kind_for_type(&arg_shape.java_ty).is_none()
+        && crate::types::sequence_element_type(&arg_shape.java_ty).is_none()
+    {
+        return None;
+    }
+
+    let lowered_arg = lower_expr_for_slot_with_refinements(
+        &args[0],
+        env,
+        argument_slot(arg_shape),
+        ctx,
+        refinements,
+    );
+    let lowered_map = lower_expr_with_refinements(map_receiver, env, ctx, refinements);
+    let values_name = "__java_map_values_remove_all_values";
+    let map_name = "__java_map_values_remove_all_map";
+    let before_name = "__java_map_values_remove_all_before";
+    Some(RustExpr::Block {
+        stmts: vec![
+            RustStmt::Let {
+                mutable: false,
+                name: values_name.to_string(),
+                ty: None,
+                value: Some(lowered_arg),
+            },
+            RustStmt::Let {
+                mutable: false,
+                name: map_name.to_string(),
+                ty: None,
+                value: Some(mutable_map_view_backing_borrow(
+                    map_receiver,
+                    lowered_map,
+                    env,
+                )),
+            },
+            RustStmt::Let {
+                mutable: false,
+                name: before_name.to_string(),
+                ty: None,
+                value: Some(receiver_method_call_projection_exact(
+                    RustExpr::Var(map_name.to_string()),
+                    "len",
+                    Vec::new(),
+                )),
+            },
+            RustStmt::Expr(receiver_method_call_projection_exact(
+                RustExpr::Var(map_name.to_string()),
+                "retain",
+                vec![RustExpr::Closure {
+                    is_move: false,
+                    return_type: None,
+                    params: vec![
+                        RustClosureParam {
+                            pattern: "_key".to_string(),
+                            ty: None,
+                        },
+                        RustClosureParam {
+                            pattern: "value".to_string(),
+                            ty: None,
+                        },
+                    ],
+                    body: RustClosureBody::Expr(Box::new(logical_not_projection(
+                        receiver_method_call_projection_exact(
+                            RustExpr::Var(values_name.to_string()),
+                            "contains",
+                            vec![RustExpr::Var("value".to_string())],
+                        ),
+                    ))),
+                }],
+            )),
+        ],
+        tail: Some(Box::new(RustExpr::Binary {
+            op: "!=".to_string(),
+            left: Box::new(receiver_method_call_projection_exact(
+                RustExpr::Var(map_name.to_string()),
+                "len",
+                Vec::new(),
+            )),
+            right: Box::new(RustExpr::Var(before_name.to_string())),
         })),
     })
 }
@@ -41935,16 +44166,24 @@ fn lower_source_receiver_call_expr_for_slot(
         return None;
     };
     let method_shape = method_call_return_shape_from_receiver(expr, env, ctx);
-    let actual = method_shape
+    let accessor_shape = source_trivial_accessor_getter_lowered_type(expr, env, ctx);
+    let method_actual = method_shape
         .as_ref()
-        .filter(|shape| shape.ownership != OwnershipShape::SharedBorrow)
+        .filter(|shape| {
+            shape.ownership != OwnershipShape::SharedBorrow
+                || shape.optional_element_type().is_some()
+        })
         .cloned()
         .map(|shape| LoweredType::Slot(Box::new(shape)))
         .or_else(|| {
             method_shape
                 .map(|shape| optional_borrow_slot_lowered_type(LoweredType::Slot(Box::new(shape))))
-        })
-        .or_else(|| source_trivial_accessor_getter_lowered_type(expr, env, ctx))?;
+        });
+    let actual = if matches!(slot, Slot::StringConcatSegment | Slot::DisplaySegment) {
+        accessor_shape.or(method_actual)
+    } else {
+        method_actual.or(accessor_shape)
+    }?;
     let mut lowered = if let Expr::Call {
         receiver,
         name,
@@ -42428,9 +44667,14 @@ fn lower_external_call_expr_for_slot(
             actual: LoweredType::from_java(JavaType::Primitive(PrimitiveType::Boolean)),
         });
     }
-    if let Some(lowered_expr) =
-        lower_interface_super_default_call(receiver.as_deref(), name, args, env, ctx)
-    {
+    if let Some(lowered_expr) = lower_interface_super_default_call(
+        receiver.as_deref(),
+        name,
+        args,
+        resolved.as_ref(),
+        env,
+        ctx,
+    ) {
         let actual = slot_target_shape(slot)
             .cloned()
             .map(|shape| LoweredType::Slot(Box::new(shape)))
@@ -43398,11 +45642,12 @@ fn lower_ternary_expr_for_slot(
             );
         }
     }
-    ternary_expr(
+    let lowered = ternary_expr(
         lower_expr_for_slot(condition, env, condition_slot(), ctx),
         lower_expr_for_slot_with_refinements(then_expr, env, slot.clone(), ctx, &then_refinements),
         lower_expr_for_slot_with_refinements(else_expr, env, slot, ctx, &else_refinements),
-    )
+    );
+    make_java_null_expect_catchable_in_propagating_ctx(lowered, ctx)
 }
 
 fn lower_fallible_ternary_expr_for_slot(
@@ -43764,6 +46009,25 @@ fn lower_string_concat_part_with_refinements(
     ctx: LowerCtx,
     refinements: &ExprRefinements,
 ) -> RustExpr {
+    if let Expr::Call {
+        receiver,
+        name,
+        args,
+        resolved,
+        ..
+    } = part
+        && let Some(lowered) = lower_java_objects_to_string_call(
+            receiver.as_deref(),
+            name,
+            args,
+            resolved.as_ref(),
+            env,
+            ctx,
+            refinements,
+        )
+    {
+        return lowered;
+    }
     if let Expr::Call {
         receiver,
         name,
@@ -44258,6 +46522,192 @@ fn lower_simple_loop_try_with_resources_catch_finally_stmt(
     else {
         return None;
     };
+    if !resources.is_empty()
+        && !catches.is_empty()
+        && try_resources_are_declarations(resources)
+        && plan_block_exception_completion(finally_block) == TryBlockCompletion::FallsThroughUnit
+        && block_has_loop_abrupt(body)
+        && !block_has_loop_abrupt(finally_block)
+        && simple_try_finally_loop_body_candidate(body)
+        && simple_loop_block_is_syntactically_non_throwing(body)
+        && simple_try_finally_loop_body_candidate(finally_block)
+        && catches
+            .iter()
+            .all(|catch| simple_try_finally_loop_body_candidate(&catch.body))
+    {
+        let try_ctx = LowerCtx {
+            result_propagation_mode: ResultPropagationMode::Propagate,
+            ..ctx
+        };
+        let mut resource_env = env.clone();
+        let mut scope_body = Vec::new();
+        for resource in resources {
+            lower_stmt(
+                resource,
+                &mut resource_env,
+                true,
+                try_ctx,
+                &ExprRefinements::default(),
+                &mut scope_body,
+            );
+            learn_stmt_shapes(
+                resource,
+                &mut resource_env,
+                ctx.current_local_shapes,
+                try_ctx.signatures,
+            );
+        }
+
+        let lowered_updates = update
+            .iter()
+            .map(|expr| lower_expr(expr, env, ctx))
+            .collect::<Vec<_>>();
+        let mut cleanup_and_finally =
+            try_resource_cleanup_stmts(resources, &resource_env, try_ctx, true)
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>();
+        cleanup_and_finally.extend(lower_block_for_body(
+            finally_block,
+            update,
+            &mut env.clone(),
+            wrap_returns_in_ok,
+            ctx,
+        ));
+        let mut body = lower_block_for_body(body, &[], &mut resource_env, wrap_returns_in_ok, ctx);
+        prepend_finally_to_loop_abrupts(&mut body, &cleanup_and_finally, &lowered_updates);
+        body.extend(cleanup_and_finally);
+        scope_body.extend(body);
+
+        return Some(vec![RustStmt::Expr(RustExpr::Block {
+            stmts: scope_body,
+            tail: None,
+        })]);
+    }
+    if !resources.is_empty()
+        && !catches.is_empty()
+        && try_resources_are_declarations(resources)
+        && block_completes_with_loop_abrupt(finally_block)
+        && !block_has_return(body)
+        && !block_has_loop_abrupt(body)
+        && !catches
+            .iter()
+            .any(|catch| block_has_loop_abrupt(&catch.body))
+        && simple_try_finally_loop_body_candidate(body)
+        && simple_try_finally_loop_body_candidate(finally_block)
+        && catches
+            .iter()
+            .all(|catch| simple_try_finally_loop_return_overridden_candidate(&catch.body))
+    {
+        let try_ctx = LowerCtx {
+            result_propagation_mode: ResultPropagationMode::Propagate,
+            ..ctx
+        };
+        let mut resource_env = env.clone();
+        let mut resource_initializers = Vec::new();
+        for resource in resources {
+            lower_stmt(
+                resource,
+                &mut resource_env,
+                true,
+                try_ctx,
+                &ExprRefinements::default(),
+                &mut resource_initializers,
+            );
+            learn_stmt_shapes(
+                resource,
+                &mut resource_env,
+                ctx.current_local_shapes,
+                try_ctx.signatures,
+            );
+        }
+
+        let mut try_body = lower_block(body, &mut resource_env, true, try_ctx);
+        try_body.push(return_stmt(None, true));
+
+        let finally_body = lower_block_for_body(
+            finally_block,
+            update,
+            &mut env.clone(),
+            wrap_returns_in_ok,
+            ctx,
+        );
+        let mut arms = vec![RustMatchArm {
+            pattern: "Ok(())".to_string(),
+            body: RustExpr::Block {
+                stmts: Vec::new(),
+                tail: None,
+            },
+        }];
+        for (clause_index, catch) in catches.iter().enumerate() {
+            let mut catch_env = env.clone();
+            catch_env.insert_catch_param_with_access_name_and_binding(
+                catch.source_name.clone(),
+                catch.name.clone(),
+                JavaType::Named {
+                    name: "JavaException".to_string(),
+                    args: Vec::new(),
+                },
+                catch.binding.clone(),
+            );
+            let mut catch_body =
+                lower_block_for_body(&catch.body, &[], &mut catch_env, wrap_returns_in_ok, ctx);
+            rewrite_returns_as_discarded_exprs(&mut catch_body);
+            arms.push(RustMatchArm {
+                pattern: loop_catch_guard_pattern(
+                    &catch.name,
+                    catch_match_class_names(
+                        ctx.current_type,
+                        ctx.current_method,
+                        clause_index,
+                        catch,
+                        ctx.facts,
+                    ),
+                ),
+                body: RustExpr::Block {
+                    stmts: catch_body,
+                    tail: None,
+                },
+            });
+        }
+        arms.push(RustMatchArm {
+            pattern: "Err(_)".to_string(),
+            body: RustExpr::Block {
+                stmts: Vec::new(),
+                tail: None,
+            },
+        });
+
+        let mut scope_body = resource_initializers;
+        scope_body.push(RustStmt::Let {
+            mutable: false,
+            name: "__java_twr_loop_result".to_string(),
+            ty: None,
+            value: Some(loop_result_scope_call_expr(
+                exception_result_type(RustType::Unit),
+                try_body,
+            )),
+        });
+        for cleanup_stmt in try_resource_cleanup_stmts(resources, &resource_env, try_ctx, true)
+            .into_iter()
+            .rev()
+        {
+            scope_body.push(cleanup_stmt);
+        }
+        scope_body.push(RustStmt::Expr(RustExpr::Match {
+            expr: Box::new(RustExpr::Var("__java_twr_loop_result".to_string())),
+            arms,
+        }));
+        scope_body.push(RustStmt::Expr(RustExpr::Block {
+            stmts: finally_body,
+            tail: None,
+        }));
+
+        return Some(vec![RustStmt::Expr(RustExpr::Block {
+            stmts: scope_body,
+            tail: None,
+        })]);
+    }
     if resources.is_empty()
         || catches.is_empty()
         || !try_resources_are_declarations(resources)
@@ -44949,6 +47399,10 @@ fn rewrite_returns_as_discarded_exprs(body: &mut Vec<RustStmt>) {
                 rewrite_returns_as_discarded_exprs(body);
                 rewritten.push(stmt);
             }
+            RustStmt::Expr(RustExpr::Block { stmts, .. }) => {
+                rewrite_returns_as_discarded_exprs(stmts);
+                rewritten.push(stmt);
+            }
             RustStmt::Return(Some(expr)) => {
                 rewritten.push(RustStmt::Expr(discarded_return_value_expr(expr.clone())))
             }
@@ -44998,6 +47452,10 @@ fn prepend_finally_to_loop_abrupts(
                 prepend_finally_to_loop_abrupts(else_body, finally_body, update_exprs);
                 rewritten.push(stmt);
             }
+            RustStmt::Expr(RustExpr::Block { stmts, .. }) => {
+                prepend_finally_to_loop_abrupts(stmts, finally_body, update_exprs);
+                rewritten.push(stmt);
+            }
             RustStmt::Break(_) => {
                 rewritten.extend(finally_body.iter().cloned());
                 rewritten.push(stmt);
@@ -45009,6 +47467,60 @@ fn prepend_finally_to_loop_abrupts(
             }
             RustStmt::Continue(_) => {
                 rewritten.extend(finally_body.iter().cloned());
+                rewritten.push(stmt);
+            }
+            _ => rewritten.push(stmt),
+        }
+    }
+    *body = rewritten;
+}
+
+fn prepend_do_while_condition_to_continues(
+    body: &mut Vec<RustStmt>,
+    condition: &RustExpr,
+    label: &Option<String>,
+) {
+    let mut rewritten = Vec::with_capacity(body.len());
+    for mut stmt in std::mem::take(body) {
+        match &mut stmt {
+            RustStmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                prepend_do_while_condition_to_continues(then_body, condition, label);
+                prepend_do_while_condition_to_continues(else_body, condition, label);
+                rewritten.push(stmt);
+            }
+            RustStmt::IfLet {
+                then_body,
+                else_body,
+                ..
+            } => {
+                prepend_do_while_condition_to_continues(then_body, condition, label);
+                prepend_do_while_condition_to_continues(else_body, condition, label);
+                rewritten.push(stmt);
+            }
+            RustStmt::Expr(RustExpr::Block { stmts, .. }) => {
+                prepend_do_while_condition_to_continues(stmts, condition, label);
+                rewritten.push(stmt);
+            }
+            RustStmt::Expr(RustExpr::Match { arms, .. }) => {
+                for arm in arms {
+                    if let RustExpr::Block { stmts, .. } = &mut arm.body {
+                        prepend_do_while_condition_to_continues(stmts, condition, label);
+                    }
+                }
+                rewritten.push(stmt);
+            }
+            RustStmt::Continue(continue_label)
+                if continue_label.is_none() || continue_label == label =>
+            {
+                rewritten.push(if_stmt(
+                    logical_not_projection(condition.clone()),
+                    vec![break_stmt(label.clone())],
+                    Vec::new(),
+                ));
                 rewritten.push(stmt);
             }
             _ => rewritten.push(stmt),
@@ -45825,6 +48337,113 @@ mod tests {
     }
 
     #[test]
+    fn erased_instanceof_hierarchy_guard_refuses_ambiguous_bare_super_edge() {
+        let support = Box::leak(Box::new(Program {
+            package: None,
+            imports: Vec::new(),
+            types: vec![
+                type_decl_extending("a.Child", "Base"),
+                empty_type_decl("a.Base"),
+            ],
+        }));
+        let summary = Box::leak(Box::new(Program {
+            package: None,
+            imports: Vec::new(),
+            types: vec![empty_type_decl("b.Base")],
+        }));
+        let ctx = LowerCtx {
+            program: &Program::default(),
+            support_local_type_program: support,
+            source_summary_type_program: summary,
+            ..lower_test_ctx()
+        };
+        let plan = crate::conversion_plan::InstanceOfPlan {
+            actual: RustSlotShape {
+                java_ty: JavaType::Named {
+                    name: "Object".to_string(),
+                    args: Vec::new(),
+                },
+                ownership: OwnershipShape::Owned,
+                view: ViewShape::ErasedObjectView,
+                dispatch: DispatchShape::ErasedObject,
+                mutability: MutabilityShape::Immutable,
+            },
+            target: RustSlotShape::for_storage(JavaType::Named {
+                name: "a.Base".to_string(),
+                args: Vec::new(),
+            }),
+            check: crate::conversion_plan::InstanceOfCheck::Unsupported {
+                actual_dispatch: DispatchShape::ErasedObject,
+                target_dispatch: DispatchShape::Concrete,
+                policy: crate::conversion_plan::InstanceOfFallbackPolicy::CompileError,
+            },
+        };
+
+        assert!(context_type_simple_name_is_ambiguous_in_lower_ctx(
+            ctx, "Base"
+        ));
+        assert!(!source_or_jdk_subtype_reaches_in_lower_ctx(
+            "a.Child", "a.Base", ctx
+        ));
+        assert!(
+            !erased_object_source_supertype_instanceof_requires_hierarchy_lowering(&plan, ctx),
+            "bare superclass edges must use combined-context ambiguity checks"
+        );
+    }
+
+    #[test]
+    fn erased_cast_hierarchy_guard_refuses_ambiguous_bare_super_edge() {
+        let support = Box::leak(Box::new(Program {
+            package: None,
+            imports: Vec::new(),
+            types: vec![
+                type_decl_extending("a.Child", "Base"),
+                empty_type_decl("a.Base"),
+            ],
+        }));
+        let summary = Box::leak(Box::new(Program {
+            package: None,
+            imports: Vec::new(),
+            types: vec![empty_type_decl("b.Base")],
+        }));
+        let ctx = LowerCtx {
+            program: &Program::default(),
+            support_local_type_program: support,
+            source_summary_type_program: summary,
+            ..lower_test_ctx()
+        };
+        let object_shape = RustSlotShape {
+            java_ty: JavaType::Named {
+                name: "Object".to_string(),
+                args: Vec::new(),
+            },
+            ownership: OwnershipShape::Owned,
+            view: ViewShape::ErasedObjectView,
+            dispatch: DispatchShape::ErasedObject,
+            mutability: MutabilityShape::Immutable,
+        };
+        let target_shape = RustSlotShape::for_storage(JavaType::Named {
+            name: "a.Base".to_string(),
+            args: Vec::new(),
+        });
+        let plan = crate::conversion_plan::CastConversionPlan {
+            actual: object_shape.clone(),
+            target: target_shape.clone(),
+            semantics: crate::conversion_plan::JavaCastSemanticsPolicy::ReferenceUpcast,
+            coercion: crate::conversion_plan::shape_coercion_plan_with_facts(
+                &object_shape,
+                &target_shape,
+                &FactSet::default(),
+            ),
+        };
+
+        assert!(
+            !erased_object_source_supertype_cast_requires_hierarchy_lowering(&plan, ctx),
+            "bare superclass edges must use combined-context ambiguity checks"
+        );
+    }
+
+    #[test]
     fn context_type_lookup_refuses_ambiguous_simple_package_peer() {
         let program = Program {
             package: None,
@@ -46002,6 +48621,31 @@ mod tests {
         };
 
         assert!(!context_type_key_is_summary_only(ctx_with_local, "b.Item"));
+    }
+
+    #[test]
+    fn context_type_key_is_in_source_summary_refuses_ambiguous_simple_owner() {
+        let support = Box::leak(Box::new(Program {
+            package: None,
+            imports: Vec::new(),
+            types: vec![empty_type_decl("a.Item")],
+        }));
+        let summary = Box::leak(Box::new(Program {
+            package: None,
+            imports: Vec::new(),
+            types: vec![empty_type_decl("b.Item")],
+        }));
+        let ctx = LowerCtx {
+            program: &Program::default(),
+            support_local_type_program: support,
+            source_summary_type_program: summary,
+            ..lower_test_ctx()
+        };
+
+        assert!(!context_type_key_is_in_source_summary(ctx, "Item"));
+        assert!(!context_type_key_is_in_source_summary(ctx, "a.Item"));
+        assert!(context_type_key_is_in_source_summary(ctx, "b.Item"));
+        assert!(context_type_key_is_in_source_summary(ctx, "BItem"));
     }
 
     #[test]
@@ -46580,6 +49224,73 @@ mod tests {
                 .map(|shape| shape.java_ty),
             Some(JavaType::String)
         );
+    }
+
+    #[test]
+    fn source_summary_nullable_receiver_call_shape_is_optional() {
+        let summary = Box::leak(Box::new(
+            parse_java_source(
+                r#"
+class Lookup {
+    Path find(String sample) {
+        return sample == null ? null : new Path();
+    }
+}
+
+class Path {
+}
+"#,
+            )
+            .program,
+        ));
+        let ctx = LowerCtx {
+            source_summary_type_program: summary,
+            ..lower_test_ctx()
+        };
+        let lookup_ty = JavaType::Named {
+            name: "Lookup".to_string(),
+            args: Vec::new(),
+        };
+        let mut env = ShapeEnv::default();
+        env.insert_local_shape(
+            "lookup".to_string(),
+            RustSlotShape::for_storage(lookup_ty.clone()),
+        );
+        env.insert_field_shape(
+            "lookup".to_string(),
+            RustSlotShape::for_storage(crate::types::optional_java_type(lookup_ty)),
+        );
+        env.insert_local_shape(
+            "sample".to_string(),
+            RustSlotShape::for_storage(JavaType::String),
+        );
+        let expected = Some((
+            OwnershipShape::Owned,
+            JavaType::Named {
+                name: "Path".to_string(),
+                args: Vec::new(),
+            },
+        ));
+        for receiver in [
+            Expr::Var("lookup".to_string()),
+            Expr::FieldAccess(Box::new(Expr::This), "lookup".to_string()),
+        ] {
+            let call = Expr::Call {
+                receiver: Some(Box::new(receiver)),
+                name: "find".to_string(),
+                args: vec![Expr::Var("sample".to_string())],
+                resolved: None,
+            };
+
+            assert_eq!(
+                planned_method_call_return_shape(&call, &env, ctx).and_then(|shape| {
+                    shape
+                        .optional_element_type()
+                        .map(|element_ty| (shape.ownership, element_ty))
+                }),
+                expected
+            );
+        }
     }
 
     #[test]
@@ -47224,6 +49935,105 @@ mod tests {
     }
 
     #[test]
+    fn optional_current_method_display_shape_refuses_ambiguous_current_owner() {
+        fn optional_string_method(name: &str) -> MethodDecl {
+            MethodDecl {
+                name: name.to_string(),
+                rust_name: None,
+                type_params: Vec::new(),
+                type_param_bounds: Vec::new(),
+                return_type: JavaType::Named {
+                    name: "Optional".to_string(),
+                    args: vec![JavaType::String],
+                },
+                throws: Vec::new(),
+                params: Vec::new(),
+                modifiers: Vec::new(),
+                body: None,
+                span: Default::default(),
+            }
+        }
+
+        fn signatures_for_type(ty: TypeDecl) -> &'static SignaturePlan {
+            let program = Program {
+                package: None,
+                imports: Vec::new(),
+                types: vec![ty],
+            };
+            Box::leak(Box::new(
+                crate::signature::solve_signatures_with_facts_and_support_context(
+                    &program,
+                    &RepresentationPlan::default(),
+                    &crate::usage::UsageFacts::default(),
+                    &FactSet::default(),
+                    &program,
+                ),
+            ))
+        }
+
+        let stale_signatures = signatures_for_type(TypeDecl {
+            members: vec![Member::Method(optional_string_method("name"))],
+            ..empty_type_decl("Item")
+        });
+        let support = Box::leak(Box::new(Program {
+            package: None,
+            imports: Vec::new(),
+            types: vec![empty_type_decl("a.Item")],
+        }));
+        let summary = Box::leak(Box::new(Program {
+            package: None,
+            imports: Vec::new(),
+            types: vec![empty_type_decl("b.Item")],
+        }));
+        let ambiguous_ctx = LowerCtx {
+            signatures: stale_signatures,
+            current_type: Some("Item"),
+            support_local_type_program: support,
+            source_summary_type_program: summary,
+            ..lower_test_ctx()
+        };
+        let call = Expr::Call {
+            receiver: None,
+            name: "name".to_string(),
+            args: Vec::new(),
+            resolved: None,
+        };
+
+        assert!(
+            optional_current_method_display_actual_shape(
+                &call,
+                &Slot::DisplaySegment,
+                ambiguous_ctx
+            )
+            .is_none(),
+            "ambiguous simple owners must not consume stale simple-owner signature shapes"
+        );
+
+        let exact_support = Box::leak(Box::new(Program {
+            package: None,
+            imports: Vec::new(),
+            types: vec![empty_type_decl("a.Item")],
+        }));
+        let exact_signatures = signatures_for_type(TypeDecl {
+            members: vec![Member::Method(optional_string_method("name"))],
+            ..empty_type_decl("a.Item")
+        });
+        let exact_ctx = LowerCtx {
+            signatures: exact_signatures,
+            current_type: Some("a.Item"),
+            support_local_type_program: exact_support,
+            source_summary_type_program: &Program::default(),
+            ..lower_test_ctx()
+        };
+
+        assert_eq!(
+            optional_current_method_display_actual_shape(&call, &Slot::DisplaySegment, exact_ctx)
+                .and_then(|shape| shape.optional_element_type()),
+            Some(JavaType::String)
+        );
+    }
+
+    #[test]
     fn static_storage_reference_uses_resolved_context_owner_identity() {
         let current = empty_type_decl("Current");
         let support = Box::leak(Box::new(Program {
@@ -47837,11 +50647,20 @@ mod tests {
         assert!(!static_owner_key_is_non_program_emitted_context(
             "AItem", ctx
         ));
+        assert!(!static_owner_key_is_non_program_emitted_context(
+            "a.Item", ctx
+        ));
         assert!(static_owner_key_is_non_program_emitted_context(
             "BItem", ctx
         ));
         assert!(static_owner_key_is_non_program_emitted_context(
+            "b.Item", ctx
+        ));
+        assert!(static_owner_key_is_non_program_emitted_context(
             "Helper", ctx
+        ));
+        assert!(static_owner_key_is_non_program_emitted_context(
+            "c.Helper", ctx
         ));
         assert!(!static_owner_key_is_non_program_emitted_context(
             "Item", ctx
@@ -47855,8 +50674,14 @@ mod tests {
             imports: Vec::new(),
             types: vec![empty_type_decl("a.Item"), empty_type_decl("b.Item")],
         }));
+        let support = Box::leak(Box::new(Program {
+            package: None,
+            imports: Vec::new(),
+            types: vec![empty_type_decl("c.Item")],
+        }));
         let ctx = LowerCtx {
             program,
+            support_local_type_program: support,
             ..lower_test_ctx()
         };
         let mut env = ShapeEnv::default();
@@ -47878,8 +50703,14 @@ mod tests {
         ));
 
         env.insert_static_type_alias("Alias".to_string(), "a.Item".to_string());
+        env.insert_static_type_alias("ContextAlias".to_string(), "c.Item".to_string());
         assert!(static_owner_receiver_is_emitted_program_type(
             Some(&Expr::Var("Alias".to_string())),
+            &env,
+            ctx
+        ));
+        assert!(!static_owner_receiver_is_emitted_program_type(
+            Some(&Expr::Var("ContextAlias".to_string())),
             &env,
             ctx
         ));
@@ -47919,6 +50750,7 @@ mod tests {
             source_summary_type_program: summary,
             ..lower_test_ctx()
         };
+        let env = ShapeEnv::default();
 
         assert_eq!(
             source_call_target_owner_candidates(
@@ -47926,6 +50758,8 @@ mod tests {
                     owner: "Item".to_string(),
                     rust_name: "make".to_string(),
                 },
+                None,
+                &env,
                 None,
                 ctx,
             ),
@@ -47937,6 +50771,8 @@ mod tests {
                     owner: "AItem".to_string(),
                     rust_name: "make".to_string(),
                 },
+                None,
+                &env,
                 None,
                 ctx,
             ),
@@ -48061,7 +50897,9 @@ mod tests {
                 static String f() {
                     for (int i = 0; i < 1; i++) {
                         try {
-                            return "try";
+                            {
+                                return "try";
+                            }
                         } finally {
                             break;
                         }
@@ -48130,6 +50968,125 @@ mod tests {
     }
 
     #[test]
+    fn prepend_finally_to_loop_abrupts_recurses_into_block_expr_stmt() {
+        let finally_stmt = expr_stmt(RustExpr::Path(vec!["run_finally".to_string()]));
+        let update_expr = RustExpr::Path(vec!["run_update".to_string()]);
+        let mut body = vec![RustStmt::Expr(RustExpr::Block {
+            stmts: vec![RustStmt::Continue(None)],
+            tail: None,
+        })];
+
+        prepend_finally_to_loop_abrupts(
+            &mut body,
+            std::slice::from_ref(&finally_stmt),
+            std::slice::from_ref(&update_expr),
+        );
+
+        let [
+            RustStmt::Expr(RustExpr::Block {
+                stmts: block_stmts,
+                tail: None,
+            }),
+        ] = body.as_slice()
+        else {
+            panic!("{body:#?}");
+        };
+        assert!(matches!(
+            block_stmts.as_slice(),
+            [
+                RustStmt::Expr(RustExpr::Path(finally_path)),
+                RustStmt::Expr(RustExpr::Path(update_path)),
+                RustStmt::Continue(None),
+            ] if finally_path == &["run_finally".to_string()]
+                && update_path == &["run_update".to_string()]
+        ));
+    }
+
+    #[test]
+    fn do_while_finally_continue_runs_finally_then_condition_check() {
+        let translation = crate::translate_source(
+            r#"
+            public class FinallyDoWhileContinue {
+                public static String run() {
+                    StringBuilder sb = new StringBuilder();
+                    int i = 0;
+                    do {
+                        try {
+                            sb.append(i);
+                            i++;
+                            if (i < 2) {
+                                continue;
+                            }
+                            sb.append("x");
+                        } finally {
+                            sb.append("f");
+                        }
+                    } while (i < 3);
+                    return sb.toString();
+                }
+            }
+            "#,
+        )
+        .rust;
+
+        assert!(
+            !translation.contains("|| -> Result<(), JavaException>"),
+            "{translation}"
+        );
+        assert!(translation.contains("sb.append(i);"), "{translation}");
+        assert!(
+            translation.contains("sb.append(&\"f\".to_string());"),
+            "{translation}"
+        );
+        assert!(translation.contains("if !(i < 3) {"), "{translation}");
+        assert!(translation.contains("break;"), "{translation}");
+        assert!(translation.contains("continue;"), "{translation}");
+    }
+
+    #[test]
+    fn do_while_condition_replay_recurses_into_match_arm_blocks() {
+        let condition = RustExpr::Var("keep_going".to_string());
+        let mut body = vec![RustStmt::Expr(RustExpr::Match {
+            expr: Box::new(RustExpr::Var("result".to_string())),
+            arms: vec![RustMatchArm {
+                pattern: "Err(_)".to_string(),
+                body: RustExpr::Block {
+                    stmts: vec![RustStmt::Continue(None)],
+                    tail: None,
+                },
+            }],
+        })];
+
+        prepend_do_while_condition_to_continues(&mut body, &condition, &None);
+
+        let [RustStmt::Expr(RustExpr::Match { arms, .. })] = body.as_slice() else {
+            panic!("{body:#?}");
+        };
+        let [
+            RustMatchArm {
+                body: RustExpr::Block { stmts, tail: None },
+                ..
+            },
+        ] = arms.as_slice()
+        else {
+            panic!("{arms:#?}");
+        };
+        assert!(matches!(
+            stmts.as_slice(),
+            [
+                RustStmt::If { condition: guard, then_body, else_body },
+                RustStmt::Continue(None),
+            ] if matches!(
+                    guard,
+                    RustExpr::Unary { op, expr }
+                        if op == "!" && matches!(expr.as_ref(), RustExpr::Var(name) if name == "keep_going")
+                )
+                && matches!(then_body.as_slice(), [RustStmt::Break(None)])
+                && else_body.is_empty()
+        ));
+    }
+
+    #[test]
     fn explicit_static_receiver_refuses_ambiguous_simple_package_peer() {
         let program = Box::leak(Box::new(Program {
             package: None,
@@ -48142,10 +51099,24 @@ mod tests {
             source_summary_type_program: &Program::default(),
             ..lower_test_ctx()
         };
-        let env = ShapeEnv::default();
+        let mut env = ShapeEnv::default();
+        env.insert_static_type_alias("Alias", "Item");
+        env.insert_static_type_alias("Exact", "a.Item");
 
         assert!(!explicit_static_receiver_matches_resolved_owner(
             &Expr::Var("Item".to_string()),
+            "a.Item",
+            &env,
+            ctx,
+        ));
+        assert!(!explicit_static_receiver_matches_resolved_owner(
+            &Expr::Var("Alias".to_string()),
+            "a.Item",
+            &env,
+            ctx,
+        ));
+        assert!(explicit_static_receiver_matches_resolved_owner(
+            &Expr::Var("Exact".to_string()),
             "a.Item",
             &env,
             ctx,
@@ -48844,6 +51815,49 @@ mod tests {
     }
 
     #[test]
+    fn fallible_array_index_read_collapses_redundant_catchable_optional_sequence_as_ref() {
+        let expr = fallible_array_index_read_expr(
+            RustExpr::Try(Box::new(RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::MethodCall {
+                    receiver: Box::new(RustExpr::MethodCall {
+                        receiver: Box::new(RustExpr::Var("row".to_string())),
+                        method: "as_ref".to_string(),
+                        args: Vec::new(),
+                    }),
+                    method: "as_ref".to_string(),
+                    args: Vec::new(),
+                }),
+                method: "ok_or_else".to_string(),
+                args: vec![RustExpr::Closure {
+                    is_move: false,
+                    params: Vec::new(),
+                    return_type: None,
+                    body: RustClosureBody::Expr(Box::new(
+                        crate::exception_lowering::new_exception_expr(
+                            "NullPointerException",
+                            RustExpr::Literal("\"Java null receiver\".to_string()".to_string()),
+                        ),
+                    )),
+                }],
+            })),
+            RustExpr::Literal("0".to_string()),
+            &JavaType::Primitive(PrimitiveType::Double),
+        );
+
+        let rendered = emit_expr(&expr);
+
+        assert!(
+            rendered.contains("let __java_arrays_source = row.as_ref().ok_or_else"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("row.as_ref().as_ref()"), "{rendered}");
+        assert!(
+            !rendered.contains("let __java_arrays_source = &row.as_ref()"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
     fn fallible_array_index_read_keeps_inner_result_propagation_before_usize_cast() {
         let expr = fallible_array_index_read_expr(
             RustExpr::Var("values".to_string()),
@@ -49015,6 +52029,142 @@ mod tests {
         assert!(rendered.contains("values.remove(&"), "{rendered}");
         assert!(rendered.ends_with(".is_some()"), "{rendered}");
         assert!(!rendered.contains("keys.remove"), "{rendered}");
+    }
+
+    #[test]
+    fn map_key_set_alias_remove_all_mutates_backing_map() {
+        let expr = crate::parser::parse_expr("keys.removeAll(to_remove)");
+        let Expr::Call {
+            receiver,
+            name,
+            args,
+            ..
+        } = expr
+        else {
+            panic!("expected call expression");
+        };
+        let mut env = ShapeEnv::new();
+        env.insert_local(
+            "values",
+            JavaType::Named {
+                name: "Map".to_string(),
+                args: vec![JavaType::String, JavaType::String],
+            },
+        );
+        env.insert_local(
+            "keys",
+            JavaType::Named {
+                name: "Set".to_string(),
+                args: vec![JavaType::String],
+            },
+        );
+        env.insert_local(
+            "to_remove",
+            JavaType::Named {
+                name: "List".to_string(),
+                args: vec![JavaType::String],
+            },
+        );
+        env.insert_map_key_set_view_receiver("keys", Expr::Var("values".to_string()));
+
+        let lowered = lower_map_view_remove_call(
+            receiver.as_deref(),
+            &name,
+            &args,
+            &env,
+            lower_test_ctx(),
+            &ExprRefinements::default(),
+        )
+        .expect("Map.keySet() alias removeAll should lower as backing-map mutation");
+        let rendered = emit_expr(&lowered);
+
+        assert!(
+            rendered.contains("let __java_map_key_set_remove_all_keys = to_remove;"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("let __java_map_key_set_remove_all_map = &mut values;"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "let __java_map_key_set_remove_all_before = __java_map_key_set_remove_all_map.len();"
+            ),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("__java_map_key_set_remove_all_map.retain(|key, _value| !__java_map_key_set_remove_all_keys.contains(key));"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "__java_map_key_set_remove_all_map.len() != __java_map_key_set_remove_all_before"
+            ),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("keys.removeAll"), "{rendered}");
+        assert!(!rendered.contains("keys.remove_all"), "{rendered}");
+    }
+
+    #[test]
+    fn map_key_set_alias_add_throws_unsupported_operation_exception() {
+        let expr = crate::parser::parse_expr("keys.add(value)");
+        let Expr::Call {
+            receiver,
+            name,
+            args,
+            ..
+        } = expr
+        else {
+            panic!("expected call expression");
+        };
+        let mut env = ShapeEnv::new();
+        env.insert_local(
+            "values",
+            JavaType::Named {
+                name: "Map".to_string(),
+                args: vec![JavaType::String, JavaType::String],
+            },
+        );
+        env.insert_local(
+            "keys",
+            JavaType::Named {
+                name: "Set".to_string(),
+                args: vec![JavaType::String],
+            },
+        );
+        env.insert_local("value", JavaType::String);
+        env.insert_map_key_set_view_receiver("keys", Expr::Var("values".to_string()));
+        let mut ctx = lower_test_ctx();
+        ctx.result_propagation_mode = ResultPropagationMode::Propagate;
+
+        let lowered = lower_map_view_remove_call(
+            receiver.as_deref(),
+            &name,
+            &args,
+            &env,
+            ctx,
+            &ExprRefinements::default(),
+        )
+        .expect("Map.keySet() add should lower as unsupported live-view mutation");
+        let rendered = emit_expr(&lowered);
+
+        assert!(
+            rendered.contains("let __java_map_key_set_unsupported_map = &mut values;"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("let __java_map_key_set_unsupported_arg0 = value;"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("Err(JavaException::new(\"UnsupportedOperationException\""),
+            "{rendered}"
+        );
+        assert!(rendered.ends_with("? }"), "{rendered}");
+        assert!(!rendered.contains("keys.add"), "{rendered}");
+        assert!(!rendered.contains(".insert("), "{rendered}");
+        assert!(!rendered.contains(".extend("), "{rendered}");
     }
 
     #[test]
@@ -49310,6 +52460,76 @@ mod tests {
     }
 
     #[test]
+    fn map_entry_set_alias_add_throws_unsupported_operation_exception() {
+        let expr = crate::parser::parse_expr("entries.add(entry)");
+        let Expr::Call {
+            receiver,
+            name,
+            args,
+            ..
+        } = expr
+        else {
+            panic!("expected call expression");
+        };
+        let mut env = ShapeEnv::new();
+        env.insert_local(
+            "values",
+            JavaType::Named {
+                name: "Map".to_string(),
+                args: vec![JavaType::String, JavaType::String],
+            },
+        );
+        env.insert_local(
+            "entries",
+            JavaType::Named {
+                name: "Set".to_string(),
+                args: vec![JavaType::Named {
+                    name: "Map.Entry".to_string(),
+                    args: vec![JavaType::String, JavaType::String],
+                }],
+            },
+        );
+        env.insert_local(
+            "entry",
+            JavaType::Named {
+                name: "Map.Entry".to_string(),
+                args: vec![JavaType::String, JavaType::String],
+            },
+        );
+        env.insert_map_entry_set_view_receiver("entries", Expr::Var("values".to_string()));
+        let mut ctx = lower_test_ctx();
+        ctx.result_propagation_mode = ResultPropagationMode::Propagate;
+
+        let lowered = lower_map_view_remove_call(
+            receiver.as_deref(),
+            &name,
+            &args,
+            &env,
+            ctx,
+            &ExprRefinements::default(),
+        )
+        .expect("Map.entrySet() add should lower as unsupported live-view mutation");
+        let rendered = emit_expr(&lowered);
+
+        assert!(
+            rendered.contains("let __java_map_entry_set_unsupported_map = &mut values;"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("let __java_map_entry_set_unsupported_arg0 = entry;"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("Err(JavaException::new(\"UnsupportedOperationException\""),
+            "{rendered}"
+        );
+        assert!(rendered.ends_with("? }"), "{rendered}");
+        assert!(!rendered.contains("entries.add"), "{rendered}");
+        assert!(!rendered.contains(".insert("), "{rendered}");
+        assert!(!rendered.contains(".extend("), "{rendered}");
+    }
+
+    #[test]
     fn map_entry_set_alias_iteration_uses_live_backing_map() {
         let mut env = ShapeEnv::new();
         env.insert_local(
@@ -49394,6 +52614,141 @@ mod tests {
             "{rendered}"
         );
         assert!(!rendered.contains("vals.contains"), "{rendered}");
+    }
+
+    #[test]
+    fn map_values_alias_remove_all_mutates_backing_map() {
+        let expr = crate::parser::parse_expr("vals.removeAll(to_remove)");
+        let Expr::Call {
+            receiver,
+            name,
+            args,
+            ..
+        } = expr
+        else {
+            panic!("expected call expression");
+        };
+        let mut env = ShapeEnv::new();
+        env.insert_local(
+            "values",
+            JavaType::Named {
+                name: "Map".to_string(),
+                args: vec![JavaType::String, JavaType::String],
+            },
+        );
+        env.insert_local(
+            "vals",
+            JavaType::Named {
+                name: "Collection".to_string(),
+                args: vec![JavaType::String],
+            },
+        );
+        env.insert_local(
+            "to_remove",
+            JavaType::Named {
+                name: "List".to_string(),
+                args: vec![JavaType::String],
+            },
+        );
+        env.insert_map_values_view_receiver("vals", Expr::Var("values".to_string()));
+
+        let lowered = lower_map_view_remove_call(
+            receiver.as_deref(),
+            &name,
+            &args,
+            &env,
+            lower_test_ctx(),
+            &ExprRefinements::default(),
+        )
+        .expect("Map.values() alias removeAll should lower as backing-map mutation");
+        let rendered = emit_expr(&lowered);
+
+        assert!(
+            rendered.contains("let __java_map_values_remove_all_values = to_remove;"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("let __java_map_values_remove_all_map = &mut values;"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "let __java_map_values_remove_all_before = __java_map_values_remove_all_map.len();"
+            ),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("__java_map_values_remove_all_map.retain(|_key, value| !__java_map_values_remove_all_values.contains(value));"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "__java_map_values_remove_all_map.len() != __java_map_values_remove_all_before"
+            ),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("vals.removeAll"), "{rendered}");
+        assert!(!rendered.contains("vals.remove_all"), "{rendered}");
+    }
+
+    #[test]
+    fn map_values_alias_add_throws_unsupported_operation_exception() {
+        let expr = crate::parser::parse_expr("vals.add(value)");
+        let Expr::Call {
+            receiver,
+            name,
+            args,
+            ..
+        } = expr
+        else {
+            panic!("expected call expression");
+        };
+        let mut env = ShapeEnv::new();
+        env.insert_local(
+            "values",
+            JavaType::Named {
+                name: "Map".to_string(),
+                args: vec![JavaType::String, JavaType::String],
+            },
+        );
+        env.insert_local(
+            "vals",
+            JavaType::Named {
+                name: "Collection".to_string(),
+                args: vec![JavaType::String],
+            },
+        );
+        env.insert_local("value", JavaType::String);
+        env.insert_map_values_view_receiver("vals", Expr::Var("values".to_string()));
+        let mut ctx = lower_test_ctx();
+        ctx.result_propagation_mode = ResultPropagationMode::Propagate;
+
+        let lowered = lower_map_view_remove_call(
+            receiver.as_deref(),
+            &name,
+            &args,
+            &env,
+            ctx,
+            &ExprRefinements::default(),
+        )
+        .expect("Map.values() add should lower as unsupported live-view mutation");
+        let rendered = emit_expr(&lowered);
+
+        assert!(
+            rendered.contains("let __java_map_values_unsupported_map = &mut values;"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("let __java_map_values_unsupported_arg0 = value;"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("Err(JavaException::new(\"UnsupportedOperationException\""),
+            "{rendered}"
+        );
+        assert!(rendered.ends_with("? }"), "{rendered}");
+        assert!(!rendered.contains("vals.add"), "{rendered}");
+        assert!(!rendered.contains(".extend("), "{rendered}");
     }
 
     #[test]
@@ -49986,6 +53341,34 @@ mod tests {
     }
 
     #[test]
+    fn typed_map_entry_parameter_display_uses_key_value_projection() {
+        let translation = crate::translate_source(
+            r#"
+            import java.util.AbstractMap;
+            import java.util.Map;
+
+            public class MapEntryParamDisplay {
+                public static String show(Map.Entry<String, String> entry) {
+                    return "x" + entry;
+                }
+
+                public static String run() {
+                    return show(new AbstractMap.SimpleEntry<String, String>("a", "1"));
+                }
+            }
+            "#,
+        )
+        .rust;
+
+        assert!(
+            translation.contains(
+                "format!(\"{}={}\", (entry.0.clone()).to_string(), (entry.1.clone()).to_string())",
+            ) && !translation.contains("java_erased_object_to_string(&entry)"),
+            "{translation}"
+        );
+    }
+
+    #[test]
     fn map_entry_field_accessors_use_tuple_fields() {
         let translation = crate::translate_source(
             r#"
@@ -50036,6 +53419,36 @@ mod tests {
                 && translation.contains("__java_map_entry_display_entry.1")
                 && !translation.contains("java_erased_object_to_string(&"),
             "direct Map.Entry iterator display should use key=value formatting"
+        );
+    }
+
+    #[test]
+    fn map_entry_return_call_display_uses_single_tuple_projection() {
+        let translation = crate::translate_source(
+            r#"
+            import java.util.AbstractMap;
+            import java.util.Map;
+
+            public class MapEntryReturnDisplay {
+                static Map.Entry<String, String> entry() {
+                    return new AbstractMap.SimpleEntry<String, String>("a", "1");
+                }
+
+                public static String run() {
+                    return "x" + entry();
+                }
+            }
+            "#,
+        )
+        .rust;
+
+        assert!(
+            translation.contains("let __java_map_entry_display_entry = Self::entry();")
+                && translation.contains("format!(\"{}={}\",")
+                && translation.contains("__java_map_entry_display_entry.0")
+                && translation.contains("__java_map_entry_display_entry.1")
+                && !translation.contains("java_erased_object_to_string(&"),
+            "{translation}"
         );
     }
 
@@ -50423,7 +53836,7 @@ mod tests {
             args: Vec::new(),
         }));
 
-        let recovered_default = rendered_none_or_default_value_projection("Default::default()")
+        let recovered_default = recover_rendered_none_or_default_value("Default::default()")
             .expect("Default::default should recover");
         assert!(
             !matches!(recovered_default.unshaped(), RustExpr::Raw(_)),
@@ -50431,11 +53844,11 @@ mod tests {
         );
         assert_eq!(recovered_default, default_trait_expr());
         assert_eq!(
-            rendered_none_or_default_value_projection("None").expect("None should recover"),
+            recover_rendered_none_or_default_value("None").expect("None should recover"),
             RustExpr::Var("None".to_string())
         );
         assert!(matches!(
-            rendered_none_or_default_value_projection("None::<Void>")
+            recover_rendered_none_or_default_value("None::<Void>")
                 .expect("typed None should recover"),
             RustExpr::GenericPath { base, args, member }
                 if matches!(base.as_slice(), [name] if name == "None")
@@ -51436,6 +54849,57 @@ class NumericBox {
     }
 
     #[test]
+    fn blank_static_final_ragged_array_uses_nested_vec_storage_type() {
+        let parsed = parse_java_source(
+            r#"
+class Owner {
+    static class Table {
+        static final double[][] VALUES;
+        static {
+            VALUES = new double[2][];
+        }
+    }
+}
+"#,
+        );
+        let owner = &parsed.program.types[0];
+        let table = owner
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Type(ty) => Some(ty),
+                _ => None,
+            })
+            .expect("nested table");
+        let field = table
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Field(field) => Some(field),
+                _ => None,
+            })
+            .expect("field");
+
+        assert!(
+            static_field_uses_ragged_array_storage(table, field),
+            "field={:?} blocks={:?}",
+            field,
+            table.static_init_blocks
+        );
+        assert_eq!(
+            crate::emit::emit_type(
+                &ragged_array2_static_storage_rust_type(
+                    &field.ty,
+                    &RustSlotShape::for_storage(field.ty.clone()),
+                    &FactSet::default()
+                )
+                .expect("ragged storage type")
+            ),
+            "Vec<Vec<f64>>"
+        );
+    }
+
+    #[test]
     fn source_summary_method_unimplemented_expr_uses_macro_call_ir() {
         let expr = source_summary_method_unimplemented_expr("GATKPath", "toPath");
 
@@ -52389,6 +55853,23 @@ let e = OuterB::new_with_outer::<T>(__outer.clone());
             opaque,
             RustStmt::Raw("if ready { OuterB::new_1(value); }".to_string())
         );
+
+        let mut helper_call = RustStmt::Raw("helper(value);".to_string());
+        assert!(!rewrite_recovered_same_outer_inner_constructor_raw_stmt(
+            &mut helper_call,
+            |_| true
+        ));
+        assert_eq!(helper_call, RustStmt::Raw("helper(value);".to_string()));
+
+        let mut helper_return = RustStmt::Raw("return helper(value);".to_string());
+        assert!(!rewrite_recovered_same_outer_inner_constructor_raw_stmt(
+            &mut helper_return,
+            |_| true
+        ));
+        assert_eq!(
+            helper_return,
+            RustStmt::Raw("return helper(value);".to_string())
+        );
     }
 
     #[test]
@@ -52563,9 +56044,56 @@ let e = OuterB::new_with_outer::<T>(__outer.clone());
 
         assert!(same_outer_inner_constructor_owner("Inner", "Outer", ctx).is_none());
         assert_eq!(
-            same_outer_inner_constructor_owner("AInner", "Outer", ctx).map(|ty| ty.name.as_str()),
+            same_outer_inner_constructor_owner("AInner", "Outer", ctx).as_deref(),
             Some("a.Inner")
         );
+    }
+
+    #[test]
+    fn array_element_default_lookup_refuses_cross_program_emitted_owner_collision() {
+        let mut defaultable = empty_type_decl("a.B.C");
+        defaultable.kind = TypeKind::Class;
+        let mut non_defaultable = empty_type_decl("AB.C");
+        non_defaultable.kind = TypeKind::Interface;
+        let program = Box::leak(Box::new(Program {
+            package: None,
+            imports: Vec::new(),
+            types: vec![defaultable],
+        }));
+        let support = Box::leak(Box::new(Program {
+            package: None,
+            imports: Vec::new(),
+            types: vec![non_defaultable],
+        }));
+        let ctx = LowerCtx {
+            program,
+            support_local_type_program: support,
+            ..lower_test_ctx()
+        };
+        assert_eq!(
+            crate::slot_render::rust_name_for_java_named_type("a.B.C"),
+            crate::slot_render::rust_name_for_java_named_type("AB.C")
+        );
+        let ambiguous_ty = JavaType::Named {
+            name: "AB.C".to_string(),
+            args: Vec::new(),
+        };
+        let exact_ty = JavaType::Named {
+            name: "a.B.C".to_string(),
+            args: Vec::new(),
+        };
+        let dimensions = vec![Expr::Literal(Literal::Int(2))];
+        let ambiguous_plan = crate::array_plan::ArrayExprPlan::Creation {
+            element_type: &ambiguous_ty,
+            dimensions: &dimensions,
+        };
+        let exact_plan = crate::array_plan::ArrayExprPlan::Creation {
+            element_type: &exact_ty,
+            dimensions: &dimensions,
+        };
+
+        assert!(!array_element_type_has_default(&ambiguous_plan, ctx));
+        assert!(array_element_type_has_default(&exact_plan, ctx));
     }
 
     fn assert_outer_this_handle_source_distinguishes_captured_inner_from_outer_receiver_gap() {
@@ -52752,6 +56280,59 @@ let e = OuterB::new_with_outer::<T>(__outer.clone());
         assert!(
             source_supertype_conversion_impls_for_type(&child, ambiguous_ctx).is_empty(),
             "ambiguous simple supertype lookup must fail closed"
+        );
+    }
+
+    #[test]
+    fn source_instance_field_names_for_conversion_refuses_cross_program_ambiguous_simple_super() {
+        let support = Program {
+            package: None,
+            imports: Vec::new(),
+            types: vec![TypeDecl {
+                members: vec![instance_field(
+                    "aOnly",
+                    JavaType::Primitive(PrimitiveType::Int),
+                )],
+                ..empty_type_decl("a.Base")
+            }],
+        };
+        let summary = Program {
+            package: None,
+            imports: Vec::new(),
+            types: vec![TypeDecl {
+                members: vec![instance_field(
+                    "bOnly",
+                    JavaType::Primitive(PrimitiveType::Int),
+                )],
+                ..empty_type_decl("b.Base")
+            }],
+        };
+        let ambiguous_child = TypeDecl {
+            extends: Some("Base".to_string()),
+            members: vec![instance_field(
+                "local",
+                JavaType::Primitive(PrimitiveType::Int),
+            )],
+            ..empty_type_decl("Child")
+        };
+
+        assert_eq!(
+            source_instance_field_names_for_conversion(&ambiguous_child, &support, &summary),
+            vec!["local".to_string()],
+            "bare same-simple package super lookup must not merge both inherited field sets"
+        );
+
+        let exact_child = TypeDecl {
+            extends: Some("b.Base".to_string()),
+            members: vec![instance_field(
+                "local",
+                JavaType::Primitive(PrimitiveType::Int),
+            )],
+            ..empty_type_decl("Child")
+        };
+        assert_eq!(
+            source_instance_field_names_for_conversion(&exact_child, &support, &summary),
+            vec!["local".to_string(), "bOnly".to_string()]
         );
     }
 

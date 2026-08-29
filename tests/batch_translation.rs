@@ -473,6 +473,72 @@ public class Main {
 }
 
 #[test]
+fn stream_static_constant_support_keeps_package_qualified_owner_identity() {
+    let primary_sources = vec![
+        new_java2rust::BatchSource {
+            path: "a/Item.java".to_string(),
+            source: r#"
+package a;
+
+public class Item {
+    public static final int KIND = 1;
+}
+"#
+            .to_string(),
+        },
+        new_java2rust::BatchSource {
+            path: "b/Item.java".to_string(),
+            source: r#"
+package b;
+
+public class Item {
+    public static final int KIND = 2;
+}
+"#
+            .to_string(),
+        },
+        new_java2rust::BatchSource {
+            path: "Main.java".to_string(),
+            source: r#"
+public class Main {
+    public static java.util.List<Integer> stream(java.util.List<Integer> xs) {
+        return xs.stream().map(x -> a.Item.KIND + b.Item.KIND + x).toList();
+    }
+}
+"#
+            .to_string(),
+        },
+    ];
+
+    let report =
+        new_java2rust::translate_batch_sources_with_context_sources_summary_sources_and_options(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+            &new_java2rust::BatchTranslationOptions {
+                emission_jobs: 2,
+                ..Default::default()
+            },
+        );
+
+    let main = report
+        .translations
+        .iter()
+        .find(|translation| translation.path == "Main.java")
+        .unwrap_or_else(|| panic!("{:#?}", report.translations));
+    assert!(main.rust.contains("AItem::KIND"), "{}", main.rust);
+    assert!(main.rust.contains("BItem::KIND"), "{}", main.rust);
+    assert!(!main.rust.contains("pub struct Item;"), "{}", main.rust);
+    assert!(
+        !main.rust.contains("pub const KIND: KIND = KIND;"),
+        "{}",
+        main.rust
+    );
+}
+
+#[test]
 fn imported_source_enum_value_of_keeps_package_owner_identity() {
     let primary_sources = vec![
         new_java2rust::BatchSource {

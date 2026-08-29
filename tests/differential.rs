@@ -20,7 +20,7 @@ use std::process::Command;
 
 use new_java2rust::translate_source;
 
-const EXPECTED_DIFFERENTIAL_FIXTURES: usize = 202;
+const EXPECTED_DIFFERENTIAL_FIXTURES: usize = 218;
 const EXPECTED_KNOWN_GAP_FIXTURES: usize = 6;
 
 #[test]
@@ -142,12 +142,12 @@ enum KnownGapExpectation {
         message: &'static str,
         diagnostic_code: Option<&'static str>,
     },
-    DivergentOutput {
-        expected_translated_output: &'static str,
+    LoudRuntimePanic {
+        message: &'static str,
         diagnostic_code: &'static str,
     },
-    RuntimePanic {
-        panic_message: &'static str,
+    DivergentOutput {
+        expected_translated_output: &'static str,
         diagnostic_code: &'static str,
     },
 }
@@ -185,8 +185,8 @@ fn known_gap_fixtures() -> Vec<KnownGapFixture> {
             display: "tests/differential/known-gaps/InnerCapture.java",
             class: "InnerCapture",
             expected_java_output: "21",
-            expectation: KnownGapExpectation::RuntimePanic {
-                panic_message: "unsupported Java inner-class outer capture construction for InnerCapture.Adder; pass an outer InnerCapture handle",
+            expectation: KnownGapExpectation::LoudRuntimePanic {
+                message: "unsupported Java inner-class outer capture construction for InnerCapture.Adder; pass an outer InnerCapture handle",
                 diagnostic_code: "inner_class_construction_panics",
             },
         },
@@ -259,6 +259,29 @@ fn check_known_gap(fixture: &KnownGapFixture) -> Result<(), String> {
                 ));
             }
         }
+        KnownGapExpectation::LoudRuntimePanic {
+            message,
+            diagnostic_code,
+        } => {
+            if !translation.diagnostics.has_code(diagnostic_code) {
+                let _ = std::fs::remove_dir_all(&work);
+                return Err(format!(
+                    "translation did not report diagnostic code {diagnostic_code:?}: {:?}",
+                    translation.diagnostics.iter().collect::<Vec<_>>()
+                ));
+            }
+            let run = run_translated_rust_source(&work, fixture.class, &translation.rust);
+            let Err(err) = run else {
+                let _ = std::fs::remove_dir_all(&work);
+                return Err("known runtime-loud translation unexpectedly ran".to_string());
+            };
+            if !err.contains(message) {
+                let _ = std::fs::remove_dir_all(&work);
+                return Err(format!(
+                    "translation did not fail at runtime with {message:?}: {err}"
+                ));
+            }
+        }
         KnownGapExpectation::DivergentOutput {
             expected_translated_output,
             diagnostic_code,
@@ -288,35 +311,6 @@ fn check_known_gap(fixture: &KnownGapFixture) -> Result<(), String> {
             if translated_output == java_output {
                 let _ = std::fs::remove_dir_all(&work);
                 return Err("known divergent translation unexpectedly matched Java".to_string());
-            }
-        }
-        KnownGapExpectation::RuntimePanic {
-            panic_message,
-            diagnostic_code,
-        } => {
-            if !translation.diagnostics.has_code(diagnostic_code) {
-                let _ = std::fs::remove_dir_all(&work);
-                return Err(format!(
-                    "translation did not report diagnostic code {diagnostic_code:?}: {:?}",
-                    translation.diagnostics.iter().collect::<Vec<_>>()
-                ));
-            }
-            let panic_stderr = match run_translated_rust_source_expect_failure(
-                &work,
-                fixture.class,
-                &translation.rust,
-            ) {
-                Ok(stderr) => stderr,
-                Err(err) => {
-                    let _ = std::fs::remove_dir_all(&work);
-                    return Err(err);
-                }
-            };
-            if !panic_stderr.contains(panic_message) {
-                let _ = std::fs::remove_dir_all(&work);
-                return Err(format!(
-                    "translated program did not panic with {panic_message:?}: {panic_stderr}"
-                ));
             }
         }
     }
@@ -351,24 +345,6 @@ fn run_translated_rust_source(work: &Path, class: &str, rust: &str) -> Result<St
         ));
     }
     Ok(String::from_utf8_lossy(&run.stdout).trim_end().to_string())
-}
-
-fn run_translated_rust_source_expect_failure(
-    work: &Path,
-    class: &str,
-    rust: &str,
-) -> Result<String, String> {
-    let binary = compile_translated_rust_source(work, class, rust)?;
-    let run = Command::new(&binary)
-        .output()
-        .map_err(|err| format!("run: {err}"))?;
-    if run.status.success() {
-        return Err(format!(
-            "translated program unexpectedly succeeded: {}",
-            String::from_utf8_lossy(&run.stdout).trim_end()
-        ));
-    }
-    Ok(String::from_utf8_lossy(&run.stderr).trim_end().to_string())
 }
 
 fn compile_translated_rust_source(work: &Path, class: &str, rust: &str) -> Result<PathBuf, String> {

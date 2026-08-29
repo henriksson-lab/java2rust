@@ -2172,10 +2172,8 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
         "switch_expression" => parse_switch_expr_node(node, source),
         "method_invocation" => {
             let receiver = node.child_by_field_name("object").map(|object| {
-                let mut receiver = parse_expr_node(object, source);
-                if text(node, source).contains(".super.") {
-                    receiver = Expr::FieldAccess(Box::new(receiver), "super".to_string());
-                }
+                let receiver = interface_super_method_owner_expr(node, source)
+                    .unwrap_or_else(|| parse_expr_node(object, source));
                 Box::new(receiver)
             });
             Expr::Call {
@@ -2223,6 +2221,41 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
             &format!("unsupported expression node: {}", node.kind()),
         ),
     }
+}
+
+fn interface_super_method_owner_expr(node: tree_sitter::Node, source: &str) -> Option<Expr> {
+    let rendered = text(node, source);
+    let owner = rendered.split_once(".super.")?.0.trim();
+    if owner.is_empty() {
+        return None;
+    }
+    Some(Expr::FieldAccess(
+        Box::new(parse_static_owner_expr_text(owner)),
+        "super".to_string(),
+    ))
+}
+
+fn parse_static_owner_expr_text(owner: &str) -> Expr {
+    owner
+        .split('.')
+        .filter(|segment| !segment.is_empty())
+        .fold(None, |expr, segment| {
+            let segment = if expr.is_none()
+                && segment
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| ch.is_ascii_uppercase())
+            {
+                segment.to_string()
+            } else {
+                to_snake_case_unescaped(segment)
+            };
+            Some(match expr {
+                Some(expr) => Expr::FieldAccess(Box::new(expr), segment),
+                None => Expr::Var(segment),
+            })
+        })
+        .unwrap_or_else(|| Expr::Var(to_snake_case_unescaped(owner)))
 }
 
 fn unsupported_expr_node(node: tree_sitter::Node, reason: &str) -> Expr {

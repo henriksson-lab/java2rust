@@ -1214,6 +1214,70 @@ class UseLocalized {
 }
 
 #[test]
+fn object_model_keeps_inherited_source_interface_receiver_as_dyn_trait() {
+    let parsed = parse_java_source(
+        r#"
+interface Distribution {
+    double value();
+}
+
+abstract class AbstractDistribution implements Distribution {
+}
+
+class RandomSampler {
+    double sample(Distribution distribution) {
+        return distribution.value();
+    }
+}
+
+class ConcreteDistribution extends AbstractDistribution {
+    double value() {
+        return 1.0;
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let effective_facts = EffectiveFacts::new(&resolved.facts);
+    let usage = analyze_usage_with_facts(&resolved.program, &resolved.facts);
+
+    let sample_usage = usage
+        .methods
+        .get(&UsageMethodKey {
+            type_name: "RandomSampler".to_string(),
+            method_name: "sample".to_string(),
+        })
+        .expect("sample usage should be recorded");
+    assert!(
+        sample_usage.call_sites.iter().any(|call| {
+            call.name == "value" && call.boundary == CallArgumentBoundary::KnownContentRead
+        }),
+        "interface receiver calls should be treated as source content reads: {:?}",
+        sample_usage.call_sites
+    );
+
+    let object_plan = plan_object_model_from_input(ObjectModelInput {
+        program: &resolved.program,
+        facts: &resolved.facts,
+        effective_facts: &effective_facts,
+        usage: Some(&usage),
+    });
+    let distribution = object_plan.strategy_for("Distribution").unwrap();
+
+    assert_eq!(
+        distribution.strategy,
+        ObjectRepresentation::DynTrait {
+            trait_name: "Distribution".to_string(),
+        }
+    );
+    assert!(distribution.rejected.is_empty());
+    assert_eq!(
+        distribution.requirements,
+        vec![DispatchRequirementKind::NeedsBorrowedTraitView]
+    );
+}
+
+#[test]
 fn object_model_uses_erased_object_when_trait_objects_are_rejected() {
     let parsed = parse_java_source(
         r#"

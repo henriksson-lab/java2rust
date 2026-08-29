@@ -451,3 +451,18 @@ append implementations are not reported as no-ops.
 A follow-up audit tightened the detector too: the Rust counter and Python sweep
 now count the exact emitted comment prefix (`/* noop Java facade method call:`),
 not arbitrary prose containing the marker phrase.
+
+## Update 2026-08-29 (Codex follow-up) — marker fixtures track current loud surfaces
+
+The fixture guard was doing its job again: two marker fixtures had become stale
+after real lowering improvements. Method-local classes now translate, so the
+old `compile_error` fixture no longer emitted `compile_error!`; it now uses the
+still-loud String reference-identity gap. One-dimensional object arrays now
+lower to nullable element vectors, so the old unsupported-array fixture no
+longer emitted `unsupported Java array creation`; it now uses the remaining
+three-dimensional array-creation fallback.
+
+The unmodelled-upcast split test also stopped assuming an exact constant
+upcast count for every translated source. The invariant is the one this audit
+needs: upcast markers remain visible and separate from no-op facade method
+counts. `tests/output_markers.rs` is back to 26/26.

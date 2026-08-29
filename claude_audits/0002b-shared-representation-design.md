@@ -2056,3 +2056,20 @@ equality warning; those are the cases 0028 lowers with `Rc::ptr_eq`/`Arc::ptr_eq
 String identity and unimplemented reference-identity cases still warn. The
 regression is `implemented_shared_identity_equality_has_no_gap_diagnostics`,
 using `tests/differential/Identity.java`.
+
+## Update 2026-08-29 (Codex follow-up) — nullable dyn-trait returns stay modeled
+
+`nullable_external_dyn_trait_return_constraints_keep_trait_owned_carrier` now
+pins the current modeled-external contract: a nullable return from a dyn-trait
+external pack keeps owned/nullability constraints and trait dispatch
+constraints, rather than collapsing back to erased-object dispatch. The old test
+name and assertions described the pre-shared-representation carrier choice.
+
+## Update 2026-08-29 (Codex follow-up) — erased external handle fixture matches nullable storage
+
+`erased_object_external_handle_lowers_store_pass_and_return_through_same_carrier`
+now pins the current carrier flow: the erased field is nullable storage,
+`store(Dog)` receives the erased `Box<dyn Any>` carrier directly, and passing the
+field to another erased argument null-checks and clone-recovers that same
+carrier. The old assertions expected boxing at the assignment site and a
+non-nullable getter shape.
