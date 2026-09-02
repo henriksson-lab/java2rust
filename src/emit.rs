@@ -525,10 +525,6 @@ fn string_literal_to_string_receiver(receiver: &RustExpr) -> Option<String> {
             }
             _ => None,
         },
-        RustExpr::Raw(rendered) => {
-            let literal = rendered.strip_suffix(".to_string()")?;
-            is_complete_string_literal(literal).then(|| literal.to_string())
-        }
         RustExpr::Literal(rendered) => {
             let literal = rendered.strip_suffix(".to_string()")?;
             is_complete_string_literal(literal).then(|| literal.to_string())
@@ -538,7 +534,20 @@ fn string_literal_to_string_receiver(receiver: &RustExpr) -> Option<String> {
 }
 
 fn is_complete_string_literal(rendered: &str) -> bool {
-    rendered.starts_with('"') && rendered.ends_with('"') && rendered.len() >= 2
+    if !rendered.starts_with('"') {
+        return false;
+    }
+    let mut escaped = false;
+    for (idx, ch) in rendered.char_indices().skip(1) {
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '"' {
+            return idx + ch.len_utf8() == rendered.len();
+        }
+    }
+    false
 }
 
 fn emit_closure_expr(
@@ -843,7 +852,11 @@ fn strip_one_balanced_outer_parentheses(raw: &str) -> Option<&str> {
     let mut in_string = false;
     let mut in_char = false;
     let mut escaped = false;
+    let mut skip_until = 0usize;
     for (index, ch) in raw.char_indices() {
+        if index < skip_until {
+            continue;
+        }
         if escaped {
             escaped = false;
             continue;
@@ -856,6 +869,24 @@ fn strip_one_balanced_outer_parentheses(raw: &str) -> Option<&str> {
             } else if in_char && ch == '\'' {
                 in_char = false;
             }
+            continue;
+        }
+        if let Some(end) = raw_string_literal_end_at(raw, index) {
+            skip_until = end;
+            continue;
+        }
+        if raw[index..].starts_with("//") {
+            skip_until = raw[index..]
+                .find('\n')
+                .map(|offset| index + offset)
+                .unwrap_or(raw.len());
+            continue;
+        }
+        if raw[index..].starts_with("/*") {
+            skip_until = raw[index + 2..]
+                .find("*/")
+                .map(|offset| index + 2 + offset + 2)
+                .unwrap_or(raw.len());
             continue;
         }
         match ch {
@@ -930,8 +961,30 @@ fn raw_contains_top_level_cast(raw: &str) -> bool {
     let mut paren_depth = 0usize;
     let mut bracket_depth = 0usize;
     let mut brace_depth = 0usize;
+    let mut skip_until = 0usize;
     let mut chars = raw.char_indices().peekable();
     while let Some((idx, ch)) = chars.next() {
+        if idx < skip_until {
+            continue;
+        }
+        if let Some(end) = raw_string_literal_end_at(raw, idx) {
+            skip_until = end;
+            continue;
+        }
+        if raw[idx..].starts_with("//") {
+            skip_until = raw[idx..]
+                .find('\n')
+                .map(|offset| idx + offset)
+                .unwrap_or(raw.len());
+            continue;
+        }
+        if raw[idx..].starts_with("/*") {
+            skip_until = raw[idx + 2..]
+                .find("*/")
+                .map(|offset| idx + 2 + offset + 2)
+                .unwrap_or(raw.len());
+            continue;
+        }
         match ch {
             '(' => paren_depth += 1,
             ')' => paren_depth = paren_depth.saturating_sub(1),
@@ -970,6 +1023,29 @@ fn raw_contains_top_level_cast(raw: &str) -> bool {
         }
     }
     false
+}
+
+fn raw_string_literal_end_at(raw: &str, idx: usize) -> Option<usize> {
+    let rest = raw.get(idx..)?;
+    let mut chars = rest.char_indices();
+    let (_, first) = chars.next()?;
+    if first != 'r' {
+        return None;
+    }
+    let mut hashes = 0usize;
+    while let Some((_, '#')) = chars.clone().next() {
+        hashes += 1;
+        chars.next();
+    }
+    let (quote_offset, quote) = chars.next()?;
+    if quote != '"' {
+        return None;
+    }
+    let terminator = format!("\"{}", "#".repeat(hashes));
+    let body_start = idx + quote_offset + 1;
+    raw.get(body_start..)?
+        .find(&terminator)
+        .map(|end| body_start + end + terminator.len())
 }
 
 fn binary_precedence(op: &str) -> u8 {
@@ -1080,6 +1156,24 @@ mod tests {
     }
 
     #[test]
+    fn raw_optional_string_literal_view_normalization_requires_complete_literal() {
+        assert!(is_complete_string_literal("\"a \\\"quoted\\\" value\""));
+        assert!(!is_complete_string_literal("\"a\" garbage \""));
+        assert_eq!(
+            emit_expr(&RustExpr::Raw(
+                "Some(\"a\" garbage \".to_string().as_str())".to_string()
+            )),
+            "Some(\"a\" garbage \".to_string().as_str())"
+        );
+        assert_eq!(
+            emit_expr(&RustExpr::Raw(
+                "Some(\"actual\".to_string().as_str())".to_string()
+            )),
+            "Some(\"actual\")"
+        );
+    }
+
+    #[test]
     fn string_literal_to_string_as_str_emits_static_literal_view() {
         let structured = RustExpr::MethodCall {
             receiver: Box::new(RustExpr::MethodCall {
@@ -1097,7 +1191,7 @@ mod tests {
             method: "as_str".to_string(),
             args: Vec::new(),
         };
-        assert_eq!(emit_expr(&raw_receiver), "\"none\"");
+        assert_eq!(emit_expr(&raw_receiver), "\"none\".to_string().as_str()");
 
         let literal_receiver = RustExpr::MethodCall {
             receiver: Box::new(RustExpr::Literal("\"none\".to_string()".to_string())),
@@ -1492,6 +1586,18 @@ mod tests {
         assert_eq!(
             emit_expr(&RustExpr::Raw("(path.contains(\"()\"))".to_string())),
             "path.contains(\"()\")"
+        );
+        assert_eq!(
+            emit_expr(&RustExpr::Raw("(value /* ) */)".to_string())),
+            "value /* ) */"
+        );
+        assert_eq!(
+            emit_expr(&RustExpr::Raw("(value // )\n)".to_string())),
+            "value // )"
+        );
+        assert_eq!(
+            emit_expr(&RustExpr::Raw("(format!(r#\"(\"#))".to_string())),
+            "format!(r#\"(\"#)"
         );
         assert_eq!(
             emit_expr(&RustExpr::Raw("(left) || (right)".to_string())),

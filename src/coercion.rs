@@ -1398,11 +1398,7 @@ fn normalize_optional_constructed_string_view_element(expr: RustExpr) -> RustExp
             method,
             args,
         } if method == "as_str" && args.is_empty() => {
-            if let RustExpr::Raw(rendered) = receiver.unshaped()
-                && let Some(literal) = rendered_string_literal_to_string_as_str_inner(rendered)
-            {
-                return string_view_expr(RustExpr::Literal(literal.to_string()));
-            }
+            let receiver = recover_parseable_raw_operand_projection(receiver.as_ref().clone());
             if let RustExpr::MethodCall {
                 receiver: literal,
                 method,
@@ -1415,7 +1411,11 @@ fn normalize_optional_constructed_string_view_element(expr: RustExpr) -> RustExp
             {
                 return string_view_expr(literal.as_ref().clone());
             }
-            expr
+            RustExpr::MethodCall {
+                receiver: Box::new(receiver),
+                method: method.clone(),
+                args: args.clone(),
+            }
         }
         _ => expr,
     }
@@ -1487,6 +1487,10 @@ fn rendered_complete_some_call_inner(rendered: &str) -> Option<&str> {
             continue;
         }
         if let Some(end) = raw_string_literal_end_at(trimmed, idx) {
+            idx = end;
+            continue;
+        }
+        if let Some(end) = raw_comment_end_at(trimmed, idx) {
             idx = end;
             continue;
         }
@@ -1582,8 +1586,12 @@ fn raw_contains_top_level_as_cast(raw: &str) -> bool {
     let mut in_string = false;
     let mut in_char = false;
     let mut escaped = false;
+    let mut skip_until = 0usize;
     let mut chars = raw.char_indices().peekable();
     while let Some((idx, ch)) = chars.next() {
+        if idx < skip_until {
+            continue;
+        }
         if escaped {
             escaped = false;
             continue;
@@ -1602,6 +1610,10 @@ fn raw_contains_top_level_as_cast(raw: &str) -> bool {
             while chars.peek().is_some_and(|(next, _)| *next < end) {
                 chars.next();
             }
+            continue;
+        }
+        if let Some(end) = raw_comment_end_at(raw, idx) {
+            skip_until = end;
             continue;
         }
         match ch {
@@ -2504,6 +2516,10 @@ fn raw_mentions_identifier(raw: &str, ident: &str) -> bool {
             skip_until = end;
             continue;
         }
+        if let Some(end) = raw_comment_end_at(raw, idx) {
+            skip_until = end;
+            continue;
+        }
         match ch {
             '"' => in_string = true,
             '\'' => in_char = true,
@@ -2520,7 +2536,7 @@ fn raw_mentions_identifier(raw: &str, ident: &str) -> bool {
 }
 
 fn raw_contains_outside_literals(raw: &str, pattern: &str) -> bool {
-    raw_find_outside_literals(raw, pattern).is_some()
+    raw_find_outside_literals_and_comments(raw, pattern).is_some()
 }
 
 fn raw_find_outside_literals(raw: &str, pattern: &str) -> Option<usize> {
@@ -2565,7 +2581,7 @@ fn raw_replace_once_outside_literals(
     pattern: &str,
     replacement: &str,
 ) -> Option<String> {
-    let index = raw_find_outside_literals(raw, pattern)?;
+    let index = raw_find_outside_literals_and_comments(raw, pattern)?;
     Some(format!(
         "{}{}{}",
         &raw[..index],
@@ -2603,6 +2619,26 @@ fn raw_string_literal_end_at(raw: &str, idx: usize) -> Option<usize> {
     raw[body_start..]
         .find(&terminator)
         .map(|offset| body_start + offset + terminator.len())
+}
+
+fn raw_comment_end_at(raw: &str, idx: usize) -> Option<usize> {
+    if raw[idx..].starts_with("//") {
+        return Some(
+            raw[idx..]
+                .find('\n')
+                .map(|offset| idx + offset)
+                .unwrap_or(raw.len()),
+        );
+    }
+    if raw[idx..].starts_with("/*") {
+        return Some(
+            raw[idx + 2..]
+                .find("*/")
+                .map(|offset| idx + 2 + offset + 2)
+                .unwrap_or(raw.len()),
+        );
+    }
+    None
 }
 
 pub fn constructor_self_field_replacement(replacement: &str) -> String {
@@ -3700,11 +3736,54 @@ pub fn string_literal_source(expr: &RustExpr) -> Option<String> {
 
 fn rust_string_literal_token_source(raw: &str) -> Option<String> {
     let raw = raw.strip_suffix(".to_string()").unwrap_or(raw);
-    if raw.starts_with('"') && raw.ends_with('"') {
-        Some(raw[1..raw.len() - 1].to_string())
-    } else {
-        None
+    let body = raw.strip_prefix('"')?.strip_suffix('"')?;
+    decode_rust_string_literal_body(body)
+}
+
+fn decode_rust_string_literal_body(body: &str) -> Option<String> {
+    let mut decoded = String::with_capacity(body.len());
+    let mut chars = body.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            decoded.push(ch);
+            continue;
+        }
+        let escaped = chars.next()?;
+        match escaped {
+            '"' => decoded.push('"'),
+            '\\' => decoded.push('\\'),
+            'n' => decoded.push('\n'),
+            'r' => decoded.push('\r'),
+            't' => decoded.push('\t'),
+            '0' => decoded.push('\0'),
+            'x' => {
+                let hi = chars.next()?.to_digit(16)?;
+                let lo = chars.next()?.to_digit(16)?;
+                decoded.push(char::from_u32((hi << 4) | lo)?);
+            }
+            'u' => {
+                if chars.next()? != '{' {
+                    return None;
+                }
+                let mut value = 0u32;
+                let mut saw_digit = false;
+                loop {
+                    let ch = chars.next()?;
+                    if ch == '}' {
+                        break;
+                    }
+                    value = value.checked_mul(16)?.checked_add(ch.to_digit(16)?)?;
+                    saw_digit = true;
+                }
+                if !saw_digit {
+                    return None;
+                }
+                decoded.push(char::from_u32(value)?);
+            }
+            _ => return None,
+        }
     }
+    Some(decoded)
 }
 
 #[cfg(test)]
@@ -3802,11 +3881,11 @@ fn terminal_to_string_receiver_is_structured(receiver: &RustExpr) -> bool {
         | RustExpr::Field(_, _)
         | RustExpr::Index(_, _)
         | RustExpr::Call { .. }
+        | RustExpr::MacroCall { .. }
         | RustExpr::MethodCall { .. }
         | RustExpr::Grouped(_) => true,
         RustExpr::Literal(_)
         | RustExpr::Raw(_)
-        | RustExpr::MacroCall { .. }
         | RustExpr::StructLit { .. }
         | RustExpr::Tuple(_)
         | RustExpr::ArrayLiteral(_)
@@ -5037,6 +5116,60 @@ pub fn owned_map_entries_set_projection(receiver: RustExpr) -> RustExpr {
                 }],
             ),
             "std::collections::HashSet<_>",
+        ),
+    )
+}
+
+pub fn owned_map_entries_vec_projection(receiver: RustExpr) -> RustExpr {
+    RustExpr::shaped(
+        RustExprShape::OwnedRecovery,
+        typed_collect_projection(
+            receiver_method_call_projection_exact(
+                receiver_method_call_projection_exact(receiver, "iter", Vec::new()),
+                "map",
+                vec![RustExpr::Closure {
+                    is_move: false,
+                    params: vec![RustClosureParam {
+                        pattern: "(key, value)".to_string(),
+                        ty: None,
+                    }],
+                    return_type: None,
+                    body: RustClosureBody::Expr(Box::new(RustExpr::Tuple(vec![
+                        apply_clone_projection(RustExpr::Var("key".to_string())).into_unshaped(),
+                        apply_clone_projection(RustExpr::Var("value".to_string())).into_unshaped(),
+                    ]))),
+                }],
+            ),
+            "Vec<_>",
+        ),
+    )
+}
+
+pub fn owned_map_entries_erased_object_array_projection(receiver: RustExpr) -> RustExpr {
+    let boxed_entry = erased_object_box_projection(RustExpr::Tuple(vec![
+        apply_clone_projection(RustExpr::Var("key".to_string())).into_unshaped(),
+        apply_clone_projection(RustExpr::Var("value".to_string())).into_unshaped(),
+    ]));
+    RustExpr::shaped(
+        RustExprShape::OwnedRecovery,
+        typed_collect_projection(
+            receiver_method_call_projection_exact(
+                receiver_method_call_projection_exact(receiver, "iter", Vec::new()),
+                "map",
+                vec![RustExpr::Closure {
+                    is_move: false,
+                    params: vec![RustClosureParam {
+                        pattern: "(key, value)".to_string(),
+                        ty: None,
+                    }],
+                    return_type: None,
+                    body: RustClosureBody::Expr(Box::new(RustExpr::Call {
+                        function: Box::new(RustExpr::Var("Some".to_string())),
+                        args: vec![boxed_entry],
+                    })),
+                }],
+            ),
+            "Vec<_>",
         ),
     )
 }
@@ -7061,6 +7194,21 @@ pub fn arrays_stream_range_projection(source: RustExpr, from: RustExpr, to: Rust
     checked_array_range_source_slice_expr(source, from, to)
 }
 
+pub fn arrays_stream_range_projection_with_result_context(
+    source: RustExpr,
+    from: RustExpr,
+    to: RustExpr,
+    propagate_java_exceptions: bool,
+) -> RustExpr {
+    if propagate_java_exceptions {
+        RustExpr::Try(Box::new(checked_array_range_source_slice_result_expr(
+            source, from, to,
+        )))
+    } else {
+        arrays_stream_range_projection(source, from, to)
+    }
+}
+
 fn checked_array_range_source_slice_expr(
     source: RustExpr,
     from: RustExpr,
@@ -7114,6 +7262,62 @@ fn checked_array_range_source_slice_expr(
             op: "&".to_string(),
             expr: Box::new(checked_array_range_slice_expr("__java_arrays_source")),
         })),
+    }
+}
+
+fn checked_array_range_source_slice_result_expr(
+    source: RustExpr,
+    from: RustExpr,
+    to: RustExpr,
+) -> RustExpr {
+    RustExpr::Block {
+        stmts: vec![
+            RustStmt::Let {
+                mutable: false,
+                name: "__java_arrays_source".to_string(),
+                ty: None,
+                value: Some(RustExpr::Unary {
+                    op: "&".to_string(),
+                    expr: Box::new(source),
+                }),
+            },
+            RustStmt::Let {
+                mutable: false,
+                name: "__java_arrays_from".to_string(),
+                ty: None,
+                value: Some(from),
+            },
+            RustStmt::Let {
+                mutable: false,
+                name: "__java_arrays_to".to_string(),
+                ty: None,
+                value: Some(to),
+            },
+            checked_array_from_exceeds_to_result_stmt(),
+            checked_array_range_out_of_bounds_result_stmt("__java_arrays_source"),
+            RustStmt::Let {
+                mutable: false,
+                name: "__java_arrays_from".to_string(),
+                ty: None,
+                value: Some(RustExpr::Cast {
+                    expr: Box::new(RustExpr::Var("__java_arrays_from".to_string())),
+                    ty: "usize".to_string(),
+                }),
+            },
+            RustStmt::Let {
+                mutable: false,
+                name: "__java_arrays_to".to_string(),
+                ty: None,
+                value: Some(RustExpr::Cast {
+                    expr: Box::new(RustExpr::Var("__java_arrays_to".to_string())),
+                    ty: "usize".to_string(),
+                }),
+            },
+        ],
+        tail: Some(Box::new(ok_result_expr(RustExpr::Unary {
+            op: "&".to_string(),
+            expr: Box::new(checked_array_range_slice_expr("__java_arrays_source")),
+        }))),
     }
 }
 
@@ -8381,46 +8585,12 @@ pub fn rewrite_optional_erased_borrowed_string_view_call_args(
     optional_string_locals: &[String],
     erased_string_cast_locals: &[String],
 ) -> RustExpr {
-    if let Some(rewritten) = rewrite_optional_erased_borrowed_string_view_call_args_projection(
+    rewrite_optional_erased_borrowed_string_view_call_args_projection(
         &lowered,
         optional_string_locals,
         erased_string_cast_locals,
-    ) {
-        return rewritten;
-    }
-    let RustExpr::Raw(rendered) = lowered.unshaped() else {
-        return lowered;
-    };
-    let mut rendered = rendered.clone();
-    let mut changed = false;
-    for name in optional_string_locals {
-        let erased_string_box = emit::emit_expr(&optional_string_erased_box_projection(name));
-        let borrowed_string_view = emit::emit_expr(&optional_string_borrowed_view_projection(name));
-        if let Some(rewritten) =
-            raw_replace_all_outside_literals(&rendered, &erased_string_box, &borrowed_string_view)
-        {
-            rendered = rewritten;
-            changed = true;
-        }
-    }
-    for name in erased_string_cast_locals {
-        let consuming_view = format!(
-            "{name}.unwrap().downcast::<String>(){}.as_str()",
-            crate::output_markers::invalid_java_cast_expect()
-        );
-        let borrowed_view = emit::emit_expr(&optional_erased_string_borrowed_view_projection(name));
-        if let Some(rewritten) =
-            raw_replace_all_outside_literals(&rendered, &consuming_view, &borrowed_view)
-        {
-            rendered = rewritten;
-            changed = true;
-        }
-    }
-    if changed {
-        rendered_projection_or_raw_leaf(&rendered)
-    } else {
-        lowered
-    }
+    )
+    .unwrap_or(lowered)
 }
 
 fn rewrite_optional_erased_borrowed_string_view_call_args_projection(
@@ -8610,9 +8780,53 @@ fn rewrite_optional_erased_borrowed_string_view_call_args_projection(
                         )
                     })
                     .flatten()
+            })
+            .or_else(|| {
+                rewrite_optional_erased_borrowed_string_view_raw_compatibility(
+                    rendered,
+                    optional_string_locals,
+                    erased_string_cast_locals,
+                )
             }),
         _ => None,
     }
+}
+
+fn rewrite_optional_erased_borrowed_string_view_raw_compatibility(
+    rendered: &str,
+    optional_string_locals: &[String],
+    erased_string_cast_locals: &[String],
+) -> Option<RustExpr> {
+    let mut rendered = rendered.to_string();
+    let mut changed = false;
+    for name in optional_string_locals {
+        let erased_string_box = emit::emit_expr(&optional_string_erased_box_projection(name));
+        let borrowed_string_view = emit::emit_expr(&optional_string_borrowed_view_projection(name));
+        if let Some(rewritten) = raw_replace_all_outside_literals_and_comments(
+            &rendered,
+            &erased_string_box,
+            &borrowed_string_view,
+        ) {
+            rendered = rewritten;
+            changed = true;
+        }
+    }
+    for name in erased_string_cast_locals {
+        let consuming_view = format!(
+            "{name}.unwrap().downcast::<String>(){}.as_str()",
+            crate::output_markers::invalid_java_cast_expect()
+        );
+        let borrowed_view = emit::emit_expr(&optional_erased_string_borrowed_view_projection(name));
+        if let Some(rewritten) = raw_replace_all_outside_literals_and_comments(
+            &rendered,
+            &consuming_view,
+            &borrowed_view,
+        ) {
+            rendered = rewritten;
+            changed = true;
+        }
+    }
+    changed.then(|| rendered_projection_or_raw_leaf(&rendered))
 }
 
 fn optional_string_erased_box_map_string_view_projection(
@@ -8790,11 +9004,15 @@ fn strip_grouped_deref_expr(mut expr: &RustExpr) -> &RustExpr {
     }
 }
 
-fn raw_replace_all_outside_literals(raw: &str, pattern: &str, replacement: &str) -> Option<String> {
+fn raw_replace_all_outside_literals_and_comments(
+    raw: &str,
+    pattern: &str,
+    replacement: &str,
+) -> Option<String> {
     let mut out = String::with_capacity(raw.len());
     let mut rest = raw;
     let mut changed = false;
-    while let Some(index) = raw_find_outside_literals(rest, pattern) {
+    while let Some(index) = raw_find_outside_literals_and_comments(rest, pattern) {
         out.push_str(&rest[..index]);
         out.push_str(replacement);
         rest = &rest[index + pattern.len()..];
@@ -8806,6 +9024,47 @@ fn raw_replace_all_outside_literals(raw: &str, pattern: &str, replacement: &str)
     } else {
         None
     }
+}
+
+fn raw_find_outside_literals_and_comments(raw: &str, pattern: &str) -> Option<usize> {
+    let mut in_string = false;
+    let mut in_char = false;
+    let mut escaped = false;
+    let mut skip_until = 0usize;
+    for (idx, ch) in raw.char_indices() {
+        if idx < skip_until {
+            continue;
+        }
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if in_string || in_char {
+            if ch == '\\' {
+                escaped = true;
+            } else if in_string && ch == '"' {
+                in_string = false;
+            } else if in_char && ch == '\'' {
+                in_char = false;
+            }
+            continue;
+        }
+        if let Some(end) = raw_string_literal_end_at(raw, idx) {
+            skip_until = end;
+            continue;
+        }
+        if let Some(end) = raw_comment_end_at(raw, idx) {
+            skip_until = end;
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '\'' => in_char = true,
+            _ if raw[idx..].starts_with(pattern) => return Some(idx),
+            _ => {}
+        }
+    }
+    None
 }
 
 pub fn deref_borrowed_projection(expr: RustExpr) -> RustExpr {
@@ -8854,10 +9113,21 @@ pub fn unwrap_result_or_panic_uncaught_java_exception(expr: RustExpr) -> RustExp
     }
     let recovered = rendered_plus_expr_projection_or_raw_leaf(&rendered);
     if !matches!(recovered.unshaped(), RustExpr::Raw(_)) {
-        return unwrap_result_or_panic_uncaught_java_exception(recovered);
+        if emit::emit_expr(&recovered) == rendered.trim() {
+            return unwrap_result_or_panic_uncaught_java_exception(recovered);
+        }
+        return method_call_projection(
+            RustExpr::Grouped(Box::new(RustExpr::Raw(rendered.clone()))),
+            "unwrap_or_else",
+            vec![panic_uncaught_java_exception_closure_expr()],
+        );
     }
+    let receiver = match recovered {
+        RustExpr::Raw(_) => RustExpr::Grouped(Box::new(recovered)),
+        _ => recovered,
+    };
     method_call_projection(
-        recovered,
+        receiver,
         "unwrap_or_else",
         vec![panic_uncaught_java_exception_closure_expr()],
     )
@@ -8869,8 +9139,10 @@ fn panic_recovered_result_expr_or_raw_leaf(rendered: &str) -> Option<RustExpr> {
     if let RustExpr::Raw(_) = recovered.unshaped() {
         return None;
     }
-    (emit::emit_expr(&recovered) == trimmed && rust_expr_is_result_panic_recovered(&recovered))
-        .then_some(recovered)
+    (emit::emit_expr(&recovered) == trimmed
+        && rust_expr_is_result_panic_recovered(&recovered)
+        && !rust_expr_contains_raw_leaf(&recovered))
+    .then_some(recovered)
 }
 
 fn rust_expr_is_result_panic_recovered(expr: &RustExpr) -> bool {
@@ -9384,7 +9656,7 @@ fn string_literal_to_string_expr(raw: &str) -> bool {
 
 fn string_literal_to_string_projection(raw: &str) -> Option<RustExpr> {
     let literal = raw.strip_suffix(".to_string()")?;
-    if !literal.starts_with('"') {
+    if !rendered_expr_is_complete_string_literal(literal) {
         return None;
     }
     Some(zero_arg_method_projection(
@@ -9473,6 +9745,15 @@ fn raw_top_level_comma_items_as_text(raw: &str) -> Vec<String> {
     let mut chars = raw.char_indices().peekable();
     while let Some((idx, ch)) = chars.next() {
         if let Some(end) = raw_string_literal_end_at(raw, idx) {
+            while let Some((next_idx, _)) = chars.peek() {
+                if *next_idx >= end {
+                    break;
+                }
+                chars.next();
+            }
+            continue;
+        }
+        if let Some(end) = raw_comment_end_at(raw, idx) {
             while let Some((next_idx, _)) = chars.peek() {
                 if *next_idx >= end {
                     break;
@@ -9599,6 +9880,15 @@ fn raw_contains_top_level_comma(raw: &str) -> bool {
     let mut chars = raw.char_indices().peekable();
     while let Some((idx, ch)) = chars.next() {
         if let Some(end) = raw_string_literal_end_at(raw, idx) {
+            while let Some((next_idx, _)) = chars.peek() {
+                if *next_idx >= end {
+                    break;
+                }
+                chars.next();
+            }
+            continue;
+        }
+        if let Some(end) = raw_comment_end_at(raw, idx) {
             while let Some((next_idx, _)) = chars.peek() {
                 if *next_idx >= end {
                     break;
@@ -10859,29 +11149,11 @@ fn map_key_shape_is_borrowed_string_view(shape: &RustSlotShape) -> bool {
 }
 
 fn rust_expr_is_simple_local_path(expr: &RustExpr) -> bool {
-    match expr.unshaped() {
-        RustExpr::Var(_) => true,
-        RustExpr::Raw(rendered) => {
-            matches!(
-                rendered_projection_or_raw_leaf(rendered.trim()).unshaped(),
-                RustExpr::Var(_)
-            )
-        }
-        _ => false,
-    }
-}
-
-fn raw_expr_is_associated_path_without_call(rendered: &str) -> bool {
-    let recovered = rendered_projection_or_raw_leaf(rendered);
-    matches!(recovered.unshaped(), RustExpr::Path(segments) if segments.len() > 1)
+    matches!(expr.unshaped(), RustExpr::Var(_))
 }
 
 fn expr_is_associated_path_without_call(expr: &RustExpr) -> bool {
-    match expr.unshaped() {
-        RustExpr::Path(segments) => segments.len() > 1,
-        RustExpr::Raw(rendered) => raw_expr_is_associated_path_without_call(rendered),
-        _ => false,
-    }
+    matches!(expr.unshaped(), RustExpr::Path(segments) if segments.len() > 1)
 }
 
 fn associated_path_view_projection(expr: RustExpr) -> RustExpr {
@@ -11103,7 +11375,10 @@ pub fn rendered_expr_is_already_string_view(rendered: &str) -> bool {
         return true;
     }
     let recovered = rendered_projection_or_raw_leaf(trimmed);
-    if matches!(recovered.unshaped(), RustExpr::Raw(_)) || emit::emit_expr(&recovered) != trimmed {
+    if matches!(recovered.unshaped(), RustExpr::Raw(_))
+        || emit::emit_expr(&recovered) != trimmed
+        || rust_expr_contains_raw_leaf(&recovered)
+    {
         return false;
     }
     rust_expr_is_string_view_projection(&recovered)
@@ -11130,12 +11405,15 @@ fn rendered_expr_is_already_owned_string_recovery(rendered: &str) -> bool {
 }
 
 fn raw_expr_is_string_view(rendered: &str) -> bool {
-    let recovered = rendered_projection_or_raw_leaf(rendered);
-    if !matches!(recovered.unshaped(), RustExpr::Raw(_)) {
-        expr_is_string_view(&recovered)
-    } else {
-        rendered_expr_is_already_string_view(rendered)
+    let trimmed = rendered.trim();
+    let recovered = rendered_projection_or_raw_leaf(trimmed);
+    if matches!(recovered.unshaped(), RustExpr::Raw(_))
+        || emit::emit_expr(&recovered) != trimmed
+        || rust_expr_contains_raw_leaf(&recovered)
+    {
+        return rendered_expr_is_already_string_view(trimmed);
     }
+    expr_is_string_view(&recovered)
 }
 
 /// A `&str` produced by an adapter, tagged so the next consumer does not have
@@ -11176,9 +11454,6 @@ fn deref_string_view_projection(expr: &RustExpr) -> Option<RustExpr> {
 }
 
 fn raw_deref_string_view_projection(rendered: &str) -> Option<RustExpr> {
-    if let Some(borrowed_item) = simple_deref_projection_source(rendered) {
-        return Some(borrowed_item_string_view_projection(borrowed_item));
-    }
     let recovered = recover_parseable_rendered_operand_projection(rendered.trim());
     let RustExpr::Unary { op, expr: inner } = recovered.unshaped() else {
         return None;
@@ -11186,19 +11461,16 @@ fn raw_deref_string_view_projection(rendered: &str) -> Option<RustExpr> {
     if op != "*" {
         return None;
     }
+    if !matches!(
+        inner.as_ref().unshaped(),
+        RustExpr::Var(_) | RustExpr::Path(_)
+    ) {
+        return None;
+    }
     Some(string_view_expr(zero_arg_method_projection(
         parenthesize_raw_method_receiver(inner.as_ref().clone()),
         "as_str",
     )))
-}
-
-fn simple_deref_projection_source(rendered: &str) -> Option<&str> {
-    let source = rendered.trim().strip_prefix('*')?;
-    (!source.is_empty()
-        && source
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_'))
-    .then_some(source)
 }
 
 pub fn instanceof_check_projection(expr: RustExpr, check: &InstanceOfCheck) -> RustExpr {
@@ -11478,7 +11750,7 @@ fn apply_borrowed_element_slot_adapter(
             let already_projected_to_target = expr
                 .recorded_slot_shape()
                 .is_some_and(|actual| slot_shapes_match_ignoring_identity(actual, &policy.target));
-            if already_projected_to_target {
+            if already_projected_to_target && !adapter.unwrap_carrier {
                 return expr;
             }
             let adapted = apply_borrowed_element_borrow_adapter(expr, adapter, policy);
@@ -12174,6 +12446,10 @@ fn split_raw_until_top_level_open_brace(raw: &str) -> Option<(&str, &str)> {
             cursor = end;
             continue;
         }
+        if let Some(end) = raw_comment_end_at(raw, cursor) {
+            cursor = end;
+            continue;
+        }
         let ch = raw[cursor..].chars().next()?;
         if ch == '"' {
             cursor = normal_string_literal_end_at(raw, cursor).unwrap_or(raw.len());
@@ -12207,6 +12483,10 @@ fn split_raw_balanced_brace_block(raw: &str) -> Option<(&str, &str)> {
     let mut cursor = 0usize;
     while cursor < raw.len() {
         if let Some(end) = raw_string_literal_end_at(raw, cursor) {
+            cursor = end;
+            continue;
+        }
+        if let Some(end) = raw_comment_end_at(raw, cursor) {
             cursor = end;
             continue;
         }
@@ -12361,6 +12641,10 @@ fn split_rendered_top_level_range_once(text: &str) -> Option<(&str, &str, bool)>
             cursor = end;
             continue;
         }
+        if let Some(end) = raw_comment_end_at(text, cursor) {
+            cursor = end;
+            continue;
+        }
         let ch = text[cursor..].chars().next()?;
         if ch == '"' {
             cursor = normal_string_literal_end_at(text, cursor).unwrap_or(text.len());
@@ -12447,6 +12731,10 @@ fn split_rendered_top_level_plus_terms<'a>(text: &'a str) -> Option<std::vec::In
             cursor = end;
             continue;
         }
+        if let Some(end) = raw_comment_end_at(text, cursor) {
+            cursor = end;
+            continue;
+        }
         let ch = text[cursor..].chars().next()?;
         if ch == '"' {
             cursor = normal_string_literal_end_at(text, cursor).unwrap_or(text.len());
@@ -12520,6 +12808,10 @@ fn split_rendered_top_level_binary_once<'a>(text: &'a str, op: &str) -> Option<(
     let mut found = None;
     while cursor < text.len() {
         if let Some(end) = raw_string_literal_end_at(text, cursor) {
+            cursor = end;
+            continue;
+        }
+        if let Some(end) = raw_comment_end_at(text, cursor) {
             cursor = end;
             continue;
         }
@@ -12634,6 +12926,10 @@ fn rendered_top_level_as_cast_parts(rendered: &str) -> Option<(&str, &str)> {
             cursor = end;
             continue;
         }
+        if let Some(end) = raw_comment_end_at(rendered, cursor) {
+            cursor = end;
+            continue;
+        }
         let ch = rendered[cursor..].chars().next()?;
         if ch == '"' {
             cursor = normal_string_literal_end_at(rendered, cursor)?;
@@ -12675,6 +12971,7 @@ fn rendered_top_level_as_cast_parts(rendered: &str) -> Option<(&str, &str)> {
 
 fn simple_rust_cast_type(ty: &str) -> bool {
     !ty.is_empty()
+        && rust_type_arg_text_is_balanced(ty)
         && ty
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | ':' | '<' | '>' | ','))
@@ -12871,6 +13168,10 @@ fn rendered_final_index_parts(rendered: &str) -> Option<(&str, &str)> {
             cursor = end;
             continue;
         }
+        if let Some(end) = raw_comment_end_at(rendered, cursor) {
+            cursor = end;
+            continue;
+        }
         let ch = rendered[cursor..].chars().next()?;
         if ch == '"' {
             cursor = normal_string_literal_end_at(rendered, cursor)?;
@@ -12975,6 +13276,12 @@ fn last_top_level_dot(raw: &str) -> Option<usize> {
             }
             continue;
         }
+        if let Some(end) = raw_comment_end_at(raw, idx) {
+            while chars.peek().is_some_and(|(next, _)| *next < end) {
+                chars.next();
+            }
+            continue;
+        }
         match ch {
             '(' => paren_depth += 1,
             ')' => paren_depth = paren_depth.saturating_sub(1),
@@ -13026,6 +13333,12 @@ fn rendered_call_parts(rendered: &str) -> Option<(&str, &str)> {
     let mut open = None;
     let mut chars = rendered.char_indices().peekable();
     while let Some((idx, ch)) = chars.next() {
+        if let Some(end) = raw_comment_end_at(rendered, idx) {
+            while chars.peek().is_some_and(|(next, _)| *next < end) {
+                chars.next();
+            }
+            continue;
+        }
         match ch {
             '(' => {
                 if depth == 0 {
@@ -13322,6 +13635,10 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
             }
         }
         Coercion::AsSlice => {
+            let expr = match expr {
+                RustExpr::Raw(rendered) => rendered_projection_or_raw_leaf(&rendered),
+                other => other,
+            };
             if expr_is_slice_view(&expr) {
                 expr
             } else if expr_is_associated_path_without_call(&expr) {
@@ -13480,15 +13797,18 @@ fn option_unwrap_projection_for_coercion(expr: RustExpr) -> RustExpr {
     }
 }
 
+#[cfg(test)]
 fn borrowed_item_string_view_projection(borrowed_item: &str) -> RustExpr {
     let receiver = borrowed_item_projection_or_raw_leaf(borrowed_item);
     borrowed_item_string_view_projection_expr(receiver)
 }
 
+#[cfg(test)]
 fn borrowed_item_string_view_projection_expr(receiver: RustExpr) -> RustExpr {
     string_view_expr(zero_arg_method_projection(receiver, "as_str"))
 }
 
+#[cfg(test)]
 fn borrowed_item_projection_or_raw_leaf(borrowed_item: &str) -> RustExpr {
     rendered_plus_expr_projection_or_raw_leaf(borrowed_item)
 }
@@ -13579,6 +13899,10 @@ fn raw_contains_top_level_operator_matching(
             prev_significant = Some(')');
             continue;
         }
+        if let Some(end) = raw_comment_end_at(raw, idx) {
+            skip_until = end;
+            continue;
+        }
         match ch {
             '"' => in_string = true,
             '\'' => in_char = true,
@@ -13650,129 +13974,74 @@ fn top_level_operator_has_left_operand(prev_significant: Option<char>) -> bool {
 }
 
 fn balanced_outer_parentheses_wrap_all(raw: &str) -> bool {
-    if !raw.starts_with('(') || !raw.ends_with(')') {
-        return false;
-    }
-    let mut depth = 0usize;
-    let mut in_string = false;
-    let mut in_char = false;
-    let mut escaped = false;
-    for (index, ch) in raw.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if in_string || in_char {
-            if ch == '\\' {
-                escaped = true;
-            } else if in_string && ch == '"' {
-                in_string = false;
-            } else if in_char && ch == '\'' {
-                in_char = false;
-            }
-            continue;
-        }
-        match ch {
-            '"' => in_string = true,
-            '\'' => in_char = true,
-            '(' => depth += 1,
-            ')' => {
-                let Some(next_depth) = depth.checked_sub(1) else {
-                    return false;
-                };
-                depth = next_depth;
-                if depth == 0 && index != raw.len() - 1 {
-                    return false;
-                }
-            }
-            _ => {}
-        }
-    }
-    depth == 0
+    balanced_outer_delimiters_wrap_all(raw, '(', ')')
 }
 
 fn balanced_outer_braces_wrap_all(raw: &str) -> bool {
-    if !raw.starts_with('{') || !raw.ends_with('}') {
+    balanced_outer_delimiters_wrap_all(raw, '{', '}')
+}
+
+fn balanced_outer_brackets_wrap_all(raw: &str) -> bool {
+    balanced_outer_delimiters_wrap_all(raw, '[', ']')
+}
+
+fn balanced_outer_delimiters_wrap_all(raw: &str, open: char, close: char) -> bool {
+    if !raw.starts_with(open) || !raw.ends_with(close) {
         return false;
     }
     let mut depth = 0usize;
-    let mut in_string = false;
-    let mut in_char = false;
-    let mut escaped = false;
-    for (index, ch) in raw.char_indices() {
-        if escaped {
-            escaped = false;
+    let mut cursor = 0usize;
+    while cursor < raw.len() {
+        if let Some(end) = raw_string_literal_end_at(raw, cursor) {
+            cursor = end;
             continue;
         }
-        if in_string || in_char {
-            if ch == '\\' {
-                escaped = true;
-            } else if in_string && ch == '"' {
-                in_string = false;
-            } else if in_char && ch == '\'' {
-                in_char = false;
-            }
+        if let Some(end) = raw_comment_end_at(raw, cursor) {
+            cursor = end;
+            continue;
+        }
+        let Some(ch) = raw[cursor..].chars().next() else {
+            break;
+        };
+        if ch == '"' || ch == '\'' {
+            cursor = escaped_literal_end(raw, cursor, ch);
             continue;
         }
         match ch {
-            '"' => in_string = true,
-            '\'' => in_char = true,
-            '{' => depth += 1,
-            '}' => {
+            ch if ch == open => depth += 1,
+            ch if ch == close => {
                 let Some(next_depth) = depth.checked_sub(1) else {
                     return false;
                 };
                 depth = next_depth;
-                if depth == 0 && index != raw.len() - 1 {
+                if depth == 0 && cursor != raw.len() - close.len_utf8() {
                     return false;
                 }
             }
             _ => {}
         }
+        cursor += ch.len_utf8();
     }
     depth == 0
 }
 
-fn balanced_outer_brackets_wrap_all(raw: &str) -> bool {
-    if !raw.starts_with('[') || !raw.ends_with(']') {
-        return false;
-    }
-    let mut depth = 0usize;
-    let mut in_string = false;
-    let mut in_char = false;
+fn escaped_literal_end(raw: &str, start: usize, quote: char) -> usize {
+    let mut cursor = start + quote.len_utf8();
     let mut escaped = false;
-    for (index, ch) in raw.char_indices() {
+    while cursor < raw.len() {
+        let Some(ch) = raw[cursor..].chars().next() else {
+            break;
+        };
+        cursor += ch.len_utf8();
         if escaped {
             escaped = false;
-            continue;
-        }
-        if in_string || in_char {
-            if ch == '\\' {
-                escaped = true;
-            } else if in_string && ch == '"' {
-                in_string = false;
-            } else if in_char && ch == '\'' {
-                in_char = false;
-            }
-            continue;
-        }
-        match ch {
-            '"' => in_string = true,
-            '\'' => in_char = true,
-            '[' => depth += 1,
-            ']' => {
-                let Some(next_depth) = depth.checked_sub(1) else {
-                    return false;
-                };
-                depth = next_depth;
-                if depth == 0 && index != raw.len() - 1 {
-                    return false;
-                }
-            }
-            _ => {}
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == quote {
+            break;
         }
     }
-    depth == 0
+    cursor
 }
 
 fn is_native_collection_facade_target(target_type: &str) -> bool {
@@ -15784,6 +16053,25 @@ mod tests {
             "call(\"left + right\")"
         );
 
+        let comment_operator = RustExpr::Raw("value /* + right */".to_string());
+        assert_eq!(
+            render_cast_operand_with_structural_parentheses(&comment_operator),
+            "value /* + right */"
+        );
+
+        let comment_cast = apply_one(
+            RustExpr::Raw("value /* as usize */".to_string()),
+            &Coercion::IndexToUsize,
+        );
+        assert!(!raw_contains_top_level_binary_operator(
+            "value /* as usize */"
+        ));
+        assert!(!raw_contains_top_level_as_cast("value /* as usize */"));
+        assert_eq!(
+            emit::emit_expr(&comment_cast),
+            "value /* as usize */ as usize"
+        );
+
         let unary = RustExpr::Raw("-value".to_string());
         assert_eq!(
             render_cast_operand_with_structural_parentheses(&unary),
@@ -15922,6 +16210,18 @@ mod tests {
             RustExpr::Grouped(grouped)
                 if matches!(grouped.as_ref(), RustExpr::Raw(raw) if raw == "left +")
         ));
+
+        let commented_operator =
+            parenthesize_raw_method_receiver(RustExpr::Raw("value /* + right */".to_string()));
+        assert_eq!(
+            emit::emit_expr(&commented_operator),
+            "(value /* + right */)"
+        );
+        assert!(matches!(
+            commented_operator,
+            RustExpr::Grouped(grouped)
+                if matches!(grouped.as_ref(), RustExpr::Raw(raw) if raw == "value /* + right */")
+        ));
     }
 
     #[test]
@@ -15981,6 +16281,11 @@ mod tests {
         assert!(rust_expr_is_constructed_optional_value(&RustExpr::Raw(
             "if index < limit { Some(value) } else { None }".to_string()
         )));
+
+        assert_eq!(
+            split_raw_until_top_level_open_brace("ready /* { */ { Some(value) } else { None }"),
+            Some(("ready /* { */", "{ Some(value) } else { None }"))
+        );
 
         let malformed = rendered_projection_or_raw_leaf("if ready { Some(value) } trailing");
         assert!(matches!(malformed.unshaped(), RustExpr::Raw(_)));
@@ -16086,6 +16391,11 @@ mod tests {
             emit::emit_expr(&raw_receiver_literal_view),
             "Some(\"none\")"
         );
+        assert!(matches!(
+            raw_receiver_literal_view.clone().into_unshaped(),
+            RustExpr::Call { args, .. }
+                if matches!(args.as_slice(), [arg] if !matches!(arg.clone().into_unshaped(), RustExpr::Raw(_)))
+        ));
 
         let reshaped = normalize_optional_constructed_string_view_expr(RustExpr::shaped(
             RustExprShape::OptionalConstructed,
@@ -16158,6 +16468,12 @@ mod tests {
         ));
         assert!(!rust_expr_mentions_constructor_self_temporary(
             &RustExpr::Raw("r#\"__java_self\"#".to_string(),)
+        ));
+        assert!(!rust_expr_mentions_constructor_self_temporary(
+            &RustExpr::Raw("/* __java_self.context */ value".to_string(),)
+        ));
+        assert!(!rust_stmt_mentions_constructor_self_temporary(
+            &RustStmt::Raw("// __java_self.context\nlet value = next;".to_string(),)
         ));
         assert!(!rust_expr_mentions_constructor_self_temporary(
             &RustExpr::Raw("not__java_self.context".to_string(),)
@@ -16744,7 +17060,10 @@ mod tests {
             RustExpr::MethodCall {
                 receiver: Box::new(RustExpr::MethodCall {
                     receiver: Box::new(RustExpr::MethodCall {
-                        receiver: Box::new(RustExpr::Raw("make_value()".to_string())),
+                        receiver: Box::new(RustExpr::Call {
+                            function: Box::new(RustExpr::Var("make_value".to_string())),
+                            args: Vec::new(),
+                        }),
                         method: "chars".to_string(),
                         args: Vec::new(),
                     }),
@@ -19702,7 +20021,10 @@ mod tests {
                 receiver: Box::new(RustExpr::MethodCall {
                     receiver: Box::new(RustExpr::MethodCall {
                         receiver: Box::new(RustExpr::MethodCall {
-                            receiver: Box::new(RustExpr::Raw("make_values()".to_string())),
+                            receiver: Box::new(RustExpr::Call {
+                                function: Box::new(RustExpr::Var("make_values".to_string())),
+                                args: Vec::new(),
+                            }),
                             method: "iter".to_string(),
                             args: Vec::new(),
                         }),
@@ -20339,6 +20661,14 @@ mod tests {
             Some("bin".to_string())
         );
         assert_eq!(
+            render_string_join_vararg_value(RustExpr::Literal("\"a\\nb\".to_string()".to_string())),
+            "\"a\\nb\".to_string()"
+        );
+        assert_eq!(
+            string_literal_source(&RustExpr::Literal("\"a\\\"b\".to_string()".to_string())),
+            Some("a\"b".to_string())
+        );
+        assert_eq!(
             string_literal_source(&RustExpr::Raw("\"bin\"".to_string())),
             None
         );
@@ -20393,6 +20723,13 @@ mod tests {
                     .expect("grouped binary receiver should recover")
             ),
             "(left + right).to_string()"
+        );
+        assert_eq!(
+            emit::emit_expr(
+                &terminal_raw_to_string_call_projection("format!(\"{}\", name).to_string()")
+                    .expect("macro-call receiver should recover")
+            ),
+            "format!(\"{}\", name).to_string()"
         );
         assert!(terminal_raw_to_string_call_projection("left + right.to_string()").is_none());
         assert!(terminal_raw_to_string_call_projection("\"bin\".to_string()").is_none());
@@ -22475,6 +22812,12 @@ mod tests {
         assert!(!rendered_expr_has_optional_unwrap_or_java_null_expect(
             "r#\"value.unwrap()\"#"
         ));
+        assert!(!rendered_expr_has_optional_unwrap_or_java_null_expect(
+            "/* value.unwrap() */ value"
+        ));
+        assert!(!rendered_expr_has_optional_unwrap_or_java_null_expect(
+            "// value.expect(\"Java null receiver\")\nvalue"
+        ));
     }
 
     #[test]
@@ -22513,6 +22856,15 @@ mod tests {
                 "r#\"value.clone().unwrap()\"#",
                 "value",
                 true,
+                false,
+            ),
+            None
+        );
+        assert_eq!(
+            replace_optional_clone_recovery_unwrap(
+                "/* value.unwrap() */ helper(value)",
+                "value",
+                false,
                 false,
             ),
             None
@@ -22595,6 +22947,19 @@ mod tests {
             )),
             emit::emit_expr(&raw_marker_text)
         );
+
+        let comment_marker_text = RustExpr::Raw(format!(
+            "/* {} {} */ value",
+            crate::output_markers::DOWNCAST_TURBOFISH,
+            crate::output_markers::invalid_java_cast_expect()
+        ));
+        assert_eq!(
+            emit::emit_expr(&rewrite_downcast_expect_message(
+                comment_marker_text.clone(),
+                "replacement"
+            )),
+            emit::emit_expr(&comment_marker_text)
+        );
     }
 
     #[test]
@@ -22633,6 +22998,32 @@ mod tests {
             "use_name(name.as_ref().map(|value| value.as_str()))"
         );
         assert!(!matches!(call_rewritten.unshaped(), RustExpr::Raw(_)));
+    }
+
+    #[test]
+    fn optional_erased_string_local_rewrite_ignores_comment_text() {
+        let erased_string_box =
+            "name.map(|value| Box::new(value.clone()) as Box<dyn std::any::Any>)";
+        let rendered = format!(
+            "/* {erased_string_box} */\n\
+             // {erased_string_box}\n\
+             let real = {erased_string_box};"
+        );
+
+        let rewritten = rewrite_optional_erased_borrowed_string_view_call_args(
+            RustExpr::Raw(rendered),
+            &["name".to_string()],
+            &[],
+        );
+
+        assert_eq!(
+            emit::emit_expr(&rewritten),
+            format!(
+                "/* {erased_string_box} */\n\
+                 // {erased_string_box}\n\
+                 let real = name.as_ref().map(|value| value.as_str());"
+            )
+        );
     }
 
     #[test]
@@ -23175,6 +23566,24 @@ mod tests {
             rendered_projection_or_raw_leaf("r#\"literal\"#"),
             RustExpr::Literal("r#\"literal\"#".to_string())
         );
+        assert!(matches!(
+            rendered_projection_or_raw_leaf("(r##\"quote: \" ) still literal\"##)"),
+            RustExpr::Grouped(inner)
+                if matches!(inner.as_ref(), RustExpr::Literal(literal)
+                    if literal == "r##\"quote: \" ) still literal\"##")
+        ));
+        assert!(matches!(
+            rendered_projection_or_raw_leaf("{ r##\"brace: \" } still literal\"## }"),
+            RustExpr::Block { tail: Some(tail), .. }
+                if matches!(tail.as_ref(), RustExpr::Literal(literal)
+                    if literal == "r##\"brace: \" } still literal\"##")
+        ));
+        assert!(matches!(
+            rendered_projection_or_raw_leaf("[r##\"bracket: \" ] still literal\"##]"),
+            RustExpr::ArrayLiteral(items)
+                if matches!(items.as_slice(), [RustExpr::Literal(literal)]
+                    if literal == "r##\"bracket: \" ] still literal\"##")
+        ));
         assert_eq!(
             rendered_projection_or_raw_leaf("'x'"),
             RustExpr::Literal("'x'".to_string())
@@ -23447,6 +23856,21 @@ mod tests {
                 ty: "Target".to_string(),
             }
         );
+        assert_eq!(
+            rendered_projection_or_raw_leaf("value.clone() as Vec<T>"),
+            RustExpr::Cast {
+                expr: Box::new(RustExpr::MethodCall {
+                    receiver: Box::new(RustExpr::Var("value".to_string())),
+                    method: "clone".to_string(),
+                    args: Vec::new(),
+                }),
+                ty: "Vec<T>".to_string(),
+            }
+        );
+        assert!(matches!(
+            rendered_projection_or_raw_leaf("value.clone() as Vec<T>>"),
+            RustExpr::Raw(raw) if raw == "value.clone() as Vec<T>>"
+        ));
         let literal_plus = rendered_projection_or_raw_leaf("left + 12");
         assert_eq!(emit::emit_expr(&literal_plus), "left + 12");
         assert!(matches!(
@@ -23714,6 +24138,26 @@ mod tests {
                 }),
             )
         );
+        assert!(matches!(
+            rendered_projection_or_raw_leaf("value /* + right */"),
+            RustExpr::Raw(raw) if raw == "value /* + right */"
+        ));
+        assert!(matches!(
+            rendered_projection_or_raw_leaf("value /* as Target */"),
+            RustExpr::Raw(raw) if raw == "value /* as Target */"
+        ));
+        assert_eq!(
+            rendered_call_parts("call(value /* ) */)"),
+            Some(("call", "value /* ) */"))
+        );
+        assert_eq!(
+            rendered_final_index_parts("values[index /* ] */]"),
+            Some(("values", "index /* ] */"))
+        );
+        assert_eq!(
+            last_top_level_dot("owner /* .ignored */.value"),
+            Some("owner /* .ignored */".len())
+        );
     }
 
     #[test]
@@ -23721,6 +24165,7 @@ mod tests {
         assert!(!raw_contains_top_level_comma("r#\"a, b\"#"));
         assert!(!raw_contains_top_level_comma("r##\"a, b\"##"));
         assert!(raw_contains_top_level_comma("r##\"a, b\"##, value"));
+        assert!(!raw_contains_top_level_comma("value /* , other */"));
 
         assert_eq!(
             split_raw_top_level_commas("r#\"a \", b\"#, value"),
@@ -24224,6 +24669,12 @@ mod tests {
         assert!(!expr_is_string_view(&RustExpr::Raw(
             "name.as_str() trailing".to_string()
         )));
+        assert!(!expr_is_string_view(&RustExpr::Raw(
+            "name trailing.as_str()".to_string()
+        )));
+        assert!(!rendered_expr_is_already_string_view(
+            "name trailing.as_str()"
+        ));
         assert!(!rendered_expr_is_already_string_view(
             "prefix + name.as_str()"
         ));
@@ -24231,6 +24682,45 @@ mod tests {
             "r#\"unterminated".to_string()
         )));
         assert!(!expr_is_string_view(&RustExpr::Raw("name".to_string())));
+    }
+
+    #[test]
+    fn raw_deref_string_view_recovery_accepts_only_plain_identifier_source() {
+        assert_eq!(
+            emit::emit_expr(&raw_deref_string_view_projection("*name").expect("plain deref")),
+            "name.as_str()"
+        );
+        assert!(raw_deref_string_view_projection("*\"name\"").is_none());
+        assert!(raw_deref_string_view_projection("*name.field").is_none());
+        assert!(raw_deref_string_view_projection("*name /* comment */").is_none());
+        assert!(raw_deref_string_view_projection("*name trailing").is_none());
+    }
+
+    #[test]
+    fn optional_erased_string_downcast_view_shortcut_accepts_only_plain_local() {
+        let suffix = format!(
+            ".unwrap().downcast::<String>(){}",
+            crate::output_markers::invalid_java_cast_expect()
+        );
+        assert_eq!(
+            emit::emit_expr(
+                &optional_erased_string_downcast_ref_view_projection(&format!("name{suffix}"))
+                    .expect("plain optional erased-string local")
+            ),
+            "name.as_ref().and_then(|value| value.downcast_ref::<String>()).expect(\"invalid Java cast\").as_str()"
+        );
+        assert!(
+            optional_erased_string_downcast_ref_view_projection(&format!("helper(name{suffix})"))
+                .is_none()
+        );
+        assert!(
+            optional_erased_string_downcast_ref_view_projection(&format!("\"name{suffix}\""))
+                .is_none()
+        );
+        assert!(
+            optional_erased_string_downcast_ref_view_projection(&format!("name.field{suffix}"))
+                .is_none()
+        );
     }
 
     #[test]

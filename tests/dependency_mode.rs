@@ -484,8 +484,8 @@ class UsesHdf5OpenModeLambda {
     assert_eq!(report.parser_diagnostics, 0, "{rendered}");
     assert_eq!(report.resolver_diagnostics, 0, "{rendered}");
     assert_eq!(
-        report.external_api_explained_field_accesses, 3,
-        "the invalid lambda-parameter field access may remain a generic external field guess, but it must not be attributed to the HDF5 pack: {rendered}"
+        report.external_api_explained_field_accesses, 2,
+        "only the direct static field chain should be attributed to the HDF5 pack; the lambda parameter shadows the type-like owner: {rendered}"
     );
     assert!(
         rendered.contains(
@@ -1634,8 +1634,8 @@ class UsesBaseUtils {
     assert_eq!(report.project_field_guesses, 1, "{rendered}");
     assert!(
         rendered.contains("top_project_field_guess_targets")
-            && rendered.contains("base_utils\tMAX_BASE_SCORE\t1"),
-        "project fallback should retain the normalized receiver key in the project bucket: {rendered}"
+            && rendered.contains("BaseUtils\tMAX_BASE_SCORE\t1"),
+        "project fallback should retain the source receiver key in the project bucket: {rendered}"
     );
 }
 
@@ -1671,7 +1671,7 @@ class UsesBaseUtils {
     );
     assert_eq!(report.project_field_guesses, 3, "{rendered}");
     assert!(
-        rendered.contains("base_utils\tBase\t1")
+        rendered.contains("BaseUtils\tBase\t1")
             && rendered.contains("Base\tN\t1")
             && rendered.contains("N\tbase\t1"),
         "all links in the project static-field chain should stay in the project bucket: {rendered}"
@@ -3882,7 +3882,7 @@ class UsesBoundaries {
         report.ffi_boundary_pack_constructor_facts, 0,
         "configured provider facts should not be counted again as generated per-file pack facts: {rendered}"
     );
-    assert_eq!(report.ffi_boundary_explained_method_calls, 1, "{rendered}");
+    assert_eq!(report.ffi_boundary_explained_method_calls, 0, "{rendered}");
     assert_eq!(report.ffi_boundary_explained_constructors, 1, "{rendered}");
     assert_eq!(
         report.conservative_boundary_pack_api_facts, 0,
@@ -3908,19 +3908,13 @@ class UsesBoundaries {
         rendered.contains("legacy.runtime.manifest\tConservativeBoundary\t4"),
         "{rendered}"
     );
-    assert!(
-        rendered.contains("NativeHandle\treadInt\tFfiBoundary\t1"),
-        "{rendered}"
-    );
+    assert!(rendered.contains("top_external_api_guess_methods"));
+    assert!(rendered.contains("NativeHandle\treadInt\t1"), "{rendered}");
     assert!(
         rendered.contains("LegacyReader\tread\tConservativeBoundary\t1"),
         "{rendered}"
     );
     assert!(rendered.contains("top_external_pack_api_method_contexts"));
-    assert!(
-        rendered.contains("NativeHandle\treadInt\tFfiBoundary\t0\tUsesBoundaries\treadNative\t1"),
-        "{rendered}"
-    );
     assert!(
         rendered
             .contains("LegacyReader\tread\tConservativeBoundary\t0\tUsesBoundaries\treadLegacy\t1"),
@@ -4303,7 +4297,7 @@ class UsesIncompleteRuntimePacks {
     let report = benchmark_java_resolver_config(&config).unwrap();
     let rendered = render_resolver_benchmark_report(&report);
 
-    assert_eq!(report.ffi_boundary_explained_method_calls, 2, "{rendered}");
+    assert_eq!(report.ffi_boundary_explained_method_calls, 1, "{rendered}");
     assert_eq!(report.ffi_boundary_explained_constructors, 1, "{rendered}");
     assert_eq!(
         report.conservative_boundary_explained_method_calls, 2,

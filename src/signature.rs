@@ -30,7 +30,7 @@ use crate::shape_projection::{
 use crate::slot_policy::{
     BorrowedContentKind, BorrowedContentPolicy, borrowed_content_type_policy,
     borrowed_return_content_policy_from_param_with_facts,
-    constructor_param_borrowed_content_policy_with_facts, method_assigns_to_binding,
+    constructor_param_borrowed_content_policy_with_facts, legacy_idless_method_assigns_to_binding,
     method_param_borrowed_content_policy_with_facts,
 };
 use crate::slot_shape::{
@@ -6624,6 +6624,44 @@ fn method_signature_owner_query_is_ambiguous<'a>(
     false
 }
 
+fn legacy_signature_owner_query_is_ambiguous<'a>(
+    owners: impl Iterator<Item = &'a str>,
+    query_type_name: &str,
+) -> bool {
+    if query_type_name.contains('.') || query_type_name.contains('$') {
+        return false;
+    }
+    let mut matches = HashSet::new();
+    for owner in owners {
+        if owner == query_type_name {
+            return false;
+        }
+        if method_signature_type_name_aliases(owner)
+            .iter()
+            .any(|alias| alias == query_type_name)
+        {
+            matches.insert(owner);
+            if matches.len() > 1 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn legacy_signature_owner_fact_matches(
+    fact_type_name: &str,
+    query_type_name: &str,
+    query_is_ambiguous: bool,
+) -> bool {
+    if fact_type_name == query_type_name {
+        return true;
+    }
+    !query_is_ambiguous
+        && !distinct_qualified_type_owners(fact_type_name, query_type_name)
+        && crate::facts::external_type_name_matches(fact_type_name, query_type_name)
+}
+
 fn java_signature_argument_matches(actual: &JavaType, target: &JavaType) -> bool {
     if matches!(actual, JavaType::Unknown(_)) || matches!(target, JavaType::Unknown(_)) {
         return false;
@@ -7123,6 +7161,11 @@ fn method_param_shape_constraints_with_declared_source_types(
         .as_ref()
         .map(collect_field_receiver_mutated_names)
         .unwrap_or_default();
+    let map_view_receiver_mutated_names = method
+        .body
+        .as_ref()
+        .map(collect_map_view_backing_receiver_mutated_names)
+        .unwrap_or_default();
     let field_receiver_read_names = method
         .body
         .as_ref()
@@ -7149,6 +7192,7 @@ fn method_param_shape_constraints_with_declared_source_types(
     if field_receiver_mutated_names.contains(&param.name)
         || array_element_mutated_names.contains(&param.name)
         || facade_mut_borrow_argument_names.contains(&param.name)
+        || map_view_receiver_mutated_names.contains(&param.name)
     {
         boundary_kind = None;
     }
@@ -7263,7 +7307,9 @@ fn method_param_shape_constraints_with_declared_source_types(
                 &method.params,
             ),
         );
-        if field_receiver_mutated_names.contains(&param.name) {
+        if field_receiver_mutated_names.contains(&param.name)
+            || map_view_receiver_mutated_names.contains(&param.name)
+        {
             push_unique_signature_constraints(
                 &mut constraints,
                 &[
@@ -9745,9 +9791,7 @@ pub fn source_binding_nullability_constraints_for_declaration(
     params: &[Param],
 ) -> Vec<SignatureConstraint> {
     let source_nullability = collect_binding_nullability_state_map_with_params(block, params);
-    binding
-        .map(|binding| source_nullability.constraints_for_binding(binding))
-        .unwrap_or_else(|| source_nullability.constraints_for_name(name))
+    source_nullability.constraints_for_declaration(name, binding)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -9774,19 +9818,31 @@ impl SourceNullabilityMap {
             .unwrap_or_default()
     }
 
+    fn constraints_for_declaration(
+        &self,
+        name: &str,
+        binding: Option<&BindingId>,
+    ) -> Vec<SignatureConstraint> {
+        binding
+            .map(|binding| self.constraints_for_binding(binding))
+            .unwrap_or_else(|| self.constraints_for_name(name))
+    }
+
     fn state_for_var(
         &self,
         name: &str,
         scopes: &[HashMap<String, BindingId>],
     ) -> Option<NullabilityState> {
-        scoped_binding(scopes, name)
-            .and_then(|binding| {
+        if let Some(binding) = scoped_binding(scopes, name) {
+            return Some(
                 self.return_by_binding
                     .get(binding)
                     .copied()
                     .or_else(|| self.by_binding.get(binding).copied())
-            })
-            .or_else(|| self.by_name.get(name).copied())
+                    .unwrap_or(NullabilityState::Unknown),
+            );
+        }
+        self.by_name.get(name).copied()
     }
 }
 
@@ -10285,7 +10341,7 @@ fn source_nullability_scopes_for_params(params: &[Param]) -> Vec<HashMap<String,
     let mut root = HashMap::new();
     for param in params {
         if let Some(binding) = &param.binding {
-            root.insert(param.name.clone(), binding.clone());
+            root.insert(param.source_name.clone(), binding.clone());
         }
     }
     vec![root]
@@ -10331,9 +10387,13 @@ fn collect_source_return_nullability_states_from_stmt(
             ));
         }
         Stmt::Return(None) => states.push(NullabilityState::DefinitelyNull),
-        Stmt::VarDecl { name, binding, .. } => {
+        Stmt::VarDecl {
+            source_name,
+            binding,
+            ..
+        } => {
             if let Some(binding) = binding {
-                insert_scoped_binding(scopes, name, binding.clone());
+                insert_scoped_binding(scopes, source_name, binding.clone());
             }
         }
         Stmt::If {
@@ -10377,14 +10437,14 @@ fn collect_source_return_nullability_states_from_stmt(
             scopes.pop();
         }
         Stmt::EnhancedFor {
-            var_name,
+            source_var_name,
             binding,
             body,
             ..
         } => {
             scopes.push(HashMap::new());
             if let Some(binding) = binding {
-                insert_scoped_binding(scopes, var_name, binding.clone());
+                insert_scoped_binding(scopes, source_var_name, binding.clone());
             }
             collect_source_return_nullability_states_from_stmts_with_refinements(
                 &body.statements,
@@ -10851,23 +10911,7 @@ fn collect_binding_nullability_states_from_stmt(
         Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
             collect_binding_nullability_states_from_stmts(&block.statements, states);
         }
-        Stmt::LocalType(ty) => {
-            for member in &ty.members {
-                match member {
-                    crate::java_ir::Member::Method(method) => {
-                        if let Some(body) = &method.body {
-                            collect_binding_nullability_states_from_stmts(&body.statements, states);
-                        }
-                    }
-                    crate::java_ir::Member::Constructor(constructor) => {
-                        if let Some(body) = &constructor.body {
-                            collect_binding_nullability_states_from_stmts(&body.statements, states);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
+        Stmt::LocalType(_) => {}
         Stmt::VarDecl {
             initializer: None, ..
         }
@@ -10946,18 +10990,9 @@ fn collect_binding_nullability_states_from_expr(
                 collect_binding_nullability_states_from_expr(arg, states);
             }
         }
-        Expr::New { args, body, .. } => {
+        Expr::New { args, body: _, .. } => {
             for arg in args {
                 collect_binding_nullability_states_from_expr(arg, states);
-            }
-            if let Some(body) = body {
-                for member in body {
-                    if let crate::java_ir::Member::Method(method) = member
-                        && let Some(body) = &method.body
-                    {
-                        collect_binding_nullability_states_from_stmts(&body.statements, states);
-                    }
-                }
             }
         }
         Expr::ArrayCreation {
@@ -10979,14 +11014,7 @@ fn collect_binding_nullability_states_from_expr(
                 collect_binding_nullability_states_from_expr(element, states);
             }
         }
-        Expr::Lambda { body, .. } => match body {
-            crate::java_ir::LambdaBody::Expr(expr) => {
-                collect_binding_nullability_states_from_expr(expr, states);
-            }
-            crate::java_ir::LambdaBody::Block(block) => {
-                collect_binding_nullability_states_from_stmts(&block.statements, states);
-            }
-        },
+        Expr::Lambda { .. } => {}
         Expr::Literal(_)
         | Expr::Var(_)
         | Expr::This
@@ -11179,7 +11207,7 @@ fn collect_binding_nullability_states_by_binding_from_stmt(
 ) {
     match stmt {
         Stmt::VarDecl {
-            name,
+            source_name,
             initializer,
             binding,
             ..
@@ -11204,7 +11232,7 @@ fn collect_binding_nullability_states_by_binding_from_stmt(
                 );
             }
             if let Some(binding) = binding {
-                insert_scoped_binding(scopes, name, binding.clone());
+                insert_scoped_binding(scopes, source_name, binding.clone());
             }
         }
         Stmt::Assign { target, value } => {
@@ -11320,7 +11348,7 @@ fn collect_binding_nullability_states_by_binding_from_stmt(
             scopes.pop();
         }
         Stmt::EnhancedFor {
-            var_name,
+            source_var_name,
             iterable,
             body,
             binding,
@@ -11334,7 +11362,7 @@ fn collect_binding_nullability_states_by_binding_from_stmt(
             );
             scopes.push(HashMap::new());
             if let Some(binding) = binding {
-                insert_scoped_binding(scopes, var_name, binding.clone());
+                insert_scoped_binding(scopes, source_var_name, binding.clone());
             }
             collect_binding_nullability_states_by_binding_from_stmts(
                 &body.statements,
@@ -11835,10 +11863,8 @@ fn collect_local_constraint_sets_from_stmts(
                 if !initializer.as_ref().is_some_and(|initializer| {
                     initializer_proves_declared_non_null(initializer, ty, facts, local_types)
                 }) {
-                    let source_constraints = declared_binding
-                        .as_ref()
-                        .map(|binding| source_nullability.constraints_for_binding(binding))
-                        .unwrap_or_else(|| source_nullability.constraints_for_name(name));
+                    let source_constraints = source_nullability
+                        .constraints_for_declaration(name, declared_binding.as_ref());
                     push_unique_signature_constraints(&mut constraints, &source_constraints);
                 }
                 apply_capture_constraints(&mut constraints, captured, name, ty, facts);
@@ -11912,10 +11938,8 @@ fn collect_local_constraint_sets_from_stmts(
                     facts,
                     declared_source_types,
                 );
-                let source_constraints = declared_binding
-                    .as_ref()
-                    .map(|binding| source_nullability.constraints_for_binding(binding))
-                    .unwrap_or_else(|| source_nullability.constraints_for_name(var_name));
+                let source_constraints = source_nullability
+                    .constraints_for_declaration(var_name, declared_binding.as_ref());
                 push_unique_signature_constraints(&mut constraints, &source_constraints);
                 apply_capture_constraints(&mut constraints, captured, var_name, var_type, facts);
                 locals.push(LocalConstraintSet {
@@ -12681,6 +12705,55 @@ mod tests {
     }
 
     #[test]
+    fn bound_local_mutability_does_not_fall_back_to_name_set_when_liveness_is_missing() {
+        let binding = BindingId::new(BindingKind::Local, "value", 0);
+        let stmt = Stmt::VarDecl {
+            ty: JavaType::String,
+            name: "value".to_string(),
+            source_name: "value".to_string(),
+            initializer: None,
+            binding: Some(binding.clone()),
+        };
+        let mutated = HashSet::from(["value".to_string()]);
+
+        let bound_constraints = local_shape_constraints_for_stmt_with_usage(
+            "value",
+            &JavaType::String,
+            &mutated,
+            &crate::liveness::LivenessAnalysis::default(),
+            &stmt,
+            None,
+            Some(&binding),
+            &FactSet::default(),
+            &HashSet::new(),
+        );
+        assert!(
+            !bound_constraints
+                .iter()
+                .any(|constraint| matches!(constraint, SignatureConstraint::MutableBinding)),
+            "resolver-bound declarations must not reuse whole-method name-set mutability when exact liveness evidence is missing"
+        );
+
+        let idless_constraints = local_shape_constraints_for_stmt_with_usage(
+            "value",
+            &JavaType::String,
+            &mutated,
+            &crate::liveness::LivenessAnalysis::default(),
+            &stmt,
+            None,
+            None,
+            &FactSet::default(),
+            &HashSet::new(),
+        );
+        assert!(
+            idless_constraints
+                .iter()
+                .any(|constraint| matches!(constraint, SignatureConstraint::MutableBinding)),
+            "id-less compatibility declarations keep the legacy name-set fallback"
+        );
+    }
+
+    #[test]
     fn duplicate_local_name_signature_plan_lookup_uses_binding_id() {
         let java_ty = JavaType::Primitive(PrimitiveType::Int);
         let first_binding = BindingId::new(BindingKind::Local, "value", 0);
@@ -13074,6 +13147,72 @@ mod tests {
     }
 
     #[test]
+    fn source_return_nullability_in_scope_binding_does_not_fall_back_to_field() {
+        let local = BindingId::new(BindingKind::Local, "value", 0);
+        let method = MethodDecl {
+            name: "keep".to_string(),
+            rust_name: None,
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            return_type: JavaType::Unknown("Object".to_string()),
+            throws: Vec::new(),
+            params: Vec::new(),
+            modifiers: Vec::new(),
+            body: Some(Block {
+                statements: vec![
+                    Stmt::VarDecl {
+                        ty: JavaType::Unknown("Object".to_string()),
+                        name: "value".to_string(),
+                        source_name: "value".to_string(),
+                        initializer: None,
+                        binding: Some(local),
+                    },
+                    Stmt::Return(Some(Expr::Var("value".to_string()))),
+                ],
+            }),
+            span: Span::default(),
+        };
+        let ty = TypeDecl {
+            kind: TypeKind::Class,
+            name: "InScopeFieldShadowReturnNullability".to_string(),
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            modifiers: Vec::new(),
+            extends: None,
+            implements: Vec::new(),
+            permits: Vec::new(),
+            members: vec![
+                crate::java_ir::Member::Field(FieldDecl {
+                    name: "value".to_string(),
+                    ty: JavaType::Unknown("Object".to_string()),
+                    modifiers: Vec::new(),
+                    initializer: None,
+                    span: Span::default(),
+                }),
+                crate::java_ir::Member::Method(method.clone()),
+            ],
+            static_init_blocks: Vec::new(),
+            span: Span::default(),
+        };
+        let mut facts = FactSet::default();
+        facts
+            .field_nullability_facts
+            .push(crate::facts::FieldNullabilityFact {
+                field: crate::facts::FieldKey {
+                    type_name: "InScopeFieldShadowReturnNullability".to_string(),
+                    field_name: "value".to_string(),
+                },
+                state: NullabilityState::DefinitelyNonNull,
+                provenance: crate::facts::FieldNullabilityProvenance::ConstructorAssignments,
+            });
+
+        assert!(
+            typed_source_method_return_nullability_constraints(&ty, &method, &facts).is_empty(),
+            "a scoped resolver-bound local with no nullability state must fail closed instead of borrowing a same-name field"
+        );
+    }
+
+    #[test]
     fn source_return_nullability_scopes_for_initializer_binding() {
         let binding = BindingId::new(BindingKind::Local, "value", 0);
         let method = MethodDecl {
@@ -13114,6 +13253,83 @@ mod tests {
     }
 
     #[test]
+    fn source_return_nullability_param_scope_uses_source_name() {
+        let binding = BindingId::new(BindingKind::Param, "self", 0);
+        let method = MethodDecl {
+            name: "first".to_string(),
+            rust_name: None,
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            return_type: JavaType::String,
+            throws: Vec::new(),
+            params: vec![Param {
+                name: "self__".to_string(),
+                source_name: "self".to_string(),
+                ty: JavaType::String,
+                is_varargs: false,
+                binding: Some(binding),
+            }],
+            modifiers: Vec::new(),
+            body: Some(Block {
+                statements: vec![
+                    Stmt::Assign {
+                        target: Expr::Var("self".to_string()),
+                        value: Expr::Literal(Literal::Null),
+                    },
+                    Stmt::Return(Some(Expr::Var("self".to_string()))),
+                ],
+            }),
+            span: Span::default(),
+        };
+
+        assert_eq!(
+            source_method_return_nullability_constraints(&method),
+            vec![SignatureConstraint::RequiredStorageNullability(
+                NullabilityState::DefinitelyNull
+            )]
+        );
+    }
+
+    #[test]
+    fn source_return_nullability_local_scope_uses_source_name() {
+        let binding = BindingId::new(BindingKind::Local, "self", 0);
+        let method = MethodDecl {
+            name: "first".to_string(),
+            rust_name: None,
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            return_type: JavaType::String,
+            throws: Vec::new(),
+            params: Vec::new(),
+            modifiers: Vec::new(),
+            body: Some(Block {
+                statements: vec![
+                    Stmt::VarDecl {
+                        ty: JavaType::String,
+                        name: "self__".to_string(),
+                        source_name: "self".to_string(),
+                        initializer: None,
+                        binding: Some(binding),
+                    },
+                    Stmt::Assign {
+                        target: Expr::Var("self".to_string()),
+                        value: Expr::Literal(Literal::Null),
+                    },
+                    Stmt::Return(Some(Expr::Var("self".to_string()))),
+                ],
+            }),
+            span: Span::default(),
+        };
+
+        assert_eq!(
+            source_method_return_nullability_constraints(&method),
+            vec![SignatureConstraint::RequiredStorageNullability(
+                NullabilityState::DefinitelyNull
+            )]
+        );
+    }
+
+    #[test]
     fn source_return_nullability_scopes_enhanced_for_binding() {
         let binding = BindingId::new(BindingKind::LoopVariable, "item", 0);
         let method = MethodDecl {
@@ -13138,6 +13354,48 @@ mod tests {
                                 value: Expr::Literal(Literal::Null),
                             },
                             Stmt::Return(Some(Expr::Var("item".to_string()))),
+                        ],
+                    },
+                    label: None,
+                    binding: Some(binding),
+                }],
+            }),
+            span: Span::default(),
+        };
+
+        assert_eq!(
+            source_method_return_nullability_constraints(&method),
+            vec![SignatureConstraint::RequiredStorageNullability(
+                NullabilityState::DefinitelyNull
+            )]
+        );
+    }
+
+    #[test]
+    fn source_return_nullability_enhanced_for_scope_uses_source_name() {
+        let binding = BindingId::new(BindingKind::LoopVariable, "self", 0);
+        let method = MethodDecl {
+            name: "first".to_string(),
+            rust_name: None,
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            return_type: JavaType::Unknown("Object".to_string()),
+            throws: Vec::new(),
+            params: Vec::new(),
+            modifiers: Vec::new(),
+            body: Some(Block {
+                statements: vec![Stmt::EnhancedFor {
+                    var_type: JavaType::Unknown("Object".to_string()),
+                    var_name: "self__".to_string(),
+                    source_var_name: "self".to_string(),
+                    iterable: Expr::Var("values".to_string()),
+                    body: Block {
+                        statements: vec![
+                            Stmt::Assign {
+                                target: Expr::Var("self".to_string()),
+                                value: Expr::Literal(Literal::Null),
+                            },
+                            Stmt::Return(Some(Expr::Var("self".to_string()))),
                         ],
                     },
                     label: None,
@@ -13219,6 +13477,72 @@ mod tests {
         assert!(
             !plan.has_method_signature_by_base_name_accepting_arity("Item", "who", 0),
             "bare same-simple owners must not report presence when multiple package peers exist, even if only one has the method"
+        );
+    }
+
+    #[test]
+    fn source_receiver_binding_constraints_do_not_borrow_package_peer_mutability() {
+        let mut usage = UsageFacts::default();
+        usage.methods.insert(
+            UsageMethodKey {
+                type_name: "a.Item".to_string(),
+                method_name: "touch".to_string(),
+            },
+            MethodUsageFacts {
+                mutates_self: true,
+                ..MethodUsageFacts::default()
+            },
+        );
+        let binding = BindingUseFacts {
+            name: "item".to_string(),
+            binding: Some(BindingId::new(BindingKind::Param, "item", 0)),
+            java_ty: JavaType::Named {
+                name: "b.Item".to_string(),
+                args: Vec::new(),
+            },
+            uses: vec![BindingUse::ReceiverForCall {
+                name: "touch".to_string(),
+                boundary: CallArgumentBoundary::InternalSameType,
+                has_literal_null_arg: false,
+            }],
+        };
+
+        assert!(
+            source_receiver_binding_constraints(&binding, &usage).is_empty(),
+            "qualified package peers must not inherit receiver mutability from same-simple facts"
+        );
+        assert!(source_method_usage_mutates_receiver(
+            &usage, "a.Item", "touch"
+        ));
+        assert!(!source_method_usage_mutates_receiver(
+            &usage, "b.Item", "touch"
+        ));
+    }
+
+    #[test]
+    fn source_summary_method_effect_return_nullability_does_not_borrow_package_peer() {
+        let mut facts = FactSet::default();
+        facts
+            .method_effect_facts
+            .push(crate::facts::MethodEffectFact {
+                method: crate::facts::MethodKey {
+                    type_name: "a.Item".to_string(),
+                    method_name: "get".to_string(),
+                },
+                receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+                return_nullability: NullabilityState::DefinitelyNonNull,
+                thrown: Vec::new(),
+                provenance: FactProvenance::ParsedSource,
+            });
+
+        assert_eq!(
+            source_summary_method_effect_return_nullability(&facts, Some("a.Item"), "get"),
+            Some(NullabilityState::DefinitelyNonNull)
+        );
+        assert_eq!(
+            source_summary_method_effect_return_nullability(&facts, Some("b.Item"), "get"),
+            None,
+            "qualified package peers must not inherit return nullability from same-simple facts"
         );
     }
 
@@ -13409,10 +13733,10 @@ fn local_shape_constraints_for_stmt_with_usage(
         facts,
         declared_source_types,
     );
-    if liveness
+    let binding_mutated = liveness
         .binding_is_mutated_after(stmt, name)
-        .unwrap_or_else(|| mutated.contains(name))
-    {
+        .unwrap_or_else(|| binding_id.is_none() && mutated.contains(name));
+    if binding_mutated {
         push_unique_signature_constraints(&mut constraints, &[SignatureConstraint::MutableBinding]);
     }
     constraints
@@ -13889,8 +14213,15 @@ fn source_method_usage_mutates_receiver(
     method_name: &str,
 ) -> bool {
     let canonical_method = crate::parser::to_snake_case(method_name);
+    let owner_query_ambiguous = legacy_signature_owner_query_is_ambiguous(
+        usage.methods.iter().filter_map(|(key, _)| {
+            (key.method_name == method_name || key.method_name == canonical_method)
+                .then_some(key.type_name.as_str())
+        }),
+        receiver_type,
+    );
     usage.methods.iter().any(|(key, method_usage)| {
-        crate::facts::external_type_name_matches(&key.type_name, receiver_type)
+        legacy_signature_owner_fact_matches(&key.type_name, receiver_type, owner_query_ambiguous)
             && (key.method_name == method_name || key.method_name == canonical_method)
             && method_usage.mutates_self
     })
@@ -14731,7 +15062,7 @@ pub fn external_call_return_binding_constraints(
         let BindingUse::AssignedFromCall {
             name,
             receiver_type,
-            boundary: CallArgumentBoundary::Unknown,
+            boundary: CallArgumentBoundary::Unknown | CallArgumentBoundary::KnownContentRead,
         } = usage
         else {
             continue;
@@ -14795,10 +15126,21 @@ fn source_summary_method_effect_return_nullability(
     name: &str,
 ) -> Option<NullabilityState> {
     let receiver_type = receiver_type?;
-    let mut states = facts.method_effect_facts.iter().filter_map(|effect| {
-        (crate::facts::external_type_name_matches(&effect.method.type_name, receiver_type)
-            && (effect.method.method_name == name
+    let owner_query_ambiguous = legacy_signature_owner_query_is_ambiguous(
+        facts.method_effect_facts.iter().filter_map(|effect| {
+            (effect.method.method_name == name
                 || crate::parser::to_snake_case(&effect.method.method_name) == name)
+                .then_some(effect.method.type_name.as_str())
+        }),
+        receiver_type,
+    );
+    let mut states = facts.method_effect_facts.iter().filter_map(|effect| {
+        (legacy_signature_owner_fact_matches(
+            &effect.method.type_name,
+            receiver_type,
+            owner_query_ambiguous,
+        ) && (effect.method.method_name == name
+            || crate::parser::to_snake_case(&effect.method.method_name) == name)
             && effect.return_nullability != NullabilityState::Unknown)
             .then_some(effect.return_nullability)
     });
@@ -15118,6 +15460,17 @@ fn collect_array_element_mutated_names(block: &Block) -> HashSet<String> {
     mutated
 }
 
+fn collect_map_view_backing_receiver_mutated_names(block: &Block) -> HashSet<String> {
+    let mut mutated = HashSet::new();
+    let mut aliases = HashMap::new();
+    collect_map_view_backing_receiver_mutated_names_from_stmts(
+        &block.statements,
+        &mut aliases,
+        &mut mutated,
+    );
+    mutated
+}
+
 fn collect_facade_mut_borrow_argument_names(
     block: &Block,
     facts: &FactSet,
@@ -15137,6 +15490,195 @@ fn collect_field_receiver_mutated_names(block: &Block) -> HashSet<String> {
     let mut mutated = HashSet::new();
     collect_field_receiver_mutated_names_from_stmts(&block.statements, &mut mutated);
     mutated
+}
+
+fn collect_map_view_backing_receiver_mutated_names_from_stmts(
+    statements: &[Stmt],
+    aliases: &mut HashMap<String, String>,
+    mutated: &mut HashSet<String>,
+) {
+    for stmt in statements {
+        match stmt {
+            Stmt::VarDecl {
+                name,
+                source_name,
+                initializer,
+                ..
+            } => {
+                if let Some(expr) = initializer {
+                    collect_map_view_backing_receiver_mutated_names_from_expr(
+                        expr, aliases, mutated,
+                    );
+                    if let Some(view_backing_receiver) = map_view_call_backing_receiver(expr)
+                        && let Some(root) = receiver_root_name(view_backing_receiver)
+                    {
+                        aliases.insert(name.clone(), root.to_string());
+                        aliases.insert(source_name.clone(), root.to_string());
+                    }
+                }
+            }
+            Stmt::Assign { target, value } => {
+                collect_map_view_backing_receiver_mutated_names_from_expr(target, aliases, mutated);
+                collect_map_view_backing_receiver_mutated_names_from_expr(value, aliases, mutated);
+            }
+            Stmt::Expr(expr) | Stmt::Return(Some(expr)) => {
+                collect_map_view_backing_receiver_mutated_names_from_expr(expr, aliases, mutated);
+            }
+            Stmt::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
+                collect_map_view_backing_receiver_mutated_names_from_expr(
+                    condition, aliases, mutated,
+                );
+                collect_map_view_backing_receiver_mutated_names_from_stmts(
+                    &then_block.statements,
+                    &mut aliases.clone(),
+                    mutated,
+                );
+                if let Some(else_block) = else_block {
+                    collect_map_view_backing_receiver_mutated_names_from_stmts(
+                        &else_block.statements,
+                        &mut aliases.clone(),
+                        mutated,
+                    );
+                }
+            }
+            Stmt::While {
+                condition, body, ..
+            } => {
+                collect_map_view_backing_receiver_mutated_names_from_expr(
+                    condition, aliases, mutated,
+                );
+                collect_map_view_backing_receiver_mutated_names_from_stmts(
+                    &body.statements,
+                    &mut aliases.clone(),
+                    mutated,
+                );
+            }
+            Stmt::DoWhile {
+                body, condition, ..
+            } => {
+                collect_map_view_backing_receiver_mutated_names_from_stmts(
+                    &body.statements,
+                    &mut aliases.clone(),
+                    mutated,
+                );
+                collect_map_view_backing_receiver_mutated_names_from_expr(
+                    condition, aliases, mutated,
+                );
+            }
+            Stmt::For {
+                init,
+                condition,
+                update,
+                body,
+                ..
+            } => {
+                let mut loop_aliases = aliases.clone();
+                collect_map_view_backing_receiver_mutated_names_from_stmts(
+                    init,
+                    &mut loop_aliases,
+                    mutated,
+                );
+                if let Some(condition) = condition {
+                    collect_map_view_backing_receiver_mutated_names_from_expr(
+                        condition,
+                        &loop_aliases,
+                        mutated,
+                    );
+                }
+                for expr in update {
+                    collect_map_view_backing_receiver_mutated_names_from_expr(
+                        expr,
+                        &loop_aliases,
+                        mutated,
+                    );
+                }
+                collect_map_view_backing_receiver_mutated_names_from_stmts(
+                    &body.statements,
+                    &mut loop_aliases,
+                    mutated,
+                );
+            }
+            Stmt::EnhancedFor { iterable, body, .. } => {
+                collect_map_view_backing_receiver_mutated_names_from_expr(
+                    iterable, aliases, mutated,
+                );
+                collect_map_view_backing_receiver_mutated_names_from_stmts(
+                    &body.statements,
+                    &mut aliases.clone(),
+                    mutated,
+                );
+            }
+            Stmt::Throw(expr) => {
+                collect_map_view_backing_receiver_mutated_names_from_expr(expr, aliases, mutated);
+            }
+            Stmt::Switch { selector, cases } => {
+                collect_map_view_backing_receiver_mutated_names_from_expr(
+                    selector, aliases, mutated,
+                );
+                for case in cases {
+                    collect_map_view_backing_receiver_mutated_names_from_stmts(
+                        &case.statements,
+                        &mut aliases.clone(),
+                        mutated,
+                    );
+                }
+            }
+            Stmt::Try {
+                resources,
+                body,
+                catches,
+                finally_block,
+            } => {
+                let mut try_aliases = aliases.clone();
+                collect_map_view_backing_receiver_mutated_names_from_stmts(
+                    resources,
+                    &mut try_aliases,
+                    mutated,
+                );
+                collect_map_view_backing_receiver_mutated_names_from_stmts(
+                    &body.statements,
+                    &mut try_aliases,
+                    mutated,
+                );
+                for catch in catches {
+                    collect_map_view_backing_receiver_mutated_names_from_stmts(
+                        &catch.body.statements,
+                        &mut aliases.clone(),
+                        mutated,
+                    );
+                }
+                if let Some(finally_block) = finally_block {
+                    collect_map_view_backing_receiver_mutated_names_from_stmts(
+                        &finally_block.statements,
+                        &mut aliases.clone(),
+                        mutated,
+                    );
+                }
+            }
+            Stmt::Block(block) => collect_map_view_backing_receiver_mutated_names_from_stmts(
+                &block.statements,
+                &mut aliases.clone(),
+                mutated,
+            ),
+            Stmt::LabeledBlock { body, .. } => {
+                collect_map_view_backing_receiver_mutated_names_from_stmts(
+                    &body.statements,
+                    &mut aliases.clone(),
+                    mutated,
+                );
+            }
+            Stmt::Return(None)
+            | Stmt::LocalType(_)
+            | Stmt::ConstructorInvocation { .. }
+            | Stmt::Break(_)
+            | Stmt::Continue(_)
+            | Stmt::Unsupported(_) => {}
+        }
+    }
 }
 
 fn collect_field_receiver_read_names(block: &Block) -> HashSet<String> {
@@ -15863,6 +16405,127 @@ fn collect_field_receiver_mutated_names_from_stmts(
     }
 }
 
+fn collect_map_view_backing_receiver_mutated_names_from_expr(
+    expr: &Expr,
+    aliases: &HashMap<String, String>,
+    mutated: &mut HashSet<String>,
+) {
+    match expr {
+        Expr::Call {
+            receiver,
+            name,
+            args,
+            ..
+        } => {
+            if let Some(receiver) = receiver
+                && crate::stdlib::native_collection_method_name_mutates_receiver(name)
+                && let Some(view_backing_receiver) = map_view_call_backing_receiver(receiver)
+                && let Some(root) = receiver_root_name(view_backing_receiver)
+            {
+                mutated.insert(root.to_string());
+            }
+            if let Some(Expr::Var(receiver_name)) = receiver.as_deref()
+                && crate::stdlib::native_collection_method_name_mutates_receiver(name)
+                && let Some(root) = aliases.get(receiver_name)
+            {
+                mutated.insert(root.clone());
+            }
+            if let Some(receiver) = receiver {
+                collect_map_view_backing_receiver_mutated_names_from_expr(
+                    receiver, aliases, mutated,
+                );
+            }
+            for arg in args {
+                collect_map_view_backing_receiver_mutated_names_from_expr(arg, aliases, mutated);
+            }
+        }
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::InstanceOf { expr, .. } => {
+            collect_map_view_backing_receiver_mutated_names_from_expr(expr, aliases, mutated);
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_map_view_backing_receiver_mutated_names_from_expr(left, aliases, mutated);
+            collect_map_view_backing_receiver_mutated_names_from_expr(right, aliases, mutated);
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_map_view_backing_receiver_mutated_names_from_expr(condition, aliases, mutated);
+            collect_map_view_backing_receiver_mutated_names_from_expr(then_expr, aliases, mutated);
+            collect_map_view_backing_receiver_mutated_names_from_expr(else_expr, aliases, mutated);
+        }
+        Expr::Switch { selector, cases } => {
+            collect_map_view_backing_receiver_mutated_names_from_expr(selector, aliases, mutated);
+            for case in cases {
+                for label in &case.labels {
+                    if let SwitchLabel::Expr(expr) = label {
+                        collect_map_view_backing_receiver_mutated_names_from_expr(
+                            expr, aliases, mutated,
+                        );
+                    }
+                }
+                collect_map_view_backing_receiver_mutated_names_from_expr(
+                    &case.value,
+                    aliases,
+                    mutated,
+                );
+            }
+        }
+        Expr::FieldAccess(receiver, _) => {
+            collect_map_view_backing_receiver_mutated_names_from_expr(receiver, aliases, mutated);
+        }
+        Expr::ArrayAccess(array, index) => {
+            collect_map_view_backing_receiver_mutated_names_from_expr(array, aliases, mutated);
+            collect_map_view_backing_receiver_mutated_names_from_expr(index, aliases, mutated);
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            for expr in dimensions {
+                collect_map_view_backing_receiver_mutated_names_from_expr(expr, aliases, mutated);
+            }
+            if let Some(initializer) = initializer {
+                for expr in initializer {
+                    collect_map_view_backing_receiver_mutated_names_from_expr(
+                        expr, aliases, mutated,
+                    );
+                }
+            }
+        }
+        Expr::ArrayInitializer(items) => {
+            for expr in items {
+                collect_map_view_backing_receiver_mutated_names_from_expr(expr, aliases, mutated);
+            }
+        }
+        Expr::New { args, .. } => {
+            for arg in args {
+                collect_map_view_backing_receiver_mutated_names_from_expr(arg, aliases, mutated);
+            }
+        }
+        Expr::Lambda { body, .. } => match body {
+            LambdaBody::Expr(expr) => {
+                collect_map_view_backing_receiver_mutated_names_from_expr(expr, aliases, mutated);
+            }
+            LambdaBody::Block(block) => collect_map_view_backing_receiver_mutated_names_from_stmts(
+                &block.statements,
+                &mut aliases.clone(),
+                mutated,
+            ),
+        },
+        Expr::MethodReference { .. }
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::ClassLiteral(_)
+        | Expr::Literal(_)
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => {}
+    }
+}
+
 fn collect_field_receiver_mutated_names_from_expr(expr: &Expr, mutated: &mut HashSet<String>) {
     match expr {
         Expr::Binary {
@@ -16368,6 +17031,12 @@ fn collect_mutated_local_names_from_expr(expr: &Expr, mutated: &mut HashSet<Stri
             }
             if let Some(receiver) = receiver {
                 if crate::stdlib::native_collection_method_name_mutates_receiver(name)
+                    && let Some(view_backing_receiver) = map_view_call_backing_receiver(receiver)
+                    && let Some(name) = receiver_root_name(view_backing_receiver)
+                {
+                    mutated.insert(name.to_string());
+                }
+                if crate::stdlib::native_collection_method_name_mutates_receiver(name)
                     && let Some(name) = receiver_root_name(receiver)
                 {
                     mutated.insert(name.to_string());
@@ -16406,6 +17075,28 @@ fn collect_mutated_local_names_from_expr(expr: &Expr, mutated: &mut HashSet<Stri
         | Expr::ClassLiteral(_)
         | Expr::Raw(_)
         | Expr::Unsupported { .. } => {}
+    }
+}
+
+fn map_view_call_backing_receiver(receiver: &Expr) -> Option<&Expr> {
+    let Expr::Call {
+        receiver: Some(map_receiver),
+        name,
+        args,
+        ..
+    } = receiver
+    else {
+        return None;
+    };
+    if args.is_empty()
+        && matches!(
+            name.as_str(),
+            "keySet" | "key_set" | "values" | "entrySet" | "entry_set"
+        )
+    {
+        Some(map_receiver)
+    } else {
+        None
     }
 }
 
@@ -17311,7 +18002,7 @@ fn internal_returned_object_alias_borrow_constraints(
             .any(|usage| matches!(usage, BindingUse::Returned));
         let compatibility_name_returned = param.binding.is_none()
             && exactly_returned_param_names.contains(param.name.as_str())
-            && !method_assigns_to_binding(method, &param.name);
+            && !legacy_idless_method_assigns_to_binding(method, &param.name);
         (returned_by_exact_binding || compatibility_name_returned)
             && java_types_have_same_signature_boundary_identity(
                 &binding.java_ty,

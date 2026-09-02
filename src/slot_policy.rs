@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use crate::effective_facts::EffectiveFacts;
 use crate::facts::FactSet;
 use crate::java_ir::{
-    ConstructorDecl, Expr, JavaType, MethodDecl, Modifier, Param, Stmt, TypeDecl,
+    BinaryOp, ConstructorDecl, Expr, JavaType, MethodDecl, Modifier, Param, Stmt, TypeDecl, UnaryOp,
 };
 use crate::representation::RepresentationPlan;
 use crate::shape_projection::{
@@ -302,7 +302,7 @@ fn method_return_allows_borrowed_param_content(
         if !method_exactly_returns_param(method, &param.name) {
             return false;
         }
-        if method_assigns_to_binding(method, &param.name) {
+        if legacy_idless_method_assigns_to_binding(method, &param.name) {
             return false;
         }
     }
@@ -313,7 +313,10 @@ fn method_return_allows_borrowed_param_content(
             .all(|usage| matches!(usage, BindingUse::Returned | BindingUse::ContentRead))
 }
 
-pub fn method_assigns_to_binding(method: &MethodDecl, binding_name: &str) -> bool {
+pub(crate) fn legacy_idless_method_assigns_to_binding(
+    method: &MethodDecl,
+    binding_name: &str,
+) -> bool {
     method
         .body
         .as_ref()
@@ -328,31 +331,67 @@ fn stmts_assign_to_binding(statements: &[Stmt], binding_name: &str) -> bool {
 
 fn stmt_assigns_to_binding(stmt: &Stmt, binding_name: &str) -> bool {
     match stmt {
-        Stmt::Assign { target, .. } => matches!(target, Expr::Var(name) if name == binding_name),
+        Stmt::Assign { target, value } => {
+            expr_is_binding_assignment_target(target, binding_name)
+                || expr_assigns_to_binding(value, binding_name)
+        }
+        Stmt::Expr(expr) | Stmt::Return(Some(expr)) | Stmt::Throw(expr) => {
+            expr_assigns_to_binding(expr, binding_name)
+        }
+        Stmt::VarDecl { initializer, .. } => initializer
+            .as_ref()
+            .is_some_and(|expr| expr_assigns_to_binding(expr, binding_name)),
         Stmt::If {
+            condition,
             then_block,
             else_block,
-            ..
         } => {
-            stmts_assign_to_binding(&then_block.statements, binding_name)
+            expr_assigns_to_binding(condition, binding_name)
+                || stmts_assign_to_binding(&then_block.statements, binding_name)
                 || else_block
                     .as_ref()
                     .is_some_and(|block| stmts_assign_to_binding(&block.statements, binding_name))
         }
-        Stmt::While { body, .. }
-        | Stmt::DoWhile { body, .. }
-        | Stmt::EnhancedFor { body, .. }
-        | Stmt::Block(body)
-        | Stmt::LabeledBlock { body, .. } => {
-            stmts_assign_to_binding(&body.statements, binding_name)
+        Stmt::While {
+            condition, body, ..
         }
-        Stmt::For { init, body, .. } => {
-            stmts_assign_to_binding(init, binding_name)
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
+            expr_assigns_to_binding(condition, binding_name)
                 || stmts_assign_to_binding(&body.statements, binding_name)
         }
-        Stmt::Switch { cases, .. } => cases
-            .iter()
-            .any(|case| stmts_assign_to_binding(&case.statements, binding_name)),
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            stmts_assign_to_binding(init, binding_name)
+                || condition
+                    .as_ref()
+                    .is_some_and(|expr| expr_assigns_to_binding(expr, binding_name))
+                || update
+                    .iter()
+                    .any(|expr| expr_assigns_to_binding(expr, binding_name))
+                || stmts_assign_to_binding(&body.statements, binding_name)
+        }
+        Stmt::EnhancedFor { iterable, body, .. } => {
+            expr_assigns_to_binding(iterable, binding_name)
+                || stmts_assign_to_binding(&body.statements, binding_name)
+        }
+        Stmt::Switch { selector, cases } => {
+            expr_assigns_to_binding(selector, binding_name)
+                || cases.iter().any(|case| {
+                    case.labels.iter().any(|label| match label {
+                        crate::java_ir::SwitchLabel::Expr(expr) => {
+                            expr_assigns_to_binding(expr, binding_name)
+                        }
+                        crate::java_ir::SwitchLabel::Default => false,
+                    }) || stmts_assign_to_binding(&case.statements, binding_name)
+                })
+        }
         Stmt::Try {
             resources,
             body,
@@ -368,16 +407,103 @@ fn stmt_assigns_to_binding(stmt: &Stmt, binding_name: &str) -> bool {
                     .as_ref()
                     .is_some_and(|block| stmts_assign_to_binding(&block.statements, binding_name))
         }
+        Stmt::Block(body) | Stmt::LabeledBlock { body, .. } => {
+            stmts_assign_to_binding(&body.statements, binding_name)
+        }
         Stmt::LocalType(_)
-        | Stmt::VarDecl { .. }
-        | Stmt::Expr(_)
-        | Stmt::Return(_)
-        | Stmt::Throw(_)
+        | Stmt::Return(None)
         | Stmt::ConstructorInvocation { .. }
         | Stmt::Break(_)
         | Stmt::Continue(_)
         | Stmt::Unsupported(_) => false,
     }
+}
+
+fn expr_assigns_to_binding(expr: &Expr, binding_name: &str) -> bool {
+    match expr {
+        Expr::Binary {
+            op: BinaryOp::Assign,
+            left,
+            right,
+        } => {
+            expr_is_binding_assignment_target(left, binding_name)
+                || expr_assigns_to_binding(right, binding_name)
+        }
+        Expr::Unary {
+            op: UnaryOp::PreInc | UnaryOp::PreDec | UnaryOp::PostInc | UnaryOp::PostDec,
+            expr,
+        } => expr_is_binding_assignment_target(expr, binding_name),
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::InstanceOf { expr, .. } => {
+            expr_assigns_to_binding(expr, binding_name)
+        }
+        Expr::Binary { left, right, .. } => {
+            expr_assigns_to_binding(left, binding_name)
+                || expr_assigns_to_binding(right, binding_name)
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            expr_assigns_to_binding(condition, binding_name)
+                || expr_assigns_to_binding(then_expr, binding_name)
+                || expr_assigns_to_binding(else_expr, binding_name)
+        }
+        Expr::Switch { selector, cases } => {
+            expr_assigns_to_binding(selector, binding_name)
+                || cases.iter().any(|case| {
+                    case.labels.iter().any(|label| match label {
+                        crate::java_ir::SwitchLabel::Expr(expr) => {
+                            expr_assigns_to_binding(expr, binding_name)
+                        }
+                        crate::java_ir::SwitchLabel::Default => false,
+                    }) || expr_assigns_to_binding(&case.value, binding_name)
+                })
+        }
+        Expr::Call { receiver, args, .. } => {
+            receiver
+                .as_ref()
+                .is_some_and(|receiver| expr_assigns_to_binding(receiver, binding_name))
+                || args
+                    .iter()
+                    .any(|arg| expr_assigns_to_binding(arg, binding_name))
+        }
+        Expr::New { args, .. } | Expr::ArrayInitializer(args) => args
+            .iter()
+            .any(|arg| expr_assigns_to_binding(arg, binding_name)),
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            dimensions
+                .iter()
+                .any(|expr| expr_assigns_to_binding(expr, binding_name))
+                || initializer.as_ref().is_some_and(|items| {
+                    items
+                        .iter()
+                        .any(|expr| expr_assigns_to_binding(expr, binding_name))
+                })
+        }
+        Expr::FieldAccess(receiver, _) => expr_assigns_to_binding(receiver, binding_name),
+        Expr::ArrayAccess(array, index) => {
+            expr_assigns_to_binding(array, binding_name)
+                || expr_assigns_to_binding(index, binding_name)
+        }
+        Expr::Lambda { .. }
+        | Expr::MethodReference { .. }
+        | Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::ClassLiteral(_)
+        | Expr::Unsupported { .. }
+        | Expr::Raw(_) => false,
+    }
+}
+
+fn expr_is_binding_assignment_target(expr: &Expr, binding_name: &str) -> bool {
+    matches!(expr, Expr::Var(name) if name == binding_name)
 }
 
 fn method_exactly_returns_param(method: &MethodDecl, param_name: &str) -> bool {
@@ -542,6 +668,31 @@ mod tests {
         }
     }
 
+    fn idless_string_param() -> Param {
+        Param {
+            name: "value".to_string(),
+            source_name: "value".to_string(),
+            ty: JavaType::String,
+            is_varargs: false,
+            binding: None,
+        }
+    }
+
+    fn private_static_idless_method_with_body(statements: Vec<Stmt>) -> MethodDecl {
+        MethodDecl {
+            name: "borrow".to_string(),
+            rust_name: None,
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            return_type: JavaType::String,
+            throws: Vec::new(),
+            params: vec![idless_string_param()],
+            modifiers: vec![Modifier::Static],
+            body: Some(Block { statements }),
+            span: Span::default(),
+        }
+    }
+
     fn usage_with_param_facts(binding: BindingId, uses: Vec<BindingUse>) -> UsageFacts {
         let mut usage = UsageFacts::default();
         let mut method_usage = MethodUsageFacts::default();
@@ -563,6 +714,31 @@ mod tests {
         usage.methods.insert(legacy_key, method_usage.clone());
         usage.methods_by_java_key.insert(
             crate::java_signature::JavaCallableKey::source_method_for_type(&ty, &method),
+            method_usage,
+        );
+        usage
+    }
+
+    fn idless_usage_with_name_facts(method: &MethodDecl, uses: Vec<BindingUse>) -> UsageFacts {
+        let mut usage = UsageFacts::default();
+        let mut method_usage = MethodUsageFacts::default();
+        method_usage.bindings.insert(
+            "value".to_string(),
+            BindingUseFacts {
+                name: "value".to_string(),
+                binding: None,
+                java_ty: JavaType::String,
+                uses,
+            },
+        );
+        let ty = owner_type();
+        let legacy_key = UsageMethodKey {
+            type_name: "Owner".to_string(),
+            method_name: "borrow".to_string(),
+        };
+        usage.methods.insert(legacy_key, method_usage.clone());
+        usage.methods_by_java_key.insert(
+            crate::java_signature::JavaCallableKey::source_method_for_type(&ty, method),
             method_usage,
         );
         usage
@@ -622,6 +798,67 @@ mod tests {
                 &effective_facts
             ),
             "resolver-bound params must prove the exact binding is returned instead of trusting the name-only return scan"
+        );
+    }
+
+    #[test]
+    fn idless_borrowed_return_policy_rejects_update_expr_mutation() {
+        let method = private_static_idless_method_with_body(vec![
+            Stmt::Expr(Expr::Unary {
+                op: UnaryOp::PostInc,
+                expr: Box::new(Expr::Var("value".to_string())),
+            }),
+            Stmt::Return(Some(Expr::Var("value".to_string()))),
+        ]);
+        let ty = owner_type();
+        let facts = FactSet::default();
+        let effective_facts = EffectiveFacts::new(&facts);
+        let usage = idless_usage_with_name_facts(&method, vec![BindingUse::Returned]);
+
+        assert!(
+            !method_return_allows_borrowed_param_content(
+                &ty,
+                &method,
+                &method.params[0],
+                &usage,
+                &effective_facts
+            ),
+            "id-less compatibility must not ignore ++/-- mutations before returning a parameter"
+        );
+    }
+
+    #[test]
+    fn idless_borrowed_return_policy_rejects_for_update_mutation() {
+        let method = private_static_idless_method_with_body(vec![
+            Stmt::For {
+                init: Vec::new(),
+                condition: None,
+                update: vec![Expr::Binary {
+                    op: BinaryOp::Assign,
+                    left: Box::new(Expr::Var("value".to_string())),
+                    right: Box::new(Expr::Literal(Literal::String("next".to_string()))),
+                }],
+                body: Block {
+                    statements: Vec::new(),
+                },
+                label: None,
+            },
+            Stmt::Return(Some(Expr::Var("value".to_string()))),
+        ]);
+        let ty = owner_type();
+        let facts = FactSet::default();
+        let effective_facts = EffectiveFacts::new(&facts);
+        let usage = idless_usage_with_name_facts(&method, vec![BindingUse::Returned]);
+
+        assert!(
+            !method_return_allows_borrowed_param_content(
+                &ty,
+                &method,
+                &method.params[0],
+                &usage,
+                &effective_facts
+            ),
+            "id-less compatibility must inspect for-update assignment expressions before returning a parameter"
         );
     }
 }

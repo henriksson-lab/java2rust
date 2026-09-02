@@ -339,26 +339,36 @@ impl RepresentationPlan {
         hierarchy_edge_diagnostic_policy(ty, self).diagnostics
     }
 
-    fn hierarchy_edges_for_subtype(&self, type_name: &str) -> &[ObjectHierarchyEdge] {
+    fn hierarchy_edges_for_subtype(&self, type_name: &str) -> Vec<ObjectHierarchyEdge> {
+        if let Some(edges) = self.hierarchy_edges_by_subtype.get(type_name) {
+            return edges.clone();
+        }
         self.hierarchy_edges_by_subtype
-            .get(type_name)
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
+            .values()
+            .flat_map(|edges| edges.iter())
+            .filter(|edge| crate::facts::external_type_name_matches(&edge.sub_name, type_name))
+            .cloned()
+            .collect()
     }
 
     fn hierarchy_edge_is_represented(&self, super_name: &str) -> bool {
-        self.hierarchy_type_is_represented(super_name)
-            || self.hierarchy_type_has_user_closed_enum_ancestor(super_name, &mut BTreeSet::new())
+        hierarchy_type_name_lookup_aliases(super_name)
+            .iter()
+            .any(|alias| {
+                self.hierarchy_type_is_represented(alias)
+                    || self
+                        .hierarchy_type_has_user_closed_enum_ancestor(alias, &mut BTreeSet::new())
+            })
     }
 
     fn hierarchy_type_is_represented(&self, type_name: &str) -> bool {
-        self.types.get(type_name).is_some_and(|entry| {
+        self.type_representation(type_name).is_some_and(|entry| {
             object_hierarchy_edge_representation_policy(entry.representation.clone()).represented
         })
     }
 
     fn hierarchy_type_is_user_closed_enum(&self, type_name: &str) -> bool {
-        self.types.get(type_name).is_some_and(|entry| {
+        self.type_representation(type_name).is_some_and(|entry| {
             object_representation_is_user_closed_enum(
                 &entry.representation,
                 fact_provenance_for_representation(entry.provenance),
@@ -375,7 +385,7 @@ impl RepresentationPlan {
             return false;
         }
         self.hierarchy_edges_for_subtype(type_name)
-            .iter()
+            .into_iter()
             .any(|edge| {
                 self.hierarchy_type_is_user_closed_enum(&edge.super_name)
                     || self.hierarchy_type_has_user_closed_enum_ancestor(&edge.super_name, visited)
@@ -383,7 +393,7 @@ impl RepresentationPlan {
     }
 
     fn hierarchy_edge_diagnostic_input(&self, ty: &TypeDecl) -> ObjectHierarchyEdgeDiagnosticInput {
-        let edges = self.hierarchy_edges_for_subtype(&ty.name).to_vec();
+        let edges = self.hierarchy_edges_for_subtype(&ty.name);
         let represented_super_names = edges
             .iter()
             .map(|edge| &edge.super_name)

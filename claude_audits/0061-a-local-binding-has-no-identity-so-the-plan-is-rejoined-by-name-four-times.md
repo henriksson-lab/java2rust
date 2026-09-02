@@ -2,8 +2,25 @@
 
 Status: **open, compatibility-only residue**
 
+Current status 2026-08-30:
+the original ordinary-source same-name-local failure is no longer valid.
+`LocalPlan` and `LocalConstraintSet` carry `BindingId`, resolver-assigned ids
+are used for parameters, declarations, enhanced-for bindings, and catches, and
+bound source declarations fail closed instead of falling back to name lookup.
+The remaining live surface is narrower compatibility residue: synthetic or
+parser-only IR that lacks resolver ids can still use deliberate name fallback
+through the usage/signature compatibility paths. Treat future fixes here as
+id-less-boundary cleanup, not as evidence that normal Java source locals are
+still rejoined by name.
+
 Partial progress:
 
+- Display-hint synthesis now gives untyped lambda parameters a scoped binding
+  when the lambda is assigned to a declared functional-interface local such as
+  `Consumer<T>`/`Function<T, R>`/`Predicate<T>`. That keeps a lambda parameter
+  named like an outer field from rejoining to the field while collecting facade
+  display return hints. Regression:
+  `stdlib::display_hint_tests::inferred_lambda_param_shadows_outer_binding_for_display_hint_owner`.
 - The signature solver's own constraint-to-plan join now carries explicit
   `BindingId`s on `LocalConstraintSet` and `LocalPlan`. Resolver-assigned ids on
   `VarDecl` and `EnhancedFor` are used when present; otherwise the signature
@@ -749,7 +766,7 @@ Follow-up 2026-08-25: the borrowed-return parameter policy no longer lets the
 legacy name-only assignment scan veto resolver-bound parameter facts. The policy
 already reads the exact parameter through `bindings_by_id`; plain assignment to
 that exact parameter is rejected by the binding's `Mutated` fact, while the old
-`method_assigns_to_binding(method, name)` scan remains only for id-less
+`legacy_idless_method_assigns_to_binding(method, name)` scan remains only for id-less
 compatibility inputs. Regression:
 `slot_policy::tests::borrowed_return_param_policy_uses_binding_facts_not_name_assignment_scan`.
 
@@ -757,7 +774,8 @@ Follow-up 2026-08-25: internal returned-object alias constraints now make the
 same distinction. The shared-borrow return constraint is selected by iterating
 declared parameters and resolving each through `binding_for_declaration`,
 instead of scanning `all_binding_facts()` for any same-name binding and then
-vetoing with `method_assigns_to_binding(method, name)`. Resolver-bound params
+vetoing with `legacy_idless_method_assigns_to_binding(method, name)`.
+Resolver-bound params
 therefore cannot be rejected by a same-name shadow local; mutation of the exact
 parameter binding still rejects through `BindingUse::Mutated`. Regression:
 `signature::tests::returned_object_alias_constraints_use_param_binding_not_shadow_name`.
@@ -1117,3 +1135,92 @@ resolver-bound parameter satisfy the return precondition through
 parameters must now carry an exact `BindingUse::Returned`; the name-only return
 scan is reserved for id-less compatibility. Regression:
 `slot_policy::tests::borrowed_return_param_content_requires_exact_returned_binding_when_param_bound`.
+
+Follow-up 2026-08-29: local shape mutability collection no longer falls back to
+the whole-method mutated-name set when a resolver-bound declaration lacks exact
+liveness evidence for the statement. The legacy name set remains available only
+for id-less compatibility declarations; bound locals require the liveness answer
+for their own declaration/binding path. Regression:
+`signature::tests::bound_local_mutability_does_not_fall_back_to_name_set_when_liveness_is_missing`.
+
+Follow-up 2026-08-30: visible-use recording no longer writes the same
+`BindingUse` through both the compatibility name map and the authoritative
+`bindings_by_id` entry when a live resolver `BindingId` is visible. Bound
+bindings now collect each use once in `bindings_by_id`; only id-less
+compatibility entries collect uses in the name map. Regressions:
+`usage::tests::record_use_records_live_binding_id_once` and the full
+`usage::tests` module.
+
+Follow-up 2026-08-30: bound local shape learning now preserves Rust keyword
+access-name aliases for ordinary declarations, not only for later map-view side
+facts. `Stmt::VarDecl { source_name: "self", name: "self__", binding: ... }`
+is inserted through the same access-name-aware `ShapeEnv` path used by main
+lowering, so expressions parsed under the source spelling can still find the
+resolver binding and solved shape. Delegated-constructor trailing statement
+shape learning uses the same policy. Regressions:
+`expr_shape::tests::bound_var_decl_shape_learning_preserves_keyword_access_name_binding`
+and
+`lower::tests::delegated_constructor_trailing_vardecl_shape_preserves_keyword_access_name_binding`.
+
+Follow-up 2026-08-30: usage scopes now insert resolver-bound params, local
+declarations, enhanced-for locals, and scoped direct declarations under their
+Java `source_name` rather than the escaped emitted Rust name. A bound
+declaration such as `source_name: "self", name: "self__"` therefore remains
+visible to later `Expr::Var("self")` use recording, while the emitted name still
+appears in the `BindingUse::AssignedToLocal` payload. Regression:
+`usage::tests::keyword_renamed_bound_local_records_uses_by_source_binding`.
+
+Follow-up 2026-08-30: the remaining public block/name source-nullability
+compatibility collector no longer crosses nested callable boundaries. Local type
+member bodies, anonymous-class method bodies, and lambda bodies can contain
+parameters or locals with the same source name as an outer local; those nested
+facts no longer leak into `source_binding_nullability_constraints(outer,
+"value")`. Regressions:
+`slot_shape_design::source_binding_nullability_constraints_do_not_cross_anonymous_method_body`
+and
+`slot_shape_design::source_binding_nullability_constraints_do_not_cross_lambda_body`.
+
+Follow-up 2026-08-30: declaration-aware source-nullability lookup now has one
+`SourceNullabilityMap::constraints_for_declaration` binding/name compatibility
+join. The public declaration helper plus local and enhanced-for constraint
+collection all route through it instead of hand-copying the same
+`binding.map(...).unwrap_or_else(name)` fallback. Guard:
+`layering::idless_local_binding_compatibility_surface_stays_explicit`; behavior
+covered by the `source_binding_nullability_constraints` slot-shape filter.
+
+Follow-up 2026-08-30: source-return nullability scopes now insert resolver-bound
+parameters, local declarations, and enhanced-for variables under their Java
+`source_name`, matching the spelling used by `Expr::Var` in source IR. A
+keyword-renamed binding such as `source_name: "self", name: "self__"` can now
+collect assignment/nullability facts and be returned through its exact
+`BindingId`. The same pass made `SourceNullabilityMap::state_for_var` fail
+closed when a scoped binding is known but has no binding-specific state, so a
+same-name field or legacy by-name entry cannot fill in for an in-scope local.
+Regressions:
+`signature::tests::source_return_nullability_param_scope_uses_source_name`,
+`signature::tests::source_return_nullability_local_scope_uses_source_name`,
+`signature::tests::source_return_nullability_enhanced_for_scope_uses_source_name`,
+and
+`signature::tests::source_return_nullability_in_scope_binding_does_not_fall_back_to_field`.
+
+Follow-up 2026-08-30: the remaining name-only assignment scan used by
+borrowed-return content policy is now named and scoped as
+`legacy_idless_method_assigns_to_binding`. The two production callers already
+sit behind `param.binding.is_none()` compatibility gates; the rename plus
+layering guard prevent it from looking like a general binding-identity API.
+Regressions:
+`slot_policy::tests::borrowed_return_param_policy_uses_binding_facts_not_name_assignment_scan`,
+`slot_policy::tests::borrowed_return_param_content_requires_exact_returned_binding_when_param_bound`,
+`signature::tests::returned_object_alias_constraints_use_param_binding_not_shadow_name`,
+and `layering::signature_uses_usage_binding_policy_for_legacy_name_fallback`.
+
+Follow-up 2026-08-30: that same id-less assignment scan now sees expression-side
+mutations instead of only `Stmt::Assign { target: Expr::Var(..) }`. The retained
+compatibility path rejects borrowed-return content when an id-less parameter is
+mutated through `++`/`--`, assignment expressions, `for` update expressions, or
+other nested expression positions before being returned. Resolver-bound
+parameters still use exact `BindingUse` facts, so this only narrows the legacy
+id-less fallback. Regressions:
+`slot_policy::tests::idless_borrowed_return_policy_rejects_update_expr_mutation`,
+`slot_policy::tests::idless_borrowed_return_policy_rejects_for_update_mutation`,
+and `layering::signature_uses_usage_binding_policy_for_legacy_name_fallback`.

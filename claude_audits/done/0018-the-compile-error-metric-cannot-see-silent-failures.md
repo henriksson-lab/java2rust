@@ -466,3 +466,25 @@ The unmodelled-upcast split test also stopped assuming an exact constant
 upcast count for every translated source. The invariant is the one this audit
 needs: upcast markers remain visible and separate from no-op facade method
 counts. `tests/output_markers.rs` is back to 26/26.
+
+## Update 2026-08-30 (Codex follow-up) — no-op call-site marker is registry-covered
+
+The lowering hook from the 2026-08-11 update existed, but its marker was not in
+`OUTPUT_MARKERS`, so `tests/output_markers.rs` could not enforce the usual
+"every marker has a fixture or named dedicated test" rule for it. The
+`noop_facade_call_site` marker is now registered and covered by the dedicated
+lowering-time test.
+
+The boundary from 2026-08-11 still matters: ordinary generated facade methods
+whose bodies are silent defaults but whose call sites do not resolve through a
+facade ABI remain a lower-bound case for `noop_facade_call_sites`. A direct
+attempt to classify builtin getters from API-effect facts was too broad:
+`Font.getSize()` currently emits a loud `unimplemented!` facade method, not a
+silent default, so it must not be counted as a no-op call.
+
+The focused-package summary also now has an explicit regression for stale
+analysis profiles. When `analysis-profile.tsv` exists but omits
+`noop_facade_call_sites`, `translate-focused-package.sh` fails with
+`missing analysis profile metric: noop_facade_call_sites` even if the idiom
+sweep reports a fallback value. Regression:
+`batch_translation::focused_package_missing_analysis_profile_metric_fails_even_with_idiom_fallback`.

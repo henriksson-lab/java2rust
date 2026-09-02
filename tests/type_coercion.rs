@@ -70,7 +70,7 @@ use new_java2rust::facts::{
     OwnedRecoveryCapability, OwnedRecoveryCapabilityFact, TypeCapabilityOverride,
 };
 use new_java2rust::java_ir::{
-    JavaCoercionEvidence, JavaCoercionKind, JavaType, Literal, PrimitiveType,
+    Expr, JavaCoercionEvidence, JavaCoercionKind, JavaType, Literal, PrimitiveType,
 };
 use new_java2rust::lowering_diagnostics::lowering_diagnostic_from_conversion_diagnostic;
 use new_java2rust::member_access_plan::{
@@ -334,6 +334,13 @@ fn optional_construction_detection_requires_some_arity_one() {
         assert!(!rust_expr_is_constructed_optional_value(&expr), "{raw}");
         assert_eq!(unwrap_some_expr(&expr), None, "{raw}");
     }
+
+    let commented_value = RustExpr::Raw("Some(value /* , right */)".to_string());
+    assert!(rust_expr_is_constructed_optional_value(&commented_value));
+    assert_eq!(
+        unwrap_some_expr(&commented_value),
+        Some(RustExpr::Raw("value /* , right */".to_string()))
+    );
 }
 
 #[test]
@@ -1124,6 +1131,53 @@ fn member_access_plan_preserves_package_qualified_static_constant_owner() {
         MemberAccessOp::StaticConstant {
             owner: "AItem".to_string(),
         }
+    );
+}
+
+#[test]
+fn member_access_plan_does_not_invent_unknown_uppercase_static_constant_owner() {
+    let mut env = TypeEnv::new();
+    env.insert_type_field("Item", "KIND", JavaType::String);
+    env.insert_static_type_alias("Cfg", "a.Config");
+    env.insert_type_field("a.Config", "LIMIT", JavaType::Primitive(PrimitiveType::Int));
+
+    let source_plan = plan_member_access_with_facts(
+        &Expr::Var("Item".to_string()),
+        "KIND",
+        &env,
+        &FactSet::default(),
+    )
+    .expect("known source type field should still plan as a static constant");
+    assert_eq!(
+        source_plan.op,
+        MemberAccessOp::StaticConstant {
+            owner: "Item".to_string(),
+        }
+    );
+
+    let alias_plan = plan_member_access_with_facts(
+        &Expr::Var("Cfg".to_string()),
+        "LIMIT",
+        &env,
+        &FactSet::default(),
+    )
+    .expect("import/static alias should still prove the static owner");
+    assert_eq!(
+        alias_plan.op,
+        MemberAccessOp::StaticConstant {
+            owner: "AConfig".to_string(),
+        }
+    );
+
+    assert!(
+        plan_member_access_with_facts(
+            &Expr::Var("Other".to_string()),
+            "VALUE",
+            &TypeEnv::new(),
+            &FactSet::default(),
+        )
+        .is_none(),
+        "capitalization alone must not prove an unknown static constant owner"
     );
 }
 
@@ -2356,7 +2410,10 @@ fn optional_string_view_projection_records_projected_family_shape() {
         raw_projected,
         RustExpr::MethodCall {
             receiver: Box::new(RustExpr::MethodCall {
-                receiver: Box::new(RustExpr::Raw("make_name()".to_string())),
+                receiver: Box::new(RustExpr::Call {
+                    function: Box::new(RustExpr::Var("make_name".to_string())),
+                    args: Vec::new(),
+                }),
                 method: "as_ref".to_string(),
                 args: Vec::new(),
             }),
@@ -6079,7 +6136,13 @@ fn shape_coercion_owns_dyn_trait_and_erased_object_adapters() {
             if matches!(
                 expr.as_ref(),
                 RustExpr::MethodCall { receiver, method, .. }
-                    if method == "clone" && matches!(receiver.as_ref(), RustExpr::Cast { .. })
+                    if method == "clone"
+                        && (matches!(receiver.as_ref(), RustExpr::Cast { .. })
+                            || matches!(
+                                receiver.as_ref(),
+                                RustExpr::Grouped(grouped)
+                                    if matches!(grouped.as_ref(), RustExpr::Cast { .. })
+                            ))
             )
     ));
 

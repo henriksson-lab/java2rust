@@ -618,7 +618,7 @@ fn source_class_bound_trait_method_signature_with_return_shape(
         .rust_name
         .clone()
         .unwrap_or_else(|| crate::parser::to_snake_case(&method.name));
-    let type_params = rust_method_type_params(method, program);
+    let type_params = rust_method_type_params(method, program, &ty.name);
     let where_clause = rust_generic_trait_method_where_clause(method);
     format!(
         "    fn {rust_name}{type_params}({}){return_type}{where_clause};",
@@ -861,7 +861,7 @@ fn collect_implemented_interfaces_for_type(
     out: &mut Vec<String>,
 ) {
     for interface_name in &ty.implements {
-        collect_implemented_interface_name(program, interface_name, seen, out);
+        collect_implemented_interface_name(program, &ty.name, interface_name, seen, out);
     }
     if let Some(super_name) = ty.extends.as_deref() {
         if ty.kind == TypeKind::Interface {
@@ -869,8 +869,10 @@ fn collect_implemented_interfaces_for_type(
             // type implements. Treating it as a superclass meant a class
             // implementing `P extends G` never got `impl G for C`, so the
             // subtrait bound could not be satisfied (`E0277`).
-            collect_implemented_interface_name(program, super_name, seen, out);
-        } else if let Some(super_ty) = find_type_decl(program, super_name) {
+            collect_implemented_interface_name(program, &ty.name, super_name, seen, out);
+        } else if let Some(super_ty) =
+            find_type_decl_for_owner_context(program, &ty.name, super_name)
+        {
             collect_implemented_interfaces_for_type(program, super_ty, seen, out);
         }
     }
@@ -878,11 +880,12 @@ fn collect_implemented_interfaces_for_type(
 
 fn collect_implemented_interface_name(
     program: &Program,
+    owner_name: &str,
     interface_name: &str,
     seen: &mut HashSet<String>,
     out: &mut Vec<String>,
 ) {
-    let interface = find_type_decl(program, interface_name);
+    let interface = find_type_decl_for_owner_context(program, owner_name, interface_name);
     let canonical_name = interface
         .map(|interface| interface.name.as_str())
         .unwrap_or(interface_name);
@@ -1557,7 +1560,7 @@ pub(crate) fn trait_method_signature_with_receiver_and_return_shape(
         .rust_name
         .clone()
         .unwrap_or_else(|| crate::parser::to_snake_case(&method.name));
-    let type_params = rust_method_type_params(method, program);
+    let type_params = rust_method_type_params(method, program, &ty.name);
     let where_clause = rust_generic_trait_method_where_clause(method);
     format!(
         "    fn {rust_name}{type_params}({}){return_type}{where_clause};",
@@ -1565,7 +1568,7 @@ pub(crate) fn trait_method_signature_with_receiver_and_return_shape(
     )
 }
 
-fn rust_method_type_params(method: &MethodDecl, program: &Program) -> String {
+fn rust_method_type_params(method: &MethodDecl, program: &Program, owner_name: &str) -> String {
     if method.type_params.is_empty() {
         return String::new();
     }
@@ -1579,7 +1582,7 @@ fn rust_method_type_params(method: &MethodDecl, program: &Program) -> String {
             else {
                 return name.clone();
             };
-            match find_type_decl(program, bound) {
+            match find_type_decl_for_owner_context(program, owner_name, bound) {
                 Some(ty) if matches!(ty.kind, TypeKind::Interface) => {
                     format!("{name}: {}", rust_name_for_java_named_type(&ty.name))
                 }
@@ -1893,7 +1896,7 @@ fn implementing_method_candidates_in_hierarchy<'a>(
         .map(|method| (ty, method))
         .collect::<Vec<_>>();
     if let Some(super_name) = ty.extends.as_deref()
-        && let Some(super_ty) = find_type_decl(program, super_name)
+        && let Some(super_ty) = find_type_decl_for_owner_context(program, &ty.name, super_name)
     {
         out.extend(
             implementing_method_candidates_in_hierarchy(super_ty, interface_method, program)
@@ -1916,9 +1919,11 @@ fn type_implements_interface(program: &Program, ty: &TypeDecl, interface: &TypeD
 }
 
 fn source_class_bounds_for_type<'a>(program: &'a Program, ty: &TypeDecl) -> Vec<&'a TypeDecl> {
-    source_type_param_bound_names(program)
+    source_type_param_bounds(program)
         .into_iter()
-        .filter_map(|bound_name| find_type_decl(program, &bound_name))
+        .filter_map(|bound| {
+            find_type_decl_for_owner_context(program, &bound.owner_name, &bound.bound_name)
+        })
         .filter(|bound| {
             matches!(bound.kind, TypeKind::Class)
                 && (bound.name == ty.name || source_type_extends(program, ty, &bound.name))
@@ -1927,61 +1932,82 @@ fn source_class_bounds_for_type<'a>(program: &'a Program, ty: &TypeDecl) -> Vec<
 }
 
 fn source_class_is_used_as_type_param_bound(program: &Program, type_name: &str) -> bool {
-    source_type_param_bound_names(program)
-        .into_iter()
-        .any(|bound| bound == type_name)
+    source_type_param_bounds(program).into_iter().any(|bound| {
+        find_type_decl_for_owner_context(program, &bound.owner_name, &bound.bound_name)
+            .is_some_and(|ty| ty.name == type_name)
+            || bound.bound_name == type_name
+    })
 }
 
-fn source_type_param_bound_names(program: &Program) -> Vec<String> {
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SourceTypeParamBound {
+    owner_name: String,
+    bound_name: String,
+}
+
+fn source_type_param_bounds(program: &Program) -> Vec<SourceTypeParamBound> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for ty in &program.types {
-        collect_source_type_param_bound_names_in_type(ty, &mut seen, &mut out);
+        collect_source_type_param_bounds_in_type(ty, &mut seen, &mut out);
     }
     out
 }
 
-fn collect_source_type_param_bound_names_in_type(
+fn collect_source_type_param_bounds_in_type(
     ty: &TypeDecl,
-    seen: &mut HashSet<String>,
-    out: &mut Vec<String>,
+    seen: &mut HashSet<SourceTypeParamBound>,
+    out: &mut Vec<SourceTypeParamBound>,
 ) {
-    collect_bound_names(&ty.type_param_bounds, seen, out);
+    collect_bound_names(&ty.name, &ty.type_param_bounds, seen, out);
     for member in &ty.members {
         match member {
-            Member::Method(method) => collect_bound_names(&method.type_param_bounds, seen, out),
+            Member::Method(method) => {
+                collect_bound_names(&ty.name, &method.type_param_bounds, seen, out)
+            }
             Member::Constructor(constructor) => {
-                collect_bound_names(&constructor.type_param_bounds, seen, out)
+                collect_bound_names(&ty.name, &constructor.type_param_bounds, seen, out)
             }
-            Member::Type(nested) => {
-                collect_source_type_param_bound_names_in_type(nested, seen, out)
-            }
+            Member::Type(nested) => collect_source_type_param_bounds_in_type(nested, seen, out),
             _ => {}
         }
     }
 }
 
 fn collect_bound_names(
+    owner_name: &str,
     bounds: &[Option<JavaType>],
-    seen: &mut HashSet<String>,
-    out: &mut Vec<String>,
+    seen: &mut HashSet<SourceTypeParamBound>,
+    out: &mut Vec<SourceTypeParamBound>,
 ) {
     for bound in bounds {
-        if let Some(JavaType::Named { name, .. }) = bound
-            && seen.insert(name.clone())
-        {
-            out.push(name.clone());
+        if let Some(JavaType::Named { name, .. }) = bound {
+            let bound = SourceTypeParamBound {
+                owner_name: owner_name.to_string(),
+                bound_name: name.clone(),
+            };
+            if seen.insert(bound.clone()) {
+                out.push(bound);
+            }
         }
     }
 }
 
 fn source_type_extends(program: &Program, ty: &TypeDecl, target_name: &str) -> bool {
     let mut next = ty.extends.as_deref();
+    let mut owner_name = ty.name.as_str();
     while let Some(name) = next {
         if name == target_name {
             return true;
         }
-        next = find_type_decl(program, name).and_then(|super_ty| super_ty.extends.as_deref());
+        let Some(super_ty) = find_type_decl_for_owner_context(program, owner_name, name) else {
+            return false;
+        };
+        if super_ty.name == target_name {
+            return true;
+        }
+        owner_name = &super_ty.name;
+        next = super_ty.extends.as_deref();
     }
     false
 }
@@ -1992,6 +2018,21 @@ fn find_type_decl<'a>(program: &'a Program, type_name: &str) -> Option<&'a TypeD
         collect_type_decl_matches(ty, type_name, &mut matches);
     }
     unique_type_decl(matches.exact)
+        .or_else(|| unique_type_decl(matches.emitted_alias))
+        .or_else(|| unique_type_decl(matches.simple))
+}
+
+fn find_type_decl_for_owner_context<'a>(
+    program: &'a Program,
+    owner_name: &str,
+    type_name: &str,
+) -> Option<&'a TypeDecl> {
+    let mut matches = TypeDeclMatches::default();
+    for ty in &program.types {
+        collect_type_decl_matches(ty, type_name, &mut matches);
+    }
+    unique_type_decl(matches.exact)
+        .or_else(|| unique_same_package_type_decl(matches.simple.as_slice(), owner_name))
         .or_else(|| unique_type_decl(matches.emitted_alias))
         .or_else(|| unique_type_decl(matches.simple))
 }
@@ -2008,6 +2049,24 @@ fn unique_type_decl(matches: Vec<&TypeDecl>) -> Option<&TypeDecl> {
         [ty] => Some(*ty),
         _ => None,
     }
+}
+
+fn unique_same_package_type_decl<'a>(
+    matches: &[&'a TypeDecl],
+    owner_name: &str,
+) -> Option<&'a TypeDecl> {
+    let owner_package = java_owner_package_prefix(owner_name)?;
+    let mut same_package = matches
+        .iter()
+        .copied()
+        .filter(|ty| java_owner_package_prefix(&ty.name) == Some(owner_package))
+        .collect::<Vec<_>>();
+    same_package.dedup_by(|left, right| left.name == right.name);
+    unique_type_decl(same_package)
+}
+
+fn java_owner_package_prefix(name: &str) -> Option<&str> {
+    name.rsplit_once('.').map(|(package, _)| package)
 }
 
 fn collect_type_decl_matches<'a>(
@@ -2032,9 +2091,12 @@ fn collect_type_decl_matches<'a>(
 
 #[cfg(test)]
 mod type_lookup_tests {
-    use super::find_type_decl;
+    use super::{
+        find_type_decl, find_type_decl_for_owner_context, implemented_interfaces_for_type,
+        rust_method_type_params, source_type_extends,
+    };
     use crate::diagnostics::Span;
-    use crate::java_ir::{Program, TypeDecl, TypeKind};
+    use crate::java_ir::{JavaType, Member, MethodDecl, Program, TypeDecl, TypeKind};
 
     fn empty_type(name: &str) -> TypeDecl {
         TypeDecl {
@@ -2049,6 +2111,13 @@ mod type_lookup_tests {
             members: Vec::new(),
             static_init_blocks: Vec::new(),
             span: Span::default(),
+        }
+    }
+
+    fn empty_interface(name: &str) -> TypeDecl {
+        TypeDecl {
+            kind: TypeKind::Interface,
+            ..empty_type(name)
         }
     }
 
@@ -2068,6 +2137,95 @@ mod type_lookup_tests {
         assert_eq!(
             find_type_decl(&program, "ANamed").map(|ty| ty.name.as_str()),
             Some("a.Named")
+        );
+    }
+
+    #[test]
+    fn find_type_decl_for_owner_context_prefers_same_package_peer() {
+        let program = Program {
+            package: None,
+            imports: Vec::new(),
+            types: vec![
+                empty_type("a.Base"),
+                empty_type("b.Base"),
+                empty_type("b.Child"),
+            ],
+        };
+
+        assert!(find_type_decl(&program, "Base").is_none());
+        assert_eq!(
+            find_type_decl_for_owner_context(&program, "b.Child", "Base")
+                .map(|ty| ty.name.as_str()),
+            Some("b.Base")
+        );
+    }
+
+    #[test]
+    fn source_type_extends_uses_same_package_before_ambiguous_simple_peer() {
+        let mut child = empty_type("b.Child");
+        child.extends = Some("Base".to_string());
+        let program = Program {
+            package: None,
+            imports: Vec::new(),
+            types: vec![empty_type("a.Base"), empty_type("b.Base"), child.clone()],
+        };
+
+        assert!(source_type_extends(&program, &child, "b.Base"));
+        assert!(!source_type_extends(&program, &child, "a.Base"));
+    }
+
+    #[test]
+    fn implemented_interfaces_use_same_package_before_ambiguous_simple_peer() {
+        let mut child = empty_type("b.Child");
+        child.implements = vec!["Named".to_string()];
+        let program = Program {
+            package: None,
+            imports: Vec::new(),
+            types: vec![
+                empty_interface("a.Named"),
+                empty_interface("b.Named"),
+                child,
+            ],
+        };
+
+        assert_eq!(
+            implemented_interfaces_for_type(&program, &program.types[2]),
+            vec!["b.Named".to_string()]
+        );
+    }
+
+    #[test]
+    fn method_type_param_bounds_use_owner_package_before_ambiguous_simple_peer() {
+        let method = MethodDecl {
+            name: "id".to_string(),
+            rust_name: Some("id".to_string()),
+            return_type: JavaType::Void,
+            params: Vec::new(),
+            type_params: vec!["T".to_string()],
+            type_param_bounds: vec![Some(JavaType::Named {
+                name: "Named".to_string(),
+                args: Vec::new(),
+            })],
+            modifiers: Vec::new(),
+            throws: Vec::new(),
+            body: None,
+            span: Span::default(),
+        };
+        let mut owner = empty_type("b.Owner");
+        owner.members = vec![Member::Method(method.clone())];
+        let program = Program {
+            package: None,
+            imports: Vec::new(),
+            types: vec![
+                empty_interface("a.Named"),
+                empty_interface("b.Named"),
+                owner,
+            ],
+        };
+
+        assert_eq!(
+            rust_method_type_params(&method, &program, "b.Owner"),
+            "<T: BNamed>"
         );
     }
 }

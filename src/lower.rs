@@ -75,12 +75,13 @@ use crate::coercion::{
     normalize_map_key_borrow_projection, normalize_reused_clone_for_borrowed_argument,
     optional_clone_recovery_owned_element_projection, optional_copied_expect_projection,
     optional_get_owned_value_result_projection, outer_this_field_mut_projection,
-    outer_this_field_projection, owned_map_entries_set_projection, owned_map_keys_set_projection,
-    owned_sequence_elements_to_optional_vec_projection, owner_associated_path_projection,
-    parenthesize_borrowed_method_receiver, primitive_parse_radix_result_projection,
-    primitive_parse_result_projection, print_macro_projection,
-    project_optional_element_borrow_carrier_with_shape, project_optional_receiver,
-    project_optional_sequence_receiver, propagate_result_projection,
+    outer_this_field_projection, owned_map_entries_erased_object_array_projection,
+    owned_map_entries_set_projection, owned_map_entries_vec_projection,
+    owned_map_keys_set_projection, owned_sequence_elements_to_optional_vec_projection,
+    owner_associated_path_projection, parenthesize_borrowed_method_receiver,
+    primitive_parse_radix_result_projection, primitive_parse_result_projection,
+    print_macro_projection, project_optional_element_borrow_carrier_with_shape,
+    project_optional_receiver, project_optional_sequence_receiver, propagate_result_projection,
     qualified_static_storage_accessor_projection, qualified_static_storage_setter_path_projection,
     reborrow_optional_mut_projection, receiver_method_call_projection,
     receiver_method_call_projection_exact, rendered_expr_is_mutable_alias,
@@ -89,7 +90,8 @@ use crate::coercion::{
     rust_expr_may_be_java_null_value, rust_expr_mentions_constructor_self_temporary,
     rust_string_literal_projection, self_associated_path_projection,
     sequence_get_expect_projection, sequence_iter_cloned_projection,
-    sequence_iter_copied_projection, sequence_iteration_source_projection, shared_borrow_expr,
+    sequence_iter_copied_projection, sequence_iteration_source_projection,
+    sequence_iteration_source_projection_with_result_context, shared_borrow_expr,
     snapshot_rendered_shared_borrow_argument, static_storage_accessor_projection,
     static_storage_assignment_value_projection, static_storage_getter_body_projection,
     static_storage_setter_body_projection, static_storage_setter_path_projection,
@@ -4927,7 +4929,17 @@ fn constructor_call_function_is_plain_new(function: &RustExpr) -> bool {
     let Some(parsed) = parse_raw_constructor_call_head(head) else {
         return false;
     };
-    parsed.name.starts_with("new") && !parsed.name.ends_with("_with_outer")
+    raw_constructor_name_is_plain_new(parsed.name)
+}
+
+fn raw_constructor_name_is_plain_new(name: &str) -> bool {
+    if name == "new" {
+        return true;
+    }
+    let Some(suffix) = name.strip_prefix("new_") else {
+        return false;
+    };
+    !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit())
 }
 
 fn constructor_call_function_head(function: &RustExpr) -> Option<&str> {
@@ -6921,6 +6933,27 @@ fn raw_string_literal_end_at(text: &str, start: usize) -> Option<usize> {
     None
 }
 
+fn raw_comment_end_at(text: &str, start: usize) -> Option<usize> {
+    let rest = text.get(start..)?;
+    if rest.starts_with("//") {
+        return Some(
+            text[start..]
+                .find('\n')
+                .map(|offset| start + offset + '\n'.len_utf8())
+                .unwrap_or(text.len()),
+        );
+    }
+    if rest.starts_with("/*") {
+        return Some(
+            text[start + 2..]
+                .find("*/")
+                .map(|offset| start + 2 + offset + 2)
+                .unwrap_or(text.len()),
+        );
+    }
+    None
+}
+
 fn lower_delegating_constructor(
     ty: &TypeDecl,
     ctor: &ConstructorDecl,
@@ -8391,9 +8424,9 @@ fn learn_delegated_constructor_trailing_stmt_shapes(
     if let Stmt::VarDecl {
         ty,
         name,
+        source_name,
         initializer,
         binding,
-        ..
     } = stmt
     {
         let mut local_plan = if let Some(local_plan) =
@@ -8407,8 +8440,13 @@ fn learn_delegated_constructor_trailing_stmt_shapes(
             refine_local_plan_from_initializer(local_plan, ty, initializer.as_ref(), env, ctx);
         local_plan = own_uninitialized_optional_borrowed_local(local_plan, initializer, ctx);
         let env_binding = binding.clone().or_else(|| Some(local_plan.binding.clone()));
-        env.insert_local_shape_with_java_type_and_binding(
-            name.clone(),
+        let access_name = env
+            .binding_access_name(source_name)
+            .map(str::to_string)
+            .unwrap_or_else(|| name.clone());
+        env.insert_local_shape_with_access_name_java_type_and_binding(
+            source_name.clone(),
+            access_name,
             local_plan.shape,
             ty.clone(),
             env_binding,
@@ -8759,6 +8797,7 @@ fn raw_assignment_stmt_projection(text: &str) -> Option<RustStmt> {
 }
 
 fn raw_assignment_target_projection(target: &str) -> Option<RustExpr> {
+    let target = raw_without_comments_outside_literals(target);
     let target = target.trim();
     if let Some((base, index)) = split_assignment_target_index(target) {
         let base = raw_assignment_target_projection(base)?;
@@ -8812,11 +8851,44 @@ fn recover_raw_statement_value_expr(rendered: &str) -> Option<RustExpr> {
 }
 
 fn recover_raw_assignment_value_expr(rendered: &str) -> Option<RustExpr> {
-    recover_raw_statement_value_expr(rendered)
+    let rendered = raw_without_comments_outside_literals(rendered);
+    recover_raw_statement_value_expr(&rendered)
 }
 
 fn recover_raw_assignment_index_expr(rendered: &str) -> Option<RustExpr> {
-    recover_raw_statement_value_expr(rendered)
+    let rendered = raw_without_comments_outside_literals(rendered);
+    recover_raw_statement_value_expr(&rendered)
+}
+
+fn raw_without_comments_outside_literals(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0usize;
+    while cursor < text.len() {
+        if let Some(end) = raw_comment_end_at(text, cursor) {
+            if !out.chars().next_back().is_none_or(char::is_whitespace) {
+                out.push(' ');
+            }
+            cursor = end;
+            continue;
+        }
+        if let Some(end) = raw_string_literal_end_at(text, cursor) {
+            out.push_str(&text[cursor..end]);
+            cursor = end;
+            continue;
+        }
+        let Some(ch) = text[cursor..].chars().next() else {
+            break;
+        };
+        if ch == '"' || ch == '\'' {
+            let end = quoted_literal_end(text, cursor, ch);
+            out.push_str(&text[cursor..end]);
+            cursor = end;
+            continue;
+        }
+        out.push(ch);
+        cursor += ch.len_utf8();
+    }
+    out
 }
 
 fn split_assignment_target_index(target: &str) -> Option<(&str, &str)> {
@@ -8826,6 +8898,10 @@ fn split_assignment_target_index(target: &str) -> Option<(&str, &str)> {
     let mut last_top_level_open = None;
     let mut cursor = 0usize;
     while cursor < target.len() {
+        if let Some(end) = raw_comment_end_at(target, cursor) {
+            cursor = end;
+            continue;
+        }
         if let Some(end) = raw_string_literal_end_at(target, cursor) {
             cursor = end;
             continue;
@@ -8884,6 +8960,10 @@ fn split_top_level_assignment(text: &str) -> Option<(&str, &str, &str)> {
     let mut brace_depth = 0usize;
     let mut cursor = 0usize;
     while cursor < text.len() {
+        if let Some(end) = raw_comment_end_at(text, cursor) {
+            cursor = end;
+            continue;
+        }
         if let Some(end) = raw_string_literal_end_at(text, cursor) {
             cursor = end;
             continue;
@@ -8906,8 +8986,14 @@ fn split_top_level_assignment(text: &str) -> Option<(&str, &str, &str)> {
                     continue;
                 }
                 let before = text[..cursor].trim_end();
-                let compound_start = compound_assignment_op_start(before);
-                if compound_start.is_none() && before.ends_with(['=', '!', '<', '>']) {
+                let logical_before = raw_without_comments_outside_literals(before);
+                let logical_before = logical_before.trim_end();
+                let compound_start = if logical_before.len() == before.len() {
+                    compound_assignment_op_start(before)
+                } else {
+                    None
+                };
+                if compound_start.is_none() && logical_before.ends_with(['=', '!', '<', '>']) {
                     cursor += ch.len_utf8();
                     continue;
                 }
@@ -9678,11 +9764,11 @@ fn lower_stmt(
             let map_entry_next_initializer = initializer.as_ref().and_then(|expr| {
                 lower_map_entry_next_expr(expr, env, ctx, refinements).map(
                     |(entry_expr, key_ty, value_ty)| {
-                        local_plan.shape = borrowed_sequence_element_shape(JavaType::Named {
+                        local_plan.shape = RustSlotShape::for_storage(JavaType::Named {
                             name: "java.util.Map.Entry".to_string(),
                             args: vec![key_ty, value_ty],
                         });
-                        entry_expr
+                        map_entry_snapshot_projection(entry_expr)
                     },
                 )
             });
@@ -9804,7 +9890,19 @@ fn lower_stmt(
                 .and_then(simple_map_entry_constructor_args)
             {
                 env.insert_simple_map_entry_value(source_name.clone(), key.clone(), value.clone());
+                if initializer
+                    .as_ref()
+                    .is_some_and(simple_map_entry_constructor_is_immutable)
+                {
+                    env.insert_simple_immutable_map_entry_local(source_name.clone());
+                }
                 env.insert_simple_map_entry_value(access_name.clone(), key.clone(), value.clone());
+                if initializer
+                    .as_ref()
+                    .is_some_and(simple_map_entry_constructor_is_immutable)
+                {
+                    env.insert_simple_immutable_map_entry_local(access_name.clone());
+                }
             }
             if name != source_name {
                 if env.binding_access_name(name).is_some() {
@@ -9845,6 +9943,12 @@ fn lower_stmt(
                     .and_then(simple_map_entry_constructor_args)
                 {
                     env.insert_simple_map_entry_value(name.clone(), key.clone(), value.clone());
+                    if initializer
+                        .as_ref()
+                        .is_some_and(simple_map_entry_constructor_is_immutable)
+                    {
+                        env.insert_simple_immutable_map_entry_local(name.clone());
+                    }
                 }
             }
         }
@@ -12558,6 +12662,12 @@ fn refine_local_plan_from_initializer(
         local_plan.shape = RustSlotShape::for_storage(local_plan.shape.java_ty.clone());
         return local_plan;
     }
+    if let Some(shape) =
+        native_map_get_required_declared_value_local_shape(initializer, declared_ty, env, ctx)
+    {
+        local_plan.shape = shape;
+        return local_plan;
+    }
     if let Expr::Cast { ty, .. } = initializer
         && cast_target_erases_slot_generic_detail(ty, &local_plan.shape.java_ty)
     {
@@ -12651,10 +12761,68 @@ fn local_optional_shape_from_initializer_shape(
     if shape_is_erased_object_boundary(local) || local.optional_element_type().is_some() {
         return None;
     }
+    if matches!(
+        local.ownership,
+        OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+    ) {
+        return None;
+    }
     initializer
         .optional_element_type()
         .is_some_and(|element_ty| same_concrete_java_type(&element_ty, &local.java_ty))
         .then(|| initializer.clone())
+}
+
+fn native_map_get_required_declared_value_local_shape(
+    initializer: &Expr,
+    declared_ty: &JavaType,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<RustSlotShape> {
+    let Expr::Call {
+        receiver,
+        name,
+        args,
+        resolved,
+    } = initializer
+    else {
+        return None;
+    };
+    if name != "get" || args.len() != 1 {
+        return None;
+    }
+    let plan = plan_call_expr_with_lower_context(
+        receiver.as_deref(),
+        name,
+        args,
+        resolved.as_ref(),
+        ctx,
+        env,
+    );
+    let CallExprPlan::Target(CallTargetPlan::NativeCollectionMethod {
+        receiver, method, ..
+    }) = plan
+    else {
+        return None;
+    };
+    if method != NativeCollectionMethod::MapGet {
+        return None;
+    }
+    let LoweredType::OptionalElementBorrow { element_shape, .. } =
+        native_collection_lowered_type(receiver, method, env.type_env())?
+    else {
+        return None;
+    };
+    if !same_concrete_java_type(&element_shape.java_ty, declared_ty) {
+        return None;
+    }
+    if !matches!(
+        element_shape.ownership,
+        OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+    ) {
+        return None;
+    }
+    Some(*element_shape)
 }
 
 fn simple_declared_local_type_is_shadowed_by_local_capture_constructor(
@@ -12840,6 +13008,13 @@ fn declared_typed_initializer_should_anchor_local_type(
         return false;
     };
     if native_collection_call_return_shape(initializer_expr, env, ctx).is_some() {
+        return false;
+    }
+    if planned_method_call_return_shape(initializer_expr, env, ctx).is_some_and(|shape| {
+        shape
+            .optional_element_type()
+            .is_some_and(|element_ty| same_concrete_java_type(&element_ty, declared_ty))
+    }) {
         return false;
     }
     initializer
@@ -13215,8 +13390,14 @@ fn refine_assigned_simple_map_entry_value(name: &str, value: &Expr, env: &mut Sh
     }
     if let Some((key, value)) = simple_map_entry_constructor_args(value) {
         env.insert_simple_map_entry_value(name.to_string(), key.clone(), value.clone());
+        if simple_map_entry_constructor_is_immutable(value) {
+            env.insert_simple_immutable_map_entry_local(name.to_string());
+        }
         if let Some(access_name) = access_name {
-            env.insert_simple_map_entry_value(access_name, key.clone(), value.clone());
+            env.insert_simple_map_entry_value(access_name.clone(), key.clone(), value.clone());
+            if simple_map_entry_constructor_is_immutable(value) {
+                env.insert_simple_immutable_map_entry_local(access_name);
+            }
         }
     } else {
         env.forget_simple_map_entry_value(name);
@@ -15591,6 +15772,12 @@ fn collect_expr_assigned_names(expr: &Expr, names: &mut std::collections::HashSe
             }
             if let Some(receiver) = receiver {
                 if crate::stdlib::native_collection_method_name_mutates_receiver(name)
+                    && let Some(view_backing_receiver) = map_view_call_backing_receiver(receiver)
+                    && let Some(name) = assigned_receiver_root_name(view_backing_receiver)
+                {
+                    names.insert(name.to_string());
+                }
+                if crate::stdlib::native_collection_method_name_mutates_receiver(name)
                     && let Some(name) = assigned_receiver_root_name(receiver)
                 {
                     names.insert(name.to_string());
@@ -15638,6 +15825,28 @@ fn collect_expr_assigned_names(expr: &Expr, names: &mut std::collections::HashSe
         | Expr::ClassLiteral(_)
         | Expr::Raw(_)
         | Expr::Unsupported { .. } => {}
+    }
+}
+
+fn map_view_call_backing_receiver(receiver: &Expr) -> Option<&Expr> {
+    let Expr::Call {
+        receiver: Some(map_receiver),
+        name,
+        args,
+        ..
+    } = receiver
+    else {
+        return None;
+    };
+    if args.is_empty()
+        && matches!(
+            name.as_str(),
+            "keySet" | "key_set" | "values" | "entrySet" | "entry_set"
+        )
+    {
+        Some(map_receiver)
+    } else {
+        None
     }
 }
 
@@ -18730,6 +18939,11 @@ fn lower_expr_with_refinements(
             {
                 return expr;
             }
+            if let Some((expr, _actual)) =
+                lower_map_view_to_array_call(receiver.as_deref(), name, args, env, ctx, refinements)
+            {
+                return expr;
+            }
             if let Some((expr, _value_ty)) = lower_map_entry_set_value_call(
                 receiver.as_deref(),
                 name,
@@ -18849,6 +19063,12 @@ fn lower_expr_with_refinements(
             if let Some(expr) = lower_source_summary_super_boundary_call(&target, name, ctx) {
                 return expr;
             }
+            let target = retarget_source_context_static_overload_name(
+                target,
+                context_fallback_signature.as_ref(),
+            );
+            let target =
+                retarget_resolved_source_static_overload_name(target, resolved.as_ref(), ctx);
             let target = retarget_static_owner_call_for_instance_field_receiver(
                 target,
                 receiver.as_deref(),
@@ -18861,6 +19081,14 @@ fn lower_expr_with_refinements(
                 receiver.as_deref(),
                 name,
                 args.len(),
+                env,
+                ctx,
+            );
+            let target = retarget_source_declared_static_overload_name(
+                target,
+                receiver.as_deref(),
+                name,
+                args,
                 env,
                 ctx,
             );
@@ -19199,21 +19427,7 @@ fn lower_expr_with_refinements(
                     bytes, offset, len,
                 ));
             }
-            if ctx.result_propagation_mode == ResultPropagationMode::Propagate
-                && concrete_java_type_name(ty)
-                    .map(crate::stdlib::canonical_external_receiver_type_key)
-                    .is_some_and(|key| matches!(key.as_str(), "StringBuilder" | "StringBuffer"))
-                && args.len() == 1
-                && matches!(
-                    crate::types::infer_expr_type(&args[0], env.type_env()),
-                    JavaType::Primitive(
-                        PrimitiveType::Byte
-                            | PrimitiveType::Short
-                            | PrimitiveType::Int
-                            | PrimitiveType::Long
-                    )
-                )
-            {
+            if string_buffer_capacity_constructor_expr(ty, args, env) {
                 let mut rust_args = lower_constructor_args_with_plan(
                     args,
                     env,
@@ -19228,10 +19442,13 @@ fn lower_expr_with_refinements(
                 let owner = concrete_java_type_name(ty)
                     .map(crate::stdlib::canonical_external_receiver_type_key)
                     .unwrap_or_else(|| "StringBuilder".to_string());
-                return propagate_result_projection(function_call_projection(
-                    RustExpr::path([owner.as_str(), "new_capacity_result"]),
-                    vec![capacity],
-                ));
+                return apply_result_value_policy_from_ctx(
+                    function_call_projection(
+                        RustExpr::path([owner.as_str(), "new_capacity_result"]),
+                        vec![capacity],
+                    ),
+                    ctx,
+                );
             }
             if ctx.result_propagation_mode == ResultPropagationMode::Propagate
                 && concrete_java_type_name(ty)
@@ -19309,7 +19526,9 @@ fn lower_expr_with_refinements(
                 ctx.facts,
                 ctx.representations,
             );
-            if external_constructor_returns_rust_result(ty, args.len(), ctx.facts) {
+            if external_constructor_returns_rust_result(ty, args.len(), ctx.facts)
+                && external_constructor_result_applies_to_expr(ty, args, env)
+            {
                 lowered = apply_result_value_policy_from_ctx(lowered, ctx);
             }
             lowered
@@ -22694,7 +22913,7 @@ fn static_storage_update_plan(
             let static_name = env.static_storage_field_access_name(name)?;
             Some(StaticStorageUpdatePlan {
                 getter: static_storage_accessor_for_name(static_name, env, ctx),
-                setter: static_storage_setter_path_projection(static_name),
+                setter: static_storage_setter_for_name(static_name, env, ctx),
                 shape: static_storage_field_shape(name, env, ctx)?,
             })
         }
@@ -23657,10 +23876,7 @@ fn context_fallback_signature_for_method(
     method: &MethodDecl,
     ctx: LowerCtx,
 ) -> ContextFallbackMethodSignature {
-    let rust_name = method
-        .rust_name
-        .clone()
-        .unwrap_or_else(|| crate::parser::to_snake_case(&method.name));
+    let rust_name = context_method_effective_rust_name(owner, method, ctx);
     if let Some(signature) = ctx
         .signatures
         .method_signature_by_rust_name(owner, &rust_name)
@@ -23688,6 +23904,32 @@ fn context_fallback_signature_for_method(
         arg_shapes: source_context_param_shapes(method, ctx),
         receiver: ReceiverPlan::Shared,
         arg_shapes_are_authoritative: false,
+    }
+}
+
+fn context_method_effective_rust_name(owner: &str, method: &MethodDecl, ctx: LowerCtx) -> String {
+    let base = crate::parser::to_snake_case(&method.name);
+    let Some(ty) = find_context_type_by_key_in_lower_ctx(ctx, owner) else {
+        return method.rust_name.clone().unwrap_or(base);
+    };
+    let overload_count = ty
+        .members
+        .iter()
+        .filter(
+            |member| matches!(member, Member::Method(candidate) if candidate.name == method.name),
+        )
+        .count();
+    if overload_count <= 1 || method.params.is_empty() {
+        return method.rust_name.clone().unwrap_or(base);
+    }
+    if method
+        .rust_name
+        .as_deref()
+        .is_some_and(|rust_name| rust_name != base)
+    {
+        method.rust_name.clone().expect("checked method rust name")
+    } else {
+        crate::java_signature::source_method_overload_rust_name(method)
     }
 }
 
@@ -24628,7 +24870,18 @@ fn lower_constructor_args_with_plan(
             .iter()
             .zip(shapes)
             .map(|(arg, shape)| {
-                lower_argument_for_explicit_slot(arg, env, argument_slot(shape), ctx)
+                let actual_shape = infer_expr_shape_with_context(
+                    arg,
+                    env,
+                    ExprShapeContext {
+                        signatures: Some(ctx.signatures),
+                        representations: Some(ctx.representations),
+                        facts: Some(ctx.facts),
+                    },
+                );
+                let lowered =
+                    lower_argument_for_explicit_slot(arg, env, argument_slot(shape.clone()), ctx);
+                adapt_owned_native_borrow_argument(lowered, arg, &shape, &actual_shape)
             })
             .collect(),
         ArgumentLoweringPlan::Unshaped { .. } => {
@@ -24665,10 +24918,6 @@ fn plan_constructor_arguments_with_signature_fallback(
     facts: &FactSet,
 ) -> ArgumentLoweringPlan {
     let arg_count = args.len();
-    let plan = plan_constructor_arguments(resolved, arg_count, signatures);
-    let ArgumentLoweringPlan::Unshaped { arg_count } = plan else {
-        return plan;
-    };
     let Some(type_name) = concrete_java_type_name(constructed_ty) else {
         return ArgumentLoweringPlan::Unshaped { arg_count };
     };
@@ -24682,6 +24931,10 @@ fn plan_constructor_arguments_with_signature_fallback(
     ) {
         return ArgumentLoweringPlan::Shaped(shapes);
     }
+    let plan = plan_constructor_arguments(resolved, arg_count, signatures);
+    let ArgumentLoweringPlan::Unshaped { arg_count } = plan else {
+        return plan;
+    };
     let Some(signature) = signatures.constructor_signature_by_rust_name(type_name, rust_name)
     else {
         return ArgumentLoweringPlan::Unshaped { arg_count };
@@ -28230,7 +28483,8 @@ fn is_java_collection_view_call(receiver: &Expr) -> bool {
     matches!(
         receiver,
         Expr::Call { name, args, .. }
-            if args.is_empty() && matches!(name.as_str(), "keySet" | "key_set")
+            if args.is_empty()
+                && matches!(name.as_str(), "keySet" | "key_set" | "values" | "entrySet" | "entry_set")
     )
 }
 
@@ -28244,15 +28498,29 @@ fn collection_view_call_receiver_type(receiver: &Expr, env: &ShapeEnv) -> Option
     else {
         return None;
     };
-    if !args.is_empty() || !matches!(name.as_str(), "keySet" | "key_set") {
+    if !args.is_empty() {
         return None;
     }
     let map_ty = crate::types::infer_expr_type(map_receiver, env.type_env());
-    let (key_ty, _) = crate::stdlib::java_map_type_args(&map_ty)?;
-    Some(JavaType::Named {
-        name: "Set".to_string(),
-        args: vec![key_ty.clone()],
-    })
+    let (key_ty, value_ty) = crate::stdlib::java_map_type_args(&map_ty)?;
+    match name.as_str() {
+        "keySet" | "key_set" => Some(JavaType::Named {
+            name: "Set".to_string(),
+            args: vec![key_ty.clone()],
+        }),
+        "values" => Some(JavaType::Named {
+            name: "Collection".to_string(),
+            args: vec![value_ty.clone()],
+        }),
+        "entrySet" | "entry_set" => Some(JavaType::Named {
+            name: "Set".to_string(),
+            args: vec![JavaType::Named {
+                name: "Map.Entry".to_string(),
+                args: vec![key_ty.clone(), value_ty.clone()],
+            }],
+        }),
+        _ => None,
+    }
 }
 
 fn slot_shape_renders_as_string_like(shape: &RustSlotShape, ctx: LowerCtx) -> bool {
@@ -29043,8 +29311,16 @@ fn lower_source_subtype_argument_as_actual(
     actual_shape: &RustSlotShape,
     ctx: LowerCtx,
 ) -> Option<RustExpr> {
-    source_subtype_argument_conversion_available(actual_shape, target_shape, env, ctx)
-        .then(|| lower_expr(arg, env, ctx))
+    source_subtype_argument_conversion_available(actual_shape, target_shape, env, ctx).then(|| {
+        adapt_source_subtype_to_supertype_argument(
+            lower_expr(arg, env, ctx),
+            arg,
+            Some(actual_shape),
+            target_shape,
+            env,
+            ctx,
+        )
+    })
 }
 
 fn adapt_source_subtype_to_supertype_argument(
@@ -31646,6 +31922,117 @@ fn retarget_external_receiver_overload_name<'a>(
     target.into_fallback_receiver_with_rust_name(external_name)
 }
 
+fn retarget_source_context_static_overload_name<'a>(
+    target: CallTargetPlan<'a>,
+    context_fallback_signature: Option<&ContextFallbackMethodSignature>,
+) -> CallTargetPlan<'a> {
+    let Some(signature) = context_fallback_signature else {
+        return target;
+    };
+    if signature.owner.is_none() {
+        return target;
+    }
+    match target {
+        CallTargetPlan::StaticOwner { owner, rust_name } if rust_name != signature.rust_name => {
+            CallTargetPlan::StaticOwner {
+                owner,
+                rust_name: signature.rust_name.clone(),
+            }
+        }
+        target => target,
+    }
+}
+
+fn retarget_resolved_source_static_overload_name<'a>(
+    target: CallTargetPlan<'a>,
+    resolved: Option<&ResolvedCall>,
+    ctx: LowerCtx,
+) -> CallTargetPlan<'a> {
+    let Some(resolved) = resolved else {
+        return target;
+    };
+    if resolved.kind != CallKind::Static || resolved.rust_name.is_empty() {
+        return target;
+    }
+    if find_context_type_by_key_in_lower_ctx(ctx, &resolved.declaring_type).is_none() {
+        return target;
+    }
+    match target {
+        CallTargetPlan::StaticOwner { owner, rust_name } if rust_name != resolved.rust_name => {
+            CallTargetPlan::StaticOwner {
+                owner,
+                rust_name: resolved.rust_name.clone(),
+            }
+        }
+        CallTargetPlan::StaticSelf { rust_name } if rust_name != resolved.rust_name => {
+            CallTargetPlan::StaticOwner {
+                owner: "Self".to_string(),
+                rust_name: resolved.rust_name.clone(),
+            }
+        }
+        target => target,
+    }
+}
+
+fn retarget_source_declared_static_overload_name<'a>(
+    target: CallTargetPlan<'a>,
+    receiver: Option<&'a Expr>,
+    name: &str,
+    args: &'a [Expr],
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> CallTargetPlan<'a> {
+    let CallTargetPlan::StaticOwner { owner, rust_name } = target else {
+        return target;
+    };
+    if rust_name != crate::parser::to_snake_case(name) {
+        return CallTargetPlan::StaticOwner { owner, rust_name };
+    }
+    let owner_key = receiver
+        .and_then(|receiver| explicit_source_static_receiver_type(Some(receiver), env, ctx))
+        .or_else(|| find_context_type_by_key_in_lower_ctx(ctx, &owner).map(|ty| ty.name.clone()));
+    let Some(owner_key) = owner_key else {
+        return CallTargetPlan::StaticOwner { owner, rust_name };
+    };
+    let Some(owner_ty) = find_context_type_by_key_in_lower_ctx(ctx, &owner_key) else {
+        return CallTargetPlan::StaticOwner { owner, rust_name };
+    };
+    let matching_methods = owner_ty
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            Member::Method(method)
+                if method.modifiers.contains(&Modifier::Static)
+                    && method.name == name
+                    && method.params.len() == args.len() =>
+            {
+                Some(method)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if matching_methods.len() <= 1 {
+        return CallTargetPlan::StaticOwner { owner, rust_name };
+    }
+    let shape_ctx = ExprShapeContext {
+        signatures: Some(ctx.signatures),
+        representations: Some(ctx.representations),
+        facts: Some(ctx.facts),
+    };
+    let arg_types = args
+        .iter()
+        .map(|arg| infer_expr_shape_with_context(arg, env, shape_ctx).java_ty)
+        .collect::<Vec<_>>();
+    let Some(method) = unique_static_method_matching_known_arg_types(&matching_methods, &arg_types)
+    else {
+        return CallTargetPlan::StaticOwner { owner, rust_name };
+    };
+    CallTargetPlan::StaticOwner {
+        owner,
+        rust_name: context_method_effective_rust_name(&owner_ty.name, method, ctx),
+    }
+}
+
 fn retarget_source_declared_overload_name<'a>(
     target: CallTargetPlan<'a>,
     receiver: Option<&'a Expr>,
@@ -32517,6 +32904,7 @@ fn adapt_native_collection_receiver(
         | NativeCollectionMethod::SetRemove
         | NativeCollectionMethod::AddAll
         | NativeCollectionMethod::RemoveAll
+        | NativeCollectionMethod::RetainAll
         | NativeCollectionMethod::Extend
         | NativeCollectionMethod::MapInsert
         | NativeCollectionMethod::MapPutIfAbsent
@@ -32528,6 +32916,7 @@ fn adapt_native_collection_receiver(
         | NativeCollectionMethod::ListIndexOf
         | NativeCollectionMethod::QueueElement
         | NativeCollectionMethod::Contains
+        | NativeCollectionMethod::ContainsAll
         | NativeCollectionMethod::SetHashCode
         | NativeCollectionMethod::MapHashCode
         | NativeCollectionMethod::MapGet
@@ -33832,6 +34221,35 @@ fn lower_expr_for_slot_with_refinements(
     {
         return map_key_remove_expr;
     }
+    if let Expr::Call {
+        receiver,
+        name,
+        args,
+        ..
+    } = expr
+        && let Some(map_entry_array_expr) = lower_map_entry_set_to_erased_object_array_slot_call(
+            receiver.as_deref(),
+            name,
+            args,
+            env,
+            &slot,
+            ctx,
+            refinements,
+        )
+    {
+        return map_entry_array_expr;
+    }
+    if let Expr::Call {
+        receiver,
+        name,
+        args,
+        ..
+    } = expr
+        && let Some((map_view_to_array_expr, actual)) =
+            lower_map_view_to_array_call(receiver.as_deref(), name, args, env, ctx, refinements)
+    {
+        return apply_expr_to_slot_via_plan(map_view_to_array_expr, actual, &slot, ctx.facts);
+    }
     if let Some(array_expr) = lower_array_expr_for_slot(expr, env, &slot, ctx, refinements) {
         return array_expr;
     }
@@ -34896,8 +35314,17 @@ fn lower_optional_receiver_field_access_for_slot(
             ctx.facts,
         )
     {
+        let receiver_plan =
+            optional_receiver_slot_plan(receiver_ty.clone(), false, false, ctx.facts);
+        let projection_plan =
+            receiver_plan.projection_plan_for_option_shape(receiver_shape.clone(), ctx.facts);
         let unwrapped_receiver = make_java_null_expect_catchable_in_propagating_ctx(
-            project_optional_receiver(lowered_receiver.clone(), OptionalReceiverProjection::Shared),
+            apply_optional_receiver_slot_projection(
+                lowered_receiver.clone(),
+                receiver_plan.projection,
+                projection_plan.element_shape.as_ref(),
+                projection_plan.conversion.as_ref(),
+            ),
             ctx,
         );
         let lowered = match plan.op {
@@ -35012,7 +35439,15 @@ fn lower_optional_receiver_field_access_plain(
     let receiver_owner = concrete_java_type_name(&receiver_ty).map(str::to_string);
     let field_shape = receiver_member_field_shape(field, env, ctx, receiver_owner.as_deref())?;
     let lowered_receiver = lower_expr_with_refinements(receiver, env, ctx, refinements);
-    let unwrapped = project_optional_receiver(lowered_receiver, OptionalReceiverProjection::Shared);
+    let receiver_plan = optional_receiver_slot_plan(receiver_ty, false, false, ctx.facts);
+    let projection_plan =
+        receiver_plan.projection_plan_for_option_shape(receiver_shape.clone(), ctx.facts);
+    let unwrapped = apply_optional_receiver_slot_projection(
+        lowered_receiver,
+        receiver_plan.projection,
+        projection_plan.element_shape.as_ref(),
+        projection_plan.conversion.as_ref(),
+    );
     let mut lowered = field_projection(
         unwrapped,
         &crate::parser::to_snake_case(accessor_member_name(field)),
@@ -37826,6 +38261,27 @@ fn same_concrete_java_type(left: &JavaType, right: &JavaType) -> bool {
     same_concrete_java_type_name(left, right_name)
 }
 
+fn java_type_copy_primitive_storage(java_ty: &JavaType) -> Option<PrimitiveType> {
+    match java_ty {
+        JavaType::Primitive(primitive) => Some(*primitive),
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+            crate::stdlib::boxed_primitive_type(name.rsplit('.').next().unwrap_or(name))
+        }
+        _ => None,
+    }
+}
+
+fn same_concrete_or_boxed_primitive_java_type(left: &JavaType, right: &JavaType) -> bool {
+    same_concrete_java_type(left, right)
+        || matches!(
+            (
+                java_type_copy_primitive_storage(left),
+                java_type_copy_primitive_storage(right)
+            ),
+            (Some(left), Some(right)) if left == right
+        )
+}
+
 fn lower_shared_self_field_owned_recovery_for_slot(
     expr: &Expr,
     env: &ShapeEnv,
@@ -38383,6 +38839,9 @@ fn slot_expr_needs_result_propagation(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx
         ty, args, resolved, ..
     } = expr
     {
+        if string_buffer_family_one_arg_constructor(ty, args.len()) {
+            return string_buffer_capacity_constructor_expr(ty, args, env);
+        }
         return constructor_expr_needs_result_propagation(ty, args.len(), resolved.as_ref(), ctx);
     }
     let Expr::Call {
@@ -38459,6 +38918,37 @@ fn constructor_expr_needs_result_propagation(
             arg_count,
         });
     ctx.callable_analysis.callable_returns_result(&key)
+}
+
+fn external_constructor_result_applies_to_expr(
+    ty: &JavaType,
+    args: &[Expr],
+    env: &ShapeEnv,
+) -> bool {
+    if string_buffer_family_one_arg_constructor(ty, args.len()) {
+        return string_buffer_capacity_constructor_expr(ty, args, env);
+    }
+    true
+}
+
+fn string_buffer_capacity_constructor_expr(ty: &JavaType, args: &[Expr], env: &ShapeEnv) -> bool {
+    string_buffer_family_one_arg_constructor(ty, args.len())
+        && matches!(
+            crate::types::infer_expr_type(&args[0], env.type_env()),
+            JavaType::Primitive(
+                PrimitiveType::Byte
+                    | PrimitiveType::Short
+                    | PrimitiveType::Int
+                    | PrimitiveType::Long
+            )
+        )
+}
+
+fn string_buffer_family_one_arg_constructor(ty: &JavaType, arg_count: usize) -> bool {
+    arg_count == 1
+        && concrete_java_type_name(ty)
+            .map(crate::stdlib::canonical_external_receiver_type_key)
+            .is_some_and(|key| matches!(key.as_str(), "StringBuilder" | "StringBuffer"))
 }
 
 fn constructor_expr_call_graph_type_name(ty: &JavaType) -> String {
@@ -39154,6 +39644,28 @@ fn lower_map_entry_next_expr(
     ))
 }
 
+fn map_entry_snapshot_projection(entry: RustExpr) -> RustExpr {
+    let entry_name = "__java_map_entry_snapshot";
+    RustExpr::Block {
+        stmts: vec![RustStmt::Let {
+            mutable: false,
+            name: entry_name.to_string(),
+            ty: None,
+            value: Some(entry),
+        }],
+        tail: Some(Box::new(RustExpr::Tuple(vec![
+            apply_clone_projection(deref_borrowed_projection(tuple_field_projection(
+                RustExpr::Var(entry_name.to_string()),
+                0,
+            ))),
+            apply_clone_projection(deref_borrowed_projection(tuple_field_projection(
+                RustExpr::Var(entry_name.to_string()),
+                1,
+            ))),
+        ]))),
+    }
+}
+
 fn iterator_next_projection_for_ctx(iterator: RustExpr, ctx: LowerCtx) -> RustExpr {
     if ctx.result_propagation_mode == ResultPropagationMode::Propagate {
         propagate_result_projection(iterator_next_result_projection(iterator))
@@ -39226,10 +39738,11 @@ fn lower_map_entry_set_expr(
         refinements,
     ));
     Some((
-        sequence_iteration_source_projection(
+        sequence_iteration_source_projection_with_result_context(
             receiver_expr,
             receiver_is_optional_map,
             SequenceIterationProjection::Borrowed,
+            ctx.result_propagation_mode == ResultPropagationMode::Propagate,
         ),
         key_ty,
         value_ty,
@@ -39250,10 +39763,11 @@ fn lower_map_entry_set_mut_iterator_expr(
         ctx,
         refinements,
     ));
-    Some(sequence_iteration_source_projection(
+    Some(sequence_iteration_source_projection_with_result_context(
         receiver_expr,
         receiver_is_optional_map,
         SequenceIterationProjection::MutBorrowed,
+        ctx.result_propagation_mode == ResultPropagationMode::Propagate,
     ))
 }
 
@@ -39353,14 +39867,25 @@ fn lower_mutable_map_entry_local_set_value_call(
     let Expr::Var(local_name) = receiver? else {
         return None;
     };
-    if !refinements.mutable_map_entry_locals.contains(local_name) {
-        return None;
-    }
     let (_key_ty, value_ty) = refinements
         .map_entry_locals
         .get(local_name)
         .cloned()
         .or_else(|| map_entry_local_types_from_env(local_name, env))?;
+    if env.simple_map_entry_local_is_immutable(local_name) {
+        return Some((
+            unsupported_operation_exception_result_expr(
+                ctx,
+                "Java SimpleImmutableEntry does not support setValue",
+            ),
+            value_ty,
+        ));
+    }
+    let mutable_entry_local = refinements.mutable_map_entry_locals.contains(local_name)
+        || env.simple_map_entry_value(local_name).is_some();
+    if !mutable_entry_local {
+        return None;
+    }
     let value_shape = value_shape_for_java_type(ctx.representations, value_ty.clone());
     let lowered_value = lower_expr_for_slot(&args[0], env, argument_slot(value_shape), ctx);
     let old_name = "__java_map_entry_set_value_old";
@@ -39477,7 +40002,9 @@ fn method_call_return_shape_from_receiver(
     }
     let mut receiver_generic_ty = None;
     let receiver_name = if is_this_receiver_expr(receiver) {
-        ctx.current_type?.to_string()
+        find_context_type_by_key_in_lower_ctx(ctx, ctx.current_type?)?
+            .name
+            .clone()
     } else {
         let shape_ctx = ExprShapeContext {
             signatures: Some(ctx.signatures),
@@ -39488,8 +40015,11 @@ fn method_call_return_shape_from_receiver(
         if stream_like_call_preserves_receiver_shape(name, args.len(), &receiver_shape) {
             return Some(receiver_shape);
         }
-        let receiver_ty = crate::types::optional_element_type(&receiver_shape.java_ty)
-            .unwrap_or(receiver_shape.java_ty);
+        let receiver_lookup_ty = declared_receiver_java_type_for_method_lookup(receiver, env)
+            .unwrap_or_else(|| receiver_shape.java_ty.clone());
+        let receiver_ty = crate::types::optional_element_type(&receiver_lookup_ty)
+            .or_else(|| crate::types::optional_element_type(&receiver_shape.java_ty))
+            .unwrap_or(receiver_lookup_ty);
         receiver_generic_ty = Some(receiver_ty.clone());
         match receiver_ty {
             JavaType::Named { name, .. } | JavaType::Unknown(name) => name,
@@ -39539,6 +40069,15 @@ fn method_call_return_shape_from_receiver(
             ctx,
         ));
     }
+    if let Some(shape) =
+        source_summary_declared_method_return_shape(&receiver_name, name, &arg_types, ctx)
+    {
+        return Some(apply_receiver_generic_return_shape(
+            shape,
+            receiver_generic_ty.as_ref(),
+            ctx,
+        ));
+    }
     if let Some(resolved) = resolved
         && let Some(shape) = ctx
             .signatures
@@ -39564,29 +40103,6 @@ fn method_call_return_shape_from_receiver(
             ctx,
         ));
     }
-    if let Some(resolved) = resolved
-        && let Some(shape) = source_summary_declared_method_return_shape(
-            &resolved.declaring_type,
-            name,
-            &arg_types,
-            ctx,
-        )
-    {
-        return Some(apply_receiver_generic_return_shape(
-            shape,
-            receiver_generic_ty.as_ref(),
-            ctx,
-        ));
-    }
-    if let Some(shape) =
-        source_summary_declared_method_return_shape(&receiver_name, name, &arg_types, ctx)
-    {
-        return Some(apply_receiver_generic_return_shape(
-            shape,
-            receiver_generic_ty.as_ref(),
-            ctx,
-        ));
-    }
     if args.is_empty()
         && let Some(shape) =
             getter_field_return_shape_from_receiver(&receiver_name, name, ctx.signatures)
@@ -39601,6 +40117,26 @@ fn method_call_return_shape_from_receiver(
         })
         .and_then(|(_, signature)| signature.return_shape.clone())
         .map(|shape| apply_receiver_generic_return_shape(shape, receiver_generic_ty.as_ref(), ctx))
+}
+
+fn declared_receiver_java_type_for_method_lookup(
+    receiver: &Expr,
+    env: &ShapeEnv,
+) -> Option<JavaType> {
+    let ty = crate::types::infer_expr_type(receiver, env.type_env());
+    if inferred_receiver_type_is_unresolved_placeholder(receiver, &ty) {
+        None
+    } else {
+        Some(ty)
+    }
+}
+
+fn inferred_receiver_type_is_unresolved_placeholder(receiver: &Expr, ty: &JavaType) -> bool {
+    match (receiver, ty) {
+        (Expr::Var(name), JavaType::Unknown(unknown)) => unknown == name,
+        (Expr::FieldAccess(_, field), JavaType::Unknown(unknown)) => unknown == field,
+        _ => false,
+    }
 }
 
 fn apply_receiver_generic_return_shape(
@@ -39672,7 +40208,7 @@ fn source_summary_declared_method_return_shape(
     arg_types: &[JavaType],
     ctx: LowerCtx,
 ) -> Option<RustSlotShape> {
-    let ty = find_context_type_by_key_in_lower_ctx(ctx, receiver_name)?;
+    let ty = find_context_type_by_key(ctx.source_summary_type_program, receiver_name)?;
     let method = find_declared_method_by_name_and_arg_types(ty, method_name, arg_types)
         .or_else(|| find_declared_method_by_name_and_arity(ty, method_name, arg_types.len()))?;
     source_summary_declared_return_shape_for_method(ty, method, ctx)
@@ -39995,7 +40531,7 @@ fn source_context_static_method_fallback_signature(
                 ctx.facts,
                 ctx.support_local_type_program,
             );
-            if let Some((rust_name, signature)) = signatures
+            let signature_match = signatures
                 .method_signature_by_base_name_and_arg_types_with_facts(
                     &ty.name, name, &arg_types, ctx.facts,
                 )
@@ -40004,9 +40540,26 @@ fn source_context_static_method_fallback_signature(
                         .method_signature_by_base_name_and_arg_types(&ty.name, name, &arg_types)
                 })
                 .or_else(|| {
-                    signatures.method_signature_by_base_name_and_arity(&ty.name, name, args.len())
+                    (matching_methods.len() == 1).then(|| {
+                        signatures.method_signature_by_base_name_and_arity(
+                            &ty.name,
+                            name,
+                            args.len(),
+                        )
+                    })?
                 })
-            {
+                .or_else(|| {
+                    (matching_methods.len() == 1).then(|| {
+                        signatures.method_signature_by_base_name_accepting_arity(
+                            &ty.name,
+                            name,
+                            args.len(),
+                        )
+                    })?
+                });
+            if let Some((rust_name, signature)) = signature_match.filter(|(rust_name, _)| {
+                matching_methods.len() == 1 || *rust_name != crate::parser::to_snake_case(name)
+            }) {
                 return Some(ContextFallbackMethodSignature {
                     owner: Some(ty.name.clone()),
                     rust_name,
@@ -40016,6 +40569,16 @@ fn source_context_static_method_fallback_signature(
                             non_emitted_static_context_arg_shapes_from_signature(signature)
                         }),
                     receiver: signature.receiver,
+                    arg_shapes_are_authoritative: true,
+                });
+            }
+            if let Some(method) = declared_method {
+                let rust_name = context_method_effective_rust_name(&ty.name, method, ctx);
+                return Some(ContextFallbackMethodSignature {
+                    owner: Some(ty.name.clone()),
+                    rust_name,
+                    arg_shapes: non_emitted_static_context_arg_shapes_for_method(method, ctx),
+                    receiver: ReceiverPlan::Shared,
                     arg_shapes_are_authoritative: true,
                 });
             }
@@ -40040,7 +40603,7 @@ fn source_context_static_method_fallback_signature(
             ctx.facts,
             ctx.support_local_type_program,
         );
-        if let Some((rust_name, signature)) = signatures
+        let signature_match = signatures
             .method_signature_by_base_name_and_arg_types_with_facts(
                 &ty.name, name, &arg_types, ctx.facts,
             )
@@ -40048,9 +40611,13 @@ fn source_context_static_method_fallback_signature(
                 signatures.method_signature_by_base_name_and_arg_types(&ty.name, name, &arg_types)
             })
             .or_else(|| {
-                signatures.method_signature_by_base_name_and_arity(&ty.name, name, args.len())
-            })
-        {
+                (matching_methods.len() == 1).then(|| {
+                    signatures.method_signature_by_base_name_and_arity(&ty.name, name, args.len())
+                })?
+            });
+        if let Some((rust_name, signature)) = signature_match.filter(|(rust_name, _)| {
+            matching_methods.len() == 1 || *rust_name != crate::parser::to_snake_case(name)
+        }) {
             return Some(ContextFallbackMethodSignature {
                 owner: Some(ty.name.clone()),
                 rust_name,
@@ -40066,10 +40633,7 @@ fn source_context_static_method_fallback_signature(
         let Some(method) = declared_method else {
             continue;
         };
-        let rust_name = method
-            .rust_name
-            .clone()
-            .unwrap_or_else(|| crate::parser::to_snake_case(&method.name));
+        let rust_name = context_method_effective_rust_name(&ty.name, method, ctx);
         return Some(ContextFallbackMethodSignature {
             owner: Some(ty.name.clone()),
             rust_name: rust_name.clone(),
@@ -40378,10 +40942,7 @@ fn source_context_current_static_method_fallback_signature(
     if let Some(method) =
         unique_static_method_matching_known_arg_types(&matching_methods, &arg_types)
     {
-        let rust_name = method
-            .rust_name
-            .clone()
-            .unwrap_or_else(|| crate::parser::to_snake_case(&method.name));
+        let rust_name = context_method_effective_rust_name(&ty.name, method, ctx);
         if let Some((signature_owner, signature)) = source_context_static_signature_by_rust_name(
             ctx.signatures,
             current_type,
@@ -41922,13 +42483,20 @@ fn map_get_optional_borrowed_element_owned_projection(
     };
     let target = target?;
     let target_element_ty = target.optional_element_type()?;
-    if target_element_ty != element_shape.java_ty || !shape_is_owned(target) {
+    if !same_concrete_or_boxed_primitive_java_type(&target_element_ty, &element_shape.java_ty) {
         return None;
     }
+    let method = if java_type_copy_primitive_storage(&element_shape.java_ty).is_some() {
+        "copied"
+    } else if shape_is_owned(target) {
+        "cloned"
+    } else {
+        return None;
+    };
     Some(RustExpr::shaped_as(
         RustExprShape::OptionalProjected,
         Some(target.clone()),
-        receiver_method_call_projection_exact(get_expr, "cloned", Vec::new()),
+        receiver_method_call_projection_exact(get_expr, method, Vec::new()),
     ))
 }
 
@@ -42284,6 +42852,16 @@ fn lower_map_key_set_call_from_backing_map(
         ("removeAll" | "remove_all", 1) => {
             lower_map_key_set_remove_all_from_backing_map(map_receiver, args, env, ctx, refinements)
         }
+        ("containsAll" | "contains_all", 1) => lower_map_key_set_contains_all_from_backing_map(
+            map_receiver,
+            args,
+            env,
+            ctx,
+            refinements,
+        ),
+        ("retainAll" | "retain_all", 1) => {
+            lower_map_key_set_retain_all_from_backing_map(map_receiver, args, env, ctx, refinements)
+        }
         ("add", 1) | ("addAll" | "add_all", 1) => {
             lower_map_key_set_unsupported_mutation_from_backing_map(
                 map_receiver,
@@ -42507,6 +43085,164 @@ fn lower_map_key_set_remove_all_from_backing_map(
     })
 }
 
+fn lower_map_view_bulk_collection_arg(
+    arg: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    let shape_ctx = ExprShapeContext {
+        signatures: Some(ctx.signatures),
+        representations: Some(ctx.representations),
+        facts: Some(ctx.facts),
+    };
+    let arg_shape = infer_expr_shape_with_context(arg, env, shape_ctx);
+    if crate::stdlib::java_collection_kind_for_type(&arg_shape.java_ty).is_none()
+        && crate::types::sequence_element_type(&arg_shape.java_ty).is_none()
+    {
+        return None;
+    }
+    Some(lower_expr_for_slot_with_refinements(
+        arg,
+        env,
+        argument_slot(arg_shape),
+        ctx,
+        refinements,
+    ))
+}
+
+fn lower_map_key_set_contains_all_from_backing_map(
+    map_receiver: &Expr,
+    args: &[Expr],
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    let lowered_map = lower_map_key_set_backing_map(map_receiver, env, ctx, refinements)?;
+    let lowered_keys = lower_map_view_bulk_collection_arg(&args[0], env, ctx, refinements)?;
+    let keys_name = "__java_map_key_set_contains_all_keys";
+    let map_name = "__java_map_key_set_contains_all_map";
+    Some(RustExpr::Block {
+        stmts: vec![
+            RustStmt::Let {
+                mutable: false,
+                name: keys_name.to_string(),
+                ty: None,
+                value: Some(lowered_keys),
+            },
+            RustStmt::Let {
+                mutable: false,
+                name: map_name.to_string(),
+                ty: None,
+                value: Some(map_view_backing_borrow(map_receiver, lowered_map, env)),
+            },
+        ],
+        tail: Some(Box::new(receiver_method_call_projection_exact(
+            receiver_method_call_projection_exact(
+                RustExpr::Var(keys_name.to_string()),
+                "iter",
+                Vec::new(),
+            ),
+            "all",
+            vec![RustExpr::Closure {
+                is_move: false,
+                return_type: None,
+                params: vec![RustClosureParam {
+                    pattern: "key".to_string(),
+                    ty: None,
+                }],
+                body: RustClosureBody::Expr(Box::new(receiver_method_call_projection_exact(
+                    RustExpr::Var(map_name.to_string()),
+                    "contains_key",
+                    vec![RustExpr::Var("key".to_string())],
+                ))),
+            }],
+        ))),
+    })
+}
+
+fn lower_map_key_set_retain_all_from_backing_map(
+    map_receiver: &Expr,
+    args: &[Expr],
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    let receiver_ty = crate::types::infer_expr_type(map_receiver, env.type_env());
+    if !crate::stdlib::java_collection_kind_for_type(&receiver_ty)
+        .is_some_and(|kind| kind.is_map_like())
+    {
+        return None;
+    }
+    let lowered_keys = lower_map_view_bulk_collection_arg(&args[0], env, ctx, refinements)?;
+    let lowered_map = lower_expr_with_refinements(map_receiver, env, ctx, refinements);
+    let keys_name = "__java_map_key_set_retain_all_keys";
+    let map_name = "__java_map_key_set_retain_all_map";
+    let before_name = "__java_map_key_set_retain_all_before";
+    Some(RustExpr::Block {
+        stmts: vec![
+            RustStmt::Let {
+                mutable: false,
+                name: keys_name.to_string(),
+                ty: None,
+                value: Some(lowered_keys),
+            },
+            RustStmt::Let {
+                mutable: false,
+                name: map_name.to_string(),
+                ty: None,
+                value: Some(mutable_map_view_backing_borrow(
+                    map_receiver,
+                    lowered_map,
+                    env,
+                )),
+            },
+            RustStmt::Let {
+                mutable: false,
+                name: before_name.to_string(),
+                ty: None,
+                value: Some(receiver_method_call_projection_exact(
+                    RustExpr::Var(map_name.to_string()),
+                    "len",
+                    Vec::new(),
+                )),
+            },
+            RustStmt::Expr(receiver_method_call_projection_exact(
+                RustExpr::Var(map_name.to_string()),
+                "retain",
+                vec![RustExpr::Closure {
+                    is_move: false,
+                    return_type: None,
+                    params: vec![
+                        RustClosureParam {
+                            pattern: "key".to_string(),
+                            ty: None,
+                        },
+                        RustClosureParam {
+                            pattern: "_value".to_string(),
+                            ty: None,
+                        },
+                    ],
+                    body: RustClosureBody::Expr(Box::new(receiver_method_call_projection_exact(
+                        RustExpr::Var(keys_name.to_string()),
+                        "contains",
+                        vec![RustExpr::Var("key".to_string())],
+                    ))),
+                }],
+            )),
+        ],
+        tail: Some(Box::new(RustExpr::Binary {
+            op: "!=".to_string(),
+            left: Box::new(receiver_method_call_projection_exact(
+                RustExpr::Var(map_name.to_string()),
+                "len",
+                Vec::new(),
+            )),
+            right: Box::new(RustExpr::Var(before_name.to_string())),
+        })),
+    })
+}
+
 fn lower_map_key_set_clear_from_backing_map(
     map_receiver: &Expr,
     env: &ShapeEnv,
@@ -42575,6 +43311,25 @@ fn mutable_map_view_backing_borrow(
             "&mut *".to_string()
         } else {
             "&mut ".to_string()
+        },
+        expr: Box::new(lowered_map),
+    }
+}
+
+fn map_view_backing_borrow(map_receiver: &Expr, lowered_map: RustExpr, env: &ShapeEnv) -> RustExpr {
+    let already_borrowed = matches!(
+        map_receiver,
+        Expr::Var(name)
+            if env.local_shape(name).is_some_and(|shape| matches!(
+                shape.ownership,
+                OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+            ))
+    );
+    RustExpr::Unary {
+        op: if already_borrowed {
+            "&*".to_string()
+        } else {
+            "&".to_string()
         },
         expr: Box::new(lowered_map),
     }
@@ -42672,6 +43427,107 @@ fn lower_map_view_remove_call(
         })
 }
 
+fn lower_map_view_to_array_call(
+    receiver: Option<&Expr>,
+    name: &str,
+    args: &[Expr],
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<(RustExpr, RustSlotShape)> {
+    if !matches!(name, "toArray" | "to_array") || args.len() > 1 {
+        return None;
+    }
+    if let Some(map_receiver) = map_key_set_backing_receiver(receiver, env) {
+        let lowered_map = lower_map_key_set_backing_map(map_receiver, env, ctx, refinements)?;
+        let receiver_ty = crate::types::infer_expr_type(map_receiver, env.type_env());
+        let (key_ty, _) = crate::stdlib::java_map_type_args(&receiver_ty)?;
+        let projected = map_view_to_array_projection(
+            crate::coercion::owned_map_keys_vec_projection(lowered_map),
+            key_ty,
+        );
+        let actual = value_shape_for_java_type(
+            ctx.representations,
+            JavaType::Array(Box::new(key_ty.clone())),
+        );
+        return Some((projected, actual));
+    }
+    if let Some(map_receiver) = map_values_backing_receiver(receiver, env) {
+        let lowered_map = lower_map_key_set_backing_map(map_receiver, env, ctx, refinements)?;
+        let receiver_ty = crate::types::infer_expr_type(map_receiver, env.type_env());
+        let (_, value_ty) = crate::stdlib::java_map_type_args(&receiver_ty)?;
+        let projected = map_view_to_array_projection(
+            crate::coercion::owned_map_values_vec_projection(lowered_map),
+            value_ty,
+        );
+        let actual = value_shape_for_java_type(
+            ctx.representations,
+            JavaType::Array(Box::new(value_ty.clone())),
+        );
+        return Some((projected, actual));
+    }
+    if let Some(map_receiver) = map_entry_set_backing_receiver(receiver, env) {
+        let lowered_map = lower_map_key_set_backing_map(map_receiver, env, ctx, refinements)?;
+        let receiver_ty = crate::types::infer_expr_type(map_receiver, env.type_env());
+        let (key_ty, value_ty) = crate::stdlib::java_map_type_args(&receiver_ty)?;
+        let entry_ty = JavaType::Named {
+            name: "Map.Entry".to_string(),
+            args: vec![key_ty.clone(), value_ty.clone()],
+        };
+        let projected =
+            map_view_to_array_projection(owned_map_entries_vec_projection(lowered_map), &entry_ty);
+        let actual =
+            value_shape_for_java_type(ctx.representations, JavaType::Array(Box::new(entry_ty)));
+        return Some((projected, actual));
+    }
+    None
+}
+
+fn lower_map_entry_set_to_erased_object_array_slot_call(
+    receiver: Option<&Expr>,
+    name: &str,
+    args: &[Expr],
+    env: &ShapeEnv,
+    slot: &Slot,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    if !matches!(name, "toArray" | "to_array")
+        || args.len() > 1
+        || !slot_targets_erased_object_array(slot, ctx)
+    {
+        return None;
+    }
+    let map_receiver = map_entry_set_backing_receiver(receiver, env)?;
+    let lowered_map = lower_map_key_set_backing_map(map_receiver, env, ctx, refinements)?;
+    Some(owned_map_entries_erased_object_array_projection(
+        lowered_map,
+    ))
+}
+
+fn slot_targets_erased_object_array(slot: &Slot, ctx: LowerCtx) -> bool {
+    let Some(target) = slot_target_shape(slot) else {
+        return false;
+    };
+    let JavaType::Array(element_ty) = &target.java_ty else {
+        return false;
+    };
+    let element_shape = value_shape_for_java_type(ctx.representations, element_ty.as_ref().clone());
+    shape_is_erased_object_boundary(&element_shape)
+}
+
+fn map_view_to_array_projection(expr: RustExpr, element_ty: &JavaType) -> RustExpr {
+    if !matches!(
+        element_ty,
+        JavaType::Primitive(_) | JavaType::Void | JavaType::Array(_)
+    ) && crate::types::optional_element_type(element_ty).is_none()
+    {
+        owned_sequence_elements_to_optional_vec_projection(expr)
+    } else {
+        expr
+    }
+}
+
 fn lower_map_entry_set_collection_call(
     receiver: Option<&Expr>,
     name: &str,
@@ -42704,7 +43560,28 @@ fn lower_map_entry_set_collection_call(
             ctx,
             refinements,
         ),
+        ("containsAll" | "contains_all", 1) => lower_map_entry_set_contains_all_from_backing_map(
+            map_receiver,
+            &args[0],
+            env,
+            ctx,
+            refinements,
+        ),
         ("remove", 1) => lower_map_entry_set_remove_from_backing_map(
+            map_receiver,
+            &args[0],
+            env,
+            ctx,
+            refinements,
+        ),
+        ("removeAll" | "remove_all", 1) => lower_map_entry_set_remove_all_from_backing_map(
+            map_receiver,
+            &args[0],
+            env,
+            ctx,
+            refinements,
+        ),
+        ("retainAll" | "retain_all", 1) => lower_map_entry_set_retain_all_from_backing_map(
             map_receiver,
             &args[0],
             env,
@@ -42763,6 +43640,320 @@ fn lower_map_entry_set_unsupported_mutation_from_backing_map(
             ctx,
             "Java Map.entrySet view does not support add",
         ))),
+    })
+}
+
+fn lower_map_entry_set_contains_all_from_backing_map(
+    map_receiver: &Expr,
+    entries_arg: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    if map_entry_set_source_aliases_receiver(entries_arg, map_receiver, env) {
+        return Some(RustExpr::Literal("true".to_string()));
+    }
+    let lowered_map = lower_map_key_set_backing_map(map_receiver, env, ctx, refinements)?;
+    let lowered_entries = lower_map_view_bulk_collection_arg(entries_arg, env, ctx, refinements)?;
+    let map_name = "__java_map_entry_set_contains_all_map";
+    let entries_name = "__java_map_entry_set_contains_all_entries";
+    Some(RustExpr::Block {
+        stmts: vec![
+            RustStmt::Let {
+                mutable: false,
+                name: entries_name.to_string(),
+                ty: None,
+                value: Some(lowered_entries),
+            },
+            RustStmt::Let {
+                mutable: false,
+                name: map_name.to_string(),
+                ty: None,
+                value: Some(map_view_backing_borrow(map_receiver, lowered_map, env)),
+            },
+        ],
+        tail: Some(Box::new(receiver_method_call_projection_exact(
+            receiver_method_call_projection_exact(
+                RustExpr::Var(entries_name.to_string()),
+                "iter",
+                Vec::new(),
+            ),
+            "all",
+            vec![RustExpr::Closure {
+                is_move: false,
+                return_type: None,
+                params: vec![RustClosureParam {
+                    pattern: "entry".to_string(),
+                    ty: None,
+                }],
+                body: RustClosureBody::Expr(Box::new(map_entry_key_value_contains_expr(
+                    RustExpr::Var(map_name.to_string()),
+                    RustExpr::Unary {
+                        op: "&".to_string(),
+                        expr: Box::new(tuple_field_projection(
+                            RustExpr::Var("entry".to_string()),
+                            0,
+                        )),
+                    },
+                    RustExpr::Unary {
+                        op: "&".to_string(),
+                        expr: Box::new(tuple_field_projection(
+                            RustExpr::Var("entry".to_string()),
+                            1,
+                        )),
+                    },
+                ))),
+            }],
+        ))),
+    })
+}
+
+fn lower_map_entry_set_retain_all_from_backing_map(
+    map_receiver: &Expr,
+    entries_arg: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    if map_entry_set_source_aliases_receiver(entries_arg, map_receiver, env) {
+        return Some(RustExpr::Literal("false".to_string()));
+    }
+    let receiver_ty = crate::types::infer_expr_type(map_receiver, env.type_env());
+    if !crate::stdlib::java_collection_kind_for_type(&receiver_ty)
+        .is_some_and(|kind| kind.is_map_like())
+    {
+        return None;
+    }
+    let lowered_entries = lower_map_view_bulk_collection_arg(entries_arg, env, ctx, refinements)?;
+    let lowered_map = lower_expr_with_refinements(map_receiver, env, ctx, refinements);
+    let entries_name = "__java_map_entry_set_retain_all_entries";
+    let map_name = "__java_map_entry_set_retain_all_map";
+    let before_name = "__java_map_entry_set_retain_all_before";
+    Some(RustExpr::Block {
+        stmts: vec![
+            RustStmt::Let {
+                mutable: false,
+                name: entries_name.to_string(),
+                ty: None,
+                value: Some(lowered_entries),
+            },
+            RustStmt::Let {
+                mutable: false,
+                name: map_name.to_string(),
+                ty: None,
+                value: Some(mutable_map_view_backing_borrow(
+                    map_receiver,
+                    lowered_map,
+                    env,
+                )),
+            },
+            RustStmt::Let {
+                mutable: false,
+                name: before_name.to_string(),
+                ty: None,
+                value: Some(receiver_method_call_projection_exact(
+                    RustExpr::Var(map_name.to_string()),
+                    "len",
+                    Vec::new(),
+                )),
+            },
+            RustStmt::Expr(receiver_method_call_projection_exact(
+                RustExpr::Var(map_name.to_string()),
+                "retain",
+                vec![RustExpr::Closure {
+                    is_move: false,
+                    return_type: None,
+                    params: vec![
+                        RustClosureParam {
+                            pattern: "key".to_string(),
+                            ty: None,
+                        },
+                        RustClosureParam {
+                            pattern: "value".to_string(),
+                            ty: None,
+                        },
+                    ],
+                    body: RustClosureBody::Expr(Box::new(receiver_method_call_projection_exact(
+                        receiver_method_call_projection_exact(
+                            RustExpr::Var(entries_name.to_string()),
+                            "iter",
+                            Vec::new(),
+                        ),
+                        "any",
+                        vec![RustExpr::Closure {
+                            is_move: false,
+                            return_type: None,
+                            params: vec![RustClosureParam {
+                                pattern: "entry".to_string(),
+                                ty: None,
+                            }],
+                            body: RustClosureBody::Expr(Box::new(
+                                map_entry_tuple_matches_key_value_projection(
+                                    RustExpr::Var("entry".to_string()),
+                                    RustExpr::Var("key".to_string()),
+                                    RustExpr::Unary {
+                                        op: "&*".to_string(),
+                                        expr: Box::new(RustExpr::Var("value".to_string())),
+                                    },
+                                ),
+                            )),
+                        }],
+                    ))),
+                }],
+            )),
+        ],
+        tail: Some(Box::new(RustExpr::Binary {
+            op: "!=".to_string(),
+            left: Box::new(receiver_method_call_projection_exact(
+                RustExpr::Var(map_name.to_string()),
+                "len",
+                Vec::new(),
+            )),
+            right: Box::new(RustExpr::Var(before_name.to_string())),
+        })),
+    })
+}
+
+fn lower_map_entry_set_remove_all_from_backing_map(
+    map_receiver: &Expr,
+    entries_arg: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    let receiver_ty = crate::types::infer_expr_type(map_receiver, env.type_env());
+    if !crate::stdlib::java_collection_kind_for_type(&receiver_ty)
+        .is_some_and(|kind| kind.is_map_like())
+    {
+        return None;
+    }
+    let lowered_map = lower_expr_with_refinements(map_receiver, env, ctx, refinements);
+    let entries_name = "__java_map_entry_set_remove_all_entries";
+    let map_name = "__java_map_entry_set_remove_all_map";
+    let before_name = "__java_map_entry_set_remove_all_before";
+
+    if map_entry_set_source_aliases_receiver(entries_arg, map_receiver, env) {
+        return Some(RustExpr::Block {
+            stmts: vec![
+                RustStmt::Let {
+                    mutable: false,
+                    name: map_name.to_string(),
+                    ty: None,
+                    value: Some(mutable_map_view_backing_borrow(
+                        map_receiver,
+                        lowered_map,
+                        env,
+                    )),
+                },
+                RustStmt::Let {
+                    mutable: false,
+                    name: before_name.to_string(),
+                    ty: None,
+                    value: Some(receiver_method_call_projection_exact(
+                        RustExpr::Var(map_name.to_string()),
+                        "len",
+                        Vec::new(),
+                    )),
+                },
+                RustStmt::Expr(receiver_method_call_projection_exact(
+                    RustExpr::Var(map_name.to_string()),
+                    "clear",
+                    Vec::new(),
+                )),
+            ],
+            tail: Some(Box::new(RustExpr::Binary {
+                op: "!=".to_string(),
+                left: Box::new(RustExpr::Var(before_name.to_string())),
+                right: Box::new(RustExpr::Literal("0".to_string())),
+            })),
+        });
+    }
+
+    let lowered_entries = lower_map_view_bulk_collection_arg(entries_arg, env, ctx, refinements)?;
+    Some(RustExpr::Block {
+        stmts: vec![
+            RustStmt::Let {
+                mutable: false,
+                name: entries_name.to_string(),
+                ty: None,
+                value: Some(lowered_entries),
+            },
+            RustStmt::Let {
+                mutable: false,
+                name: map_name.to_string(),
+                ty: None,
+                value: Some(mutable_map_view_backing_borrow(
+                    map_receiver,
+                    lowered_map,
+                    env,
+                )),
+            },
+            RustStmt::Let {
+                mutable: false,
+                name: before_name.to_string(),
+                ty: None,
+                value: Some(receiver_method_call_projection_exact(
+                    RustExpr::Var(map_name.to_string()),
+                    "len",
+                    Vec::new(),
+                )),
+            },
+            RustStmt::Expr(receiver_method_call_projection_exact(
+                RustExpr::Var(map_name.to_string()),
+                "retain",
+                vec![RustExpr::Closure {
+                    is_move: false,
+                    return_type: None,
+                    params: vec![
+                        RustClosureParam {
+                            pattern: "key".to_string(),
+                            ty: None,
+                        },
+                        RustClosureParam {
+                            pattern: "value".to_string(),
+                            ty: None,
+                        },
+                    ],
+                    body: RustClosureBody::Expr(Box::new(logical_not_projection(
+                        receiver_method_call_projection_exact(
+                            receiver_method_call_projection_exact(
+                                RustExpr::Var(entries_name.to_string()),
+                                "iter",
+                                Vec::new(),
+                            ),
+                            "any",
+                            vec![RustExpr::Closure {
+                                is_move: false,
+                                return_type: None,
+                                params: vec![RustClosureParam {
+                                    pattern: "entry".to_string(),
+                                    ty: None,
+                                }],
+                                body: RustClosureBody::Expr(Box::new(
+                                    map_entry_tuple_matches_key_value_projection(
+                                        RustExpr::Var("entry".to_string()),
+                                        RustExpr::Var("key".to_string()),
+                                        RustExpr::Unary {
+                                            op: "&*".to_string(),
+                                            expr: Box::new(RustExpr::Var("value".to_string())),
+                                        },
+                                    ),
+                                )),
+                            }],
+                        ),
+                    ))),
+                }],
+            )),
+        ],
+        tail: Some(Box::new(RustExpr::Binary {
+            op: "!=".to_string(),
+            left: Box::new(receiver_method_call_projection_exact(
+                RustExpr::Var(map_name.to_string()),
+                "len",
+                Vec::new(),
+            )),
+            right: Box::new(RustExpr::Var(before_name.to_string())),
+        })),
     })
 }
 
@@ -42847,27 +44038,14 @@ fn lower_map_entry_set_contains_local_from_backing_map(
         return None;
     }
     let lowered_map = lower_map_key_set_backing_map(map_receiver, env, ctx, refinements)?;
-    let key_name = "__java_map_entry_set_contains_key";
-    let key = apply_clone_projection(deref_borrowed_projection(tuple_field_projection(
-        RustExpr::Var(local_name.to_string()),
-        0,
-    )));
-    Some(RustExpr::Block {
-        stmts: vec![RustStmt::Let {
-            mutable: false,
-            name: key_name.to_string(),
-            ty: None,
-            value: Some(key),
-        }],
-        tail: Some(Box::new(receiver_method_call_projection_exact(
-            lowered_map,
-            "contains_key",
-            vec![RustExpr::Unary {
-                op: "&".to_string(),
-                expr: Box::new(RustExpr::Var(key_name.to_string())),
-            }],
-        ))),
-    })
+    let prefix = "__java_map_entry_set_contains";
+    let (key, value) = map_entry_local_key_value_projection(local_name, env);
+    Some(map_entry_set_key_value_contains_projection(
+        lowered_map,
+        key,
+        value,
+        prefix,
+    ))
 }
 
 fn lower_map_entry_set_contains_next_from_backing_map(
@@ -42883,7 +44061,9 @@ fn lower_map_entry_set_contains_next_from_backing_map(
     }
     let lowered_map = lower_map_key_set_backing_map(map_receiver, env, ctx, refinements)?;
     let map_name = "__java_map_entry_set_contains_map";
+    let entry_name = "__java_map_entry_set_contains_entry";
     let key_name = "__java_map_entry_set_contains_key";
+    let value_name = "__java_map_entry_set_contains_value";
     let next_entry = iterator_next_projection_for_ctx(
         receiver_method_call_projection_exact(
             RustExpr::Var(map_name.to_string()),
@@ -42893,7 +44073,12 @@ fn lower_map_entry_set_contains_next_from_backing_map(
         ctx,
     );
     let key = apply_clone_projection(deref_borrowed_projection(tuple_field_projection(
-        next_entry, 0,
+        RustExpr::Var(entry_name.to_string()),
+        0,
+    )));
+    let value = apply_clone_projection(deref_borrowed_projection(tuple_field_projection(
+        RustExpr::Var(entry_name.to_string()),
+        1,
     )));
     Some(RustExpr::Block {
         stmts: vec![
@@ -42908,20 +44093,38 @@ fn lower_map_entry_set_contains_next_from_backing_map(
             },
             RustStmt::Let {
                 mutable: false,
+                name: entry_name.to_string(),
+                ty: None,
+                value: Some(next_entry),
+            },
+            RustStmt::Let {
+                mutable: false,
                 name: key_name.to_string(),
                 ty: None,
                 value: Some(key),
             },
+            RustStmt::Let {
+                mutable: false,
+                name: value_name.to_string(),
+                ty: None,
+                value: Some(value),
+            },
         ],
-        tail: Some(Box::new(receiver_method_call_projection_exact(
+        tail: Some(Box::new(map_entry_set_key_value_contains_tail(
             RustExpr::Var(map_name.to_string()),
-            "contains_key",
-            vec![RustExpr::Unary {
-                op: "&".to_string(),
-                expr: Box::new(RustExpr::Var(key_name.to_string())),
-            }],
+            key_name,
+            value_name,
         ))),
     })
+}
+
+fn map_entry_set_source_aliases_receiver(
+    source: &Expr,
+    map_receiver: &Expr,
+    env: &ShapeEnv,
+) -> bool {
+    map_entry_set_backing_receiver(Some(source), env)
+        .is_some_and(|source_map| source_map == map_receiver)
 }
 
 fn lower_map_entry_set_remove_from_backing_map(
@@ -42964,7 +44167,9 @@ fn lower_map_entry_set_remove_from_backing_map(
     }
     let lowered_map = lower_map_key_set_backing_map(map_receiver, env, ctx, refinements)?;
     let map_name = "__java_map_entry_set_remove_map";
+    let entry_name = "__java_map_entry_set_remove_entry";
     let key_name = "__java_map_entry_set_remove_key";
+    let value_name = "__java_map_entry_set_remove_value";
     let next_entry = iterator_next_projection_for_ctx(
         receiver_method_call_projection_exact(
             RustExpr::Var(map_name.to_string()),
@@ -42974,7 +44179,12 @@ fn lower_map_entry_set_remove_from_backing_map(
         ctx,
     );
     let key = apply_clone_projection(deref_borrowed_projection(tuple_field_projection(
-        next_entry, 0,
+        RustExpr::Var(entry_name.to_string()),
+        0,
+    )));
+    let value = apply_clone_projection(deref_borrowed_projection(tuple_field_projection(
+        RustExpr::Var(entry_name.to_string()),
+        1,
     )));
     Some(RustExpr::Block {
         stmts: vec![
@@ -42990,23 +44200,43 @@ fn lower_map_entry_set_remove_from_backing_map(
             },
             RustStmt::Let {
                 mutable: false,
+                name: entry_name.to_string(),
+                ty: None,
+                value: Some(next_entry),
+            },
+            RustStmt::Let {
+                mutable: false,
                 name: key_name.to_string(),
                 ty: None,
                 value: Some(key),
             },
+            RustStmt::Let {
+                mutable: false,
+                name: value_name.to_string(),
+                ty: None,
+                value: Some(value),
+            },
         ],
-        tail: Some(Box::new(receiver_method_call_projection_exact(
-            receiver_method_call_projection_exact(
+        tail: Some(Box::new(RustExpr::If {
+            condition: Box::new(map_entry_set_key_value_contains_tail(
                 RustExpr::Var(map_name.to_string()),
-                "remove",
-                vec![RustExpr::Unary {
-                    op: "&".to_string(),
-                    expr: Box::new(RustExpr::Var(key_name.to_string())),
-                }],
-            ),
-            "is_some",
-            Vec::new(),
-        ))),
+                key_name,
+                value_name,
+            )),
+            then_expr: Box::new(receiver_method_call_projection_exact(
+                receiver_method_call_projection_exact(
+                    RustExpr::Var(map_name.to_string()),
+                    "remove",
+                    vec![RustExpr::Unary {
+                        op: "&".to_string(),
+                        expr: Box::new(RustExpr::Var(key_name.to_string())),
+                    }],
+                ),
+                "is_some",
+                Vec::new(),
+            )),
+            else_expr: Box::new(RustExpr::Literal("false".to_string())),
+        })),
     })
 }
 
@@ -43027,10 +44257,8 @@ fn lower_map_entry_set_remove_local_from_backing_map(
     let lowered_map = lower_map_key_set_backing_map(map_receiver, env, ctx, refinements)?;
     let map_name = "__java_map_entry_set_remove_map";
     let key_name = "__java_map_entry_set_remove_key";
-    let key = apply_clone_projection(deref_borrowed_projection(tuple_field_projection(
-        RustExpr::Var(local_name.to_string()),
-        0,
-    )));
+    let value_name = "__java_map_entry_set_remove_value";
+    let (key, value) = map_entry_local_key_value_projection(local_name, env);
     Some(RustExpr::Block {
         stmts: vec![
             RustStmt::Let {
@@ -43038,6 +44266,12 @@ fn lower_map_entry_set_remove_local_from_backing_map(
                 name: key_name.to_string(),
                 ty: None,
                 value: Some(key),
+            },
+            RustStmt::Let {
+                mutable: false,
+                name: value_name.to_string(),
+                ty: None,
+                value: Some(value),
             },
             RustStmt::Let {
                 mutable: false,
@@ -43050,19 +44284,47 @@ fn lower_map_entry_set_remove_local_from_backing_map(
                 )),
             },
         ],
-        tail: Some(Box::new(receiver_method_call_projection_exact(
-            receiver_method_call_projection_exact(
+        tail: Some(Box::new(RustExpr::If {
+            condition: Box::new(map_entry_set_key_value_contains_tail(
                 RustExpr::Var(map_name.to_string()),
-                "remove",
-                vec![RustExpr::Unary {
-                    op: "&".to_string(),
-                    expr: Box::new(RustExpr::Var(key_name.to_string())),
-                }],
-            ),
-            "is_some",
-            Vec::new(),
-        ))),
+                key_name,
+                value_name,
+            )),
+            then_expr: Box::new(receiver_method_call_projection_exact(
+                receiver_method_call_projection_exact(
+                    RustExpr::Var(map_name.to_string()),
+                    "remove",
+                    vec![RustExpr::Unary {
+                        op: "&".to_string(),
+                        expr: Box::new(RustExpr::Var(key_name.to_string())),
+                    }],
+                ),
+                "is_some",
+                Vec::new(),
+            )),
+            else_expr: Box::new(RustExpr::Literal("false".to_string())),
+        })),
     })
+}
+
+fn map_entry_local_key_value_projection(local_name: &str, env: &ShapeEnv) -> (RustExpr, RustExpr) {
+    (
+        map_entry_local_field_projection(local_name, 0, env),
+        map_entry_local_field_projection(local_name, 1, env),
+    )
+}
+
+fn map_entry_local_field_projection(local_name: &str, index: usize, env: &ShapeEnv) -> RustExpr {
+    let field = tuple_field_projection(RustExpr::Var(local_name.to_string()), index);
+    let field = if env
+        .local_shape(local_name)
+        .is_some_and(|shape| shape.ownership == OwnershipShape::Owned)
+    {
+        field
+    } else {
+        deref_borrowed_projection(field)
+    };
+    apply_clone_projection(field)
 }
 
 fn lower_map_entry_set_remove_simple_entry_from_backing_map(
@@ -43253,15 +44515,22 @@ fn map_entry_set_key_value_contains_tail(
     key_name: &str,
     value_name: &str,
 ) -> RustExpr {
+    map_entry_key_value_contains_expr(
+        map,
+        RustExpr::Unary {
+            op: "&".to_string(),
+            expr: Box::new(RustExpr::Var(key_name.to_string())),
+        },
+        RustExpr::Unary {
+            op: "&".to_string(),
+            expr: Box::new(RustExpr::Var(value_name.to_string())),
+        },
+    )
+}
+
+fn map_entry_key_value_contains_expr(map: RustExpr, key: RustExpr, value: RustExpr) -> RustExpr {
     receiver_method_call_projection_exact(
-        receiver_method_call_projection_exact(
-            map,
-            "get",
-            vec![RustExpr::Unary {
-                op: "&".to_string(),
-                expr: Box::new(RustExpr::Var(key_name.to_string())),
-            }],
-        ),
+        receiver_method_call_projection_exact(map, "get", vec![key]),
         "is_some_and",
         vec![RustExpr::Closure {
             is_move: false,
@@ -43273,13 +44542,36 @@ fn map_entry_set_key_value_contains_tail(
             body: RustClosureBody::Expr(Box::new(RustExpr::Binary {
                 op: "==".to_string(),
                 left: Box::new(RustExpr::Var("value".to_string())),
-                right: Box::new(RustExpr::Unary {
-                    op: "&".to_string(),
-                    expr: Box::new(RustExpr::Var(value_name.to_string())),
-                }),
+                right: Box::new(value),
             })),
         }],
     )
+}
+
+fn map_entry_tuple_matches_key_value_projection(
+    entry: RustExpr,
+    key: RustExpr,
+    value: RustExpr,
+) -> RustExpr {
+    RustExpr::Binary {
+        op: "&&".to_string(),
+        left: Box::new(RustExpr::Binary {
+            op: "==".to_string(),
+            left: Box::new(key),
+            right: Box::new(RustExpr::Unary {
+                op: "&".to_string(),
+                expr: Box::new(tuple_field_projection(entry.clone(), 0)),
+            }),
+        }),
+        right: Box::new(RustExpr::Binary {
+            op: "==".to_string(),
+            left: Box::new(value),
+            right: Box::new(RustExpr::Unary {
+                op: "&".to_string(),
+                expr: Box::new(tuple_field_projection(entry, 1)),
+            }),
+        }),
+    }
 }
 
 fn lower_simple_map_entry_display_for_slot(
@@ -43486,6 +44778,20 @@ fn java_type_is_simple_map_entry(ty: &JavaType) -> bool {
     )
 }
 
+fn simple_map_entry_constructor_is_immutable(expr: &Expr) -> bool {
+    let Expr::New { ty, args, .. } = expr else {
+        return false;
+    };
+    args.len() == 2 && java_type_is_simple_immutable_map_entry(ty)
+}
+
+fn java_type_is_simple_immutable_map_entry(ty: &JavaType) -> bool {
+    let JavaType::Named { name, .. } = ty else {
+        return false;
+    };
+    name.rsplit('.').next().unwrap_or(name).trim() == "SimpleImmutableEntry"
+}
+
 fn map_entry_set_backing_receiver<'a>(
     receiver: Option<&'a Expr>,
     env: &'a ShapeEnv,
@@ -43560,6 +44866,16 @@ fn lower_map_values_call_from_backing_map(
         }
         ("removeAll" | "remove_all", 1) => {
             lower_map_values_remove_all_from_backing_map(map_receiver, args, env, ctx, refinements)
+        }
+        ("containsAll" | "contains_all", 1) => lower_map_values_contains_all_from_backing_map(
+            map_receiver,
+            args,
+            env,
+            ctx,
+            refinements,
+        ),
+        ("retainAll" | "retain_all", 1) => {
+            lower_map_values_retain_all_from_backing_map(map_receiver, args, env, ctx, refinements)
         }
         ("add", 1) | ("addAll" | "add_all", 1) => {
             lower_map_values_unsupported_mutation_from_backing_map(
@@ -43688,6 +45004,72 @@ fn lower_map_values_contains_from_backing_map(
                         expr: Box::new(RustExpr::Var(needle_name.to_string())),
                     }),
                 })),
+            }],
+        ))),
+    })
+}
+
+fn lower_map_values_contains_all_from_backing_map(
+    map_receiver: &Expr,
+    args: &[Expr],
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    let lowered_values = lower_map_view_bulk_collection_arg(&args[0], env, ctx, refinements)?;
+    let lowered_map = lower_map_key_set_backing_map(map_receiver, env, ctx, refinements)?;
+    let values_name = "__java_map_values_contains_all_values";
+    let map_name = "__java_map_values_contains_all_map";
+    Some(RustExpr::Block {
+        stmts: vec![
+            RustStmt::Let {
+                mutable: false,
+                name: values_name.to_string(),
+                ty: None,
+                value: Some(lowered_values),
+            },
+            RustStmt::Let {
+                mutable: false,
+                name: map_name.to_string(),
+                ty: None,
+                value: Some(map_view_backing_borrow(map_receiver, lowered_map, env)),
+            },
+        ],
+        tail: Some(Box::new(receiver_method_call_projection_exact(
+            receiver_method_call_projection_exact(
+                RustExpr::Var(values_name.to_string()),
+                "iter",
+                Vec::new(),
+            ),
+            "all",
+            vec![RustExpr::Closure {
+                is_move: false,
+                return_type: None,
+                params: vec![RustClosureParam {
+                    pattern: "required".to_string(),
+                    ty: None,
+                }],
+                body: RustClosureBody::Expr(Box::new(receiver_method_call_projection_exact(
+                    receiver_method_call_projection_exact(
+                        RustExpr::Var(map_name.to_string()),
+                        "values",
+                        Vec::new(),
+                    ),
+                    "any",
+                    vec![RustExpr::Closure {
+                        is_move: false,
+                        return_type: None,
+                        params: vec![RustClosureParam {
+                            pattern: "value".to_string(),
+                            ty: None,
+                        }],
+                        body: RustClosureBody::Expr(Box::new(RustExpr::Binary {
+                            op: "==".to_string(),
+                            left: Box::new(RustExpr::Var("value".to_string())),
+                            right: Box::new(RustExpr::Var("required".to_string())),
+                        })),
+                    }],
+                ))),
             }],
         ))),
     })
@@ -43887,6 +45269,88 @@ fn lower_map_values_remove_all_from_backing_map(
                             "contains",
                             vec![RustExpr::Var("value".to_string())],
                         ),
+                    ))),
+                }],
+            )),
+        ],
+        tail: Some(Box::new(RustExpr::Binary {
+            op: "!=".to_string(),
+            left: Box::new(receiver_method_call_projection_exact(
+                RustExpr::Var(map_name.to_string()),
+                "len",
+                Vec::new(),
+            )),
+            right: Box::new(RustExpr::Var(before_name.to_string())),
+        })),
+    })
+}
+
+fn lower_map_values_retain_all_from_backing_map(
+    map_receiver: &Expr,
+    args: &[Expr],
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    let receiver_ty = crate::types::infer_expr_type(map_receiver, env.type_env());
+    if !crate::stdlib::java_collection_kind_for_type(&receiver_ty)
+        .is_some_and(|kind| kind.is_map_like())
+    {
+        return None;
+    }
+    let lowered_values = lower_map_view_bulk_collection_arg(&args[0], env, ctx, refinements)?;
+    let lowered_map = lower_expr_with_refinements(map_receiver, env, ctx, refinements);
+    let values_name = "__java_map_values_retain_all_values";
+    let map_name = "__java_map_values_retain_all_map";
+    let before_name = "__java_map_values_retain_all_before";
+    Some(RustExpr::Block {
+        stmts: vec![
+            RustStmt::Let {
+                mutable: false,
+                name: values_name.to_string(),
+                ty: None,
+                value: Some(lowered_values),
+            },
+            RustStmt::Let {
+                mutable: false,
+                name: map_name.to_string(),
+                ty: None,
+                value: Some(mutable_map_view_backing_borrow(
+                    map_receiver,
+                    lowered_map,
+                    env,
+                )),
+            },
+            RustStmt::Let {
+                mutable: false,
+                name: before_name.to_string(),
+                ty: None,
+                value: Some(receiver_method_call_projection_exact(
+                    RustExpr::Var(map_name.to_string()),
+                    "len",
+                    Vec::new(),
+                )),
+            },
+            RustStmt::Expr(receiver_method_call_projection_exact(
+                RustExpr::Var(map_name.to_string()),
+                "retain",
+                vec![RustExpr::Closure {
+                    is_move: false,
+                    return_type: None,
+                    params: vec![
+                        RustClosureParam {
+                            pattern: "_key".to_string(),
+                            ty: None,
+                        },
+                        RustClosureParam {
+                            pattern: "value".to_string(),
+                            ty: None,
+                        },
+                    ],
+                    body: RustClosureBody::Expr(Box::new(receiver_method_call_projection_exact(
+                        RustExpr::Var(values_name.to_string()),
+                        "contains",
+                        vec![RustExpr::Var("value".to_string())],
                     ))),
                 }],
             )),
@@ -44764,6 +46228,16 @@ fn lower_external_call_expr_for_slot(
         ctx,
     )
     .or_else(|| {
+        source_context_resolved_static_method_fallback_signature(
+            receiver.as_deref(),
+            name,
+            args,
+            resolved.as_ref(),
+            env,
+            ctx,
+        )
+    })
+    .or_else(|| {
         source_context_static_method_fallback_signature(receiver.as_deref(), name, args, env, ctx)
     })
     .or_else(|| {
@@ -44822,12 +46296,23 @@ fn lower_external_call_expr_for_slot(
         env,
         ctx,
     );
+    let target =
+        retarget_source_context_static_overload_name(target, context_fallback_signature.as_ref());
+    let target = retarget_resolved_source_static_overload_name(target, resolved.as_ref(), ctx);
     let target = retarget_java_logging_facade_call(target, receiver.as_deref(), name);
     let target = retarget_external_receiver_overload_name(
         target,
         receiver.as_deref(),
         name,
         args.len(),
+        env,
+        ctx,
+    );
+    let target = retarget_source_declared_static_overload_name(
+        target,
+        receiver.as_deref(),
+        name,
+        args,
         env,
         ctx,
     );
@@ -47717,6 +49202,27 @@ mod tests {
         }
     }
 
+    fn static_int_method_with_param(name: &str, param_ty: JavaType) -> MethodDecl {
+        MethodDecl {
+            name: name.to_string(),
+            rust_name: None,
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            return_type: JavaType::Primitive(PrimitiveType::Int),
+            throws: Vec::new(),
+            params: vec![Param {
+                name: "value".to_string(),
+                source_name: "value".to_string(),
+                ty: param_ty,
+                is_varargs: false,
+                binding: None,
+            }],
+            modifiers: vec![Modifier::Static],
+            body: None,
+            span: Default::default(),
+        }
+    }
+
     fn instance_void_method(name: &str) -> MethodDecl {
         MethodDecl {
             modifiers: Vec::new(),
@@ -49258,7 +50764,7 @@ class Path {
         );
         env.insert_field_shape(
             "lookup".to_string(),
-            RustSlotShape::for_storage(crate::types::optional_java_type(lookup_ty)),
+            RustSlotShape::for_storage(crate::types::optional_java_type(lookup_ty.clone())),
         );
         env.insert_local_shape(
             "sample".to_string(),
@@ -49291,6 +50797,39 @@ class Path {
                 expected
             );
         }
+
+        let mut shared_field_env = ShapeEnv::default();
+        let mut shared_optional_lookup =
+            RustSlotShape::for_storage(crate::types::optional_java_type(lookup_ty.clone()));
+        shared_optional_lookup.ownership = OwnershipShape::SharedBorrow;
+        shared_field_env.insert_field_shape_with_access_name_and_java_type(
+            "lookup",
+            "lookup",
+            shared_optional_lookup,
+            lookup_ty,
+        );
+        shared_field_env.insert_local_shape(
+            "sample".to_string(),
+            RustSlotShape::for_storage(JavaType::String),
+        );
+        let call = Expr::Call {
+            receiver: Some(Box::new(Expr::FieldAccess(
+                Box::new(Expr::This),
+                "lookup".to_string(),
+            ))),
+            name: "find".to_string(),
+            args: vec![Expr::Var("sample".to_string())],
+            resolved: None,
+        };
+
+        assert_eq!(
+            planned_method_call_return_shape(&call, &shared_field_env, ctx).and_then(|shape| {
+                shape
+                    .optional_element_type()
+                    .map(|element_ty| (shape.ownership, element_ty))
+            }),
+            expected
+        );
     }
 
     #[test]
@@ -50159,6 +51698,27 @@ class Path {
     }
 
     #[test]
+    fn bare_static_storage_update_uses_recorded_owner_for_getter_and_setter() {
+        let mut env = ShapeEnv::new();
+        env.insert_static_storage_field_shape_owned_by_with_access_name(
+            "a.Counter",
+            "count",
+            "count",
+            RustSlotShape::for_storage(JavaType::Primitive(PrimitiveType::Int)),
+        );
+        let ctx = LowerCtx {
+            current_type: Some("Use"),
+            ..lower_test_ctx()
+        };
+
+        let plan = static_storage_update_plan(&Expr::Var("count".to_string()), &env, ctx)
+            .expect("bare static storage update should resolve through recorded field owner");
+
+        assert_eq!(emit_expr(&plan.getter), "ACounter::__static_count()");
+        assert_eq!(emit_expr(&plan.setter), "ACounter::__set_static_count");
+    }
+
+    #[test]
     fn source_declared_instance_method_lookup_refuses_cross_program_ambiguous_owner() {
         fn renamed_instance_method(java_name: &str, rust_name: &str) -> MethodDecl {
             MethodDecl {
@@ -50248,6 +51808,116 @@ class Path {
         .expect("unique simple receiver should resolve to support a.Util");
 
         assert_eq!(signature.owner.as_deref(), Some("a.Util"));
+    }
+
+    #[test]
+    fn source_context_static_fallback_selects_summary_overload_by_arg_type() {
+        let program = Box::leak(Box::new(Program::default()));
+        let mut summary_program = Program {
+            package: Some("dep".to_string()),
+            imports: Vec::new(),
+            types: vec![TypeDecl {
+                members: vec![
+                    Member::Method(static_int_method_with_param(
+                        "pick",
+                        JavaType::Primitive(PrimitiveType::Int),
+                    )),
+                    Member::Method(static_int_method_with_param("pick", JavaType::String)),
+                ],
+                ..empty_type_decl("dep.Util")
+            }],
+        };
+        crate::resolve::assign_rust_names_to_context_program(&mut summary_program);
+        let summary = Box::leak(Box::new(summary_program));
+        let ctx = LowerCtx {
+            program,
+            support_local_type_program: &Program::default(),
+            source_summary_type_program: summary,
+            ..lower_test_ctx()
+        };
+        let mut env = ShapeEnv::default();
+        for receiver in ["Util", "DepUtil"] {
+            let int_signature = source_context_static_method_fallback_signature(
+                Some(&Expr::Var(receiver.to_string())),
+                "pick",
+                &[Expr::Literal(Literal::Int(1))],
+                &env,
+                ctx,
+            )
+            .expect("int summary overload should be selected");
+            let string_signature = source_context_static_method_fallback_signature(
+                Some(&Expr::Var(receiver.to_string())),
+                "pick",
+                &[Expr::Literal(Literal::String("ab".to_string()))],
+                &env,
+                ctx,
+            )
+            .expect("string summary overload should be selected");
+
+            assert_eq!(int_signature.rust_name, "pick_int");
+            assert_eq!(string_signature.rust_name, "pick_string");
+        }
+
+        env.insert_static_type_alias("Util", "dep.Util");
+        env.insert_static_type_alias("DepUtil", "dep.Util");
+        let aliased_signature = source_context_static_method_fallback_signature(
+            Some(&Expr::Var("Util".to_string())),
+            "pick",
+            &[Expr::Literal(Literal::String("ab".to_string()))],
+            &env,
+            ctx,
+        )
+        .expect("aliased summary overload should be selected");
+        assert_eq!(aliased_signature.rust_name, "pick_string");
+    }
+
+    #[test]
+    fn source_context_static_overload_lowers_to_selected_name() {
+        let program = Box::leak(Box::new(Program::default()));
+        let mut summary_program = Program {
+            package: Some("dep".to_string()),
+            imports: Vec::new(),
+            types: vec![TypeDecl {
+                members: vec![
+                    Member::Method(static_int_method_with_param(
+                        "pick",
+                        JavaType::Primitive(PrimitiveType::Int),
+                    )),
+                    Member::Method(static_int_method_with_param("pick", JavaType::String)),
+                ],
+                ..empty_type_decl("dep.Util")
+            }],
+        };
+        crate::resolve::assign_rust_names_to_context_program(&mut summary_program);
+        let summary = Box::leak(Box::new(summary_program));
+        let ctx = LowerCtx {
+            program,
+            support_local_type_program: summary,
+            source_summary_type_program: summary,
+            ..lower_test_ctx()
+        };
+        let mut env = ShapeEnv::default();
+        env.insert_static_type_alias("Util", "dep.Util");
+
+        let expr = Expr::Call {
+            receiver: Some(Box::new(Expr::Var("Util".to_string()))),
+            name: "pick".to_string(),
+            args: vec![Expr::Literal(Literal::String("ab".to_string()))],
+            resolved: Some(ResolvedCall {
+                kind: CallKind::Static,
+                declaring_type: "dep.Util".to_string(),
+                rust_name: "pick".to_string(),
+                return_type: JavaType::Primitive(PrimitiveType::Int),
+                arg_target_types: vec![JavaType::String],
+                arg_coercions: Vec::new(),
+            }),
+        };
+        let lowered = lower_expr_with_refinements(&expr, &env, ctx, &ExprRefinements::default());
+
+        assert_eq!(
+            crate::emit::emit_expr(&lowered),
+            "DepUtil::pick_string(\"ab\")"
+        );
     }
 
     #[test]
@@ -51242,6 +52912,39 @@ class Path {
     }
 
     #[test]
+    fn delegated_constructor_trailing_vardecl_shape_preserves_keyword_access_name_binding() {
+        let binding =
+            crate::binding_id::BindingId::new(crate::binding_id::BindingKind::Local, "self", 1);
+        let mut ctx = lower_test_ctx();
+        let local_plans = Box::leak(Box::new(vec![LocalPlan {
+            binding: binding.clone(),
+            name: "self__".to_string(),
+            java_ty: JavaType::String,
+            shape: RustSlotShape::for_storage(JavaType::String),
+            binding_mutable: false,
+        }]));
+        ctx.current_local_shapes = local_plans;
+        let stmt = Stmt::VarDecl {
+            ty: JavaType::String,
+            name: "self__".to_string(),
+            source_name: "self".to_string(),
+            initializer: Some(Expr::Literal(Literal::String("first".to_string()))),
+            binding: Some(binding.clone()),
+        };
+        let mut env = ShapeEnv::default();
+
+        learn_delegated_constructor_trailing_stmt_shapes(
+            &DelegatedConstructorTrailingStmt::Statement { stmt: &stmt },
+            &mut env,
+            ctx,
+        );
+
+        assert_eq!(env.binding_id("self"), Some(&binding));
+        assert_eq!(env.binding_id("self__"), Some(&binding));
+        assert!(env.local_shape("self").is_some());
+    }
+
+    #[test]
     fn delegated_constructor_trailing_idless_vardecl_preserves_selected_plan_binding() {
         let selected_binding =
             crate::binding_id::BindingId::new(crate::binding_id::BindingKind::Local, "value", 3);
@@ -52107,6 +53810,138 @@ class Path {
     }
 
     #[test]
+    fn map_key_set_alias_contains_all_reads_backing_map() {
+        let expr = crate::parser::parse_expr("keys.containsAll(required)");
+        let Expr::Call {
+            receiver,
+            name,
+            args,
+            ..
+        } = expr
+        else {
+            panic!("expected call expression");
+        };
+        let mut env = ShapeEnv::new();
+        env.insert_local(
+            "values",
+            JavaType::Named {
+                name: "Map".to_string(),
+                args: vec![JavaType::String, JavaType::String],
+            },
+        );
+        env.insert_local(
+            "keys",
+            JavaType::Named {
+                name: "Set".to_string(),
+                args: vec![JavaType::String],
+            },
+        );
+        env.insert_local(
+            "required",
+            JavaType::Named {
+                name: "List".to_string(),
+                args: vec![JavaType::String],
+            },
+        );
+        env.insert_map_key_set_view_receiver("keys", Expr::Var("values".to_string()));
+
+        let lowered = lower_map_view_remove_call(
+            receiver.as_deref(),
+            &name,
+            &args,
+            &env,
+            lower_test_ctx(),
+            &ExprRefinements::default(),
+        )
+        .expect("Map.keySet() alias containsAll should read the backing map");
+        let rendered = emit_expr(&lowered);
+
+        assert!(
+            rendered.contains("let __java_map_key_set_contains_all_keys = required;"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("let __java_map_key_set_contains_all_map = &values;"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("__java_map_key_set_contains_all_keys.iter().all(|key| __java_map_key_set_contains_all_map.contains_key(key))"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("keys.containsAll"), "{rendered}");
+        assert!(!rendered.contains("keys.contains_all"), "{rendered}");
+    }
+
+    #[test]
+    fn map_key_set_alias_retain_all_mutates_backing_map() {
+        let expr = crate::parser::parse_expr("keys.retainAll(required)");
+        let Expr::Call {
+            receiver,
+            name,
+            args,
+            ..
+        } = expr
+        else {
+            panic!("expected call expression");
+        };
+        let mut env = ShapeEnv::new();
+        env.insert_local(
+            "values",
+            JavaType::Named {
+                name: "Map".to_string(),
+                args: vec![JavaType::String, JavaType::String],
+            },
+        );
+        env.insert_local(
+            "keys",
+            JavaType::Named {
+                name: "Set".to_string(),
+                args: vec![JavaType::String],
+            },
+        );
+        env.insert_local(
+            "required",
+            JavaType::Named {
+                name: "List".to_string(),
+                args: vec![JavaType::String],
+            },
+        );
+        env.insert_map_key_set_view_receiver("keys", Expr::Var("values".to_string()));
+
+        let lowered = lower_map_view_remove_call(
+            receiver.as_deref(),
+            &name,
+            &args,
+            &env,
+            lower_test_ctx(),
+            &ExprRefinements::default(),
+        )
+        .expect("Map.keySet() alias retainAll should mutate the backing map");
+        let rendered = emit_expr(&lowered);
+
+        assert!(
+            rendered.contains("let __java_map_key_set_retain_all_keys = required;"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("let __java_map_key_set_retain_all_map = &mut values;"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("__java_map_key_set_retain_all_map.retain(|key, _value| __java_map_key_set_retain_all_keys.contains(key));"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "__java_map_key_set_retain_all_map.len() != __java_map_key_set_retain_all_before"
+            ),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("keys.retainAll"), "{rendered}");
+        assert!(!rendered.contains("keys.retain_all"), "{rendered}");
+    }
+
+    #[test]
     fn map_key_set_alias_add_throws_unsupported_operation_exception() {
         let expr = crate::parser::parse_expr("keys.add(value)");
         let Expr::Call {
@@ -52329,6 +54164,138 @@ class Path {
     }
 
     #[test]
+    fn map_values_alias_contains_all_reads_backing_map_values() {
+        let expr = crate::parser::parse_expr("vals.containsAll(required)");
+        let Expr::Call {
+            receiver,
+            name,
+            args,
+            ..
+        } = expr
+        else {
+            panic!("expected call expression");
+        };
+        let mut env = ShapeEnv::new();
+        env.insert_local(
+            "values",
+            JavaType::Named {
+                name: "Map".to_string(),
+                args: vec![JavaType::String, JavaType::String],
+            },
+        );
+        env.insert_local(
+            "vals",
+            JavaType::Named {
+                name: "Collection".to_string(),
+                args: vec![JavaType::String],
+            },
+        );
+        env.insert_local(
+            "required",
+            JavaType::Named {
+                name: "List".to_string(),
+                args: vec![JavaType::String],
+            },
+        );
+        env.insert_map_values_view_receiver("vals", Expr::Var("values".to_string()));
+
+        let lowered = lower_map_view_remove_call(
+            receiver.as_deref(),
+            &name,
+            &args,
+            &env,
+            lower_test_ctx(),
+            &ExprRefinements::default(),
+        )
+        .expect("Map.values() alias containsAll should read backing map values");
+        let rendered = emit_expr(&lowered);
+
+        assert!(
+            rendered.contains("let __java_map_values_contains_all_values = required;"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("let __java_map_values_contains_all_map = &values;"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("__java_map_values_contains_all_values.iter().all(|required| __java_map_values_contains_all_map.values().any(|value| value == required))"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("vals.containsAll"), "{rendered}");
+        assert!(!rendered.contains("vals.contains_all"), "{rendered}");
+    }
+
+    #[test]
+    fn map_values_alias_retain_all_mutates_backing_map() {
+        let expr = crate::parser::parse_expr("vals.retainAll(required)");
+        let Expr::Call {
+            receiver,
+            name,
+            args,
+            ..
+        } = expr
+        else {
+            panic!("expected call expression");
+        };
+        let mut env = ShapeEnv::new();
+        env.insert_local(
+            "values",
+            JavaType::Named {
+                name: "Map".to_string(),
+                args: vec![JavaType::String, JavaType::String],
+            },
+        );
+        env.insert_local(
+            "vals",
+            JavaType::Named {
+                name: "Collection".to_string(),
+                args: vec![JavaType::String],
+            },
+        );
+        env.insert_local(
+            "required",
+            JavaType::Named {
+                name: "List".to_string(),
+                args: vec![JavaType::String],
+            },
+        );
+        env.insert_map_values_view_receiver("vals", Expr::Var("values".to_string()));
+
+        let lowered = lower_map_view_remove_call(
+            receiver.as_deref(),
+            &name,
+            &args,
+            &env,
+            lower_test_ctx(),
+            &ExprRefinements::default(),
+        )
+        .expect("Map.values() alias retainAll should mutate the backing map");
+        let rendered = emit_expr(&lowered);
+
+        assert!(
+            rendered.contains("let __java_map_values_retain_all_values = required;"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("let __java_map_values_retain_all_map = &mut values;"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("__java_map_values_retain_all_map.retain(|_key, value| __java_map_values_retain_all_values.contains(value));"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "__java_map_values_retain_all_map.len() != __java_map_values_retain_all_before"
+            ),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("vals.retainAll"), "{rendered}");
+        assert!(!rendered.contains("vals.retain_all"), "{rendered}");
+    }
+
+    #[test]
     fn map_values_alias_clear_and_size_use_backing_map() {
         let mut env = ShapeEnv::new();
         env.insert_local(
@@ -52527,6 +54494,340 @@ class Path {
         assert!(!rendered.contains("entries.add"), "{rendered}");
         assert!(!rendered.contains(".insert("), "{rendered}");
         assert!(!rendered.contains(".extend("), "{rendered}");
+    }
+
+    #[test]
+    fn map_entry_set_alias_contains_all_reads_backing_map_entries() {
+        let expr = crate::parser::parse_expr("entries.containsAll(required)");
+        let Expr::Call {
+            receiver,
+            name,
+            args,
+            ..
+        } = expr
+        else {
+            panic!("expected call expression");
+        };
+        let mut env = ShapeEnv::new();
+        env.insert_local(
+            "values",
+            JavaType::Named {
+                name: "Map".to_string(),
+                args: vec![JavaType::String, JavaType::String],
+            },
+        );
+        env.insert_local(
+            "entries",
+            JavaType::Named {
+                name: "Set".to_string(),
+                args: vec![JavaType::Named {
+                    name: "Map.Entry".to_string(),
+                    args: vec![JavaType::String, JavaType::String],
+                }],
+            },
+        );
+        env.insert_local(
+            "required",
+            JavaType::Named {
+                name: "Set".to_string(),
+                args: vec![JavaType::Named {
+                    name: "Map.Entry".to_string(),
+                    args: vec![JavaType::String, JavaType::String],
+                }],
+            },
+        );
+        env.insert_map_entry_set_view_receiver("entries", Expr::Var("values".to_string()));
+
+        let lowered = lower_map_view_remove_call(
+            receiver.as_deref(),
+            &name,
+            &args,
+            &env,
+            lower_test_ctx(),
+            &ExprRefinements::default(),
+        )
+        .expect("Map.entrySet() alias containsAll should read the backing map entries");
+        let rendered = emit_expr(&lowered);
+
+        assert!(
+            rendered.contains("let __java_map_entry_set_contains_all_entries = required;"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("let __java_map_entry_set_contains_all_map = &values;"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("__java_map_entry_set_contains_all_entries.iter().all(|entry| __java_map_entry_set_contains_all_map.get(&entry.0).is_some_and(|value| value == &entry.1))"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("entries.containsAll"), "{rendered}");
+        assert!(!rendered.contains("entries.contains_all"), "{rendered}");
+    }
+
+    #[test]
+    fn map_entry_set_alias_retain_all_mutates_backing_map_entries() {
+        let expr = crate::parser::parse_expr("entries.retainAll(required)");
+        let Expr::Call {
+            receiver,
+            name,
+            args,
+            ..
+        } = expr
+        else {
+            panic!("expected call expression");
+        };
+        let mut env = ShapeEnv::new();
+        env.insert_local(
+            "values",
+            JavaType::Named {
+                name: "Map".to_string(),
+                args: vec![JavaType::String, JavaType::String],
+            },
+        );
+        env.insert_local(
+            "entries",
+            JavaType::Named {
+                name: "Set".to_string(),
+                args: vec![JavaType::Named {
+                    name: "Map.Entry".to_string(),
+                    args: vec![JavaType::String, JavaType::String],
+                }],
+            },
+        );
+        env.insert_local(
+            "required",
+            JavaType::Named {
+                name: "Set".to_string(),
+                args: vec![JavaType::Named {
+                    name: "Map.Entry".to_string(),
+                    args: vec![JavaType::String, JavaType::String],
+                }],
+            },
+        );
+        env.insert_map_entry_set_view_receiver("entries", Expr::Var("values".to_string()));
+
+        let lowered = lower_map_view_remove_call(
+            receiver.as_deref(),
+            &name,
+            &args,
+            &env,
+            lower_test_ctx(),
+            &ExprRefinements::default(),
+        )
+        .expect("Map.entrySet() alias retainAll should mutate the backing map entries");
+        let rendered = emit_expr(&lowered);
+
+        assert!(
+            rendered.contains("let __java_map_entry_set_retain_all_entries = required;"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("let __java_map_entry_set_retain_all_map = &mut values;"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("__java_map_entry_set_retain_all_map.retain(|key, value| __java_map_entry_set_retain_all_entries.iter().any(|entry| key == &entry.0 && &*value == &entry.1));"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "__java_map_entry_set_retain_all_map.len() != __java_map_entry_set_retain_all_before"
+            ),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("entries.retainAll"), "{rendered}");
+        assert!(!rendered.contains("entries.retain_all"), "{rendered}");
+    }
+
+    #[test]
+    fn map_entry_set_alias_bulk_self_aliases_are_noops() {
+        let mut env = ShapeEnv::new();
+        env.insert_local(
+            "values",
+            JavaType::Named {
+                name: "Map".to_string(),
+                args: vec![JavaType::String, JavaType::String],
+            },
+        );
+        env.insert_local(
+            "entries",
+            JavaType::Named {
+                name: "Set".to_string(),
+                args: vec![JavaType::Named {
+                    name: "Map.Entry".to_string(),
+                    args: vec![JavaType::String, JavaType::String],
+                }],
+            },
+        );
+        env.insert_map_entry_set_view_receiver("entries", Expr::Var("values".to_string()));
+
+        for (call, expected) in [
+            ("entries.containsAll(entries)", "true"),
+            ("entries.retainAll(entries)", "false"),
+            ("entries.containsAll(values.entrySet())", "true"),
+            ("entries.retainAll(values.entrySet())", "false"),
+        ] {
+            let Expr::Call {
+                receiver,
+                name,
+                args,
+                ..
+            } = crate::parser::parse_expr(call)
+            else {
+                panic!("expected call expression");
+            };
+            let lowered = lower_map_view_remove_call(
+                receiver.as_deref(),
+                &name,
+                &args,
+                &env,
+                lower_test_ctx(),
+                &ExprRefinements::default(),
+            )
+            .expect("self-alias entrySet bulk call should lower");
+            assert_eq!(emit_expr(&lowered), expected, "{call}");
+        }
+    }
+
+    #[test]
+    fn map_entry_set_alias_remove_all_mutates_backing_map_entries() {
+        let expr = crate::parser::parse_expr("entries.removeAll(required)");
+        let Expr::Call {
+            receiver,
+            name,
+            args,
+            ..
+        } = expr
+        else {
+            panic!("expected call expression");
+        };
+        let mut env = ShapeEnv::new();
+        env.insert_local(
+            "values",
+            JavaType::Named {
+                name: "Map".to_string(),
+                args: vec![JavaType::String, JavaType::String],
+            },
+        );
+        env.insert_local(
+            "entries",
+            JavaType::Named {
+                name: "Set".to_string(),
+                args: vec![JavaType::Named {
+                    name: "Map.Entry".to_string(),
+                    args: vec![JavaType::String, JavaType::String],
+                }],
+            },
+        );
+        env.insert_local(
+            "required",
+            JavaType::Named {
+                name: "Set".to_string(),
+                args: vec![JavaType::Named {
+                    name: "Map.Entry".to_string(),
+                    args: vec![JavaType::String, JavaType::String],
+                }],
+            },
+        );
+        env.insert_map_entry_set_view_receiver("entries", Expr::Var("values".to_string()));
+
+        let lowered = lower_map_view_remove_call(
+            receiver.as_deref(),
+            &name,
+            &args,
+            &env,
+            lower_test_ctx(),
+            &ExprRefinements::default(),
+        )
+        .expect("Map.entrySet() alias removeAll should mutate the backing map entries");
+        let rendered = emit_expr(&lowered);
+
+        assert!(
+            rendered.contains("let __java_map_entry_set_remove_all_entries = required;"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("let __java_map_entry_set_remove_all_map = &mut values;"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("__java_map_entry_set_remove_all_map.retain(|key, value| !__java_map_entry_set_remove_all_entries.iter().any(|entry| key == &entry.0 && &*value == &entry.1));"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "__java_map_entry_set_remove_all_map.len() != __java_map_entry_set_remove_all_before"
+            ),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("entries.removeAll"), "{rendered}");
+        assert!(!rendered.contains("entries.remove_all"), "{rendered}");
+    }
+
+    #[test]
+    fn map_entry_set_alias_remove_all_self_alias_clears_backing_map() {
+        let expr = crate::parser::parse_expr("entries.removeAll(entries)");
+        let Expr::Call {
+            receiver,
+            name,
+            args,
+            ..
+        } = expr
+        else {
+            panic!("expected call expression");
+        };
+        let mut env = ShapeEnv::new();
+        env.insert_local(
+            "values",
+            JavaType::Named {
+                name: "Map".to_string(),
+                args: vec![JavaType::String, JavaType::String],
+            },
+        );
+        env.insert_local(
+            "entries",
+            JavaType::Named {
+                name: "Set".to_string(),
+                args: vec![JavaType::Named {
+                    name: "Map.Entry".to_string(),
+                    args: vec![JavaType::String, JavaType::String],
+                }],
+            },
+        );
+        env.insert_map_entry_set_view_receiver("entries", Expr::Var("values".to_string()));
+
+        let lowered = lower_map_view_remove_call(
+            receiver.as_deref(),
+            &name,
+            &args,
+            &env,
+            lower_test_ctx(),
+            &ExprRefinements::default(),
+        )
+        .expect("self-alias Map.entrySet().removeAll should clear the backing map");
+        let rendered = emit_expr(&lowered);
+
+        assert!(
+            rendered.contains("let __java_map_entry_set_remove_all_map = &mut values;"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "let __java_map_entry_set_remove_all_before = __java_map_entry_set_remove_all_map.len();"
+            ),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("__java_map_entry_set_remove_all_map.clear();"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("__java_map_entry_set_remove_all_before != 0"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("entries.removeAll"), "{rendered}");
+        assert!(!rendered.contains("entries.remove_all"), "{rendered}");
     }
 
     #[test]
@@ -52889,9 +55190,9 @@ class Path {
             "{translation}"
         );
         assert!(
-            translation.contains(
-                "__java_map_entry_set_remove_map.remove(&__java_map_entry_set_remove_key).is_some()"
-            ),
+            translation.contains("__java_map_entry_set_remove_value =")
+                && translation.contains("__java_map_entry_set_remove_map.get")
+                && translation.contains("__java_map_entry_set_remove_map.remove"),
             "{translation}"
         );
         assert!(
@@ -52924,9 +55225,9 @@ class Path {
             "{translation}"
         );
         assert!(
-            translation.contains(
-                "__java_map_entry_set_contains_map.contains_key(&__java_map_entry_set_contains_key)"
-            ),
+            translation.contains("__java_map_entry_set_contains_value =")
+                && translation.contains("__java_map_entry_set_contains_map.get")
+                && translation.contains("is_some_and"),
             "{translation}"
         );
         assert!(
@@ -52956,11 +55257,14 @@ class Path {
         .rust;
 
         assert!(
-            translation.contains("let __java_map_entry_set_contains_key = (*entry.0).clone();"),
+            translation.contains("let __java_map_entry_snapshot = values.iter().next()")
+                && translation.contains("let __java_map_entry_set_contains_key = entry.0.clone();"),
             "{translation}"
         );
         assert!(
-            translation.contains("values.contains_key(&__java_map_entry_set_contains_key)"),
+            translation.contains("let __java_map_entry_set_contains_value = entry.1.clone();")
+                && translation.contains("__java_map_entry_set_contains_map.get")
+                && translation.contains("is_some_and"),
             "{translation}"
         );
         assert!(
@@ -52990,7 +55294,12 @@ class Path {
         .rust;
 
         assert!(
-            translation.contains("let __java_map_entry_set_remove_key = (*entry.0).clone();"),
+            translation.contains("let __java_map_entry_snapshot = values.iter().next()")
+                && translation.contains("let __java_map_entry_set_remove_key = entry.0.clone();"),
+            "{translation}"
+        );
+        assert!(
+            translation.contains("let __java_map_entry_set_remove_value = entry.1.clone();"),
             "{translation}"
         );
         assert!(
@@ -52998,13 +55307,40 @@ class Path {
             "{translation}"
         );
         assert!(
-            translation.contains(
-                "__java_map_entry_set_remove_map.remove(&__java_map_entry_set_remove_key).is_some()"
-            ),
+            translation.contains("__java_map_entry_set_remove_map.get")
+                && translation.contains("__java_map_entry_set_remove_map.remove"),
             "{translation}"
         );
         assert!(
             !translation.contains("values.iter().remove("),
+            "{translation}"
+        );
+    }
+
+    #[test]
+    fn map_entry_set_contains_and_remove_detached_local_compare_key_and_value() {
+        let translation = crate::translate_source(include_str!(
+            "../tests/differential/MapEntryDetachedContract.java"
+        ))
+        .rust;
+
+        assert!(
+            translation.contains("let __java_map_entry_snapshot = values.iter().next()")
+                && translation.contains("let __java_map_entry_set_contains_key = entry.0.clone();")
+                && translation
+                    .contains("let __java_map_entry_set_contains_value = entry.1.clone();")
+                && translation.contains("__java_map_entry_set_contains_map.get"),
+            "{translation}"
+        );
+        assert!(
+            translation.contains("let __java_map_entry_set_remove_key = entry.0.clone();")
+                && translation.contains("let __java_map_entry_set_remove_value = entry.1.clone();")
+                && translation.contains("__java_map_entry_set_remove_map.get")
+                && translation.contains("__java_map_entry_set_remove_map.remove"),
+            "{translation}"
+        );
+        assert!(
+            !translation.contains("values.contains_key(&__java_map_entry_set_contains_key)"),
             "{translation}"
         );
     }
@@ -53246,6 +55582,32 @@ class Path {
     }
 
     #[test]
+    fn map_entry_set_to_array_uses_backing_map_without_double_iterating_view() {
+        let translation = crate::translate_source(
+            r#"
+            import java.util.HashMap;
+            import java.util.Map;
+
+            public class MapEntrySetToArray {
+                static Object[] entries(Map<String, String> values) {
+                    return values.entrySet().toArray();
+                }
+            }
+            "#,
+        )
+        .rust;
+
+        assert!(
+            translation.contains("values.iter().map(|(key, value)|")
+                && translation.contains(
+                    "Some(Box::new((key.clone(), value.clone())) as Box<dyn std::any::Any>)"
+                )
+                && !translation.contains("values.iter().iter()"),
+            "{translation}"
+        );
+    }
+
+    #[test]
     fn map_entry_set_contains_simple_entry_local_reassignment_updates_backing_map_args() {
         let translation = crate::translate_source(
             r#"
@@ -53341,6 +55703,62 @@ class Path {
     }
 
     #[test]
+    fn simple_map_entry_local_set_value_mutates_tuple_and_returns_old_value() {
+        let translation = crate::translate_source(
+            r#"
+            import java.util.AbstractMap;
+            import java.util.Map;
+
+            public class SimpleEntryLocalSetValue {
+                public static String run() {
+                    Map.Entry<String, String> entry = new AbstractMap.SimpleEntry<String, String>("a", "1");
+                    String old = entry.setValue("2");
+                    return old + "," + entry;
+                }
+            }
+            "#,
+        )
+        .rust;
+
+        assert!(
+            translation.contains("let __java_map_entry_set_value_old = (*entry.1).clone();")
+                && translation.contains("entry.1 = \"2\".to_string();")
+                && translation.contains("let old: String = {")
+                && !translation.contains("entry.set_value(")
+                && !translation.contains("entry.setValue("),
+            "{translation}"
+        );
+    }
+
+    #[test]
+    fn simple_immutable_map_entry_set_value_raises_unsupported_operation() {
+        let translation = crate::translate_source(
+            r#"
+            import java.util.AbstractMap;
+            import java.util.Map;
+
+            public class SimpleImmutableEntryLocalSetValue {
+                public static String run() {
+                    Map.Entry<String, String> entry = new AbstractMap.SimpleImmutableEntry<String, String>("a", "1");
+                    String old = entry.setValue("2");
+                    return old + "," + entry;
+                }
+            }
+            "#,
+        )
+        .rust;
+
+        assert!(
+            translation.contains("UnsupportedOperationException")
+                && translation.contains("Java SimpleImmutableEntry does not support setValue")
+                && !translation.contains("entry.1 = \"2\".to_string();")
+                && !translation.contains("entry.set_value(")
+                && !translation.contains("entry.setValue("),
+            "{translation}"
+        );
+    }
+
+    #[test]
     fn typed_map_entry_parameter_display_uses_key_value_projection() {
         let translation = crate::translate_source(
             r#"
@@ -53413,12 +55831,12 @@ class Path {
         .rust;
 
         assert!(
-            translation.contains("let __java_map_entry_display_entry = values.iter().next().expect(\"Java iterator exhausted\");")
+            translation.contains("let __java_map_entry_display_entry = values.iter().next().ok_or_else(|| JavaException::new(\"NoSuchElementException\", \"Java Iterator.next on exhausted iterator\".to_string()))?;")
                 && translation.contains("format!(\"{}={}\",")
                 && translation.contains("__java_map_entry_display_entry.0")
                 && translation.contains("__java_map_entry_display_entry.1")
                 && !translation.contains("java_erased_object_to_string(&"),
-            "direct Map.Entry iterator display should use key=value formatting"
+            "direct Map.Entry iterator display should use key=value formatting:\n{translation}"
         );
     }
 
@@ -55337,6 +57755,30 @@ class Owner {
             } if op == "+"
         ));
 
+        let comment_target = raw_assignment_stmt_projection("self.value /* [ */ = other.value;")
+            .expect("comment text in assignment target should not affect top-level scanning");
+        let RustStmt::Assign { target, value } = comment_target else {
+            panic!("expected Assign for comment-bearing field target");
+        };
+        assert_eq!(emit_expr(&target), "self.value");
+        assert_eq!(emit_expr(&value), "other.value");
+        assert!(matches!(target, RustExpr::Field(_, _)));
+
+        let comment_index =
+            raw_assignment_stmt_projection("self.values[/* ] */ index] = other.value;")
+                .expect("comment text in assignment index should not close the index");
+        let RustStmt::Assign { target, value } = comment_index else {
+            panic!("expected Assign for comment-bearing indexed target");
+        };
+        assert_eq!(emit_expr(&target), "self.values[index]");
+        assert_eq!(emit_expr(&value), "other.value");
+        assert!(matches!(target, RustExpr::Index(_, _)));
+
+        assert_eq!(
+            split_top_level_assignment("self.value /* = */ = other.value"),
+            Some(("self.value /* = */", "=", "other.value"))
+        );
+
         assert!(raw_assignment_stmt_projection("self.values[self..broken] = value;").is_none());
         assert!(raw_assignment_stmt_projection("self..broken = value;").is_none());
         assert!(raw_assignment_stmt_projection("left + right = value;").is_none());
@@ -55646,6 +58088,9 @@ let e = OuterB::new_with_outer::<T>(__outer.clone());
         assert!(raw_constructor_call_expr_projection("OuterB::new (value)").is_none());
         assert!(raw_constructor_call_expr_projection("new(value)").is_none());
         assert!(raw_constructor_call_expr_projection("Owner::make(value)").is_none());
+        assert!(raw_constructor_call_expr_projection("Owner::renew(value)").is_none());
+        assert!(raw_constructor_call_expr_projection("Owner::newish(value)").is_none());
+        assert!(raw_constructor_call_expr_projection("helper(OuterB::new_1(value))").is_none());
     }
 
     #[test]

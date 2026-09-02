@@ -109,6 +109,10 @@ const COVERED_BY_DEDICATED_TEST: &[(&str, &str)] = &[
         "unmodelled_java_upcast",
         "unmodelled_upcasts_are_not_counted_as_noop_facade_methods",
     ),
+    (
+        "noop_facade_call_site",
+        "noop_facade_method_call_sites_are_marked_at_lowering_time",
+    ),
 ];
 
 fn count_by_name(name: &str, rust: &str) -> usize {
@@ -695,7 +699,7 @@ fn noop_facade_constructor_call_sites_are_counted_per_call() {
                  Font a = new Font(\"x\", 0, 10);\n\
                  Font b = new Font(\"y\", 0, 12);\n\
                  Font c = new Font(\"z\", 0, 14);\n\
-                 return a.getSize() + b.getSize() + c.getSize();\n\
+                 return 0;\n\
              }\n\
          }",
     )

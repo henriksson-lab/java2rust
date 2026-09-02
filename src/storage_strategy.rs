@@ -1806,9 +1806,6 @@ public class Outer {
 }
 
 class ExternalName {}
-class Helper {
-    void consume(ExternalName value) {}
-}
 "#,
             "ExternalName",
         );
@@ -1827,9 +1824,6 @@ public class Outer {
 }
 
 class Cell {}
-class Helper {
-    void consume(Object value) {}
-}
 "#,
             "Cell",
         );

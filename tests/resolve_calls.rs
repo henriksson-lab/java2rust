@@ -458,7 +458,9 @@ class EnclosingFactoryDelegationResolution {
         .members
         .iter()
         .find_map(|member| match member {
-            Member::Type(ty) if ty.name == "Segment" => Some(ty),
+            Member::Type(ty) if ty.name == "EnclosingFactoryDelegationResolution.Segment" => {
+                Some(ty)
+            }
             _ => None,
         })
         .unwrap();
@@ -623,7 +625,7 @@ class Owner {
         panic!("expected resolved nested implicit no-arg constructor");
     };
 
-    assert_eq!(constructor.declaring_type, "Helper");
+    assert_eq!(constructor.declaring_type, "Owner.Helper");
     assert_eq!(constructor.rust_name, "new");
 }
 
@@ -670,7 +672,7 @@ class RightOwner {
                 owner.name
             );
         };
-        assert_eq!(constructor.declaring_type, "Result");
+        assert_eq!(constructor.declaring_type, format!("{}.Result", owner.name));
         assert_eq!(constructor.rust_name, "new");
     }
 }
@@ -704,7 +706,9 @@ class OwnerWithNestedSiblings {
         .members
         .iter()
         .find_map(|member| match member {
-            Member::Type(nested) if nested.name == "Element" => Some(nested),
+            Member::Type(nested) if nested.name == "OwnerWithNestedSiblings.Element" => {
+                Some(nested)
+            }
             _ => None,
         })
         .unwrap();
@@ -731,7 +735,7 @@ class OwnerWithNestedSiblings {
         panic!("expected resolved sibling nested constructor");
     };
 
-    assert_eq!(constructor.declaring_type, "Insert");
+    assert_eq!(constructor.declaring_type, "OwnerWithNestedSiblings.Insert");
     assert_eq!(constructor.rust_name, "new");
 }
 
@@ -764,7 +768,9 @@ class OuterWithGenericNestedSiblings {
         .members
         .iter()
         .find_map(|member| match member {
-            Member::Type(nested) if nested.name == "Reader" => Some(nested),
+            Member::Type(nested) if nested.name == "OuterWithGenericNestedSiblings.Reader" => {
+                Some(nested)
+            }
             _ => None,
         })
         .unwrap();
@@ -791,7 +797,10 @@ class OuterWithGenericNestedSiblings {
         panic!("expected resolved generic sibling nested constructor");
     };
 
-    assert_eq!(constructor.declaring_type, "OverlapIterator");
+    assert_eq!(
+        constructor.declaring_type,
+        "OuterWithGenericNestedSiblings.OverlapIterator"
+    );
     assert_eq!(constructor.rust_name, "new");
 }
 
@@ -1037,7 +1046,7 @@ class RecordTable {
         .find(|ty| ty.name == "RecordTable")
         .and_then(|ty| {
             ty.members.iter().find_map(|member| match member {
-                Member::Type(nested) if nested.name == "Reader" => Some(nested),
+                Member::Type(nested) if nested.name == "RecordTable.Reader" => Some(nested),
                 _ => None,
             })
         })
@@ -1058,7 +1067,7 @@ class RecordTable {
         panic!("expected resolved nested class overload call from enclosing field type");
     };
 
-    assert_eq!(call.declaring_type, "Reader");
+    assert_eq!(call.declaring_type, "RecordTable.Reader");
     assert_eq!(call.rust_name, "accept_string");
 }
 
@@ -6778,6 +6787,59 @@ class UsesQualifiedNestedStaticFieldWithCollision {
 }
 
 #[test]
+fn resolver_static_field_lookup_respects_local_receiver_shadowing() {
+    let parsed = parse_java_source(
+        r#"
+class Bounds {
+    public final static int SENTINEL = 7;
+}
+
+class Other {
+}
+
+class UsesShadowedStaticFieldName {
+    void accept(int value) {}
+    void accept(String value) {}
+
+    void run(Other bounds) {
+        accept(bounds.SENTINEL);
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    assert!(
+        !resolved.diagnostics.has_errors(),
+        "{:?}",
+        resolved.diagnostics
+    );
+
+    let ty = resolved
+        .program
+        .types
+        .iter()
+        .find(|ty| ty.name == "UsesShadowedStaticFieldName")
+        .unwrap();
+    let Stmt::Expr(Expr::Call {
+        resolved: Some(call),
+        ..
+    }) = first_stmt(ty).unwrap()
+    else {
+        panic!("expected call expression");
+    };
+    assert_eq!(
+        call.arg_coercions[0].actual,
+        JavaType::Unknown("SENTINEL".to_string()),
+        "shadowed local receiver should not be typed through the static Bounds.SENTINEL field: {call:?}"
+    );
+    assert_eq!(
+        call.arg_coercions[0].kind,
+        JavaCoercionKind::UnknownFallback,
+        "shadowed local receiver should reach only the explicit unknown-overload fallback: {call:?}"
+    );
+}
+
+#[test]
 fn resolver_prefers_nested_type_static_member_over_same_named_instance_field() {
     let parsed = parse_java_source(
         r#"
@@ -11875,8 +11937,8 @@ class ExternalNestedEnumAndNumericConstantResolution {
     assert_eq!(
         calls,
         vec![
-            "accept_variant_type_",
-            "accept_variant_type_",
+            "accept_variant_type",
+            "accept_variant_type",
             "accept_policy_duplicate_tagging_policy",
             "accept_policy_duplicate_tagging_policy",
             "accept_header_version_v_c_f_header_version",

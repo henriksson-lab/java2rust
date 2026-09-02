@@ -17,19 +17,20 @@ use new_java2rust::external_packs::{
     builtin_external_pack_manifest_for_provider_name, builtin_external_pack_manifests,
     bwa_pack_facts, disq_write_pack_facts, external_api_arities_for_receiver,
     external_api_effect_for_receiver_with_arity, external_constructor_arities_for,
-    external_constructor_for, external_crate_api_mapping_for_receiver,
-    external_crate_constructor_mapping_for, external_field_for, external_library_pack_for_type,
-    fastutil_pack_facts, genomicsdb_pack_facts, google_bigquery_pack_facts,
-    google_bigquery_storage_pack_facts, google_cloud_nio_pack_facts, google_storage_pack_facts,
-    guava_concurrent_pack_facts, guava_immutable_collect_pack_facts, hadoop_conf_pack_facts,
-    hdf5_pack_facts, hipparchus_distribution_pack_facts, htsjdk_bcf_pack_facts,
-    htsjdk_nested_helper_pack_facts, htsjdk_sam_bam_pack_facts, htsjdk_sam_cram_pack_facts,
-    htsjdk_sam_header_pack_facts, htsjdk_sam_metrics_pack_facts, htsjdk_sam_reader_pack_facts,
-    htsjdk_sam_record_pack_facts, htsjdk_sam_reference_pack_facts, htsjdk_sam_writer_pack_facts,
-    htsjdk_samtools_util_pack_facts, htsjdk_tribble_feature_pack_facts,
-    htsjdk_tribble_index_pack_facts, htsjdk_variantcontext_pack_facts, htsjdk_vcf_pack_facts,
-    iharder_base64_pack_facts, intel_gkl_pack_facts, jackson_databind_pack_facts, jama_pack_facts,
-    java_sql_pack_facts, jgrapht_pack_facts, kryo_pack_facts, kryo_serializers_pack_facts,
+    external_constructor_for, external_conversion_adapter_for,
+    external_crate_api_mapping_for_receiver, external_crate_constructor_mapping_for,
+    external_field_for, external_library_pack_for_type, fastutil_pack_facts, genomicsdb_pack_facts,
+    google_bigquery_pack_facts, google_bigquery_storage_pack_facts, google_cloud_nio_pack_facts,
+    google_storage_pack_facts, guava_concurrent_pack_facts, guava_immutable_collect_pack_facts,
+    hadoop_conf_pack_facts, hdf5_pack_facts, hipparchus_distribution_pack_facts,
+    htsjdk_bcf_pack_facts, htsjdk_nested_helper_pack_facts, htsjdk_sam_bam_pack_facts,
+    htsjdk_sam_cram_pack_facts, htsjdk_sam_header_pack_facts, htsjdk_sam_metrics_pack_facts,
+    htsjdk_sam_reader_pack_facts, htsjdk_sam_record_pack_facts, htsjdk_sam_reference_pack_facts,
+    htsjdk_sam_writer_pack_facts, htsjdk_samtools_util_pack_facts,
+    htsjdk_tribble_feature_pack_facts, htsjdk_tribble_index_pack_facts,
+    htsjdk_variantcontext_pack_facts, htsjdk_vcf_pack_facts, iharder_base64_pack_facts,
+    intel_gkl_pack_facts, jackson_databind_pack_facts, jama_pack_facts, java_sql_pack_facts,
+    jgrapht_pack_facts, kryo_pack_facts, kryo_serializers_pack_facts,
     modeled_no_state_external_super_constructor, opencsv_pack_facts, org_json_pack_facts,
     parse_external_pack_manifest, picard_markduplicates_pack_facts, picard_metrics_pack_facts,
     picard_programgroups_pack_facts, picard_vcf_pack_facts, reflections_pack_facts,
@@ -41,15 +42,32 @@ use new_java2rust::facts::{
     ExceptionKind, ExternalApiArgumentEffectFact, ExternalApiCoverage, ExternalApiEffectFact,
     ExternalApiRole, ExternalArgumentAliasPolicy, ExternalConstructorFact,
     ExternalCrateApiMappingFact, ExternalCrateConstructorMappingFact, ExternalCrateTypeMappingFact,
-    ExternalFieldFact, ExternalFieldKind, ExternalLibraryMode, FacadeAbiFact, FacadeSlot,
-    FactProvenance, FactSet, FieldKey, FieldNullabilityFact, FieldNullabilityProvenance,
-    HierarchyOverride, HierarchyStrategy, NullabilityState, ObjectSafetyFact,
-    ObjectSafetyViolation, ReceiverAbi, ReceiverMutabilityFact, ResultAbi, Staticness,
-    TypeCapabilityOverride, UnsupportedExternalApiFact, UnsupportedExternalConstructorFact,
-    UnsupportedExternalFieldFact,
+    ExternalFieldFact, ExternalFieldKind, ExternalLibraryMode, ExternalLibraryPackFact,
+    FacadeAbiFact, FacadeSlot, FactProvenance, FactSet, FieldKey, FieldNullabilityFact,
+    FieldNullabilityProvenance, HierarchyOverride, HierarchyStrategy, NullabilityState,
+    ObjectSafetyFact, ObjectSafetyViolation, ReceiverAbi, ReceiverMutabilityFact, ResultAbi,
+    Staticness, TypeCapabilityOverride, UnsupportedExternalApiFact,
+    UnsupportedExternalConstructorFact, UnsupportedExternalFieldFact,
 };
 use new_java2rust::java_ir::{JavaType, PrimitiveType};
 use new_java2rust::{parser, resolve, semantic_analysis};
+
+#[test]
+fn files_new_buffered_reader_returns_buffered_reader_fact() {
+    let effect = external_api_effect_for_receiver_with_arity(
+        Some("java.nio.file.Files"),
+        "newBufferedReader",
+        Some(1),
+    )
+    .expect("Files.newBufferedReader should be modelled");
+    assert_eq!(
+        effect.return_type,
+        Some(JavaType::Named {
+            name: "BufferedReader".to_string(),
+            args: Vec::new(),
+        })
+    );
+}
 
 #[test]
 fn builtin_external_pack_manifests_declare_boundaries_and_crate_hooks() {
@@ -633,6 +651,42 @@ fn builtin_external_library_pack_lookup_uses_manifest_boundaries() {
     assert!(
         external_library_pack_for_type("UnownedDependencyType").is_none(),
         "unknown external types must not be claimed by a builtin pack"
+    );
+}
+
+#[test]
+fn external_library_pack_member_lookup_refuses_cross_package_simple_alias() {
+    let mut facts = FactSet::default();
+    facts.external_library_packs.push(ExternalLibraryPackFact {
+        pack_name: "a-pack".to_string(),
+        package_prefix: "a".to_string(),
+        mode: ExternalLibraryMode::ExternalFactModel,
+        coverage: ExternalApiCoverage::Semantic,
+        rust_target: None,
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "read".to_string(),
+        receiver_type: Some("a.Item".to_string()),
+        arg_count: Some(0),
+        parameter_patterns: None,
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::String),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+
+    assert_eq!(
+        facts
+            .external_library_pack_for_type("a.Item")
+            .map(|pack| pack.pack_name.as_str()),
+        Some("a-pack")
+    );
+    assert!(
+        facts.external_library_pack_for_type("other.Item").is_none(),
+        "member fallback must not infer pack ownership through a package-simple alias"
     );
 }
 
@@ -2700,6 +2754,20 @@ fn external_pack_manifest_parser_emits_pack_boundary_and_member_facts() {
 }
 
 #[test]
+fn platform_conversion_adapter_lookup_prefers_exact_endpoint_names() {
+    let simple = external_conversion_adapter_for("ZipOutputStream", "OutputStream")
+        .expect("simple ZipOutputStream adapter should resolve");
+    assert_eq!(simple.from_type, "ZipOutputStream");
+    assert_eq!(simple.to_type, "OutputStream");
+
+    let qualified =
+        external_conversion_adapter_for("java.util.zip.ZipOutputStream", "OutputStream")
+            .expect("qualified ZipOutputStream adapter should resolve");
+    assert_eq!(qualified.from_type, "java.util.zip.ZipOutputStream");
+    assert_eq!(qualified.to_type, "OutputStream");
+}
+
+#[test]
 fn callable_keys_lookup_external_pack_api_constructor_and_field_facts() {
     let parsed = parse_external_pack_manifest(
         r#"
@@ -2893,6 +2961,52 @@ fn facade_abi_lookup_uses_callable_key_and_prefers_user_override() {
         .expect("facade ABI should be addressable by callable key");
     assert_eq!(selected.rust_path, "override_facade::read");
     assert_eq!(selected.receiver, ReceiverAbi::FreeFunction);
+}
+
+#[test]
+fn facade_abi_for_call_refuses_ambiguous_simple_package_owner() {
+    let mut facts = FactSet::default();
+    for (owner, rust_path) in [("a.Item", "a_facade::work"), ("b.Item", "b_facade::work")] {
+        facts.facade_abi_facts.push(FacadeAbiFact {
+            key: CallableKey::method_with_params(
+                owner,
+                "work",
+                Staticness::Unknown,
+                vec![new_java2rust::facts::TypePattern::Exact(
+                    new_java2rust::facts::TypeKey {
+                        type_name: "java.lang.String".to_string(),
+                    },
+                )],
+            ),
+            rust_path: rust_path.to_string(),
+            receiver: ReceiverAbi::BorrowedSelf,
+            args: vec![FacadeSlot::Borrowed],
+            return_slot: FacadeSlot::Owned,
+            result: ResultAbi::Plain,
+            borrow_source: None,
+            borrowed_return_recovery: None,
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+    }
+
+    let arg_types = [JavaType::String];
+    let a_key = CallableKey::method("a.Item", "work", Staticness::Unknown, 1);
+    let b_key = CallableKey::method("b.Item", "work", Staticness::Unknown, 1);
+    let bare_key = CallableKey::method("Item", "work", Staticness::Unknown, 1);
+
+    assert_eq!(
+        facts
+            .facade_abi_for_call(&a_key, &arg_types)
+            .map(|fact| fact.rust_path.as_str()),
+        Some("a_facade::work")
+    );
+    assert_eq!(
+        facts
+            .facade_abi_for_call(&b_key, &arg_types)
+            .map(|fact| fact.rust_path.as_str()),
+        Some("b_facade::work")
+    );
+    assert!(facts.facade_abi_for_call(&bare_key, &arg_types).is_none());
 }
 
 #[test]
@@ -7512,6 +7626,30 @@ fn java_platform_concurrent_static_factory_declares_precise_return_type() {
             .any(|effect| effect.receiver_type.as_deref() == Some("ExecutorService")),
         "ExecutorService.submit/1 should be discoverable from a used call name"
     );
+
+    for receiver in [
+        "Future",
+        "java.util.concurrent.Future",
+        "JavaUtilConcurrentFuture",
+    ] {
+        let effect = external_api_effect_for_receiver_with_arity(Some(receiver), "get", Some(0))
+            .unwrap_or_else(|| panic!("{receiver}.get/0 should be platform-modeled"));
+        assert_eq!(effect.provenance, FactProvenance::BuiltinExternalModel);
+        assert_eq!(effect.arg_count, Some(0));
+        assert_eq!(effect.role, ExternalApiRole::Getter);
+        assert!(
+            effect.thrown.iter().any(
+                |ty| matches!(ty, JavaType::Named { name, .. } if name == "ExecutionException")
+            ),
+            "{receiver}.get/0 should declare its checked ExecutionException"
+        );
+        assert!(
+            effect.thrown.iter().any(
+                |ty| matches!(ty, JavaType::Named { name, .. } if name == "InterruptedException")
+            ),
+            "{receiver}.get/0 should declare its checked InterruptedException"
+        );
+    }
 }
 
 #[test]

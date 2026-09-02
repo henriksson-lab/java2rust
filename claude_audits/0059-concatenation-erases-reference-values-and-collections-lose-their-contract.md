@@ -11,6 +11,29 @@ downcast evidence, platform support, or an explicit external display-capability
 fact is available.
 Kind: behavioural (differential), JDK facades / collections / enums.
 
+Follow-up 2026-08-30 entry-set `removeAll` pass: `Map.entrySet().removeAll(...)`
+now mutates the live backing map instead of falling through to an unmodelled
+collection call. The lowering mirrors the existing `retainAll` backing-map
+path with the predicate inverted, and handles self-aliases such as
+`entries.removeAll(entries)` by clearing the backing map and returning whether
+it was non-empty. Regressions:
+`lower::tests::map_entry_set_alias_remove_all_mutates_backing_map_entries`,
+`lower::tests::map_entry_set_alias_remove_all_self_alias_clears_backing_map`,
+and `tests/idiom_gaps.rs::map_entry_set_bulk_methods_use_backing_map_contract`.
+
+Follow-up 2026-08-30 map-view `toArray` pass: `Map.values().toArray(...)` now
+uses the backing-map value projection directly instead of relying on the
+`keySet()`-only collection-view classifier and falling through to generic
+method lowering. The existing `keySet().toArray(...)` path was moved to the
+same direct backing-map projection, so both key and value views preserve the
+Java array carrier for reference elements without materializing a view and then
+iterating it again. `Map.entrySet().toArray()` now has a slot-aware erased
+array path for `Object[]` targets, boxing each fresh `(key, value)` tuple as
+`Box<dyn Any>` while preserving the typed `Map.Entry[]` expression path. This
+also guards against the invalid `values.iter().iter()` shape. Regressions:
+`idiom_gaps::collection_to_array_empty_string_array_lowers_to_owned_vec` and
+`lower::tests::map_entry_set_to_array_uses_backing_map_without_double_iterating_view`.
+
 Follow-up 2026-08-29 entry-set unsupported mutation pass:
 `Map.entrySet().add(...)` and `Map.entrySet().addAll(...)` now follow Java's
 live-view contract by raising `UnsupportedOperationException` instead of
@@ -1087,6 +1110,18 @@ Covered by
 The remaining entry residue is limited to expressions that are not typed as
 `Map.Entry<K,V>` or cannot otherwise expose a key/value pair.
 
+Follow-up 2026-08-30 local `SimpleEntry.setValue` pass:
+locals initialized from `new AbstractMap.SimpleEntry<>(key, value)` now lower
+`entry.setValue(value)` against the tuple carrier directly: clone field `.1`,
+assign the new value, and return the old value. Locals initialized from
+`new AbstractMap.SimpleImmutableEntry<>(...)` keep the same tuple carrier for
+display/equality, but `setValue` now raises `UnsupportedOperationException`
+instead of mutating the tuple or falling through to an invalid tuple method
+call. Covered by
+`lower::tests::simple_map_entry_local_set_value_mutates_tuple_and_returns_old_value`
+and
+`lower::tests::simple_immutable_map_entry_set_value_raises_unsupported_operation`.
+
 Follow-up 2026-08-29 platform erased-display coverage:
 the platform erased-object display table already includes the modeled JDK
 carriers used by current corpus fixtures. Added generated-crate checks for
@@ -1240,3 +1275,74 @@ rendering `Option<i32>.to_string()`. Covered by
 and by direct generated-crate checks for `tests/differential/Generics.java`;
 `tests/differential/LambdaMutation.java` was also rechecked to keep the recent
 single-`.as_slice()` cleanup pinned.
+
+Follow-up 2026-08-30 direct collection bulk-method pass:
+ordinary `List`/set-like `Collection.containsAll` and `retainAll` now lower to
+native Rust collection contracts instead of missing `.contains_all(...)` /
+`.retain_all(...)` calls. `containsAll` evaluates the source once through
+`.iter().all(|value| receiver.contains(value))`; `retainAll` snapshots the
+source, retains matching receiver elements, and returns whether the receiver
+length changed. Self-alias bulk calls are recognized through the existing
+audited clone-recovery wrapper, so `values.retainAll(values)` returns `false`
+without rebuilding the collection. Covered by
+`tests/idiom_gaps.rs::collection_contains_all_uses_all_with_contains`,
+`tests/idiom_gaps.rs::collection_retain_all_return_uses_boolean_collection_contract`,
+and `tests/idiom_gaps.rs::collection_retain_all_self_alias_is_noop_false`.
+Map-view `retainAll`/`containsAll` remains a separate live-view follow-up.
+
+Follow-up 2026-08-30 map key/value view bulk-method pass:
+tracked `Map.keySet()` and `Map.values()` live views now lower
+`containsAll`/`retainAll` through the backing map instead of falling through to
+snapshot collection pseudo-methods. Key views test required keys with
+`contains_key` and retain map entries whose keys are present in the source
+collection; values views test each required value against the backing map's
+values iterator and retain entries whose values are present in the source
+collection. Read-only bulk checks borrow the map temporary so later uses are
+not consumed. Covered by
+`lower::tests::map_key_set_alias_contains_all_reads_backing_map`,
+`lower::tests::map_key_set_alias_retain_all_mutates_backing_map`,
+`lower::tests::map_values_alias_contains_all_reads_backing_map_values`, and
+`lower::tests::map_values_alias_retain_all_mutates_backing_map`.
+
+Follow-up 2026-08-30 map entry-set bulk-method pass:
+tracked `Map.entrySet()` live views now lower `containsAll` and `retainAll`
+through the backing map's key/value pairs. `containsAll` folds the supplied
+entry collection with `all`, testing each tuple against `map.get(key)` and the
+stored value. `retainAll` mutates the backing map with `retain`, keeping only
+entries present in the supplied entry collection and returning whether the map
+length changed. Same backing-view aliases short-circuit to Java's no-op
+results: `containsAll(self)` is `true`, `retainAll(self)` is `false`. The
+signature and local-mutability collectors now also recognize mutating map-view
+calls such as `values.entrySet().retainAll(keep)` as mutations of `values`.
+The signature pass also tracks locals initialized from a map view, so
+`entries.retainAll(keep)` after `entries = values.entrySet()` gives the method
+an `&mut` map parameter instead of an immutable borrow. Covered by
+`lower::tests::map_entry_set_alias_contains_all_reads_backing_map_entries`,
+`lower::tests::map_entry_set_alias_retain_all_mutates_backing_map_entries`,
+`lower::tests::map_entry_set_alias_bulk_self_aliases_are_noops`, and
+`tests/idiom_gaps.rs::map_entry_set_bulk_methods_use_backing_map_contract`.
+Alias signature coverage:
+`tests/idiom_gaps.rs::map_entry_set_alias_retain_all_marks_backing_map_mutable`.
+
+Follow-up 2026-08-30 erased map-entry toArray display pass:
+`Map.entrySet().toArray()` still lowers its `Object[]` carrier as boxed
+`(String, String)` tuples for `Map.Entry<String, String>` values. The generated
+erased-display helper now recognizes that tuple carrier and renders it with the
+Java `Map.Entry.toString()` shape, `key=value`, instead of falling through to
+the unsupported erased-object display panic when the array element is later
+concatenated or displayed. Covered by the generated runtime assertion in
+`tests/idiom_gaps.rs::collection_to_array_empty_string_array_lowers_to_owned_vec`.
+
+Follow-up 2026-08-30 detached map-entry contract pass:
+locals initialized from `values.entrySet().iterator().next()` now snapshot both
+key and value into the tuple carrier, so later `entrySet().contains(entry)` and
+`entrySet().remove(entry)` compare the full Java `Map.Entry` contract rather
+than checking only the key against the backing map. Direct synthetic
+`entrySet().contains(values.entrySet().iterator().next())` and `remove(...)`
+paths now also bind and compare both fields before mutating. Covered by
+`lower::tests::map_entry_set_contains_and_remove_detached_local_compare_key_and_value`,
+`tests/idiom_gaps.rs::detached_map_entry_local_uses_key_and_value_contract`,
+and `tests/differential/MapEntryDetachedContract.java`. A full differential
+rerun in this tree still stops on unrelated StringBuilder catchability failures;
+the new detached-entry fixture itself compiles and matches Java through the
+focused generated-crate test.

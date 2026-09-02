@@ -507,6 +507,24 @@ fn idless_local_binding_compatibility_surface_stays_explicit() {
     assert!(
         signature_source.contains("for duplicate in collect_duplicate_declared_local_names(block)")
     );
+    assert!(signature_source.contains("fn constraints_for_declaration"));
+    assert!(
+        signature_source.contains("source_nullability.constraints_for_declaration(name, binding)")
+    );
+    assert!(
+        signature_source.contains("constraints_for_declaration(name, declared_binding.as_ref())")
+    );
+    assert!(
+        signature_source
+            .contains(".constraints_for_declaration(var_name, declared_binding.as_ref())")
+    );
+    assert_eq!(
+        signature_source
+            .matches(".map(|binding| source_nullability.constraints_for_binding(binding))")
+            .count(),
+        0,
+        "declaration nullability callers should not re-open-code binding/name fallback"
+    );
     assert!(
         !signature_source
             .contains("let duplicate_names = collect_duplicate_declared_local_names(block);")
@@ -588,6 +606,28 @@ fn signature_uses_usage_binding_policy_for_legacy_name_fallback() {
     assert!(
         !usage_source.contains("pub fn binding_for_declaration("),
         "the broad implicit-fallback binding lookup wrapper should not exist"
+    );
+    assert!(
+        !slot_policy_source.contains("pub fn method_assigns_to_binding"),
+        "name-only assignment scans must not be exposed as a general slot-policy API"
+    );
+    assert!(
+        slot_policy_source.contains("pub(crate) fn legacy_idless_method_assigns_to_binding"),
+        "the remaining name-only assignment scan should advertise its id-less compatibility scope"
+    );
+    assert_eq!(
+        slot_policy_source
+            .matches("legacy_idless_method_assigns_to_binding")
+            .count(),
+        2,
+        "slot-policy legacy assignment scan should have one id-less caller and one helper definition"
+    );
+    assert_eq!(
+        signature_source
+            .matches("legacy_idless_method_assigns_to_binding")
+            .count(),
+        2,
+        "signature's legacy assignment scan use should stay explicit and localized"
     );
 }
 
@@ -1440,13 +1480,17 @@ fn call_target_lowering_uses_shared_projection_helpers() {
 #[test]
 fn exception_lowering_keeps_exception_paths_structured() {
     let source = include_str!("../src/exception_lowering.rs");
+    let production_source = source
+        .split("#[cfg(test)]")
+        .next()
+        .expect("exception lowering source should have a production prefix");
     let coercion_source = include_str!("../src/coercion.rs");
 
-    assert!(!source.contains("JavaType"));
-    assert!(!source.contains("exception_class_name"));
-    assert!(!source.contains("JavaType::Named"));
-    assert!(!source.contains("JavaType::Unknown"));
-    let throw_policy_source = source
+    assert!(!production_source.contains("JavaType"));
+    assert!(!production_source.contains("exception_class_name"));
+    assert!(!production_source.contains("JavaType::Named"));
+    assert!(!production_source.contains("JavaType::Unknown"));
+    let throw_policy_source = production_source
         .split("pub fn throw_stmt_with_result_policy")
         .nth(1)
         .and_then(|tail| tail.split("pub fn try_catch_stmt").next())
@@ -1458,10 +1502,10 @@ fn exception_lowering_keeps_exception_paths_structured() {
         "non-result throw lowering should keep the exception expression structured"
     );
     assert!(
-        source.contains("parenthesize_raw_postfix_receiver(message)")
-            && source.contains("parenthesize_raw_postfix_receiver(wrapper)")
-            && !source.contains("fn raw_needs_method_receiver_parentheses")
-            && !source.contains("RustExpr::Raw(format!(\"({trimmed})\""),
+        production_source.contains("parenthesize_raw_postfix_receiver(message)")
+            && production_source.contains("parenthesize_raw_postfix_receiver(wrapper)")
+            && !production_source.contains("fn raw_needs_method_receiver_parentheses")
+            && !production_source.contains("RustExpr::Raw(format!(\"({trimmed})\""),
         "exception method receivers should delegate Raw recovery to the central coercion helper"
     );
     let postfix_receiver_source = coercion_source

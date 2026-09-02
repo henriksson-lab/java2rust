@@ -307,12 +307,20 @@ impl<'a> ExternalFactLookupIndex<'a> {
             return Some(effect);
         }
         if provenance.is_none() {
+            let receiver_ambiguous = external_api_effect_simple_owner_alias_is_ambiguous(
+                &self.facts.external_api_effect_facts,
+                receiver_type,
+                method_name,
+                |fact| fact.arg_count == arg_count && fact.return_type.is_some(),
+                None,
+            );
             if let Some(effect) = arg_count.and_then(|arg_count| {
                 self.find_external_api_effect_candidate(method_name, |fact| {
                     external_method_name_matches(&fact.method_name, method_name)
-                        && external_optional_type_name_matches(
+                        && external_api_effect_receiver_matches(
                             fact.receiver_type.as_deref(),
                             receiver_type,
+                            receiver_ambiguous,
                         )
                         && fact.arg_count == Some(arg_count)
                         && fact.return_type.is_some()
@@ -320,11 +328,21 @@ impl<'a> ExternalFactLookupIndex<'a> {
             }) {
                 return Some(effect);
             }
+            let receiver_ambiguous = external_api_effect_simple_owner_alias_is_ambiguous(
+                &self.facts.external_api_effect_facts,
+                receiver_type,
+                method_name,
+                |fact| {
+                    (arg_count.is_none() || fact.arg_count.is_none()) && fact.return_type.is_some()
+                },
+                None,
+            );
             if let Some(effect) = self.find_external_api_effect_candidate(method_name, |fact| {
                 external_method_name_matches(&fact.method_name, method_name)
-                    && external_optional_type_name_matches(
+                    && external_api_effect_receiver_matches(
                         fact.receiver_type.as_deref(),
                         receiver_type,
+                        receiver_ambiguous,
                     )
                     && (arg_count.is_none() || fact.arg_count.is_none())
                     && fact.return_type.is_some()
@@ -334,22 +352,38 @@ impl<'a> ExternalFactLookupIndex<'a> {
         }
         arg_count
             .and_then(|arg_count| {
+                let receiver_ambiguous = external_api_effect_simple_owner_alias_is_ambiguous(
+                    &self.facts.external_api_effect_facts,
+                    receiver_type,
+                    method_name,
+                    |fact| fact.arg_count == Some(arg_count),
+                    provenance,
+                );
                 self.find_external_api_effect_candidate(method_name, |fact| {
                     external_method_name_matches(&fact.method_name, method_name)
-                        && external_optional_type_name_matches(
+                        && external_api_effect_receiver_matches(
                             fact.receiver_type.as_deref(),
                             receiver_type,
+                            receiver_ambiguous,
                         )
                         && fact.arg_count == Some(arg_count)
                         && provenance.is_none_or(|provenance| fact.provenance == provenance)
                 })
             })
             .or_else(|| {
+                let receiver_ambiguous = external_api_effect_simple_owner_alias_is_ambiguous(
+                    &self.facts.external_api_effect_facts,
+                    receiver_type,
+                    method_name,
+                    |fact| arg_count.is_none() || fact.arg_count.is_none(),
+                    provenance,
+                );
                 self.find_external_api_effect_candidate(method_name, |fact| {
                     external_method_name_matches(&fact.method_name, method_name)
-                        && external_optional_type_name_matches(
+                        && external_api_effect_receiver_matches(
                             fact.receiver_type.as_deref(),
                             receiver_type,
+                            receiver_ambiguous,
                         )
                         && (arg_count.is_none() || fact.arg_count.is_none())
                         && provenance.is_none_or(|provenance| fact.provenance == provenance)
@@ -367,12 +401,20 @@ impl<'a> ExternalFactLookupIndex<'a> {
         let arg_count = arg_types.len();
         let mut saw_parameter_facts = false;
         let mut best = None::<(&'a ExternalApiEffectFact, (bool, usize, bool))>;
+        let receiver_ambiguous = external_api_effect_simple_owner_alias_is_ambiguous(
+            &self.facts.external_api_effect_facts,
+            receiver_type,
+            method_name,
+            |fact| fact.arg_count == Some(arg_count),
+            provenance,
+        );
         for index in self.external_api_candidate_indices(method_name) {
             let fact = &self.facts.external_api_effect_facts[index];
             if !external_method_name_matches(&fact.method_name, method_name)
-                || !external_optional_type_name_matches(
+                || !external_api_effect_receiver_matches(
                     fact.receiver_type.as_deref(),
                     receiver_type,
+                    receiver_ambiguous,
                 )
                 || fact.arg_count != Some(arg_count)
                 || provenance.is_some_and(|provenance| fact.provenance != provenance)
@@ -464,39 +506,27 @@ impl<'a> ExternalFactLookupIndex<'a> {
         arg_count: Option<usize>,
         parameter_index: usize,
     ) -> Option<&'a ExternalApiArgumentEffectFact> {
-        self.facts
-            .external_api_argument_effect_facts
-            .iter()
-            .rev()
-            .find(|fact| {
-                external_method_name_matches(&fact.method_name, method_name)
-                    && external_optional_type_name_matches(
-                        fact.receiver_type.as_deref(),
-                        receiver_type,
-                    )
-                    && (arg_count.is_none()
-                        || fact.arg_count == arg_count
-                        || fact.arg_count.is_none())
-                    && fact.parameter_index == parameter_index
-                    && fact.provenance == FactProvenance::UserOverride
-            })
-            .or_else(|| {
-                self.facts
-                    .external_api_argument_effect_facts
-                    .iter()
-                    .rev()
-                    .find(|fact| {
-                        external_method_name_matches(&fact.method_name, method_name)
-                            && external_optional_type_name_matches(
-                                fact.receiver_type.as_deref(),
-                                receiver_type,
-                            )
-                            && (arg_count.is_none()
-                                || fact.arg_count == arg_count
-                                || fact.arg_count.is_none())
-                            && fact.parameter_index == parameter_index
-                    })
-            })
+        let arity_matches = |fact: &ExternalApiArgumentEffectFact| {
+            arg_count.is_none() || fact.arg_count == arg_count || fact.arg_count.is_none()
+        };
+        find_external_api_argument_effect_for_receiver(
+            &self.facts.external_api_argument_effect_facts,
+            receiver_type,
+            method_name,
+            arity_matches,
+            parameter_index,
+            Some(FactProvenance::UserOverride),
+        )
+        .or_else(|| {
+            find_external_api_argument_effect_for_receiver(
+                &self.facts.external_api_argument_effect_facts,
+                receiver_type,
+                method_name,
+                arity_matches,
+                parameter_index,
+                None,
+            )
+        })
     }
 
     fn find_exact_receiver_external_api_effect(
@@ -674,14 +704,14 @@ impl<'a> ExternalFactLookupIndex<'a> {
         }
         self.facts.external_api_effect_facts.iter().any(|fact| {
             fact.receiver_type.as_deref().is_some_and(|receiver_type| {
-                external_type_name_matches(receiver_type, type_name)
+                external_type_name_directly_matches(receiver_type, type_name)
                     && external_pack_owns_type(pack, receiver_type)
             })
         }) || self.facts.external_constructor_facts.iter().any(|fact| {
-            external_type_name_matches(&fact.type_name, type_name)
+            external_type_name_directly_matches(&fact.type_name, type_name)
                 && external_pack_owns_type(pack, &fact.type_name)
         }) || self.facts.external_field_facts.iter().any(|fact| {
-            external_type_name_matches(&fact.field.type_name, type_name)
+            external_type_name_directly_matches(&fact.field.type_name, type_name)
                 && external_pack_owns_type(pack, &fact.field.type_name)
         })
     }
@@ -2037,21 +2067,34 @@ impl FactSet {
         self.external_api_effect_for_receiver_with_arity(receiver_type, method_name, arg_count)
             .or_else(|| {
                 receiver_type.and_then(|receiver_type| {
-                    self.external_crate_api_mapping_facts
-                        .iter()
-                        .rev()
-                        .filter(|mapping| {
-                            mapping.rust_name == method_name
-                                && (mapping.arg_count == arg_count || mapping.arg_count.is_none())
-                                && external_type_name_matches(&mapping.receiver_type, receiver_type)
-                        })
-                        .find_map(|mapping| {
+                    find_external_crate_api_mapping_for_rust_name(
+                        &self.external_crate_api_mapping_facts,
+                        receiver_type,
+                        method_name,
+                        arg_count,
+                    )
+                    .and_then(|mapping| {
+                        self.external_api_effect_for_receiver_with_arity(
+                            Some(&mapping.receiver_type),
+                            &mapping.method_name,
+                            arg_count.or(mapping.arg_count),
+                        )
+                    })
+                    .or_else(|| {
+                        find_external_crate_api_mapping_for_rust_name(
+                            &self.external_crate_api_mapping_facts,
+                            receiver_type,
+                            method_name,
+                            None,
+                        )
+                        .and_then(|mapping| {
                             self.external_api_effect_for_receiver_with_arity(
                                 Some(&mapping.receiver_type),
                                 &mapping.method_name,
                                 arg_count.or(mapping.arg_count),
                             )
                         })
+                    })
                 })
             })
     }
@@ -2093,12 +2136,104 @@ impl FactSet {
         };
         let generic_arity_matches =
             |fact: &ExternalApiArgumentEffectFact| arg_count.is_some() && fact.arg_count.is_none();
-        self.external_api_argument_effect_facts
-            .iter()
-            .rev()
-            .find(|fact| {
+        find_external_api_argument_effect_for_receiver(
+            &self.external_api_argument_effect_facts,
+            receiver_type,
+            method_name,
+            arity_matches,
+            parameter_index,
+            Some(FactProvenance::UserOverride),
+        )
+        .or_else(|| {
+            self.external_api_argument_effect_facts
+                .iter()
+                .rev()
+                .find(|fact| {
+                    external_method_name_matches(&fact.method_name, method_name)
+                        && arity_matches(fact)
+                        && fact.receiver_type.is_none()
+                        && fact.parameter_index == parameter_index
+                        && fact.provenance == FactProvenance::UserOverride
+                })
+        })
+        .or_else(|| {
+            find_external_api_argument_effect_for_receiver(
+                &self.external_api_argument_effect_facts,
+                receiver_type,
+                method_name,
+                arity_matches,
+                parameter_index,
+                None,
+            )
+        })
+        .or_else(|| {
+            self.external_api_argument_effect_facts
+                .iter()
+                .rev()
+                .find(|fact| {
+                    external_method_name_matches(&fact.method_name, method_name)
+                        && arity_matches(fact)
+                        && fact.receiver_type.is_none()
+                        && fact.parameter_index == parameter_index
+                })
+        })
+        .or_else(|| {
+            find_external_api_argument_effect_for_receiver(
+                &self.external_api_argument_effect_facts,
+                receiver_type,
+                method_name,
+                generic_arity_matches,
+                parameter_index,
+                Some(FactProvenance::UserOverride),
+            )
+        })
+        .or_else(|| {
+            self.external_api_argument_effect_facts
+                .iter()
+                .rev()
+                .find(|fact| {
+                    external_method_name_matches(&fact.method_name, method_name)
+                        && generic_arity_matches(fact)
+                        && fact.receiver_type.is_none()
+                        && fact.parameter_index == parameter_index
+                        && fact.provenance == FactProvenance::UserOverride
+                })
+        })
+        .or_else(|| {
+            find_external_api_argument_effect_for_receiver(
+                &self.external_api_argument_effect_facts,
+                receiver_type,
+                method_name,
+                generic_arity_matches,
+                parameter_index,
+                None,
+            )
+        })
+        .or_else(|| {
+            self.external_api_argument_effect_facts
+                .iter()
+                .rev()
+                .find(|fact| {
+                    external_method_name_matches(&fact.method_name, method_name)
+                        && generic_arity_matches(fact)
+                        && fact.receiver_type.is_none()
+                        && fact.parameter_index == parameter_index
+                })
+        })
+        .or_else(|| {
+            if arg_count.is_some() {
+                return None;
+            }
+            self.unambiguous_explicit_arity_external_api_argument_effect(|fact| {
                 external_method_name_matches(&fact.method_name, method_name)
-                    && arity_matches(fact)
+                    && !external_api_argument_effect_simple_owner_alias_is_ambiguous(
+                        &self.external_api_argument_effect_facts,
+                        receiver_type,
+                        method_name,
+                        |_| true,
+                        parameter_index,
+                        Some(FactProvenance::UserOverride),
+                    )
                     && external_optional_type_name_matches(
                         fact.receiver_type.as_deref(),
                         receiver_type,
@@ -2106,143 +2241,49 @@ impl FactSet {
                     && fact.parameter_index == parameter_index
                     && fact.provenance == FactProvenance::UserOverride
             })
-            .or_else(|| {
-                self.external_api_argument_effect_facts
-                    .iter()
-                    .rev()
-                    .find(|fact| {
-                        external_method_name_matches(&fact.method_name, method_name)
-                            && arity_matches(fact)
-                            && fact.receiver_type.is_none()
-                            && fact.parameter_index == parameter_index
-                            && fact.provenance == FactProvenance::UserOverride
-                    })
+        })
+        .or_else(|| {
+            if arg_count.is_some() {
+                return None;
+            }
+            self.unambiguous_explicit_arity_external_api_argument_effect(|fact| {
+                external_method_name_matches(&fact.method_name, method_name)
+                    && fact.receiver_type.is_none()
+                    && fact.parameter_index == parameter_index
+                    && fact.provenance == FactProvenance::UserOverride
             })
-            .or_else(|| {
-                self.external_api_argument_effect_facts
-                    .iter()
-                    .rev()
-                    .find(|fact| {
-                        external_method_name_matches(&fact.method_name, method_name)
-                            && arity_matches(fact)
-                            && external_optional_type_name_matches(
-                                fact.receiver_type.as_deref(),
-                                receiver_type,
-                            )
-                            && fact.parameter_index == parameter_index
-                    })
+        })
+        .or_else(|| {
+            if arg_count.is_some() {
+                return None;
+            }
+            self.unambiguous_explicit_arity_external_api_argument_effect(|fact| {
+                external_method_name_matches(&fact.method_name, method_name)
+                    && !external_api_argument_effect_simple_owner_alias_is_ambiguous(
+                        &self.external_api_argument_effect_facts,
+                        receiver_type,
+                        method_name,
+                        |_| true,
+                        parameter_index,
+                        None,
+                    )
+                    && external_optional_type_name_matches(
+                        fact.receiver_type.as_deref(),
+                        receiver_type,
+                    )
+                    && fact.parameter_index == parameter_index
             })
-            .or_else(|| {
-                self.external_api_argument_effect_facts
-                    .iter()
-                    .rev()
-                    .find(|fact| {
-                        external_method_name_matches(&fact.method_name, method_name)
-                            && arity_matches(fact)
-                            && fact.receiver_type.is_none()
-                            && fact.parameter_index == parameter_index
-                    })
+        })
+        .or_else(|| {
+            if arg_count.is_some() {
+                return None;
+            }
+            self.unambiguous_explicit_arity_external_api_argument_effect(|fact| {
+                external_method_name_matches(&fact.method_name, method_name)
+                    && fact.receiver_type.is_none()
+                    && fact.parameter_index == parameter_index
             })
-            .or_else(|| {
-                self.external_api_argument_effect_facts
-                    .iter()
-                    .rev()
-                    .find(|fact| {
-                        external_method_name_matches(&fact.method_name, method_name)
-                            && generic_arity_matches(fact)
-                            && external_optional_type_name_matches(
-                                fact.receiver_type.as_deref(),
-                                receiver_type,
-                            )
-                            && fact.parameter_index == parameter_index
-                            && fact.provenance == FactProvenance::UserOverride
-                    })
-            })
-            .or_else(|| {
-                self.external_api_argument_effect_facts
-                    .iter()
-                    .rev()
-                    .find(|fact| {
-                        external_method_name_matches(&fact.method_name, method_name)
-                            && generic_arity_matches(fact)
-                            && fact.receiver_type.is_none()
-                            && fact.parameter_index == parameter_index
-                            && fact.provenance == FactProvenance::UserOverride
-                    })
-            })
-            .or_else(|| {
-                self.external_api_argument_effect_facts
-                    .iter()
-                    .rev()
-                    .find(|fact| {
-                        external_method_name_matches(&fact.method_name, method_name)
-                            && generic_arity_matches(fact)
-                            && external_optional_type_name_matches(
-                                fact.receiver_type.as_deref(),
-                                receiver_type,
-                            )
-                            && fact.parameter_index == parameter_index
-                    })
-            })
-            .or_else(|| {
-                self.external_api_argument_effect_facts
-                    .iter()
-                    .rev()
-                    .find(|fact| {
-                        external_method_name_matches(&fact.method_name, method_name)
-                            && generic_arity_matches(fact)
-                            && fact.receiver_type.is_none()
-                            && fact.parameter_index == parameter_index
-                    })
-            })
-            .or_else(|| {
-                if arg_count.is_some() {
-                    return None;
-                }
-                self.unambiguous_explicit_arity_external_api_argument_effect(|fact| {
-                    external_method_name_matches(&fact.method_name, method_name)
-                        && external_optional_type_name_matches(
-                            fact.receiver_type.as_deref(),
-                            receiver_type,
-                        )
-                        && fact.parameter_index == parameter_index
-                        && fact.provenance == FactProvenance::UserOverride
-                })
-            })
-            .or_else(|| {
-                if arg_count.is_some() {
-                    return None;
-                }
-                self.unambiguous_explicit_arity_external_api_argument_effect(|fact| {
-                    external_method_name_matches(&fact.method_name, method_name)
-                        && fact.receiver_type.is_none()
-                        && fact.parameter_index == parameter_index
-                        && fact.provenance == FactProvenance::UserOverride
-                })
-            })
-            .or_else(|| {
-                if arg_count.is_some() {
-                    return None;
-                }
-                self.unambiguous_explicit_arity_external_api_argument_effect(|fact| {
-                    external_method_name_matches(&fact.method_name, method_name)
-                        && external_optional_type_name_matches(
-                            fact.receiver_type.as_deref(),
-                            receiver_type,
-                        )
-                        && fact.parameter_index == parameter_index
-                })
-            })
-            .or_else(|| {
-                if arg_count.is_some() {
-                    return None;
-                }
-                self.unambiguous_explicit_arity_external_api_argument_effect(|fact| {
-                    external_method_name_matches(&fact.method_name, method_name)
-                        && fact.receiver_type.is_none()
-                        && fact.parameter_index == parameter_index
-                })
-            })
+        })
     }
 
     fn unambiguous_explicit_arity_external_api_argument_effect(
@@ -2301,32 +2342,13 @@ impl FactSet {
         parameter_index: usize,
         parameter_type: &JavaType,
     ) -> Option<&ExternalFfiHandoverFact> {
-        self.external_ffi_handover_facts
-            .iter()
-            .rev()
-            .find(|fact| {
-                fact.method_name == method_name
-                    && external_optional_type_name_matches(
-                        fact.receiver_type.as_deref(),
-                        receiver_type,
-                    )
-                    && fact.slot == ExternalFfiHandoverSlot::Argument { parameter_index }
-                    && fact
-                        .parameter_type
-                        .as_ref()
-                        .is_none_or(|fact_ty| fact_ty == parameter_type)
-            })
-            .or_else(|| {
-                self.external_ffi_handover_facts.iter().rev().find(|fact| {
-                    fact.method_name == method_name
-                        && fact.receiver_type.is_none()
-                        && fact.slot == ExternalFfiHandoverSlot::Argument { parameter_index }
-                        && fact
-                            .parameter_type
-                            .as_ref()
-                            .is_none_or(|fact_ty| fact_ty == parameter_type)
-                })
-            })
+        find_external_ffi_handover_for_receiver(
+            &self.external_ffi_handover_facts,
+            receiver_type,
+            method_name,
+            ExternalFfiHandoverSlot::Argument { parameter_index },
+            parameter_type,
+        )
     }
 
     pub fn external_ffi_receiver_handover_for_receiver(
@@ -2335,32 +2357,13 @@ impl FactSet {
         method_name: &str,
         receiver_java_ty: &JavaType,
     ) -> Option<&ExternalFfiHandoverFact> {
-        self.external_ffi_handover_facts
-            .iter()
-            .rev()
-            .find(|fact| {
-                fact.method_name == method_name
-                    && external_optional_type_name_matches(
-                        fact.receiver_type.as_deref(),
-                        receiver_type,
-                    )
-                    && fact.slot == ExternalFfiHandoverSlot::Receiver
-                    && fact
-                        .parameter_type
-                        .as_ref()
-                        .is_none_or(|fact_ty| fact_ty == receiver_java_ty)
-            })
-            .or_else(|| {
-                self.external_ffi_handover_facts.iter().rev().find(|fact| {
-                    fact.method_name == method_name
-                        && fact.receiver_type.is_none()
-                        && fact.slot == ExternalFfiHandoverSlot::Receiver
-                        && fact
-                            .parameter_type
-                            .as_ref()
-                            .is_none_or(|fact_ty| fact_ty == receiver_java_ty)
-                })
-            })
+        find_external_ffi_handover_for_receiver(
+            &self.external_ffi_handover_facts,
+            receiver_type,
+            method_name,
+            ExternalFfiHandoverSlot::Receiver,
+            receiver_java_ty,
+        )
     }
 
     pub fn external_constructor_argument_effect_for(
@@ -2369,25 +2372,22 @@ impl FactSet {
         arg_count: usize,
         parameter_index: usize,
     ) -> Option<&ExternalConstructorArgumentEffectFact> {
-        self.external_constructor_argument_effect_facts
-            .iter()
-            .rev()
-            .find(|fact| {
-                external_type_name_matches(&fact.type_name, type_name)
-                    && fact.arg_count == arg_count
-                    && fact.parameter_index == parameter_index
-                    && fact.provenance == FactProvenance::UserOverride
-            })
-            .or_else(|| {
-                self.external_constructor_argument_effect_facts
-                    .iter()
-                    .rev()
-                    .find(|fact| {
-                        external_type_name_matches(&fact.type_name, type_name)
-                            && fact.arg_count == arg_count
-                            && fact.parameter_index == parameter_index
-                    })
-            })
+        find_external_constructor_argument_effect_for(
+            &self.external_constructor_argument_effect_facts,
+            type_name,
+            arg_count,
+            parameter_index,
+            FactProvenance::UserOverride,
+        )
+        .or_else(|| {
+            find_external_constructor_argument_effect_for(
+                &self.external_constructor_argument_effect_facts,
+                type_name,
+                arg_count,
+                parameter_index,
+                FactProvenance::ExternalLibraryPack,
+            )
+        })
     }
 
     pub fn external_conversion_adapter_for(
@@ -2395,23 +2395,20 @@ impl FactSet {
         from_type: &str,
         to_type: &str,
     ) -> Option<&ExternalConversionAdapterFact> {
-        self.external_conversion_adapter_facts
-            .iter()
-            .rev()
-            .find(|fact| {
-                external_type_name_matches(&fact.from_type, from_type)
-                    && external_type_name_matches(&fact.to_type, to_type)
-                    && fact.provenance == FactProvenance::UserOverride
-            })
-            .or_else(|| {
-                self.external_conversion_adapter_facts
-                    .iter()
-                    .rev()
-                    .find(|fact| {
-                        external_type_name_matches(&fact.from_type, from_type)
-                            && external_type_name_matches(&fact.to_type, to_type)
-                    })
-            })
+        find_external_conversion_adapter_for(
+            &self.external_conversion_adapter_facts,
+            from_type,
+            to_type,
+            FactProvenance::UserOverride,
+        )
+        .or_else(|| {
+            find_external_conversion_adapter_for(
+                &self.external_conversion_adapter_facts,
+                from_type,
+                to_type,
+                FactProvenance::ExternalLibraryPack,
+            )
+        })
     }
 
     pub fn facade_abi_for_key(&self, key: &CallableKey) -> Option<&FacadeAbiFact> {
@@ -2432,17 +2429,28 @@ impl FactSet {
         key: &CallableKey,
         arg_types: &[JavaType],
     ) -> Option<&FacadeAbiFact> {
-        self.facade_abi_facts
-            .iter()
-            .rev()
-            .filter(|fact| callable_key_header_matches(&fact.key, key))
-            .filter(|fact| callable_key_params_match_java_types(&fact.key.params, arg_types))
-            .max_by_key(|fact| {
-                (
-                    fact.provenance == FactProvenance::UserOverride,
-                    callable_key_param_specificity(&fact.key.params),
-                )
-            })
+        find_facade_abi_for_call(
+            self.facade_abi_facts
+                .iter()
+                .rev()
+                .filter(|fact| callable_key_header_directly_matches(&fact.key, key)),
+            arg_types,
+        )
+        .or_else(|| {
+            if callable_key_simple_owner_alias_is_ambiguous(
+                self.facade_abi_facts.iter().map(|fact| &fact.key),
+                key,
+            ) {
+                return None;
+            }
+            find_facade_abi_for_call(
+                self.facade_abi_facts
+                    .iter()
+                    .rev()
+                    .filter(|fact| callable_key_header_matches(&fact.key, key)),
+                arg_types,
+            )
+        })
     }
 
     pub fn external_crate_api_mapping_for_receiver(
@@ -2451,88 +2459,40 @@ impl FactSet {
         method_name: &str,
         arg_count: Option<usize>,
     ) -> Option<&ExternalCrateApiMappingFact> {
-        self.external_crate_api_mapping_facts
-            .iter()
-            .rev()
-            .find(|fact| {
-                external_type_name_directly_matches(&fact.receiver_type, receiver_type)
-                    && fact.method_name == method_name
-                    && fact.arg_count == arg_count
-                    && fact.provenance == FactProvenance::UserOverride
-            })
-            .or_else(|| {
-                self.external_crate_api_mapping_facts
-                    .iter()
-                    .rev()
-                    .find(|fact| {
-                        external_type_name_directly_matches(&fact.receiver_type, receiver_type)
-                            && fact.method_name == method_name
-                            && fact.arg_count.is_none()
-                            && fact.provenance == FactProvenance::UserOverride
-                    })
-            })
-            .or_else(|| {
-                self.external_crate_api_mapping_facts
-                    .iter()
-                    .rev()
-                    .find(|fact| {
-                        external_type_name_matches(&fact.receiver_type, receiver_type)
-                            && fact.method_name == method_name
-                            && fact.arg_count == arg_count
-                            && fact.provenance == FactProvenance::UserOverride
-                    })
-            })
-            .or_else(|| {
-                self.external_crate_api_mapping_facts
-                    .iter()
-                    .rev()
-                    .find(|fact| {
-                        external_type_name_matches(&fact.receiver_type, receiver_type)
-                            && fact.method_name == method_name
-                            && fact.arg_count.is_none()
-                            && fact.provenance == FactProvenance::UserOverride
-                    })
-            })
-            .or_else(|| {
-                self.external_crate_api_mapping_facts
-                    .iter()
-                    .rev()
-                    .find(|fact| {
-                        external_type_name_directly_matches(&fact.receiver_type, receiver_type)
-                            && fact.method_name == method_name
-                            && fact.arg_count == arg_count
-                    })
-            })
-            .or_else(|| {
-                self.external_crate_api_mapping_facts
-                    .iter()
-                    .rev()
-                    .find(|fact| {
-                        external_type_name_directly_matches(&fact.receiver_type, receiver_type)
-                            && fact.method_name == method_name
-                            && fact.arg_count.is_none()
-                    })
-            })
-            .or_else(|| {
-                self.external_crate_api_mapping_facts
-                    .iter()
-                    .rev()
-                    .find(|fact| {
-                        external_type_name_matches(&fact.receiver_type, receiver_type)
-                            && fact.method_name == method_name
-                            && fact.arg_count == arg_count
-                    })
-            })
-            .or_else(|| {
-                self.external_crate_api_mapping_facts
-                    .iter()
-                    .rev()
-                    .find(|fact| {
-                        external_type_name_matches(&fact.receiver_type, receiver_type)
-                            && fact.method_name == method_name
-                            && fact.arg_count.is_none()
-                    })
-            })
+        find_external_crate_api_mapping_for_receiver(
+            &self.external_crate_api_mapping_facts,
+            receiver_type,
+            method_name,
+            arg_count,
+            Some(FactProvenance::UserOverride),
+        )
+        .or_else(|| {
+            find_external_crate_api_mapping_for_receiver(
+                &self.external_crate_api_mapping_facts,
+                receiver_type,
+                method_name,
+                None,
+                Some(FactProvenance::UserOverride),
+            )
+        })
+        .or_else(|| {
+            find_external_crate_api_mapping_for_receiver(
+                &self.external_crate_api_mapping_facts,
+                receiver_type,
+                method_name,
+                arg_count,
+                None,
+            )
+        })
+        .or_else(|| {
+            find_external_crate_api_mapping_for_receiver(
+                &self.external_crate_api_mapping_facts,
+                receiver_type,
+                method_name,
+                None,
+                None,
+            )
+        })
     }
 
     pub fn external_crate_constructor_mapping_for(
@@ -2540,79 +2500,51 @@ impl FactSet {
         type_name: &str,
         arg_count: usize,
     ) -> Option<&ExternalCrateConstructorMappingFact> {
-        self.external_crate_constructor_mapping_facts
-            .iter()
-            .rev()
-            .find(|fact| {
-                external_type_name_directly_matches(&fact.type_name, type_name)
-                    && fact.arg_count == arg_count
-                    && fact.provenance == FactProvenance::UserOverride
-            })
-            .or_else(|| {
-                self.external_crate_constructor_mapping_facts
-                    .iter()
-                    .rev()
-                    .find(|fact| {
-                        external_type_name_matches(&fact.type_name, type_name)
-                            && fact.arg_count == arg_count
-                            && fact.provenance == FactProvenance::UserOverride
-                    })
-            })
-            .or_else(|| {
-                self.external_crate_constructor_mapping_facts
-                    .iter()
-                    .rev()
-                    .find(|fact| {
-                        external_type_name_directly_matches(&fact.type_name, type_name)
-                            && fact.arg_count == arg_count
-                    })
-            })
-            .or_else(|| {
-                self.external_crate_constructor_mapping_facts
-                    .iter()
-                    .rev()
-                    .find(|fact| {
-                        external_type_name_matches(&fact.type_name, type_name)
-                            && fact.arg_count == arg_count
-                    })
-            })
+        find_external_crate_constructor_mapping_for(
+            &self.external_crate_constructor_mapping_facts,
+            type_name,
+            arg_count,
+            Some(FactProvenance::UserOverride),
+        )
+        .or_else(|| {
+            find_external_crate_constructor_mapping_for(
+                &self.external_crate_constructor_mapping_facts,
+                type_name,
+                arg_count,
+                None,
+            )
+        })
     }
 
     pub fn external_crate_rust_type_name_for(&self, type_name: &str) -> Option<&str> {
-        self.external_crate_type_mapping_facts
-            .iter()
-            .rev()
-            .find(|fact| {
-                external_type_name_directly_matches(&fact.type_name, type_name)
-                    && fact.provenance == FactProvenance::UserOverride
-            })
+        find_external_crate_type_mapping_for(
+            &self.external_crate_type_mapping_facts,
+            type_name,
+            Some(FactProvenance::UserOverride),
+        )
+        .or_else(|| {
+            find_external_crate_type_mapping_for(
+                &self.external_crate_type_mapping_facts,
+                type_name,
+                None,
+            )
+        })
+        .map(|fact| fact.rust_type_name.as_str())
+        .or_else(|| {
+            find_external_crate_constructor_type_mapping_for(
+                &self.external_crate_constructor_mapping_facts,
+                type_name,
+                Some(FactProvenance::UserOverride),
+            )
             .or_else(|| {
-                self.external_crate_type_mapping_facts
-                    .iter()
-                    .rev()
-                    .find(|fact| external_type_name_matches(&fact.type_name, type_name))
+                find_external_crate_constructor_type_mapping_for(
+                    &self.external_crate_constructor_mapping_facts,
+                    type_name,
+                    None,
+                )
             })
-            .map(|fact| fact.rust_type_name.as_str())
-            .or_else(|| {
-                self.external_crate_constructor_mapping_facts
-                    .iter()
-                    .rev()
-                    .find(|fact| {
-                        external_type_name_directly_matches(&fact.type_name, type_name)
-                            && fact.rust_type_name.is_some()
-                            && fact.provenance == FactProvenance::UserOverride
-                    })
-                    .or_else(|| {
-                        self.external_crate_constructor_mapping_facts
-                            .iter()
-                            .rev()
-                            .find(|fact| {
-                                external_type_name_matches(&fact.type_name, type_name)
-                                    && fact.rust_type_name.is_some()
-                            })
-                    })
-                    .and_then(|fact| fact.rust_type_name.as_deref())
-            })
+            .and_then(|fact| fact.rust_type_name.as_deref())
+        })
     }
 
     pub fn external_rust_result_for_receiver(
@@ -2636,12 +2568,13 @@ impl FactSet {
         arg_count: Option<usize>,
         user_override_only: bool,
     ) -> Option<&ExternalRustResultFact> {
-        self.external_rust_result_facts.iter().rev().find(|fact| {
-            fact.method_name == method_name
-                && fact.arg_count == arg_count
-                && (!user_override_only || fact.provenance == FactProvenance::UserOverride)
-                && external_optional_type_name_matches(fact.receiver_type.as_deref(), receiver_type)
-        })
+        find_external_rust_result_for_receiver(
+            &self.external_rust_result_facts,
+            receiver_type,
+            method_name,
+            arg_count,
+            user_override_only,
+        )
     }
 
     pub fn external_rust_return_type_for_receiver(
@@ -2665,18 +2598,13 @@ impl FactSet {
         arg_count: Option<usize>,
         user_override_only: bool,
     ) -> Option<&ExternalRustReturnTypeFact> {
-        self.external_rust_return_type_facts
-            .iter()
-            .rev()
-            .find(|fact| {
-                fact.method_name == method_name
-                    && fact.arg_count == arg_count
-                    && (!user_override_only || fact.provenance == FactProvenance::UserOverride)
-                    && external_optional_type_name_matches(
-                        fact.receiver_type.as_deref(),
-                        receiver_type,
-                    )
-            })
+        find_external_rust_return_type_for_receiver(
+            &self.external_rust_return_type_facts,
+            receiver_type,
+            method_name,
+            arg_count,
+            user_override_only,
+        )
     }
 
     pub fn external_constructor_rust_result_for(
@@ -2684,23 +2612,28 @@ impl FactSet {
         type_name: &str,
         arg_count: usize,
     ) -> Option<&ExternalConstructorRustResultFact> {
-        self.external_constructor_rust_result_facts
-            .iter()
-            .rev()
-            .find(|fact| {
-                external_type_name_matches(&fact.type_name, type_name)
-                    && fact.arg_count == arg_count
-                    && fact.provenance == FactProvenance::UserOverride
-            })
-            .or_else(|| {
-                self.external_constructor_rust_result_facts
-                    .iter()
-                    .rev()
-                    .find(|fact| {
-                        external_type_name_matches(&fact.type_name, type_name)
-                            && fact.arg_count == arg_count
-                    })
-            })
+        find_external_constructor_rust_result_for(
+            &self.external_constructor_rust_result_facts,
+            type_name,
+            arg_count,
+            FactProvenance::UserOverride,
+        )
+        .or_else(|| {
+            find_external_constructor_rust_result_for(
+                &self.external_constructor_rust_result_facts,
+                type_name,
+                arg_count,
+                FactProvenance::ExternalLibraryPack,
+            )
+        })
+        .or_else(|| {
+            find_external_constructor_rust_result_for(
+                &self.external_constructor_rust_result_facts,
+                type_name,
+                arg_count,
+                FactProvenance::BuiltinExternalModel,
+            )
+        })
     }
 
     pub fn external_constructor_for(
@@ -2835,6 +2768,13 @@ impl FactSet {
                     && fact.method_name == method_name
             })
             .or_else(|| {
+                if unsupported_external_api_simple_owner_alias_is_ambiguous(
+                    &self.unsupported_external_api_facts,
+                    receiver_type,
+                    method_name,
+                ) {
+                    return None;
+                }
                 self.unsupported_external_api_facts
                     .iter()
                     .rev()
@@ -2858,6 +2798,13 @@ impl FactSet {
                     && fact.arg_count == arg_count
             })
             .or_else(|| {
+                if unsupported_external_constructor_simple_owner_alias_is_ambiguous(
+                    &self.unsupported_external_constructor_facts,
+                    type_name,
+                    arg_count,
+                ) {
+                    return None;
+                }
                 self.unsupported_external_constructor_facts
                     .iter()
                     .rev()
@@ -2881,6 +2828,13 @@ impl FactSet {
                     && external_field_name_matches(&fact.field.field_name, field_name)
             })
             .or_else(|| {
+                if unsupported_external_field_simple_owner_alias_is_ambiguous(
+                    &self.unsupported_external_field_facts,
+                    type_name,
+                    field_name,
+                ) {
+                    return None;
+                }
                 self.unsupported_external_field_facts
                     .iter()
                     .rev()
@@ -2892,6 +2846,20 @@ impl FactSet {
     }
 
     pub fn recursion_facts_for(&self, type_name: &str, method_name: &str) -> Vec<&RecursionFact> {
+        let direct = self
+            .recursion_facts
+            .iter()
+            .filter(|fact| method_key_directly_matches(&fact.method, type_name, method_name))
+            .collect::<Vec<_>>();
+        if !direct.is_empty()
+            || method_key_simple_owner_alias_is_ambiguous(
+                self.recursion_facts.iter().map(|fact| &fact.method),
+                type_name,
+                method_name,
+            )
+        {
+            return direct;
+        }
         self.recursion_facts
             .iter()
             .filter(|fact| method_key_matches(&fact.method, type_name, method_name))
@@ -2907,10 +2875,36 @@ impl FactSet {
             .iter()
             .rev()
             .find(|fact| {
-                method_key_matches(&fact.method, type_name, method_name)
+                method_key_directly_matches(&fact.method, type_name, method_name)
                     && fact.provenance == FactProvenance::UserOverride
             })
             .or_else(|| {
+                if method_key_simple_owner_alias_is_ambiguous(
+                    self.method_effect_facts.iter().map(|fact| &fact.method),
+                    type_name,
+                    method_name,
+                ) {
+                    return None;
+                }
+                self.method_effect_facts.iter().rev().find(|fact| {
+                    method_key_matches(&fact.method, type_name, method_name)
+                        && fact.provenance == FactProvenance::UserOverride
+                })
+            })
+            .or_else(|| {
+                self.method_effect_facts
+                    .iter()
+                    .rev()
+                    .find(|fact| method_key_directly_matches(&fact.method, type_name, method_name))
+            })
+            .or_else(|| {
+                if method_key_simple_owner_alias_is_ambiguous(
+                    self.method_effect_facts.iter().map(|fact| &fact.method),
+                    type_name,
+                    method_name,
+                ) {
+                    return None;
+                }
                 self.method_effect_facts
                     .iter()
                     .rev()
@@ -2922,7 +2916,19 @@ impl FactSet {
         self.source_equals_override_facts
             .iter()
             .rev()
-            .find(|fact| external_type_name_matches(&fact.type_name, type_name))
+            .find(|fact| external_type_name_directly_matches(&fact.type_name, type_name))
+            .or_else(|| {
+                if source_equals_override_simple_owner_alias_is_ambiguous(
+                    &self.source_equals_override_facts,
+                    type_name,
+                ) {
+                    return None;
+                }
+                self.source_equals_override_facts
+                    .iter()
+                    .rev()
+                    .find(|fact| external_type_name_matches(&fact.type_name, type_name))
+            })
     }
 
     pub fn method_has_thrown_exceptions(&self, type_name: &str, method_name: &str) -> bool {
@@ -2950,12 +2956,33 @@ impl FactSet {
         kind: ControlFlowFactKind,
     ) -> bool {
         self.control_flow_facts.iter().any(|fact| {
+            method_key_directly_matches(&fact.method, type_name, method_name) && fact.kind == kind
+        }) || (!method_key_simple_owner_alias_is_ambiguous(
+            self.control_flow_facts.iter().map(|fact| &fact.method),
+            type_name,
+            method_name,
+        ) && self.control_flow_facts.iter().any(|fact| {
             method_key_matches(&fact.method, type_name, method_name) && fact.kind == kind
-        })
+        }))
     }
 
     pub fn dispatch_requirements_for(&self, type_name: &str) -> Vec<DispatchRequirementKind> {
         let mut requirements = Vec::new();
+        for fact in &self.dispatch_requirement_facts {
+            if external_type_name_directly_matches(&fact.type_name, type_name)
+                && !requirements.contains(&fact.requirement)
+            {
+                requirements.push(fact.requirement);
+            }
+        }
+        if !requirements.is_empty()
+            || dispatch_requirement_simple_owner_alias_is_ambiguous(
+                &self.dispatch_requirement_facts,
+                type_name,
+            )
+        {
+            return requirements;
+        }
         for fact in &self.dispatch_requirement_facts {
             if external_type_name_matches(&fact.type_name, type_name)
                 && !requirements.contains(&fact.requirement)
@@ -2967,6 +2994,19 @@ impl FactSet {
     }
 
     pub fn dispatch_requirement_facts_for(&self, type_name: &str) -> Vec<&DispatchRequirementFact> {
+        let direct = self
+            .dispatch_requirement_facts
+            .iter()
+            .filter(|fact| external_type_name_directly_matches(&fact.type_name, type_name))
+            .collect::<Vec<_>>();
+        if !direct.is_empty()
+            || dispatch_requirement_simple_owner_alias_is_ambiguous(
+                &self.dispatch_requirement_facts,
+                type_name,
+            )
+        {
+            return direct;
+        }
         self.dispatch_requirement_facts
             .iter()
             .filter(|fact| external_type_name_matches(&fact.type_name, type_name))
@@ -2978,10 +3018,28 @@ impl FactSet {
             .iter()
             .rev()
             .find(|fact| {
-                exception_type_name_matches(&fact.type_name, type_name)
+                external_type_name_directly_matches(&fact.type_name, type_name)
                     && fact.kind != ExceptionKind::Unknown
             })
             .or_else(|| {
+                if exception_simple_owner_alias_is_ambiguous(&self.exception_facts, type_name) {
+                    return None;
+                }
+                self.exception_facts.iter().rev().find(|fact| {
+                    exception_type_name_matches(&fact.type_name, type_name)
+                        && fact.kind != ExceptionKind::Unknown
+                })
+            })
+            .or_else(|| {
+                self.exception_facts
+                    .iter()
+                    .rev()
+                    .find(|fact| external_type_name_directly_matches(&fact.type_name, type_name))
+            })
+            .or_else(|| {
+                if exception_simple_owner_alias_is_ambiguous(&self.exception_facts, type_name) {
+                    return None;
+                }
                 self.exception_facts
                     .iter()
                     .rev()
@@ -2991,6 +3049,20 @@ impl FactSet {
     }
 
     pub fn catch_facts_for(&self, type_name: &str, method_name: &str) -> Vec<&CatchFact> {
+        let direct = self
+            .catch_facts
+            .iter()
+            .filter(|fact| method_key_directly_matches(&fact.method, type_name, method_name))
+            .collect::<Vec<_>>();
+        if !direct.is_empty()
+            || method_key_simple_owner_alias_is_ambiguous(
+                self.catch_facts.iter().map(|fact| &fact.method),
+                type_name,
+                method_name,
+            )
+        {
+            return direct;
+        }
         self.catch_facts
             .iter()
             .filter(|fact| method_key_matches(&fact.method, type_name, method_name))
@@ -3063,6 +3135,18 @@ impl FactSet {
 
     pub fn extends_type_for(&self, java_ty: &JavaType) -> Option<JavaType> {
         crate::effective_facts::EffectiveFacts::new(self).extends_type_for(java_ty)
+    }
+
+    pub fn extends_type_name_for(&self, type_name: &str) -> Option<String> {
+        let java_ty = JavaType::Named {
+            name: type_name.to_string(),
+            args: Vec::new(),
+        };
+        match self.extends_type_for(&java_ty)? {
+            JavaType::String => Some("String".to_string()),
+            JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(name),
+            _ => None,
+        }
     }
 
     pub fn implemented_types_for(&self, java_ty: &JavaType) -> Vec<JavaType> {
@@ -3298,6 +3382,54 @@ fn callable_key_header_matches(fact: &CallableKey, query: &CallableKey) -> bool 
             || fact.generic_arity == query.generic_arity)
 }
 
+fn callable_key_header_directly_matches(fact: &CallableKey, query: &CallableKey) -> bool {
+    external_type_name_directly_matches(&fact.owner.type_name, &query.owner.type_name)
+        && fact.member == query.member
+        && fact.kind == query.kind
+        && (fact.staticness == query.staticness
+            || fact.staticness == Staticness::Unknown
+            || query.staticness == Staticness::Unknown)
+        && fact.arity == query.arity
+        && (fact.generic_arity.is_none()
+            || query.generic_arity.is_none()
+            || fact.generic_arity == query.generic_arity)
+}
+
+fn callable_key_simple_owner_alias_is_ambiguous<'a>(
+    keys: impl Iterator<Item = &'a CallableKey>,
+    query: &CallableKey,
+) -> bool {
+    package_simple_owner_alias_is_ambiguous(
+        keys.filter_map(|key| {
+            (key.member == query.member
+                && key.kind == query.kind
+                && (key.staticness == query.staticness
+                    || key.staticness == Staticness::Unknown
+                    || query.staticness == Staticness::Unknown)
+                && key.arity == query.arity
+                && (key.generic_arity.is_none()
+                    || query.generic_arity.is_none()
+                    || key.generic_arity == query.generic_arity))
+                .then_some(key.owner.type_name.as_str())
+        }),
+        &query.owner.type_name,
+    )
+}
+
+fn find_facade_abi_for_call<'a>(
+    facts: impl Iterator<Item = &'a FacadeAbiFact>,
+    arg_types: &[JavaType],
+) -> Option<&'a FacadeAbiFact> {
+    facts
+        .filter(|fact| callable_key_params_match_java_types(&fact.key.params, arg_types))
+        .max_by_key(|fact| {
+            (
+                fact.provenance == FactProvenance::UserOverride,
+                callable_key_param_specificity(&fact.key.params),
+            )
+        })
+}
+
 fn callable_key_params_match_java_types(params: &[TypePattern], arg_types: &[JavaType]) -> bool {
     params.len() == arg_types.len()
         && params
@@ -3414,6 +3546,19 @@ fn external_optional_type_name_matches(
     }
 }
 
+fn external_optional_type_name_directly_matches(
+    fact_type_name: Option<&str>,
+    query_type_name: Option<&str>,
+) -> bool {
+    match (fact_type_name, query_type_name) {
+        (Some(fact_type_name), Some(query_type_name)) => {
+            external_type_name_directly_matches(fact_type_name, query_type_name)
+        }
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 fn external_method_name_matches(fact_method_name: &str, query_method_name: &str) -> bool {
     let fact_aliases = external_method_name_aliases(fact_method_name);
     external_method_name_aliases(query_method_name)
@@ -3472,6 +3617,7 @@ fn external_type_name_aliases(type_name: &str) -> Rc<[String]> {
 fn external_type_name_aliases_uncached(type_name: &str) -> Vec<String> {
     let mut aliases = external_direct_type_name_aliases(type_name);
     let canonical = crate::stdlib::canonical_external_receiver_type_key(type_name);
+    aliases.extend(nested_type_suffix_aliases(type_name));
     if let Some(simple) = package_qualified_simple_alias(type_name) {
         aliases.extend([
             simple.to_string(),
@@ -3591,6 +3737,48 @@ fn method_key_matches(method: &MethodKey, type_name: &str, method_name: &str) ->
             || crate::parser::to_snake_case(&method.method_name) == method_name)
 }
 
+fn method_key_simple_owner_alias_is_ambiguous<'a>(
+    methods: impl Iterator<Item = &'a MethodKey>,
+    type_name: &str,
+    method_name: &str,
+) -> bool {
+    package_simple_owner_alias_is_ambiguous(
+        methods.filter_map(|method| {
+            (method.method_name == method_name
+                || crate::parser::to_snake_case(&method.method_name) == method_name)
+                .then_some(method.type_name.as_str())
+        }),
+        type_name,
+    )
+}
+
+fn source_equals_override_simple_owner_alias_is_ambiguous(
+    facts: &[SourceEqualsOverrideFact],
+    type_name: &str,
+) -> bool {
+    package_simple_owner_alias_is_ambiguous(
+        facts.iter().map(|fact| fact.type_name.as_str()),
+        type_name,
+    )
+}
+
+fn dispatch_requirement_simple_owner_alias_is_ambiguous(
+    facts: &[DispatchRequirementFact],
+    type_name: &str,
+) -> bool {
+    package_simple_owner_alias_is_ambiguous(
+        facts.iter().map(|fact| fact.type_name.as_str()),
+        type_name,
+    )
+}
+
+fn exception_simple_owner_alias_is_ambiguous(facts: &[ExceptionFact], type_name: &str) -> bool {
+    package_simple_owner_alias_is_ambiguous(
+        facts.iter().map(|fact| fact.type_name.as_str()),
+        type_name,
+    )
+}
+
 fn field_nullability_simple_owner_alias_is_ambiguous(
     facts: &[FieldNullabilityFact],
     type_name: &str,
@@ -3646,6 +3834,827 @@ fn external_constructor_simple_owner_alias_is_ambiguous(
                 || (fact.provenance == FactProvenance::ExternalLibraryPack
                     && fact.arg_types.len() == arg_types.len()))
             .then_some(fact.type_name.as_str())
+        }),
+        type_name,
+    )
+}
+
+fn find_external_constructor_argument_effect_for<'a>(
+    facts: &'a [ExternalConstructorArgumentEffectFact],
+    type_name: &str,
+    arg_count: usize,
+    parameter_index: usize,
+    provenance: FactProvenance,
+) -> Option<&'a ExternalConstructorArgumentEffectFact> {
+    facts
+        .iter()
+        .rev()
+        .find(|fact| {
+            fact.type_name == type_name
+                && fact.arg_count == arg_count
+                && fact.parameter_index == parameter_index
+                && fact.provenance == provenance
+        })
+        .or_else(|| {
+            facts.iter().rev().find(|fact| {
+                external_type_name_directly_matches(&fact.type_name, type_name)
+                    && fact.arg_count == arg_count
+                    && fact.parameter_index == parameter_index
+                    && fact.provenance == provenance
+            })
+        })
+        .or_else(|| {
+            if external_constructor_argument_effect_simple_owner_alias_is_ambiguous(
+                facts,
+                type_name,
+                arg_count,
+                parameter_index,
+                provenance,
+            ) {
+                return None;
+            }
+            facts.iter().rev().find(|fact| {
+                external_type_name_matches(&fact.type_name, type_name)
+                    && fact.arg_count == arg_count
+                    && fact.parameter_index == parameter_index
+                    && fact.provenance == provenance
+            })
+        })
+}
+
+fn external_constructor_argument_effect_simple_owner_alias_is_ambiguous(
+    facts: &[ExternalConstructorArgumentEffectFact],
+    type_name: &str,
+    arg_count: usize,
+    parameter_index: usize,
+    provenance: FactProvenance,
+) -> bool {
+    package_simple_owner_alias_is_ambiguous(
+        facts.iter().filter_map(|fact| {
+            (fact.arg_count == arg_count
+                && fact.parameter_index == parameter_index
+                && fact.provenance == provenance)
+                .then_some(fact.type_name.as_str())
+        }),
+        type_name,
+    )
+}
+
+fn find_external_api_argument_effect_for_receiver<'a>(
+    facts: &'a [ExternalApiArgumentEffectFact],
+    receiver_type: Option<&str>,
+    method_name: &str,
+    arity_matches: impl Fn(&ExternalApiArgumentEffectFact) -> bool + Copy,
+    parameter_index: usize,
+    provenance: Option<FactProvenance>,
+) -> Option<&'a ExternalApiArgumentEffectFact> {
+    facts
+        .iter()
+        .rev()
+        .find(|fact| {
+            external_method_name_matches(&fact.method_name, method_name)
+                && arity_matches(fact)
+                && external_optional_type_name_directly_matches(
+                    fact.receiver_type.as_deref(),
+                    receiver_type,
+                )
+                && fact.parameter_index == parameter_index
+                && provenance.is_none_or(|provenance| fact.provenance == provenance)
+        })
+        .or_else(|| {
+            if external_api_argument_effect_simple_owner_alias_is_ambiguous(
+                facts,
+                receiver_type,
+                method_name,
+                arity_matches,
+                parameter_index,
+                provenance,
+            ) {
+                return None;
+            }
+            facts.iter().rev().find(|fact| {
+                external_method_name_matches(&fact.method_name, method_name)
+                    && arity_matches(fact)
+                    && external_optional_type_name_matches(
+                        fact.receiver_type.as_deref(),
+                        receiver_type,
+                    )
+                    && fact.parameter_index == parameter_index
+                    && provenance.is_none_or(|provenance| fact.provenance == provenance)
+            })
+        })
+}
+
+fn external_api_argument_effect_simple_owner_alias_is_ambiguous(
+    facts: &[ExternalApiArgumentEffectFact],
+    receiver_type: Option<&str>,
+    method_name: &str,
+    arity_matches: impl Fn(&ExternalApiArgumentEffectFact) -> bool,
+    parameter_index: usize,
+    provenance: Option<FactProvenance>,
+) -> bool {
+    let Some(receiver_type) = receiver_type else {
+        return false;
+    };
+    package_simple_owner_alias_is_ambiguous(
+        facts.iter().filter_map(|fact| {
+            (external_method_name_matches(&fact.method_name, method_name)
+                && arity_matches(fact)
+                && fact.parameter_index == parameter_index
+                && provenance.is_none_or(|provenance| fact.provenance == provenance))
+            .then_some(fact.receiver_type.as_deref())
+            .flatten()
+        }),
+        receiver_type,
+    )
+}
+
+fn external_api_effect_receiver_matches(
+    fact_receiver_type: Option<&str>,
+    receiver_type: Option<&str>,
+    broad_match_is_ambiguous: bool,
+) -> bool {
+    optional_external_type_name_directly_matches(fact_receiver_type, receiver_type)
+        || (!broad_match_is_ambiguous
+            && external_optional_type_name_matches(fact_receiver_type, receiver_type))
+}
+
+fn external_api_effect_simple_owner_alias_is_ambiguous(
+    facts: &[ExternalApiEffectFact],
+    receiver_type: Option<&str>,
+    method_name: &str,
+    signature_matches: impl Fn(&ExternalApiEffectFact) -> bool,
+    provenance: Option<FactProvenance>,
+) -> bool {
+    let Some(receiver_type) = receiver_type else {
+        return false;
+    };
+    package_simple_owner_alias_is_ambiguous(
+        facts.iter().filter_map(|fact| {
+            (external_method_name_matches(&fact.method_name, method_name)
+                && signature_matches(fact)
+                && provenance.is_none_or(|provenance| fact.provenance == provenance))
+            .then_some(fact.receiver_type.as_deref())
+            .flatten()
+        }),
+        receiver_type,
+    )
+}
+
+fn find_external_crate_api_mapping_for_receiver<'a>(
+    facts: &'a [ExternalCrateApiMappingFact],
+    receiver_type: &str,
+    method_name: &str,
+    arg_count: Option<usize>,
+    provenance: Option<FactProvenance>,
+) -> Option<&'a ExternalCrateApiMappingFact> {
+    facts
+        .iter()
+        .rev()
+        .find(|fact| {
+            external_crate_api_mapping_signature_matches(fact, method_name, arg_count, provenance)
+                && external_type_name_directly_matches(&fact.receiver_type, receiver_type)
+        })
+        .or_else(|| {
+            if external_crate_api_mapping_simple_owner_alias_is_ambiguous(
+                facts,
+                receiver_type,
+                method_name,
+                arg_count,
+                provenance,
+            ) {
+                return None;
+            }
+            facts.iter().rev().find(|fact| {
+                external_crate_api_mapping_signature_matches(
+                    fact,
+                    method_name,
+                    arg_count,
+                    provenance,
+                ) && external_type_name_matches(&fact.receiver_type, receiver_type)
+            })
+        })
+}
+
+fn external_crate_api_mapping_signature_matches(
+    fact: &ExternalCrateApiMappingFact,
+    method_name: &str,
+    arg_count: Option<usize>,
+    provenance: Option<FactProvenance>,
+) -> bool {
+    fact.method_name == method_name
+        && fact.arg_count == arg_count
+        && provenance.is_none_or(|provenance| fact.provenance == provenance)
+}
+
+fn external_crate_api_mapping_simple_owner_alias_is_ambiguous(
+    facts: &[ExternalCrateApiMappingFact],
+    receiver_type: &str,
+    method_name: &str,
+    arg_count: Option<usize>,
+    provenance: Option<FactProvenance>,
+) -> bool {
+    package_simple_owner_alias_is_ambiguous(
+        facts.iter().filter_map(|fact| {
+            external_crate_api_mapping_signature_matches(fact, method_name, arg_count, provenance)
+                .then_some(fact.receiver_type.as_str())
+        }),
+        receiver_type,
+    )
+}
+
+fn find_external_crate_api_mapping_for_rust_name<'a>(
+    facts: &'a [ExternalCrateApiMappingFact],
+    receiver_type: &str,
+    rust_name: &str,
+    arg_count: Option<usize>,
+) -> Option<&'a ExternalCrateApiMappingFact> {
+    facts
+        .iter()
+        .rev()
+        .find(|fact| {
+            external_crate_api_rust_name_mapping_signature_matches(fact, rust_name, arg_count)
+                && external_type_name_directly_matches(&fact.receiver_type, receiver_type)
+        })
+        .or_else(|| {
+            if external_crate_api_rust_name_mapping_simple_owner_alias_is_ambiguous(
+                facts,
+                receiver_type,
+                rust_name,
+                arg_count,
+            ) {
+                return None;
+            }
+            facts.iter().rev().find(|fact| {
+                external_crate_api_rust_name_mapping_signature_matches(fact, rust_name, arg_count)
+                    && external_type_name_matches(&fact.receiver_type, receiver_type)
+            })
+        })
+}
+
+fn external_crate_api_rust_name_mapping_signature_matches(
+    fact: &ExternalCrateApiMappingFact,
+    rust_name: &str,
+    arg_count: Option<usize>,
+) -> bool {
+    fact.rust_name == rust_name && fact.arg_count == arg_count
+}
+
+fn external_crate_api_rust_name_mapping_simple_owner_alias_is_ambiguous(
+    facts: &[ExternalCrateApiMappingFact],
+    receiver_type: &str,
+    rust_name: &str,
+    arg_count: Option<usize>,
+) -> bool {
+    package_simple_owner_alias_is_ambiguous(
+        facts.iter().filter_map(|fact| {
+            external_crate_api_rust_name_mapping_signature_matches(fact, rust_name, arg_count)
+                .then_some(fact.receiver_type.as_str())
+        }),
+        receiver_type,
+    )
+}
+
+fn find_external_crate_constructor_mapping_for<'a>(
+    facts: &'a [ExternalCrateConstructorMappingFact],
+    type_name: &str,
+    arg_count: usize,
+    provenance: Option<FactProvenance>,
+) -> Option<&'a ExternalCrateConstructorMappingFact> {
+    facts
+        .iter()
+        .rev()
+        .find(|fact| {
+            external_crate_constructor_mapping_signature_matches(fact, arg_count, provenance)
+                && external_type_name_directly_matches(&fact.type_name, type_name)
+        })
+        .or_else(|| {
+            if external_crate_constructor_mapping_simple_owner_alias_is_ambiguous(
+                facts, type_name, arg_count, provenance,
+            ) {
+                return None;
+            }
+            facts.iter().rev().find(|fact| {
+                external_crate_constructor_mapping_signature_matches(fact, arg_count, provenance)
+                    && external_type_name_matches(&fact.type_name, type_name)
+            })
+        })
+}
+
+fn find_external_crate_constructor_type_mapping_for<'a>(
+    facts: &'a [ExternalCrateConstructorMappingFact],
+    type_name: &str,
+    provenance: Option<FactProvenance>,
+) -> Option<&'a ExternalCrateConstructorMappingFact> {
+    facts
+        .iter()
+        .rev()
+        .find(|fact| {
+            fact.rust_type_name.is_some()
+                && provenance.is_none_or(|provenance| fact.provenance == provenance)
+                && external_type_name_directly_matches(&fact.type_name, type_name)
+        })
+        .or_else(|| {
+            if external_crate_constructor_type_mapping_simple_owner_alias_is_ambiguous(
+                facts, type_name, provenance,
+            ) {
+                return None;
+            }
+            facts.iter().rev().find(|fact| {
+                fact.rust_type_name.is_some()
+                    && provenance.is_none_or(|provenance| fact.provenance == provenance)
+                    && external_type_name_matches(&fact.type_name, type_name)
+            })
+        })
+}
+
+fn external_crate_constructor_mapping_signature_matches(
+    fact: &ExternalCrateConstructorMappingFact,
+    arg_count: usize,
+    provenance: Option<FactProvenance>,
+) -> bool {
+    fact.arg_count == arg_count && provenance.is_none_or(|provenance| fact.provenance == provenance)
+}
+
+fn external_crate_constructor_mapping_simple_owner_alias_is_ambiguous(
+    facts: &[ExternalCrateConstructorMappingFact],
+    type_name: &str,
+    arg_count: usize,
+    provenance: Option<FactProvenance>,
+) -> bool {
+    package_simple_owner_alias_is_ambiguous(
+        facts.iter().filter_map(|fact| {
+            external_crate_constructor_mapping_signature_matches(fact, arg_count, provenance)
+                .then_some(fact.type_name.as_str())
+        }),
+        type_name,
+    )
+}
+
+fn external_crate_constructor_type_mapping_simple_owner_alias_is_ambiguous(
+    facts: &[ExternalCrateConstructorMappingFact],
+    type_name: &str,
+    provenance: Option<FactProvenance>,
+) -> bool {
+    package_simple_owner_alias_is_ambiguous(
+        facts.iter().filter_map(|fact| {
+            (fact.rust_type_name.is_some()
+                && provenance.is_none_or(|provenance| fact.provenance == provenance))
+            .then_some(fact.type_name.as_str())
+        }),
+        type_name,
+    )
+}
+
+fn find_external_crate_type_mapping_for<'a>(
+    facts: &'a [ExternalCrateTypeMappingFact],
+    type_name: &str,
+    provenance: Option<FactProvenance>,
+) -> Option<&'a ExternalCrateTypeMappingFact> {
+    facts
+        .iter()
+        .rev()
+        .find(|fact| {
+            provenance.is_none_or(|provenance| fact.provenance == provenance)
+                && external_type_name_directly_matches(&fact.type_name, type_name)
+        })
+        .or_else(|| {
+            if external_crate_type_mapping_simple_owner_alias_is_ambiguous(
+                facts, type_name, provenance,
+            ) {
+                return None;
+            }
+            facts.iter().rev().find(|fact| {
+                provenance.is_none_or(|provenance| fact.provenance == provenance)
+                    && external_type_name_matches(&fact.type_name, type_name)
+            })
+        })
+}
+
+fn external_crate_type_mapping_simple_owner_alias_is_ambiguous(
+    facts: &[ExternalCrateTypeMappingFact],
+    type_name: &str,
+    provenance: Option<FactProvenance>,
+) -> bool {
+    package_simple_owner_alias_is_ambiguous(
+        facts.iter().filter_map(|fact| {
+            provenance
+                .is_none_or(|provenance| fact.provenance == provenance)
+                .then_some(fact.type_name.as_str())
+        }),
+        type_name,
+    )
+}
+
+fn find_external_ffi_handover_for_receiver<'a>(
+    facts: &'a [ExternalFfiHandoverFact],
+    receiver_type: Option<&str>,
+    method_name: &str,
+    slot: ExternalFfiHandoverSlot,
+    parameter_type: &JavaType,
+) -> Option<&'a ExternalFfiHandoverFact> {
+    facts
+        .iter()
+        .rev()
+        .find(|fact| {
+            external_ffi_handover_signature_matches(fact, method_name, slot, parameter_type)
+                && fact.receiver_type.as_deref() == receiver_type
+        })
+        .or_else(|| {
+            facts.iter().rev().find(|fact| {
+                external_ffi_handover_signature_matches(fact, method_name, slot, parameter_type)
+                    && optional_external_type_name_directly_matches(
+                        fact.receiver_type.as_deref(),
+                        receiver_type,
+                    )
+            })
+        })
+        .or_else(|| {
+            if external_ffi_handover_simple_owner_alias_is_ambiguous(
+                facts,
+                receiver_type,
+                method_name,
+                slot,
+                parameter_type,
+            ) {
+                return None;
+            }
+            facts.iter().rev().find(|fact| {
+                external_ffi_handover_signature_matches(fact, method_name, slot, parameter_type)
+                    && external_optional_type_name_matches(
+                        fact.receiver_type.as_deref(),
+                        receiver_type,
+                    )
+            })
+        })
+        .or_else(|| {
+            facts.iter().rev().find(|fact| {
+                external_ffi_handover_signature_matches(fact, method_name, slot, parameter_type)
+                    && fact.receiver_type.is_none()
+            })
+        })
+}
+
+fn external_ffi_handover_signature_matches(
+    fact: &ExternalFfiHandoverFact,
+    method_name: &str,
+    slot: ExternalFfiHandoverSlot,
+    parameter_type: &JavaType,
+) -> bool {
+    fact.method_name == method_name
+        && fact.slot == slot
+        && fact
+            .parameter_type
+            .as_ref()
+            .is_none_or(|fact_ty| fact_ty == parameter_type)
+}
+
+fn external_ffi_handover_simple_owner_alias_is_ambiguous(
+    facts: &[ExternalFfiHandoverFact],
+    receiver_type: Option<&str>,
+    method_name: &str,
+    slot: ExternalFfiHandoverSlot,
+    parameter_type: &JavaType,
+) -> bool {
+    let Some(receiver_type) = receiver_type else {
+        return false;
+    };
+    package_simple_owner_alias_is_ambiguous(
+        facts.iter().filter_map(|fact| {
+            external_ffi_handover_signature_matches(fact, method_name, slot, parameter_type)
+                .then_some(fact.receiver_type.as_deref())
+                .flatten()
+        }),
+        receiver_type,
+    )
+}
+
+fn find_external_rust_result_for_receiver<'a>(
+    facts: &'a [ExternalRustResultFact],
+    receiver_type: Option<&str>,
+    method_name: &str,
+    arg_count: Option<usize>,
+    user_override_only: bool,
+) -> Option<&'a ExternalRustResultFact> {
+    facts
+        .iter()
+        .rev()
+        .find(|fact| {
+            external_rust_result_signature_matches(fact, method_name, arg_count, user_override_only)
+                && fact.receiver_type.as_deref() == receiver_type
+        })
+        .or_else(|| {
+            facts.iter().rev().find(|fact| {
+                external_rust_result_signature_matches(
+                    fact,
+                    method_name,
+                    arg_count,
+                    user_override_only,
+                ) && optional_external_type_name_directly_matches(
+                    fact.receiver_type.as_deref(),
+                    receiver_type,
+                )
+            })
+        })
+        .or_else(|| {
+            if external_rust_result_simple_owner_alias_is_ambiguous(
+                facts,
+                receiver_type,
+                method_name,
+                arg_count,
+                user_override_only,
+            ) {
+                return None;
+            }
+            facts.iter().rev().find(|fact| {
+                external_rust_result_signature_matches(
+                    fact,
+                    method_name,
+                    arg_count,
+                    user_override_only,
+                ) && external_optional_type_name_matches(
+                    fact.receiver_type.as_deref(),
+                    receiver_type,
+                )
+            })
+        })
+}
+
+fn external_rust_result_signature_matches(
+    fact: &ExternalRustResultFact,
+    method_name: &str,
+    arg_count: Option<usize>,
+    user_override_only: bool,
+) -> bool {
+    fact.method_name == method_name
+        && fact.arg_count == arg_count
+        && (!user_override_only || fact.provenance == FactProvenance::UserOverride)
+}
+
+fn external_rust_result_simple_owner_alias_is_ambiguous(
+    facts: &[ExternalRustResultFact],
+    receiver_type: Option<&str>,
+    method_name: &str,
+    arg_count: Option<usize>,
+    user_override_only: bool,
+) -> bool {
+    let Some(receiver_type) = receiver_type else {
+        return false;
+    };
+    package_simple_owner_alias_is_ambiguous(
+        facts.iter().filter_map(|fact| {
+            external_rust_result_signature_matches(fact, method_name, arg_count, user_override_only)
+                .then_some(fact.receiver_type.as_deref())
+                .flatten()
+        }),
+        receiver_type,
+    )
+}
+
+fn find_external_rust_return_type_for_receiver<'a>(
+    facts: &'a [ExternalRustReturnTypeFact],
+    receiver_type: Option<&str>,
+    method_name: &str,
+    arg_count: Option<usize>,
+    user_override_only: bool,
+) -> Option<&'a ExternalRustReturnTypeFact> {
+    facts
+        .iter()
+        .rev()
+        .find(|fact| {
+            external_rust_return_type_signature_matches(
+                fact,
+                method_name,
+                arg_count,
+                user_override_only,
+            ) && fact.receiver_type.as_deref() == receiver_type
+        })
+        .or_else(|| {
+            facts.iter().rev().find(|fact| {
+                external_rust_return_type_signature_matches(
+                    fact,
+                    method_name,
+                    arg_count,
+                    user_override_only,
+                ) && optional_external_type_name_directly_matches(
+                    fact.receiver_type.as_deref(),
+                    receiver_type,
+                )
+            })
+        })
+        .or_else(|| {
+            if external_rust_return_type_simple_owner_alias_is_ambiguous(
+                facts,
+                receiver_type,
+                method_name,
+                arg_count,
+                user_override_only,
+            ) {
+                return None;
+            }
+            facts.iter().rev().find(|fact| {
+                external_rust_return_type_signature_matches(
+                    fact,
+                    method_name,
+                    arg_count,
+                    user_override_only,
+                ) && external_optional_type_name_matches(
+                    fact.receiver_type.as_deref(),
+                    receiver_type,
+                )
+            })
+        })
+}
+
+fn external_rust_return_type_signature_matches(
+    fact: &ExternalRustReturnTypeFact,
+    method_name: &str,
+    arg_count: Option<usize>,
+    user_override_only: bool,
+) -> bool {
+    fact.method_name == method_name
+        && fact.arg_count == arg_count
+        && (!user_override_only || fact.provenance == FactProvenance::UserOverride)
+}
+
+fn external_rust_return_type_simple_owner_alias_is_ambiguous(
+    facts: &[ExternalRustReturnTypeFact],
+    receiver_type: Option<&str>,
+    method_name: &str,
+    arg_count: Option<usize>,
+    user_override_only: bool,
+) -> bool {
+    let Some(receiver_type) = receiver_type else {
+        return false;
+    };
+    package_simple_owner_alias_is_ambiguous(
+        facts.iter().filter_map(|fact| {
+            external_rust_return_type_signature_matches(
+                fact,
+                method_name,
+                arg_count,
+                user_override_only,
+            )
+            .then_some(fact.receiver_type.as_deref())
+            .flatten()
+        }),
+        receiver_type,
+    )
+}
+
+fn find_external_constructor_rust_result_for<'a>(
+    facts: &'a [ExternalConstructorRustResultFact],
+    type_name: &str,
+    arg_count: usize,
+    provenance: FactProvenance,
+) -> Option<&'a ExternalConstructorRustResultFact> {
+    facts
+        .iter()
+        .rev()
+        .find(|fact| {
+            fact.type_name == type_name
+                && fact.arg_count == arg_count
+                && fact.provenance == provenance
+        })
+        .or_else(|| {
+            facts.iter().rev().find(|fact| {
+                external_type_name_directly_matches(&fact.type_name, type_name)
+                    && fact.arg_count == arg_count
+                    && fact.provenance == provenance
+            })
+        })
+        .or_else(|| {
+            if external_constructor_rust_result_simple_owner_alias_is_ambiguous(
+                facts, type_name, arg_count, provenance,
+            ) {
+                return None;
+            }
+            facts.iter().rev().find(|fact| {
+                external_type_name_matches(&fact.type_name, type_name)
+                    && fact.arg_count == arg_count
+                    && fact.provenance == provenance
+            })
+        })
+}
+
+fn external_constructor_rust_result_simple_owner_alias_is_ambiguous(
+    facts: &[ExternalConstructorRustResultFact],
+    type_name: &str,
+    arg_count: usize,
+    provenance: FactProvenance,
+) -> bool {
+    package_simple_owner_alias_is_ambiguous(
+        facts.iter().filter_map(|fact| {
+            (fact.arg_count == arg_count && fact.provenance == provenance)
+                .then_some(fact.type_name.as_str())
+        }),
+        type_name,
+    )
+}
+
+fn find_external_conversion_adapter_for<'a>(
+    facts: &'a [ExternalConversionAdapterFact],
+    from_type: &str,
+    to_type: &str,
+    provenance: FactProvenance,
+) -> Option<&'a ExternalConversionAdapterFact> {
+    facts
+        .iter()
+        .rev()
+        .find(|fact| {
+            fact.from_type == from_type && fact.to_type == to_type && fact.provenance == provenance
+        })
+        .or_else(|| {
+            facts.iter().rev().find(|fact| {
+                external_type_name_directly_matches(&fact.from_type, from_type)
+                    && external_type_name_directly_matches(&fact.to_type, to_type)
+                    && fact.provenance == provenance
+            })
+        })
+        .or_else(|| {
+            if external_conversion_adapter_simple_endpoint_alias_is_ambiguous(
+                facts, from_type, to_type, provenance,
+            ) {
+                return None;
+            }
+            facts.iter().rev().find(|fact| {
+                external_type_name_matches(&fact.from_type, from_type)
+                    && external_type_name_matches(&fact.to_type, to_type)
+                    && fact.provenance == provenance
+            })
+        })
+}
+
+fn external_conversion_adapter_simple_endpoint_alias_is_ambiguous(
+    facts: &[ExternalConversionAdapterFact],
+    from_type: &str,
+    to_type: &str,
+    provenance: FactProvenance,
+) -> bool {
+    package_simple_owner_alias_is_ambiguous(
+        facts.iter().filter_map(|fact| {
+            (fact.provenance == provenance && external_type_name_matches(&fact.to_type, to_type))
+                .then_some(fact.from_type.as_str())
+        }),
+        from_type,
+    ) || package_simple_owner_alias_is_ambiguous(
+        facts.iter().filter_map(|fact| {
+            (fact.provenance == provenance
+                && external_type_name_matches(&fact.from_type, from_type))
+            .then_some(fact.to_type.as_str())
+        }),
+        to_type,
+    )
+}
+
+fn optional_external_type_name_directly_matches(
+    fact_type_name: Option<&str>,
+    query_type_name: Option<&str>,
+) -> bool {
+    match (fact_type_name, query_type_name) {
+        (Some(fact_type_name), Some(query_type_name)) => {
+            external_type_name_directly_matches(fact_type_name, query_type_name)
+        }
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn unsupported_external_constructor_simple_owner_alias_is_ambiguous(
+    facts: &[UnsupportedExternalConstructorFact],
+    type_name: &str,
+    arg_count: usize,
+) -> bool {
+    package_simple_owner_alias_is_ambiguous(
+        facts
+            .iter()
+            .filter_map(|fact| (fact.arg_count == arg_count).then_some(fact.type_name.as_str())),
+        type_name,
+    )
+}
+
+fn unsupported_external_api_simple_owner_alias_is_ambiguous(
+    facts: &[UnsupportedExternalApiFact],
+    receiver_type: &str,
+    method_name: &str,
+) -> bool {
+    package_simple_owner_alias_is_ambiguous(
+        facts.iter().filter_map(|fact| {
+            (fact.method_name == method_name).then_some(fact.receiver_type.as_str())
+        }),
+        receiver_type,
+    )
+}
+
+fn unsupported_external_field_simple_owner_alias_is_ambiguous(
+    facts: &[UnsupportedExternalFieldFact],
+    type_name: &str,
+    field_name: &str,
+) -> bool {
+    package_simple_owner_alias_is_ambiguous(
+        facts.iter().filter_map(|fact| {
+            external_field_name_matches(&fact.field.field_name, field_name)
+                .then_some(fact.field.type_name.as_str())
         }),
         type_name,
     )

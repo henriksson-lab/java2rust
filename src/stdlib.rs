@@ -4,9 +4,10 @@ use crate::effective_facts::EffectiveFacts;
 use crate::facts::FactSet;
 use crate::facts::{
     CallableKey, ExternalApiEffectFact, ExternalApiRole, ExternalArgumentAliasPolicy,
-    ExternalConversionAdapterKind, ExternalFieldFact, ExternalFieldKind, FacadeAbiFact, FacadeSlot,
-    FactProvenance, FieldKey, HierarchyStrategy, NullabilityState, ReceiverAbi,
-    ReceiverMutabilityFact, ResultAbi, Staticness, TypeCapabilityOverride, TypeKey, TypePattern,
+    ExternalConstructorRustResultFact, ExternalConversionAdapterKind, ExternalFieldFact,
+    ExternalFieldKind, FacadeAbiFact, FacadeSlot, FactProvenance, FieldKey, HierarchyStrategy,
+    NullabilityState, ReceiverAbi, ReceiverMutabilityFact, ResultAbi, Staticness,
+    TypeCapabilityOverride, TypeKey, TypePattern,
 };
 use crate::java_ir::{
     BinaryOp, Block, Expr, FieldDecl, JavaType, LambdaBody, Literal, Member, MethodDecl, Modifier,
@@ -1387,6 +1388,10 @@ fn add_jdk_optional_abi_facts(facts: &mut FactSet) {
 
 fn add_jdk_collection_abi_facts(facts: &mut FactSet) {
     for owner in ["BitSet", "java.util.BitSet"] {
+        facts
+            .external_constructor_rust_result_facts
+            .push(jdk_constructor_result_fact(owner, 1));
+
         let mut effect =
             jdk_instance_api_fact(owner, "get", 1, JavaType::Primitive(PrimitiveType::Boolean));
         effect.thrown = vec![JavaType::Named {
@@ -1394,6 +1399,15 @@ fn add_jdk_collection_abi_facts(facts: &mut FactSet) {
             args: Vec::new(),
         }];
         facts.external_api_effect_facts.push(effect);
+
+        facts.facade_abi_facts.push(jdk_result_method_abi(
+            owner,
+            "get",
+            1,
+            "BitSet::get_result",
+            vec![FacadeSlot::Owned],
+            FacadeSlot::Owned,
+        ));
 
         let mut effect = jdk_instance_api_fact(owner, "set", 1, JavaType::Void);
         effect.receiver_mutability = ReceiverMutabilityFact::MutatesReceiver;
@@ -1894,6 +1908,10 @@ fn add_jdk_platform_io_abi_facts(facts: &mut FactSet) {
         "JavaLangStringBuffer",
         "JavaLangStringBuilder",
     ] {
+        facts
+            .external_constructor_rust_result_facts
+            .push(jdk_constructor_result_fact(owner, 1));
+
         for method in ["charAt", "char_at"] {
             let mut effect =
                 jdk_instance_api_fact(owner, method, 1, JavaType::Primitive(PrimitiveType::Char));
@@ -2186,6 +2204,15 @@ fn jdk_result_method_abi(
     let mut fact = rust_stdlib_method_abi(owner, method, arity, rust_path, args, return_slot);
     fact.result = ResultAbi::ResultWrapped;
     fact
+}
+
+fn jdk_constructor_result_fact(owner: &str, arity: usize) -> ExternalConstructorRustResultFact {
+    ExternalConstructorRustResultFact {
+        type_name: owner.to_string(),
+        arg_count: arity,
+        returns_result: true,
+        provenance: FactProvenance::BuiltinExternalModel,
+    }
 }
 
 fn jdk_result_method_abi_with_params(
@@ -2593,6 +2620,8 @@ fn native_collection_kind_receiver_mutates(kind: JavaCollectionKind, method_name
                 | "remove"
                 | "removeAll"
                 | "remove_all"
+                | "retainAll"
+                | "retain_all"
                 | "removeIf"
                 | "remove_if"
                 | "clear"
@@ -4902,6 +4931,28 @@ fn is_known_external_enum_type(receiver: &str) -> bool {
     )
 }
 
+pub fn known_external_enum_synthetic_call_return_type(
+    receiver: &str,
+    method_name: &str,
+    arg_count: usize,
+) -> Option<JavaType> {
+    let receiver = canonical_external_receiver_type_key(receiver);
+    if !is_known_external_enum_type(&receiver) {
+        return None;
+    }
+    match (method_name, arg_count) {
+        ("values", 0) => Some(JavaType::Array(Box::new(JavaType::Named {
+            name: receiver,
+            args: Vec::new(),
+        }))),
+        ("valueOf", 1) => Some(JavaType::Named {
+            name: receiver,
+            args: Vec::new(),
+        }),
+        _ => None,
+    }
+}
+
 fn is_vcf_header_line_type_constant(field_name: &str) -> bool {
     matches!(
         field_name,
@@ -6325,6 +6376,10 @@ impl Pattern {
         }
     }
 
+    pub fn to_string(&self) -> String {
+        self.pattern.to_string()
+    }
+
     pub fn matcher<S: AsRef<str>>(&self, input: S) -> Matcher {
         let input = input.as_ref().to_string();
         let matched = java_pattern_matches(self.pattern, &input);
@@ -6338,6 +6393,12 @@ impl Pattern {
             matched,
             groups,
         }
+    }
+}
+
+impl std::fmt::Display for Pattern {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.pattern)
     }
 }
 
@@ -7883,8 +7944,17 @@ pub fn java_erased_any_to_string(value: &dyn std::any::Any) -> String {{
     if let Some(value) = value.downcast_ref::<std::sync::Arc<std::boxed::Box<dyn std::any::Any>>>() {{
         return java_erased_any_to_string(value.as_ref().as_ref());
     }}
+    if value.is::<Vec<std::boxed::Box<dyn std::any::Any>>>() {{
+        return "[Ljava.lang.Object;@0".to_string();
+    }}
+    if value.is::<Vec<Option<std::boxed::Box<dyn std::any::Any>>>>() {{
+        return "[Ljava.lang.Object;@0".to_string();
+    }}
     if let Some(value) = value.downcast_ref::<String>() {{
         return value.clone();
+    }}
+    if let Some((key, entry_value)) = value.downcast_ref::<(String, String)>() {{
+        return format!("{{}}={{}}", key, entry_value);
     }}
 {platform_to_string_downcasts}
 {external_to_string_downcasts}
@@ -7943,6 +8013,7 @@ const PLATFORM_ERASED_DISPLAY_TYPES: &[&str] = &[
     "AtomicInteger",
     "AtomicLong",
     "Path",
+    "Pattern",
     "Random",
     "StringBuilder",
     "StringBuffer",
@@ -7967,8 +8038,24 @@ fn platform_erased_display_supporting_type_mentions(
     match platform_type {
         "InputStream" => program_mentions_java_type(program, "System"),
         "Path" => program_mentions_java_type(program, "File"),
+        "Pattern" => {
+            program_imports_external_type(program, "java.util.regex.Pattern")
+                || program_mentions_java_type(program, "JavaUtilRegexPattern")
+        }
         _ => false,
     }
+}
+
+fn program_imports_external_type(program: &Program, external_type: &str) -> bool {
+    let Some((package, _simple_name)) = external_type.rsplit_once('.') else {
+        return false;
+    };
+    program.package.as_deref() == Some(package)
+        || program.imports.iter().any(|import| {
+            !import.is_static
+                && ((import.path == external_type && !import.is_wildcard)
+                    || (import.path == package && import.is_wildcard))
+        })
 }
 
 fn external_erased_object_to_string_downcasts(programs: &[&Program], facts: &FactSet) -> String {
@@ -12943,7 +13030,7 @@ impl ExternalApiFacadeSupport {
         add(
             "new_buffered_reader",
             1,
-            "    pub fn new_buffered_reader<T0>(_arg0: T0) -> Result<Reader, JavaException> { unimplemented!(\"Files.newBufferedReader is not modelled\") }",
+            "    pub fn new_buffered_reader<T0>(_arg0: T0) -> Result<BufferedReader, JavaException> { unimplemented!(\"Files.newBufferedReader is not modelled\") }",
         );
         add(
             "read_all_lines",
@@ -15416,6 +15503,27 @@ impl DisplayHintTypeContext {
         ctx
     }
 
+    fn with_lambda_params_for_target(
+        &self,
+        params: &[crate::java_ir::LambdaParam],
+        target_ty: Option<&JavaType>,
+    ) -> Self {
+        let mut ctx = self.with_lambda_params(params);
+        if let Some(inferred_types) = target_ty.and_then(|ty| lambda_input_types_for_target(ty))
+            && inferred_types.len() == params.len()
+        {
+            for (param, ty) in params.iter().zip(inferred_types.iter()) {
+                if param.ty.is_none() {
+                    ctx.insert_local(&param.name, ty);
+                    if param.source_name != param.name {
+                        ctx.insert_local(&param.source_name, ty);
+                    }
+                }
+            }
+        }
+        ctx
+    }
+
     fn insert_local(&mut self, name: &str, ty: &JavaType) {
         ctx_insert_binding_aliases(&mut self.bindings, name, ty);
     }
@@ -15453,6 +15561,26 @@ fn ctx_insert_binding_aliases(
     if snake != name {
         bindings.insert(snake, ty.clone());
     }
+}
+
+fn lambda_input_types_for_target(ty: &JavaType) -> Option<Vec<JavaType>> {
+    let JavaType::Named { name, args } = ty else {
+        return None;
+    };
+    let simple = canonical_external_receiver_type_key(name)
+        .rsplit('.')
+        .next()
+        .unwrap_or(name.as_str())
+        .to_string();
+    let shape = functional_interface_shape(&simple)?;
+    shape
+        .inputs
+        .iter()
+        .map(|input| match input {
+            FunctionalTypeSource::TypeArgument(index) => args.get(*index).cloned(),
+            FunctionalTypeSource::Primitive(primitive) => Some(JavaType::Primitive(*primitive)),
+        })
+        .collect()
 }
 
 fn collect_program_display_return_hints(program: &Program) -> BTreeSet<DisplayContextReturnHint> {
@@ -15545,7 +15673,11 @@ fn collect_stmt_display_return_hints(
             ..
         } => {
             if let Some(expr) = initializer {
-                collect_expr_display_return_hints(expr, ctx, hints);
+                if let Expr::Lambda { params, body } = expr {
+                    collect_lambda_display_return_hints(params, body, ctx, hints, Some(ty));
+                } else {
+                    collect_expr_display_return_hints(expr, ctx, hints);
+                }
             }
             ctx.insert_local(name, ty);
         }
@@ -15803,15 +15935,7 @@ fn collect_expr_display_return_hints(
             }
         }
         Expr::Lambda { params, body } => {
-            let mut lambda_ctx = ctx.with_lambda_params(params);
-            match body {
-                crate::java_ir::LambdaBody::Expr(expr) => {
-                    collect_expr_display_return_hints(expr, &lambda_ctx, hints)
-                }
-                crate::java_ir::LambdaBody::Block(block) => {
-                    collect_block_display_return_hints(block, &mut lambda_ctx, hints);
-                }
-            }
+            collect_lambda_display_return_hints(params, body, ctx, hints, None);
         }
         Expr::Literal(_)
         | Expr::Var(_)
@@ -15821,6 +15945,24 @@ fn collect_expr_display_return_hints(
         | Expr::ClassLiteral(_)
         | Expr::Raw(_)
         | Expr::Unsupported { .. } => {}
+    }
+}
+
+fn collect_lambda_display_return_hints(
+    params: &[crate::java_ir::LambdaParam],
+    body: &crate::java_ir::LambdaBody,
+    ctx: &DisplayHintTypeContext,
+    hints: &mut BTreeSet<DisplayContextReturnHint>,
+    target_ty: Option<&JavaType>,
+) {
+    let mut lambda_ctx = ctx.with_lambda_params_for_target(params, target_ty);
+    match body {
+        crate::java_ir::LambdaBody::Expr(expr) => {
+            collect_expr_display_return_hints(expr, &lambda_ctx, hints)
+        }
+        crate::java_ir::LambdaBody::Block(block) => {
+            collect_block_display_return_hints(block, &mut lambda_ctx, hints);
+        }
     }
 }
 
@@ -15940,6 +16082,47 @@ class OtherSequenceFile {}
                 arg_count: 0,
             }),
             "lambda parameter should shadow the outer field: {hints:?}"
+        );
+    }
+
+    #[test]
+    fn inferred_lambda_param_shadows_outer_binding_for_display_hint_owner() {
+        let program = crate::parser::parse_java_source(
+            r#"
+class InferredLambdaDisplayHintShadow {
+    private SequenceFile sequenceFile;
+
+    void write(StringBuffer summaryText) {
+        Consumer<OtherSequenceFile> consumer =
+            sequenceFile -> summaryText.append(sequenceFile.name());
+    }
+}
+
+class SequenceFile {}
+class OtherSequenceFile {}
+"#,
+        )
+        .program;
+
+        let hints = collect_program_display_return_hints(&program);
+
+        assert!(
+            hints.contains(&DisplayContextReturnHint {
+                owner: "OtherSequenceFile".to_string(),
+                java_method: "name".to_string(),
+                rust_method: "name".to_string(),
+                arg_count: 0,
+            }),
+            "{hints:?}"
+        );
+        assert!(
+            !hints.contains(&DisplayContextReturnHint {
+                owner: "SequenceFile".to_string(),
+                java_method: "name".to_string(),
+                rust_method: "name".to_string(),
+                arg_count: 0,
+            }),
+            "inferred lambda parameter should shadow the outer field: {hints:?}"
         );
     }
 
@@ -21966,10 +22149,13 @@ fn type_uses_java_erased_object_runtime_support(ty: &crate::java_ir::TypeDecl) -
 
 fn member_uses_java_erased_object_runtime_support(member: &crate::java_ir::Member) -> bool {
     match member {
-        crate::java_ir::Member::Field(field) => field
-            .initializer
-            .as_ref()
-            .is_some_and(expr_uses_java_erased_object_runtime_support),
+        crate::java_ir::Member::Field(field) => {
+            java_type_uses_java_erased_object_runtime_support(&field.ty)
+                || field
+                    .initializer
+                    .as_ref()
+                    .is_some_and(expr_uses_java_erased_object_runtime_support)
+        }
         crate::java_ir::Member::Method(method) => {
             java_type_uses_java_erased_object_runtime_support(&method.return_type)
                 || method
@@ -22190,9 +22376,11 @@ fn expr_uses_java_erased_object_runtime_support(expr: &Expr) -> bool {
                 block_uses_java_erased_object_runtime_support(block)
             }
         },
-        Expr::New { args, body, .. } => {
-            args.iter()
-                .any(expr_uses_java_erased_object_runtime_support)
+        Expr::New { ty, args, body, .. } => {
+            java_type_uses_java_erased_object_runtime_support(ty)
+                || args
+                    .iter()
+                    .any(expr_uses_java_erased_object_runtime_support)
                 || body
                     .iter()
                     .flatten()

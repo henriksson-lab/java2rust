@@ -51,6 +51,8 @@ pub struct ShapeEnv {
     map_entry_value_receivers_by_binding: HashMap<BindingId, Expr>,
     simple_map_entry_values: HashMap<String, (Expr, Expr)>,
     simple_map_entry_values_by_binding: HashMap<BindingId, (Expr, Expr)>,
+    simple_immutable_map_entry_locals: HashSet<String>,
+    simple_immutable_map_entry_locals_by_binding: HashSet<BindingId>,
     nested_array2_locals: HashSet<String>,
     nested_array2_locals_by_binding: HashSet<BindingId>,
 }
@@ -122,8 +124,30 @@ impl ShapeEnv {
     pub fn forget_simple_map_entry_value(&mut self, name: &str) {
         if let Some(binding) = self.binding_ids.get(name) {
             self.simple_map_entry_values_by_binding.remove(binding);
+            self.simple_immutable_map_entry_locals_by_binding
+                .remove(binding);
         }
         self.simple_map_entry_values.remove(name);
+        self.simple_immutable_map_entry_locals.remove(name);
+    }
+
+    pub fn insert_simple_immutable_map_entry_local(&mut self, name: impl Into<String>) {
+        let name = name.into();
+        if let Some(binding) = self.binding_ids.get(&name).cloned() {
+            self.simple_immutable_map_entry_locals_by_binding
+                .insert(binding);
+        } else {
+            self.simple_immutable_map_entry_locals.insert(name);
+        }
+    }
+
+    pub fn simple_map_entry_local_is_immutable(&self, name: &str) -> bool {
+        if let Some(binding) = self.binding_ids.get(name) {
+            return self
+                .simple_immutable_map_entry_locals_by_binding
+                .contains(binding);
+        }
+        self.simple_immutable_map_entry_locals.contains(name)
     }
 
     pub fn forget_map_entry_value_receiver(&mut self, name: &str) {
@@ -156,6 +180,8 @@ impl ShapeEnv {
             self.map_entry_set_view_receivers_by_binding.remove(binding);
             self.map_entry_value_receivers_by_binding.remove(binding);
             self.simple_map_entry_values_by_binding.remove(binding);
+            self.simple_immutable_map_entry_locals_by_binding
+                .remove(binding);
             self.nested_array2_locals_by_binding.remove(binding);
         }
         self.map_key_set_view_receivers.remove(name);
@@ -163,6 +189,7 @@ impl ShapeEnv {
         self.map_entry_set_view_receivers.remove(name);
         self.map_entry_value_receivers.remove(name);
         self.simple_map_entry_values.remove(name);
+        self.simple_immutable_map_entry_locals.remove(name);
         self.nested_array2_locals.remove(name);
     }
 
@@ -1410,7 +1437,10 @@ pub fn learn_stmt_shapes(
             initializer,
             binding,
         } => {
-            let access_name = env.binding_access_name(source_name).map(str::to_string);
+            let access_name = env
+                .binding_access_name(source_name)
+                .map(str::to_string)
+                .unwrap_or_else(|| name.clone());
             let local_plan =
                 local_plan_for_declaration_shape(signatures, locals, binding.as_ref(), name, ty);
             let shape = local_plan
@@ -1419,8 +1449,9 @@ pub fn learn_stmt_shapes(
             let env_binding = binding
                 .clone()
                 .or_else(|| local_plan.map(|plan| plan.binding.clone()));
-            env.insert_local_shape_with_java_type_and_binding(
-                name.clone(),
+            env.insert_local_shape_with_access_name_java_type_and_binding(
+                source_name.clone(),
+                access_name.clone(),
                 shape,
                 ty.clone(),
                 env_binding,
@@ -1430,10 +1461,7 @@ pub fn learn_stmt_shapes(
                 if source_name != name {
                     env.insert_map_key_set_view_receiver(source_name.clone(), receiver.clone());
                 }
-                if let Some(access_name) = access_name
-                    .as_ref()
-                    .filter(|access_name| *access_name != name && *access_name != source_name)
-                {
+                if access_name != *name && access_name != *source_name {
                     env.insert_map_key_set_view_receiver(access_name.clone(), receiver.clone());
                 }
             }
@@ -1442,10 +1470,7 @@ pub fn learn_stmt_shapes(
                 if source_name != name {
                     env.insert_map_values_view_receiver(source_name.clone(), receiver.clone());
                 }
-                if let Some(access_name) = access_name
-                    .as_ref()
-                    .filter(|access_name| *access_name != name && *access_name != source_name)
-                {
+                if access_name != *name && access_name != *source_name {
                     env.insert_map_values_view_receiver(access_name.clone(), receiver.clone());
                 }
             }
@@ -1454,10 +1479,7 @@ pub fn learn_stmt_shapes(
                 if source_name != name {
                     env.insert_map_entry_set_view_receiver(source_name.clone(), receiver.clone());
                 }
-                if let Some(access_name) = access_name
-                    .as_ref()
-                    .filter(|access_name| *access_name != name && *access_name != source_name)
-                {
+                if access_name != *name && access_name != *source_name {
                     env.insert_map_entry_set_view_receiver(access_name.clone(), receiver.clone());
                 }
             }
@@ -1467,10 +1489,7 @@ pub fn learn_stmt_shapes(
                 if source_name != name {
                     env.insert_map_entry_value_receiver(source_name.clone(), receiver.clone());
                 }
-                if let Some(access_name) = access_name
-                    .as_ref()
-                    .filter(|access_name| *access_name != name && *access_name != source_name)
-                {
+                if access_name != *name && access_name != *source_name {
                     env.insert_map_entry_value_receiver(access_name.clone(), receiver.clone());
                 }
             }
@@ -1479,22 +1498,37 @@ pub fn learn_stmt_shapes(
                 .and_then(simple_map_entry_constructor_args)
             {
                 env.insert_simple_map_entry_value(name.clone(), key.clone(), value.clone());
+                if initializer
+                    .as_ref()
+                    .is_some_and(simple_map_entry_constructor_is_immutable)
+                {
+                    env.insert_simple_immutable_map_entry_local(name.clone());
+                }
                 if source_name != name {
                     env.insert_simple_map_entry_value(
                         source_name.clone(),
                         key.clone(),
                         value.clone(),
                     );
+                    if initializer
+                        .as_ref()
+                        .is_some_and(simple_map_entry_constructor_is_immutable)
+                    {
+                        env.insert_simple_immutable_map_entry_local(source_name.clone());
+                    }
                 }
-                if let Some(access_name) = access_name
-                    .as_ref()
-                    .filter(|access_name| *access_name != name && *access_name != source_name)
-                {
+                if access_name != *name && access_name != *source_name {
                     env.insert_simple_map_entry_value(
                         access_name.clone(),
                         key.clone(),
                         value.clone(),
                     );
+                    if initializer
+                        .as_ref()
+                        .is_some_and(simple_map_entry_constructor_is_immutable)
+                    {
+                        env.insert_simple_immutable_map_entry_local(access_name.clone());
+                    }
                 }
             }
         }
@@ -1678,6 +1712,20 @@ fn java_type_is_simple_map_entry(ty: &JavaType) -> bool {
         name.rsplit('.').next().unwrap_or(name).trim(),
         "SimpleEntry" | "SimpleImmutableEntry"
     )
+}
+
+fn simple_map_entry_constructor_is_immutable(expr: &Expr) -> bool {
+    let Expr::New { ty, args, .. } = expr else {
+        return false;
+    };
+    args.len() == 2 && java_type_is_simple_immutable_map_entry(ty)
+}
+
+fn java_type_is_simple_immutable_map_entry(ty: &JavaType) -> bool {
+    let JavaType::Named { name, .. } = ty else {
+        return false;
+    };
+    name.rsplit('.').next().unwrap_or(name).trim() == "SimpleImmutableEntry"
 }
 
 fn local_plan_for_declaration_shape<'a>(
@@ -2182,6 +2230,35 @@ mod tests {
         learn_stmt_shapes(&stmt, &mut env, &plans, &SignaturePlan::default());
 
         assert_eq!(env.binding_id("value"), Some(&selected_binding));
+    }
+
+    #[test]
+    fn bound_var_decl_shape_learning_preserves_keyword_access_name_binding() {
+        let java_ty = JavaType::String;
+        let binding = BindingId::new(BindingKind::Local, "self".to_string(), 0);
+        let plans = vec![LocalPlan {
+            binding: binding.clone(),
+            name: "self__".to_string(),
+            java_ty: java_ty.clone(),
+            shape: RustSlotShape::for_storage(java_ty.clone()),
+            binding_mutable: false,
+        }];
+        let stmt = Stmt::VarDecl {
+            ty: java_ty,
+            name: "self__".to_string(),
+            source_name: "self".to_string(),
+            initializer: Some(Expr::Literal(crate::java_ir::Literal::String(
+                "x".to_string(),
+            ))),
+            binding: Some(binding.clone()),
+        };
+        let mut env = ShapeEnv::new();
+
+        learn_stmt_shapes(&stmt, &mut env, &plans, &SignaturePlan::default());
+
+        assert_eq!(env.binding_id("self"), Some(&binding));
+        assert_eq!(env.binding_id("self__"), Some(&binding));
+        assert!(env.local_shape("self").is_some());
     }
 
     #[test]

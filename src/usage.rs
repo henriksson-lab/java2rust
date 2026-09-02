@@ -243,14 +243,12 @@ impl MethodUsageFacts {
     }
 
     pub fn record_visible_binding_use(&mut self, name: &str, usage: BindingUse) {
-        let binding_id = self.visible_binding_id_for_name(name);
-        if self.name_binding_is_current(name)
+        if let Some(binding_id) = self.visible_binding_id_for_name(name) {
+            if let Some(binding) = self.bindings_by_id.get_mut(&binding_id) {
+                binding.uses.push(usage);
+            }
+        } else if self.name_binding_is_current(name)
             && let Some(binding) = self.bindings.get_mut(name)
-        {
-            binding.uses.push(usage.clone());
-        }
-        if let Some(binding_id) = binding_id
-            && let Some(binding) = self.bindings_by_id.get_mut(&binding_id)
         {
             binding.uses.push(usage);
         }
@@ -547,7 +545,7 @@ fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts, semantic_facts: &Fa
                 for param in &method.params {
                     insert_binding_use_facts(
                         &mut method_facts,
-                        param.name.clone(),
+                        param.source_name.clone(),
                         param.binding.clone(),
                         param.ty.clone(),
                     );
@@ -596,7 +594,7 @@ fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts, semantic_facts: &Fa
                 for param in &ctor.params {
                     insert_binding_use_facts(
                         &mut ctor_facts,
-                        param.name.clone(),
+                        param.source_name.clone(),
                         param.binding.clone(),
                         param.ty.clone(),
                     );
@@ -1385,11 +1383,12 @@ fn analyze_stmt(
         Stmt::VarDecl {
             ty,
             name,
+            source_name,
             initializer,
             binding,
             ..
         } => {
-            insert_binding_use_facts(facts, name.clone(), binding.clone(), ty.clone());
+            insert_binding_use_facts(facts, source_name.clone(), binding.clone(), ty.clone());
             if let Some(initializer) = initializer {
                 if let Expr::Var(source_name) = initializer {
                     record_use(
@@ -1735,7 +1734,8 @@ fn analyze_stmt(
         }
         Stmt::EnhancedFor {
             var_type,
-            var_name,
+            var_name: _,
+            source_var_name,
             iterable,
             body,
             binding,
@@ -1752,8 +1752,13 @@ fn analyze_stmt(
                 type_env,
                 source_return_nullability,
             );
-            let saved_binding = facts.hide_visible_binding_for_scope(var_name);
-            insert_binding_use_facts(facts, var_name.clone(), binding.clone(), var_type.clone());
+            let saved_binding = facts.hide_visible_binding_for_scope(source_var_name);
+            insert_binding_use_facts(
+                facts,
+                source_var_name.clone(),
+                binding.clone(),
+                var_type.clone(),
+            );
             analyze_scoped_statements(
                 &body.statements,
                 facts,
@@ -1765,7 +1770,7 @@ fn analyze_stmt(
                 type_env,
                 source_return_nullability,
             );
-            restore_binding_use_facts(facts, var_name.clone(), saved_binding);
+            restore_binding_use_facts(facts, source_var_name.clone(), saved_binding);
         }
         Stmt::Switch { selector, cases } => {
             analyze_expr(
@@ -3159,10 +3164,13 @@ fn save_direct_var_decl_bindings(
     let mut saved = Vec::new();
     let mut seen = HashSet::new();
     for stmt in statements {
-        if let Stmt::VarDecl { name, .. } = stmt
-            && seen.insert(name.clone())
+        if let Stmt::VarDecl { source_name, .. } = stmt
+            && seen.insert(source_name.clone())
         {
-            saved.push((name.clone(), facts.snapshot_visible_binding_for_scope(name)));
+            saved.push((
+                source_name.clone(),
+                facts.snapshot_visible_binding_for_scope(source_name),
+            ));
         }
     }
     saved
@@ -3773,6 +3781,86 @@ mod tests {
     }
 
     #[test]
+    fn record_use_records_live_binding_id_once() {
+        let binding = BindingId::new(BindingKind::Local, "value", 1);
+        let mut facts = MethodUsageFacts::default();
+        facts.bindings.insert(
+            "value".to_string(),
+            binding_fact("value", Some(binding.clone())),
+        );
+        facts.bindings_by_id.insert(
+            binding.clone(),
+            binding_fact("value", Some(binding.clone())),
+        );
+
+        record_use(&mut facts, "value", BindingUse::Returned);
+
+        assert_eq!(
+            facts
+                .bindings_by_id
+                .get(&binding)
+                .expect("live binding should collect the use")
+                .uses,
+            vec![BindingUse::Returned]
+        );
+        assert!(
+            facts
+                .bindings
+                .get("value")
+                .expect("compatibility name entry remains present")
+                .uses
+                .is_empty(),
+            "live binding-id use recording should not duplicate through the name map"
+        );
+    }
+
+    #[test]
+    fn keyword_renamed_bound_local_records_uses_by_source_binding() {
+        let binding = BindingId::new(BindingKind::Local, "self", 0);
+        let stmt = Stmt::VarDecl {
+            ty: JavaType::String,
+            name: "self__".to_string(),
+            source_name: "self".to_string(),
+            initializer: Some(Expr::Var("input".to_string())),
+            binding: Some(binding.clone()),
+        };
+        let mut facts = MethodUsageFacts::default();
+        insert_binding_use_facts(
+            &mut facts,
+            "input".to_string(),
+            Some(BindingId::new(BindingKind::Param, "input", 0)),
+            JavaType::String,
+        );
+
+        analyze_stmt(
+            &stmt,
+            &mut facts,
+            "Owner",
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+            &FactSet::default(),
+            &TypeEnv::new(),
+            &HashMap::new(),
+        );
+        record_use(&mut facts, "self", BindingUse::Returned);
+
+        assert_eq!(
+            facts.visible_binding_id_for_name("self"),
+            Some(binding.clone())
+        );
+        assert_eq!(facts.visible_binding_id_for_name("self__"), None);
+        assert_eq!(
+            facts
+                .bindings_by_id
+                .get(&binding)
+                .expect("source binding id should be visible")
+                .uses,
+            vec![BindingUse::Returned]
+        );
+    }
+
+    #[test]
     fn name_map_binding_id_must_match_the_queried_name() {
         let other = BindingId::new(BindingKind::Local, "other", 1);
         let mut facts = MethodUsageFacts::default();
@@ -3940,7 +4028,9 @@ mod tests {
             .and_then(|tail| tail.split("fn restore_scoped_binding_uses").next())
             .expect("save_direct_var_decl_bindings source should be discoverable");
 
-        assert!(analyze_stmt_source.contains("facts.hide_visible_binding_for_scope(var_name)"));
+        assert!(
+            analyze_stmt_source.contains("facts.hide_visible_binding_for_scope(source_var_name)")
+        );
         assert!(
             analyze_stmt_source
                 .contains("facts.hide_visible_binding_for_scope(&catch.source_name)")
@@ -3948,7 +4038,9 @@ mod tests {
         assert!(
             analyze_lambda_source.contains("facts.hide_visible_binding_for_scope(&param.name)")
         );
-        assert!(save_direct_source.contains("facts.snapshot_visible_binding_for_scope(name)"));
+        assert!(
+            save_direct_source.contains("facts.snapshot_visible_binding_for_scope(source_name)")
+        );
         assert!(
             !analyze_stmt_source.contains("facts.bindings.remove")
                 && !analyze_lambda_source.contains("facts.bindings.remove")

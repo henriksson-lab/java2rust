@@ -5,7 +5,6 @@ use crate::coercion::{
     receiver_method_call_projection_exact,
 };
 use crate::facts::{ExternalLibraryMode, FactSet};
-use crate::java_ir::JavaType;
 use crate::rust_ir::{
     RustClosureBody, RustClosureParam, RustExpr, RustItem, RustMatchArm, RustStmt, RustType,
 };
@@ -214,17 +213,10 @@ fn source_exception_parent_match_arms(facts: &FactSet) -> String {
         if built_in_children.contains(sub_name) {
             continue;
         }
-        let exception_ty = JavaType::Named {
-            name: exception.type_name.clone(),
-            args: Vec::new(),
-        };
-        let Some(parent_ty) = facts.extends_type_for(&exception_ty) else {
+        let Some(parent_name) = facts.extends_type_name_for(&exception.type_name) else {
             continue;
         };
-        let Some(parent_name) = java_type_name(&parent_ty) else {
-            continue;
-        };
-        let parent_simple = parent_name.rsplit('.').next().unwrap_or(parent_name);
+        let parent_simple = parent_name.rsplit('.').next().unwrap_or(&parent_name);
         if parent_simple == sub_name || parent_simple.is_empty() {
             continue;
         }
@@ -233,14 +225,6 @@ fn source_exception_parent_match_arms(facts: &FactSet) -> String {
         ));
     }
     arms.into_iter().collect()
-}
-
-fn java_type_name(java_ty: &JavaType) -> Option<&str> {
-    match java_ty {
-        JavaType::String => Some("String"),
-        JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(name),
-        _ => None,
-    }
 }
 
 pub fn external_exception_conversions(facts: &FactSet) -> Vec<ExternalExceptionConversion> {
@@ -1217,6 +1201,7 @@ fn unit_expr() -> RustExpr {
 mod tests {
     use super::*;
     use crate::facts::{ExceptionFact, ExceptionKind, FactProvenance, TypeCapabilityOverride};
+    use crate::java_ir::JavaType;
 
     #[test]
     fn plain_return_catch_rewrites_returned_err_to_panic() {

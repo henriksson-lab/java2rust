@@ -1152,6 +1152,12 @@ fn apply_native_collection_method(
         NativeCollectionMethod::RemoveAll => {
             return apply_native_collection_remove_all(receiver, args);
         }
+        NativeCollectionMethod::ContainsAll => {
+            return apply_native_collection_contains_all(receiver, args);
+        }
+        NativeCollectionMethod::RetainAll => {
+            return apply_native_collection_retain_all(receiver, args);
+        }
         NativeCollectionMethod::Extend => "extend",
         NativeCollectionMethod::MapHashCode => {
             return java_map_hash_code_projection(receiver);
@@ -1970,7 +1976,7 @@ fn apply_native_collection_remove_all(receiver: RustExpr, mut args: Vec<RustExpr
     let source = args.remove(0);
     let values = "__java_remove_all_values";
     let before = "__java_remove_all_before";
-    if source == receiver {
+    if collection_bulk_source_aliases_receiver(&source, &receiver) {
         return RustExpr::Block {
             stmts: vec![
                 RustStmt::Let {
@@ -2044,6 +2050,112 @@ fn apply_native_collection_remove_all(receiver: RustExpr, mut args: Vec<RustExpr
             )),
             right: Box::new(RustExpr::Var(before.to_string())),
         })),
+    }
+}
+
+fn apply_native_collection_contains_all(receiver: RustExpr, mut args: Vec<RustExpr>) -> RustExpr {
+    if args.len() != 1 {
+        return compile_error_call(
+            "Java Collection.containsAll(source) requires one source argument",
+        );
+    }
+    let source = args.remove(0);
+    if collection_bulk_source_aliases_receiver(&source, &receiver) {
+        return RustExpr::Literal("true".to_string());
+    }
+    receiver_method_call_projection_exact(
+        receiver_method_call_projection_exact(source, "iter", Vec::new()),
+        "all",
+        vec![RustExpr::Closure {
+            is_move: false,
+            params: vec![RustClosureParam {
+                pattern: "value".to_string(),
+                ty: None,
+            }],
+            return_type: None,
+            body: RustClosureBody::Expr(Box::new(receiver_method_call_projection_exact(
+                receiver,
+                "contains",
+                vec![RustExpr::Var("value".to_string())],
+            ))),
+        }],
+    )
+}
+
+fn apply_native_collection_retain_all(receiver: RustExpr, mut args: Vec<RustExpr>) -> RustExpr {
+    if args.len() != 1 {
+        return compile_error_call(
+            "Java Collection.retainAll(source) requires one source argument",
+        );
+    }
+    let source = args.remove(0);
+    if collection_bulk_source_aliases_receiver(&source, &receiver) {
+        return RustExpr::Literal("false".to_string());
+    }
+    let values = "__java_retain_all_values";
+    let before = "__java_retain_all_before";
+    RustExpr::Block {
+        stmts: vec![
+            RustStmt::Let {
+                mutable: false,
+                name: values.to_string(),
+                ty: None,
+                value: Some(source),
+            },
+            RustStmt::Let {
+                mutable: false,
+                name: before.to_string(),
+                ty: None,
+                value: Some(receiver_method_call_projection_exact(
+                    receiver.clone(),
+                    "len",
+                    Vec::new(),
+                )),
+            },
+            RustStmt::Expr(receiver_method_call_projection_exact(
+                receiver.clone(),
+                "retain",
+                vec![RustExpr::Closure {
+                    is_move: false,
+                    params: vec![RustClosureParam {
+                        pattern: "value".to_string(),
+                        ty: None,
+                    }],
+                    return_type: None,
+                    body: RustClosureBody::Expr(Box::new(receiver_method_call_projection_exact(
+                        RustExpr::Var(values.to_string()),
+                        "contains",
+                        vec![RustExpr::Var("value".to_string())],
+                    ))),
+                }],
+            )),
+        ],
+        tail: Some(Box::new(RustExpr::Binary {
+            op: "!=".to_string(),
+            left: Box::new(receiver_method_call_projection_exact(
+                receiver,
+                "len",
+                Vec::new(),
+            )),
+            right: Box::new(RustExpr::Var(before.to_string())),
+        })),
+    }
+}
+
+fn collection_bulk_source_aliases_receiver(source: &RustExpr, receiver: &RustExpr) -> bool {
+    if source == receiver {
+        return true;
+    }
+    match source {
+        RustExpr::Shaped { expr, .. } | RustExpr::PostfixComment { expr, .. } => {
+            collection_bulk_source_aliases_receiver(expr, receiver)
+        }
+        RustExpr::MethodCall {
+            receiver: clone_receiver,
+            method,
+            args,
+        } if method == "clone" && args.is_empty() => clone_receiver.as_ref() == receiver,
+        _ => false,
     }
 }
 

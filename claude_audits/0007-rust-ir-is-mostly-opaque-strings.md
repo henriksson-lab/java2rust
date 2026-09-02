@@ -30,6 +30,25 @@ Current status 2026-08-29 (Codex audit pass):
   that made `tests/differential/LambdaMutation.java` fail on stable Rust with
   `E0658` from slice-view reapplication. Regression:
   `coercion::tests::as_slice_coercion_reuses_recorded_slice_view`.
+- Follow-up 2026-08-30: optional erased-string borrowed-view rewrites now enter
+  through structured `RustExpr` traversal and reserve whole-text replacement
+  for `RustExpr::Raw` compatibility leaves. The raw path still preserves the
+  old statement-like block behavior by replacing outside literals/comments, but
+  structured expressions no longer render first just to splice optional string
+  views. Regressions:
+  `slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`
+  and the `coercion::tests::optional_erased_string_*` cluster.
+- Follow-up 2026-08-30: `string_literal_source` now decodes complete Rust string
+  literal tokens instead of slicing off quotes. This keeps `String.join`
+  vararg normalization from re-quoting already-escaped token text and changing
+  runtime values such as newlines or embedded quotes. Regression:
+  `coercion::tests::string_join_projection_helpers_own_literal_and_to_string_idempotence`.
+- Follow-up 2026-08-30: terminal `.to_string()` recovery now accepts macro-call
+  receivers that have already been recovered into structured `RustExpr::MacroCall`.
+  This keeps valid expressions like `format!("{}", name).to_string()` in the
+  method-call IR instead of preserving them as grouped raw compatibility text.
+  Regression:
+  `coercion::tests::string_join_projection_helpers_own_literal_and_to_string_idempotence`.
 
 Partial progress 2026-08-24:
 
@@ -3782,3 +3801,223 @@ deleted. Regressions:
 `coercion::tests::audited_clone_recovery_preserves_into_suffix`,
 `coercion::tests::audited_clone_recovery_for_constructed_optional_clones_element`,
 and `slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`.
+
+Follow-up 2026-08-29: stream-lambda raw static-member recovery no longer treats
+capitalization alone as evidence that `Owner.member` is a Java static access.
+The raw compatibility branch still accepts imported/context aliases and a small
+known built-in owner set such as `Math`, but unproven raw owners like
+`Item.VALUE` now fall back to ordinary rendered-expression recovery instead of
+being rewritten to `Item::VALUE`. Regression:
+`slot_shape_design::stream_lambda_lowers_split_length_and_integer_parse_in_nullable_map`.
+
+Follow-up 2026-08-30: optional-erased-string raw argument rewriting no longer
+rewrites semantic-looking text inside Rust comments. The remaining raw
+compatibility replacement path now skips string literals, raw string literals,
+line comments, and block comments before replacing optional erased-string boxes
+with borrowed string views; the old literal-only bulk replacer was deleted.
+Regressions:
+`coercion::tests::optional_erased_string_local_rewrite_ignores_comment_text`
+and `slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`.
+
+Follow-up 2026-08-30: the constructor-self temporary raw fallback no longer
+treats `__java_self` inside Rust comments as semantic evidence. The shared raw
+identifier scanner already skipped string, char, and raw-string literals; it
+now skips line and block comments too before answering identifier-presence
+queries. Regression:
+`coercion::tests::constructor_self_temporary_raw_fallback_requires_identifier_token`.
+
+Follow-up 2026-08-30: raw string-view detection now requires recovered
+structure to round-trip to the original text and contain no opaque raw leaves
+before accepting a zero-argument `.as_str()` shell. Malformed raw receivers such
+as `name trailing.as_str()` no longer prove that the expression is already a
+borrowed string view. Regression:
+`coercion::tests::an_untagged_string_view_still_falls_back_to_the_text`.
+
+Follow-up 2026-08-30: raw top-level operator/cast detection, including the
+emitter's raw-cast precedence check, now skips Rust line and block comments,
+matching the existing literal/raw-string handling. Comment text such as
+`/* + */` or `/* as usize */` no longer changes cast operand grouping or
+top-level operator detection. Regression:
+`coercion::tests::cast_operand_parenthesization_prefers_expression_structure`.
+
+Follow-up 2026-08-30: optional-unwrap detection/rewrite and downcast-expect
+message rewriting now use the comment-aware raw finder. Literal text was
+already ignored; line and block comments mentioning `.unwrap()`,
+`.expect("Java null receiver")`, or the downcast marker no longer prove or
+rewrite executable Rust. Regressions:
+`coercion::tests::optional_unwrap_detection_ignores_literal_text`,
+`coercion::tests::optional_clone_recovery_unwrap_rewrite_ignores_literal_text`,
+and `coercion::tests::downcast_expect_message_rewrite_ignores_literal_text`.
+
+Follow-up 2026-08-30: the remaining rendered-expression splitters used by
+optional construction, range, plus, simple binary, cast, and comma recovery now
+skip Rust line and block comments before interpreting punctuation or `as` as
+syntax. Raw fallbacks such as `Some(value /* , right */)`,
+`value /* + right */`, and `value /* as Target */` no longer get rejected or
+reconstructed based on comment text. Regressions:
+`type_coercion::optional_construction_detection_requires_some_arity_one`,
+`coercion::tests::raw_method_receiver_parenthesization_prefers_recovered_structure`,
+`coercion::tests::rendered_projection_recovers_structured_leaves`, and
+`coercion::tests::raw_comma_splitter_ignores_commas_inside_raw_string_literals`.
+
+Follow-up 2026-08-30: raw Rust type-argument splitting now tracks nested
+parentheses, brackets, braces, raw strings, string literals, and Rust comments
+before treating a comma as a top-level generic separator. Type guards such as
+`raw_rust_result_args` no longer mis-split `Result<fn(i32, i32), JavaException>`
+or `Result<T /*,*/, JavaException>`, which keeps downstream Result/Option
+facade checks from proving type identity from comment or function-pointer
+punctuation. Regression:
+`types::raw_rust_type_tests::raw_rust_type_args_ignore_nested_rust_delimiters_and_comments`.
+
+Follow-up 2026-08-30: emitter-side raw optional string-view normalization now
+requires a real complete string literal instead of only checking that the text
+starts and ends with `"`. Malformed raw text like
+`Some("a" garbage ".to_string().as_str())` is preserved instead of being
+normalized to invalid `Some("a" garbage ")` output. Regression:
+`emit::tests::raw_optional_string_literal_view_normalization_requires_complete_literal`.
+
+Follow-up 2026-08-30: raw assignment recovery now skips Rust line and block
+comments while finding the top-level assignment operator and while splitting an
+indexed assignment target. It also strips comments from the recovered target,
+index, and value fragments before reparsing them as structured expressions, so
+comment text such as `/* [ */`, `/* ] */`, or `/* = */` no longer changes the
+assignment shape or turns a plain `=` into a bogus `/=` compound assignment.
+Regression:
+`lower::tests::raw_assignment_projection_recovers_bitwise_and_shift_compound_ops`.
+
+Follow-up 2026-08-30: struct-derive `Clone` support no longer treats raw
+`Rc`/`Arc` text as cloneable by prefix alone. Shared-handle detection now goes
+through the raw generic-argument parser, so well-formed `Rc<T>` and `Arc<T>`
+still count as cloneable while malformed text such as `std::rc::Rc<T` or
+`std::rc::Rc<Left, Right>` fails closed instead of silently enabling an invalid
+derive. Regression:
+`item_assembly::tests::raw_shared_handle_clone_support_requires_complete_generic_type`.
+
+Follow-up 2026-08-30: optional string-view construction no longer suffix-parses
+a raw receiver when the outer `.as_str()` call is already structured. A
+parseable raw receiver such as `"none".to_string()` is recovered into method
+call/literal IR first, then the existing structured `to_string().as_str()`
+normalizer removes the borrowed temporary before wrapping with `Some`. The
+whole-expression raw compatibility case remains explicit for legacy raw
+`Some(...)` text. Regression:
+`coercion::tests::optional_string_view_construction_normalizes_structured_borrow_by_tag`.
+
+Follow-up 2026-08-30: balanced outer delimiter recovery now uses one
+comment/raw-string-aware scanner for parentheses, braces, and brackets instead
+of three manual string/char loops. Raw Rust string literal bodies containing
+`)`, `}`, or `]` no longer make otherwise parseable grouped, block, or array
+expressions stay opaque `RustExpr::Raw`. Regression:
+`coercion::tests::rendered_projection_recovers_borrowed_leaf_expressions`.
+
+Follow-up 2026-08-30: optional erased-string borrowed-view call-argument
+rewriting now recovers a parseable raw expression into structured `RustExpr`
+before using the legacy literal/comment-aware text replacement fallback.
+Parseable raw calls such as `use_name(name.map(...))` are handled by the same
+structured walker as ordinary `RustExpr::Call`, while statement-like raw
+fragments remain on the explicit compatibility path. Regression coverage is the
+existing `coercion::tests::optional_erased_string_local_rewrite_ignores_literal_text`.
+
+Follow-up 2026-08-30: same-outer inner-constructor raw call recovery no longer
+treats any function whose final segment starts with `new` as a constructor.
+The compatibility detector now accepts only the generated constructor spellings
+`new` and `new_<digits>`, so raw calls such as `Owner::renew(value)`,
+`Owner::newish(value)`, and nested `helper(Owner::new_1(value))` are not
+promoted to top-level constructor calls by prefix coincidence. Regression:
+`lower::tests::same_outer_inner_constructor_raw_expr_rewrite_recovers_structured_call`.
+
+Follow-up 2026-08-30: the remaining raw string-view shortcuts in `coercion.rs`
+were checked against misleading text examples and pinned at their current
+fail-closed boundary. Raw deref string-view recovery accepts only `*ident`, not
+field/literal/comment/trailing forms, and optional erased-string downcast-view
+recovery accepts only a plain local before the downcast suffix, not nested calls,
+string literals, or field paths. Regressions:
+`coercion::tests::raw_deref_string_view_recovery_accepts_only_plain_identifier_source`
+and
+`coercion::tests::optional_erased_string_downcast_view_shortcut_accepts_only_plain_local`.
+
+Follow-up 2026-08-30: emitter-side `.to_string().as_str()` literal folding no
+longer assigns semantic meaning to a raw receiver such as
+`RustExpr::Raw("\"x\".to_string()")`. The optimization remains for structured
+`RustExpr::MethodCall { method: "to_string", receiver: Literal(..) }` and for
+the older literal-leaf compatibility case, but raw rendered receiver text now
+emits as written. Regression:
+`emit::tests::string_literal_to_string_as_str_emits_static_literal_view`.
+
+Follow-up 2026-08-30: optional receiver field access no longer calls
+`project_optional_receiver` directly from the field-access helpers. Both plain
+and slot-aware optional receiver field reads now go through
+`optional_receiver_slot_plan`, `projection_plan_for_option_shape`, and
+`apply_optional_receiver_slot_projection`, so optional element carrier shape
+decisions stay in the same centralized path as the other optional projection
+sites. The stale source guard now rejects direct `project_optional_receiver(`
+and `project_optional_receiver_with_shape(` calls without rejecting the central
+projection helper name itself. Regression:
+`slot_shape_design::optional_element_borrow_carrier_construction_is_centralized`.
+
+Follow-up 2026-08-30: map-key borrow idempotence no longer asks a helper to
+recover `RustExpr::Raw` text just to decide whether an expression is a simple
+local path. Parseable raw locals are still normalized before the idempotence
+check; `rust_expr_is_simple_local_path` itself is now structural-only and
+accepts only `RustExpr::Var`. Regressions:
+`coercion::tests::map_key_borrow_normalizes_raw_local_before_local_identity_checks`,
+`coercion::tests::raw_field_path_does_not_satisfy_local_name_identity`,
+`type_coercion::map_key_borrow_projection_is_centralized_and_idempotent`, and
+`slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`.
+
+Follow-up 2026-08-30: raw deref string-view recovery no longer has its own
+`*identifier` text parser. The compatibility path now asks the shared raw-leaf
+recovery machinery for structured unary evidence and only then composes
+`.as_str()` structurally, preserving the same fail-closed boundary for literals,
+field paths, comments, and trailing text. The borrowed-item string-view helpers
+left behind by that shortcut are test-only now, so they no longer appear as
+unused production helpers in integration-target builds. Regressions:
+`coercion::tests::raw_deref_string_view_recovery_accepts_only_plain_identifier_source`
+and `slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`.
+
+Follow-up 2026-08-30: map-view bulk argument lowering no longer carries an
+unused `_debug_name` parameter. Temporary naming remains owned by each
+keySet/values/entrySet lowering arm; the shared helper now only answers the
+actual question it owns: whether the argument is collection/sequence shaped and
+how to lower it through the inferred argument slot. Regression coverage:
+`cargo test --release --lib alias_ -- --nocapture`.
+
+Follow-up 2026-08-30: stream-lambda parameter access-name insertion now has a
+single owner. `stream_lambda_scoped_env` inserts the parameter source-to-Rust
+name mapping for both shaped and unshaped params; nullable and prefix-statement
+lambda lowering no longer repeat the same insertion before adding prefix-local
+access names. Guarded by
+`slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`;
+the broader `slot_shape_design stream_plan` filter remains green.
+
+Follow-up 2026-08-30: stream-source capability checks now share a single
+Java-type predicate. The direct and optional source-shape helpers still preserve
+their caller-specific precedence, but both delegate the actual "is this Java
+type stream-capable?" question to `java_type_is_stream_capable` instead of
+duplicating the `stream_element_type` / source-capability-fact lookup. Guarded
+by `slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`;
+verified with the two stream-source capability fact tests and the broader
+`slot_shape_design stream_plan` filter.
+
+Follow-up 2026-08-30: borrowed string-literal temporary planning no longer
+accepts raw text merely because the prefix before `.to_string()` starts with a
+quote. The helper now uses the shared complete-string-literal predicate, so
+malformed compatibility leaves such as `&"actual" trailing.to_string()` fail
+closed instead of creating an invalid `RustExpr::Literal`. Regression:
+`slot_shape_design::coercion_owns_borrowed_string_literal_temporary_projection`;
+the broader rendered-string centralization guard remains green.
+
+Follow-up 2026-08-30: rendered cast recovery now rejects unbalanced generic
+type text before promoting a raw fragment to `RustExpr::Cast`. Simple casts and
+balanced generic casts such as `value.clone() as Vec<T>` still recover
+structurally, but malformed text such as `value.clone() as Vec<T>>` remains an
+opaque raw compatibility leaf instead of carrying an invalid cast type string.
+Regression:
+`coercion::tests::rendered_projection_recovers_borrowed_leaf_expressions`;
+the rendered-string centralization guard now also checks that
+`simple_rust_cast_type` uses the shared balanced type-argument predicate.
+
+Follow-up 2026-08-30: emitter raw outer-parenthesis stripping now skips raw
+strings and Rust line/block comments before counting delimiters. Parentheses
+inside `/* ... */`, `// ...`, or raw string literal bodies no longer decide
+whether a top-level raw expression is balanced enough to strip. Regression:
+`emit::tests::raw_parentheses_strip_is_balanced_and_string_aware`.

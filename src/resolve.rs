@@ -1768,7 +1768,14 @@ impl ProgramSymbols {
     }
 
     fn constructors_for_new(&self, type_name: &str, current_type: &str) -> Vec<ConstructorSymbol> {
-        let constructors = self.constructors_for(type_name);
+        let direct_type_name = self.source_type_name(type_name).to_string();
+        let lexical_type_name = self.lexical_constructor_type_name(type_name, current_type);
+        let constructor_type_name = lexical_type_name.as_deref().unwrap_or(&direct_type_name);
+        let constructors = self
+            .constructors_by_type
+            .get(constructor_type_name)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
         let scoped = constructors
             .iter()
             .filter(|constructor| self.constructor_visible_from(constructor, current_type))
@@ -1779,6 +1786,22 @@ impl ProgramSymbols {
         } else {
             scoped
         }
+    }
+
+    fn lexical_constructor_type_name(&self, type_name: &str, current_type: &str) -> Option<String> {
+        if type_name.contains('.') {
+            return None;
+        }
+        self.lexical_type_scope(current_type)
+            .into_iter()
+            .filter_map(|scope_type| {
+                let candidate = format!("{scope_type}.{type_name}");
+                let source_name = self.source_type_name(&candidate).to_string();
+                self.constructors_by_type
+                    .contains_key(&source_name)
+                    .then_some(source_name)
+            })
+            .next()
     }
 
     fn constructor_visible_from(
@@ -3226,7 +3249,7 @@ fn resolve_expr_calls(
                 }
             } else if let Some(receiver_ty) = receiver
                 .as_deref()
-                .and_then(|receiver| source_static_type_receiver(receiver, symbols))
+                .and_then(|receiver| source_static_type_receiver(receiver, symbols, env))
             {
                 let receiver_methods = symbols
                     .methods_for_hierarchy(&receiver_ty)
@@ -3314,6 +3337,18 @@ fn resolve_expr_calls(
                     }),
                     Err(message) => diagnostics.error("resolve_call_ambiguous", message),
                 }
+            } else if let Some(enum_call) = receiver.as_deref().and_then(|receiver| {
+                external_enum_synthetic_call(
+                    receiver,
+                    name,
+                    arg_types.len(),
+                    current_type,
+                    symbols,
+                    env,
+                    external_facts,
+                )
+            }) {
+                *resolved = Some(enum_call);
             } else {
                 let receiver_type = receiver
                     .as_deref()
@@ -3765,7 +3800,7 @@ fn record_unresolved_field_access(
     {
         return;
     }
-    if type_qualified_static_field(receiver, field, current_type, symbols).is_some() {
+    if type_qualified_static_field(receiver, field, current_type, symbols, env).is_some() {
         return;
     }
     if is_package_qualified_type_fragment(expr, env) {
@@ -3856,7 +3891,7 @@ fn field_receiver_type_name(
         }),
         Expr::FieldAccess(inner_receiver, field_name) => {
             if let Some(field) =
-                type_qualified_static_field(inner_receiver, field_name, current_type, symbols)
+                type_qualified_static_field(inner_receiver, field_name, current_type, symbols, env)
             {
                 return Some(java_type_simple_name(&field.ty));
             }
@@ -3924,10 +3959,14 @@ fn type_qualified_static_field<'a>(
     field_name: &str,
     current_type: &str,
     symbols: &'a ProgramSymbols,
+    env: &TypeEnv,
 ) -> Option<&'a FieldSymbol> {
     let Expr::Var(name) = receiver else {
         return None;
     };
+    if env.local_type(name).is_some() || env.field_type(name).is_some() {
+        return None;
+    }
     let source_name = symbols.source_type_name(name);
     symbols.static_field_for_from(source_name, field_name, current_type)
 }
@@ -4094,6 +4133,19 @@ fn infer_resolver_expr_type_with_facts(
             {
                 return enum_call.return_type;
             }
+            if let Some(enum_call) = receiver.as_deref().and_then(|receiver| {
+                external_enum_synthetic_call(
+                    receiver,
+                    name,
+                    arg_types.len(),
+                    current_type,
+                    symbols,
+                    env,
+                    external_facts,
+                )
+            }) {
+                return enum_call.return_type;
+            }
             if receiver.is_none()
                 || receiver
                     .as_deref()
@@ -4176,7 +4228,7 @@ fn infer_resolver_expr_type_with_facts(
                 };
             }
             if let Some(symbol) =
-                type_qualified_static_field(receiver, field, current_type, symbols)
+                type_qualified_static_field(receiver, field, current_type, symbols, env)
             {
                 return symbol.ty.clone();
             }
@@ -4267,6 +4319,44 @@ fn source_enum_synthetic_call(
     })
 }
 
+fn external_enum_synthetic_call(
+    receiver: &Expr,
+    name: &str,
+    arg_count: usize,
+    current_type: &str,
+    symbols: &ProgramSymbols,
+    env: &TypeEnv,
+    external_facts: &FactSet,
+) -> Option<ResolvedCall> {
+    let receiver_ty =
+        infer_resolver_expr_type_with_facts(receiver, current_type, symbols, env, external_facts);
+    let (JavaType::Named {
+        name: receiver_name,
+        ..
+    }
+    | JavaType::Unknown(receiver_name)) = receiver_ty
+    else {
+        return None;
+    };
+    let return_type = crate::stdlib::known_external_enum_synthetic_call_return_type(
+        &receiver_name,
+        name,
+        arg_count,
+    )?;
+    Some(ResolvedCall {
+        declaring_type: crate::stdlib::canonical_external_receiver_type_key(&receiver_name),
+        rust_name: crate::parser::to_snake_case(name),
+        kind: CallKind::Static,
+        return_type,
+        arg_target_types: if name == "valueOf" && arg_count == 1 {
+            vec![JavaType::String]
+        } else {
+            Vec::new()
+        },
+        arg_coercions: Vec::new(),
+    })
+}
+
 fn source_receiver_type(
     receiver: &Expr,
     current_type: &str,
@@ -4289,10 +4379,17 @@ fn source_receiver_type(
     source_receiver_type_from_actual(receiver_actual_ty, symbols)
 }
 
-fn source_static_type_receiver(receiver: &Expr, symbols: &ProgramSymbols) -> Option<String> {
+fn source_static_type_receiver(
+    receiver: &Expr,
+    symbols: &ProgramSymbols,
+    env: &TypeEnv,
+) -> Option<String> {
     let Expr::Var(name) = receiver else {
         return None;
     };
+    if env.local_type(name).is_some() {
+        return None;
+    }
     let source_name = symbols.source_type_name(name);
     symbols
         .methods_by_type
@@ -5714,6 +5811,11 @@ fn java_type_applicability(
                 .then_some((OverloadArgumentConversion::ReferenceWidening, 10))
                 .ok_or_else(|| argument_type_mismatch(&actual_java, &target_java))
         }
+        (JavaType::Array(actual_inner), JavaType::Array(target_inner)) => {
+            java_type_applicability(actual_inner, target_inner, symbols, external_facts)
+                .map(|(conversion, score)| (conversion, score + 1))
+                .map_err(|_| argument_type_mismatch(&actual_java, &target_java))
+        }
         (
             JavaType::Named {
                 name: actual,
@@ -5954,6 +6056,10 @@ fn java_type_match_score(
         (JavaType::String, JavaType::Named { name, .. }) => {
             crate::stdlib::is_known_java_subtype("String", name).then_some(10)
         }
+        (JavaType::Array(actual_inner), JavaType::Array(target_inner)) => {
+            java_type_match_score(actual_inner, target_inner, symbols, external_facts)
+                .map(|score| score + 1)
+        }
         (
             JavaType::Named {
                 name: actual,
@@ -6022,6 +6128,11 @@ fn named_reference_match_score(
 ) -> Option<u32> {
     if actual == target {
         return generic_arguments_match_score(actual_args, target_args, symbols, external_facts);
+    }
+
+    if crate::facts::external_type_name_matches(actual, target) {
+        return generic_arguments_match_score(actual_args, target_args, symbols, external_facts)
+            .map(|score| score + 1);
     }
 
     if target == "Enum" && symbols.is_source_enum_type(actual) {
@@ -6126,6 +6237,19 @@ fn generic_argument_match_score(
         ) if actual_name == target_name => {
             generic_arguments_match_score(actual_args, target_args, symbols, external_facts)
                 .map(|score| score + 1)
+        }
+        (
+            JavaType::Named {
+                name: actual_name,
+                args: actual_args,
+            },
+            JavaType::Named {
+                name: target_name,
+                args: target_args,
+            },
+        ) if crate::facts::external_type_name_matches(actual_name, target_name) => {
+            generic_arguments_match_score(actual_args, target_args, symbols, external_facts)
+                .map(|score| score + 2)
         }
         (_, JavaType::Named { name, args })
             if args.is_empty() && is_method_type_variable(name, None) =>

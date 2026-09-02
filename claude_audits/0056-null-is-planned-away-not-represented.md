@@ -7,6 +7,52 @@ to compile or panic instead of reaching translated control flow, and unknown
 erased-object display still has no dynamic Java `toString` recovery.
 Kind: semantics / lowering.
 
+Follow-up 2026-08-30 current-tree triage:
+the original broad `null` complaint is mostly stale. Bare `null`, nullable
+arrays, catchable null receivers, null comparisons, and display fallbacks now
+either lower through explicit optional/null carriers or fail loud where the
+translator lacks a sound model. The remaining live surface in this audit is
+unknown erased-object display without source/platform/external `toString`
+evidence: current lowering routes it through the erased-object display helper,
+which handles known downcasts and otherwise panics instead of silently returning
+`""`. That is a bounded fact/platform expansion problem for known types, and a
+larger runtime representation question for arbitrary unknown erased objects.
+Guard: `idiom_gaps::external_object_to_string_fallback_is_loud_not_empty`.
+
+Follow-up 2026-08-30 plain-object support emission pass:
+`new Object()` now marks the generated crate as needing erased-object runtime
+support even when the value is only stored and never displayed. The support
+detector now scans field declared types and constructor target types, so
+`Box::new(JavaPlainObject::new()) as Box<dyn Any>` cannot be emitted without
+also emitting the `JavaPlainObject` support item. Regression:
+`tests/idiom_gaps.rs::plain_object_constructor_emits_erased_runtime_support_without_display_use`.
+
+Follow-up 2026-08-30 external-constructor borrowed argument pass:
+shaped constructor arguments now reuse the method-call owned-native borrow
+adapter. A Rust-crate-mapped external constructor whose manifest marks a
+reference parameter as borrowed now emits `&allocator` instead of passing the
+owned facade local, and `unknown` constructor-argument nullability still plans
+as non-optional. Regressions:
+`tests/slot_shape_design.rs::external_constructor_argument_fact_borrows_facade_parameter`
+and
+`tests/slot_shape_design.rs::external_constructor_argument_unknown_nullability_defaults_to_non_null`;
+both were removed from the slot-shape expected-failure baseline after the
+generated crate fixture gained a minimal `arrow_facade` compile stub. Broader
+non-argument null representation and unknown erased display remain open.
+
+Follow-up 2026-08-30 native map/external getter pass:
+`Map.get` into a declared final external facade local now keeps the borrowed
+map element shape instead of inheriting an owned `Option<T>` initializer shape;
+the borrowed-element conversion also no longer treats a pre-projected
+`Option<&T>::as_ref()` as sufficient when the carrier still needs a required
+null unwrap. External return-nullability evidence now survives read-only
+modeled-call boundary classification, so `VariantContext.getAttribute` feeds
+`MaybeNull` into the assigned `Object` local. Regressions:
+`tests/slot_shape_design.rs::native_map_get_into_final_facade_local_keeps_value_shape`
+and
+`tests/slot_shape_design.rs::variantcontext_nullable_attribute_getter_flows_into_option_slot_planning`;
+both were removed from the slot-shape expected-failure baseline.
+
 Follow-up 2026-08-29 nullable array/out-parameter pass:
 nullable array argument fixtures now match the checked-array/`Result` lowering
 instead of stale unchecked expectations, and the two remaining known gaps in
@@ -457,6 +503,14 @@ and
 `tests/idiom_gaps.rs::map_entry_set_iterator_next_get_key_uses_receiver_signature_shape`;
 the latter is promoted out of the idiom-gaps failure baseline.
 
+Follow-up 2026-08-30 map-entry iterator optional receiver repair:
+the entry-set iterator projection itself now uses the result-aware sequence
+iteration helper, so nullable map receivers become catchable
+`NullPointerException` projections before `iterator().next()` rather than panic
+unwraps. This covers both read-only and mutating entry-set iterator lowering.
+Verified:
+`cargo test --release map_entry_set_iterator_next_get_key --test idiom_gaps -- --nocapture`.
+
 Follow-up 2026-08-29: source-summary nullable method returns now keep their
 optional local carrier when initialized from a summary-only receiver call.
 The body lowering gives source-summary declared return nullability priority over
@@ -468,6 +522,16 @@ source-summary type. Regressions:
 `tests/idiom_gaps.rs::nullable_source_call_through_field_receiver_stays_optional_without_double_wrap`,
 and
 `lower::tests::source_summary_nullable_receiver_call_shape_is_optional`.
+
+Follow-up 2026-08-30 support-shell precedence repair:
+the nullable source-summary local tests above regressed again when source-summary
+support shells and parsed summary declarations shared the same owner name. The
+method facade still exposed `Option<Path>`, but local initializer planning read
+the shell signature first and flattened `Path path = lookup.find(sample)` back
+to `Path`. Receiver return-shape planning now asks the source-summary
+declaration before merged support-context signatures and uses the receiver's
+declared Java identity separately from its Rust storage shape. Verified:
+`cargo test --release source_summary --test idiom_gaps -- --nocapture`.
 
 Follow-up 2026-08-29 baseline pass: two more nullable tests were stale rather
 than active failures. Reference-array default null elements now allocate through
@@ -1288,3 +1352,65 @@ can call receiverless helpers through the current receiver, and explicit
 primitive casts now apply to the whole shift/bitwise expression while using the
 current Java-integer-safe `wrapping_shr`/`wrapping_sub` spelling. The primitive
 fixture only needed assertion text updated to the current lowering form.
+
+Follow-up 2026-08-30 erased object-array display pass:
+`java_erased_any_to_string` now recognizes erased object-array carriers used by
+`Object...` varargs and nullable erased object arrays. Those values render with
+the translator's deterministic Java array identity string,
+`[Ljava.lang.Object;@0`, instead of falling through to the unsupported erased
+runtime-target panic. The varargs exception-message fixture now runs generated
+tests that call `java_erased_object_to_string` on both
+`Vec<Box<dyn Any>>` and `Vec<Option<Box<dyn Any>>>`. Covered by
+`idiom_gaps::exception_constructor_erased_object_varargs_use_java_display_helper`.
+
+Follow-up 2026-08-30 regex Pattern erased-display pass:
+`java.util.regex.Pattern` now participates in the platform erased-display
+downcast table when the source imports or otherwise mentions the regex Pattern
+facade. The support `Pattern` carrier exposes Java's `Pattern.toString()` shape
+by returning the original pattern text, so an erased `Object` holding a Pattern
+can display `a+` instead of falling into the unknown-erased panic. Covered by
+`idiom_gaps::erased_pattern_display_uses_platform_regex_pattern_text`.
+
+Follow-up 2026-08-30 optional map-get carrier pass:
+`Map.get` into an optional slot now treats boxed Java primitives such as
+`Integer`/`java.lang.Integer` as compatible with their primitive storage type
+for the borrowed optional element projection. This lets `Map<String, Integer>`
+read `Integer old = counts.get(name)` as
+`counts.get(name.as_str()).copied()` instead of falling through to the generic
+optional conversion path and emitting the redundant
+`counts.get(name.as_str()).as_ref().copied()`. Covered by
+`fixtures::translates_map_get_null_ternary_with_borrowed_optional_carrier`.
+
+Follow-up 2026-08-30 borrowed stream findFirst carrier pass:
+`findFirst()` over a borrowed stream now tags the lowered `.next()` terminal as
+an already-projected optional carrier. The value is already `Option<&T>`, so the
+generic optional conversion path must not add another `.as_ref()` before clone
+recovery. This fixes `Option<&String>` vs `Option<String>` generated-code
+failures while keeping the optional carrier decision explicit in the stream
+terminal lowering. Covered by
+`fixtures::stream_find_match_generated_rust_preserves_behavior` and
+`fixtures::translates_stream_find_first_and_any_match_through_slot_coercion`.
+
+Follow-up 2026-08-30 stream flatMap optional-sequence pass:
+flatMap lambda collection sources now unwrap optional sequence returns before
+iterating the inner collection. For `group.names().stream()`, source method
+signature shape proves `group.names()` is `Option<Vec<String>>`, so the emitted
+closure now iterates `group.names().unwrap().into_iter()` instead of iterating
+the outer `Option` and collecting `Vec<Vec<String>>`. Nested flatMap stream
+pipelines also reuse the lambda scoped environment built while lowering prefix
+statements, so a prefix such as `let names =
+group.names().expect("Java null receiver")` is treated as a non-optional local
+inside `names.stream()`. Covered by
+`fixtures::stream_flat_map_projection_generated_rust_preserves_behavior`,
+`fixtures::translates_stream_flat_map_block_pipeline`,
+`slot_shape_design::stream_plan_infers_flat_map_lambda_projection_stream_shape`,
+and `slot_shape_design::stream_plan_lowers_flat_map_block_returning_stream_pipeline`.
+
+Follow-up 2026-08-30 try-with-resources BufferedReader model pass:
+the built-in `Files.newBufferedReader` external fact and emitted facade support
+now return `BufferedReader` rather than the supertype `Reader`, matching Java's
+API. Try-with-resources resource lowering therefore keeps the resource concrete
+instead of erasing it to `Box<dyn Any>`, preserving `read_line()` nullability and
+the concrete `close()` cleanup path. Covered by
+`external_packs::files_new_buffered_reader_returns_buffered_reader_fact` and
+`fixtures::try_with_resources_nullable_read_and_closeable_cleanup_compiles`.

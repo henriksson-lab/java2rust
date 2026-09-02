@@ -42,14 +42,25 @@ pub fn apply_lowered_slot_expr_conversion(
     plan: &LoweredSlotExprConversionPlan,
 ) -> RustExpr {
     apply_slot_conversion_plan(
-        normalize_lowered_expr_for_conversion(lowered),
+        normalize_lowered_expr_for_conversion(lowered, &plan.conversion),
         &plan.conversion,
     )
 }
 
-fn normalize_lowered_expr_for_conversion(lowered: LoweredExpr) -> RustExpr {
+fn normalize_lowered_expr_for_conversion(
+    lowered: LoweredExpr,
+    conversion: &SlotConversionPlan,
+) -> RustExpr {
     let LoweredExpr { expr, actual } = lowered;
     if expr.recorded_shape() == Some(RustExprShape::OptionalProjected) {
+        return expr;
+    }
+    if let SlotConversionPlan::BorrowedElement(policy) = conversion
+        && policy
+            .adapter
+            .as_ref()
+            .is_some_and(|adapter| adapter.unwrap_carrier)
+    {
         return expr;
     }
     let LoweredType::OptionalElementBorrow { element_shape, .. } = actual else {

@@ -26575,6 +26575,11 @@ const JAVA_SQL_MODELED_APIS: &[ExternalPackModeledApi] = &[
 ];
 
 const VCF_MODELED_APIS: &[ExternalPackModeledApi] = &[
+    modeled_semantic("htsjdk.variant.vcf.VCFUtils", "smartMergeHeaders"),
+    modeled_semantic("HtsjdkVariantVcfVCFUtils", "smartMergeHeaders"),
+    modeled_semantic("HtsjdkVariantVcfVCFUtils", "smart_merge_headers"),
+    modeled_semantic("VCFUtils", "smartMergeHeaders"),
+    modeled_semantic("VCFUtils", "smart_merge_headers"),
     modeled_semantic("htsjdk.variant.vcf.VCFFileReader", "getFileHeader"),
     modeled_semantic("VCFFileReader", "getFileHeader"),
     modeled_semantic("htsjdk.variant.vcf.VCFFileReader", "iterator"),
@@ -30720,7 +30725,7 @@ fn java_platform_io_api_effect(
                 1,
                 ExternalApiRole::Getter,
                 JavaType::Named {
-                    name: "Reader".to_string(),
+                    name: "BufferedReader".to_string(),
                     args: Vec::new(),
                 },
             )
@@ -31276,7 +31281,36 @@ fn java_platform_concurrent_api_effect(
                 args: Vec::new(),
             },
         ),
+        ("Future" | "JavaUtilConcurrentFuture" | "java.util.concurrent.Future", "get")
+            if matches_arg_count(0) =>
+        {
+            (
+                0,
+                ExternalApiRole::Getter,
+                JavaType::Unknown("Object".to_string()),
+            )
+        }
         _ => return None,
+    };
+    let thrown = if matches!(
+        (simple_receiver, method_name),
+        (
+            "Future" | "JavaUtilConcurrentFuture" | "java.util.concurrent.Future",
+            "get"
+        )
+    ) {
+        vec![
+            JavaType::Named {
+                name: "InterruptedException".to_string(),
+                args: Vec::new(),
+            },
+            JavaType::Named {
+                name: "ExecutionException".to_string(),
+                args: Vec::new(),
+            },
+        ]
+    } else {
+        Vec::new()
     };
     Some(ExternalApiEffectFact {
         method_name: method_name.to_string(),
@@ -31287,7 +31321,7 @@ fn java_platform_concurrent_api_effect(
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: Some(return_type),
         return_nullability: NullabilityState::DefinitelyNonNull,
-        thrown: Vec::new(),
+        thrown,
         provenance: FactProvenance::BuiltinExternalModel,
     })
 }
@@ -31432,15 +31466,12 @@ pub fn external_conversion_adapter_for(
     if let Some(fact) = java_platform_conversion_adapter_for(from_type, to_type) {
         return Some(fact);
     }
-    builtin_external_pack_fact_sets()
+    let facts = builtin_external_pack_fact_sets()
         .iter()
         .flat_map(|(_, facts)| &facts.external_conversion_adapter_facts)
-        .rev()
-        .find(|fact| {
-            crate::facts::external_type_name_matches(&fact.from_type, from_type)
-                && crate::facts::external_type_name_matches(&fact.to_type, to_type)
-        })
         .cloned()
+        .collect::<Vec<_>>();
+    find_external_pack_conversion_adapter(facts, from_type, to_type)
 }
 
 pub fn external_conversion_adapters() -> Vec<ExternalConversionAdapterFact> {
@@ -31467,11 +31498,28 @@ fn java_platform_conversion_adapter_for(
     from_type: &str,
     to_type: &str,
 ) -> Option<ExternalConversionAdapterFact> {
-    java_platform_conversion_adapters()
-        .into_iter()
-        .find(|fact| {
-            crate::facts::external_type_name_matches(&fact.from_type, from_type)
-                && crate::facts::external_type_name_matches(&fact.to_type, to_type)
+    find_external_pack_conversion_adapter(java_platform_conversion_adapters(), from_type, to_type)
+}
+
+fn find_external_pack_conversion_adapter(
+    facts: Vec<ExternalConversionAdapterFact>,
+    from_type: &str,
+    to_type: &str,
+) -> Option<ExternalConversionAdapterFact> {
+    facts
+        .iter()
+        .rev()
+        .find(|fact| fact.from_type == from_type && fact.to_type == to_type)
+        .cloned()
+        .or_else(|| {
+            facts
+                .iter()
+                .rev()
+                .find(|fact| {
+                    crate::facts::external_type_name_matches(&fact.from_type, from_type)
+                        && crate::facts::external_type_name_matches(&fact.to_type, to_type)
+                })
+                .cloned()
         })
 }
 

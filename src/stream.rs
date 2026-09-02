@@ -145,6 +145,7 @@ pub enum FlatMapPlan<'a> {
 pub struct LambdaCollectionStreamPlan<'a> {
     pub lambda: LambdaPlan<'a>,
     pub source: &'a Expr,
+    pub optional_sequence: bool,
     pub iteration: StreamSourceIteration,
 }
 
@@ -751,7 +752,7 @@ fn flat_map_plan<'a>(
     }
 
     let lambda = lambda_plan(expr)?;
-    if let Some(plan) = lambda_collection_stream_plan(lambda.clone()) {
+    if let Some(plan) = lambda_collection_stream_plan(lambda.clone(), input_shape, env, facts) {
         return Some(FlatMapPlan::LambdaCollectionStream(plan));
     }
     lambda_stream_chain_plan(lambda, input_shape, env, facts)
@@ -759,6 +760,9 @@ fn flat_map_plan<'a>(
 
 fn lambda_collection_stream_plan<'a>(
     lambda: LambdaPlan<'a>,
+    input_shape: &RustSlotShape,
+    env: &TypeEnv,
+    facts: &FactSet,
 ) -> Option<LambdaCollectionStreamPlan<'a>> {
     let Expr::Call {
         receiver: Some(source),
@@ -777,9 +781,12 @@ fn lambda_collection_stream_plan<'a>(
     } else {
         StreamSourceIteration::OwnedValue
     };
+    let mut lambda_env = env.clone();
+    lambda_env.insert_local(lambda.param_name.clone(), input_shape.java_ty.clone());
     Some(LambdaCollectionStreamPlan {
         lambda,
         source,
+        optional_sequence: stream_source_is_optional_sequence(source, &lambda_env, facts),
         iteration,
     })
 }

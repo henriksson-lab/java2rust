@@ -1370,7 +1370,7 @@ fn erased_override_should_not_replace_parsed_source(
     override_fact: &HierarchyOverride,
     strategy: &ObjectStrategyPlan,
 ) -> bool {
-    override_fact.provenance != FactProvenance::UserOverride
+    !matches!(override_fact.provenance, FactProvenance::UserOverride)
         && matches!(override_fact.strategy, HierarchyStrategy::ErasedObject)
         && strategy.has_provenance(FactProvenance::ParsedSource)
 }
@@ -1379,7 +1379,7 @@ fn erased_override_should_not_insert_beside_parsed_source(
     override_fact: &HierarchyOverride,
     plan: &ObjectModelPlan,
 ) -> bool {
-    override_fact.provenance != FactProvenance::UserOverride
+    !matches!(override_fact.provenance, FactProvenance::UserOverride)
         && matches!(override_fact.strategy, HierarchyStrategy::ErasedObject)
         && plan.strategies.values().any(|strategy| {
             strategy.has_provenance(FactProvenance::ParsedSource)
@@ -1530,7 +1530,7 @@ pub fn hierarchy_override_application_policy_with_effective_facts(
             hierarchy_override_representation_policy_with_effective_facts(override_fact, facts);
         diagnostics.extend(policy.diagnostics);
         Some(policy.representation)
-    } else if external_pack_override_introduces_boundary_root(override_fact) {
+    } else if hierarchy_override_introduces_boundary_root(override_fact) {
         let policy =
             hierarchy_override_representation_policy_with_effective_facts(override_fact, facts);
         diagnostics.extend(policy.diagnostics);
@@ -1553,7 +1553,19 @@ fn hierarchy_override_represented_subtypes(
     context: &ObjectHierarchyContext,
 ) -> Vec<String> {
     match &override_fact.strategy {
-        HierarchyStrategy::ClosedEnum { variants, .. } => variants.clone(),
+        HierarchyStrategy::ClosedEnum { variants, .. } => {
+            let known_subtypes = context.transitive_subtypes_of(&override_fact.type_name);
+            variants
+                .iter()
+                .map(|variant| {
+                    known_subtypes
+                        .iter()
+                        .find(|subtype| hierarchy_name_matches(variant, subtype))
+                        .cloned()
+                        .unwrap_or_else(|| variant.clone())
+                })
+                .collect()
+        }
         _ => context.direct_subtypes_of(&override_fact.type_name),
     }
 }
@@ -1564,7 +1576,7 @@ pub fn hierarchy_override_validation_policy(
 ) -> HierarchyOverrideValidationPolicy {
     let mut diagnostics = Vec::new();
     if !context.contains_type(&override_fact.type_name)
-        && !external_pack_override_introduces_boundary_root(override_fact)
+        && !hierarchy_override_introduces_boundary_root(override_fact)
     {
         diagnostics.push(representation_override_conflict_diagnostic(format!(
             "hierarchy override references unknown Java type {}",
@@ -1585,14 +1597,22 @@ pub fn hierarchy_override_validation_policy(
     }
 }
 
-fn external_pack_override_introduces_boundary_root(override_fact: &HierarchyOverride) -> bool {
-    override_fact.provenance == FactProvenance::ExternalLibraryPack
-        && matches!(
+fn hierarchy_override_introduces_boundary_root(override_fact: &HierarchyOverride) -> bool {
+    match override_fact.provenance {
+        FactProvenance::ExternalLibraryPack => matches!(
             override_fact.strategy,
             HierarchyStrategy::ConcreteStruct
                 | HierarchyStrategy::DynTrait { .. }
                 | HierarchyStrategy::ErasedObject
-        )
+        ),
+        FactProvenance::CorpusAnalysis => {
+            matches!(override_fact.strategy, HierarchyStrategy::ErasedObject)
+        }
+        FactProvenance::ParsedSource
+        | FactProvenance::BuiltinExternalModel
+        | FactProvenance::UserOverride
+        | FactProvenance::ConservativeFallback => false,
+    }
 }
 
 pub fn hierarchy_override_representation_policy(
@@ -1839,12 +1859,15 @@ fn push_closed_enum_override_validation_diagnostics(
 ) {
     let known_subtypes = context.transitive_subtypes_of(&override_fact.type_name);
     for variant in variants {
-        if !context.contains_type(variant) {
+        let known_variant = known_subtypes
+            .iter()
+            .any(|subtype| hierarchy_name_matches(variant, subtype));
+        if !context.contains_type(variant) && !known_variant {
             diagnostics.push(representation_override_conflict_diagnostic(format!(
                 "closed enum override for {} references unknown variant {}",
                 override_fact.type_name, variant
             )));
-        } else if !known_subtypes.iter().any(|subtype| subtype == variant) {
+        } else if !known_variant {
             diagnostics.push(representation_override_conflict_diagnostic(format!(
                 "closed enum override for {} includes {}, but source facts do not record it as a subtype",
                 override_fact.type_name, variant
@@ -1852,7 +1875,10 @@ fn push_closed_enum_override_validation_diagnostics(
         }
     }
     for subtype in context.terminal_subtypes_of(&override_fact.type_name) {
-        if !variants.iter().any(|variant| variant == &subtype) {
+        if !variants
+            .iter()
+            .any(|variant| hierarchy_name_matches(variant, &subtype))
+        {
             diagnostics.push(representation_override_conflict_diagnostic(format!(
                 "closed enum override for {} omits terminal source subtype {}",
                 override_fact.type_name, subtype

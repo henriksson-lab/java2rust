@@ -3,6 +3,30 @@
 Recorded 2026-08-23.
 Status: **open**.
 
+Follow-up 2026-08-30 layering cleanup: exception-support lowering no longer
+imports or constructs `JavaType` while building source exception parent arms.
+The Java-type-specific parent lookup is now hidden behind
+`FactSet::extends_type_name_for`, keeping `exception_lowering` on facts plus
+structured Rust IR rather than re-entering Java semantic types from the render
+layer. The layering guard now checks the production prefix before test fixtures.
+Regressions: `layering::exception_lowering_keeps_exception_paths_structured`,
+the full `tests/layering.rs` suite, and the `semantic_facts` exception filter.
+Companion unit fixtures now import `JavaType` inside the `#[cfg(test)]` module
+only, preserving the production layering boundary while keeping
+`cargo test --lib` compile-clean.
+
+Follow-up 2026-08-30: `Arrays.stream(values, from, to)` range checks now use
+the result-returning Java-exception carrier when the stream is lowered inside a
+propagating `try/catch` context. The source-slice projection mirrors the
+existing array range mutator split: ordinary value contexts keep the uncaught
+panic wrapper, while propagated contexts return `Err(JavaException::new(...))`
+for `fromIndex > toIndex` and out-of-bounds ranges, then apply `?` before
+building the iterator. Regression:
+`idiom_gaps::java_arrays_stream_range_in_try_lowers_to_java_exception_results`;
+the existing structured stream-range test now pins both panic and result
+rendering paths. The audit remains open for the broader panic-only exception
+surface and general `finally` completion carrier.
+
 Follow-up 2026-08-29 baseline pass: six exception/finally fixtures were still
 listed in `tests/baselines/idiom-gaps-failures.txt` even though current
 lowering covers them. Two assertions were stale after newer result/cleanup
@@ -1522,3 +1546,48 @@ path compile with generated-crate checks, so
 `optional_print_stream_field_println_uses_arity_named_support` and
 `optional_print_stream_field_println_with_mutating_optional_arg_uses_mut_receiver`
 were removed from `tests/baselines/idiom-gaps-failures.txt`.
+
+Follow-up 2026-08-30 BitSet get result ABI pass:
+`java.util.BitSet.get(int)` already advertised a catchable
+`IndexOutOfBoundsException` effect, but the selected JDK facade facts only
+registered the result ABI for `set(int)`. `BitSet.get` now has a
+`BitSet::get_result` facade ABI with a borrowed receiver, owned index argument,
+owned boolean result, and `Result` wrapping, so catchable lowering can rely on
+the same fact surface as the runtime helper. Covered by
+`slot_shape_design::stdlib_owns_known_jdk_content_method_facts`.
+
+Follow-up 2026-08-30 fallible constructor fact pass:
+`BitSet(int)`, `StringBuilder(int)`, and `StringBuffer(int)` already have
+`*_result` runtime constructors that throw `NegativeArraySizeException`, and
+lowering had bespoke propagated-context branches for those shapes. The selected
+JDK fact surface now records builtin `ExternalConstructorRustResultFact` rows
+for the simple, qualified, and canonical aliases, and constructor-result lookup
+consults builtin model facts after user and external-pack facts. Catchable
+constructor planning can now see the same fallibility without relying only on
+the bespoke lowering branch. Covered by
+`slot_shape_design::stdlib_owns_known_jdk_content_method_facts`.
+
+Follow-up 2026-08-30 `Future.get()` call-site propagation pass:
+the generic `Future<T>` facade already returned `Result<T, JavaException>`, but
+ordinary slot lowering still missed `?` for lambda locals such as
+`Reader reader = future.get()` inside a catchable `forEach` body. The selected
+Java platform concurrent facts now model `Future.get()` as throwing checked
+`InterruptedException`/`ExecutionException`, and both external-result lookup
+paths consult the built-in external-pack surface instead of only stored
+`FactSet` rows. This keeps the generated facade and call-site propagation in
+agreement. Covered by
+`tests/external_packs.rs::java_platform_concurrent_static_factory_declares_precise_return_type`
+and
+`tests/idiom_gaps.rs::foreach_lambda_throw_wraps_enclosing_method_in_result`.
+
+Follow-up 2026-08-30 StringBuilder capacity-constructor precision pass:
+the `StringBuilder(int)` / `StringBuffer(int)` constructor fact was keyed only
+by owner and arity, so one-argument string constructors such as
+`new StringBuilder("ab")` were falsely classified as result-returning. Slot
+fallibility and value lowering now apply that constructor result only when the
+single argument is an integral capacity. Capacity constructors render
+`new_capacity_result(...)` in both catchable and ordinary contexts, using `?`
+or the uncaught-Java-exception adapter as appropriate; string/char-sequence
+initializers stay on plain `new_1(...)`. Covered by
+`tests/idiom_gaps.rs::string_builder_capacity_constructor_uses_result_only_for_integral_capacity`.
+The full differential test now passes all 219 checked-in fixtures.

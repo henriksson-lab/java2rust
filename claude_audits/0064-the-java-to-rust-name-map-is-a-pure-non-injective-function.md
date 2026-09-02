@@ -13,6 +13,22 @@ one level below it
 
 Current tree update:
 
+* Follow-up 2026-08-30: source-summary superclass boundary facts are still
+  generated as corpus-analysis erased-boundary facts, but those facts no longer
+  replace or shadow a parsed source type representation. This keeps a
+  cotranslated `VCFCompoundHeaderLine` concrete with `ParsedSource` provenance
+  even when source-summary metadata also names it as a boundary. Regression:
+  `slot_shape_design::source_summary_boundary_erasure_does_not_replace_parsed_source_type`.
+* Representation lowering now resolves unqualified `extends`, `implements`, and
+  source type-parameter bound names in the declaring type's package before
+  falling back to emitted-alias or unique-simple-name lookup. A package peer
+  pair such as `a.Base`/`b.Base` no longer makes `b.Child extends Base` fail
+  closed in representation/interface/bound analysis just because the simple
+  name is globally ambiguous. Regressions:
+  `representation_lowering::type_lookup_tests::source_type_extends_uses_same_package_before_ambiguous_simple_peer`,
+  `representation_lowering::type_lookup_tests::implemented_interfaces_use_same_package_before_ambiguous_simple_peer`,
+  and
+  `representation_lowering::type_lookup_tests::method_type_param_bounds_use_owner_package_before_ambiguous_simple_peer`.
 * Generic source type-bound lookup no longer accepts the first emitted Rust
   alias match when multiple Java owners collapse to the same Rust name. Exact
   Java-owner lookup still wins, but the Rust-alias tier now requires uniqueness
@@ -28,6 +44,36 @@ Current tree update:
   selects the last matching fact when both `a.Item` and `b.Item` publish the
   same member/constructor shape. Regression:
   `semantic_facts::fact_lookup_refuses_ambiguous_simple_package_owner_aliases`.
+  Follow-up 2026-08-30: unsupported external constructor and unsupported
+  external API/field facts now use the same ambiguity guard before falling
+  through to broad owner matching. Exact `a.Item`/`b.Item` unsupported facts
+  still resolve, while bare `Item` fails closed instead of selecting whichever
+  package peer appears last. The same regression covers these fact families.
+  The same pass also moved external API argument-effect facts onto a shared
+  exact/direct-then-guarded-broad lookup helper, including the private indexed
+  path used while matching external API parameter facts. Concrete arity still
+  outranks generic arity, receiver-specific facts still outrank receiverless
+  facts, and user overrides still occupy their existing precedence tier.
+  External API effect facts now use the same direct-or-guarded-broad owner
+  check in both ordinary receiver lookup and the parameter-aware call lookup, so
+  `Item.transform(...)` no longer selects between `a.Item` and `b.Item` facts by
+  insertion order while exact owners continue to resolve.
+  Source equals-override facts and dispatch-requirement facts now follow the
+  same rule: exact/direct owners win, unique simple-owner compatibility remains,
+  and ambiguous bare package-simple owners fail closed instead of merging or
+  selecting requirements from multiple package peers. The MethodKey-backed fact
+  families now follow the same policy as well: method effect, control-flow,
+  recursion, and catch facts resolve exact `a.Item.work`/`b.Item.work` keys, but
+  a bare `Item.work` query no longer borrows whichever package peer happens to
+  match the simple owner alias. Facade ABI call lookup now uses the same split:
+  exact qualified callable keys still select their ABI, while a bare owner such
+  as `Item.work(String)` is rejected when both `a.Item` and `b.Item` publish the
+  same callable header. Exception-kind lookup also resolves exact
+  `a.Problem`/`b.Problem` facts but rejects a bare `Problem` when the package
+  peers disagree on checked/unchecked classification. External-library pack
+  discovery from member facts now requires a direct/canonical member owner
+  match, so a pack that owns `a.Item` is not inferred for `other.Item` through
+  the shared simple alias `Item`.
 * Resolved anonymous interface constructors now resolve the declaring interface
   owner through the local import/static-alias table and combined context lookup
   before rendering the trait object constructor. `import a.I; new I() { ... }`
@@ -1470,3 +1516,177 @@ has already resolved the owner. Regressions:
 `usage::tests::receiver_static_type_match_fails_closed_for_package_qualified_simple_name`
 and
 `usage::tests::resolved_receiver_boundary_refuses_package_qualified_simple_name_match`.
+
+Follow-up 2026-08-29: member-access static constant planning no longer treats a
+bare capitalized owner as sufficient proof of a Java static owner. The fallback
+static-constant branch now requires an import/static alias, a known source
+type-field entry, a package-qualified owner, or a small known built-in owner
+set; otherwise `Other.VALUE` fails closed instead of inventing
+`Other::VALUE` with an unknown Java type. Regression:
+`type_coercion::member_access_plan_does_not_invent_unknown_uppercase_static_constant_owner`.
+
+Follow-up 2026-08-29: bare static constant reads now prefer explicit static
+member imports over the flat static-field owner map. `lower_bare_name("KIND")`
+therefore renders `AItem::KIND` for `import static a.Item.KIND` even when a
+support/context peer has also registered `b.Item.KIND` under the same bare
+field spelling. Regression:
+`slot_shape_design::access_lowering_owns_bare_field_and_member_access_fallbacks`.
+
+Follow-up 2026-08-30: bare static-storage update expressions now qualify the
+setter through the same recorded-owner path as the getter. `count++` for a
+static field recorded as owned by `a.Counter` now plans
+`ACounter::__static_count()` and `ACounter::__set_static_count`, instead of
+reading from the owner-qualified getter and writing through an unqualified
+setter path. Regressions:
+`lower::tests::bare_static_storage_update_uses_recorded_owner_for_getter_and_setter`
+and `slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`.
+
+Follow-up 2026-08-30: signature planning's legacy source-summary fact scans no
+longer borrow method mutability or return-nullability facts from a different
+package peer. Qualified receiver owners such as `b.Item` now fail closed
+against `a.Item` facts even though both expose the same simple `Item` alias;
+bare legacy owner compatibility remains limited by the existing unique-owner
+ambiguity rule. Regressions:
+`signature::tests::source_receiver_binding_constraints_do_not_borrow_package_peer_mutability`
+and
+`signature::tests::source_summary_method_effect_return_nullability_does_not_borrow_package_peer`.
+
+Follow-up 2026-08-30: constructor argument-effect fact lookup now follows the
+same exact/direct/ambiguous-simple-owner policy as the neighboring external
+constructor and field fact lookups. A bare `Item` lookup no longer silently
+selects the last `ExternalConstructorArgumentEffectFact` when both `a.Item` and
+`b.Item` provide an effect for the same arity and parameter index, while exact
+qualified lookups still resolve. Regression:
+`semantic_facts::fact_lookup_refuses_ambiguous_simple_package_owner_aliases`.
+
+Follow-up 2026-08-30: external conversion-adapter fact lookup now applies the
+same package-simple ambiguity guard to both endpoints. Exact qualified adapter
+facts such as `a.Item -> Target` and `Source -> b.Item` still resolve, but bare
+`Item` no longer selects one package peer for either the source or target side
+of an `Into` adapter. Regression:
+`semantic_facts::fact_lookup_refuses_ambiguous_simple_package_owner_aliases`.
+
+Follow-up 2026-08-30: global platform/external-pack conversion adapter lookup
+now prefers exact endpoint pairs before falling back to broad alias matching.
+`ZipOutputStream -> OutputStream` therefore resolves to the simple facade
+adapter, while `java.util.zip.ZipOutputStream -> OutputStream` resolves to the
+qualified platform adapter instead of whichever alias-compatible fact appears
+first. Regression:
+`external_packs::platform_conversion_adapter_lookup_prefers_exact_endpoint_names`.
+
+Follow-up 2026-08-30: FFI handover facts and legacy Rust result/return-type
+facts now use the same exact/direct/ambiguous-simple-owner policy as the
+neighboring constructor and field lookups. Bare `Item.handover(...)` or
+`Item.open(...)` no longer inherits receiver, argument, result, return-slot, or
+constructor-result facts from whichever of `a.Item`/`b.Item` appears last,
+while exact qualified owners still resolve. Regression:
+`semantic_facts::fact_lookup_refuses_ambiguous_simple_package_owner_aliases`.
+
+Follow-up 2026-08-30: external crate API mappings, constructor mappings, and
+type-name mappings now use the same fail-closed package-simple owner policy.
+Direct owner matches are preferred before any broad alias fallback, and a bare
+`Item` query no longer selects one of two package peers for mapped method names,
+constructor names, or Rust carrier type names. Regression:
+`semantic_facts::fact_lookup_refuses_ambiguous_simple_package_owner_aliases`.
+
+Follow-up 2026-08-30: the Rust-name-to-Java-method fallback in
+`external_api_effect_for_receiver_with_arity_or_rust_name` now uses the same
+external crate API mapping policy. A shared Rust facade method name can still
+resolve for exact `a.Item` or `b.Item` receivers, but a bare `Item` receiver no
+longer picks one package peer's mapped Java method effect. Regression:
+`semantic_facts::fact_lookup_refuses_ambiguous_simple_package_owner_aliases`.
+
+Follow-up 2026-08-30: source static-type receiver detection now respects local
+variable shadowing. A local named `connection` in a scope that also imports a
+source-summary type `Connection` is no longer treated as the static owner
+selected by the snake-case type alias; `connection.getTarget()` reaches the
+instance receiver resolver instead of recording a stale unresolved/static-method
+fact. Regressions:
+`resolver_benchmark::tests::source_static_type_receiver_respects_local_shadowing_for_imported_nested_type`
+and
+`dependency_mode::source_summary_root_resolves_imported_nested_graph_types`.
+
+Follow-up 2026-08-30: type-qualified static-field lookup now uses the same
+lexical shadow guard. A local named `bounds` no longer gets typed through the
+snake-case alias for source class `Bounds` when resolving `bounds.SENTINEL`;
+the expression reaches only the explicit unknown-overload fallback instead of
+an identity `int` coercion from the static field. Legitimate
+`Outer.Bounds.SENTINEL` and source-summary nested static-field cases still
+resolve. Regression:
+`resolve_calls::resolver_static_field_lookup_respects_local_receiver_shadowing`.
+
+Follow-up 2026-08-30: dependency-mode source/external field attribution now
+handles the parser's split spelling for lambda parameters used as field-access
+owners. In source text such as `HDF5File -> HDF5File.OpenMode.CREATE`, the
+lambda binding is normalized to an emitted local name while the uppercase
+field-access receiver remains source-like for static-owner parsing. The
+benchmark type extractors now resolve those uppercase owner tokens through the
+normalized local binding and treat synthetic `lambda_param:*` unknowns as
+non-owners, so lambda parameters no longer become HDF5 pack or source-summary
+field evidence. Regressions:
+`dependency_mode::resolver_benchmark_does_not_treat_lambda_params_as_static_pack_receivers`
+and
+`dependency_mode::source_summary_field_contexts_do_not_treat_lambda_params_as_static_receivers`.
+
+Follow-up 2026-08-30: two dependency-mode project field attribution checks had
+stale normalized-owner assertions after the owner-key cleanup. The behavior was
+already in the intended bucket: `BaseUtils.MAX_BASE_SCORE` and
+`BaseUtils.Base.N.base` both stay as project field pressure with zero external
+field guesses. The tests now assert the source owner spelling instead of the
+old normalized `base_utils` string. Regressions:
+`dependency_mode::resolver_benchmark_classifies_snake_case_project_field_receiver_as_project`
+and
+`dependency_mode::resolver_benchmark_propagates_project_field_guess_ownership_through_static_field_chains`.
+
+Follow-up 2026-08-30: dependency-mode source-summary type maps now retain the
+package-relative owner-qualified nested spelling in addition to simple and fully
+qualified names. This closes the attribution hole where
+`new UserException.ValidationFailure(...)` resolved successfully but could not
+be counted as a source-summary constructor because the table had
+`ValidationFailure` and `dep.exceptions.UserException.ValidationFailure`, but
+not `UserException.ValidationFailure`. Regression:
+`dependency_mode::source_summary_roots_resolve_project_helper_fields_and_nested_exception_constructors`.
+
+Follow-up 2026-08-30: `resolve_calls`' nested/lexical owner cluster is green.
+Unqualified nested constructor lookup now checks the current lexical type scope
+before falling back, so sibling nested constructors such as `new Insert(...)`
+inside `Owner.Element` resolve to `Owner.Insert`. The source-program builder no
+longer imports every top-level type in a package for a single explicit import,
+so `import demo.lib.Marker` does not make incidental `demo.lib.Container.Writer`
+look source-owned. Known external enum-like receiver `values()` calls now expose
+typed array returns, and overload scoring applies external type aliases to
+arrays as well as direct named references. Regressions:
+`resolve_calls::resolver_prefers_sibling_nested_constructor_visible_from_nested_class`,
+`resolve_calls::resolver_matches_generic_sibling_nested_constructor_with_current_receiver_argument`,
+`resolve_calls::resolver_uses_enclosing_static_method_return_type_in_nested_constructor_delegation`,
+`resolve_calls::resolver_uses_enclosing_source_field_type_for_nested_class_overload_arguments`,
+`resolve_calls::resolver_benchmark_does_not_import_incidental_nested_package_types`,
+`resolve_calls::resolver_uses_external_domain_constants_for_primitive_and_string_overloads`,
+and the stale known-failure entries now covered by the full
+`cargo test --release --test resolve_calls` pass.
+
+Follow-up 2026-08-30: `dependency_mode`'s hierarchy/source-summary cluster is
+green. Source-summary superclass facts can now introduce corpus-derived
+erased-object boundary roots into per-file representation plans without
+overriding primary source classes. Hierarchy diagnostics also normalize generic
+supertype spellings and simple nested subtype declarations against
+owner-qualified edge keys, and closed-enum override variants such as `SplitRead`
+resolve to source keys such as `BreakpointEvidence.SplitRead` during validation
+and application. Regressions:
+`dependency_mode::primary_extends_source_summary_base_is_erased_boundary_not_inheritance_pressure`,
+`dependency_mode::primary_source_hierarchy_override_cleans_breakpoint_evidence_shape`,
+`dependency_mode::external_fact_hierarchy_override_cleans_breakpoint_evidence_shape`,
+`dependency_mode::external_fact_closed_enum_override_cleans_multilevel_hierarchy_shape`,
+`dependency_mode::nested_source_serializer_subclass_of_qualified_kryo_serializer_uses_external_boundary`,
+and the full `cargo test --release --test dependency_mode` pass.
+
+Follow-up 2026-08-30: the source-summary static overload call-site cluster is
+green. Summary facade emission already produced `pick_int`/`pick_string`, and
+instance calls already used `inst_int`/`inst_string`, but static source-summary
+calls whose receiver spelling had been normalized still re-planned from the
+receiver and fell back to bare `pick`. Resolved source static calls now retarget
+static owners to the resolver-selected `ResolvedCall.rust_name` before argument
+planning, so all four `summary_source` slot-shape tests pass. Regressions:
+`lower::tests::source_context_static_overload_lowers_to_selected_name`,
+`slot_shape_design::summary_source_overloads_get_one_rust_name_from_every_path`,
+and `slot_shape_design::a_summary_source_type_gets_no_unmodelled_import_stub`.

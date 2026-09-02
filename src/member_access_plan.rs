@@ -54,7 +54,9 @@ pub fn java_member_access_policy_with_facts(
                 kind: JavaMemberAccessKind::StaticConstant,
             });
         }
-        if is_static_constant_member(member) && static_constant_owner(receiver, env).is_some() {
+        if is_static_constant_member(member)
+            && static_constant_owner(receiver, member, env).is_some()
+        {
             return Some(JavaMemberAccessPolicy {
                 member: member.to_string(),
                 java_ty: infer_member_access_type(receiver, member, env)
@@ -130,7 +132,7 @@ pub fn plan_member_access_with_facts(
                 &policy.java_ty,
                 facts,
             )
-            .or_else(|| static_constant_owner(receiver, env))?,
+            .or_else(|| static_constant_owner(receiver, &policy.member, env))?,
         },
         JavaMemberAccessKind::InstanceField => MemberAccessOp::RustField {
             rust_name: crate::parser::to_snake_case(&policy.member),
@@ -162,7 +164,7 @@ fn member_access_shape(kind: JavaMemberAccessKind, java_ty: JavaType) -> RustSlo
     shape
 }
 
-fn static_constant_owner(receiver: &Expr, env: &TypeEnv) -> Option<String> {
+fn static_constant_owner(receiver: &Expr, member: &str, env: &TypeEnv) -> Option<String> {
     let owner = match receiver {
         Expr::Var(owner) => owner,
         Expr::FieldAccess(_, _) => {
@@ -178,13 +180,50 @@ fn static_constant_owner(receiver: &Expr, env: &TypeEnv) -> Option<String> {
     if env.local_type(owner).is_some() || (!upper_camel_owner && env.field_type(owner).is_some()) {
         return None;
     }
-    if upper_camel_owner {
-        Some(owner.to_string())
+    if let Some(alias) = env.static_type_alias(owner) {
+        Some(crate::slot_render::rust_name_for_java_named_type(alias))
+    } else if source_type_static_field_exists(owner, member, env) {
+        Some(crate::slot_render::rust_name_for_java_named_type(owner))
+    } else if known_builtin_static_constant_owner(owner) {
+        Some(crate::slot_render::rust_name_for_java_named_type(owner))
     } else if owner.contains('_') || owner.chars().all(|ch| ch.is_ascii_lowercase()) {
-        Some(upper_camel_from_snake(owner))
+        let canonical = crate::stdlib::canonical_external_receiver_type_key(owner);
+        (canonical != owner.as_str() || known_builtin_static_constant_owner(&canonical))
+            .then(|| crate::slot_render::rust_name_for_java_named_type(&canonical))
     } else {
         None
     }
+}
+
+fn source_type_static_field_exists(owner: &str, member: &str, env: &TypeEnv) -> bool {
+    let member_alias = crate::parser::to_snake_case(member);
+    env.type_field_type(owner, member).is_some()
+        || env.type_field_type(owner, &member_alias).is_some()
+        || env
+            .static_type_alias(owner)
+            .is_some_and(|alias| env.type_field_type(alias, member).is_some())
+        || env
+            .static_type_alias(owner)
+            .is_some_and(|alias| env.type_field_type(alias, &member_alias).is_some())
+}
+
+fn known_builtin_static_constant_owner(owner: &str) -> bool {
+    matches!(
+        crate::stdlib::canonical_external_receiver_type_key(owner).as_str(),
+        "Arrays"
+            | "Collections"
+            | "Collectors"
+            | "Constants"
+            | "Files"
+            | "GATKVCFConstants"
+            | "Integer"
+            | "Math"
+            | "Objects"
+            | "StrictMath"
+            | "System"
+            | "Thread"
+            | "VCFConstants"
+    )
 }
 
 fn static_constant_rust_owner_from_name(owner: &str) -> Option<String> {

@@ -26,7 +26,9 @@ pub fn lower_bare_name(name: &str, env: &ShapeEnv) -> RustExpr {
     } else if bare_name_local_type(name, env).is_none()
         && let Some(static_name) = env.static_field_access_name(name)
     {
-        if let Some(owner) = env.static_field_access_owner(name) {
+        if let Some(owner) =
+            static_member_import_owner(name, env).or_else(|| env.static_field_access_owner(name))
+        {
             owner_associated_path_projection(
                 &crate::slot_render::rust_name_for_java_named_type(owner),
                 static_name,
@@ -39,6 +41,13 @@ pub fn lower_bare_name(name: &str, env: &ShapeEnv) -> RustExpr {
     } else {
         RustExpr::Var(crate::parser::to_snake_case(name))
     }
+}
+
+fn static_member_import_owner<'a>(name: &str, env: &'a ShapeEnv) -> Option<&'a str> {
+    env.type_env().static_member_import_owner(name).or_else(|| {
+        env.type_env()
+            .static_member_import_owner(&crate::parser::to_snake_case(name))
+    })
 }
 
 fn bare_name_local_type<'a>(name: &str, env: &'a ShapeEnv) -> Option<&'a crate::java_ir::JavaType> {

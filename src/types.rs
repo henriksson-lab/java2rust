@@ -538,20 +538,116 @@ fn raw_rust_box_arg(raw: &str) -> Option<&str> {
 pub fn split_top_level_rust_type_args(args: &str) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut start = 0;
-    let mut depth = 0usize;
-    for (idx, ch) in args.char_indices() {
+    let mut angle_depth = 0usize;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+    let mut cursor = 0usize;
+    while cursor < args.len() {
+        if let Some(end) = rust_type_raw_string_literal_end_at(args, cursor) {
+            cursor = end;
+            continue;
+        }
+        if let Some(end) = rust_type_comment_end_at(args, cursor) {
+            cursor = end;
+            continue;
+        }
+        let ch = args[cursor..]
+            .chars()
+            .next()
+            .expect("cursor is always on a char boundary");
+        if ch == '"' {
+            cursor = rust_type_string_literal_end_at(args, cursor).unwrap_or(args.len());
+            continue;
+        }
         match ch {
-            '<' => depth += 1,
-            '>' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
-                parts.push(args[start..idx].trim());
-                start = idx + ch.len_utf8();
+            '<' => angle_depth += 1,
+            '>' => angle_depth = angle_depth.saturating_sub(1),
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            '{' => brace_depth += 1,
+            '}' => brace_depth = brace_depth.saturating_sub(1),
+            ',' if angle_depth == 0
+                && paren_depth == 0
+                && bracket_depth == 0
+                && brace_depth == 0 =>
+            {
+                parts.push(args[start..cursor].trim());
+                start = cursor + ch.len_utf8();
             }
             _ => {}
         }
+        cursor += ch.len_utf8();
     }
     parts.push(args[start..].trim());
     parts
+}
+
+fn rust_type_comment_end_at(raw: &str, idx: usize) -> Option<usize> {
+    if raw[idx..].starts_with("//") {
+        return Some(
+            raw[idx..]
+                .find('\n')
+                .map(|offset| idx + offset)
+                .unwrap_or(raw.len()),
+        );
+    }
+    if raw[idx..].starts_with("/*") {
+        return Some(
+            raw[idx + 2..]
+                .find("*/")
+                .map(|offset| idx + 2 + offset + 2)
+                .unwrap_or(raw.len()),
+        );
+    }
+    None
+}
+
+fn rust_type_raw_string_literal_end_at(raw: &str, idx: usize) -> Option<usize> {
+    let rest = raw.get(idx..)?;
+    let mut chars = rest.char_indices();
+    let (_, first) = chars.next()?;
+    if first != 'r' {
+        return None;
+    }
+    let mut hashes = 0usize;
+    let mut quote_start = None;
+    for (offset, ch) in chars {
+        match ch {
+            '#' if quote_start.is_none() => hashes += 1,
+            '"' if quote_start.is_none() => {
+                quote_start = Some(offset);
+                break;
+            }
+            _ => return None,
+        }
+    }
+    let quote_start = quote_start?;
+    let body_start = idx + quote_start + 1;
+    let terminator = format!("\"{}", "#".repeat(hashes));
+    raw[body_start..]
+        .find(&terminator)
+        .map(|offset| body_start + offset + terminator.len())
+}
+
+fn rust_type_string_literal_end_at(raw: &str, idx: usize) -> Option<usize> {
+    let rest = raw.get(idx..)?;
+    if !rest.starts_with('"') {
+        return None;
+    }
+    let mut escaped = false;
+    for (offset, ch) in rest.char_indices().skip(1) {
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '"' {
+            return Some(idx + offset + ch.len_utf8());
+        }
+    }
+    None
 }
 
 pub fn is_known_raw_generic_type(java_ty: &JavaType) -> bool {
@@ -874,6 +970,31 @@ pub fn primitive_widening_steps(from: PrimitiveType, to: PrimitiveType) -> Optio
         return Some(1 + to_position - numeric_widening_chain_position(PrimitiveType::Int));
     }
     Some(to_position - from_position)
+}
+
+#[cfg(test)]
+mod raw_rust_type_tests {
+    use super::*;
+
+    #[test]
+    fn raw_rust_type_args_ignore_nested_rust_delimiters_and_comments() {
+        assert_eq!(
+            raw_rust_result_args("Result<fn(i32, i32), JavaException>"),
+            Some(vec!["fn(i32, i32)", "JavaException"])
+        );
+        assert_eq!(
+            raw_rust_result_args("Result<T /*,*/, JavaException>"),
+            Some(vec!["T /*,*/", "JavaException"])
+        );
+        assert_eq!(
+            raw_rust_result_args("Result<&'a T, JavaException>"),
+            Some(vec!["&'a T", "JavaException"])
+        );
+        assert_eq!(
+            split_top_level_rust_type_args("Vec<[u8; 2]>, Result<{ const N: usize }, E>"),
+            vec!["Vec<[u8; 2]>", "Result<{ const N: usize }, E>"]
+        );
+    }
 }
 
 #[cfg(test)]

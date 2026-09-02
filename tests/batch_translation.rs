@@ -1570,6 +1570,177 @@ exec "{}" "$@"
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn focused_package_missing_analysis_profile_metric_fails_even_with_idiom_fallback() {
+    let dir = unique_temp_dir("focused_missing_analysis_profile_metric");
+    let primary = dir.join("java");
+    let out = dir.join("out");
+    fs::create_dir_all(&primary).unwrap();
+    fs::write(
+        primary.join("Clean.java"),
+        r#"
+public class Clean {
+    public int value() {
+        return 1;
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let fake_translator = dir.join("fake-translator.sh");
+    fs::write(
+        &fake_translator,
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "translate-batch" ]]; then
+  out_dir=""
+  generated_dir=""
+  phase_events=""
+  worker_events=""
+  primary=""
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      --out-dir)
+        out_dir="$2"
+        shift 2
+        ;;
+      --generated-dir)
+        generated_dir="$2"
+        shift 2
+        ;;
+      --phase-events)
+        phase_events="$2"
+        shift 2
+        ;;
+      --worker-events)
+        worker_events="$2"
+        shift 2
+        ;;
+      --primary)
+        primary="$2"
+        shift 2
+        ;;
+      *)
+        shift
+        ;;
+    esac
+  done
+  mkdir -p "$generated_dir"
+  printf 'source\trust_path\ttranslate_status\tdiagnostics\tinvalid_patterns\tunsupported_members\n' > "$out_dir/status.tsv"
+  printf 'pub struct Clean;\n' > "$generated_dir/00001_Clean.rs"
+  printf '%s/Clean.java\t%s/00001_Clean.rs\tok\t0\t0\t0\n' "$primary" "$generated_dir" >> "$out_dir/status.tsv"
+  printf 'metric\tvalue\nprimary_files\t1\n' > "$out_dir/analysis-profile.tsv"
+  printf 'batch_global_semantic\tok\t0\tfake\n' >> "$phase_events"
+  printf 'batch_translate_end\t%s\t0\t%s\t0\tok\t%s\n' "$$" "$primary" "$generated_dir" >> "$worker_events"
+  exit 0
+fi
+printf 'unexpected fake translator command: %s\n' "${1:-}" >&2
+exit 1
+"#,
+    )
+    .unwrap();
+    let mut translator_permissions = fs::metadata(&fake_translator).unwrap().permissions();
+    translator_permissions.set_mode(0o755);
+    fs::set_permissions(&fake_translator, translator_permissions).unwrap();
+
+    let real_python = Command::new("which")
+        .arg("python3")
+        .output()
+        .expect("locate python3");
+    assert!(
+        real_python.status.success(),
+        "python3 is required for focused wrapper test"
+    );
+    let real_python = String::from_utf8(real_python.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let fake_bin = dir.join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_python = fake_bin.join("python3");
+    fs::write(
+        &fake_python,
+        format!(
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${{1:-}}" == *"/scripts/sweep-generated-idioms.py" ]]; then
+  out_tsv=""
+  out_md=""
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      --out-tsv)
+        out_tsv="$2"
+        shift 2
+        ;;
+      --out-md)
+        out_md="$2"
+        shift 2
+        ;;
+      *)
+        shift
+        ;;
+    esac
+  done
+  printf 'signal\tcount\tfiles\n' > "$out_tsv"
+  printf 'unsupported_statements\t0\t0\n' >> "$out_tsv"
+  printf 'unsupported_members\t0\t0\n' >> "$out_tsv"
+  printf 'unsupported_expressions\t0\t0\n' >> "$out_tsv"
+  printf 'unmodelled_types\t0\t0\n' >> "$out_tsv"
+  printf 'unmodelled_call_sites\t0\t0\n' >> "$out_tsv"
+  printf 'noop_facade_methods\t0\t0\n' >> "$out_tsv"
+  printf 'noop_facade_call_sites\t7\t1\n' >> "$out_tsv"
+  printf 'unmodelled_upcast_conversions\t0\t0\n' >> "$out_tsv"
+  printf 'stubbed_constants\t0\t0\n' >> "$out_tsv"
+  printf '# fake sweep\n' > "$out_md"
+  exit 0
+fi
+exec "{}" "$@"
+"#,
+            real_python
+        ),
+    )
+    .unwrap();
+    let mut python_permissions = fs::metadata(&fake_python).unwrap().permissions();
+    python_permissions.set_mode(0o755);
+    fs::set_permissions(&fake_python, python_permissions).unwrap();
+
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/translate-focused-package.sh");
+    let output = Command::new(&script)
+        .arg("--skip-resolver-bench")
+        .arg("--jobs")
+        .arg("1")
+        .arg("--primary")
+        .arg(&primary)
+        .arg("--out")
+        .arg(&out)
+        .env("NEW_JAVA2RUST_BIN", &fake_translator)
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                fake_bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .output()
+        .expect("run focused package wrapper");
+    assert!(
+        !output.status.success(),
+        "focused wrapper should fail when analysis profile exists but omits a required metric\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("missing analysis profile metric: noop_facade_call_sites"),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn focused_package_wrapper_preserves_primary_source_types_covered_by_external_pack() {
     let dir = unique_temp_dir("focused_primary_pack_overlap");

@@ -6,13 +6,21 @@ use std::path::Path;
 
 use common::{GeneratedCrateModule, cargo_check_generated_modules};
 use new_java2rust::facts::{
-    AccessorInlinePolicy, ControlFlowFactKind, DispatchRequirementKind, ExceptionKind,
-    ExternalApiArgumentEffectFact, ExternalApiCoverage, ExternalApiEffectFact, ExternalApiRole,
-    ExternalArgumentAliasPolicy, ExternalConstructorFact, ExternalFieldFact, ExternalFieldKind,
-    ExternalFieldValueFact, ExternalLibraryMode, ExternalLibraryPackFact, FactProvenance, FactSet,
-    FieldKey, FieldNullabilityFact, FieldNullabilityProvenance, MethodKey, NullabilityState,
-    ReceiverMutabilityFact, RecursionKind, TrivialAccessorFact, TrivialAccessorKind,
-    TypeCapabilityOverride, UnresolvedTargetFact, UnresolvedTargetKind,
+    AccessorInlinePolicy, CatchFact, ControlFlowFact, ControlFlowFactKind, DispatchRequirementKind,
+    ExceptionFact, ExceptionKind, ExternalApiArgumentEffectFact, ExternalApiCoverage,
+    ExternalApiEffectFact, ExternalApiRole, ExternalArgumentAliasPolicy,
+    ExternalConstructorArgumentEffectFact, ExternalConstructorFact,
+    ExternalConstructorRustResultFact, ExternalConversionAdapterFact,
+    ExternalConversionAdapterKind, ExternalCrateApiMappingFact,
+    ExternalCrateConstructorMappingFact, ExternalCrateTypeMappingFact, ExternalFfiHandoverFact,
+    ExternalFfiHandoverSlot, ExternalFieldFact, ExternalFieldKind, ExternalFieldValueFact,
+    ExternalLibraryMode, ExternalLibraryPackFact, ExternalRustResultFact,
+    ExternalRustReturnTypeFact, FacadeSlot, FactProvenance, FactSet, FieldKey,
+    FieldNullabilityFact, FieldNullabilityProvenance, MethodEffectFact, MethodKey,
+    NullabilityState, ReceiverMutabilityFact, RecursionFact, RecursionKind,
+    SourceEqualsOverrideFact, TrivialAccessorFact, TrivialAccessorKind, TypeCapabilityOverride,
+    UnresolvedTargetFact, UnresolvedTargetKind, UnsupportedExternalApiFact,
+    UnsupportedExternalConstructorFact, UnsupportedExternalFieldFact,
 };
 use new_java2rust::java_ir::{JavaType, PrimitiveType};
 use new_java2rust::object_model::plan_object_model_with_effective_facts;
@@ -1802,10 +1810,261 @@ fn fact_lookup_refuses_ambiguous_simple_package_owner_aliases() {
                 provenance: FactProvenance::ExternalLibraryPack,
             });
         facts
+            .source_equals_override_facts
+            .push(SourceEqualsOverrideFact {
+                type_name: owner.to_string(),
+                provenance: FactProvenance::ExternalLibraryPack,
+            });
+        facts.exception_facts.push(ExceptionFact {
+            type_name: owner.replace("Item", "Problem"),
+            kind: if owner == "a.Item" {
+                ExceptionKind::Checked
+            } else {
+                ExceptionKind::Unchecked
+            },
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+        facts
+            .dispatch_requirement_facts
+            .push(new_java2rust::facts::DispatchRequirementFact {
+                type_name: owner.to_string(),
+                requirement: if owner == "a.Item" {
+                    DispatchRequirementKind::NeedsSubtypeDispatch
+                } else {
+                    DispatchRequirementKind::NeedsDowncast
+                },
+                provenance: FactProvenance::ExternalLibraryPack,
+            });
+        let method = MethodKey {
+            type_name: owner.to_string(),
+            method_name: "work".to_string(),
+        };
+        facts.method_effect_facts.push(MethodEffectFact {
+            method: method.clone(),
+            receiver_mutability: if owner == "a.Item" {
+                ReceiverMutabilityFact::MutatesReceiver
+            } else {
+                ReceiverMutabilityFact::ReadOnly
+            },
+            return_nullability: if owner == "a.Item" {
+                NullabilityState::MaybeNull
+            } else {
+                NullabilityState::DefinitelyNonNull
+            },
+            thrown: Vec::new(),
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+        facts.control_flow_facts.push(ControlFlowFact {
+            method: method.clone(),
+            kind: ControlFlowFactKind::TailRecursiveSelfCall,
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+        facts.recursion_facts.push(RecursionFact {
+            method: method.clone(),
+            calls: method.clone(),
+            kind: RecursionKind::Direct,
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+        facts.catch_facts.push(CatchFact {
+            method,
+            clause_index: 0,
+            types: vec![JavaType::Named {
+                name: value.to_string(),
+                args: Vec::new(),
+            }],
+            assignable_from: Vec::new(),
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+        facts
             .external_constructor_facts
             .push(ExternalConstructorFact {
                 type_name: owner.to_string(),
                 arg_types: Vec::new(),
+                provenance: FactProvenance::ExternalLibraryPack,
+            });
+        facts.external_constructor_argument_effect_facts.push(
+            ExternalConstructorArgumentEffectFact {
+                type_name: owner.to_string(),
+                arg_count: 1,
+                parameter_index: 0,
+                parameter_type: None,
+                parameter_nullability: NullabilityState::MaybeNull,
+                argument_mutability: ReceiverMutabilityFact::ReadOnly,
+                alias_policy: ExternalArgumentAliasPolicy::Borrowed,
+                provenance: FactProvenance::ExternalLibraryPack,
+            },
+        );
+        facts
+            .external_conversion_adapter_facts
+            .push(ExternalConversionAdapterFact {
+                from_type: owner.to_string(),
+                to_type: "Target".to_string(),
+                kind: ExternalConversionAdapterKind::Into,
+                provenance: FactProvenance::ExternalLibraryPack,
+            });
+        facts
+            .external_conversion_adapter_facts
+            .push(ExternalConversionAdapterFact {
+                from_type: "Source".to_string(),
+                to_type: owner.to_string(),
+                kind: ExternalConversionAdapterKind::Into,
+                provenance: FactProvenance::ExternalLibraryPack,
+            });
+        facts
+            .external_crate_api_mapping_facts
+            .push(ExternalCrateApiMappingFact {
+                receiver_type: owner.to_string(),
+                method_name: "mapped".to_string(),
+                arg_count: Some(1),
+                rust_name: format!("{value}_mapped"),
+                provenance: FactProvenance::ExternalLibraryPack,
+            });
+        facts
+            .external_crate_api_mapping_facts
+            .push(ExternalCrateApiMappingFact {
+                receiver_type: owner.to_string(),
+                method_name: format!("{value}_java_method"),
+                arg_count: Some(1),
+                rust_name: "shared_rust_name".to_string(),
+                provenance: FactProvenance::ExternalLibraryPack,
+            });
+        facts.external_api_effect_facts.push(ExternalApiEffectFact {
+            method_name: format!("{value}_java_method"),
+            receiver_type: Some(owner.to_string()),
+            arg_count: Some(1),
+            parameter_patterns: None,
+            role: ExternalApiRole::Getter,
+            receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+            return_type: Some(if owner == "a.Item" {
+                JavaType::String
+            } else {
+                JavaType::Primitive(PrimitiveType::Int)
+            }),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: Vec::new(),
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+        facts.external_api_effect_facts.push(ExternalApiEffectFact {
+            method_name: "transform".to_string(),
+            receiver_type: Some(owner.to_string()),
+            arg_count: Some(1),
+            parameter_patterns: None,
+            role: ExternalApiRole::Getter,
+            receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+            return_type: Some(if owner == "a.Item" {
+                JavaType::String
+            } else {
+                JavaType::Primitive(PrimitiveType::Int)
+            }),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: Vec::new(),
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+        facts
+            .external_api_argument_effect_facts
+            .push(ExternalApiArgumentEffectFact {
+                method_name: "fill".to_string(),
+                receiver_type: Some(owner.to_string()),
+                arg_count: Some(1),
+                parameter_index: 0,
+                parameter_type: None,
+                parameter_nullability: NullabilityState::MaybeNull,
+                argument_mutability: ReceiverMutabilityFact::ReadOnly,
+                alias_policy: ExternalArgumentAliasPolicy::Borrowed,
+                provenance: FactProvenance::ExternalLibraryPack,
+            });
+        facts
+            .external_crate_type_mapping_facts
+            .push(ExternalCrateTypeMappingFact {
+                type_name: owner.to_string(),
+                rust_type_name: format!("{value}Type"),
+                provenance: FactProvenance::ExternalLibraryPack,
+            });
+        facts
+            .external_crate_constructor_mapping_facts
+            .push(ExternalCrateConstructorMappingFact {
+                type_name: owner.to_string(),
+                arg_count: 1,
+                rust_type_name: Some(format!("{value}CtorType")),
+                rust_name: format!("{value}_new"),
+                provenance: FactProvenance::ExternalLibraryPack,
+            });
+        facts
+            .external_ffi_handover_facts
+            .push(ExternalFfiHandoverFact {
+                method_name: "handover".to_string(),
+                receiver_type: Some(owner.to_string()),
+                slot: ExternalFfiHandoverSlot::Receiver,
+                parameter_type: Some(JavaType::Named {
+                    name: owner.to_string(),
+                    args: Vec::new(),
+                }),
+                provenance: FactProvenance::ExternalLibraryPack,
+            });
+        facts
+            .external_ffi_handover_facts
+            .push(ExternalFfiHandoverFact {
+                method_name: "handover".to_string(),
+                receiver_type: Some(owner.to_string()),
+                slot: ExternalFfiHandoverSlot::Argument { parameter_index: 0 },
+                parameter_type: Some(JavaType::String),
+                provenance: FactProvenance::ExternalLibraryPack,
+            });
+        facts
+            .external_rust_result_facts
+            .push(ExternalRustResultFact {
+                receiver_type: Some(owner.to_string()),
+                method_name: "open".to_string(),
+                arg_count: Some(1),
+                returns_result: owner == "a.Item",
+                provenance: FactProvenance::ExternalLibraryPack,
+            });
+        facts
+            .external_rust_return_type_facts
+            .push(ExternalRustReturnTypeFact {
+                receiver_type: Some(owner.to_string()),
+                method_name: "open".to_string(),
+                arg_count: Some(1),
+                rust_type_name: value.to_string(),
+                return_slot: FacadeSlot::Owned,
+                borrowed_return_recovery: None,
+                provenance: FactProvenance::ExternalLibraryPack,
+            });
+        facts
+            .external_constructor_rust_result_facts
+            .push(ExternalConstructorRustResultFact {
+                type_name: owner.to_string(),
+                arg_count: 1,
+                returns_result: owner == "a.Item",
+                provenance: FactProvenance::ExternalLibraryPack,
+            });
+        facts
+            .unsupported_external_constructor_facts
+            .push(UnsupportedExternalConstructorFact {
+                pack_name: "test".to_string(),
+                type_name: owner.to_string(),
+                arg_count: 1,
+                reason: value.to_string(),
+                provenance: FactProvenance::ExternalLibraryPack,
+            });
+        facts
+            .unsupported_external_api_facts
+            .push(UnsupportedExternalApiFact {
+                pack_name: "test".to_string(),
+                receiver_type: owner.to_string(),
+                method_name: "rawCall".to_string(),
+                reason: value.to_string(),
+                provenance: FactProvenance::ExternalLibraryPack,
+            });
+        facts
+            .unsupported_external_field_facts
+            .push(UnsupportedExternalFieldFact {
+                pack_name: "test".to_string(),
+                field: FieldKey {
+                    type_name: owner.to_string(),
+                    field_name: "RAW".to_string(),
+                },
+                reason: value.to_string(),
                 provenance: FactProvenance::ExternalLibraryPack,
             });
     }
@@ -1850,6 +2109,83 @@ fn fact_lookup_refuses_ambiguous_simple_package_owner_aliases() {
 
     assert_eq!(
         facts
+            .source_equals_override_for("a.Item")
+            .map(|fact| fact.type_name.as_str()),
+        Some("a.Item")
+    );
+    assert_eq!(
+        facts
+            .source_equals_override_for("b.Item")
+            .map(|fact| fact.type_name.as_str()),
+        Some("b.Item")
+    );
+    assert!(facts.source_equals_override_for("Item").is_none());
+
+    assert_eq!(
+        facts.exception_kind_for("a.Problem"),
+        Some(ExceptionKind::Checked)
+    );
+    assert_eq!(
+        facts.exception_kind_for("b.Problem"),
+        Some(ExceptionKind::Unchecked)
+    );
+    assert!(facts.exception_kind_for("Problem").is_none());
+
+    assert_eq!(
+        facts.dispatch_requirements_for("a.Item"),
+        vec![DispatchRequirementKind::NeedsSubtypeDispatch]
+    );
+    assert_eq!(
+        facts.dispatch_requirements_for("b.Item"),
+        vec![DispatchRequirementKind::NeedsDowncast]
+    );
+    assert!(facts.dispatch_requirements_for("Item").is_empty());
+    assert_eq!(facts.dispatch_requirement_facts_for("a.Item").len(), 1);
+    assert!(facts.dispatch_requirement_facts_for("Item").is_empty());
+
+    assert_eq!(
+        facts
+            .method_effect_for("a.Item", "work")
+            .map(|fact| (fact.receiver_mutability, fact.return_nullability)),
+        Some((
+            ReceiverMutabilityFact::MutatesReceiver,
+            NullabilityState::MaybeNull
+        ))
+    );
+    assert_eq!(
+        facts
+            .method_effect_for("b.Item", "work")
+            .map(|fact| (fact.receiver_mutability, fact.return_nullability)),
+        Some((
+            ReceiverMutabilityFact::ReadOnly,
+            NullabilityState::DefinitelyNonNull
+        ))
+    );
+    assert!(facts.method_effect_for("Item", "work").is_none());
+    assert!(facts.has_control_flow_fact(
+        "a.Item",
+        "work",
+        ControlFlowFactKind::TailRecursiveSelfCall
+    ));
+    assert!(facts.has_control_flow_fact(
+        "b.Item",
+        "work",
+        ControlFlowFactKind::TailRecursiveSelfCall
+    ));
+    assert!(!facts.has_control_flow_fact(
+        "Item",
+        "work",
+        ControlFlowFactKind::TailRecursiveSelfCall
+    ));
+    assert_eq!(facts.recursion_facts_for("a.Item", "work").len(), 1);
+    assert_eq!(facts.recursion_facts_for("b.Item", "work").len(), 1);
+    assert!(facts.recursion_facts_for("Item", "work").is_empty());
+    assert_eq!(facts.catch_facts_for("a.Item", "work").len(), 1);
+    assert_eq!(facts.catch_facts_for("b.Item", "work").len(), 1);
+    assert!(facts.catch_facts_for("Item", "work").is_empty());
+
+    assert_eq!(
+        facts
             .external_constructor_for("a.Item", &[])
             .map(|fact| fact.type_name.as_str()),
         Some("a.Item")
@@ -1861,6 +2197,352 @@ fn fact_lookup_refuses_ambiguous_simple_package_owner_aliases() {
         Some("b.Item")
     );
     assert!(facts.external_constructor_for("Item", &[]).is_none());
+
+    assert_eq!(
+        facts
+            .external_constructor_argument_effect_for("a.Item", 1, 0)
+            .map(|fact| fact.type_name.as_str()),
+        Some("a.Item")
+    );
+    assert_eq!(
+        facts
+            .external_constructor_argument_effect_for("b.Item", 1, 0)
+            .map(|fact| fact.type_name.as_str()),
+        Some("b.Item")
+    );
+    assert!(
+        facts
+            .external_constructor_argument_effect_for("Item", 1, 0)
+            .is_none()
+    );
+
+    assert_eq!(
+        facts
+            .external_conversion_adapter_for("a.Item", "Target")
+            .map(|fact| fact.from_type.as_str()),
+        Some("a.Item")
+    );
+    assert_eq!(
+        facts
+            .external_conversion_adapter_for("b.Item", "Target")
+            .map(|fact| fact.from_type.as_str()),
+        Some("b.Item")
+    );
+    assert!(
+        facts
+            .external_conversion_adapter_for("Item", "Target")
+            .is_none()
+    );
+    assert_eq!(
+        facts
+            .external_conversion_adapter_for("Source", "a.Item")
+            .map(|fact| fact.to_type.as_str()),
+        Some("a.Item")
+    );
+    assert_eq!(
+        facts
+            .external_conversion_adapter_for("Source", "b.Item")
+            .map(|fact| fact.to_type.as_str()),
+        Some("b.Item")
+    );
+    assert!(
+        facts
+            .external_conversion_adapter_for("Source", "Item")
+            .is_none()
+    );
+
+    assert_eq!(
+        facts
+            .external_crate_api_mapping_for_receiver("a.Item", "mapped", Some(1))
+            .map(|fact| fact.rust_name.as_str()),
+        Some("A_KIND_mapped")
+    );
+    assert_eq!(
+        facts
+            .external_crate_api_mapping_for_receiver("b.Item", "mapped", Some(1))
+            .map(|fact| fact.rust_name.as_str()),
+        Some("B_KIND_mapped")
+    );
+    assert!(
+        facts
+            .external_crate_api_mapping_for_receiver("Item", "mapped", Some(1))
+            .is_none()
+    );
+    assert_eq!(
+        facts
+            .external_api_effect_for_receiver_with_arity_or_rust_name(
+                Some("a.Item"),
+                "shared_rust_name",
+                Some(1),
+            )
+            .and_then(|fact| fact.return_type.as_ref()),
+        Some(&JavaType::String)
+    );
+    assert_eq!(
+        facts
+            .external_api_effect_for_receiver_with_arity_or_rust_name(
+                Some("b.Item"),
+                "shared_rust_name",
+                Some(1),
+            )
+            .and_then(|fact| fact.return_type.as_ref()),
+        Some(&JavaType::Primitive(PrimitiveType::Int))
+    );
+    assert!(
+        facts
+            .external_api_effect_for_receiver_with_arity_or_rust_name(
+                Some("Item"),
+                "shared_rust_name",
+                Some(1),
+            )
+            .is_none()
+    );
+    assert_eq!(
+        facts.external_crate_rust_type_name_for("a.Item"),
+        Some("A_KINDType")
+    );
+    assert_eq!(
+        facts.external_crate_rust_type_name_for("b.Item"),
+        Some("B_KINDType")
+    );
+    assert!(facts.external_crate_rust_type_name_for("Item").is_none());
+    assert_eq!(
+        facts
+            .external_crate_constructor_mapping_for("a.Item", 1)
+            .map(|fact| fact.rust_name.as_str()),
+        Some("A_KIND_new")
+    );
+    assert_eq!(
+        facts
+            .external_crate_constructor_mapping_for("b.Item", 1)
+            .map(|fact| fact.rust_name.as_str()),
+        Some("B_KIND_new")
+    );
+    assert!(
+        facts
+            .external_crate_constructor_mapping_for("Item", 1)
+            .is_none()
+    );
+
+    let a_item_ty = JavaType::Named {
+        name: "a.Item".to_string(),
+        args: Vec::new(),
+    };
+    let b_item_ty = JavaType::Named {
+        name: "b.Item".to_string(),
+        args: Vec::new(),
+    };
+    let bare_item_ty = JavaType::Named {
+        name: "Item".to_string(),
+        args: Vec::new(),
+    };
+    assert_eq!(
+        facts
+            .external_ffi_receiver_handover_for_receiver(Some("a.Item"), "handover", &a_item_ty)
+            .and_then(|fact| fact.receiver_type.as_deref()),
+        Some("a.Item")
+    );
+    assert_eq!(
+        facts
+            .external_ffi_receiver_handover_for_receiver(Some("b.Item"), "handover", &b_item_ty)
+            .and_then(|fact| fact.receiver_type.as_deref()),
+        Some("b.Item")
+    );
+    assert!(
+        facts
+            .external_ffi_receiver_handover_for_receiver(Some("Item"), "handover", &bare_item_ty)
+            .is_none()
+    );
+    assert_eq!(
+        facts
+            .external_ffi_argument_handover_for_receiver(
+                Some("a.Item"),
+                "handover",
+                0,
+                &JavaType::String,
+            )
+            .and_then(|fact| fact.receiver_type.as_deref()),
+        Some("a.Item")
+    );
+    assert_eq!(
+        facts
+            .external_ffi_argument_handover_for_receiver(
+                Some("b.Item"),
+                "handover",
+                0,
+                &JavaType::String,
+            )
+            .and_then(|fact| fact.receiver_type.as_deref()),
+        Some("b.Item")
+    );
+    assert!(
+        facts
+            .external_ffi_argument_handover_for_receiver(
+                Some("Item"),
+                "handover",
+                0,
+                &JavaType::String,
+            )
+            .is_none()
+    );
+
+    assert_eq!(
+        facts
+            .external_rust_result_for_receiver(Some("a.Item"), "open", Some(1))
+            .map(|fact| fact.returns_result),
+        Some(true)
+    );
+    assert_eq!(
+        facts
+            .external_rust_result_for_receiver(Some("b.Item"), "open", Some(1))
+            .map(|fact| fact.returns_result),
+        Some(false)
+    );
+    assert!(
+        facts
+            .external_rust_result_for_receiver(Some("Item"), "open", Some(1))
+            .is_none()
+    );
+    assert_eq!(
+        facts
+            .external_rust_return_type_for_receiver(Some("a.Item"), "open", Some(1))
+            .map(|fact| fact.rust_type_name.as_str()),
+        Some("A_KIND")
+    );
+    assert_eq!(
+        facts
+            .external_rust_return_type_for_receiver(Some("b.Item"), "open", Some(1))
+            .map(|fact| fact.rust_type_name.as_str()),
+        Some("B_KIND")
+    );
+    assert!(
+        facts
+            .external_rust_return_type_for_receiver(Some("Item"), "open", Some(1))
+            .is_none()
+    );
+    assert_eq!(
+        facts
+            .external_constructor_rust_result_for("a.Item", 1)
+            .map(|fact| fact.returns_result),
+        Some(true)
+    );
+    assert_eq!(
+        facts
+            .external_constructor_rust_result_for("b.Item", 1)
+            .map(|fact| fact.returns_result),
+        Some(false)
+    );
+    assert!(
+        facts
+            .external_constructor_rust_result_for("Item", 1)
+            .is_none()
+    );
+
+    assert_eq!(
+        facts
+            .external_api_effect_for_receiver_with_arity(Some("a.Item"), "transform", Some(1))
+            .and_then(|fact| fact.receiver_type.as_deref()),
+        Some("a.Item")
+    );
+    assert_eq!(
+        facts
+            .external_api_effect_for_receiver_with_arity(Some("b.Item"), "transform", Some(1))
+            .and_then(|fact| fact.receiver_type.as_deref()),
+        Some("b.Item")
+    );
+    assert!(
+        facts
+            .external_api_effect_for_receiver_with_arity(Some("Item"), "transform", Some(1))
+            .is_none()
+    );
+    assert!(
+        facts
+            .external_lookup_index()
+            .external_api_effect_for_call(Some("Item"), "transform", &[JavaType::String])
+            .is_none()
+    );
+
+    assert_eq!(
+        facts
+            .external_api_argument_effect_for_receiver_with_arity(
+                Some("a.Item"),
+                "fill",
+                Some(1),
+                0
+            )
+            .and_then(|fact| fact.receiver_type.as_deref()),
+        Some("a.Item")
+    );
+    assert_eq!(
+        facts
+            .external_api_argument_effect_for_receiver_with_arity(
+                Some("b.Item"),
+                "fill",
+                Some(1),
+                0
+            )
+            .and_then(|fact| fact.receiver_type.as_deref()),
+        Some("b.Item")
+    );
+    assert!(
+        facts
+            .external_api_argument_effect_for_receiver_with_arity(Some("Item"), "fill", Some(1), 0)
+            .is_none()
+    );
+
+    assert_eq!(
+        facts
+            .unsupported_external_constructor_for("a.Item", 1)
+            .map(|fact| fact.type_name.as_str()),
+        Some("a.Item")
+    );
+    assert_eq!(
+        facts
+            .unsupported_external_constructor_for("b.Item", 1)
+            .map(|fact| fact.type_name.as_str()),
+        Some("b.Item")
+    );
+    assert!(
+        facts
+            .unsupported_external_constructor_for("Item", 1)
+            .is_none()
+    );
+
+    assert_eq!(
+        facts
+            .unsupported_external_api_for_receiver("a.Item", "rawCall")
+            .map(|fact| fact.receiver_type.as_str()),
+        Some("a.Item")
+    );
+    assert_eq!(
+        facts
+            .unsupported_external_api_for_receiver("b.Item", "rawCall")
+            .map(|fact| fact.receiver_type.as_str()),
+        Some("b.Item")
+    );
+    assert!(
+        facts
+            .unsupported_external_api_for_receiver("Item", "rawCall")
+            .is_none()
+    );
+
+    assert_eq!(
+        facts
+            .unsupported_external_field_for("a.Item", "RAW")
+            .map(|fact| fact.field.type_name.as_str()),
+        Some("a.Item")
+    );
+    assert_eq!(
+        facts
+            .unsupported_external_field_for("b.Item", "RAW")
+            .map(|fact| fact.field.type_name.as_str()),
+        Some("b.Item")
+    );
+    assert!(
+        facts
+            .unsupported_external_field_for("Item", "RAW")
+            .is_none()
+    );
 }
 
 #[test]

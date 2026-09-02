@@ -9,6 +9,18 @@ hierarchy lowering still has no real carrier for dynamic class identity and
 dispatch.
 Kind: behavioural (differential), object model / dispatch.
 
+Updated 2026-08-30 current-tree triage: the original silent object-slicing
+behavior is no longer current for ordinary source-class upcasts; expression
+lowering and the generated concrete source hierarchy conversion helper now fail
+loud with the class-hierarchy carrier diagnostic instead of fabricating a
+superclass value. The audit remains valid as a missing-feature complaint:
+`Base b = new Sub(); return b.m();` still cannot preserve Java dynamic dispatch
+through the supertype slot. A real fix needs a member-preserving source class
+hierarchy carrier with subtype-aware runtime identity and dispatch, not another
+local conversion adapter. Existing guardrails include
+`lower::tests::concrete_source_supertype_conversion_impl_is_loud_not_field_copy`
+and the known-gap `InheritanceUpcast.java`.
+
 Updated 2026-08-26 (guardrail): the generated concrete source hierarchy
 `impl From<Sub> for Super` helper no longer rebuilds the superclass by copying
 the apparent superclass fields out of the subclass value. If an unsupported
@@ -620,3 +632,21 @@ Pinned by:
 
 The audit remains open for non-carrier inheritance and wider dynamic dispatch
 lowering; this closes the sealed carrier repair path only.
+
+## Codex follow-up 2026-08-30 — shaped subtype arguments use the loud adapter
+
+`lower_source_subtype_argument_as_actual` no longer returns the bare lowered
+argument before the source-supertype adapter can inspect it. Shaped argument
+lowering now routes the subtype value through
+`adapt_source_subtype_to_supertype_argument`, so unsupported source-class
+upcasts at method-call argument boundaries emit the existing
+`compile_error!("unsupported Java class upcast: ... requires class hierarchy lowering")`
+instead of depending on a fabricated `From<Sub> for Base` conversion or a raw
+call-site coercion.
+
+Pinned by:
+
+- `shaped_source_subtype_argument_requires_hierarchy_lowering`
+
+The audit remains open for the actual non-carrier class hierarchy
+representation and dynamic dispatch model.

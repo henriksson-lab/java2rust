@@ -1082,7 +1082,7 @@ fn source_type_modes_by_name(parsed_files: &[ParsedJavaFile]) -> HashMap<String,
     for parsed_file in parsed_files {
         let package = package_key(&parsed_file.parsed.program);
         for ty in &parsed_file.parsed.program.types {
-            collect_source_type_mode(&mut modes, &package, ty, parsed_file.mode);
+            collect_source_type_mode(&mut modes, &package, ty, parsed_file.mode, None);
         }
     }
     modes
@@ -1096,7 +1096,7 @@ fn source_type_fields_by_name(
     for parsed_file in parsed_files {
         let package = package_key(&parsed_file.parsed.program);
         for ty in &parsed_file.parsed.program.types {
-            collect_source_type_fields(&mut fields, &mut extends_by_type, &package, ty);
+            collect_source_type_fields(&mut fields, &mut extends_by_type, &package, ty, None);
         }
     }
     inherit_source_type_fields(&mut fields, &extends_by_type);
@@ -1108,9 +1108,11 @@ fn collect_source_type_fields(
     extends_by_type: &mut HashMap<String, String>,
     package: &str,
     ty: &TypeDecl,
+    owner_qualified_name: Option<&str>,
 ) {
     let simple_name = ty.name.clone();
     let qualified_name = qualified_type_name(package, &ty.name);
+    let owner_nested_name = owner_qualified_name.map(|owner| format!("{owner}.{}", ty.name));
     let simple_alias = crate::parser::to_snake_case(&simple_name);
     let qualified_alias = crate::parser::to_snake_case(&qualified_name);
     let direct_simple_fields = direct_source_field_infos(ty, &simple_name);
@@ -1126,16 +1128,53 @@ fn collect_source_type_fields(
     fields
         .entry(qualified_alias.clone())
         .or_insert_with(|| direct_simple_fields.clone());
+    if let Some(owner_nested_name) = &owner_nested_name {
+        fields
+            .entry(owner_nested_name.clone())
+            .or_insert_with(|| direct_source_field_infos(ty, owner_nested_name));
+        if let Some(package_relative_name) = package_relative_type_name(package, owner_nested_name)
+        {
+            fields
+                .entry(package_relative_name.to_string())
+                .or_insert_with(|| direct_source_field_infos(ty, package_relative_name));
+            fields
+                .entry(crate::parser::to_snake_case(package_relative_name))
+                .or_insert_with(|| direct_simple_fields.clone());
+        }
+        fields
+            .entry(crate::parser::to_snake_case(owner_nested_name))
+            .or_insert_with(|| direct_simple_fields.clone());
+    }
     if let Some(super_type) = &ty.extends {
         let super_name = source_hierarchy_type_name(super_type);
         extends_by_type.insert(simple_name, super_name.clone());
-        extends_by_type.insert(qualified_name, super_name.clone());
+        extends_by_type.insert(qualified_name.clone(), super_name.clone());
         extends_by_type.insert(simple_alias, super_name.clone());
-        extends_by_type.insert(qualified_alias, super_name);
+        extends_by_type.insert(qualified_alias, super_name.clone());
+        if let Some(owner_nested_name) = &owner_nested_name {
+            extends_by_type.insert(owner_nested_name.clone(), super_name.clone());
+            if let Some(package_relative_name) =
+                package_relative_type_name(package, owner_nested_name)
+            {
+                extends_by_type.insert(package_relative_name.to_string(), super_name.clone());
+                extends_by_type.insert(
+                    crate::parser::to_snake_case(package_relative_name),
+                    super_name.clone(),
+                );
+            }
+            extends_by_type.insert(crate::parser::to_snake_case(owner_nested_name), super_name);
+        }
     }
     for member in &ty.members {
         if let Member::Type(nested) = member {
-            collect_source_type_fields(fields, extends_by_type, package, nested);
+            let nested_owner = owner_nested_name.as_deref().unwrap_or(&qualified_name);
+            collect_source_type_fields(
+                fields,
+                extends_by_type,
+                package,
+                nested,
+                Some(nested_owner),
+            );
         }
     }
 }
@@ -1187,6 +1226,11 @@ fn source_hierarchy_type_name(raw_type: &str) -> String {
     }
 }
 
+fn package_relative_type_name<'a>(package: &str, qualified_type: &'a str) -> Option<&'a str> {
+    let prefix = format!("{package}.");
+    qualified_type.strip_prefix(&prefix)
+}
+
 fn direct_source_field_infos(
     ty: &TypeDecl,
     declaring_type: &str,
@@ -1210,11 +1254,11 @@ fn collect_source_type_mode(
     package: &str,
     ty: &TypeDecl,
     mode: DependencyMode,
+    owner_qualified_name: Option<&str>,
 ) {
     modes.entry(ty.name.clone()).or_insert(mode);
-    modes
-        .entry(qualified_type_name(package, &ty.name))
-        .or_insert(mode);
+    let qualified_name = qualified_type_name(package, &ty.name);
+    modes.entry(qualified_name.clone()).or_insert(mode);
     modes
         .entry(crate::parser::to_snake_case(&ty.name))
         .or_insert(mode);
@@ -1223,9 +1267,26 @@ fn collect_source_type_mode(
             package, &ty.name,
         )))
         .or_insert(mode);
+    let owner_nested_name = owner_qualified_name.map(|owner| format!("{owner}.{}", ty.name));
+    if let Some(owner_nested_name) = &owner_nested_name {
+        modes.entry(owner_nested_name.clone()).or_insert(mode);
+        if let Some(package_relative_name) = package_relative_type_name(package, owner_nested_name)
+        {
+            modes
+                .entry(package_relative_name.to_string())
+                .or_insert(mode);
+            modes
+                .entry(crate::parser::to_snake_case(package_relative_name))
+                .or_insert(mode);
+        }
+        modes
+            .entry(crate::parser::to_snake_case(owner_nested_name))
+            .or_insert(mode);
+    }
     for member in &ty.members {
         if let Member::Type(nested) = member {
-            collect_source_type_mode(modes, package, nested, mode);
+            let nested_owner = owner_nested_name.as_deref().unwrap_or(&qualified_name);
+            collect_source_type_mode(modes, package, nested, mode, Some(nested_owner));
         }
     }
 }
@@ -1360,21 +1421,6 @@ impl SourceTypeIndex {
                         );
                     }
                 }
-            } else if let Some(package) = package_name_for_qualified_type(&import.path) {
-                if let Some(qualified_names) = self.by_package.get(package) {
-                    for qualified_name in qualified_names {
-                        if !is_top_level_qualified_type(package, qualified_name) {
-                            continue;
-                        }
-                        push_source_type_by_qualified_name(
-                            self,
-                            &mut types,
-                            &mut seen,
-                            &mut seen_simple_names,
-                            qualified_name,
-                        );
-                    }
-                }
             }
         }
 
@@ -1441,12 +1487,19 @@ impl SourceTypeIndex {
             return Vec::new();
         }
         if type_name.contains('.') {
-            return self
-                .by_qualified_name
-                .contains_key(type_name)
-                .then(|| type_name.to_string())
-                .into_iter()
-                .collect();
+            let mut out = Vec::new();
+            if self.by_qualified_name.contains_key(type_name) {
+                out.push(type_name.to_string());
+            }
+            if let Some(same_package_name) =
+                imported_or_same_package_nested_type_name(self, entry, type_name)
+                && self.by_qualified_name.contains_key(&same_package_name)
+            {
+                out.push(same_package_name);
+            }
+            out.sort();
+            out.dedup();
+            return out;
         }
 
         let mut out = Vec::new();
@@ -1549,6 +1602,32 @@ impl SourceTypeIndex {
                 .then(|| package.clone())
         })
     }
+}
+
+fn imported_or_same_package_nested_type_name(
+    index: &SourceTypeIndex,
+    entry: &SourceTypeEntry,
+    type_name: &str,
+) -> Option<String> {
+    let (outer_name, nested_suffix) = type_name.split_once('.')?;
+    let same_package_outer = qualified_type_name(&entry.package, outer_name);
+    let same_package_nested = format!("{same_package_outer}.{nested_suffix}");
+    if index.by_qualified_name.contains_key(&same_package_nested) {
+        return Some(same_package_nested);
+    }
+    for import in &entry.imports {
+        if import.is_static || import.is_wildcard {
+            continue;
+        }
+        let imported_simple_name = import.path.rsplit('.').next().unwrap_or(&import.path);
+        if imported_simple_name == outer_name
+            || crate::parser::to_snake_case(imported_simple_name)
+                == crate::parser::to_snake_case(outer_name)
+        {
+            return Some(format!("{}.{nested_suffix}", import.path));
+        }
+    }
+    None
 }
 
 fn project_package_root(package: &str) -> Option<String> {
@@ -4933,6 +5012,12 @@ fn lambda_body_env(env: &TypeEnv, params: &[crate::java_ir::LambdaParam]) -> Typ
             .clone()
             .unwrap_or_else(|| JavaType::Unknown(format!("lambda_param:{}", param.name)));
         lambda_env.insert_local(param.name.clone(), ty);
+        if param.source_name != param.name {
+            let source_ty = param.ty.clone().unwrap_or_else(|| {
+                JavaType::Unknown(format!("lambda_param:{}", param.source_name))
+            });
+            lambda_env.insert_local(param.source_name.clone(), source_ty);
+        }
     }
     lambda_env
 }
@@ -4943,7 +5028,8 @@ fn external_pack_field_receiver_type(
     env: &TypeEnv,
 ) -> Option<String> {
     match external_pack_expr_type(receiver, semantic_facts, env) {
-        Some(JavaType::Named { name, .. }) | Some(JavaType::Unknown(name)) => Some(name),
+        Some(JavaType::Named { name, .. }) => Some(name),
+        Some(JavaType::Unknown(name)) => (!name.starts_with("lambda_param:")).then_some(name),
         Some(JavaType::String) => Some("String".to_string()),
         Some(JavaType::Array(_)) => Some("Array".to_string()),
         Some(JavaType::Primitive(primitive)) => Some(format!("{primitive:?}")),
@@ -4960,6 +5046,7 @@ fn external_pack_expr_type(
         Expr::Var(name) => env
             .local_type(name)
             .cloned()
+            .or_else(|| normalized_local_type(name, env))
             .or_else(|| env.field_type(name).cloned())
             .or_else(|| Some(JavaType::Unknown(name.clone()))),
         Expr::This | Expr::Super => None,
@@ -5024,6 +5111,7 @@ fn source_dependency_expr_type(
         Expr::Var(name) => env
             .local_type(name)
             .cloned()
+            .or_else(|| normalized_local_type(name, env))
             .or_else(|| env.field_type(name).cloned())
             .or_else(|| Some(JavaType::Unknown(name.clone()))),
         Expr::This | Expr::Super => None,
@@ -5047,6 +5135,13 @@ fn source_dependency_expr_type(
         Expr::Literal(literal) => Some(crate::types::literal_type(literal)),
         _ => None,
     }
+}
+
+fn normalized_local_type(name: &str, env: &TypeEnv) -> Option<JavaType> {
+    let normalized = crate::parser::to_snake_case_unescaped(name);
+    (normalized != name)
+        .then(|| env.local_type(&normalized).cloned())
+        .flatten()
 }
 
 fn source_field_info_for(
@@ -8221,5 +8316,122 @@ fn java_type_summary(java_ty: &crate::java_ir::JavaType) -> String {
                 format!("? super {}", java_type_summary(ty))
             }
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_static_type_receiver_respects_local_shadowing_for_imported_nested_type() {
+        let app = crate::parser::parse_java_source(
+            r#"
+package app.usecase;
+
+import dep.assembly.AssemblyGraph;
+import dep.assembly.AssemblyGraph.Contig;
+import dep.assembly.AssemblyGraph.Connection;
+import java.util.List;
+
+class UsesAssemblyGraph {
+    AssemblyGraph rewrite(AssemblyGraph graph, Contig first) {
+        Connection connection = first.getSoleSuccessor();
+        Contig target = connection.getTarget();
+        for (Connection conn : target.getConnections()) {
+            Connection replacement =
+                    new Connection(conn.getTarget(), conn.getOverlapLen(), false, conn.isTargetReverse());
+            replacement.rcConnection(first);
+        }
+        first.setConnections(target.getConnections());
+        Contig joined = new Contig(first.getSequence(), null, first.getReadCount());
+        return new AssemblyGraph(joined);
+    }
+}
+"#,
+        );
+        let summary = crate::parser::parse_java_source(
+            r#"
+package dep.assembly;
+
+public final class AssemblyGraph {
+    public AssemblyGraph(List<Contig> contigs) {}
+    public AssemblyGraph(Contig contig) {}
+
+    public List<Contig> getContigs() { return null; }
+
+    public static final class Contig {
+        public Contig(byte[] sequence, byte[] coverage, int readCount) {}
+
+        public byte[] getSequence() { return null; }
+        public int getReadCount() { return 0; }
+        public List<Connection> getConnections() { return null; }
+        public void setConnections(List<Connection> connections) {}
+        public Connection getSoleSuccessor() { return null; }
+    }
+
+    public static final class Connection {
+        public Connection(Contig target, int overlapLen, boolean sourceReverse, boolean targetReverse) {}
+
+        public Contig getTarget() { return null; }
+        public int getOverlapLen() { return 0; }
+        public boolean isTargetReverse() { return false; }
+        public Connection rcConnection(Contig replacementTarget) { return null; }
+    }
+}
+"#,
+        );
+        let parsed_files = vec![
+            ParsedJavaFile {
+                parsed: app.clone(),
+                mode: DependencyMode::PrimarySource,
+                file_label: "app/usecase/UsesAssemblyGraph.java".to_string(),
+            },
+            ParsedJavaFile {
+                parsed: summary,
+                mode: DependencyMode::SourceSummary,
+                file_label: "dep/assembly/AssemblyGraph.java".to_string(),
+            },
+        ];
+        let source_programs = combined_source_programs_by_package(&parsed_files);
+        let source_index = SourceTypeIndex::from_programs(&source_programs);
+        let source_program = source_index.source_program_for_file(&app.program, &source_programs);
+
+        assert!(
+            source_program
+                .types
+                .iter()
+                .any(|ty| ty.name == "Connection"),
+            "explicit nested import should add the nested summary declaration: {source_program:#?}"
+        );
+        let connection_methods = source_program
+            .types
+            .iter()
+            .find(|ty| ty.name == "Connection")
+            .map(|ty| {
+                ty.members
+                    .iter()
+                    .filter(|member| matches!(member, Member::Method(_)))
+                    .count()
+            })
+            .unwrap_or(0);
+        assert_eq!(
+            connection_methods, 4,
+            "injected Connection should carry its source-summary methods: {source_program:#?}"
+        );
+        let source_symbols = crate::resolve::source_symbols_from_program(&source_program);
+        let summary_facts =
+            crate::resolve::declaration_facts_from_program(&parsed_files[1].parsed.program);
+        let resolved = crate::resolve::resolve_program_with_source_symbols_and_facts(
+            &app.program,
+            app.diagnostics,
+            &source_symbols,
+            &summary_facts,
+        );
+        assert!(
+            resolved.facts.unresolved_target_facts.is_empty(),
+            "local receiver should not be treated as a static type owner through a source-summary type alias: {:#?}",
+            resolved.facts.unresolved_target_facts
+        );
     }
 }

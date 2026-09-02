@@ -208,6 +208,11 @@ pub const OUTPUT_MARKERS: &[OutputMarker] = &[
         text: UNTRANSLATED_JAVA_PUT_CALL,
         kind: OutputMarkerKind::UntranslatedCall,
     },
+    OutputMarker {
+        name: "noop_facade_call_site",
+        text: NOOP_FACADE_METHOD_CALL_SITE,
+        kind: OutputMarkerKind::Stub,
+    },
 ];
 
 /// Look a marker up by name. Used by the fixture test to pair a fixture with

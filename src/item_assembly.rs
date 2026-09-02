@@ -1252,6 +1252,53 @@ mod tests {
     }
 
     #[test]
+    fn raw_shared_handle_clone_support_requires_complete_generic_type() {
+        let support = Program::default();
+        let type_params = HashSet::new();
+        let signatures = SignaturePlan::default();
+        let facts = FactSet::default();
+
+        for raw in [
+            "std::rc::Rc<Unmodelled>",
+            "Rc<Unmodelled>",
+            "std::sync::Arc<Unmodelled>",
+            "Arc<Unmodelled>",
+            "Vec<std::sync::Arc<Unmodelled>>",
+        ] {
+            assert!(
+                rust_type_supports_struct_derive_clone(
+                    &RustType::Raw(raw.to_string()),
+                    &type_params,
+                    &signatures,
+                    &facts,
+                    &support,
+                    &mut HashSet::new(),
+                ),
+                "well-formed shared handle should support Clone derive: {raw}"
+            );
+        }
+
+        for raw in [
+            "std::rc::Rc<Unmodelled",
+            "std::sync::Arc<Unmodelled",
+            "Vec<std::rc::Rc<Unmodelled>",
+            "std::rc::Rc<Left, Right>",
+        ] {
+            assert!(
+                !rust_type_supports_struct_derive_clone(
+                    &RustType::Raw(raw.to_string()),
+                    &type_params,
+                    &signatures,
+                    &facts,
+                    &support,
+                    &mut HashSet::new(),
+                ),
+                "malformed shared handle text should fail closed: {raw}"
+            );
+        }
+    }
+
+    #[test]
     fn structured_method_calls_count_method_name_reads() {
         let call = RustExpr::MethodCall {
             receiver: Box::new(RustExpr::Var("self".to_string())),
@@ -2018,7 +2065,7 @@ fn rust_type_supports_struct_derive_clone(
             visiting,
         ),
         RustType::Raw(raw)
-            if raw.starts_with("std::rc::Rc<")
+            if raw_rust_shared_handle_type_inner(raw).is_some()
                 || raw_rust_type_supports_derive_clone(
                     raw,
                     type_params,
@@ -2137,7 +2184,7 @@ fn raw_type_arg_supports_derive_clone(
     // collection element reaches here instead, and without this a
     // `HashSet<Rc<T>>` field silently cost its struct the `Clone` derive
     // (claude_audits/0002b).
-    if raw.starts_with("std::rc::Rc<") || raw.starts_with("std::sync::Arc<") {
+    if raw_rust_shared_handle_type_inner(raw).is_some() {
         return true;
     }
     if matches!(
@@ -2197,6 +2244,20 @@ fn raw_type_arg_supports_derive_clone(
         support_program,
         visiting,
     )
+}
+
+fn raw_rust_shared_handle_type_inner(raw: &str) -> Option<&str> {
+    raw_rust_generic_args(raw, "std::rc::Rc")
+        .or_else(|| raw_rust_generic_args(raw, "Rc"))
+        .or_else(|| raw_rust_generic_args(raw, "std::sync::Arc"))
+        .or_else(|| raw_rust_generic_args(raw, "Arc"))
+        .and_then(|args| {
+            if args.len() == 1 {
+                args.first().copied().map(str::trim)
+            } else {
+                None
+            }
+        })
 }
 
 fn raw_dyn_trait_supports_box_clone_adapter(trait_name: &str) -> bool {

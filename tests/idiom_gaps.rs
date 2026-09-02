@@ -4075,6 +4075,53 @@ class JavaArraysRangeCatchUse {
 }
 
 #[test]
+fn java_arrays_stream_range_in_try_lowers_to_java_exception_results() {
+    let translation = translate_source(
+        r#"
+import java.util.Arrays;
+
+class JavaArraysStreamRangeCatchUse {
+    static int sum(int[] values, int from, int to) {
+        try {
+            return Arrays.stream(values, from, to).sum();
+        } catch (IllegalArgumentException ex) {
+            return -1;
+        } catch (ArrayIndexOutOfBoundsException ex) {
+            return -2;
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("Err(JavaException::new(\"IllegalArgumentException\"")
+            && translation
+                .rust
+                .contains("Err(JavaException::new(\"ArrayIndexOutOfBoundsException\"")
+            && translation
+                .rust
+                .contains("Ok(&__java_arrays_source[__java_arrays_from..__java_arrays_to]) }?.iter()")
+            && !translation
+                .rust
+                .contains("panic!(\"uncaught Java exception: {:?}\", JavaException::new(\"IllegalArgumentException\", \"fromIndex > toIndex\""),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "java_arrays_stream_range_catch_use",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn reused_string_source_clones_for_multiple_owned_local_assignments() {
     let translation = translate_source(
         r#"
@@ -6486,9 +6533,10 @@ class Path {
     );
 
     assert!(
-        translation.rust.contains(
-            "let path: Option<Path> = self.lookup.as_ref().unwrap().find(sample.as_str());"
-        ) && translation.rust.contains("return path;")
+        translation
+            .rust
+            .contains("let path: Option<Path> = self.lookup.as_ref().unwrap().find(sample);")
+            && translation.rust.contains("return path;")
             && !translation
                 .rust
                 .contains("let path: Option<Path> = Some(self.lookup.as_ref().unwrap().find"),
@@ -6535,11 +6583,12 @@ class Path {
     );
 
     assert!(
-        translation.rust.contains(
-            "let path: Option<Path> = self.lookup.as_ref().unwrap().find(sample.as_str());"
-        ) && translation
+        translation
             .rust
-            .contains("return path.as_ref().unwrap().to_file();")
+            .contains("let path: Option<Path> = self.lookup.as_ref().unwrap().find(sample);")
+            && translation
+                .rust
+                .contains("return path.as_ref().unwrap().to_file();")
             && !translation
                 .rust
                 .contains("Some(self.lookup.as_ref().unwrap().find"),
@@ -6851,6 +6900,15 @@ class ToArrayEmptyStringArrayKeySet {
     String[] keys(java.util.Map<String, String> values) {
         return values.keySet().toArray(new String[0]);
     }
+
+    String[] vals(java.util.Map<String, String> values) {
+        return values.values().toArray(new String[0]);
+    }
+
+    Object[] entries(java.util.Map<String, String> values) {
+        return values.entrySet().toArray();
+    }
+
 }
 "#,
     );
@@ -6861,7 +6919,13 @@ class ToArrayEmptyStringArrayKeySet {
             .rust
             .contains("names.iter().cloned().map(Some).collect::<Vec<_>>()")
             && translation.rust.contains(
-                "values.keys().cloned().collect::<Vec<_>>().iter().cloned().map(Some).collect::<Vec<_>>()"
+                "values.keys().cloned().collect::<Vec<_>>().into_iter().map(Some).collect::<Vec<_>>()"
+            )
+            && translation.rust.contains(
+                "values.values().cloned().collect::<Vec<_>>().into_iter().map(Some).collect::<Vec<_>>()"
+            )
+            && translation.rust.contains(
+                "values.iter().map(|(key, value)| Some(Box::new((key.clone(), value.clone())) as Box<dyn std::any::Any>)).collect::<Vec<_>>()"
             )
             && !translation.rust.contains(".to_array("),
         "{}",
@@ -6873,12 +6937,18 @@ class ToArrayEmptyStringArrayKeySet {
         translation.rust
     );
 
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "collection_to_array_empty_string_array",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[test]
+fn erased_map_entry_tuple_display_uses_java_entry_format() {
+    let entry: Box<dyn std::any::Any> = Box::new(("a".to_string(), "1".to_string()));
+    assert_eq!(java_erased_object_to_string(&entry), "a=1");
+}
+"#,
         }],
     );
 }
@@ -9959,6 +10029,239 @@ class CollectionRemoveAllSelfAlias {
 }
 
 #[test]
+fn collection_contains_all_uses_all_with_contains() {
+    let translation = translate_source(
+        r#"
+import java.util.ArrayList;
+import java.util.List;
+
+class CollectionContainsAllReturn {
+    boolean contains(List<String> lines, ArrayList<String> expected) {
+        return lines.containsAll(expected);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains(".iter().all(|value| lines.contains(value))")
+            && !translation.rust.contains(".contains_all(")
+            && !translation.rust.contains(".containsAll("),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "collection_contains_all_return",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn collection_retain_all_return_uses_boolean_collection_contract() {
+    let translation = translate_source(
+        r#"
+import java.util.HashSet;
+import java.util.Set;
+
+class CollectionRetainAllReturn {
+    boolean retain(Set<String> lines, HashSet<String> keep) {
+        return lines.retainAll(keep);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let __java_retain_all_values = keep;")
+            && translation
+                .rust
+                .contains("let __java_retain_all_before = lines.len();")
+            && translation
+                .rust
+                .contains("lines.retain(|value| __java_retain_all_values.contains(value));")
+            && translation
+                .rust
+                .contains("lines.len() != __java_retain_all_before")
+            && !translation.rust.contains(".retain_all(")
+            && !translation.rust.contains(".retainAll("),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "collection_retain_all_return",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn collection_retain_all_self_alias_is_noop_false() {
+    let translation = translate_source(
+        r#"
+import java.util.ArrayList;
+import java.util.List;
+
+class CollectionRetainAllSelfAlias {
+    boolean retain(List<String> lines) {
+        return lines.retainAll(lines);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("return false;")
+            && !translation.rust.contains("__java_retain_all_values")
+            && !translation.rust.contains("lines.retain(")
+            && !translation.rust.contains(".retain_all(")
+            && !translation.rust.contains(".retainAll("),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "collection_retain_all_self_alias",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn map_entry_set_bulk_methods_use_backing_map_contract() {
+    let translation = translate_source(
+        r#"
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+
+class MapEntrySetBulkMethods {
+    boolean contains(HashMap<String, String> values, HashSet<Map.Entry<String, String>> required) {
+        return values.entrySet().containsAll(required);
+    }
+
+    boolean retain(HashMap<String, String> values, HashSet<Map.Entry<String, String>> keep) {
+        return values.entrySet().retainAll(keep);
+    }
+
+    boolean remove(HashMap<String, String> values, HashSet<Map.Entry<String, String>> drop) {
+        return values.entrySet().removeAll(drop);
+    }
+
+    boolean retainSelf(HashMap<String, String> values) {
+        return values.entrySet().retainAll(values.entrySet());
+    }
+
+    boolean removeSelf(HashMap<String, String> values) {
+        return values.entrySet().removeAll(values.entrySet());
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("__java_map_entry_set_contains_all_entries.iter().all")
+            && translation
+                .rust
+                .contains("__java_map_entry_set_contains_all_map.get(&entry.0).is_some_and")
+            && translation
+                .rust
+                .contains("__java_map_entry_set_retain_all_map.retain")
+            && translation
+                .rust
+                .contains("__java_map_entry_set_retain_all_entries.iter().any")
+            && translation
+                .rust
+                .contains("key == &entry.0 && &*value == &entry.1")
+            && translation
+                .rust
+                .contains("__java_map_entry_set_remove_all_map.retain")
+            && translation
+                .rust
+                .contains("__java_map_entry_set_remove_all_entries.iter().any")
+            && translation
+                .rust
+                .contains("__java_map_entry_set_remove_all_map.clear();")
+            && translation.rust.contains("return false;")
+            && !translation.rust.contains(".containsAll(")
+            && !translation.rust.contains(".contains_all(")
+            && !translation.rust.contains(".retainAll(")
+            && !translation.rust.contains(".retain_all(")
+            && !translation.rust.contains(".removeAll(")
+            && !translation.rust.contains(".remove_all("),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "map_entry_set_bulk_methods",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn map_entry_set_alias_retain_all_marks_backing_map_mutable() {
+    let translation = translate_source(
+        r#"
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+
+class MapEntrySetAliasRetainAll {
+    boolean retainAlias(HashMap<String, String> values, HashSet<Map.Entry<String, String>> keep) {
+        Set<Map.Entry<String, String>> entries = values.entrySet();
+        return entries.retainAll(keep);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("values: &mut std::collections::HashMap<String, String>")
+            && translation
+                .rust
+                .contains("__java_map_entry_set_retain_all_map.retain")
+            && !translation.rust.contains(".retainAll(")
+            && !translation.rust.contains(".retain_all("),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "map_entry_set_alias_retain_all",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn collection_remove_all_on_field_marks_self_mutable() {
     let translation = translate_source(
         r#"
@@ -12943,7 +13246,7 @@ fn map_entry_set_iterator_next_get_key_uses_native_iterator_shape() {
     assert!(
         translation
             .rust
-            .contains("values().as_ref().expect(\"Java null receiver\").iter().next().ok_or_else(|| JavaException::new(\"NoSuchElementException\", \"Java Iterator.next on exhausted iterator\".to_string()))?.0.clone()")
+            .contains("values().as_ref().ok_or_else(|| JavaException::new(\"NullPointerException\", \"Java null receiver\".to_string()))?.iter().next().ok_or_else(|| JavaException::new(\"NoSuchElementException\", \"Java Iterator.next on exhausted iterator\".to_string()))?.0.clone()")
             && !translation.rust.contains(".entry_set()")
             && !translation.rust.contains(".iterator()")
             && !translation.rust.contains(".get_key()"),
@@ -12966,7 +13269,7 @@ fn map_entry_set_iterator_next_get_key_uses_receiver_signature_shape() {
     let translation = translate_source(&idiom_gap("MapEntrySetFirstKeyFromNullableField.java"));
 
     assert!(
-        translation.rust.contains("self.holder.as_ref().ok_or_else(|| JavaException::new(\"NullPointerException\", \"Java null receiver\".to_string()))?.get_values().as_ref().expect(\"Java null receiver\").iter().next().ok_or_else(|| JavaException::new(\"NoSuchElementException\", \"Java Iterator.next on exhausted iterator\".to_string()))?.0.clone()")
+        translation.rust.contains("self.holder.as_ref().ok_or_else(|| JavaException::new(\"NullPointerException\", \"Java null receiver\".to_string()))?.get_values().as_ref().ok_or_else(|| JavaException::new(\"NullPointerException\", \"Java null receiver\".to_string()))?.iter().next().ok_or_else(|| JavaException::new(\"NoSuchElementException\", \"Java Iterator.next on exhausted iterator\".to_string()))?.0.clone()")
             && !translation.rust.contains(".entry_set()")
             && !translation.rust.contains(".iterator()")
             && !translation.rust.contains(".get_key()"),
@@ -14392,6 +14695,47 @@ class Standards<T extends CompoundLine> {
 
     cargo_check_generated_modules_fails_with(
         "type_param_bound_source_supertype_assignment_requires_hierarchy_lowering",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "requires class hierarchy lowering",
+    );
+}
+
+#[test]
+fn shaped_source_subtype_argument_requires_hierarchy_lowering() {
+    let source = r#"
+class Base {
+    int id;
+}
+
+class Sub extends Base {
+}
+
+class Use {
+    Base keep(Base value) {
+        return value;
+    }
+
+    int run(Sub value) {
+        return keep(value).id;
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation.rust.contains(
+            "compile_error!(\"unsupported Java class upcast: Sub to Base requires class hierarchy lowering\")"
+        ) && !translation.rust.contains("self.keep(value.into())"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "shaped_source_subtype_argument_requires_hierarchy_lowering",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
@@ -17270,15 +17614,14 @@ class Reader {
 
     assert!(
         translation.rust.contains(
-            // `Reader` is aliased into the map, so it is stored behind its handle
-            // (claude_audits/0002). What this pins is the `Result` wrapping.
-            "pub fn run(&self, futures: &std::collections::HashMap<String, Future<std::rc::Rc<Reader>>>) -> Result<std::collections::HashMap<String, std::rc::Rc<Reader>>, JavaException>"
+            "pub fn run(&self, futures: &std::collections::HashMap<String, Future<Reader>>) -> Result<std::collections::HashMap<String, Reader>, JavaException>"
         ) && translation
             .rust
             .contains("Err(e) if e.is_instance(&[\"ExecutionException\"])")
+            && translation.rust.contains("let mut reader: Reader = future.get()?;")
             && translation.rust.contains("return Err(JavaException::with_cause(\"UserException\"")
             && translation.rust.contains("readers.insert(name.clone(), reader);")
-            && translation.rust.contains("return Ok(readers);"),
+            && translation.rust.contains("return Ok((readers).into_iter().collect::<std::collections::HashMap<_, _>>());"),
         "{}",
         translation.rust
     );
@@ -22400,6 +22743,37 @@ class PlainObjectToStringFallback {
 }
 
 #[test]
+fn plain_object_constructor_emits_erased_runtime_support_without_display_use() {
+    let translation = translate_source(
+        r#"
+class PlainObjectCtorOnly {
+    void make() {
+        Object value = new Object();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("Box::new(JavaPlainObject::new()) as Box<dyn std::any::Any>")
+            && translation.rust.contains("pub struct JavaPlainObject"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "plain_object_ctor_only_emits_erased_runtime_support",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn external_object_to_string_fallback_is_loud_not_empty() {
     let translation = translate_source(
         r#"
@@ -22480,6 +22854,48 @@ class DisplayCapableExternalObject {
             name: "fixture",
             rust: translation.rust,
             tests: "",
+        }],
+    );
+}
+
+#[test]
+fn erased_pattern_display_uses_platform_regex_pattern_text() {
+    let translation = translate_source(
+        r#"
+import java.util.regex.Pattern;
+
+class ErasedPatternDisplay {
+    String render() {
+        Object value = Pattern.compile("a+");
+        return "x" + value;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("java_erased_object_to_string(&value)")
+            && translation
+                .rust
+                .contains("if let Some(value) = value.downcast_ref::<Pattern>()")
+            && translation.rust.contains("return value.to_string();"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "erased_pattern_display",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[test]
+fn pattern_erased_display_uses_pattern_text() {
+    assert_eq!(java_erased_object_to_string(&Pattern::compile("a+")), "a+");
+}
+"#,
         }],
     );
 }
@@ -27649,6 +28065,59 @@ class MapEntryEnhancedFor {
 }
 
 #[test]
+fn detached_map_entry_local_uses_key_and_value_contract() {
+    let translation = translate_source(include_str!("differential/MapEntryDetachedContract.java"));
+
+    assert!(
+        translation
+            .rust
+            .contains("let __java_map_entry_snapshot = values.iter().next()")
+            && translation
+                .rust
+                .contains("let __java_map_entry_set_contains_key = entry.0.clone();")
+            && translation
+                .rust
+                .contains("let __java_map_entry_set_contains_value = entry.1.clone();")
+            && translation
+                .rust
+                .contains("__java_map_entry_set_contains_map.get")
+            && translation
+                .rust
+                .contains("let __java_map_entry_set_remove_key = entry.0.clone();")
+            && translation
+                .rust
+                .contains("let __java_map_entry_set_remove_value = entry.1.clone();")
+            && translation
+                .rust
+                .contains("__java_map_entry_set_remove_map.get")
+            && translation
+                .rust
+                .contains("__java_map_entry_set_remove_map.remove"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "map_entry_detached_contract",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn detached_map_entry_uses_key_and_value_contract() {
+        assert_eq!(MapEntryDetachedContract::run().unwrap(), "false,false,2");
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
 fn map_get_static_string_constant_key_does_not_double_borrow_str() {
     let translation = translate_source(
         r#"
@@ -30824,6 +31293,50 @@ mod generated_tests {
 }
 
 #[test]
+fn string_builder_capacity_constructor_uses_result_only_for_integral_capacity() {
+    let translation =
+        translate_source(include_str!("differential/StringBuilderCapacityCatch.java"));
+
+    assert!(
+        translation
+            .rust
+            .contains("StringBuilder::new_capacity_result(3)")
+            && translation
+                .rust
+                .contains("StringBuilder::new_capacity_result(-1)?")
+            && translation
+                .rust
+                .contains("StringBuffer::new_capacity_result(-2)?")
+            && !translation
+                .rust
+                .contains("StringBuilder::new_1(3).unwrap_or_else")
+            && !translation.rust.contains("StringBuilder::new_1(-1)?")
+            && !translation.rust.contains("StringBuffer::new_1(-2)?"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "string_builder_capacity_constructor",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn capacity_constructor_contract_matches_java() {
+        assert_eq!(StringBuilderCapacityCatch::run(), "ok:builder:buffer");
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
 fn array2_creation_negative_dimension_in_try_lowers_to_java_exception_result() {
     let translation = translate_source(
         r#"
@@ -33647,12 +34160,24 @@ class ErasedObjectVarargsExceptionMessage {
         translation.rust
     );
 
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "exception_constructor_erased_object_varargs",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[test]
+fn erased_object_array_display_uses_java_identity_display() {
+    let args: Vec<Box<dyn std::any::Any>> = vec![Box::new("one".to_string())];
+    assert_eq!(java_erased_object_to_string(&args), "[Ljava.lang.Object;@0");
+
+    let nullable_args: Vec<Option<Box<dyn std::any::Any>>> = vec![None];
+    assert_eq!(
+        java_erased_object_to_string(&nullable_args),
+        "[Ljava.lang.Object;@0"
+    );
+}
+"#,
         }],
     );
 }

@@ -483,6 +483,8 @@ pub enum NativeCollectionMethod {
     SetRemove,
     AddAll,
     RemoveAll,
+    ContainsAll,
+    RetainAll,
     Extend,
     MapHashCode,
     MapInsert,
@@ -682,9 +684,12 @@ pub fn native_collection_lowered_type(
         NativeCollectionMethod::ListAdd => Some(LoweredType::from_java(JavaType::Primitive(
             PrimitiveType::Boolean,
         ))),
-        NativeCollectionMethod::AddAll | NativeCollectionMethod::RemoveAll => Some(
-            LoweredType::from_java(JavaType::Primitive(PrimitiveType::Boolean)),
-        ),
+        NativeCollectionMethod::AddAll
+        | NativeCollectionMethod::RemoveAll
+        | NativeCollectionMethod::ContainsAll
+        | NativeCollectionMethod::RetainAll => Some(LoweredType::from_java(JavaType::Primitive(
+            PrimitiveType::Boolean,
+        ))),
         NativeCollectionMethod::ListSet => {
             let element_ty = crate::types::sequence_element_type(&receiver_ty)?;
             Some(LoweredType::from_java(element_ty.clone()))
@@ -1552,6 +1557,16 @@ pub fn external_call_returns_rust_result_with_external_index(
     }
     external_index
         .external_api_effect_for_receiver_with_arity(receiver_key.as_deref(), name, Some(arg_count))
+        .cloned()
+        .or_else(|| {
+            (!facts.disable_builtin_external_packs).then(|| {
+                crate::external_packs::external_api_effect_for_receiver_with_arity(
+                    receiver_key.as_deref(),
+                    name,
+                    Some(arg_count),
+                )
+            })?
+        })
         .is_some_and(|effect| facts.thrown_types_include_checked_exception(&effect.thrown))
 }
 
@@ -1584,12 +1599,19 @@ pub fn external_call_has_thrown_effect_for_receiver(
     name: &str,
     arg_count: usize,
 ) -> bool {
-    facts
-        .external_api_effect_for_receiver_with_arity_or_rust_name(
-            Some(receiver_name),
-            name,
-            Some(arg_count),
-        )
+    let external_index = facts.external_lookup_index();
+    external_index
+        .external_api_effect_for_receiver_with_arity(Some(receiver_name), name, Some(arg_count))
+        .cloned()
+        .or_else(|| {
+            (!facts.disable_builtin_external_packs).then(|| {
+                crate::external_packs::external_api_effect_for_receiver_with_arity(
+                    Some(receiver_name),
+                    name,
+                    Some(arg_count),
+                )
+            })?
+        })
         .is_some_and(|effect| facts.thrown_types_include_checked_exception(&effect.thrown))
 }
 
@@ -2065,6 +2087,23 @@ pub fn apply_fallback_static_owner_rust_name<'a>(
             || rust_name
                 .strip_prefix(&current)
                 .is_some_and(|suffix| suffix.starts_with('_')) =>
+        {
+            CallExprPlan::Target(CallTargetPlan::StaticOwner { owner, rust_name })
+        }
+        (
+            CallExprPlan::Target(CallTargetPlan::StaticOwner {
+                owner,
+                rust_name: current,
+            }),
+            Some(rust_name),
+        ) if current.rsplit_once('_').is_some_and(|(base, suffix)| {
+            !base.is_empty()
+                && !suffix.is_empty()
+                && suffix.bytes().all(|byte| byte.is_ascii_digit())
+                && rust_name
+                    .strip_prefix(base)
+                    .is_some_and(|suffix| suffix.starts_with('_'))
+        }) =>
         {
             CallExprPlan::Target(CallTargetPlan::StaticOwner { owner, rust_name })
         }
@@ -3505,19 +3544,31 @@ fn plan_native_collection_receiver_call<'a>(
             NativeCollectionMethod::ListRemoveObject
         }
         (crate::stdlib::JavaCollectionKind::List, "contains") => NativeCollectionMethod::Contains,
+        (crate::stdlib::JavaCollectionKind::List, "containsAll" | "contains_all") => {
+            NativeCollectionMethod::ContainsAll
+        }
         (kind, "hashCode" | "hash_code") if kind.is_set_like() => {
             NativeCollectionMethod::SetHashCode
         }
         (kind, "contains") if kind.is_set_like() => NativeCollectionMethod::Contains,
+        (kind, "containsAll" | "contains_all") if kind.is_set_like() => {
+            NativeCollectionMethod::ContainsAll
+        }
         (kind, "add") if kind.is_set_like() => NativeCollectionMethod::SetInsert,
         (kind, "remove") if kind.is_set_like() => NativeCollectionMethod::SetRemove,
         (crate::stdlib::JavaCollectionKind::List, "addAll") => NativeCollectionMethod::AddAll,
         (crate::stdlib::JavaCollectionKind::List, "removeAll" | "remove_all") => {
             NativeCollectionMethod::RemoveAll
         }
+        (crate::stdlib::JavaCollectionKind::List, "retainAll" | "retain_all") => {
+            NativeCollectionMethod::RetainAll
+        }
         (kind, "addAll") if kind.is_set_like() => NativeCollectionMethod::AddAll,
         (kind, "removeAll" | "remove_all") if kind.is_set_like() => {
             NativeCollectionMethod::RemoveAll
+        }
+        (kind, "retainAll" | "retain_all") if kind.is_set_like() => {
+            NativeCollectionMethod::RetainAll
         }
         (kind, "hashCode" | "hash_code") if kind.is_map_like() => {
             NativeCollectionMethod::MapHashCode
@@ -5135,6 +5186,8 @@ pub fn native_collection_method_arg_shapes(
         }
         NativeCollectionMethod::AddAll
         | NativeCollectionMethod::RemoveAll
+        | NativeCollectionMethod::ContainsAll
+        | NativeCollectionMethod::RetainAll
         | NativeCollectionMethod::Extend
             if arg_count == 1 =>
         {
@@ -5639,6 +5692,8 @@ fn facade_abi_native_collection_arg_java_types(
         }
         NativeCollectionMethod::AddAll
         | NativeCollectionMethod::RemoveAll
+        | NativeCollectionMethod::ContainsAll
+        | NativeCollectionMethod::RetainAll
         | NativeCollectionMethod::Extend
             if arg_count == 1 =>
         {

@@ -2,7 +2,7 @@ use crate::call_plan::{native_java_instance_receiver_type_hint, resolved_call_ar
 use crate::coercion::{
     BorrowProjectionUse, IndexToUsizeProjection, LoweredExpr, SequenceIterationProjection,
     StreamLambdaArgumentSlotPlan, StreamLambdaParamProjection, apply_clone_projection,
-    arrays_stream_range_projection, borrowed_collection_flat_map_projection,
+    arrays_stream_range_projection_with_result_context, borrowed_collection_flat_map_projection,
     current_receiver_method_call_projection, ensure_borrow_projection, field_projection,
     function_call_projection, index_to_usize_projection, indexed_access_projection,
     len_i32_projection, nullable_stream_map_body_projection,
@@ -27,7 +27,7 @@ use crate::java_ir::{BinaryOp, CallKind, Expr, JavaType, Literal, Stmt, SwitchLa
 use crate::literal_lowering::literal_to_rust;
 use crate::method_reference_shape::method_reference_receiver_type_for_call_plan_with_facts;
 use crate::operator_lowering::{binary_op_to_rust, stream_unary_prefix};
-use crate::rust_ir::{RustClosureBody, RustClosureParam, RustExpr, RustStmt};
+use crate::rust_ir::{RustClosureBody, RustClosureParam, RustExpr, RustExprShape, RustStmt};
 use crate::shape_projection::borrowed_string_content_shape;
 use crate::signature::SignaturePlan;
 use crate::slot_render::rust_type_for_slot_with_facts;
@@ -1062,7 +1062,11 @@ fn apply_stream_ops_structured(
                 )?;
                 let iter_source = sequence_iteration_source_projection(
                     source,
-                    false,
+                    stream_source_optional_sequence_for_render(
+                        plan.source,
+                        plan.optional_sequence,
+                        ctx,
+                    ),
                     sequence_iteration_projection(plan.iteration),
                 );
                 expr = if prefix_stmts.is_empty() {
@@ -1083,14 +1087,18 @@ fn apply_stream_ops_structured(
             }
             StreamOp::FlatMap(FlatMapPlan::LambdaStreamChain { lambda, pipeline }) => {
                 let param_shape = effective_stream_item_shape(&item_shape, item_is_borrowed);
-                let (prefix_stmts, _, _) = emit_stream_lambda_prefix_stmts_and_locals(
+                let (prefix_stmts, _, scoped_env) = emit_stream_lambda_prefix_stmts_and_locals(
                     lambda.body,
                     &lambda.param_name,
                     &lambda.rust_param_name,
                     ctx,
                     Some(&param_shape),
                 )?;
-                let nested = render_stream_sub_pipeline_expr(pipeline, lambda, ctx)?;
+                let nested_ctx = scoped_env
+                    .as_ref()
+                    .map(|env| ctx.with_env(env))
+                    .unwrap_or(ctx);
+                let nested = render_stream_sub_pipeline_expr(pipeline, lambda, nested_ctx)?;
                 expr = if prefix_stmts.is_empty() {
                     stream_flat_map_op_projection(expr, &lambda.rust_param_name, nested)
                 } else {
@@ -1127,6 +1135,51 @@ fn lambda_collection_flat_map_element_shape(
     let mut env = TypeEnv::new();
     env.insert_local(plan.lambda.param_name.clone(), param_shape.java_ty.clone());
     infer_stream_source_element_shape_with_facts(plan.source, &env, facts)
+}
+
+fn stream_source_optional_sequence_for_render(
+    source: &Expr,
+    planned_optional_sequence: bool,
+    ctx: StreamRenderContext<'_>,
+) -> bool {
+    if let Some(env) = ctx.env {
+        let shape = infer_expr_shape_with_context(
+            source,
+            env,
+            ExprShapeContext {
+                signatures: ctx.signatures,
+                representations: None,
+                facts: ctx.facts,
+            },
+        );
+        if optional_shape_is_stream_capable(&shape, ctx.facts) {
+            return true;
+        }
+        if shape_is_stream_capable(&shape, ctx.facts) {
+            return false;
+        }
+    }
+    planned_optional_sequence
+}
+
+fn optional_shape_is_stream_capable(shape: &RustSlotShape, facts: Option<&FactSet>) -> bool {
+    let Some(element_ty) = shape.optional_element_type() else {
+        return false;
+    };
+    java_type_is_stream_capable(&element_ty, facts)
+}
+
+fn shape_is_stream_capable(shape: &RustSlotShape, facts: Option<&FactSet>) -> bool {
+    java_type_is_stream_capable(&shape.java_ty, facts)
+}
+
+fn java_type_is_stream_capable(java_ty: &JavaType, facts: Option<&FactSet>) -> bool {
+    crate::types::stream_element_type(java_ty).is_some()
+        || facts.is_some_and(|facts| {
+            crate::stream_shape::stream_source_capability_policy(java_ty, facts)
+                .capability_element
+                .is_some()
+        })
 }
 
 fn collection_flat_map_element_shape(
@@ -1241,6 +1294,20 @@ fn render_stream_terminal_expr(
             ))
         }
         StreamTerminal::Collect(crate::stdlib::JavaCollectionKind::Map) => None,
+        StreamTerminal::FindFirst if item_is_borrowed => {
+            let next = receiver_method_call_projection_exact(receiver, "next", Vec::new());
+            let target = match &plan.actual {
+                LoweredType::OptionalElementBorrow { option_shape, .. } => {
+                    Some((**option_shape).clone())
+                }
+                _ => None,
+            };
+            Some(RustExpr::shaped_as(
+                RustExprShape::OptionalProjected,
+                target,
+                next,
+            ))
+        }
         _ => no_op_stream_terminal_method(&plan.terminal)
             .map(|method| receiver_method_call_projection_exact(receiver, method, Vec::new())),
     }
@@ -1340,7 +1407,12 @@ fn stream_source_range_projection(
     .unwrap_or_else(|| {
         crate::unsupported::compile_error_expr("unsupported Arrays.stream range end")
     });
-    arrays_stream_range_projection(source, from, to)
+    arrays_stream_range_projection_with_result_context(
+        source,
+        from,
+        to,
+        ctx.propagate_java_exceptions,
+    )
 }
 
 fn sequence_iteration_projection(iteration: StreamSourceIteration) -> SequenceIterationProjection {
@@ -1472,7 +1544,11 @@ fn render_stream_sub_pipeline_expr(
     };
     let expr = sequence_iteration_source_projection_with_result_context(
         source,
-        pipeline.source.optional_sequence,
+        stream_source_optional_sequence_for_render(
+            pipeline.source.expr,
+            pipeline.source.optional_sequence,
+            ctx,
+        ),
         iteration,
         ctx.propagate_java_exceptions,
     );
@@ -1997,7 +2073,6 @@ fn emit_nullable_stream_lambda_closure_body_expr(
         param_shape,
     );
     if let Some(env) = scoped_env.as_mut() {
-        env.insert_binding_access_name(lambda.param_name.clone(), lambda.rust_param_name.clone());
         for source_name in &source_names {
             if let Some(access_name) = access_names.get(*source_name) {
                 env.insert_binding_access_name((*source_name).to_string(), access_name.clone());
@@ -2207,7 +2282,6 @@ fn emit_stream_lambda_prefix_stmts_and_locals<'a>(
         std::iter::once(param).chain(source_names.iter().copied()),
     );
     if let Some(env) = scoped_env.as_mut() {
-        env.insert_binding_access_name(param.to_string(), param_rust.to_string());
         for source_name in &source_names {
             if let Some(access_name) = access_names.get(*source_name) {
                 env.insert_binding_access_name((*source_name).to_string(), access_name.clone());

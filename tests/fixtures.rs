@@ -57,7 +57,7 @@ fn translates_static_import_and_qualified_static_utility_owner() {
     );
     assert!(
         translation.rust.contains(
-            "unimplemented!(\"unresolved Java static call StaticUtility.read_value is not modelled\")"
+            "unimplemented!(\"unresolved Java static call ExternalLibStaticUtility.read_value is not modelled\")"
         ),
         "{}",
         translation.rust
@@ -75,6 +75,11 @@ fn translates_static_import_and_qualified_static_utility_owner() {
         translation.rust
     );
     assert!(!translation.rust.contains("return read_value(path)"));
+    assert!(
+        translation
+            .rust
+            .contains("return StaticUtility::read_value(path);")
+    );
     assert!(!translation.rust.contains("external.lib"));
     cargo_check_translation("static_import_utility_owner", &translation.rust);
 }
@@ -399,7 +404,7 @@ fn translates_stream_flat_map_block_pipeline() {
     );
     assert!(
         translation.rust.contains(
-            "groups.iter().flat_map(|group| { let names = group.names(); names.unwrap().into_iter().filter(move |name| !name.is_empty()).map(|name| name.trim().to_string()) }).collect::<Vec<_>>()"
+            "groups.iter().flat_map(|group| { let names = group.names().expect(\"Java null receiver\"); names.into_iter().filter(move |name| !name.is_empty()).map(|name| name.trim().to_string()) }).collect::<Vec<_>>()"
         ),
         "{}",
         translation.rust
@@ -450,7 +455,13 @@ fn try_with_resources_nullable_read_and_closeable_cleanup_compiles() {
     assert!(
         translation.rust.contains("reader.read_line()?.unwrap()")
             && !translation.rust.contains("reader.read_line()?.unwrap()?")
-            && translation.rust.contains("audit.close()?;")
+            && translation.rust.contains(
+                "let reader: BufferedReader = JavaNioFileFiles::new_buffered_reader(&path)?;"
+            )
+            && !translation
+                .rust
+                .contains("let reader: Box<dyn std::any::Any>")
+            && translation.rust.contains("match audit.close()")
             && translation.rust.contains("impl Closeable")
             && translation
                 .rust
@@ -545,7 +556,7 @@ fn translates_simple_class_shape() {
         translation.diagnostics
     );
     assert!(translation.rust.contains("pub struct SimpleClass"));
-    assert!(translation.rust.contains("name: String"));
+    assert!(translation.rust.contains("name: Option<String>"));
     assert!(translation.rust.contains("count: i32"));
     assert!(
         translation
@@ -557,7 +568,7 @@ fn translates_simple_class_shape() {
     assert!(
         translation
             .rust
-            .contains("format!(\"{}:{}\", self.name, (self.count).to_string())")
+            .contains("format!(\"{}:{}\", self.name.as_ref().map(|value| std::convert::AsRef::<str>::as_ref(value)).unwrap_or(\"null\"), (self.count).to_string())")
     );
     cargo_check_translation("simple_class_shape", &translation.rust);
 }
@@ -767,7 +778,7 @@ fn translates_constructor_delegation_to_resolved_constructor_calls() {
     assert!(
         translation
             .rust
-            .contains("return format!(\"{}:{}\", self.label, (self.count).to_string());")
+            .contains("return format!(\"{}:{}\", self.label.as_ref().map(|value| std::convert::AsRef::<str>::as_ref(value)).unwrap_or(\"null\"), (self.count).to_string());")
     );
     cargo_check_translation("constructor_delegation_resolved_calls", &translation.rust);
 }
@@ -1078,7 +1089,7 @@ fn stream_flat_map_projection_generated_rust_preserves_behavior() {
     );
     assert!(
         translation.rust.contains(
-            "groups.iter().flat_map(|group| group.names().into_iter()).collect::<Vec<_>>()"
+            "groups.iter().flat_map(|group| group.names().unwrap().into_iter()).collect::<Vec<_>>()"
         ),
         "{}",
         translation.rust
@@ -1377,7 +1388,10 @@ fn nested_static_builder_call_uses_resolved_type_owner() {
         translation.diagnostics
     );
     assert!(translation.rust.contains(
-        "let builder: NestedStaticBuilderCall_Builder = unimplemented!(\"unresolved Java static call GenomicsDBColumn.new_builder is not modelled\");"
+        "pub type GenomicsDBColumn = NestedStaticBuilderCall_Coordinates_GenomicsDBColumn;"
+    ));
+    assert!(translation.rust.contains(
+        "let builder: NestedStaticBuilderCall_Builder = GenomicsDBColumn::new_builder();"
     ));
     assert!(!translation.rust.contains("coordinates.genomics_d_b_column"));
     assert!(!translation.rust.contains("Coordinates::GenomicsDBColumn"));

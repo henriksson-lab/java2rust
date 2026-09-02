@@ -387,3 +387,9 @@ perf report --children --percent-limit 2 --stdio -g none
 `Ext.java` is 40 copies of
 `public String mN(VariantContext vc) { return vc.getContig() + vc.getStart() + vc.getEnd(); }`
 with `import htsjdk.variant.variantcontext.VariantContext;`.
+
+Follow-up 2026-08-30: the shared external type alias cache now also carries the
+nested-type suffix aliases that were previously only used by exception lookup.
+This closed the Avro `Schema.Parser` semantic-pack lookup without adding a
+second constructor-owner path, and keeps the new alias spellings on the same
+memoized path as package/simple/canonical spellings.
