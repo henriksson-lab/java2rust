@@ -5388,7 +5388,53 @@ fn rust_expr_is_i32_iterator_sum(expr: &RustExpr) -> bool {
     )
 }
 
+/// The message every "this Java reference was optional, discharge it" unwrap carries.
+pub(crate) const JAVA_NULL_RECEIVER_EXPECT: &str = "Java null receiver";
+
+/// Does this expression's outermost projection already discharge a Java optionality?
+///
+/// Around 150 sites independently decide to unwrap an optional receiver, and more
+/// than one of them can fire on the same expression -- each asks the *plan* whether
+/// the receiver is optional, and the plan still says yes after an earlier projection
+/// already discharged it in the *expression* (0007/0008: the Rust IR carries no
+/// record of what was done to it). The result is
+/// `m.get(k).expect(..).expect(..)` or `x.as_ref().ok_or_else(..)?.ok_or_else(..)?`,
+/// which is `E0599` because the second unwrap lands on the element the first
+/// produced.
+///
+/// This is the single answer to "has it already been discharged". It replaces three
+/// hand-written shape lists that had grown inside
+/// `strip_redundant_java_null_expect_after_unwrap`, each recognising the one shape
+/// that was in front of whoever added it -- so a fourth shape (`.get()` under the
+/// inner expect, audits 0056/0059 R3) was simply not on the list.
+fn java_optionality_already_discharged(expr: &RustExpr) -> bool {
+    match expr.unshaped() {
+        RustExpr::MethodCall { method, args, .. } => {
+            (method == "unwrap" && args.is_empty())
+                || (method == "expect" && is_java_null_receiver_expect_args(args))
+        }
+        // `opt.ok_or_else(|| ..)?` -- the `?` discharges it.
+        RustExpr::Try(inner) => matches!(
+            inner.unshaped(),
+            RustExpr::MethodCall { method, args, .. } if method == "ok_or_else" && args.len() == 1
+        ),
+        _ => false,
+    }
+}
+
+fn is_java_null_receiver_expect_args(args: &[RustExpr]) -> bool {
+    matches!(args, [RustExpr::Literal(message)]
+        if message.trim_matches('"') == JAVA_NULL_RECEIVER_EXPECT)
+}
+
 fn method_expect_projection(expr: RustExpr, message: &str) -> RustExpr {
+    // Idempotent for the null-receiver unwrap: adding a second one to an expression
+    // that already discharged its optionality does not unwrap "more", it unwraps the
+    // wrong thing. Enforced at the constructor so no caller has to remember -- the
+    // strip pass below stays only for expressions built without it.
+    if message == JAVA_NULL_RECEIVER_EXPECT && java_optionality_already_discharged(&expr) {
+        return expr;
+    }
     RustExpr::MethodCall {
         receiver: Box::new(expr),
         method: "expect".to_string(),
@@ -5445,53 +5491,11 @@ pub fn strip_redundant_java_null_expect_after_unwrap(expr: RustExpr) -> RustExpr
                 .into_iter()
                 .map(strip_redundant_java_null_expect_after_unwrap)
                 .collect::<Vec<_>>();
+            // One predicate, not three shape lists. See
+            // `java_optionality_already_discharged`.
             if method == "expect"
-                && matches!(args.as_slice(), [RustExpr::Literal(message)] if message == "\"Java null receiver\"")
-                && matches!(
-                    receiver.unshaped(),
-                    RustExpr::MethodCall {
-                        method,
-                        args,
-                        ..
-                    } if method == "unwrap" && args.is_empty()
-                )
-            {
-                *receiver
-            } else if method == "expect"
-                && matches!(args.as_slice(), [RustExpr::Literal(message)] if message == "\"Java null receiver\"")
-                && matches!(
-                    receiver.unshaped(),
-                    RustExpr::Try(inner)
-                        if matches!(
-                            inner.unshaped(),
-                            RustExpr::MethodCall {
-                                method,
-                                args,
-                                ..
-                            } if method == "ok_or_else" && args.len() == 1
-                        )
-                )
-            {
-                *receiver
-            } else if method == "expect"
-                && matches!(args.as_slice(), [RustExpr::Literal(message)] if message == "\"Java null receiver\"")
-                && matches!(
-                    receiver.unshaped(),
-                    RustExpr::MethodCall {
-                        receiver,
-                        method,
-                        args,
-                    } if method == "expect"
-                        && matches!(args.as_slice(), [RustExpr::Literal(message)] if message == "\"Java null receiver\"")
-                        && matches!(
-                            receiver.unshaped(),
-                            RustExpr::MethodCall {
-                                method,
-                                args,
-                                ..
-                            } if method == "as_ref" && args.is_empty()
-                        )
-                )
+                && is_java_null_receiver_expect_args(&args)
+                && java_optionality_already_discharged(&receiver)
             {
                 *receiver
             } else {

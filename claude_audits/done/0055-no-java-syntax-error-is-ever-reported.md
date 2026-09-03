@@ -231,3 +231,42 @@ Step 1 is roughly ten lines and turns 0054's whole class of failure from
 "different answer" into "reported error" for any input that is actually
 malformed. It does not fix 0054 itself — those inputs parse cleanly — but it
 closes the door this audit is about.
+
+---
+
+## Re-verified 2026-09-02 — all three findings fixed
+
+Findings **A and B**: the repro exits 1 with three `java_syntax_error`
+diagnostics, `NotJava.java` exits 1, four further malformed shapes are caught,
+and 60 valid corpus files produce **zero false positives**.
+
+Finding **C** was fixed in form only and has now been fixed properly.
+`translate_status` was derived instead of the literal `"ok"`, but batch mode
+pooled every *primary* file's parse diagnostics into a batch-wide bag and
+appended that bag to each file. Every file carried every other file's parse
+errors, so the column had flipped from constant-`ok` to effectively
+constant-`errors` — still not a measurement. Measured on a three-file batch with
+one unparseable member:
+
+| file | before | after |
+|---|---|---|
+| `Good.java` | `errors`, 1 diagnostic | `ok`, 0 |
+| `Also.java` | `errors`, 1 diagnostic | `ok`, 0 |
+| `Bad.java` | `errors`, **2** diagnostics | `errors`, 1 |
+
+The bad file was counted twice because its diagnostics reach it directly through
+`parsed.diagnostics` as well.
+
+The fix is a deletion, not a filter: a primary file's parse diagnostics are
+simply not put in the shared bag. The bag holds context and summary diagnostics,
+which genuinely are shared by every file — the invariant the single-file path
+always kept. The two paths now agree by construction rather than by parallel
+maintenance.
+
+Regression test: `translate_batch_keeps_parse_diagnostics_with_the_file_that_caused_them`
+in `tests/batch_translation.rs`, which asserts both the isolation and the
+no-double-count.
+
+Suite unchanged against HEAD (`batch_translation` 20/2 → 21/2; the two failures
+are pre-existing and unrelated, in the offline-cargo and external-pack wrapper
+tests).

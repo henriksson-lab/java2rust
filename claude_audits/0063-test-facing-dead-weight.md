@@ -366,3 +366,15 @@ Checked all `idiom_gap("…")` and `parser_gap("…")` arguments against
    else; the originally listed §1/§6/§7 candidates have already been removed or
    superseded by live-path assertions.
    Done: current inventory reports `TEST_ONLY_DESCRIPTOR_COUNT 0`.
+
+---
+
+## Re-verified 2026-09-02 — reopened, the second half regressed
+
+The headline reproduces exactly: descriptor functions with no production caller
+went **46 -> 0**, and all 34 named descriptors are absent.
+
+Sections 3-5 did not hold. `tests/layering.rs` exists (1,645 lines, 53 tests) and
+the nine named negative-only tests are gone, but `include_str!` occurrences went
+**260 -> 278**, pure source-grep tests **69 -> 74**, and **16 pure source-grep
+tests remain in `slot_shape_design.rs`** against a claim of zero. See `TODO2.md`.

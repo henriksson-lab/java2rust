@@ -1414,3 +1414,134 @@ instead of erasing it to `Box<dyn Any>`, preserving `read_line()` nullability an
 the concrete `close()` cleanup path. Covered by
 `external_packs::files_new_buffered_reader_returns_buffered_reader_fact` and
 `fixtures::try_with_resources_nullable_read_and_closeable_cleanup_compiles`.
+
+---
+
+## 2026-09-02 — one regression fixed, one isolated but open
+
+### Fixed: `Map.get` into a declared local aborted at runtime
+
+`native_map_get_required_declared_value_local_shape` (added in `6312cb8`, the most
+recent commit, one caller, no test naming it) gave a `Map.get` initializer the
+*element borrow* shape, discarding the optionality:
+
+```rust
+let miss: &String = m.get(&_java_borrowed_miss_0).expect("Java null receiver");
+```
+
+Its premise is wrong — `String v = map.get(k)` in Java does **not** mean the value
+is present. The worst form needed no null test at all:
+
+```java
+String miss = m.get("b");
+return "reached:" + miss;      // Java: reached:null
+```
+
+which **panicked** (`Java null receiver`). Removed the refinement and the dead
+function (57 lines). Now `let miss: Option<String> = m.get(..).cloned();`, and the
+program prints `reached:null`, matching the oracle. `MapGetNull2.java` no longer
+emits `compile_error!`.
+
+### Fixed: the receiver was projected twice
+
+`LinkedNode.java` and `NullableArrayLengthCatch.java` failed the differential gate
+with a doubled projection:
+
+```rust
+cur.as_ref().ok_or_else(..)?.ok_or_else(..)?.value      // E0599
+```
+
+The second unwrap lands on the element the first already produced. Isolated by
+bisection: the same field read is correct or not depending only on its syntactic
+context.
+
+| Java | before |
+|---|---|
+| `return cur.value;` | single unwrap, correct |
+| `int v = cur.value;` | single, correct |
+| `return cur.value + 1;` | **double**, `E0599` |
+| `t += cur.value;` | **double**, `E0599` |
+
+Cause: `apply_optional_receiver_slot_projection` (`conversion_lowering.rs:89`)
+projects the receiver, discharging the optionality, and then applies a conversion
+that discharges it *again*. A slot-directed lowering took a different route and
+so stayed correct, which is why the defect looked context-sensitive.
+
+`strip_redundant_java_null_expect_after_unwrap` already existed for exactly this
+— and was applied at **one of the four** call sites of that function. The other
+three had no guard. Rather than adding it at the remaining three, it now runs
+**inside** `apply_optional_receiver_slot_projection`, so no caller can forget it:
+the same one-question-many-answers shape 0042/0044/0046 describe, closed by moving
+the answer to where the question is asked.
+
+Two hypotheses tried and **rejected by measurement**, recorded so they are not
+retried: feeding the conversion the element shape instead of its own `actual`
+(no effect — `element_shape` is `None` on that path), and disabling
+`lower_optional_receiver_field_access_plain` at either of its two call sites (no
+effect — the sites route to each other, so only disabling both changes anything,
+and that removes the unwrap entirely and is wrong).
+
+Verified: `differential` **2 passed, 0 failed**; `type_coercion`, `object_model`,
+`semantic_facts` and `slot_shape_design` unchanged against HEAD; `--lib` green.
+
+### Also fixed: the same double, reached through a map value
+
+`m.get("a").get(1)` produced `.expect("Java null receiver").expect("Java null receiver")`
+— the outer call adapted its own receiver, asked the *plan* whether it was
+optional, and got "yes" because the plan does not record what the inner
+projection already did to the expression (0007/0008).
+
+The strip pass had grown **three** hand-written arms, each recognising the one
+shape of "already discharged" that was in front of whoever added it
+(`.unwrap()`, `.ok_or_else(..)?`, `.as_ref().expect(..)`), so a fourth shape —
+`.get()` under the inner expect — was simply not on the list. Around 150 sites
+construct this unwrap; enumerating the shapes they can produce is not a strategy
+that terminates.
+
+There is one predicate now, `java_optionality_already_discharged`, and the strip
+shares it rather than carrying its own list. More importantly the null-receiver
+unwrap is **idempotent at its constructor**: `method_expect_projection` returns
+the expression unchanged when it already discharges, so the double cannot be
+built in the first place and the strip is only a net for expressions assembled
+without it.
+
+Checked before generalising: a nullable-valued `Map<String,String>` lowers its
+value slot as `String`, not `Option<String>`, so no genuine `Option<Option<T>>`
+needs two identical null-receiver unwraps. (That lowering has its own defect —
+a `null` value becomes `Default::default()`, the empty string, silently — which
+belongs to this audit's open remainder, not to the double.)
+
+Gated by `tests/differential/NestedMapValueRead.java`. The sequence-side twin —
+`Col.values()[i]` unwrapping a non-optional element — is pinned in
+`known-gaps/EnumValuesElementIntoObject.java` and wants the same treatment.
+
+### Open, and paid for by the `Map.get` fix: the local is cloned
+
+Giving a `Map.get` initializer the map value's *borrow* shape discarded the
+optionality, so
+
+```java
+String miss = m.get("b");
+return "reached:" + miss;      // Java prints reached:null
+```
+
+aborted the process. Removing that shape fixes it, and costs something real:
+
+| | before | after |
+|---|---|---|
+| binding | `let p: &Payload = m.get(k).expect(..)` | `let p: Option<Payload> = m.get(k).cloned()` |
+| a miss | aborts | catchable `NullPointerException` |
+| the value | borrowed | **cloned**, so the alias is broken (0002) |
+
+The catchability is an improvement — Java throws, it does not abort. The clone is
+not: a local that is only ever dereferenced wants the borrow, and the borrow was
+right *for that body*. It was wrong for the one that reaches a value context, and
+the shape was chosen without asking which body it was in.
+
+Deciding by **use** is the version that costs nothing: borrow-and-unwrap when the
+local is only ever a receiver, keep the `Option` when it can reach a value
+context. The liveness machinery that would answer this already exists. Not
+implemented. Pinned by
+`slot_shape_design::native_map_get_into_final_facade_local_keeps_value_shape`,
+whose expectation now records the clone explicitly so that closing this is a
+visible change rather than a silent one.

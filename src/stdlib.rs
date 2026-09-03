@@ -8554,7 +8554,13 @@ fn source_type_is_source_hierarchy_carrier_root(
 }
 
 fn source_type_has_java_object_stringification(ty: &TypeDecl, program: &Program) -> bool {
-    matches!(ty.kind, TypeKind::Class | TypeKind::Record)
+    // An enum is stringifiable without declaring anything: `Enum.toString` returns
+    // the constant's name, and the generated enum already carries a `Display` that
+    // writes `self.name()`. Leaving `Enum` out of this list meant no downcast arm
+    // was emitted for it, so `Object b = Col.BLUE; b.toString()` fell through to
+    // the empty-string default and printed "" where Java prints "BLUE" -- a silent
+    // wrong answer, which 0018 ranks below a compile error. See 0059 R1.
+    matches!(ty.kind, TypeKind::Class | TypeKind::Record | TypeKind::Enum)
         || source_type_has_effective_java_to_string(ty, program)
 }
 

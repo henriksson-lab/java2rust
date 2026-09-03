@@ -1207,13 +1207,23 @@ fn trait_impl_method(
             .compile_error_body(&signature),
         );
     };
-    let (implementing_owner, implementing_method) = candidates
-        .iter()
-        .copied()
-        .find(|(_, candidate)| {
-            trait_impl_method_compatibility_error(interface_method, candidate).is_none()
-        })
-        .unwrap_or(candidates[0]);
+    let compatible = candidates.iter().copied().find(|(_, candidate)| {
+        trait_impl_method_compatibility_error(interface_method, candidate).is_none()
+    });
+    // A `default` method that nothing overrides keeps the interface's body --
+    // that is what `default` means. Candidates are gathered by *name*, so an
+    // unrelated overload (`f(String)`) is offered for `f(int)`, and taking
+    // `candidates[0]` regardless then reported the two as incompatible and
+    // emitted `panic!("incompatible Java interface method implementation")`
+    // beside the method that does exist. That compiled with no diagnostic and
+    // aborted at run time through the trait object, while a call on the concrete
+    // type was fine. The no-candidates branch above already defers to the
+    // default; this is the same case reached with a namesake in the way.
+    // See claude_audits/0065.
+    if compatible.is_none() && interface_method.body.is_some() {
+        return None;
+    }
+    let (implementing_owner, implementing_method) = compatible.unwrap_or(candidates[0]);
     if let Some(message) =
         trait_impl_method_compatibility_error(interface_method, implementing_method)
     {

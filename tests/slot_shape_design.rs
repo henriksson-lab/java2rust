@@ -1693,10 +1693,27 @@ class NativeMapFinalFacadeValueUse {
         "{:?}",
         translation.diagnostics
     );
+    // The local used to take the map value's *borrow* shape, discarding the
+    // optionality: `let payload: &Payload = payloads.get(name).expect(..)`. That is
+    // right only because this body dereferences `payload` immediately -- Java does
+    // throw here -- and it aborts the process, where Java throws a *catchable*
+    // NullPointerException. The same shape applied to a local that flows into a
+    // value context (`String miss = m.get("b"); return "reached:" + miss;`) panicked
+    // where Java prints `reached:null`, which is the abort this expectation is now
+    // written against having removed.
+    //
+    // The remaining cost is real and is recorded in 0056: the local is an owned
+    // `Option<Payload>` rather than a borrow, so the value is cloned and the alias
+    // is broken (0002). Deciding by *use* -- borrow-and-unwrap when the local is
+    // only ever dereferenced, keep the `Option` when it can reach a value context --
+    // is the shape that costs nothing, and is not implemented.
     assert!(
-        translation.rust.contains(
-            "let payload: &ExternalOwner_Payload = payloads.get(name).expect(\"Java null receiver\");"
-        ) && translation.rust.contains("return Ok(payload.get_name());")
+        translation
+            .rust
+            .contains("let payload: Option<ExternalOwner_Payload> = payloads.get(name).cloned();")
+            && translation.rust.contains(
+                "return Ok(payload.as_ref().ok_or_else(|| JavaException::new(\"NullPointerException\", \"Java null receiver\".to_string()))?.get_name());"
+            )
             && !translation
                 .rust
                 .contains("let payload: Box<dyn std::any::Any>"),
@@ -41109,7 +41126,22 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(!lower_source.contains(".next().expect(\"Java iterator exhausted\")"));
     assert!(lower_source.contains("iterator_next_result_projection(iterator)"));
     assert!(lower_source.contains("iterator_next_expect_projection(iterator)"));
-    assert!(lower_source.contains("tuple_field_projection(next_expr, field_index)"));
+    // The accessor match, the tuple projection and the slot application were written
+    // out three times in `lower_map_entry_accessor_expr_for_slot`, once per way of
+    // obtaining the entry receiver, and the copies had drifted. They are one
+    // question now, so the guardrail names the shared projection rather than one of
+    // the three call sites it replaced.
+    assert!(lower_source.contains("fn map_entry_accessor_projection("));
+    assert!(lower_source.contains("tuple_field_projection(entry, field_index)"));
+    assert!(
+        lower_source.matches("fn map_entry_accessor_field(").count() == 1
+            && lower_source
+                .matches("map_entry_accessor_projection(")
+                .count()
+                == 4,
+        "map-entry accessor selection and projection should each have one definition \
+         and one call per receiver form"
+    );
     assert!(!coercion_source.contains("pub fn render_sequence_iteration_source"));
     assert!(coercion_source.contains("pub fn sequence_iteration_source_projection"));
     assert!(lower_source.contains("sequence_iteration_source_projection"));

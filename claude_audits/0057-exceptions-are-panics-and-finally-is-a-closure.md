@@ -1591,3 +1591,35 @@ or the uncaught-Java-exception adapter as appropriate; string/char-sequence
 initializers stay on plain `new_1(...)`. Covered by
 `tests/idiom_gaps.rs::string_builder_capacity_constructor_uses_result_only_for_integral_capacity`.
 The full differential test now passes all 219 checked-in fixtures.
+
+---
+
+## 2026-09-02 — `unmodifiable*` / `asList`: deliberately not "fixed" yet
+
+The recheck added a silent-divergence finding: `Collections.unmodifiableList`,
+`unmodifiableMap` and `Arrays.asList` erase to a plain `mut Vec`/`HashMap`, so
+Java's `UnsupportedOperationException` never happens (Java `uoe` vs translated
+`added:2`), and a dead `catch (UnsupportedOperationException)` arm is emitted
+beside it.
+
+The obvious fix — refuse these loudly, as 0058 now does for upcasts — was
+**measured and rejected**. Every use in the repo is read-only consumption:
+
+```
+examples/idiom-gaps/CollectionAddAllAndSize.java:10   values.addAll(Arrays.asList("a", "b"))
+examples/idiom-gaps/ArraysAsListSplitAddAll.java:10   fields.addAll(Arrays.asList(split))
+tests/differential/CollectionAddAllReturn.java:15,19,20
+tests/differential/MapKeySetRemoveAll.java:13
+```
+
+11 occurrences, all `Arrays.asList` as an argument to `addAll`/`removeAll`, and
+**zero** uses of `unmodifiable*` anywhere in `examples/` or `tests/`. All of them
+are correct today as a `Vec`. A blanket refusal would break six working fixtures,
+including differential ones, to correct a divergence none of them exhibits.
+
+The divergence needs *mutation through the view*, so the real fix is to carry
+"this value came from an unmodifiable view" on the value and refuse the mutating
+call — not to refuse the constructor. That is a fact-and-shape change of the same
+kind as the shared-handle work, not a lowering tweak, and it should be scheduled
+as one. Until then this stays open and known, because a wrong loud answer here
+would cost more than the silent one it replaces.

@@ -360,3 +360,36 @@ class Child2 extends Base2 { @Override int f(int a){...} int f(String s){...} }
 Each asserts *values through a supertype-typed reference*, not spellings — 0009's
 2026-08-03 update records two tests that asserted contradictory spellings of the
 same construct and both passed for months.
+
+---
+
+## Re-verified 2026-09-02 — reopened, 2 of 4 scopes fixed
+
+**Fixed:** §1, the cross-file translator panic — `exit=0`, no `signature.rs:5267`,
+`Child` gets consistent `f_int`/`f_string`, `rustc` clean, and `translate-batch`
+no longer kills the worker. §3, three levels of inheritance, fixed at name level.
+
+**Not fixed, and silently wrong** — §2, an overload introduced through
+`implements`:
+
+```java
+interface I { default int f(int a) { return a + 1; } int f(String s); }
+class Impl implements I { public int f(String s) { return s.length() + 1000; } }
+I x = new Impl(); x.f("ab") + "," + x.f(101)
+```
+
+Java prints `1002,102`. The translation compiles with **0 rustc errors**, emits
+**0 translator diagnostics**, and aborts `exit=101` on
+
+```rust
+fn f_int(&self, a: i32) -> i32 { panic!("incompatible Java interface method implementation: ..."); }
+```
+
+nine lines above the `Impl::f_string` that exists. Only the trait-object path is
+affected, which is why it survived. Same defect cross-file. §3-mirror (a subclass
+*adding* an overload) is also unfixed: `H_Base::f` vs `H_Child::f_int` disagree.
+
+**Why the tests did not catch it:** `idiom_gaps.rs:13676/13726/13777` assert only
+`translation.rust.contains("pub fn f_int...")` — spellings, never values, and
+never the trait-impl slot. Direction item 4 (make the `panic!` a translator
+diagnostic) remains undone; this is the fourth ask.

@@ -342,7 +342,14 @@ pub fn translate_batch_sources_with_context_sources_summary_sources_and_options(
     for source in primary_sources {
         let mut parsed = parser::parse_java_source(&source.source);
         qualify_same_package_class_literals(&mut parsed.program);
-        context_diagnostics.extend(parsed.diagnostics.clone());
+        // A *primary* file's parse diagnostics belong to that file, and already
+        // reach it through `parsed.diagnostics` in
+        // `translate_parsed_source_with_batch_context`. Adding them to the
+        // batch-wide bag as well gave every file in the batch every other file's
+        // parse errors -- so one unparseable file marked all its clean siblings
+        // `errors`, and was itself counted twice. The bag is for *context* and
+        // summary sources, which really are shared; that is the invariant the
+        // single-file path above keeps. See claude_audits/0055.
         parsed_primary.push((source.path.clone(), parsed));
     }
     timings.primary_parse_ms = primary_parse_start.elapsed().as_millis();

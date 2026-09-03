@@ -20,8 +20,8 @@ use std::process::Command;
 
 use new_java2rust::translate_source;
 
-const EXPECTED_DIFFERENTIAL_FIXTURES: usize = 219;
-const EXPECTED_KNOWN_GAP_FIXTURES: usize = 6;
+const EXPECTED_DIFFERENTIAL_FIXTURES: usize = 221;
+const EXPECTED_KNOWN_GAP_FIXTURES: usize = 8;
 
 #[test]
 fn translated_output_matches_java_output() {
@@ -150,6 +150,16 @@ enum KnownGapExpectation {
         expected_translated_output: &'static str,
         diagnostic_code: &'static str,
     },
+    /// The generated Rust does not compile, and the translator does not know it.
+    ///
+    /// The three variants above all require the *translator* to have noticed --
+    /// a `compile_error!`, a diagnostic code, or a divergence it predicted. A gap
+    /// only `rustc` can see had nowhere to be recorded, which is 0018's complaint
+    /// one level up: the shelf for known-broken things could only hold the
+    /// known-broken things we already had a name for. Recording the `rustc` error
+    /// code keeps the gap honest -- and this fails once the gap is fixed, which is
+    /// the prompt to promote the fixture out of `known-gaps/`.
+    RustcCompileError { error_code: &'static str },
 }
 
 fn known_gap_fixtures() -> Vec<KnownGapFixture> {
@@ -161,6 +171,22 @@ fn known_gap_fixtures() -> Vec<KnownGapFixture> {
             expectation: KnownGapExpectation::DivergentOutput {
                 expected_translated_output: "0|0|0|0",
                 diagnostic_code: "observable_alias",
+            },
+        },
+        KnownGapFixture {
+            display: "tests/differential/known-gaps/BorrowedElementIntoPrimitiveLocal.java",
+            class: "BorrowedElementIntoPrimitiveLocal",
+            expected_java_output: "2,3",
+            expectation: KnownGapExpectation::RustcCompileError {
+                error_code: "E0308",
+            },
+        },
+        KnownGapFixture {
+            display: "tests/differential/known-gaps/EnumValuesElementIntoObject.java",
+            class: "EnumValuesElementIntoObject",
+            expected_java_output: "BLUE,BLUE",
+            expectation: KnownGapExpectation::RustcCompileError {
+                error_code: "E0599",
             },
         },
         KnownGapFixture {
@@ -279,6 +305,22 @@ fn check_known_gap(fixture: &KnownGapFixture) -> Result<(), String> {
                 let _ = std::fs::remove_dir_all(&work);
                 return Err(format!(
                     "translation did not fail at runtime with {message:?}: {err}"
+                ));
+            }
+        }
+        KnownGapExpectation::RustcCompileError { error_code } => {
+            let compiled = compile_translated_rust_source(&work, fixture.class, &translation.rust);
+            let Err(err) = compiled else {
+                let _ = std::fs::remove_dir_all(&work);
+                return Err(
+                    "generated Rust compiled; the gap is fixed -- promote this fixture out of known-gaps/"
+                        .to_string(),
+                );
+            };
+            if !err.contains(error_code) {
+                let _ = std::fs::remove_dir_all(&work);
+                return Err(format!(
+                    "generated Rust did not fail with {error_code:?}: {err}"
                 ));
             }
         }

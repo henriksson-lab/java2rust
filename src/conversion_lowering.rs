@@ -104,7 +104,15 @@ pub fn apply_optional_receiver_slot_projection(
         expr: projected,
         actual: conversion_plan.actual.clone(),
     };
-    apply_lowered_slot_expr_conversion(projected, conversion_plan)
+    // The projection above already discharges the optionality, and the
+    // conversion can discharge it a second time -- giving
+    // `cur.as_ref().ok_or_else(..)?.ok_or_else(..)?`, where the second unwrap
+    // lands on the element the first produced (`E0599`). One of the four callers
+    // of this function wrapped the result in this strip and the other three did
+    // not; doing it here means no caller can forget. See claude_audits/0056.
+    crate::coercion::strip_redundant_java_null_expect_after_unwrap(
+        apply_lowered_slot_expr_conversion(projected, conversion_plan),
+    )
 }
 
 pub fn apply_reused_optional_unwrap(

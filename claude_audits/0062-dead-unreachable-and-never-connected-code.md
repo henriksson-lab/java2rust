@@ -817,3 +817,29 @@ All findings came from four passes over the tree, none of which need `cargo`:
    candidates were false positives.
 4. **overload pairs** — for each `fn X_with_facts`, check whether `fn X` exists and
    whether `X` has any production caller.
+
+---
+
+## Re-verified 2026-09-02 — reopened, two censuses regrew
+
+Every **named** item verifies as gone, and where a live replacement was claimed it
+is genuinely constructed and reachable. **≈1,669 lines** actually deleted against
+the ~1,700 estimate. Items 2 and 3 confirmed clean by inspection, not assumption.
+
+Reopened for three reasons:
+
+1. The two open-ended closing counts — "4 retained public helpers" and "one
+   test-only base wrapper" — are **17** and **6** at HEAD.
+2. **8 of the 17 residual zero-caller functions are kept alive only by
+   `assert!(source.contains("pub fn X"))`** — 0063's own anti-pattern, regrown.
+3. **`RewriteNeed` was deleted against this audit's explicit instruction.** It was
+   in the "never finished — do not delete" list; its four unimplemented rewrites
+   now survive only inside this file. Likewise the `DynCloneBoxAdapter*` design
+   was replaced by a live `CloneBoxDynTrait` producer, but the adapter
+   *generation* it deferred is still missing: the only `clone_box` body emitted
+   for a plain source-class carrier is
+   `panic!("requires a cloneable Java object carrier")`
+   (`representation_lowering.rs:1020`). The admission moved from `src/` into
+   generated output.
+
+Appendix A holds, corrected: **16** flags (not 15), all connected.

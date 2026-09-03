@@ -1346,3 +1346,67 @@ and `tests/differential/MapEntryDetachedContract.java`. A full differential
 rerun in this tree still stops on unrelated StringBuilder catchability failures;
 the new detached-entry fixture itself compiles and matches Java through the
 focused generated-crate test.
+
+---
+
+## Re-verified 2026-09-02 — the five regressions, re-measured
+
+The re-check found five previously-correct areas broken. All five reproduce, and
+two are now fixed. The remaining three are pinned as differential fixtures rather
+than left as prose, so they cannot regress further unnoticed.
+
+### R1 `Object b = Col.BLUE` — **fixed**
+
+An enum constant is written like a static field read and is not one: it is a
+variant. `lower_java_enum_static_field_access_with_owner` knows this, but it was
+a *sibling* of `lower_static_storage_field_access` rather than a step inside it,
+so which of the two claimed the access depended on context. `Col c = Col.BLUE`
+reached the enum path; `Object b = Col.BLUE` reached the static-storage path and
+emitted `Col::__static_BLUE()` — an accessor that is only generated for real
+static fields (`E0599`). The static-storage resolver now declines a field that is
+a variant of its owner, so the enum path is the only lowering that can claim one,
+in every context.
+
+Fixing that alone turned the compile error into something worse. Java's
+`Enum.toString` returns the constant's name, but enums were excluded from the
+erased-object downcast table — `source_type_has_java_object_stringification`
+admitted `Class` and `Record` only — so `b.toString()` fell through to the
+empty-string default: Java `BLUE`, Rust `""`. A **silent wrong answer**, which
+0018 ranks below the compile error it replaced. The generated enum already
+carried a `Display` writing `self.name()`; it is now reachable through the erased
+path. Gated by `tests/differential/EnumConstantAsObject.java` (`BLUE,RED,BLUE`,
+matching the oracle).
+
+### R3 nested-map read — **fixed**, see 0056
+
+`m.get("a").get(1)` emitted two identical `.expect("Java null receiver")` calls,
+the second landing on the `Vec` the first produced. Fixed at the constructor;
+gated by `tests/differential/NestedMapValueRead.java`.
+
+### R2 `Col.values()[i]` — **open**, now pinned
+
+`known-gaps/EnumValuesElementIntoObject.java`. The array read produces an optional
+element and the erasure unwraps it again: `Col::values()[1].unwrap()`, where
+`values()` returns `Vec<Self>` and the elements are not optional. This is the
+sequence-side twin of 0056's doubled receiver unwrap and wants the same treatment
+— one answer to "has this already been discharged", not a per-site decision.
+
+### R4 entry-set `sum += e.getValue()` — **open**, now pinned
+
+`known-gaps/BorrowedElementIntoPrimitiveLocal.java`. A borrowed collection element
+is not dereferenced into a primitive-value slot: `&i32` where `i32` is expected
+(`E0308`). The fixture covers both shapes of the same defect — a declared `int`
+local from `list.get(i)`, and the compound assignment — so a fix that handles only
+one of them leaves it failing. Read-only loops are unaffected, which is why it
+went unnoticed: the value has to land in a slot that owns a primitive.
+
+Redundancy removed while measuring this: `lower_map_entry_accessor_expr_for_slot`
+contained the accessor match, the tuple projection and the slot application
+written out **three times**, once per way of obtaining the receiver, and the
+copies had drifted — `getKey` fell back to the slot's target type when the
+entry's type argument was `Unknown` and `getValue` did not, for no reason beyond
+which copy was edited last. They are one question now
+(`map_entry_accessor_field` + `map_entry_accessor_projection`); a fourth receiver
+form only has to say how to get the entry expression.
+
+### R5 → gate failure, fixed under 0056.

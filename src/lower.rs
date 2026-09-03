@@ -12662,12 +12662,6 @@ fn refine_local_plan_from_initializer(
         local_plan.shape = RustSlotShape::for_storage(local_plan.shape.java_ty.clone());
         return local_plan;
     }
-    if let Some(shape) =
-        native_map_get_required_declared_value_local_shape(initializer, declared_ty, env, ctx)
-    {
-        local_plan.shape = shape;
-        return local_plan;
-    }
     if let Expr::Cast { ty, .. } = initializer
         && cast_target_erases_slot_generic_detail(ty, &local_plan.shape.java_ty)
     {
@@ -12771,58 +12765,6 @@ fn local_optional_shape_from_initializer_shape(
         .optional_element_type()
         .is_some_and(|element_ty| same_concrete_java_type(&element_ty, &local.java_ty))
         .then(|| initializer.clone())
-}
-
-fn native_map_get_required_declared_value_local_shape(
-    initializer: &Expr,
-    declared_ty: &JavaType,
-    env: &ShapeEnv,
-    ctx: LowerCtx,
-) -> Option<RustSlotShape> {
-    let Expr::Call {
-        receiver,
-        name,
-        args,
-        resolved,
-    } = initializer
-    else {
-        return None;
-    };
-    if name != "get" || args.len() != 1 {
-        return None;
-    }
-    let plan = plan_call_expr_with_lower_context(
-        receiver.as_deref(),
-        name,
-        args,
-        resolved.as_ref(),
-        ctx,
-        env,
-    );
-    let CallExprPlan::Target(CallTargetPlan::NativeCollectionMethod {
-        receiver, method, ..
-    }) = plan
-    else {
-        return None;
-    };
-    if method != NativeCollectionMethod::MapGet {
-        return None;
-    }
-    let LoweredType::OptionalElementBorrow { element_shape, .. } =
-        native_collection_lowered_type(receiver, method, env.type_env())?
-    else {
-        return None;
-    };
-    if !same_concrete_java_type(&element_shape.java_ty, declared_ty) {
-        return None;
-    }
-    if !matches!(
-        element_shape.ownership,
-        OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
-    ) {
-        return None;
-    }
-    Some(*element_shape)
 }
 
 fn simple_declared_local_type_is_shadowed_by_local_capture_constructor(
@@ -22141,13 +22083,40 @@ fn source_java_enum_values_call_owner(
     source_type_name_from_expr(receiver, env, ctx)
 }
 
+/// The owner of `receiver.field` *when that access is really static storage*.
+///
+/// A Java enum constant is written like a static field read and is not one: it is
+/// a variant, lowered by `lower_java_enum_static_field_access_with_owner` to
+/// `Col::BLUE`. That lowering is a sibling of this one rather than a step inside
+/// it, so which of the two claimed `Col.BLUE` depended on the surrounding context
+/// -- assigning to a `Col` local reached the enum path, but assigning to `Object`
+/// reached this one and emitted `Col::__static_BLUE()`, an accessor that is never
+/// generated for a variant (`E0599`). Declining here means the enum path is the
+/// only lowering that can claim a variant, in every context. See 0059 R1.
+fn static_storage_owner_for_field(
+    receiver: &Expr,
+    field: &str,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<String> {
+    let owner = static_storage_owner_type_name(receiver, env, ctx)?;
+    if ctx
+        .representations
+        .java_enum_variant_path_for_label(&owner, field)
+        .is_some()
+    {
+        return None;
+    }
+    Some(owner)
+}
+
 fn lower_static_storage_field_access(
     receiver: &Expr,
     field: &str,
     env: &ShapeEnv,
     ctx: LowerCtx,
 ) -> Option<RustExpr> {
-    let owner = static_storage_owner_type_name(receiver, env, ctx)?;
+    let owner = static_storage_owner_for_field(receiver, field, env, ctx)?;
     let field_name = static_storage_access_name_for_owner(&owner, field, env, ctx)?;
     let rust_owner = crate::slot_render::rust_name_for_java_named_type(&owner);
     Some(qualified_static_storage_accessor_projection(
@@ -22163,7 +22132,7 @@ fn lower_static_storage_field_access_for_slot(
     slot: &Slot,
     ctx: LowerCtx,
 ) -> Option<RustExpr> {
-    let owner = static_storage_owner_type_name(receiver, env, ctx)?;
+    let owner = static_storage_owner_for_field(receiver, field, env, ctx)?;
     if static_field_access_is_associated_const(&owner, field, ctx) {
         return None;
     }
@@ -39464,6 +39433,49 @@ fn lower_reused_optional_wrap_for_slot(
     ))
 }
 
+/// `entry.getKey()` / `entry.getValue()` as a tuple field read.
+///
+/// The accessor match, the tuple projection and the slot application used to be
+/// written out three times in `lower_map_entry_accessor_expr_for_slot`, once per
+/// way of obtaining the receiver -- and the three copies had already drifted:
+/// `getKey` fell back to the slot's target type when the entry's type argument was
+/// `Unknown` and `getValue` did not, for no reason other than which copy someone
+/// last edited. They are one question now.
+fn map_entry_accessor_field(
+    name: &str,
+    key_ty: JavaType,
+    value_ty: JavaType,
+    slot: &Slot,
+) -> Option<(usize, JavaType)> {
+    const MAP_ENTRY_VALUE_ACCESSOR: &str = concat!("get", "Value");
+    match name {
+        "getKey" | "get_key" => Some((
+            0,
+            map_entry_accessor_type_or_slot_target(&key_ty, slot).unwrap_or(key_ty),
+        )),
+        accessor if accessor == MAP_ENTRY_VALUE_ACCESSOR || accessor == "get_value" => Some((
+            1,
+            map_entry_accessor_type_or_slot_target(&value_ty, slot).unwrap_or(value_ty),
+        )),
+        _ => None,
+    }
+}
+
+fn map_entry_accessor_projection(
+    entry: RustExpr,
+    field_index: usize,
+    actual_ty: JavaType,
+    slot: &Slot,
+    ctx: LowerCtx,
+) -> RustExpr {
+    let entry_access = tuple_field_projection(entry, field_index);
+    let actual = crate::shape_projection::borrowed_sequence_element_shape(actual_ty);
+    make_java_null_expect_catchable_in_propagating_ctx(
+        apply_expr_to_slot_via_plan(entry_access, actual, slot, ctx.facts),
+        ctx,
+    )
+}
+
 fn lower_map_entry_accessor_expr_for_slot(
     expr: &Expr,
     env: &ShapeEnv,
@@ -39484,7 +39496,9 @@ fn lower_map_entry_accessor_expr_for_slot(
         return None;
     }
     let receiver = receiver.as_deref()?;
-    const MAP_ENTRY_VALUE_ACCESSOR: &str = concat!("get", "Value");
+
+    // The three ways an entry receiver can be reached. Everything after this is
+    // shared, so a new one only has to say how to get the entry expression.
     if let Expr::Var(local_name) = receiver
         && let Some((key_ty, value_ty)) = refinements
             .map_entry_locals
@@ -39492,58 +39506,34 @@ fn lower_map_entry_accessor_expr_for_slot(
             .cloned()
             .or_else(|| map_entry_local_types_from_env(local_name, env))
     {
-        let (field_index, actual_ty) = match name.as_str() {
-            "getKey" | "get_key" => (
-                0,
-                map_entry_accessor_type_or_slot_target(&key_ty, slot).unwrap_or(key_ty),
-            ),
-            accessor if accessor == MAP_ENTRY_VALUE_ACCESSOR || accessor == "get_value" => {
-                (1, value_ty)
-            }
-            _ => return None,
-        };
-        let entry_access = tuple_field_projection(RustExpr::Var(local_name.clone()), field_index);
-        let actual = crate::shape_projection::borrowed_sequence_element_shape(actual_ty);
-        return Some(make_java_null_expect_catchable_in_propagating_ctx(
-            apply_expr_to_slot_via_plan(entry_access, actual, slot, ctx.facts),
+        let (field_index, actual_ty) = map_entry_accessor_field(name, key_ty, value_ty, slot)?;
+        return Some(map_entry_accessor_projection(
+            RustExpr::Var(local_name.clone()),
+            field_index,
+            actual_ty,
+            slot,
             ctx,
         ));
     }
     if let Some((next_expr, key_ty, value_ty)) =
         lower_map_entry_next_expr(receiver, env, ctx, refinements)
     {
-        let (field_index, actual_ty) = match name.as_str() {
-            "getKey" | "get_key" => (
-                0,
-                map_entry_accessor_type_or_slot_target(&key_ty, slot).unwrap_or(key_ty),
-            ),
-            accessor if accessor == MAP_ENTRY_VALUE_ACCESSOR || accessor == "get_value" => {
-                (1, value_ty)
-            }
-            _ => return None,
-        };
-        let entry_access = tuple_field_projection(next_expr, field_index);
-        let actual = crate::shape_projection::borrowed_sequence_element_shape(actual_ty);
-        return Some(make_java_null_expect_catchable_in_propagating_ctx(
-            apply_expr_to_slot_via_plan(entry_access, actual, slot, ctx.facts),
+        let (field_index, actual_ty) = map_entry_accessor_field(name, key_ty, value_ty, slot)?;
+        return Some(map_entry_accessor_projection(
+            next_expr,
+            field_index,
+            actual_ty,
+            slot,
             ctx,
         ));
     }
     let (key_ty, value_ty) = map_entry_type_args_from_expr_shape(receiver, env, ctx)?;
-    let (field_index, actual_ty) = match name.as_str() {
-        "getKey" | "get_key" => (
-            0,
-            map_entry_accessor_type_or_slot_target(&key_ty, slot).unwrap_or(key_ty),
-        ),
-        accessor if accessor == MAP_ENTRY_VALUE_ACCESSOR || accessor == "get_value" => {
-            (1, value_ty)
-        }
-        _ => return None,
-    };
-    let entry_access = tuple_field_projection(lower_expr(receiver, env, ctx), field_index);
-    let actual = crate::shape_projection::borrowed_sequence_element_shape(actual_ty);
-    Some(make_java_null_expect_catchable_in_propagating_ctx(
-        apply_expr_to_slot_via_plan(entry_access, actual, slot, ctx.facts),
+    let (field_index, actual_ty) = map_entry_accessor_field(name, key_ty, value_ty, slot)?;
+    Some(map_entry_accessor_projection(
+        lower_expr(receiver, env, ctx),
+        field_index,
+        actual_ty,
+        slot,
         ctx,
     ))
 }

@@ -1844,3 +1844,78 @@ public class ModeledPeer {
     );
     assert!(generated.contains("pub struct ModeledPeer"), "{generated}");
 }
+
+/// One unparseable file in a batch must not mark its clean siblings `errors`.
+///
+/// Batch mode pooled every *primary* file's parse diagnostics into a batch-wide
+/// bag and then appended that bag to each file's own diagnostics. Every file
+/// therefore carried every other file's parse errors, so a single bad file made
+/// the whole batch read `errors`, and the bad file was counted twice -- its own
+/// diagnostics reach it directly through `parsed.diagnostics` as well. The
+/// column had gone from constant-`ok` (the original 0055 finding) to
+/// effectively constant-`errors`, which is still not a measurement.
+///
+/// The bag is for context and summary sources, which genuinely are shared by
+/// every file; the single-file path always kept that invariant.
+///
+/// See claude_audits/0055-batch-translation-status-is-not-measured.md.
+#[test]
+fn translate_batch_keeps_parse_diagnostics_with_the_file_that_caused_them() {
+    let dir = unique_temp_dir("translate_batch_diagnostic_isolation");
+    let source_dir = dir.join("java");
+    let out_dir = dir.join("out");
+    let generated_dir = out_dir.join("generated");
+    fs::create_dir_all(&source_dir).unwrap();
+    fs::create_dir_all(&generated_dir).unwrap();
+    fs::write(
+        source_dir.join("CleanOne.java"),
+        "public class CleanOne { public static int run() { return 7; } }\n",
+    )
+    .unwrap();
+    fs::write(
+        source_dir.join("CleanTwo.java"),
+        "public class CleanTwo { public static int run() { return 8; } }\n",
+    )
+    .unwrap();
+    fs::write(
+        source_dir.join("Unparseable.java"),
+        "public class Unparseable { public static int run() { return ((( } }\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_new-java2rust"))
+        .arg("translate-batch")
+        .arg("--primary")
+        .arg(&source_dir)
+        .arg("--out-dir")
+        .arg(&out_dir)
+        .arg("--generated-dir")
+        .arg(&generated_dir)
+        .output()
+        .expect("run translate-batch");
+    assert!(
+        output.status.success(),
+        "translate-batch failed\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let status = fs::read_to_string(out_dir.join("status.tsv")).unwrap();
+    let mut seen = 0;
+    for line in status.lines().skip(1) {
+        let fields = line.split('\t').collect::<Vec<_>>();
+        let (source, translate_status, diagnostics) = (fields[0], fields[2], fields[3]);
+        seen += 1;
+        if source.ends_with("Unparseable.java") {
+            assert_eq!(translate_status, "errors", "{status}");
+            // Exactly once -- not once from its own parse and again from the bag.
+            assert_eq!(diagnostics, "1", "{status}");
+        } else {
+            assert_eq!(
+                translate_status, "ok",
+                "a clean file inherited another file's parse errors\n{status}"
+            );
+            assert_eq!(diagnostics, "0", "{status}");
+        }
+    }
+    assert_eq!(seen, 3, "{status}");
+}
