@@ -33,7 +33,7 @@ pub fn generic_facade_interface_erases_to_named_rust_type(java_ty: &JavaType) ->
     )
 }
 
-pub fn broad_ioutils_support_item() -> crate::rust_ir::RustItem {
+pub(crate) fn broad_ioutils_support_item() -> crate::rust_ir::RustItem {
     crate::rust_ir::RustItem::Raw(
         r#"pub struct IOUtils;
 
@@ -717,6 +717,7 @@ pub fn is_jdk_input_stream_facade_type(canonical_key: &str) -> bool {
 #[cfg(test)]
 mod jdk_name_set_tests {
     use super::*;
+    use crate::rust_ir::RustItem;
 
     #[test]
     fn exception_supertypes_cover_the_hierarchy_roots_and_nothing_else() {
@@ -737,5 +738,19 @@ mod jdk_name_set_tests {
         ));
         assert!(!is_jdk_input_stream_facade_type("OutputStream"));
         assert!(!is_jdk_input_stream_facade_type("Reader"));
+    }
+
+    #[test]
+    fn broad_ioutils_support_item_contains_path_file_boundaries() {
+        let RustItem::Raw(support) = broad_ioutils_support_item() else {
+            panic!("Broad IOUtils support should remain a single runtime support item");
+        };
+
+        assert!(support.contains("pub struct IOUtils;"));
+        assert!(support.contains("pub fn get_path<P: JavaPathArg>(path: P) -> Path"));
+        assert!(support.contains("pub fn append_path_to_dir<D: JavaPathArg, P: JavaPathArg>"));
+        assert!(support.contains("pub fn assert_file_is_readable<P: JavaPathArg>"));
+        assert!(support.contains("pub fn assert_paths_are_readable<P: JavaPathArg>"));
+        assert!(support.contains("pub fn create_temp_file<P: JavaPathArg, S: JavaPathArg>"));
     }
 }

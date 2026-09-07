@@ -7,6 +7,49 @@ to compile or panic instead of reaching translated control flow, and unknown
 erased-object display still has no dynamic Java `toString` recovery.
 Kind: semantics / lowering.
 
+Follow-up 2026-09-07 `String.join` null delimiter pass: the delimiter argument
+now keeps Java's required non-null contract instead of flowing through borrowed
+string-content lowering as `Default::default()`. In propagating `try/catch`
+contexts, `String.join(null, "a", "b")` now raises a catchable
+`NullPointerException`; null join elements still use the existing Java display
+policy. Differential fixture: `tests/differential/StringJoinNullDelimiter.java`.
+
+Follow-up 2026-09-07 erased native collection display pass: erased `Object`
+display now recovers the concrete native collection carriers emitted for
+`ArrayList<String>`, `LinkedHashSet<String>`, and
+`LinkedHashMap<String,Integer>` instead of panicking at runtime. Promoted
+differential fixtures: `tests/differential/ErasedArrayListDisplay.java`,
+`tests/differential/ErasedLinkedHashSetDisplay.java`, and
+`tests/differential/ErasedLinkedHashMapDisplay.java`; the focused erased-display
+oracle now covers them alongside the platform display fixtures. Arbitrary
+unknown erased-object display remains loud and open.
+
+Follow-up 2026-09-07 erased `BitSet` display pass: the modeled
+`java.util.BitSet` runtime facade now implements Java-like `Display` output for
+set bits, and erased `Object` display includes `BitSet` downcast arms when the
+program mentions the platform type. Promoted differential fixture:
+`tests/differential/ErasedBitSetDisplay.java`; focused generated-crate
+regression:
+`slot_shape_design::erased_bitset_object_display_delegates_to_bitset_display`.
+The focused erased-platform differential loop now includes this promoted fixture
+and the companion Class/Locale/Pattern erased-display fixtures, so the
+one-command erased-display check matches the audit's claimed coverage.
+
+Follow-up 2026-09-07 erased `Class` display pass: erased `Object` values
+holding `JavaClass<T>` now downcast through the concrete class-literal token
+types present in the translated programs, not only `JavaClass<()>`. `JavaClass`
+also implements Java `Class.toString()` display, and `String.class` now carries
+the Java name `java.lang.String`. Promoted differential fixture:
+`tests/differential/ErasedClassDisplay.java`.
+
+Follow-up 2026-09-07 nullable external display guard: external
+`toString(): String` facts now mark a facade display-capable only when the fact's
+return nullability is `DefinitelyNonNull`. When a nullable `toString` facade
+method is emitted, its return stays nullable, but `Display` stays on the loud
+unsupported facade path instead of assuming the display contract is non-null.
+Regression:
+`slot_shape_design::nullable_external_to_string_fact_does_not_mark_facade_display_capable`.
+
 Follow-up 2026-08-30 current-tree triage:
 the original broad `null` complaint is mostly stale. Bare `null`, nullable
 arrays, catchable null receivers, null comparisons, and display fallbacks now
@@ -18,6 +61,13 @@ which handles known downcasts and otherwise panics instead of silently returning
 `""`. That is a bounded fact/platform expansion problem for known types, and a
 larger runtime representation question for arbitrary unknown erased objects.
 Guard: `idiom_gaps::external_object_to_string_fallback_is_loud_not_empty`.
+
+Follow-up 2026-09-06 stale-baseline pass: the map-get string display segment
+row was still listed as an idiom-gap failure even though current lowering uses
+the borrowed optional display path and compiles:
+`values.get(key).as_ref().map(|value| value.to_string()).unwrap_or_else(...)`.
+The assertion now accepts that current shape. Verified:
+`idiom_gaps::map_get_string_display_segment_unwraps_optional_borrow`.
 
 Follow-up 2026-08-30 plain-object support emission pass:
 `new Object()` now marks the generated crate as needing erased-object runtime
@@ -66,13 +116,16 @@ through shaped/grouped/`?` wrappers, avoiding the invalid
 Regressions:
 `tests/idiom_gaps.rs::local_array_argument_to_nullable_out_parameter_stays_owned_vec`,
 `tests/idiom_gaps.rs::nullable_mutable_array_helper_return_count_keeps_caller_storage_owned`,
-`tests/idiom_gaps.rs::nullable_borrowed_array_param_passes_to_slice_helper_without_extra_as_slice`,
 `tests/idiom_gaps.rs::nullable_read_only_array_parameters_lower_as_optional_borrowed_slices`,
 `tests/idiom_gaps.rs::nullable_out_parameter_reborrows_for_recursive_call_before_reuse`,
 and
 `lower::tests::fallible_array_index_read_collapses_redundant_catchable_optional_sequence_as_ref`.
 The audit remains open for broader non-argument null representation and unknown
 erased display.
+
+Correction 2026-09-07: `nullable_borrowed_array_param_passes_to_slice_helper_without_extra_as_slice`
+was no longer a release `idiom_gaps` failure and has been removed from the
+checked-in failure baseline.
 
 Follow-up 2026-08-29 write-side nullable array receiver pass:
 optional mutable sequence receivers now use the same catchable Java-null
@@ -464,6 +517,10 @@ keeps the baseline from hiding already-fixed catchable/display/nullability
 paths; the broader null representation and unknown erased-display work remain
 open.
 
+Correction 2026-09-07: `borrowed_nullable_trim_equals_original_uses_optional_string_view_policy`
+was still present in the checked-in failure baseline. It now passes after exact
+optional borrowed arguments are left unchanged at source-call boundaries.
+
 Updated 2026-08-25 while-assignment follow-up: the runtime form of
 `while ((row = cursor.read()) == null) { ... } return row;` now compiles and
 matches Java. The loop lowerer already refined `row` to non-null after the
@@ -543,6 +600,10 @@ instead of unwrapping at the method boundary. Verified:
 and
 `tests/idiom_gaps.rs::solved_local_plan_inherits_nullable_source_call_initializer`;
 the latter was removed from the idiom-gaps expected-failure baseline.
+
+Correction 2026-09-07: the release `idiom_gaps` baseline confirms
+`solved_local_plan_inherits_nullable_source_call_initializer` is no longer a
+current failure.
 
 Follow-up 2026-08-29 baseline pass: nullable source-interface forwarding was
 also a stale assertion. The generated trait surface now widens `String getID()`
@@ -996,6 +1057,10 @@ E0277: `dyn Any` doesn't implement `std::fmt::Display`
 ```
 
 This is now fixed and covered by `tests/differential/MapGetNull2.java`.
+Follow-up 2026-09-07: `MapGetNull2` and the adjacent present-null map-value
+fixture `MapPutNullValue` also have a named focused differential loop,
+`differential::nullable_map_get_fixtures_match_java_output`, so this null
+contract can be rechecked without the full differential sweep.
 Adding a second `Option<String>` local no longer flips a third local's
 representation to erased.
 
@@ -1134,15 +1199,16 @@ which checks the translated output matches Java's stable `xjava.io.` prefix.
 This is still a platform-carrier mitigation; arbitrary unknown erased display
 without source/platform/fact evidence remains open.
 
-Follow-up 2026-08-28: `Object value = new Random(1); "x" + value` now follows
-the same platform erased-display route. `Random` is included in the generated
-platform downcast table when it appears in the source surface, and the generated
-external facade `Display` fallback emits Java-object-style
-`java.util.Random@0` instead of panicking. Promoted differential fixture:
-`ErasedRandomDisplay`, which compares Java and translated output through the
-stable `xjava.util.Random@` prefix. This remains a platform-carrier mitigation;
-arbitrary unknown erased display without source/platform/fact evidence remains
-open.
+Follow-up 2026-08-28/2026-09-07: `Object value = new Random(1); "x" + value`
+and direct `value.toString()` now follow the same platform erased-display
+route. `Random` is included in the generated platform downcast table when it
+appears in the source surface, and the generated external facade `toString`
+stub now delegates to `Display` instead of emitting an unmodelled panic that
+shadowed Rust's blanket `ToString` implementation. Promoted differential
+fixture: `ErasedRandomDisplay`, which compares Java and translated output
+through the stable `java.util.Random@` prefix for both concat and direct calls.
+This remains a platform-carrier mitigation; arbitrary unknown erased display
+without source/platform/fact evidence remains open.
 
 Follow-up 2026-08-28: `Object value = new URL("http://example.com/a"); "x" +
 value` now uses the platform erased-display route. Both generated `URL` support
@@ -1336,6 +1402,11 @@ and length reads unwrap through the current nullable array path. Verified:
 `nullable_path_overload_argument_uses_option_param_and_non_optional_resolve_sibling`,
 and `optional_array_receivers_unwrap_for_read_indexing_and_length`.
 
+Correction 2026-09-07: `optional_array_receivers_unwrap_for_read_indexing_and_length`
+was also still present in the checked-in failure baseline. It now passes after
+optional ndarray row-count lowering unwraps the `Option` receiver without adding
+the slice projection used for `Vec` lengths.
+
 Follow-up 2026-08-29 baseline pass: two more stale nullable/string-shape rows
 were removed after focused verification. `bare_final_instance_field_read_does_not_become_static_constant`
 now compiles with the instance nullable field read preserved, and
@@ -1505,17 +1576,20 @@ the expression unchanged when it already discharges, so the double cannot be
 built in the first place and the strip is only a net for expressions assembled
 without it.
 
-Checked before generalising: a nullable-valued `Map<String,String>` lowers its
+Checked before generalising: a nullable-valued `Map<String,String>` lowered its
 value slot as `String`, not `Option<String>`, so no genuine `Option<Option<T>>`
-needs two identical null-receiver unwraps. (That lowering has its own defect —
-a `null` value becomes `Default::default()`, the empty string, silently — which
-belongs to this audit's open remainder, not to the double.)
+needed two identical null-receiver unwraps. That separate defect is now fixed
+for literal map-value writes: receiver-call usage records the literal-null
+argument indexes, so `Map.put(k, null)`/`putIfAbsent(k, null)` optionalize only
+the value type and `Map.put(null, v)` does not widen the value slot. Gated by
+`signature::tests::literal_null_map_value_receiver_call_optionalizes_value_type_only`
+and `tests/differential/MapPutNullValue.java`.
 
 Gated by `tests/differential/NestedMapValueRead.java`. The sequence-side twin —
-`Col.values()[i]` unwrapping a non-optional element — is pinned in
-`known-gaps/EnumValuesElementIntoObject.java` and wants the same treatment.
+`Col.values()[i]` unwrapping a non-optional element — is now covered by
+`tests/differential/EnumValuesElementIntoObject.java`.
 
-### Open, and paid for by the `Map.get` fix: the local is cloned
+### Partly fixed: `Map.get` locals split receiver-only from value-context use
 
 Giving a `Map.get` initializer the map value's *borrow* shape discarded the
 optionality, so
@@ -1527,7 +1601,7 @@ return "reached:" + miss;      // Java prints reached:null
 
 aborted the process. Removing that shape fixes it, and costs something real:
 
-| | before | after |
+| | original borrowed fix | broad optional fix |
 |---|---|---|
 | binding | `let p: &Payload = m.get(k).expect(..)` | `let p: Option<Payload> = m.get(k).cloned()` |
 | a miss | aborts | catchable `NullPointerException` |
@@ -1540,8 +1614,56 @@ the shape was chosen without asking which body it was in.
 
 Deciding by **use** is the version that costs nothing: borrow-and-unwrap when the
 local is only ever a receiver, keep the `Option` when it can reach a value
-context. The liveness machinery that would answer this already exists. Not
-implemented. Pinned by
-`slot_shape_design::native_map_get_into_final_facade_local_keeps_value_shape`,
-whose expectation now records the clone explicitly so that closing this is a
-visible change rather than a silent one.
+context. The liveness machinery that would answer this already exists.
+
+Follow-up 2026-09-06: the signature-side predicate now makes that use split
+explicit for final erased-object facade values. A `Map.get` local only receives
+the shared-borrow constraint when its post-initializer uses are receiver
+dereferences; value-context uses such as `return payload;` keep the owned
+optional/value shape. This removes the broad constraint that could discard
+nullability for locals that are not immediately dereferenced, while preserving
+the existing receiver-only optimization. Regressions:
+`slot_shape_design::native_map_get_into_final_facade_local_keeps_value_shape`
+and
+`slot_shape_design::native_map_get_value_context_final_facade_local_keeps_option_shape`.
+
+Follow-up 2026-09-06: lowering now respects the same split for initialized
+local declarations. Receiver-only final facade `Map.get` locals lower as
+`Option<&T>` without `.cloned()`, preserving aliasing while keeping the later
+receiver-null projection catchable. Value-context locals still lower as owned
+optionals.
+
+Follow-up 2026-09-07 easy-row pass: four nullable/optional idiom rows were
+removed from the failure baseline after focused generated-crate checks. Three
+were stale assertions for current lowering:
+`constructor_initialized_local_receiver_does_not_get_optional_adapter`,
+`optional_field_mutating_overload_call_uses_signature_name_and_mut_receiver`,
+and
+`optional_map_string_get_compares_to_cross_class_static_string_constant`. The
+fourth,
+`null_guarded_array_parameter_writes_use_mut_optional_receiver_once`, exposed a
+real Rust borrow conflict in checked array writes: the mutable slot was held
+while the RHS read the same nullable receiver. Simple checked array assignments
+now precompute the RHS before taking the mutable slice borrow; compound writes
+keep the old slot-first ordering so they can read the previous slot value.
+
+Follow-up 2026-09-07 nullable map-value null comparison: `Map.get(k) == null`
+now treats both map absence and a present nullable value containing Java `null`
+as null. The map-get null-comparison branch lowers nullable map values to
+`get(k).is_none_or(|value| value.is_none())`; `!= null` uses the matching
+`is_some_and(|value| value.is_some())`. This fixes the remaining behavioral
+gap in `tests/differential/MapPutNullValue.java`, where Java distinguishes
+neither missing keys nor present null values at the `get(k) == null` surface.
+Focused verification on 2026-09-07 compiled and ran that promoted fixture on
+both sides: Java produced `true:null:x`, and the translated Rust binary produced
+the same output.
+
+Follow-up 2026-09-07 focused erased-display loop: the cheap platform display
+oracle now includes the promoted `ErasedStringBuilderDisplay` and
+`ErasedUriDisplay` fixtures, alongside the existing atomic, class, file,
+input-stream, locale, path, pattern, random, and URL carriers. This is coverage
+hygiene for already-modeled carriers; unknown erased display remains open.
+
+Follow-up 2026-09-07 focused erased-display loop: the same cheap oracle now
+also includes `ErasedPlatformDisplay`, so the broad platform-display fixture is
+covered by the targeted recheck instead of only by the full differential sweep.

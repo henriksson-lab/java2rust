@@ -13,6 +13,12 @@ Verified: `cargo test --release --test idiom_gaps catch_and_finally_field_mutati
 `cargo test --release --test idiom_gaps jaligner_try_catch_finally_cleanup_gets_combined_exception_plan`;
 `cargo check --release`
 
+Follow-up 2026-09-06: the adjacent final-statement `try/catch` unit-`Result`
+tail gap from the 2026-09-02 recheck is fixed. A unit-returning method promoted
+to `Result<(), JavaException>` now appends `return Ok(());` when its final
+`try/catch` can fall through via a catch body. Regression:
+`idiom_gaps::final_try_catch_unit_result_method_gets_ok_tail`.
+
 Original status: **open**
 
 Dimension: phase architecture / information lost between passes.

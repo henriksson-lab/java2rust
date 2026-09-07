@@ -1049,20 +1049,38 @@ pub fn lower_equality_comparison_expr_for_op(
             left: Box::new(some_expr(borrow_for_some_expr(left))),
             right: Box::new(option_as_ref(right)),
         },
-        EqualityComparisonPlan::LeftOptionalStringView { left_view } => RustExpr::Binary {
-            op: op.to_string(),
-            left: Box::new(option_as_string_view(left, left_view)),
-            right: Box::new(some_expr(parenthesize_raw_operand_for_prefix_or_call_arg(
-                right,
-            ))),
-        },
-        EqualityComparisonPlan::RightOptionalStringView { right_view } => RustExpr::Binary {
-            op: op.to_string(),
-            left: Box::new(some_expr(parenthesize_raw_operand_for_prefix_or_call_arg(
-                left,
-            ))),
-            right: Box::new(option_as_string_view(right, right_view)),
-        },
+        EqualityComparisonPlan::LeftOptionalStringView { left_view } => {
+            let left_is_string = expr_records_non_optional_string(&left);
+            RustExpr::Binary {
+                op: op.to_string(),
+                left: Box::new(if left_is_string {
+                    string_equality_operand_expr(left, StringEqualityOperandView::NativeString)
+                } else {
+                    option_as_string_view(left, left_view)
+                }),
+                right: Box::new(if left_is_string {
+                    parenthesize_raw_operand_for_prefix_or_call_arg(right)
+                } else {
+                    some_expr(parenthesize_raw_operand_for_prefix_or_call_arg(right))
+                }),
+            }
+        }
+        EqualityComparisonPlan::RightOptionalStringView { right_view } => {
+            let right_is_string = expr_records_non_optional_string(&right);
+            RustExpr::Binary {
+                op: op.to_string(),
+                left: Box::new(if right_is_string {
+                    parenthesize_raw_operand_for_prefix_or_call_arg(left)
+                } else {
+                    some_expr(parenthesize_raw_operand_for_prefix_or_call_arg(left))
+                }),
+                right: Box::new(if right_is_string {
+                    string_equality_operand_expr(right, StringEqualityOperandView::NativeString)
+                } else {
+                    option_as_string_view(right, right_view)
+                }),
+            }
+        }
         EqualityComparisonPlan::SharedHandleIdentity {
             handle_path,
             left_borrowed,
@@ -1190,6 +1208,12 @@ fn option_as_string_view(expr: RustExpr, view: OptionalStringEqualityOperandView
         OptionalStringEqualityOperandView::NativeString => optional_string_view_projection(expr),
         OptionalStringEqualityOperandView::BorrowedStr => expr,
     }
+}
+
+fn expr_records_non_optional_string(expr: &RustExpr) -> bool {
+    expr.recorded_slot_shape().is_some_and(|actual| {
+        actual.java_ty == JavaType::String && actual.optional_element_type().is_none()
+    })
 }
 
 pub fn lower_unary_expr(op: UnaryOp, operand: RustExpr) -> RustExpr {
@@ -1383,6 +1407,29 @@ mod equality_symmetry_tests {
         assert_eq!(
             crate::emit::emit_expr(&rendered),
             "match (left_value, right_value) { (Some(left), Some(right)) => !left.equals(Box::new((*right).clone())), (None, None) => false, _ => true }"
+        );
+    }
+
+    #[test]
+    fn optional_string_view_equality_honors_non_optional_recorded_slot_value() {
+        let produced = shape(JavaType::String, OwnershipShape::Owned, ViewShape::Native);
+        let left = RustExpr::shaped_as(
+            crate::rust_ir::RustExprShape::ResultPropagated,
+            Some(produced),
+            RustExpr::Raw("get_string()?".to_string()),
+        );
+        let rendered = lower_equality_comparison_expr_for_op(
+            BinaryOp::Ne,
+            EqualityComparisonPlan::LeftOptionalStringView {
+                left_view: OptionalStringEqualityOperandView::NativeString,
+            },
+            left,
+            RustExpr::Var("value".to_string()),
+        );
+
+        assert_eq!(
+            crate::emit::emit_expr(&rendered),
+            "get_string()?.as_str() != value"
         );
     }
 

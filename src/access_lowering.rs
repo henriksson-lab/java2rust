@@ -1,18 +1,15 @@
+use crate::coercion::{
+    OptionalReceiverProjection, associated_const_projection, field_projection,
+    owner_associated_path_projection, project_optional_receiver, self_associated_path_projection,
+    self_field_projection, static_storage_accessor_projection,
+};
 use crate::expr_shape::ShapeEnv;
 use crate::java_ir::Expr;
 use crate::member_access_plan::{MemberAccessOp, MemberAccessPlan};
 use crate::rust_ir::RustExpr;
 use crate::types::TypeEnv;
-use crate::{
-    coercion::{
-        OptionalReceiverProjection, associated_const_projection, field_projection,
-        owner_associated_path_projection, project_optional_receiver,
-        self_associated_path_projection, self_field_projection, static_storage_accessor_projection,
-    },
-    emit,
-};
 
-pub fn lower_bare_name(name: &str, env: &ShapeEnv) -> RustExpr {
+pub(crate) fn lower_bare_name(name: &str, env: &ShapeEnv) -> RustExpr {
     if env.local_type(name).is_none()
         && env.is_instance_field(name)
         && !bare_name_looks_like_static_owner(name)
@@ -57,10 +54,6 @@ fn bare_name_local_type<'a>(name: &str, env: &'a ShapeEnv) -> Option<&'a crate::
     })
 }
 
-pub fn render_bare_name(name: &str, env: &ShapeEnv) -> String {
-    emit::emit_expr(&lower_bare_name(name, env))
-}
-
 /// A static-storage read, qualified with the declaring type when that is not
 /// the type being lowered
 /// ([0037](../claude_audits/done/0037-nested-class-outer-static-read-is-capture.md)).
@@ -79,7 +72,7 @@ fn bare_name_looks_like_static_owner(name: &str) -> bool {
         .is_some_and(|ch| ch.is_ascii_uppercase())
 }
 
-pub fn lower_field_access_with_facts(
+pub(crate) fn lower_field_access_with_facts(
     receiver: &Expr,
     field: &str,
     type_env: &TypeEnv,
@@ -200,5 +193,177 @@ fn rust_associated_const_ident(name: &str) -> String {
         "r#in".to_string()
     } else {
         name.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::external_packs::parse_external_pack_manifest;
+    use crate::facts::FactSet;
+    use crate::java_ir::{JavaType, PrimitiveType};
+    use crate::parser::parse_expr;
+    use crate::slot_shape::RustSlotShape;
+    use crate::types::TypeEnv;
+
+    fn render_bare_name(name: &str, env: &ShapeEnv) -> String {
+        crate::emit::emit_expr(&lower_bare_name(name, env))
+    }
+
+    #[test]
+    fn bare_name_rendering_is_test_local_compatibility() {
+        let mut env = ShapeEnv::new();
+        env.insert_field("count", JavaType::Primitive(PrimitiveType::Int));
+        env.insert_static_field_shape(
+            "LIMIT",
+            RustSlotShape::for_storage(JavaType::Primitive(PrimitiveType::Int)),
+        );
+        env.insert_static_field_shape_for_owner_with_access_name(
+            "b.Item",
+            "KIND",
+            "KIND",
+            RustSlotShape::for_storage(JavaType::String),
+        );
+        env.insert_static_member_import("KIND", "a.Item");
+        env.insert_local("local", JavaType::Primitive(PrimitiveType::Int));
+
+        assert_eq!(render_bare_name("count", &env), "self.count");
+        assert_eq!(render_bare_name("local", &env), "local");
+        assert_eq!(render_bare_name("LIMIT", &env), "Self::LIMIT");
+        assert_eq!(render_bare_name("KIND", &env), "AItem::KIND");
+
+        assert_eq!(
+            lower_bare_name("count", &env),
+            RustExpr::Field(
+                Box::new(RustExpr::Var("self".to_string())),
+                "count".to_string()
+            )
+        );
+        assert_eq!(
+            lower_bare_name("local", &env),
+            RustExpr::Var("local".to_string())
+        );
+        assert_eq!(
+            lower_bare_name("LIMIT", &env),
+            RustExpr::Path(vec!["Self".to_string(), "LIMIT".to_string()])
+        );
+        assert_eq!(
+            lower_bare_name("KIND", &env),
+            RustExpr::Path(vec!["AItem".to_string(), "KIND".to_string()])
+        );
+    }
+
+    #[test]
+    fn field_access_lowering_uses_member_access_plans() {
+        let mut type_env = TypeEnv::new();
+        type_env.insert_local("values", JavaType::Array(Box::new(JavaType::String)));
+        type_env.insert_type_field("Owner", "CONSTANT", JavaType::String);
+        type_env.insert_local(
+            "callback",
+            JavaType::Named {
+                name: "BatchCompletionCallbackFunctionArgument".to_string(),
+                args: Vec::new(),
+            },
+        );
+
+        assert_eq!(
+            lower_field_access_with_facts(
+                &parse_expr("values"),
+                "length",
+                &type_env,
+                RustExpr::Var("values".to_string()),
+                &FactSet::default(),
+            ),
+            RustExpr::Cast {
+                expr: Box::new(RustExpr::MethodCall {
+                    receiver: Box::new(RustExpr::Var("values".to_string())),
+                    method: "len".to_string(),
+                    args: Vec::new(),
+                }),
+                ty: "i32".to_string(),
+            }
+        );
+        assert_eq!(
+            lower_field_access_with_facts(
+                &parse_expr("callback"),
+                "batchCount",
+                &type_env,
+                RustExpr::Var("callback".to_string()),
+                &FactSet::default(),
+            ),
+            RustExpr::Field(
+                Box::new(RustExpr::Var("callback".to_string())),
+                "batch_count".to_string()
+            )
+        );
+        assert_eq!(
+            lower_field_access_with_facts(
+                &parse_expr("helper"),
+                "name",
+                &type_env,
+                RustExpr::Var("helper".to_string()),
+                &FactSet::default(),
+            ),
+            RustExpr::Field(
+                Box::new(RustExpr::Var("helper".to_string())),
+                "name".to_string()
+            )
+        );
+        assert_eq!(
+            lower_field_access_with_facts(
+                &Expr::Var("Owner".to_string()),
+                "CONSTANT",
+                &type_env,
+                RustExpr::Var("owner".to_string()),
+                &FactSet::default(),
+            ),
+            RustExpr::Path(vec!["Owner".to_string(), "CONSTANT".to_string()])
+        );
+    }
+
+    #[test]
+    fn rust_crate_mapped_external_static_fields_render_associated_constants() {
+        let facts = parse_external_pack_manifest(
+            r#"
+external-pack hdf5 HDF5File rust-crate-mapping mapped target=hdf5_facade
+external-pack hdf5 HDF5File.OpenMode rust-crate-mapping mapped target=hdf5_facade
+external-pack hdf5 OpenMode rust-crate-mapping mapped target=hdf5_facade
+external-pack-field hdf5 HDF5File OpenMode mapped
+external-pack-field hdf5 HDF5File.OpenMode CREATE mapped
+external-pack-field hdf5 OpenMode READ_ONLY mapped
+"#,
+        )
+        .facts;
+
+        let hdf5_open_mode = Expr::FieldAccess(
+            Box::new(Expr::Var("HDF5File".to_string())),
+            "OpenMode".to_string(),
+        );
+        assert_eq!(
+            lower_field_access_with_facts(
+                &hdf5_open_mode,
+                "CREATE",
+                &TypeEnv::default(),
+                RustExpr::Raw("ignored".to_string()),
+                &facts,
+            ),
+            RustExpr::Path(vec![
+                "hdf5_facade::OpenMode".to_string(),
+                "CREATE".to_string(),
+            ])
+        );
+        assert_eq!(
+            lower_field_access_with_facts(
+                &Expr::Var("OpenMode".to_string()),
+                "READ_ONLY",
+                &TypeEnv::default(),
+                RustExpr::Raw("ignored".to_string()),
+                &facts,
+            ),
+            RustExpr::Path(vec![
+                "hdf5_facade::OpenMode".to_string(),
+                "READ_ONLY".to_string(),
+            ])
+        );
     }
 }

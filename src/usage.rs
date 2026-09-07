@@ -13,7 +13,7 @@ use crate::types::TypeEnv;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UsageFacts {
     pub methods: HashMap<UsageMethodKey, MethodUsageFacts>,
-    pub methods_by_rust_name: HashMap<UsageMethodKey, MethodUsageFacts>,
+    pub(crate) methods_by_rust_name: HashMap<UsageMethodKey, MethodUsageFacts>,
     pub methods_by_java_key: HashMap<JavaCallableKey, MethodUsageFacts>,
     pub constructors: HashMap<UsageConstructorKey, MethodUsageFacts>,
 }
@@ -129,8 +129,8 @@ pub struct UsageConstructorKey {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MethodUsageFacts {
-    pub bindings: HashMap<String, BindingUseFacts>,
-    pub bindings_by_id: HashMap<BindingId, BindingUseFacts>,
+    pub(crate) bindings: HashMap<String, BindingUseFacts>,
+    pub(crate) bindings_by_id: HashMap<BindingId, BindingUseFacts>,
     pub call_sites: Vec<CallSiteUse>,
     pub constructor_call_sites: Vec<ConstructorCallSiteUse>,
     pub returned_call_results: Vec<ReturnedCallResultUse>,
@@ -147,7 +147,7 @@ impl UsageFacts {
         self.source_method_usage_for_owner(JavaOwnerKey::source_type(ty), method)
     }
 
-    pub fn source_method_usage_for_owner(
+    pub(crate) fn source_method_usage_for_owner(
         &self,
         owner: JavaOwnerKey,
         method: &crate::java_ir::MethodDecl,
@@ -158,67 +158,117 @@ impl UsageFacts {
 }
 
 impl MethodUsageFacts {
-    pub fn binding_for_declaration_with_name_fallback(
+    pub fn from_binding_facts(bindings: impl IntoIterator<Item = BindingUseFacts>) -> Self {
+        let mut facts = Self::default();
+        for binding in bindings {
+            if let Some(binding_id) = binding.binding.clone() {
+                facts.bindings_by_id.insert(binding_id, binding.clone());
+            }
+            facts.bindings.insert(binding.name.clone(), binding);
+        }
+        facts
+    }
+
+    pub fn binding_facts_for_name(&self, name: &str) -> Option<&BindingUseFacts> {
+        self.bindings
+            .get(name)
+            .filter(|binding| self.binding_use_facts_are_current(name, binding))
+    }
+
+    pub fn unique_binding_facts_for_name(&self, name: &str) -> Option<&BindingUseFacts> {
+        let mut matches = self
+            .all_binding_facts()
+            .into_iter()
+            .filter(|binding| binding.name == name);
+        let binding = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        Some(binding)
+    }
+
+    pub(crate) fn binding_for_declaration_with_name_fallback(
         &self,
         binding: Option<&BindingId>,
         name: &str,
         allow_name_fallback: bool,
     ) -> Option<&BindingUseFacts> {
         match binding {
-            Some(binding) => self.bindings_by_id.get(binding),
+            Some(binding) => self
+                .bindings_by_id
+                .get(binding)
+                .filter(|facts| binding_id_facts_are_current(binding, facts)),
             None if allow_name_fallback => {
                 let name_binding = self.bindings.get(name)?;
-                if let Some(id) = &name_binding.binding {
-                    return (id.name() == name)
-                        .then(|| self.bindings_by_id.get(id))
-                        .flatten();
+                if !self.binding_use_facts_are_current(name, name_binding) {
+                    return None;
                 }
-                self.id_less_binding_name_is_unambiguous(name)
-                    .then_some(name_binding)
+                if let Some(id) = &name_binding.binding {
+                    return self
+                        .bindings_by_id
+                        .get(id)
+                        .filter(|facts| binding_id_facts_are_current(id, facts));
+                }
+                Some(name_binding)
             }
             None => None,
         }
     }
 
-    pub fn visible_binding_id_for_name(&self, name: &str) -> Option<BindingId> {
-        let binding_id = self
-            .bindings
-            .get(name)
-            .and_then(|binding| binding.binding.clone())
-            .filter(|binding| binding.name() == name)?;
+    pub(crate) fn visible_binding_id_for_name(&self, name: &str) -> Option<BindingId> {
+        let binding = self.bindings.get(name)?;
+        if !self.binding_use_facts_are_current(name, binding) {
+            return None;
+        }
+        let binding_id = binding.binding.clone()?;
         self.bindings_by_id
-            .contains_key(&binding_id)
-            .then_some(binding_id)
+            .get(&binding_id)
+            .filter(|facts| binding_id_facts_are_current(&binding_id, facts))
+            .map(|_| binding_id)
     }
 
-    pub fn visible_binding_java_type_for_name(&self, name: &str) -> Option<&JavaType> {
+    pub(crate) fn visible_binding_java_type_for_name(&self, name: &str) -> Option<&JavaType> {
         let binding_id = self.visible_binding_id_for_name(name)?;
         self.bindings_by_id
             .get(&binding_id)
             .map(|binding| &binding.java_ty)
     }
 
-    pub fn name_binding_is_current(&self, name: &str) -> bool {
+    pub fn binding_facts_for_id(&self, binding_id: &BindingId) -> Option<&BindingUseFacts> {
+        self.bindings_by_id
+            .get(binding_id)
+            .filter(|facts| binding_id_facts_are_current(binding_id, facts))
+    }
+
+    pub fn contains_binding_id(&self, binding_id: &BindingId) -> bool {
+        self.binding_facts_for_id(binding_id).is_some()
+    }
+
+    pub fn contains_binding_name(&self, name: &str) -> bool {
+        self.binding_facts_for_name(name).is_some()
+    }
+
+    pub(crate) fn name_binding_is_current(&self, name: &str) -> bool {
         let Some(binding) = self.bindings.get(name) else {
             return false;
         };
         self.binding_use_facts_are_current(name, binding)
     }
 
-    pub fn snapshot_visible_binding_for_scope(&self, name: &str) -> Option<BindingUseFacts> {
+    pub(crate) fn snapshot_visible_binding_for_scope(&self, name: &str) -> Option<BindingUseFacts> {
         self.bindings
             .get(name)
             .filter(|binding| self.binding_use_facts_are_current(name, binding))
             .cloned()
     }
 
-    pub fn hide_visible_binding_for_scope(&mut self, name: &str) -> Option<BindingUseFacts> {
+    pub(crate) fn hide_visible_binding_for_scope(&mut self, name: &str) -> Option<BindingUseFacts> {
         let saved = self.snapshot_visible_binding_for_scope(name);
         self.bindings.remove(name);
         saved
     }
 
-    pub fn restore_visible_binding_for_scope(
+    pub(crate) fn restore_visible_binding_for_scope(
         &mut self,
         name: String,
         saved: Option<BindingUseFacts>,
@@ -233,6 +283,9 @@ impl MethodUsageFacts {
             } else {
                 saved
             };
+            if restored.name != name {
+                return;
+            }
             if let Some(binding) = &restored.binding {
                 self.bindings.insert(name, restored.clone());
                 self.bindings_by_id.insert(binding.clone(), restored);
@@ -242,7 +295,7 @@ impl MethodUsageFacts {
         }
     }
 
-    pub fn record_visible_binding_use(&mut self, name: &str, usage: BindingUse) {
+    pub(crate) fn record_visible_binding_use(&mut self, name: &str, usage: BindingUse) {
         if let Some(binding_id) = self.visible_binding_id_for_name(name) {
             if let Some(binding) = self.bindings_by_id.get_mut(&binding_id) {
                 binding.uses.push(usage);
@@ -254,23 +307,50 @@ impl MethodUsageFacts {
         }
     }
 
-    pub fn all_binding_facts(&self) -> Vec<&BindingUseFacts> {
+    pub(crate) fn record_declared_binding_use(
+        &mut self,
+        name: &str,
+        binding_id: Option<&BindingId>,
+        usage: BindingUse,
+    ) {
+        let mut recorded_by_id = false;
+        if let Some(binding_id) = binding_id {
+            let binding_is_current = self
+                .bindings_by_id
+                .get(binding_id)
+                .is_some_and(|facts| binding_id_facts_are_current(binding_id, facts));
+            if binding_is_current && let Some(binding) = self.bindings_by_id.get_mut(binding_id) {
+                binding.uses.push(usage.clone());
+                recorded_by_id = true;
+            }
+        }
+        if self.name_binding_is_current(name)
+            && let Some(binding) = self.bindings.get_mut(name)
+        {
+            binding.uses.push(usage);
+        } else if !recorded_by_id {
+            self.record_visible_binding_use(name, usage);
+        }
+    }
+
+    pub(crate) fn all_binding_facts(&self) -> Vec<&BindingUseFacts> {
         let mut facts = Vec::new();
         let mut seen_bindings = HashSet::new();
         for (binding_id, binding) in &self.bindings_by_id {
+            if !binding_id_facts_are_current(binding_id, binding) {
+                continue;
+            }
             seen_bindings.insert(binding_id.clone());
             facts.push(binding);
         }
-        for binding in self.bindings.values() {
+        for (name, binding) in &self.bindings {
+            if !self.binding_use_facts_are_current(name, binding) {
+                continue;
+            }
             if let Some(binding_id) = &binding.binding {
                 if seen_bindings.contains(binding_id) {
                     continue;
                 }
-                if !self.bindings_by_id.contains_key(binding_id) {
-                    continue;
-                }
-            } else if !self.id_less_binding_name_is_unambiguous(&binding.name) {
-                continue;
             }
             facts.push(binding);
         }
@@ -282,14 +362,29 @@ impl MethodUsageFacts {
     }
 
     fn binding_use_facts_are_current(&self, name: &str, binding: &BindingUseFacts) -> bool {
+        if binding.name != name {
+            return false;
+        }
         binding
             .binding
             .as_ref()
             .map(|binding_id| {
-                binding_id.name() == name && self.bindings_by_id.contains_key(binding_id)
+                binding_id.name() == name
+                    && self
+                        .bindings_by_id
+                        .get(binding_id)
+                        .is_some_and(|facts| binding_id_facts_are_current(binding_id, facts))
             })
             .unwrap_or_else(|| self.id_less_binding_name_is_unambiguous(name))
     }
+}
+
+fn binding_id_facts_are_current(binding_id: &BindingId, facts: &BindingUseFacts) -> bool {
+    facts.name == binding_id.name()
+        && facts
+            .binding
+            .as_ref()
+            .is_none_or(|stored| stored == binding_id)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -323,6 +418,7 @@ pub enum BindingUse {
         name: String,
         boundary: CallArgumentBoundary,
         has_literal_null_arg: bool,
+        literal_null_arg_indices: Vec<usize>,
     },
     StoredInField {
         field_name: String,
@@ -1410,9 +1506,9 @@ fn analyze_stmt(
                     semantic_facts,
                     type_env,
                 ) {
-                    record_use(
-                        facts,
-                        name,
+                    facts.record_declared_binding_use(
+                        source_name,
+                        binding.as_ref(),
                         BindingUse::AssignedFromCall {
                             name: policy.name,
                             receiver_type: policy.receiver_type,
@@ -2341,8 +2437,7 @@ fn analyze_expr_with_context(
             {
                 record_use(facts, binding, BindingUse::ContentRead);
             }
-            if !is_content_read_method(name)
-                && let Some(receiver) = receiver
+            if let Some(receiver) = receiver
                 && let Expr::Var(binding) = receiver.as_ref()
             {
                 record_use(
@@ -2352,6 +2447,7 @@ fn analyze_expr_with_context(
                         name: name.clone(),
                         boundary: call_boundary,
                         has_literal_null_arg: args.iter().any(expr_is_null_literal),
+                        literal_null_arg_indices: null_argument_indices(args),
                     },
                 );
             }
@@ -2710,17 +2806,17 @@ fn analyze_lambda_body(
     let saved_params = params
         .iter()
         .map(|param| {
-            let saved = facts.hide_visible_binding_for_scope(&param.name);
+            let saved = facts.hide_visible_binding_for_scope(&param.source_name);
             insert_binding_use_facts(
                 facts,
-                param.name.clone(),
+                param.source_name.clone(),
                 None,
                 param
                     .ty
                     .clone()
                     .unwrap_or_else(|| JavaType::Unknown("lambda parameter".to_string())),
             );
-            (param.name.clone(), saved)
+            (param.source_name.clone(), saved)
         })
         .collect::<Vec<_>>();
 
@@ -2959,15 +3055,14 @@ fn call_receiver_java_type(receiver: Option<&Expr>, facts: &MethodUsageFacts) ->
 }
 
 fn agreed_binding_java_type(facts: &MethodUsageFacts, name: &str) -> Option<JavaType> {
-    if let Some(binding_id) = facts.visible_binding_id_for_name(name) {
-        return facts
-            .bindings_by_id
-            .get(&binding_id)
-            .map(|binding| binding.java_ty.clone());
-    }
     facts
-        .binding_for_declaration_with_name_fallback(None, name, true)
-        .map(|binding| binding.java_ty.clone())
+        .visible_binding_java_type_for_name(name)
+        .cloned()
+        .or_else(|| {
+            facts
+                .binding_for_declaration_with_name_fallback(None, name, true)
+                .map(|binding| binding.java_ty.clone())
+        })
 }
 
 fn usage_java_type_name(java_ty: &JavaType) -> Option<&str> {
@@ -3886,6 +3981,134 @@ mod tests {
     }
 
     #[test]
+    fn name_map_payload_name_must_match_the_lookup_key() {
+        let mut facts = MethodUsageFacts::default();
+        facts.bindings.insert(
+            "value".to_string(),
+            BindingUseFacts {
+                name: "other".to_string(),
+                binding: None,
+                java_ty: JavaType::String,
+                uses: Vec::new(),
+            },
+        );
+
+        assert!(!facts.name_binding_is_current("value"));
+        assert!(
+            facts
+                .binding_for_declaration_with_name_fallback(None, "value", true)
+                .is_none(),
+            "id-less compatibility must not accept a stale payload stored under another name"
+        );
+        assert!(
+            facts.snapshot_visible_binding_for_scope("value").is_none(),
+            "scope snapshots must not preserve mismatched name-map payloads"
+        );
+        assert!(
+            facts.all_binding_facts().is_empty(),
+            "aggregate readers must not expose mismatched name-map payloads"
+        );
+
+        record_use(&mut facts, "value", BindingUse::Returned);
+        assert!(
+            facts
+                .bindings
+                .get("value")
+                .is_some_and(|binding| binding.uses.is_empty()),
+            "stale id-less payloads must not collect uses by lookup key"
+        );
+    }
+
+    #[test]
+    fn bound_name_map_payload_name_must_match_the_lookup_key() {
+        let binding = BindingId::new(BindingKind::Local, "value", 1);
+        let mut facts = MethodUsageFacts::default();
+        facts.bindings_by_id.insert(
+            binding.clone(),
+            binding_fact("value", Some(binding.clone())),
+        );
+        facts.bindings.insert(
+            "value".to_string(),
+            BindingUseFacts {
+                name: "other".to_string(),
+                binding: Some(binding.clone()),
+                java_ty: JavaType::String,
+                uses: Vec::new(),
+            },
+        );
+
+        assert_eq!(facts.visible_binding_id_for_name("value"), None);
+        assert!(
+            facts
+                .binding_for_declaration_with_name_fallback(None, "value", true)
+                .is_none(),
+            "binding-id recovery must ignore a name-map payload whose stored name drifted"
+        );
+        assert!(!facts.name_binding_is_current("value"));
+        assert!(
+            facts.snapshot_visible_binding_for_scope("value").is_none(),
+            "scope snapshots must not preserve bound payloads whose stored name drifted"
+        );
+        assert_eq!(
+            facts
+                .all_binding_facts()
+                .iter()
+                .filter(|fact| fact.name == "value")
+                .count(),
+            1,
+            "aggregate readers should expose only the authoritative binding-id fact"
+        );
+    }
+
+    #[test]
+    fn binding_id_payload_name_must_match_the_binding_key() {
+        let binding = BindingId::new(BindingKind::Local, "value", 1);
+        let mut facts = MethodUsageFacts::default();
+        facts.bindings_by_id.insert(
+            binding.clone(),
+            BindingUseFacts {
+                name: "other".to_string(),
+                binding: Some(binding.clone()),
+                java_ty: JavaType::String,
+                uses: Vec::new(),
+            },
+        );
+        facts.bindings.insert(
+            "value".to_string(),
+            binding_fact("value", Some(binding.clone())),
+        );
+
+        assert_eq!(facts.visible_binding_id_for_name("value"), None);
+        assert!(
+            facts
+                .binding_for_declaration_with_name_fallback(Some(&binding), "value", false)
+                .is_none(),
+            "binding-id lookup must reject a payload whose stored name drifted"
+        );
+        assert!(
+            facts.all_binding_facts().is_empty(),
+            "aggregate readers must not expose a binding-id payload whose name disagrees with its key"
+        );
+    }
+
+    #[test]
+    fn binding_facts_for_id_rejects_stale_payload_name() {
+        let binding = BindingId::new(BindingKind::Local, "value", 1);
+        let mut facts = MethodUsageFacts::default();
+        facts.bindings_by_id.insert(
+            binding.clone(),
+            BindingUseFacts {
+                name: "other".to_string(),
+                binding: Some(binding.clone()),
+                java_ty: JavaType::String,
+                uses: Vec::new(),
+            },
+        );
+
+        assert_eq!(facts.binding_facts_for_id(&binding), None);
+    }
+
+    #[test]
     fn record_use_rejects_stale_name_map_binding() {
         let binding = BindingId::new(BindingKind::Local, "value", 1);
         let mut facts = MethodUsageFacts::default();
@@ -3954,6 +4177,19 @@ mod tests {
         );
         assert!(facts.bindings.get("value").is_none());
         assert!(facts.bindings_by_id.get(&binding).is_none());
+    }
+
+    #[test]
+    fn restore_visible_binding_rejects_mismatched_saved_payload_name() {
+        let mut facts = MethodUsageFacts::default();
+
+        facts.restore_visible_binding_for_scope(
+            "value".to_string(),
+            Some(binding_fact("other", None)),
+        );
+
+        assert!(facts.bindings.get("value").is_none());
+        assert!(facts.bindings.get("other").is_none());
     }
 
     #[test]
@@ -4036,7 +4272,8 @@ mod tests {
                 .contains("facts.hide_visible_binding_for_scope(&catch.source_name)")
         );
         assert!(
-            analyze_lambda_source.contains("facts.hide_visible_binding_for_scope(&param.name)")
+            analyze_lambda_source
+                .contains("facts.hide_visible_binding_for_scope(&param.source_name)")
         );
         assert!(
             save_direct_source.contains("facts.snapshot_visible_binding_for_scope(source_name)")
@@ -4091,6 +4328,91 @@ class ScopedFieldReturn {
                     .iter()
                     .any(|use_fact| matches!(use_fact, BindingUse::Returned))),
             "the out-of-scope local must not receive the return use: {method_usage:?}"
+        );
+    }
+
+    #[test]
+    fn content_read_method_receiver_also_records_receiver_call_use() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+class ContentReadReceiverUse {
+    String f(String value) {
+        return value.toString();
+    }
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let usage = analyze_usage(&resolved.program);
+        let method_usage = usage
+            .methods
+            .get(&UsageMethodKey {
+                type_name: "ContentReadReceiverUse".to_string(),
+                method_name: "f".to_string(),
+            })
+            .expect("method usage should be recorded");
+        let value = method_usage
+            .all_binding_facts()
+            .into_iter()
+            .find(|binding| binding.name == "value")
+            .expect("value binding should be recorded");
+
+        assert!(
+            value
+                .uses
+                .iter()
+                .any(|usage| matches!(usage, BindingUse::ContentRead)),
+            "{value:?}"
+        );
+        assert!(
+            value.uses.iter().any(|usage| matches!(
+                usage,
+                BindingUse::ReceiverForCall { name, .. } if name == "toString"
+            )),
+            "{value:?}"
+        );
+    }
+
+    #[test]
+    fn lambda_keyword_param_scope_uses_source_name() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+class LambdaKeywordParamScope {
+    void f(String self) {
+        java.util.function.Function<String, String> mapper = self -> self.toString();
+        self.toString();
+    }
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let usage = analyze_usage(&resolved.program);
+        let method_usage = usage
+            .methods
+            .get(&UsageMethodKey {
+                type_name: "LambdaKeywordParamScope".to_string(),
+                method_name: "f".to_string(),
+            })
+            .expect("method usage should be recorded");
+        let method_param = method_usage
+            .all_binding_facts()
+            .into_iter()
+            .find(|binding| binding.name == "self" && binding.binding.is_some())
+            .expect("source-named method parameter should be recorded");
+        let receiver_calls = method_param
+            .uses
+            .iter()
+            .filter(|usage| {
+                matches!(
+                    usage,
+                    BindingUse::ReceiverForCall { name, .. } if name == "toString"
+                )
+            })
+            .count();
+
+        assert_eq!(
+            receiver_calls, 1,
+            "lambda parameter source name must shadow the outer parameter inside the lambda body"
         );
     }
 

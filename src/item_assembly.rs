@@ -30,7 +30,8 @@ use crate::types::{
     two_dimensional_array_element_type,
 };
 
-pub fn struct_item_for_type_with_facts(
+#[cfg(test)]
+pub(crate) fn struct_item_for_type_with_facts(
     ty: &TypeDecl,
     signatures: &SignaturePlan,
     facts: &FactSet,
@@ -38,7 +39,8 @@ pub fn struct_item_for_type_with_facts(
     struct_item_for_type_with_facts_and_support_context(ty, signatures, facts, &Program::default())
 }
 
-pub fn struct_item_for_type_with_facts_and_support_context(
+#[cfg(test)]
+fn struct_item_for_type_with_facts_and_support_context(
     ty: &TypeDecl,
     signatures: &SignaturePlan,
     facts: &FactSet,
@@ -53,7 +55,7 @@ pub fn struct_item_for_type_with_facts_and_support_context(
     })
 }
 
-pub fn struct_item_for_type_with_facts_representations_and_support_context(
+pub(crate) fn struct_item_for_type_with_facts_representations_and_support_context(
     ty: &TypeDecl,
     signatures: &SignaturePlan,
     facts: &FactSet,
@@ -75,11 +77,12 @@ pub fn struct_item_for_type_with_facts_representations_and_support_context(
     })
 }
 
-pub fn impl_item_for_type(ty: &TypeDecl, functions: Vec<RustFunction>) -> RustItem {
+#[cfg(test)]
+pub(crate) fn impl_item_for_type(ty: &TypeDecl, functions: Vec<RustFunction>) -> RustItem {
     impl_item_for_type_with_support_context(ty, functions, &Program::default())
 }
 
-pub fn impl_item_for_type_with_support_context(
+pub(crate) fn impl_item_for_type_with_support_context(
     ty: &TypeDecl,
     functions: Vec<RustFunction>,
     support_program: &Program,
@@ -92,7 +95,7 @@ pub fn impl_item_for_type_with_support_context(
     })
 }
 
-pub fn rust_decl_name_for_source_type(ty: &TypeDecl) -> String {
+pub(crate) fn rust_decl_name_for_source_type(ty: &TypeDecl) -> String {
     let name = rust_name_for_java_named_type(&ty.name);
     if ty.type_params.is_empty() {
         name
@@ -101,7 +104,7 @@ pub fn rust_decl_name_for_source_type(ty: &TypeDecl) -> String {
     }
 }
 
-pub fn rust_use_name_for_source_type(ty: &TypeDecl) -> String {
+pub(crate) fn rust_use_name_for_source_type(ty: &TypeDecl) -> String {
     rust_decl_name_for_source_type(ty)
 }
 
@@ -121,7 +124,7 @@ fn rust_impl_target_for_source_type(ty: &TypeDecl, support_program: &Program) ->
 /// class parameters and once for method/constructor parameters — and the two
 /// copies drifted: only the class copy learned the JDK case, so a
 /// `Comparable` bound on a method was silently dropped.
-pub fn rust_bounds_for_java_type_param(
+pub(crate) fn rust_bounds_for_java_type_param(
     bound: &JavaType,
     support_programs: &[&Program],
 ) -> Vec<String> {
@@ -147,7 +150,7 @@ pub fn rust_bounds_for_java_type_param(
 /// A separate scan is a second source of truth, and the previous one walked only
 /// class parameters — so a `Comparable` bound on a method projected to `Ord`
 /// while the trait providing `compare_to` was never emitted.
-pub fn program_projects_java_comparable_bound(
+pub(crate) fn program_projects_java_comparable_bound(
     program: &Program,
     support_programs: &[&Program],
 ) -> bool {
@@ -246,7 +249,7 @@ fn source_type_param_into_supertype_bounds(bound: &str, support_program: &Progra
 /// and flowing through a method may be cloned. Here, a parameter that arrives as
 /// an argument and is read more than once in the body is what makes clone
 /// recovery insert `.clone()`, which then needs the bound to compile.
-pub fn callable_type_param_needs_clone_bound(
+pub(crate) fn callable_type_param_needs_clone_bound(
     type_param: &str,
     params: &[crate::java_ir::Param],
     body: Option<&crate::java_ir::Block>,
@@ -689,11 +692,8 @@ fn source_type_bound_is_class_like(bound: &str, support_programs: &[&Program]) -
         .is_some_and(|ty| matches!(ty.kind, crate::java_ir::TypeKind::Class))
 }
 
-pub fn raw_item(item: String) -> RustItem {
-    RustItem::Raw(item)
-}
-
-pub fn constructor_function_shell_with_facts(
+#[cfg(test)]
+pub(crate) fn constructor_function_shell_with_facts(
     ty: &TypeDecl,
     ctor: &ConstructorDecl,
     signatures: &SignaturePlan,
@@ -710,7 +710,8 @@ pub fn constructor_function_shell_with_facts(
     )
 }
 
-pub fn constructor_function_shell_with_facts_and_support_context(
+#[cfg(test)]
+fn constructor_function_shell_with_facts_and_support_context(
     ty: &TypeDecl,
     ctor: &ConstructorDecl,
     signatures: &SignaturePlan,
@@ -728,7 +729,7 @@ pub fn constructor_function_shell_with_facts_and_support_context(
     )
 }
 
-pub fn constructor_function_shell_with_facts_and_support_contexts(
+pub(crate) fn constructor_function_shell_with_facts_and_support_contexts(
     ty: &TypeDecl,
     ctor: &ConstructorDecl,
     signatures: &SignaturePlan,
@@ -755,7 +756,10 @@ pub fn constructor_function_shell_with_facts_and_support_contexts(
     }
 }
 
-pub fn constructor_return_body(ty: &TypeDecl, fields: Vec<(String, RustExpr)>) -> Vec<RustStmt> {
+pub(crate) fn constructor_return_body(
+    ty: &TypeDecl,
+    fields: Vec<(String, RustExpr)>,
+) -> Vec<RustStmt> {
     vec![RustStmt::Return(Some(RustExpr::StructLit {
         name: rust_use_name_for_source_type(ty),
         fields: reorder_struct_literal_moves_after_reads(recover_struct_literal_field_exprs(
@@ -764,7 +768,7 @@ pub fn constructor_return_body(ty: &TypeDecl, fields: Vec<(String, RustExpr)>) -
     }))]
 }
 
-pub fn with_type_param_marker_field_values(
+pub(crate) fn with_type_param_marker_field_values(
     ty: &TypeDecl,
     mut fields: Vec<(String, RustExpr)>,
 ) -> Vec<(String, RustExpr)> {
@@ -1229,6 +1233,372 @@ mod tests {
     }
 
     #[test]
+    fn method_shell_exception_plan_is_internal_and_wraps_return_type() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+class ExternalShell {
+    private int len(ExternalLabel value) {
+        return value.length();
+    }
+}
+
+class ExternalLabel {}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let mut facts = resolved.facts.clone();
+        facts
+            .type_capability_overrides
+            .push(crate::facts::TypeCapabilityOverride {
+                type_name: "ExternalLabel".to_string(),
+                copy: None,
+                clone: None,
+                string_like: Some(true),
+                sequence_like: None,
+                implements: Vec::new(),
+                extends: None,
+                final_type: None,
+                object_safe_trait: None,
+                provenance: crate::facts::FactProvenance::UserOverride,
+            });
+        let representations =
+            crate::representation::plan_representations(&resolved.program, &facts);
+        let usage = crate::usage::analyze_usage(&resolved.program);
+        let signatures = crate::signature::solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &usage,
+            &facts,
+        );
+        let ty = &resolved.program.types[0];
+        let method = ty
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) => Some(method),
+                _ => None,
+            })
+            .unwrap();
+        let body = vec![RustStmt::Return(Some(RustExpr::Literal("0".to_string())))];
+
+        let default_shell =
+            method_function_shell_with_facts(ty, method, &signatures, body.clone(), &facts);
+        let planned_shell = method_function_shell_with_facts_and_exception_plan(
+            ty,
+            method,
+            &signatures,
+            body,
+            &facts,
+            MethodExceptionPlan {
+                wrap_returns_in_result: false,
+            },
+        );
+        assert_eq!(planned_shell.return_type, default_shell.return_type);
+
+        let result_shell = method_function_shell_with_facts_and_exception_plan(
+            ty,
+            method,
+            &signatures,
+            Vec::new(),
+            &facts,
+            MethodExceptionPlan {
+                wrap_returns_in_result: true,
+            },
+        );
+        assert_eq!(
+            result_shell.return_type,
+            Some(exception_result_type(default_shell.return_type.unwrap()))
+        );
+    }
+
+    #[test]
+    fn item_assembly_uses_fact_aware_slot_rendering_for_function_shells() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+class ExternalShell {
+    private int len(ExternalLabel value) {
+        return value.length();
+    }
+}
+
+class ExternalLabel {}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let mut facts = resolved.facts.clone();
+        facts
+            .type_capability_overrides
+            .push(crate::facts::TypeCapabilityOverride {
+                type_name: "ExternalLabel".to_string(),
+                copy: None,
+                clone: None,
+                string_like: Some(true),
+                sequence_like: None,
+                implements: Vec::new(),
+                extends: None,
+                final_type: None,
+                object_safe_trait: None,
+                provenance: crate::facts::FactProvenance::UserOverride,
+            });
+        let representations =
+            crate::representation::plan_representations(&resolved.program, &facts);
+        let usage = crate::usage::analyze_usage(&resolved.program);
+        let signatures = crate::signature::solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &usage,
+            &facts,
+        );
+        let ty = &resolved.program.types[0];
+        let method = ty
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) => Some(method),
+                _ => None,
+            })
+            .unwrap();
+        let body = vec![RustStmt::Return(Some(RustExpr::Literal("0".to_string())))];
+
+        let default_facts = FactSet::default();
+        let default_shell =
+            method_function_shell_with_facts(ty, method, &signatures, body.clone(), &default_facts);
+        let fact_shell = method_function_shell_with_facts(ty, method, &signatures, body, &facts);
+
+        assert_eq!(
+            default_shell.params[0].ty,
+            RustType::Ref {
+                mutable: false,
+                lifetime: None,
+                inner: Box::new(RustType::Named("ExternalLabel".to_string())),
+            }
+        );
+        assert_eq!(
+            fact_shell.params[0].ty,
+            RustType::Ref {
+                mutable: false,
+                lifetime: None,
+                inner: Box::new(RustType::Raw("str".to_string())),
+            }
+        );
+    }
+
+    #[test]
+    fn delegating_constructor_return_body_calls_self_associated_constructor() {
+        assert_eq!(
+            delegating_constructor_return_body(
+                "new_with_name",
+                vec![RustExpr::Var("name".to_string())],
+            ),
+            vec![RustStmt::Return(Some(RustExpr::Call {
+                function: Box::new(RustExpr::Path(vec![
+                    "Self".to_string(),
+                    "new_with_name".to_string(),
+                ])),
+                args: vec![RustExpr::Var("name".to_string())],
+            }))]
+        );
+    }
+
+    #[test]
+    fn item_assembly_owns_struct_impl_and_function_shells_from_signatures() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+class Holder {
+    String name;
+    Holder(String name) { this.name = name; }
+    public String echo(String value) { return value; }
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let representations =
+            crate::representation::plan_representations(&resolved.program, &resolved.facts);
+        let usage = crate::usage::analyze_usage(&resolved.program);
+        let signatures = crate::signature::solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &usage,
+            &FactSet::default(),
+        );
+        let ty = &resolved.program.types[0];
+        let method = ty
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) => Some(method),
+                _ => None,
+            })
+            .unwrap();
+        let ctor = ty
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Constructor(ctor) => Some(ctor),
+                _ => None,
+            })
+            .unwrap();
+        let default_facts = FactSet::default();
+
+        let struct_item = struct_item_for_type_with_facts(ty, &signatures, &default_facts);
+        let RustItem::Struct(rust_struct) = struct_item else {
+            panic!("type shell should be assembled as a struct item");
+        };
+        assert_eq!(rust_struct.name, "Holder");
+        assert_eq!(rust_struct.fields.len(), 1);
+        assert_eq!(rust_struct.fields[0].name, "name");
+        assert_eq!(
+            rust_struct.fields[0].ty,
+            crate::slot_render::rust_type_for_slot(
+                signatures.field_shape("Holder", "name").unwrap()
+            )
+        );
+
+        let ctor_body = vec![RustStmt::Return(None)];
+        let ctor_fn = constructor_function_shell_with_facts(
+            ty,
+            ctor,
+            &signatures,
+            ctor_body.clone(),
+            &default_facts,
+        );
+        assert_eq!(ctor_fn.name, "new");
+        assert_eq!(ctor_fn.params.len(), 1);
+        assert_eq!(ctor_fn.params[0].name, "name");
+        assert_eq!(
+            ctor_fn.params[0].ty,
+            crate::slot_render::rust_type_for_slot(
+                &signatures.constructor_param_plans(ty, ctor).unwrap()[0].shape
+            )
+        );
+        assert_eq!(
+            ctor_fn.return_type,
+            Some(RustType::Named("Holder".to_string()))
+        );
+        assert_eq!(ctor_fn.receiver, None);
+        assert_eq!(ctor_fn.body, ctor_body);
+
+        assert_eq!(
+            constructor_return_body(
+                ty,
+                vec![("name".to_string(), RustExpr::Var("name".to_string()))]
+            ),
+            vec![RustStmt::Return(Some(RustExpr::StructLit {
+                name: "Holder".to_string(),
+                fields: vec![("name".to_string(), RustExpr::Var("name".to_string()))],
+            }))]
+        );
+        assert_eq!(
+            constructor_return_body(
+                ty,
+                vec![
+                    ("reader".to_string(), RustExpr::Var("reader".to_string())),
+                    (
+                        "query".to_string(),
+                        RustExpr::MethodCall {
+                            receiver: Box::new(RustExpr::Var("reader".to_string())),
+                            method: "query_3".to_string(),
+                            args: Vec::new(),
+                        },
+                    ),
+                ],
+            ),
+            vec![RustStmt::Return(Some(RustExpr::StructLit {
+                name: "Holder".to_string(),
+                fields: vec![
+                    (
+                        "query".to_string(),
+                        RustExpr::MethodCall {
+                            receiver: Box::new(RustExpr::Var("reader".to_string())),
+                            method: "query_3".to_string(),
+                            args: Vec::new(),
+                        },
+                    ),
+                    ("reader".to_string(), RustExpr::Var("reader".to_string())),
+                ],
+            }))]
+        );
+        assert_eq!(
+            constructor_return_body(
+                ty,
+                vec![
+                    ("reader".to_string(), RustExpr::Raw("reader".to_string())),
+                    (
+                        "query".to_string(),
+                        RustExpr::Raw("Some(reader.query_3(contig, start, end))".to_string()),
+                    ),
+                ],
+            ),
+            vec![RustStmt::Return(Some(RustExpr::StructLit {
+                name: "Holder".to_string(),
+                fields: vec![
+                    (
+                        "query".to_string(),
+                        RustExpr::Shaped {
+                            shape: crate::rust_ir::RustExprShape::OptionalConstructed,
+                            actual: None,
+                            expr: Box::new(RustExpr::Call {
+                                function: Box::new(RustExpr::Path(vec!["Some".to_string()])),
+                                args: vec![RustExpr::MethodCall {
+                                    receiver: Box::new(RustExpr::Var("reader".to_string())),
+                                    method: "query_3".to_string(),
+                                    args: vec![
+                                        RustExpr::Var("contig".to_string()),
+                                        RustExpr::Var("start".to_string()),
+                                        RustExpr::Var("end".to_string()),
+                                    ],
+                                }],
+                            }),
+                        },
+                    ),
+                    ("reader".to_string(), RustExpr::Var("reader".to_string())),
+                ],
+            }))]
+        );
+        assert_eq!(
+            constructor_default_field_value_with_facts(
+                "count".to_string(),
+                RustSlotShape::for_storage(JavaType::Primitive(PrimitiveType::Int)),
+                &default_facts,
+            ),
+            (
+                "count".to_string(),
+                default_expr_for_slot_with_facts(
+                    &RustSlotShape::for_storage(JavaType::Primitive(PrimitiveType::Int)),
+                    &default_facts
+                )
+            )
+        );
+
+        let method_body = vec![RustStmt::Return(Some(RustExpr::Var("value".to_string())))];
+        let method_fn = method_function_shell_with_facts(
+            ty,
+            method,
+            &signatures,
+            method_body.clone(),
+            &default_facts,
+        );
+        assert_eq!(method_fn.name, "echo");
+        assert_eq!(method_fn.params.len(), 1);
+        assert_eq!(method_fn.params[0].name, "value");
+        assert_eq!(
+            method_fn.return_type,
+            signatures
+                .method_return_shape(ty, method)
+                .map(|method_shape| crate::slot_render::rust_type_for_slot(&method_shape))
+        );
+        assert_eq!(method_fn.receiver, Some(RustReceiver::Shared));
+        assert_eq!(method_fn.body, method_body);
+
+        let impl_item = impl_item_for_type(ty, vec![method_fn.clone()]);
+        let RustItem::Impl(rust_impl) = impl_item else {
+            panic!("impl shell should be assembled as an impl item");
+        };
+        assert_eq!(rust_impl.target, "Holder");
+        assert_eq!(rust_impl.functions, vec![method_fn]);
+    }
+
+    #[test]
     fn derive_support_type_lookup_refuses_ambiguous_emitted_rust_name() {
         let support = support_program(vec![
             test_type_decl("a.B.C", TypeKind::Class, None),
@@ -1451,7 +1821,7 @@ mod tests {
     }
 }
 
-pub fn constructor_default_field_value_with_facts(
+pub(crate) fn constructor_default_field_value_with_facts(
     field_name: String,
     shape: RustSlotShape,
     facts: &FactSet,
@@ -1459,18 +1829,25 @@ pub fn constructor_default_field_value_with_facts(
     (field_name, default_expr_for_slot_with_facts(&shape, facts))
 }
 
-pub fn static_storage_initial_fallback_value(shape: &RustSlotShape, facts: &FactSet) -> RustExpr {
+pub(crate) fn static_storage_initial_fallback_value(
+    shape: &RustSlotShape,
+    facts: &FactSet,
+) -> RustExpr {
     default_expr_for_slot_with_facts(shape, facts)
 }
 
-pub fn delegating_constructor_return_body(rust_name: &str, args: Vec<RustExpr>) -> Vec<RustStmt> {
+pub(crate) fn delegating_constructor_return_body(
+    rust_name: &str,
+    args: Vec<RustExpr>,
+) -> Vec<RustStmt> {
     vec![RustStmt::Return(Some(function_call_projection(
         self_associated_path_projection(rust_name),
         args,
     )))]
 }
 
-pub fn method_function_shell_with_facts(
+#[cfg(test)]
+pub(crate) fn method_function_shell_with_facts(
     ty: &TypeDecl,
     method: &MethodDecl,
     signatures: &SignaturePlan,
@@ -1489,7 +1866,8 @@ pub fn method_function_shell_with_facts(
     )
 }
 
-pub fn method_function_shell_with_facts_and_exception_plan(
+#[cfg(test)]
+fn method_function_shell_with_facts_and_exception_plan(
     ty: &TypeDecl,
     method: &MethodDecl,
     signatures: &SignaturePlan,
@@ -1508,7 +1886,8 @@ pub fn method_function_shell_with_facts_and_exception_plan(
     )
 }
 
-pub fn method_function_shell_with_facts_exception_plan_and_support_context(
+#[cfg(test)]
+fn method_function_shell_with_facts_exception_plan_and_support_context(
     ty: &TypeDecl,
     method: &MethodDecl,
     signatures: &SignaturePlan,
@@ -1528,7 +1907,7 @@ pub fn method_function_shell_with_facts_exception_plan_and_support_context(
     )
 }
 
-pub fn method_function_shell_with_facts_exception_plan_and_support_contexts(
+pub(crate) fn method_function_shell_with_facts_exception_plan_and_support_contexts(
     ty: &TypeDecl,
     method: &MethodDecl,
     signatures: &SignaturePlan,
@@ -1584,7 +1963,7 @@ fn static_method_needs_borrowed_return_lifetime(
             .any(|param| rust_type_contains_ref(&param.ty))
 }
 
-pub fn method_return_shape(
+fn method_return_shape(
     ty: &TypeDecl,
     method: &MethodDecl,
     signatures: &SignaturePlan,
@@ -1595,7 +1974,7 @@ pub fn method_return_shape(
         .clone()
 }
 
-pub fn method_return_type_with_facts(
+fn method_return_type_with_facts(
     ty: &TypeDecl,
     method: &MethodDecl,
     signatures: &SignaturePlan,
@@ -2273,7 +2652,7 @@ fn raw_dyn_trait_supports_box_clone_adapter(trait_name: &str) -> bool {
 /// asked speculatively — to decide whether `new T[n]` can allocate `n` slots —
 /// so a wrong "yes" would turn a loud fallback into a broken build. A wrong
 /// "no" only keeps today's diagnostic.
-pub fn rust_type_supports_struct_derive_default(
+fn rust_type_supports_struct_derive_default(
     ty: &RustType,
     type_params: &HashSet<String>,
     signatures: &SignaturePlan,
@@ -2332,7 +2711,7 @@ pub fn rust_type_supports_struct_derive_default(
 ///
 /// Unknown names answer `false` — see the note on
 /// [`rust_type_supports_struct_derive_default`].
-pub fn rust_named_type_supports_struct_derive_default(
+fn rust_named_type_supports_struct_derive_default(
     name: &str,
     type_params: &HashSet<String>,
     signatures: &SignaturePlan,
@@ -2359,7 +2738,7 @@ pub fn rust_named_type_supports_struct_derive_default(
     )
 }
 
-pub fn source_type_decl_supports_struct_derive_default(
+pub(crate) fn source_type_decl_supports_struct_derive_default(
     ty: &TypeDecl,
     type_params: &HashSet<String>,
     signatures: &SignaturePlan,
@@ -2521,11 +2900,11 @@ fn rust_type_supports_struct_derive_eq_hash(ty: &RustType) -> bool {
     }
 }
 
-pub fn is_static_field(field: &FieldDecl) -> bool {
+pub(crate) fn is_static_field(field: &FieldDecl) -> bool {
     field.modifiers.contains(&Modifier::Static)
 }
 
-pub fn is_static_final_field(field: &FieldDecl) -> bool {
+fn is_static_final_field(field: &FieldDecl) -> bool {
     field.modifiers.contains(&Modifier::Static) && field.modifiers.contains(&Modifier::Final)
 }
 
@@ -2548,7 +2927,7 @@ fn associated_consts_for_type(ty: &TypeDecl) -> Vec<RustAssociatedConst> {
         .collect()
 }
 
-pub fn static_final_field_has_associated_const(ty: &TypeDecl, field: &FieldDecl) -> bool {
+pub(crate) fn static_final_field_has_associated_const(ty: &TypeDecl, field: &FieldDecl) -> bool {
     if !is_static_final_field(field) {
         return false;
     }

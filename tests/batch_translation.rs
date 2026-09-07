@@ -448,6 +448,16 @@ public class Main {
     assert!(a_item.rust.contains("pub struct AItem"), "{}", a_item.rust);
     assert!(b_item.rust.contains("pub struct BItem"), "{}", b_item.rust);
     assert!(
+        !a_item.rust.contains("pub type Item = AItem;"),
+        "{}",
+        a_item.rust
+    );
+    assert!(
+        !b_item.rust.contains("pub type Item = BItem;"),
+        "{}",
+        b_item.rust
+    );
+    assert!(
         !a_item.rust.contains("pub struct Item") && !b_item.rust.contains("pub struct Item"),
         "declarations should not collapse to the simple name:\n{}\n{}",
         a_item.rust,
@@ -528,9 +538,29 @@ public class Main {
         .iter()
         .find(|translation| translation.path == "Main.java")
         .unwrap_or_else(|| panic!("{:#?}", report.translations));
+    let a_item = report
+        .translations
+        .iter()
+        .find(|translation| translation.path == "a/Item.java")
+        .unwrap_or_else(|| panic!("{:#?}", report.translations));
+    let b_item = report
+        .translations
+        .iter()
+        .find(|translation| translation.path == "b/Item.java")
+        .unwrap_or_else(|| panic!("{:#?}", report.translations));
     assert!(main.rust.contains("AItem::KIND"), "{}", main.rust);
     assert!(main.rust.contains("BItem::KIND"), "{}", main.rust);
     assert!(!main.rust.contains("pub struct Item;"), "{}", main.rust);
+    assert!(
+        !a_item.rust.contains("pub type Item = AItem;"),
+        "{}",
+        a_item.rust
+    );
+    assert!(
+        !b_item.rust.contains("pub type Item = BItem;"),
+        "{}",
+        b_item.rust
+    );
     assert!(
         !main.rust.contains("pub const KIND: KIND = KIND;"),
         "{}",

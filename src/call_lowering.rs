@@ -18,8 +18,8 @@ use crate::coercion::{
     collections_unmodifiable_projection, discard_value_projection, erased_object_box_projection,
     erased_object_constructor_projection, external_crate_associated_path_projection,
     external_crate_path_projection, external_facade_rust_path_projection, facade_method_name,
-    file_exists_projection, free_function_path_projection, function_call_projection,
-    index_to_usize_projection, java_class_literal_path_projection,
+    field_projection, file_exists_projection, free_function_path_projection,
+    function_call_projection, index_to_usize_projection, java_class_literal_path_projection,
     java_class_static_path_projection, java_integral_parse_null_argument_as_number_format,
     java_iterator_from_collection_projection, java_list_hash_code_projection,
     java_map_hash_code_projection, java_plain_object_constructor_projection,
@@ -57,7 +57,7 @@ use crate::output_markers::noop_facade_method_call_site_marker;
 use crate::representation::RepresentationPlan;
 use crate::rust_ir::{RustClosureBody, RustClosureParam, RustExpr, RustStmt, RustType};
 use crate::shape_projection::shape_is_erased_object_boundary;
-use crate::slot_render::rust_type_for_slot_with_facts;
+use crate::slot_render::{rust_type_for_java_type_with_facts, rust_type_for_slot_with_facts};
 use crate::stream_lowering::{StreamLambdaValue, emit_stream_lambda_body_expr};
 
 pub fn apply_call_target(
@@ -196,7 +196,7 @@ pub fn apply_call_target(
             declaring_type,
             rust_name,
             ..
-        } => apply_super_boundary_call(declaring_type, rust_name),
+        } => apply_super_boundary_call(declaring_type, rust_name, args),
     }
 }
 
@@ -251,7 +251,18 @@ fn apply_external_facade_receiver_call(
     }
 }
 
-fn apply_super_boundary_call(declaring_type: &str, rust_name: &str) -> RustExpr {
+fn apply_super_boundary_call(
+    declaring_type: &str,
+    rust_name: &str,
+    args: Vec<RustExpr>,
+) -> RustExpr {
+    if rust_name == "read_3" && declaring_type.contains("InputStream") {
+        return receiver_method_call_projection_exact(
+            field_projection(RustExpr::Var("self".to_string()), "r#in"),
+            "read_3",
+            args,
+        );
+    }
     compile_error_call(&format!(
         "unsupported Java super call: {declaring_type}.{rust_name} requires class hierarchy lowering"
     ))
@@ -852,6 +863,21 @@ fn apply_native_java_static_method(
             };
             objects_is_null_projection(arg)
         }
+        NativeJavaStaticMethod::PatternCompile => {
+            let mut args = args.into_iter();
+            let Some(pattern) = args.next() else {
+                return compile_error_call("Pattern.compile requires one argument");
+            };
+            if args.next().is_some() {
+                return compile_error_call(
+                    "Pattern.compile with flags requires regex flag lowering",
+                );
+            }
+            function_call_projection(
+                owner_associated_path_projection("Pattern", "compile"),
+                vec![pattern],
+            )
+        }
     }
 }
 
@@ -1040,7 +1066,7 @@ fn apply_native_collection_static_method(
     }
 }
 
-pub fn apply_collection_remove_if(receiver: RustExpr, predicate: &Expr) -> Option<RustExpr> {
+pub(crate) fn apply_collection_remove_if(receiver: RustExpr, predicate: &Expr) -> Option<RustExpr> {
     let Expr::Lambda { params, body } = predicate else {
         return None;
     };
@@ -1122,6 +1148,9 @@ fn apply_native_collection_method(
         NativeCollectionMethod::ListGet => {
             return apply_list_get(receiver, args);
         }
+        NativeCollectionMethod::ListSubList => {
+            return apply_list_sub_list(receiver, args);
+        }
         NativeCollectionMethod::ListIndexOf => {
             return apply_list_index_of(receiver, args);
         }
@@ -1194,19 +1223,19 @@ fn apply_native_collection_method(
     receiver_method_call_projection_exact(receiver, rust_name, args)
 }
 
-pub fn map_first_key_projection(receiver: RustExpr) -> RustExpr {
+fn map_first_key_projection(receiver: RustExpr) -> RustExpr {
     unwrap_result_or_panic_uncaught_java_exception(map_first_key_result_projection(receiver))
 }
 
-pub fn map_last_key_projection(receiver: RustExpr) -> RustExpr {
+fn map_last_key_projection(receiver: RustExpr) -> RustExpr {
     unwrap_result_or_panic_uncaught_java_exception(map_last_key_result_projection(receiver))
 }
 
-pub fn map_first_key_result_projection(receiver: RustExpr) -> RustExpr {
+pub(crate) fn map_first_key_result_projection(receiver: RustExpr) -> RustExpr {
     map_key_result_projection(receiver, "next", "Java TreeMap.firstKey on empty map")
 }
 
-pub fn map_last_key_result_projection(receiver: RustExpr) -> RustExpr {
+pub(crate) fn map_last_key_result_projection(receiver: RustExpr) -> RustExpr {
     map_key_result_projection(receiver, "next_back", "Java TreeMap.lastKey on empty map")
 }
 
@@ -1383,7 +1412,7 @@ fn apply_list_insert(receiver: RustExpr, mut args: Vec<RustExpr>) -> RustExpr {
     )
 }
 
-pub fn list_insert_result_projection(
+pub(crate) fn list_insert_result_projection(
     receiver: RustExpr,
     index: RustExpr,
     value: RustExpr,
@@ -1474,7 +1503,7 @@ fn apply_list_get(receiver: RustExpr, mut args: Vec<RustExpr>) -> RustExpr {
     )
 }
 
-pub fn list_get_result_projection(receiver: RustExpr, index: RustExpr) -> RustExpr {
+pub(crate) fn list_get_result_projection(receiver: RustExpr, index: RustExpr) -> RustExpr {
     let index_name = "__java_list_get_index";
     let index_var = RustExpr::Var(index_name.to_string());
     let value = receiver_method_call_projection_exact(
@@ -1522,6 +1551,112 @@ pub fn list_get_result_projection(receiver: RustExpr, index: RustExpr) -> RustEx
     }
 }
 
+fn apply_list_sub_list(receiver: RustExpr, mut args: Vec<RustExpr>) -> RustExpr {
+    if args.len() != 2 {
+        return compile_error_call("Java List.subList requires begin and end indexes");
+    }
+    let end = args.pop().expect("len checked");
+    let begin = args.pop().expect("len checked");
+    let begin = index_to_usize_projection(begin, IndexToUsizeProjection::StreamLambdaArgument);
+    let end = index_to_usize_projection(end, IndexToUsizeProjection::StreamLambdaArgument);
+    receiver_method_call_projection_exact(
+        RustExpr::Index(
+            Box::new(receiver),
+            Box::new(RustExpr::Range {
+                start: Box::new(begin),
+                end: Box::new(end),
+                inclusive: false,
+            }),
+        ),
+        "to_vec",
+        Vec::new(),
+    )
+}
+
+pub(crate) fn list_sub_list_result_projection(
+    receiver: RustExpr,
+    begin: RustExpr,
+    end: RustExpr,
+) -> RustExpr {
+    let begin_name = "__java_list_sub_list_begin";
+    let end_name = "__java_list_sub_list_end";
+    let begin_var = RustExpr::Var(begin_name.to_string());
+    let end_var = RustExpr::Var(end_name.to_string());
+    let begin_usize = RustExpr::Cast {
+        expr: Box::new(begin_var.clone()),
+        ty: "usize".to_string(),
+    };
+    let end_usize = RustExpr::Cast {
+        expr: Box::new(end_var.clone()),
+        ty: "usize".to_string(),
+    };
+    let out_of_bounds = list_index_out_of_bounds_exception_expr();
+    let invalid_order = RustExpr::Binary {
+        op: "<".to_string(),
+        left: Box::new(end_var.clone()),
+        right: Box::new(begin_var.clone()),
+    };
+    let invalid_bounds = RustExpr::Binary {
+        op: "||".to_string(),
+        left: Box::new(RustExpr::Binary {
+            op: "<".to_string(),
+            left: Box::new(begin_var.clone()),
+            right: Box::new(RustExpr::Literal("0".to_string())),
+        }),
+        right: Box::new(RustExpr::Binary {
+            op: ">".to_string(),
+            left: Box::new(end_var.clone()),
+            right: Box::new(len_i32_projection(receiver.clone())),
+        }),
+    };
+    let slice = RustExpr::Index(
+        Box::new(receiver),
+        Box::new(RustExpr::Range {
+            start: Box::new(begin_usize),
+            end: Box::new(end_usize),
+            inclusive: false,
+        }),
+    );
+    RustExpr::Block {
+        stmts: vec![
+            RustStmt::Let {
+                mutable: false,
+                name: begin_name.to_string(),
+                ty: None,
+                value: Some(begin),
+            },
+            RustStmt::Let {
+                mutable: false,
+                name: end_name.to_string(),
+                ty: None,
+                value: Some(end),
+            },
+        ],
+        tail: Some(Box::new(RustExpr::If {
+            condition: Box::new(invalid_bounds),
+            then_expr: Box::new(function_call_projection(
+                RustExpr::Var("Err".to_string()),
+                vec![out_of_bounds],
+            )),
+            else_expr: Box::new(RustExpr::If {
+                condition: Box::new(invalid_order),
+                then_expr: Box::new(function_call_projection(
+                    RustExpr::Var("Err".to_string()),
+                    vec![list_invalid_range_exception_expr()],
+                )),
+                else_expr: Box::new(function_call_projection(
+                    RustExpr::Var("Ok".to_string()),
+                    vec![receiver_method_call_projection_exact(
+                        slice,
+                        "to_vec",
+                        Vec::new(),
+                    )],
+                )),
+            }),
+        })),
+    }
+}
+
 fn apply_list_set(receiver: RustExpr, mut args: Vec<RustExpr>) -> RustExpr {
     if args.len() != 2 {
         return compile_error_call("Java List.set requires index and value arguments");
@@ -1561,7 +1696,7 @@ fn apply_list_set(receiver: RustExpr, mut args: Vec<RustExpr>) -> RustExpr {
     }
 }
 
-pub fn list_set_result_projection(
+pub(crate) fn list_set_result_projection(
     receiver: RustExpr,
     index: RustExpr,
     value: RustExpr,
@@ -1646,6 +1781,13 @@ fn list_index_out_of_bounds_exception_expr() -> RustExpr {
     )
 }
 
+fn list_invalid_range_exception_expr() -> RustExpr {
+    crate::exception_lowering::new_exception_expr(
+        "IllegalArgumentException",
+        rust_string_literal_projection("fromIndex > toIndex"),
+    )
+}
+
 fn ok_or_else_java_exception_projection(value: RustExpr, exception: RustExpr) -> RustExpr {
     receiver_method_call_projection_exact(
         value,
@@ -1674,7 +1816,7 @@ fn apply_list_remove_index(receiver: RustExpr, mut args: Vec<RustExpr>) -> RustE
     )
 }
 
-pub fn list_remove_index_result_projection(receiver: RustExpr, index: RustExpr) -> RustExpr {
+pub(crate) fn list_remove_index_result_projection(receiver: RustExpr, index: RustExpr) -> RustExpr {
     let index_name = "__java_list_remove_index";
     let index_usize_name = "__java_list_remove_index_usize";
     let old_name = "__java_list_remove_old";
@@ -1741,15 +1883,15 @@ pub fn list_remove_index_result_projection(receiver: RustExpr, index: RustExpr) 
     }
 }
 
-pub fn queue_remove_projection(receiver: RustExpr) -> RustExpr {
+fn queue_remove_projection(receiver: RustExpr) -> RustExpr {
     unwrap_result_or_panic_uncaught_java_exception(queue_remove_result_projection(receiver))
 }
 
-pub fn queue_element_projection(receiver: RustExpr) -> RustExpr {
+fn queue_element_projection(receiver: RustExpr) -> RustExpr {
     unwrap_result_or_panic_uncaught_java_exception(queue_element_result_projection(receiver))
 }
 
-pub fn queue_element_result_projection(receiver: RustExpr) -> RustExpr {
+pub(crate) fn queue_element_result_projection(receiver: RustExpr) -> RustExpr {
     let value = receiver_method_call_projection_exact(
         receiver_method_call_projection_exact(
             receiver,
@@ -1762,7 +1904,7 @@ pub fn queue_element_result_projection(receiver: RustExpr) -> RustExpr {
     ok_or_else_java_exception_projection(value, queue_no_such_element_exception_expr("element"))
 }
 
-pub fn queue_remove_result_projection(receiver: RustExpr) -> RustExpr {
+pub(crate) fn queue_remove_result_projection(receiver: RustExpr) -> RustExpr {
     let no_such_element = queue_no_such_element_exception_expr("remove");
     RustExpr::If {
         condition: Box::new(receiver_method_call_projection_exact(
@@ -1931,7 +2073,7 @@ fn apply_map_put_if_absent(receiver: RustExpr, mut args: Vec<RustExpr>) -> RustE
     }
 }
 
-pub fn apply_native_collection_extend(receiver: RustExpr, arg: RustExpr) -> RustExpr {
+pub(crate) fn apply_native_collection_extend(receiver: RustExpr, arg: RustExpr) -> RustExpr {
     receiver_method_call_projection_exact(receiver, "extend", vec![arg])
 }
 
@@ -2159,12 +2301,15 @@ fn collection_bulk_source_aliases_receiver(source: &RustExpr, receiver: &RustExp
     }
 }
 
-pub fn apply_class_literal_token(ty: &JavaType, facts: &FactSet) -> RustExpr {
+pub(crate) fn apply_class_literal_token(ty: &JavaType, facts: &FactSet) -> RustExpr {
     let plan = crate::stdlib::class_literal_token_plan(ty, facts);
     apply_class_literal_token_with_rust_type(ty, plan.rust_type)
 }
 
-pub fn apply_class_literal_token_with_rust_type(ty: &JavaType, rust_type: RustType) -> RustExpr {
+pub(crate) fn apply_class_literal_token_with_rust_type(
+    ty: &JavaType,
+    rust_type: RustType,
+) -> RustExpr {
     function_call_projection(
         java_class_literal_path_projection(rust_type),
         vec![rust_string_literal_projection(
@@ -2348,7 +2493,10 @@ fn apply_native_collection_new_target(
         };
     }
     match native_collection {
-        NativeCollectionNewTarget::Empty { kind } => native_collection_empty_new_projection(kind),
+        NativeCollectionNewTarget::Empty { kind } => {
+            sequence_like_empty_native_collection_projection(target, facts)
+                .unwrap_or_else(|| native_collection_empty_new_projection(kind))
+        }
         NativeCollectionNewTarget::WithCapacity { kind } => {
             let capacity = args
                 .pop()
@@ -2363,6 +2511,21 @@ fn apply_native_collection_new_target(
             .pop()
             .unwrap_or_else(|| native_collection_default_constructor_projection(kind)),
     }
+}
+
+fn sequence_like_empty_native_collection_projection(
+    target: &NewTargetPlan,
+    facts: &FactSet,
+) -> Option<RustExpr> {
+    let element_ty = facts.sequence_element_type_for(&target.owner_shape.java_ty)?;
+    Some(function_call_projection(
+        RustExpr::GenericPath {
+            base: vec!["Vec".to_string()],
+            args: vec![rust_type_for_java_type_with_facts(&element_ty, facts)],
+            member: Some("new".to_string()),
+        },
+        Vec::new(),
+    ))
 }
 
 fn native_collection_new_target_kind(
@@ -2380,6 +2543,21 @@ fn native_collection_new_target_kind(
 mod tests {
     use super::*;
     use crate::emit;
+
+    #[test]
+    fn class_literal_token_application_stays_structured() {
+        assert_eq!(
+            apply_class_literal_token(&JavaType::String, &FactSet::default()),
+            RustExpr::Call {
+                function: Box::new(RustExpr::GenericPath {
+                    base: vec!["JavaClass".to_string()],
+                    args: vec![RustType::String],
+                    member: Some("literal".to_string()),
+                }),
+                args: vec![RustExpr::Literal("\"java.lang.String\"".to_string())],
+            }
+        );
+    }
 
     #[test]
     fn optional_get_native_fallback_uses_uncaught_java_exception_adapter() {

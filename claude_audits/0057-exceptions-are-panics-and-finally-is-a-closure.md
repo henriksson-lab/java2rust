@@ -3,6 +3,79 @@
 Recorded 2026-08-23.
 Status: **open**.
 
+Follow-up 2026-09-07 `List.subList` exception-class pass: catchable
+`List.subList(from, to)` lowering now preserves Java's split exception contract.
+`from > to` raises `IllegalArgumentException`, while negative/out-of-size bounds
+continue to raise `IndexOutOfBoundsException`. Regression:
+`idiom_gaps::list_sub_list_invalid_range_is_catchable_as_illegal_argument`.
+
+Follow-up 2026-09-07: the exception-support predicate is crate-local. Integration
+tests now assert the public `plan_java_exception_support` result instead of
+keeping `program_uses_java_exception_with_facts` exported as a standalone API.
+The same pass removed two remaining lowering-side source exception probes:
+fallible receiver projection and summary-only `super` fallback wrapping now ask
+the solved method/callable exception plans instead of reading `method.throws` or
+`facts.method_has_thrown_exceptions` directly.
+`plan_call_exception_propagation_with_external_index` is also crate-local now:
+the public boundary remains the no-index wrapper for tests and the
+external-only propagation planner used by lowering.
+
+Follow-up 2026-09-06: erased-object downcast failures inside propagating
+`try/catch` lowering now become catchable `ClassCastException`s instead of
+panicking through `.expect("invalid Java cast")`. The rewrite is limited to the
+existing propagated runtime-expect pass: `downcast::<T>()` uses `map_err(...)?`,
+and optional/reference downcast chains use `ok_or_else(...)?`. Regression:
+`idiom_gaps::erased_object_class_cast_exception_is_catchable`.
+
+Follow-up 2026-09-07 stale-baseline cleanup: the Java exception logging surface
+now compiles without treating `System.err` as a value. `println` lowers to
+`eprintln!` through the optional localized-message display path, and both
+`printStackTrace` calls are omitted by the translation runtime marker. Removed
+`idiom_gaps::java_exception_logging_surface_compiles_without_system_err_value`
+from the failure baseline after focused generated-crate verification.
+At that intermediate checkpoint, release `idiom_gaps` was `743/73`; later
+2026-09-07 passes in this file supersede that baseline.
+
+Follow-up 2026-09-06 stale-baseline pass: two try/finally rows were still
+listed as idiom-gap failures after current generated code compiled. The
+standalone `SimpleTryFinallyCleanup` generated test now passes the borrowed
+`Resource` parameter the method actually expects, and the try-with-resources
+assertion now checks the cleanup-result combiner rather than the older direct
+`input.close()?` tail. Verified:
+`idiom_gaps::simple_try_finally_cleanup_generated_rust_compiles` and
+`idiom_gaps::translates_exception_propagating_try_with_resources_without_catch`.
+The adjacent JAligner try/catch/finally row was then closed by making optional
+erased-object assignment wrapping use the non-optional concrete RHS shape before
+the erased-object element conversion. `Object sequence = null; sequence =
+resource.read();` now stores `Some(Box::new(resource.read()?) as Box<dyn Any>)`
+instead of boxing `Some(...)` as the erased object. Verified:
+`idiom_gaps::translates_jaligner_try_catch_finally_cleanup_without_placeholder`.
+
+Follow-up 2026-09-06: direct structural mutation of a freshly returned
+`Collections.unmodifiableList`/`unmodifiableSet`/`unmodifiableMap` view, and
+direct structural mutation of a fixed-size `Arrays.asList(...)` view, now lower
+to `UnsupportedOperationException` instead of mutating the wrapped Rust
+collection through the identity projection. The fix is intentionally limited to
+the direct expression shape, for example
+`Collections.unmodifiableList(values).add(value)` or
+`Arrays.asList(value).add(other)`. `Arrays.asList(...).set(i, v)` is not
+treated as unsupported, matching Java's fixed-size-list contract. Regressions:
+`lower::tests::direct_unmodifiable_list_mutation_throws_unsupported_operation_exception`
+and
+`lower::tests::direct_arrays_as_list_add_throws_unsupported_operation_exception`.
+
+Follow-up 2026-09-06: local aliases of those direct views now carry explicit
+view provenance in `ShapeEnv`, keyed by binding id where available and cleared
+on redeclaration. Structural mutation through an aliased
+`Collections.unmodifiable*` or `Arrays.asList(...)` local now lowers to
+`UnsupportedOperationException` too, without re-evaluating the original view
+initializer arguments at the mutation site. Regressions:
+`expr_shape::tests::bound_collection_view_facts_do_not_survive_same_name_redeclaration`,
+`lower::tests::aliased_unmodifiable_list_mutation_throws_unsupported_operation_exception`,
+`lower::tests::aliased_arrays_as_list_add_throws_unsupported_operation_exception`,
+and
+`lower::tests::collection_view_var_decl_facts_feed_later_mutation_lowering`.
+
 Follow-up 2026-08-30 layering cleanup: exception-support lowering no longer
 imports or constructs `JavaType` while building source exception parent arms.
 The Java-type-specific parent lookup is now hidden behind
@@ -1468,16 +1541,24 @@ Covered by
 
 Follow-up 2026-08-29 fallthrough source-call propagation pass:
 the `try_return_with_fallthrough_catch_uses_outer_fallback_return` fixture no
-longer fails for the unrelated local `URL`/platform `URL` name collision, and
-the generated crate now compiles. Promoting it exposed the real lowering bug:
-after `let connection = url.open_connection()?`, the follow-up source call
-`connection.get_manifest()` returned `Result<Manifest, JavaException>` but was
-not being propagated inside the same catchable try closure. The fallback
-result-return check now consults the original source receiver's `ShapeEnv` type
-before falling back to recovering an owner from the lowered Rust receiver, so
-local receiver calls declared `throws` consistently get `?`. The fixture was
-removed from `tests/baselines/idiom-gaps-failures.txt`. The general completion
-carrier and remaining panic paths are still open.
+longer fails for the unrelated local `URL`/platform `URL` name collision.
+At one 2026-09-07 release baseline recheck, the fixture still belonged in
+`tests/baselines/idiom-gaps-failures.txt`: the catch arm computed a fallback
+message but did not feed that value into a real fallthrough completion carrier,
+and the generated code fell through to `Default::default()` instead. The
+explicit-null return pass below supersedes this intermediate state. The general
+completion carrier and remaining panic paths are still open.
+
+Follow-up 2026-09-07 explicit-null return pass:
+source methods with an explicit non-primitive `return null` no longer let
+concrete/native returned-call facts strip the nullable return carrier. The
+fallthrough try/catch row now keeps `Result<Option<String>, JavaException>`
+inside the try value carrier and returns `None` for the outer fallback. The
+adjacent `StreamCallbackChain.computeScores` assertion was updated from the old
+`Default::default()` placeholder to the current `return None;` nullable return.
+Focused generated-crate checks pass for both rows, and release `idiom_gaps` is
+now `816 passed; 0 failed`. The audit remains open for the broader completion
+carrier and remaining panic-based exception surfaces.
 
 Follow-up 2026-08-29 loop-finally block-expression pass:
 the simple loop-body `try/finally` fast path now rewrites unlabeled
@@ -1594,7 +1675,7 @@ The full differential test now passes all 219 checked-in fixtures.
 
 ---
 
-## 2026-09-02 — `unmodifiable*` / `asList`: deliberately not "fixed" yet
+## 2026-09-02 — `unmodifiable*` / `asList`: direct mutation fixed, alias fix followed
 
 The recheck added a silent-divergence finding: `Collections.unmodifiableList`,
 `unmodifiableMap` and `Arrays.asList` erase to a plain `mut Vec`/`HashMap`, so
@@ -1617,9 +1698,68 @@ tests/differential/MapKeySetRemoveAll.java:13
 are correct today as a `Vec`. A blanket refusal would break six working fixtures,
 including differential ones, to correct a divergence none of them exhibits.
 
-The divergence needs *mutation through the view*, so the real fix is to carry
-"this value came from an unmodifiable view" on the value and refuse the mutating
-call — not to refuse the constructor. That is a fact-and-shape change of the same
-kind as the shared-handle work, not a lowering tweak, and it should be scheduled
-as one. Until then this stays open and known, because a wrong loud answer here
-would cost more than the silent one it replaces.
+At that point, the divergence needed *mutation through the view*, so the real
+fix was to carry "this value came from an unmodifiable view" on the value and
+refuse the mutating call — not to refuse the constructor. The follow-up below
+records the bounded direct/local-alias repair that landed later; broader
+exception/finally work remains open separately.
+
+Follow-up 2026-09-06: the direct expression subset is now fixed without the
+blanket refusal rejected above. Fresh structural calls such as
+`Collections.unmodifiableList(values).add(value)` and `Arrays.asList(value).add(other)`
+lower to `UnsupportedOperationException`, while read-only `Arrays.asList` uses
+still lower as collection values. A later 2026-09-06 follow-up also records
+local view provenance, so storing the view in a local and mutating it later is
+covered by focused block-lowering tests. The broader 0057 exception/finally
+surface remains open.
+
+Follow-up 2026-09-06: `List.subList(from, to)` is now recognized as a native
+list call. Ordinary lowering returns an owned `Vec` copy, and propagating
+`try`/`catch` lowering checks Java range failures instead of panicking. It now
+preserves the Java exception split: negative/out-of-size bounds raise
+`IndexOutOfBoundsException`, while `from > to` raises `IllegalArgumentException`.
+Chained
+`subList(...).size()` is also retargeted through native collection lowering.
+This deliberately does not implement Java's live-view aliasing or fail-fast
+iterator semantics. Covered by
+`tests/idiom_gaps.rs::list_sub_list_returns_owned_vec_copy` and
+`tests/idiom_gaps.rs::list_sub_list_out_of_bounds_is_catchable`, with the
+exception-class split covered by
+`tests/idiom_gaps.rs::list_sub_list_invalid_range_is_catchable_as_illegal_argument`.
+
+Follow-up 2026-09-07: the checked-in assertions for
+`selected_opaque_future_get_is_generic_instance_surface` and
+`optional_print_stream_field_println_with_mutating_optional_arg_uses_mut_receiver`
+were stale against the current lowering. Both generated crates compile with the
+null-safe/fallible receiver path, so those rows were removed from the idiom-gaps
+baseline.
+
+Follow-up 2026-09-07: a read-only triage suggested adding a compile-loud
+boundary test for nested labeled `try/finally` loop completion. The focused
+probe showed that shape is already supported: a labeled `continue outer` from
+inside a nested loop runs the `finally` body before the outer loop update and
+does not lower through a closure-crossing `Result` block. The regression is
+now positive and compile/runtime-backed by
+`tests/idiom_gaps.rs::nested_labeled_try_finally_continue_runs_finally_before_outer_update`.
+
+Follow-up 2026-09-07 super-boundary fallibility cleanup: `CallTargetPlan` no
+longer stores a `SuperBoundary.propagates_result` bit computed from
+`FactSet::method_has_thrown_exceptions`. The summary-only and emitted-summary
+super-call lowerers now ask `CallableAnalysis` for the solved
+`CallableKey::Method` instead, matching the source-summary super-call path and
+removing one more raw fact probe from lowering-visible call planning. Guarded by
+`slot_shape_design::semantic_analysis_owns_exception_classification_and_catch_facts`.
+
+Follow-up 2026-09-07 focused finally/TWR oracle: promoted completion fixtures
+now have a small differential loop instead of relying only on the full fixture
+sweep. `finally_completion_fixtures_match_java_output` covers return override,
+catch/finally return override, continue overriding break, nested/labeled
+continue, and try-with-resources break/continue shapes. This pins the bounded
+cases already handled today; the broader completion-carrier design remains
+open.
+
+Follow-up 2026-09-07 focused finally/TWR oracle: that loop now also covers the
+promoted block/do-while/throwing-finally cases and the promoted
+try-with-resources+finally cases. The recheck remains intentionally bounded to
+currently supported completion shapes; the broader nested/labeled completion
+carrier is still open.

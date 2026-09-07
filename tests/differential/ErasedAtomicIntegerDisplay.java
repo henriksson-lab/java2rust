@@ -4,7 +4,7 @@ public class ErasedAtomicIntegerDisplay {
     public static String run() {
         Object value = new AtomicInteger(3);
         value = new AtomicInteger(((AtomicInteger) value).incrementAndGet());
-        return "x" + value;
+        return "x" + value + ",direct=" + value.toString();
     }
 
     public static void main(String[] args) {

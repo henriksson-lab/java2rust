@@ -1204,7 +1204,8 @@ pub fn ownership_coercion_policy_with_effective_facts(
     {
         return OwnershipCoercionPolicy::BorrowOwnedMutably;
     }
-    if actual.java_ty == target.java_ty
+    if (actual.java_ty == target.java_ty
+        || boxed_primitive_element_matches_target(&actual.java_ty, &target.java_ty))
         && actual.dispatch == target.dispatch
         && matches!(
             actual.ownership,
@@ -3010,9 +3011,9 @@ fn slot_conversion_plan_by_value(
             SlotConversionPlan::Shape(shape_coercion_plan_with_facts(actual, target, facts))
         }
         Slot::StringConcatSegment | Slot::DisplaySegment
-            if actual
-                .optional_element_type()
-                .is_some_and(|element_ty| java_type_is_erased_object_display_like(&element_ty)) =>
+            if actual.optional_element_type().is_some_and(|element_ty| {
+                optional_element_is_erased_object_display_like(actual, element_ty)
+            }) =>
         {
             SlotConversionPlan::Syntax(SyntaxCoercionPlan {
                 actual: actual.java_ty.clone(),
@@ -3346,6 +3347,17 @@ fn java_type_is_erased_object_display_like(java_ty: &JavaType) -> bool {
     java_type_is_erased_object_like(java_ty) || java_type_is_erased_object_sequence_like(java_ty)
 }
 
+fn optional_element_is_erased_object_display_like(
+    option_shape: &RustSlotShape,
+    element_ty: JavaType,
+) -> bool {
+    java_type_is_erased_object_display_like(&element_ty)
+        || matches!(
+            optional_element_slot_shape(option_shape, element_ty).dispatch,
+            DispatchShape::ErasedObject
+        )
+}
+
 fn java_type_needs_java_object_display_fallback(
     java_ty: &JavaType,
     content: &CoercionContentPolicy,
@@ -3502,6 +3514,25 @@ mod tests {
             plan.conversion,
             SlotConversionPlan::Syntax(SyntaxCoercionPlan {
                 policy: SyntaxSlotCoercionPolicy::SetToJavaDisplayString,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn optional_erased_concrete_facade_string_concat_uses_erased_display_policy() {
+        let mut actual = RustSlotShape::for_storage(optional_java_type(JavaType::Named {
+            name: "VCFHeader".to_string(),
+            args: Vec::new(),
+        }));
+        actual.dispatch = DispatchShape::ErasedObject;
+
+        let plan = plan_slot_conversion(actual, Slot::StringConcatSegment, &FactSet::default());
+
+        assert!(matches!(
+            plan.conversion,
+            SlotConversionPlan::Syntax(SyntaxCoercionPlan {
+                policy: SyntaxSlotCoercionPolicy::OptionalErasedObjectToJavaDisplayString,
                 ..
             })
         ));

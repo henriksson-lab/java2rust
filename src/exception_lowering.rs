@@ -283,7 +283,7 @@ pub fn throw_stmt(exception: RustExpr) -> RustStmt {
     throw_stmt_with_result_policy(exception, true)
 }
 
-pub fn throw_stmt_with_result_policy(exception: RustExpr, wrap_in_result: bool) -> RustStmt {
+pub(crate) fn throw_stmt_with_result_policy(exception: RustExpr, wrap_in_result: bool) -> RustStmt {
     if !wrap_in_result {
         return uncaught_java_exception_panic_stmt(exception);
     }
@@ -404,7 +404,11 @@ pub fn try_catch_value_fallthrough_stmt(
     arms.push(RustMatchArm {
         pattern: "Ok(None)".to_string(),
         body: RustExpr::Block {
-            stmts: Vec::new(),
+            stmts: if outer_returns_result && outer_result_returns_option {
+                vec![RustStmt::Return(Some(ok_none_expr()))]
+            } else {
+                Vec::new()
+            },
             tail: None,
         },
     });
@@ -1105,7 +1109,7 @@ fn exception_message_expr(message: RustExpr) -> RustExpr {
     )
 }
 
-pub fn fallback_exception_expr(value: RustExpr) -> RustExpr {
+pub(crate) fn fallback_exception_expr(value: RustExpr) -> RustExpr {
     java_exception_new_projection("JavaException", fallback_exception_message_expr(value))
 }
 
@@ -1144,7 +1148,10 @@ pub fn exception_expr_from_new_with_cause_hint(
     second_arg_is_cause: bool,
 ) -> RustExpr {
     let mut args = args.into_iter();
-    let message = args.next().unwrap_or_else(empty_exception_message);
+    let message = args.next().unwrap_or_else(|| RustExpr::Call {
+        function: Box::new(RustExpr::path(["String", "new"])),
+        args: Vec::new(),
+    });
     if second_arg_is_cause && let Some(cause) = args.next() {
         new_exception_expr_with_cause(class_name, message, cause)
     } else if args.len() > 0 {
@@ -1166,13 +1173,6 @@ fn combined_exception_message(first: RustExpr, rest: Vec<RustExpr>) -> RustExpr 
     args.push(first);
     args.extend(rest);
     macro_call_projection("format", args)
-}
-
-pub fn empty_exception_message() -> RustExpr {
-    RustExpr::Call {
-        function: Box::new(RustExpr::path(["String", "new"])),
-        args: Vec::new(),
-    }
 }
 
 fn ok_expr(value: RustExpr) -> RustExpr {
@@ -1534,6 +1534,57 @@ mod tests {
 
         let raw = fallback_exception_message_expr(RustExpr::Raw("value + 1".to_string()));
         assert_eq!(crate::emit::emit_expr(&raw), "format!(\"{:?}\", value + 1)");
+
+        assert_eq!(
+            fallback_exception_expr(RustExpr::Var("err".to_string())),
+            RustExpr::Call {
+                function: Box::new(RustExpr::path(["JavaException", "new"])),
+                args: vec![
+                    RustExpr::Literal("\"JavaException\"".to_string()),
+                    RustExpr::MacroCall {
+                        macro_name: "format".to_string(),
+                        args: vec![
+                            RustExpr::Literal("\"{:?}\"".to_string()),
+                            RustExpr::Var("err".to_string()),
+                        ],
+                    },
+                ],
+            }
+        );
+
+        let uncaught = throw_stmt_with_result_policy(
+            new_exception_expr(
+                "IllegalArgumentException",
+                RustExpr::Literal("\"bad\".to_string()".to_string()),
+            ),
+            false,
+        );
+        assert_eq!(
+            uncaught,
+            RustStmt::Expr(RustExpr::MacroCall {
+                macro_name: "panic".to_string(),
+                args: vec![
+                    RustExpr::Literal("\"uncaught Java exception: {:?}\"".to_string()),
+                    RustExpr::Call {
+                        function: Box::new(RustExpr::path(["JavaException", "new"])),
+                        args: vec![
+                            RustExpr::Literal("\"IllegalArgumentException\"".to_string()),
+                            RustExpr::MethodCall {
+                                receiver: Box::new(RustExpr::Literal(
+                                    "\"bad\".to_string()".to_string()
+                                )),
+                                method: "to_string".to_string(),
+                                args: Vec::new(),
+                            },
+                        ],
+                    },
+                ],
+            })
+        );
+        assert_eq!(
+            crate::emit::emit_statements(&[uncaught], 0),
+            "panic!(\"uncaught Java exception: {:?}\", JavaException::new(\"IllegalArgumentException\", \"bad\".to_string().to_string()));\n"
+        );
 
         let cause_or_self = exception_cause_or_self_if_instance_expr(
             RustExpr::Raw("left + right".to_string()),

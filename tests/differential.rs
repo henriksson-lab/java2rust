@@ -20,8 +20,8 @@ use std::process::Command;
 
 use new_java2rust::translate_source;
 
-const EXPECTED_DIFFERENTIAL_FIXTURES: usize = 221;
-const EXPECTED_KNOWN_GAP_FIXTURES: usize = 8;
+const EXPECTED_DIFFERENTIAL_FIXTURES: usize = 233;
+const EXPECTED_KNOWN_GAP_FIXTURES: usize = 6;
 
 #[test]
 fn translated_output_matches_java_output() {
@@ -59,6 +59,239 @@ fn translated_output_matches_java_output() {
         "translated output differs from Java for {} of {} fixtures:\n\n{}",
         failures.len(),
         fixtures.len(),
+        failures.join("\n\n")
+    );
+}
+
+#[test]
+fn erased_display_fixtures_match_java_output() {
+    let translator = translator_binary().unwrap_or_else(|| {
+        panic!("translator binary not built; run `cargo build --release` before differential tests")
+    });
+    for tool in ["javac", "java", "rustc"] {
+        assert!(
+            have_tool(tool),
+            "required differential test tool `{tool}` is not available"
+        );
+    }
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/differential");
+    let fixtures = [
+        "ErasedAtomicBooleanDisplay",
+        "ErasedAtomicIntegerDisplay",
+        "ErasedAtomicLongDisplay",
+        "ErasedArrayListDisplay",
+        "ErasedBitSetDisplay",
+        "ErasedClassDisplay",
+        "ErasedFileDisplay",
+        "ErasedInputStreamDisplay",
+        "ErasedLinkedHashMapDisplay",
+        "ErasedLinkedHashSetDisplay",
+        "ErasedLocaleDisplay",
+        "ErasedMapEntryDisplay",
+        "ErasedPathDisplay",
+        "ErasedPatternDisplay",
+        "ErasedPlatformDisplay",
+        "ErasedRandomDisplay",
+        "ErasedStringBuilderDisplay",
+        "ErasedUriDisplay",
+        "ErasedUrlDisplay",
+    ];
+    let mut failures = Vec::new();
+    for class in fixtures {
+        let fixture = root.join(format!("{class}.java"));
+        match compare_fixture(&translator, &fixture, class) {
+            Ok(()) => {}
+            Err(report) => failures.push(format!("{class}: {report}")),
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "erased display fixture output differs from Java:\n\n{}",
+        failures.join("\n\n")
+    );
+}
+
+#[test]
+fn nullable_map_get_fixtures_match_java_output() {
+    let translator = translator_binary().unwrap_or_else(|| {
+        panic!("translator binary not built; run `cargo build --release` before differential tests")
+    });
+    for tool in ["javac", "java", "rustc"] {
+        assert!(
+            have_tool(tool),
+            "required differential test tool `{tool}` is not available"
+        );
+    }
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/differential");
+    let fixtures = ["MapGetNull2", "MapPutNullValue"];
+    let mut failures = Vec::new();
+    for class in fixtures {
+        let fixture = root.join(format!("{class}.java"));
+        match compare_fixture(&translator, &fixture, class) {
+            Ok(()) => {}
+            Err(report) => failures.push(format!("{class}: {report}")),
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "nullable Map.get fixture output differs from Java:\n\n{}",
+        failures.join("\n\n")
+    );
+}
+
+#[test]
+fn borrowed_element_discharge_fixtures_match_java_output() {
+    let translator = translator_binary().unwrap_or_else(|| {
+        panic!("translator binary not built; run `cargo build --release` before differential tests")
+    });
+    for tool in ["javac", "java", "rustc"] {
+        assert!(
+            have_tool(tool),
+            "required differential test tool `{tool}` is not available"
+        );
+    }
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/differential");
+    let fixtures = [
+        "NestedMapValueRead",
+        "EnumValuesElementIntoObject",
+        "BorrowedElementIntoPrimitiveLocal",
+    ];
+    let mut failures = Vec::new();
+    for class in fixtures {
+        let fixture = root.join(format!("{class}.java"));
+        match compare_fixture(&translator, &fixture, class) {
+            Ok(()) => {}
+            Err(report) => failures.push(format!("{class}: {report}")),
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "borrowed-element discharge fixture output differs from Java:\n\n{}",
+        failures.join("\n\n")
+    );
+}
+
+#[test]
+fn string_join_null_display_fixtures_match_java_output() {
+    let translator = translator_binary().unwrap_or_else(|| {
+        panic!("translator binary not built; run `cargo build --release` before differential tests")
+    });
+    for tool in ["javac", "java", "rustc"] {
+        assert!(
+            have_tool(tool),
+            "required differential test tool `{tool}` is not available"
+        );
+    }
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/differential");
+    let fixtures = [
+        "StringJoinNullDelimiter",
+        "StringJoinNullElement",
+        "StringJoinVarargsNullElement",
+    ];
+    let mut failures = Vec::new();
+    for class in fixtures {
+        let fixture = root.join(format!("{class}.java"));
+        match compare_fixture(&translator, &fixture, class) {
+            Ok(()) => {}
+            Err(report) => failures.push(format!("{class}: {report}")),
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "String.join null-display fixture output differs from Java:\n\n{}",
+        failures.join("\n\n")
+    );
+}
+
+#[test]
+fn list_exception_fixtures_match_java_output() {
+    let translator = translator_binary().unwrap_or_else(|| {
+        panic!("translator binary not built; run `cargo build --release` before differential tests")
+    });
+    for tool in ["javac", "java", "rustc"] {
+        assert!(
+            have_tool(tool),
+            "required differential test tool `{tool}` is not available"
+        );
+    }
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/differential");
+    let fixtures = [
+        "ListAddIndexCatch",
+        "ListGetCatch",
+        "ListRemoveIndexCatch",
+        "ListSetCatch",
+        "ListSubListInvalidRangeCatch",
+    ];
+    let mut failures = Vec::new();
+    for class in fixtures {
+        let fixture = root.join(format!("{class}.java"));
+        match compare_fixture(&translator, &fixture, class) {
+            Ok(()) => {}
+            Err(report) => failures.push(format!("{class}: {report}")),
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "list exception fixture output differs from Java:\n\n{}",
+        failures.join("\n\n")
+    );
+}
+
+#[test]
+fn finally_completion_fixtures_match_java_output() {
+    let translator = translator_binary().unwrap_or_else(|| {
+        panic!("translator binary not built; run `cargo build --release` before differential tests")
+    });
+    for tool in ["javac", "java", "rustc"] {
+        assert!(
+            have_tool(tool),
+            "required differential test tool `{tool}` is not available"
+        );
+    }
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/differential");
+    let fixtures = [
+        "FinallyReturnOverride",
+        "CatchFinallyReturnOverride",
+        "FinallyContinueOverridesBreak",
+        "FinallyNestedContinue",
+        "FinallyBlockContinue",
+        "FinallyDoWhileContinue",
+        "FinallyThrowOverride",
+        "CatchFinallyLabeledContinue",
+        "TryWithResourcesFinally",
+        "TryWithResourcesFinallyBodyBreak",
+        "TryWithResourcesFinallyBodyContinue",
+        "TryWithResourcesCatchFinally",
+        "TryWithResourcesCloseThrowFinally",
+        "TryWithResourcesPrimaryExceptionCatchFinally",
+        "TryWithResourcesCatchBreak",
+        "TryWithResourcesCatchContinue",
+        "TryWithResourcesBodyBreak",
+        "TryWithResourcesBodyContinue",
+    ];
+    let mut failures = Vec::new();
+    for class in fixtures {
+        let fixture = root.join(format!("{class}.java"));
+        match compare_fixture(&translator, &fixture, class) {
+            Ok(()) => {}
+            Err(report) => failures.push(format!("{class}: {report}")),
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "finally completion fixture output differs from Java:\n\n{}",
         failures.join("\n\n")
     );
 }
@@ -138,6 +371,9 @@ struct KnownGapFixture {
 }
 
 enum KnownGapExpectation {
+    LoudDiagnostic {
+        diagnostic_code: &'static str,
+    },
     LoudCompileError {
         message: &'static str,
         diagnostic_code: Option<&'static str>,
@@ -146,20 +382,6 @@ enum KnownGapExpectation {
         message: &'static str,
         diagnostic_code: &'static str,
     },
-    DivergentOutput {
-        expected_translated_output: &'static str,
-        diagnostic_code: &'static str,
-    },
-    /// The generated Rust does not compile, and the translator does not know it.
-    ///
-    /// The three variants above all require the *translator* to have noticed --
-    /// a `compile_error!`, a diagnostic code, or a divergence it predicted. A gap
-    /// only `rustc` can see had nowhere to be recorded, which is 0018's complaint
-    /// one level up: the shelf for known-broken things could only hold the
-    /// known-broken things we already had a name for. Recording the `rustc` error
-    /// code keeps the gap honest -- and this fails once the gap is fixed, which is
-    /// the prompt to promote the fixture out of `known-gaps/`.
-    RustcCompileError { error_code: &'static str },
 }
 
 fn known_gap_fixtures() -> Vec<KnownGapFixture> {
@@ -168,25 +390,8 @@ fn known_gap_fixtures() -> Vec<KnownGapFixture> {
             display: "tests/differential/known-gaps/Aliasing.java",
             class: "Aliasing",
             expected_java_output: "5|7|3|9",
-            expectation: KnownGapExpectation::DivergentOutput {
-                expected_translated_output: "0|0|0|0",
+            expectation: KnownGapExpectation::LoudDiagnostic {
                 diagnostic_code: "observable_alias",
-            },
-        },
-        KnownGapFixture {
-            display: "tests/differential/known-gaps/BorrowedElementIntoPrimitiveLocal.java",
-            class: "BorrowedElementIntoPrimitiveLocal",
-            expected_java_output: "2,3",
-            expectation: KnownGapExpectation::RustcCompileError {
-                error_code: "E0308",
-            },
-        },
-        KnownGapFixture {
-            display: "tests/differential/known-gaps/EnumValuesElementIntoObject.java",
-            class: "EnumValuesElementIntoObject",
-            expected_java_output: "BLUE,BLUE",
-            expectation: KnownGapExpectation::RustcCompileError {
-                error_code: "E0599",
             },
         },
         KnownGapFixture {
@@ -263,6 +468,25 @@ fn check_known_gap(fixture: &KnownGapFixture) -> Result<(), String> {
 
     let translation = translate_source(&source);
     match fixture.expectation {
+        KnownGapExpectation::LoudDiagnostic { diagnostic_code } => {
+            let diagnostic = translation
+                .diagnostics
+                .iter()
+                .find(|diagnostic| diagnostic.code == diagnostic_code)
+                .ok_or_else(|| {
+                    format!(
+                        "translation did not report diagnostic code {diagnostic_code:?}: {:?}",
+                        translation.diagnostics.iter().collect::<Vec<_>>()
+                    )
+                })?;
+            if diagnostic.severity != new_java2rust::diagnostics::Severity::Error {
+                let _ = std::fs::remove_dir_all(&work);
+                return Err(format!(
+                    "diagnostic code {diagnostic_code:?} was not an error: {:?}",
+                    diagnostic.severity
+                ));
+            }
+        }
         KnownGapExpectation::LoudCompileError {
             message,
             diagnostic_code,
@@ -306,53 +530,6 @@ fn check_known_gap(fixture: &KnownGapFixture) -> Result<(), String> {
                 return Err(format!(
                     "translation did not fail at runtime with {message:?}: {err}"
                 ));
-            }
-        }
-        KnownGapExpectation::RustcCompileError { error_code } => {
-            let compiled = compile_translated_rust_source(&work, fixture.class, &translation.rust);
-            let Err(err) = compiled else {
-                let _ = std::fs::remove_dir_all(&work);
-                return Err(
-                    "generated Rust compiled; the gap is fixed -- promote this fixture out of known-gaps/"
-                        .to_string(),
-                );
-            };
-            if !err.contains(error_code) {
-                let _ = std::fs::remove_dir_all(&work);
-                return Err(format!(
-                    "generated Rust did not fail with {error_code:?}: {err}"
-                ));
-            }
-        }
-        KnownGapExpectation::DivergentOutput {
-            expected_translated_output,
-            diagnostic_code,
-        } => {
-            if !translation.diagnostics.has_code(diagnostic_code) {
-                let _ = std::fs::remove_dir_all(&work);
-                return Err(format!(
-                    "translation did not report diagnostic code {diagnostic_code:?}: {:?}",
-                    translation.diagnostics.iter().collect::<Vec<_>>()
-                ));
-            }
-            let translated_output =
-                match run_translated_rust_source(&work, fixture.class, &translation.rust) {
-                    Ok(output) => output,
-                    Err(err) => {
-                        let _ = std::fs::remove_dir_all(&work);
-                        return Err(err);
-                    }
-                };
-            if translated_output != expected_translated_output {
-                let _ = std::fs::remove_dir_all(&work);
-                return Err(format!(
-                    "known divergent translation changed: expected {:?}, got {:?}",
-                    expected_translated_output, translated_output
-                ));
-            }
-            if translated_output == java_output {
-                let _ = std::fs::remove_dir_all(&work);
-                return Err("known divergent translation unexpectedly matched Java".to_string());
             }
         }
     }

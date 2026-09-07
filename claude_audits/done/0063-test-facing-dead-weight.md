@@ -1,12 +1,11 @@
 # 0063 — Test-facing dead weight: a design registry only the tests read, and tests that cannot fail
 
-Status: **fixed**. The original inventory was measured by parsing every
-`#[test]` body in `tests/`, not by running the full suite. The current closure
-evidence is stronger than the original scan: the descriptor inventory has been
-re-run against current source and reports `TEST_ONLY_DESCRIPTOR_COUNT 0`; the
-strict `slot_shape_design.rs` source-only scanner reports `COUNT 0`; the new
-`tests/layering.rs` target passes; and `cargo check`, `cargo fmt -- --check`, and
-`git diff --check` are clean for this slice.
+Status: **fixed for the rechecked source-layout scope**. The original inventory was measured by
+parsing every `#[test]` body in `tests/`, not by running the full suite. The
+descriptor inventory has been re-run against current source and reports
+`TEST_ONLY_DESCRIPTOR_COUNT 0`; after the 2026-09-06 cleanup, the conservative
+`slot_shape_design.rs` source-only scanner reports `candidate_count 0` and the
+relocated source-layout guards pass in `tests/layering.rs`.
 
 Updated 2026-08-24: `cargo test --lib` exposed three stale `coercion.rs` unit
 assertions that still described the old rendered spellings for static storage
@@ -378,3 +377,44 @@ Sections 3-5 did not hold. `tests/layering.rs` exists (1,645 lines, 53 tests) an
 the nine named negative-only tests are gone, but `include_str!` occurrences went
 **260 -> 278**, pure source-grep tests **69 -> 74**, and **16 pure source-grep
 tests remain in `slot_shape_design.rs`** against a claim of zero. See `TODO2.md`.
+
+Updated 2026-09-06: the positive source-grep assertions that kept
+`constructor_self_field_replacement`, `has_explicit_hierarchy_override`,
+`method_usage_for_source_method`, `method_signature_for_source_method`,
+`source_method_returns_result`, and `unwrap_rendered_some_expr` alive have been
+removed or inverted while deleting those dead helpers under 0062. The audit
+remains open for relocating the remaining pure source-layout tests into
+`tests/layering.rs` or replacing them with behavior checks.
+
+The pure source-layout guard
+`trivial_accessor_detection_is_not_a_lowering_special_case` has also moved from
+`slot_shape_design.rs` to `tests/layering.rs`, reducing the remaining
+`slot_shape_design.rs` source-grep inventory by one.
+
+Three more pure source-layout guards moved to `tests/layering.rs` in the same
+cleanup stream: `callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating`,
+`semantic_facts_own_nullability_and_external_api_heuristics_before_lowering`,
+and `map_get_return_adaptation_uses_native_lowered_type_plan`.
+`representation_lowering_owns_dyn_trait_impl_compatibility_policy` moved as a
+fourth pure source-layout guard in that batch.
+`callable_analysis_shell_reaches_lowering_context` was then moved as another
+source-only layering guard.
+
+Seven more source-only ownership/layering guards were moved from
+`slot_shape_design.rs` to `tests/layering.rs`:
+`coercion_plan_owns_invalid_cast_runtime_policy`,
+`coercion_plan_owns_clone_recovery_policy`,
+`coercion_plan_owns_borrowed_element_recovery_fallback_policy`,
+`lower_consumes_cast_and_instanceof_plans_without_rechecking_representation_facts`,
+`signature_solver_collects_param_constraints_before_applying_shapes`,
+`call_lowering_renders_constructor_owner_types_with_facts`,
+and `external_api_support_passes_share_missing_return_surface_policy`.
+Two of those had stale source-string expectations that were still listed as
+`slot_shape_design` expected failures; the assertions now match the current
+implementation and pass under `tests/layering.rs`.
+
+Current conservative scanner result:
+
+```
+candidate_count 0
+```

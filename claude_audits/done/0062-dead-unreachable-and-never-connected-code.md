@@ -1,9 +1,60 @@
 # 0062 — Dead, unreachable and never-connected code in `src/`
 
-Status: **fixed**. The original scan was grep + construction/pattern
-classification rather than `rustc` dead-code output; later cleanup passes
-re-ran the scans, removed the remaining accidental dead surface, and documented
-the few intentionally retained public/identity helpers.
+Status: **done after 2026-09-06 recheck cleanup**. The original scan was grep +
+construction/pattern classification rather than `rustc` dead-code output; later
+cleanup passes re-ran the scans, removed most accidental dead surface, and
+documented the few intentionally retained public/identity helpers. The 2026-09-02
+recheck reopened the audit because the open-ended zero-caller and test-wrapper
+censuses had regrown; the 2026-09-06 cleanup removed those regressions and
+re-ran both censuses.
+
+Updated 2026-09-06: the recheck's clearest residual zero-caller wrapper,
+`external_packs::builtin_external_library_packs()`, has been deleted. The live
+entry point remains `builtin_external_library_pack_facts() -> &'static FactSet`,
+and the source-layout guard now requires the clone-returning compatibility
+wrapper to stay absent. The same cleanup pass deleted additional residual
+zero-caller helpers whose only references were definitions or source-layout
+assertions: `coercion::unwrap_rendered_some_expr`,
+`coercion::apply_expr_to_shape_with_facts`,
+`coercion::constructor_self_field_replacement`,
+`object_model::has_explicit_hierarchy_override`,
+`callable_analysis::{method_usage_for_source_method, method_signature_for_source_method, source_method_returns_result}`,
+`facts::{trivial_getter_field_for, trivial_setter_field_for}`, and
+`stream::stream_identity_value_expr`. A follow-up pass also removed the
+no-binding `ShapeEnv::{insert_loop_variable_shape_with_access_name, insert_catch_param}`
+wrappers and the unused erased-object runtime support default wrappers, leaving
+production on the binding-aware and representation-aware entry points. This
+cleanup also removed the stale
+`constructor_plan::plan_constructor_field_values_with_inherited_fields` and
+`signature::required_local_plan_by_binding` wrappers in favor of their live
+context/shape-specific neighbors. The undocumented default
+`signature::receiver_constraints()` wrapper was then removed as well; tests now
+call `receiver_constraints_with_usage(..., None)` explicitly where they need the
+old no-usage behavior. The production-dead
+`coercion::project_optional_element_borrow_carrier()` ownership-only wrapper was
+also deleted in favor of the live shape-aware
+`project_optional_element_borrow_carrier_with_shape()` entry point. The default
+`signature::solve_signatures()` wrapper is gone too; callers now spell the
+facts-aware `solve_signatures_with_facts(..., &FactSet::default())` path
+explicitly. A subsequent one-symbol check removed another small zero-caller
+batch: the no-facts
+`object_model::hierarchy_override_representation_policy()` wrapper and its
+re-export, the unused `RepresentationPlan::{storage_strategy, storage}` accessors,
+the unused `SharedHandle::rust_path()` helper, three unused test-only rendered
+projection helpers in `coercion`, and the standalone
+`exception_lowering::empty_exception_message()` helper, which is now inlined at
+its only use. The wrapper census then retired the remaining object-model
+no-facts test wrappers:
+`object_representation_policy`, `object_safety_fact_policy`,
+`hierarchy_override_application_policy`, `closed_enum_inference_policy`, and
+`closed_enum_proof_policy`; tests now construct `EffectiveFacts` explicitly and
+call the `_with_effective_facts` entry points. The scan also proved several
+apparent candidates were false positives because they are used as function
+pointers or emitted inside generated runtime-support templates. Together these
+removals close the reopened item-6/item-7 census: the wrapper scan now reports
+zero test-only base wrappers, and the zero-reference scan reports only generated
+runtime-support template functions from `stdlib.rs`, which this audit explicitly
+excludes from production dead-code accounting.
 
 Updated 2026-08-24 final pass: the production zero-caller scan no longer has
 accidental dead public wrappers after excluding documented public inspection
@@ -13,6 +64,13 @@ uses it as the planned binding identity key; deleting it would preserve today's
 name-rejoin bug rather than fix dead code. Two remaining descriptor echo fields
 in `shape_projection` (`EscapingRoleDispatchPolicy.source_dispatch` and
 `DispatchRequirementProjectionPolicy.source_dispatch`) were removed in this pass.
+
+Updated 2026-09-06: two internal helpers from the regrown public surface were
+fenced back to crate-local visibility:
+`coercion::constructor_self_field_projection` and
+`stdlib::java_erased_object_runtime_support_item_with_source_programs_facts_and_representations`.
+The existing source centralization guard now expects the constructor-self helper
+to be `pub(crate)`.
 
 Updated 2026-08-24: another test-only default wrapper was retired:
 `access_lowering::lower_field_access` had no production caller and only four
@@ -116,7 +174,7 @@ live static-constant support entry point remains
 and the stale docs reference now names it. The current zero-caller scan reports
 26 candidates.
 
-Recorded 2026-08-24. Companion: [0063](0063-test-facing-dead-weight.md)
+Recorded 2026-08-24. Companion: [0063](done/0063-test-facing-dead-weight.md)
 covered the test-side half and is now fixed.
 
 ## Why grep and not `rustc`
@@ -832,6 +890,8 @@ Reopened for three reasons:
    test-only base wrapper" — are **17** and **6** at HEAD.
 2. **8 of the 17 residual zero-caller functions are kept alive only by
    `assert!(source.contains("pub fn X"))`** — 0063's own anti-pattern, regrown.
+   The named examples in that recheck have since been removed or inverted, and
+   the remaining source-layout guards moved back to `tests/layering.rs`.
 3. **`RewriteNeed` was deleted against this audit's explicit instruction.** It was
    in the "never finished — do not delete" list; its four unimplemented rewrites
    now survive only inside this file. Likewise the `DynCloneBoxAdapter*` design
@@ -843,3 +903,24 @@ Reopened for three reasons:
    generated output.
 
 Appendix A holds, corrected: **16** flags (not 15), all connected.
+
+## Recheck 2026-09-06
+
+The residual zero-caller wrapper `coercion::unwrap_rendered_some_expr` was
+deleted. The live API is `coercion::unwrap_some_expr`, which still owns both
+structured `Some(...)` and legacy rendered `Some(...)` recovery.
+
+Additional residual zero-caller helpers were deleted in the same pass:
+`apply_expr_to_shape_with_facts`, `constructor_self_field_replacement`,
+`has_explicit_hierarchy_override`,
+`method_usage_for_source_method`, `method_signature_for_source_method`,
+`source_method_returns_result`, `trivial_getter_field_for`,
+`trivial_setter_field_for`, and `stream_identity_value_expr`. A follow-up pass
+removed `insert_loop_variable_shape_with_access_name`, `insert_catch_param`,
+`java_erased_object_runtime_support_item`,
+`java_erased_object_runtime_support_item_with_programs`,
+`java_erased_object_runtime_support_item_with_programs_and_facts`, and
+`java_erased_object_runtime_support_item_with_source_programs_and_facts`. The
+stale wrappers `plan_constructor_field_values_with_inherited_fields` and
+`required_local_plan_by_binding` were deleted as well. Their source-layout guards
+now assert absence where a guard is still useful.

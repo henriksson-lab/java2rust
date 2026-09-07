@@ -4,7 +4,7 @@ use crate::method_reference_plan::{MethodReferencePlan, plan_method_reference};
 use crate::slot_shape::RustSlotShape;
 use crate::types::TypeEnv;
 
-pub fn infer_single_input_method_reference_output_shape_with_context(
+pub(crate) fn infer_single_input_method_reference_output_shape_with_context(
     target: &str,
     method: &str,
     input_shape: &RustSlotShape,
@@ -111,7 +111,7 @@ fn method_reference_output_shape_from_call_plan(
     None
 }
 
-pub fn method_reference_receiver_type_for_call_plan(
+pub(crate) fn method_reference_receiver_type_for_call_plan(
     target: &str,
     input_shape: Option<&RustSlotShape>,
 ) -> Option<JavaType> {
@@ -120,7 +120,7 @@ pub fn method_reference_receiver_type_for_call_plan(
     })
 }
 
-pub fn method_reference_receiver_type_for_call_plan_with_facts(
+pub(crate) fn method_reference_receiver_type_for_call_plan_with_facts(
     target: &str,
     method: &str,
     input_shape: Option<&RustSlotShape>,
@@ -190,7 +190,7 @@ fn external_api_receiver_type_for_method_reference(
         })
 }
 
-pub fn object_method_reference_receiver_type(
+fn object_method_reference_receiver_type(
     target: &str,
     input_shape: &RustSlotShape,
 ) -> Option<JavaType> {
@@ -203,21 +203,24 @@ pub fn object_method_reference_receiver_type(
     }
 }
 
-pub fn infer_method_reference_output_shape_for_plan(
+pub(crate) fn infer_method_reference_output_shape_for_plan(
     plan: &MethodReferencePlan,
     input_shape: &RustSlotShape,
 ) -> Option<RustSlotShape> {
     match plan {
         MethodReferencePlan::AssociatedFunction { owner, method }
-            if owner == "Integer" && method == "int_value" =>
+            if method_reference_plan_owner_simple_name(owner) == "Integer"
+                && method == "int_value" =>
         {
             Some(RustSlotShape::for_storage(JavaType::Primitive(
                 PrimitiveType::Int,
             )))
         }
         MethodReferencePlan::AssociatedFunction { owner, method }
-            if (owner == "String" && method == "value_of")
-                || (owner == "Object" && method == "to_string") =>
+            if (method_reference_plan_owner_simple_name(owner) == "String"
+                && method == "value_of")
+                || (method_reference_plan_owner_simple_name(owner) == "Object"
+                    && method == "to_string") =>
         {
             Some(crate::shape_projection::owned_string_value_shape())
         }
@@ -226,6 +229,15 @@ pub fn infer_method_reference_output_shape_for_plan(
         }
         _ => None,
     }
+}
+
+fn method_reference_plan_owner_simple_name(owner: &str) -> String {
+    let canonical = crate::stdlib::canonical_external_receiver_type_key(owner);
+    canonical
+        .rsplit(['.', '$'])
+        .next()
+        .unwrap_or(owner)
+        .to_string()
 }
 
 fn infer_unbound_accessor_method_reference_fallback_shape(
@@ -238,4 +250,161 @@ fn infer_unbound_accessor_method_reference_fallback_shape(
     let mut shape = input_shape.clone();
     shape.java_ty = JavaType::Unknown(method.to_string());
     Some(shape)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::facts::{
+        ExternalApiEffectFact, FacadeAbiFact, FacadeSlot, FactProvenance, NullabilityState,
+        ReceiverMutabilityFact, ResultAbi,
+    };
+
+    #[test]
+    fn method_reference_receiver_type_uses_native_and_object_fallbacks() {
+        assert_eq!(
+            method_reference_receiver_type_for_call_plan(
+                "String",
+                Some(&RustSlotShape::for_storage(JavaType::String)),
+            ),
+            Some(JavaType::String)
+        );
+        assert_eq!(
+            method_reference_receiver_type_for_call_plan(
+                "Object",
+                Some(&RustSlotShape::for_storage(JavaType::Unknown(
+                    "NameHolder".to_string(),
+                ))),
+            ),
+            Some(JavaType::Unknown("NameHolder".to_string()))
+        );
+    }
+
+    #[test]
+    fn method_reference_output_shape_uses_native_accessors_and_external_facts() {
+        assert_eq!(
+            infer_single_input_method_reference_output_shape_with_context(
+                "Integer",
+                "intValue",
+                &RustSlotShape::for_storage(JavaType::String),
+                &TypeEnv::new(),
+                &FactSet::default(),
+            ),
+            Some(RustSlotShape::for_storage(JavaType::Primitive(
+                PrimitiveType::Int,
+            )))
+        );
+        assert_eq!(
+            infer_single_input_method_reference_output_shape_with_context(
+                "Object",
+                "toString",
+                &RustSlotShape::for_storage(JavaType::String),
+                &TypeEnv::new(),
+                &FactSet::default(),
+            ),
+            Some(crate::shape_projection::owned_string_value_shape())
+        );
+        assert_eq!(
+            infer_single_input_method_reference_output_shape_with_context(
+                "NameHolder",
+                "getName",
+                &RustSlotShape::for_storage(JavaType::Unknown("NameHolder".to_string())),
+                &TypeEnv::new(),
+                &FactSet::default(),
+            )
+            .map(|shape| shape.java_ty),
+            Some(JavaType::Unknown("get_name".to_string()))
+        );
+
+        let mut external_method_ref_facts = FactSet::default();
+        external_method_ref_facts
+            .external_api_effect_facts
+            .push(ExternalApiEffectFact {
+                method_name: "label".to_string(),
+                receiver_type: Some("FacadeValue".to_string()),
+                arg_count: Some(0),
+                parameter_patterns: None,
+                role: ExternalApiRole::Getter,
+                receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+                return_type: Some(JavaType::String),
+                return_nullability: NullabilityState::DefinitelyNonNull,
+                thrown: Vec::new(),
+                provenance: FactProvenance::UserOverride,
+            });
+        external_method_ref_facts
+            .facade_abi_facts
+            .push(FacadeAbiFact {
+                key: CallableKey::method(
+                    "FacadeValue".to_string(),
+                    "label".to_string(),
+                    Staticness::Unknown,
+                    0,
+                ),
+                rust_path: "FacadeValueFacade::label_text".to_string(),
+                receiver: ReceiverAbi::BorrowedSelf,
+                args: Vec::new(),
+                return_slot: FacadeSlot::Owned,
+                result: ResultAbi::Plain,
+                borrow_source: None,
+                borrowed_return_recovery: None,
+                provenance: FactProvenance::UserOverride,
+            });
+        let facade_value_shape = RustSlotShape::for_storage(JavaType::Named {
+            name: "FacadeValue".to_string(),
+            args: Vec::new(),
+        });
+        assert_eq!(
+            infer_single_input_method_reference_output_shape_with_context(
+                "FacadeValue",
+                "label",
+                &facade_value_shape,
+                &TypeEnv::new(),
+                &external_method_ref_facts,
+            ),
+            Some(crate::shape_projection::owned_string_value_shape())
+        );
+
+        let mut external_getter_method_ref_facts = FactSet::default();
+        external_getter_method_ref_facts
+            .external_api_effect_facts
+            .push(ExternalApiEffectFact {
+                method_name: "getName".to_string(),
+                receiver_type: Some("ExternalRecord".to_string()),
+                arg_count: Some(0),
+                parameter_patterns: None,
+                role: ExternalApiRole::Getter,
+                receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+                return_type: Some(JavaType::String),
+                return_nullability: NullabilityState::DefinitelyNonNull,
+                thrown: Vec::new(),
+                provenance: FactProvenance::UserOverride,
+            });
+        assert_eq!(
+            infer_single_input_method_reference_output_shape_with_context(
+                "ExternalRecord",
+                "getName",
+                &RustSlotShape::for_storage(JavaType::Named {
+                    name: "ExternalRecord".to_string(),
+                    args: Vec::new(),
+                }),
+                &TypeEnv::new(),
+                &external_getter_method_ref_facts,
+            ),
+            Some(crate::shape_projection::owned_string_value_shape())
+        );
+        assert_eq!(
+            infer_single_input_method_reference_output_shape_with_context(
+                "ExternalRecord",
+                "getName",
+                &RustSlotShape::for_storage(JavaType::Named {
+                    name: "ExternalRecord".to_string(),
+                    args: Vec::new(),
+                }),
+                &TypeEnv::new(),
+                &FactSet::default(),
+            )
+            .map(|shape| shape.java_ty),
+            Some(JavaType::Unknown("get_name".to_string()))
+        );
+    }
 }

@@ -17,7 +17,8 @@ Kind: blocked by unimplemented `SharedLocal`/shared receiver construction ([0002
 Non-static inner classes compile, and paths that already possess an outer handle
 now have non-panicking `_with_outer` constructor and method companions. The
 remaining ordinary outer method path still has no shared receiver handle, so the
-original method body calls the fallback constructor and refuses to compile. A
+original method body calls the fallback constructor and remains runtime-loud
+while the translator reports `inner_class_construction_panics`. A
 separate `method_with_outer` body exists when lowering can make the body
 non-panicking; the unresolved part is routing ordinary calls to that companion
 once receivers themselves are represented as shared handles.
@@ -152,9 +153,10 @@ capture from a copy, and a copy-based implementation would return 10.
 ## Update 2026-08-05 — the interim requirement is met; the repair still needs 0002b
 
 Status: **still open** for the feature. What changed is that it is no longer
-silent. Later 2026-08-29 work changed the generated fallback from runtime
-`panic!` to `compile_error!`; the old panic-marker discussion below records the
-first interim guardrail, not the current emitted form.
+silent. Later 2026-08-29 work kept the known-gap mode runtime-loud while making
+the translator diagnostic and fallback marker explicit; the old panic-marker
+discussion below records the first interim guardrail, not a claim that ordinary
+inner construction is fixed.
 
 This file asked: *"Until then, this should be a translator diagnostic, not a
 runtime `panic!` embedded in generated code. As written, a corpus reports zero
@@ -178,8 +180,8 @@ compile errors for a program guaranteed to abort."* Both halves are now covered:
   inner class no longer contributes zero to every quality signal the project has.
 
 The diagnostic remains a warning so batch translation can still report other
-issues in the file; the generated Rust now refuses to compile at the unsupported
-construction site instead of aborting at runtime.
+issues in the file; the current known-gap harness expects a loud runtime panic
+at the unsupported construction site plus the translator diagnostic.
 
 ### Why the repair is still not here
 
@@ -238,8 +240,8 @@ inner-class case, and `scripts/gate.sh --all` is clean with the updated
 
 `tests/differential/known-gaps/InnerCapture.java` now makes the unsupported
 path executable known-gap coverage as well: Java must print `21`, the current
-generated Rust must fail to compile with the inner-construction message, and
-the translator must report `inner_class_construction_panics`.
+generated Rust must panic loudly with the inner-construction message, and the
+translator must report `inner_class_construction_panics`.
 
 ### Codex follow-up 2026-08-11 — captured outer-field writes use the existing handle
 
@@ -485,14 +487,13 @@ constructor targets still mark real captured-inner construction sites such as
 classes. Regression:
 `top_level_constructor_does_not_report_same_simple_inner_capture_panic`.
 
-### Codex follow-up 2026-08-29 — missing outer-handle construction is compile-visible
+### Codex follow-up 2026-08-29 — missing outer-handle construction stays runtime-loud
 
-The remaining unsupported constructor path now emits `compile_error!` instead
-of a generated `panic!`. The diagnostic code remains
-`inner_class_construction_panics` for continuity, but
-`tests/differential/known-gaps/InnerCapture.java` now expects a loud compile
-error containing the outer-capture message rather than compiling a program that
-fails only when run.
+An intermediate pass recorded this path as compile-visible, but the current
+checked-in harness keeps the unsupported constructor fallback runtime-loud. The
+diagnostic code remains `inner_class_construction_panics` for continuity, and
+`tests/differential/known-gaps/InnerCapture.java` now expects
+`KnownGapExpectation::LoudRuntimePanic` with the outer-capture message.
 
 This does not implement ordinary `Outer::make() { return new Inner(); }`: the
 feature still needs a receiver representation that can pass an
@@ -548,15 +549,11 @@ The feature remains open for ordinary outer methods, because `&self`/`&mut self`
 receivers still cannot synthesize the `Rc<RefCell<Outer>>` handle needed by a
 non-static inner constructor.
 
-### Codex follow-up 2026-08-29 — known-gap harness accepts runtime-loud refusals
+### Codex follow-up 2026-09-07 — known-gap harness rechecked
 
-The known-gap differential harness still treated every loud refusal as a
-`compile_error!`, so `InnerCapture.java` failed the harness after the companion
-fallback bodies above intentionally moved this specific path back to a runtime
-`panic!`. The fixture is not silently wrong: Java still prints `21`, the
-translator reports `inner_class_construction_panics`, the generated Rust
-compiles, and running it fails with the unsupported outer-capture message.
-
-`KnownGapExpectation` now has a `LoudRuntimePanic` mode for that shape. This
-keeps compile-loud gaps compile-loud while letting companioned generated crates
-typecheck when their reachable `_with_outer` path is supported.
+A read-only triage suggested `InnerCapture.java` had become compile-loud, but a
+focused known-gap run disproved that: ordinary `new Inner()` from an outer
+instance method still lowers the missing captured receiver to a `panic!`
+expression while reporting `inner_class_construction_panics`. The
+`LoudRuntimePanic` expectation remains the accurate current harness mode until
+ordinary inner construction can route through a shared outer handle.

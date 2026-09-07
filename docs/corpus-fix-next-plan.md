@@ -1044,7 +1044,7 @@ longer parses optional wrapper renderings locally.
 Optional constructed-value detection cleanup: argument borrowing now calls
 `coercion::rust_expr_is_constructed_optional_value` when avoiding accidental
 borrows of already-constructed optional wrappers. The raw `Some(...)`
-compatibility fallback remains centralized beside `unwrap_rendered_some_expr`
+compatibility fallback remains centralized beside `unwrap_some_expr`
 and optional string-view normalization instead of living in `lower.rs`.
 Remaining cleanup should continue replacing nullable call sites that choose
 `.as_ref()`, `.as_deref()`, `Some(...)`, or clone recovery locally with calls
@@ -4633,7 +4633,7 @@ Current status:
   no longer wraps slot conversion results in
   `normalize_optional_constructed_string_view_expr` or parses `Some(inner)`
   locally for assignment rewrap; it calls
-  `unwrap_rendered_some_expr` from `coercion.rs` for the remaining legacy raw
+  `unwrap_some_expr` from `coercion.rs` for the remaining legacy raw
   compatibility boundary. `OptionalShapeCoercionPolicy::MapElement` rendering
   is also isolated as `render_optional_element_projection`, keeping
   `.as_ref()`, `.as_deref()`, `.as_deref_mut()`, and `map(|value| ...)`

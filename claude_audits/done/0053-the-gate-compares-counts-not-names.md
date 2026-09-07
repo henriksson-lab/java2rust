@@ -7,12 +7,20 @@ Severity: **high (process)** — it is the mechanism that decides whether any of
 other audits' fixes are believed.
 Kind: measurement.
 
+Current state 2026-09-07: `tests/differential.rs` asserts 228 active
+differential fixtures. `tests/baselines/suite-results.tsv` records 3141 passed
+/ 99 failed / 3240 total; the only red target is `slot_shape_design` at 480
+passed / 99 failed. The older 23-fixture and 264-failure sections below are
+retained as the pre-fix snapshot, not current status.
+
 Codex follow-up 2026-08-23: measurement hardening slices landed. The differential
 harness no longer returns `ok` when the translator binary or required tools are
-missing; it panics instead, and it asserts the active fixture count is 23. Verified
-both directions: `cargo test --release --test differential` runs the fixtures and
-passes, while `env PATH=/nonexistent ./target/release/deps/differential-...`
-now fails on missing `javac` instead of reporting a green skip. `scripts/gate.sh`
+missing; it panics instead, and it asserts the active fixture count. That count
+was 23 when this note was recorded; the current guard in `tests/differential.rs`
+is 228 fixtures. Verified both directions:
+`cargo test --release --test differential` runs the fixtures and passes, while
+`env PATH=/nonexistent ./target/release/deps/differential-...` now fails on
+missing `javac` instead of reporting a green skip. `scripts/gate.sh`
 also now extracts failed test names and compares them when a per-target
 failure-name baseline exists, so the existing `idiom_gaps` name baseline is no
 longer dead prose. `scripts/translate-focused-package.sh` now fails loudly when
@@ -28,7 +36,7 @@ with `scripts/gate.sh --all`.
 
 Companion to [0052](0052-the-example-corpora-are-asserted-on-but-never-compiled.md)
 (what the suites cannot see) and to
-[0018](done/0018-the-compile-error-metric-cannot-see-silent-failures.md), whose
+[0018](0018-the-compile-error-metric-cannot-see-silent-failures.md), whose
 second-pass conclusion was *"a metric whose detectors can silently stop matching
 is worse than no metric, because it reports success."* This file finds four
 places where that is still true, one level up from the detectors: in the thing
@@ -43,7 +51,7 @@ that reads them.
 `tests/baselines/suite-results.tsv` (`scripts/gate.sh:57-60,92-107`). Nothing
 else is compared.
 
-The baseline currently accepts **264 failing tests out of 2617**:
+At recording time, the baseline accepted **264 failing tests out of 2617**:
 
 | target | passed | failed |
 |---|---:|---:|
@@ -377,10 +385,10 @@ restore.
 
 ## Relation to other issues
 
-- [0018](done/0018-the-compile-error-metric-cannot-see-silent-failures.md) —
+- [0018](0018-the-compile-error-metric-cannot-see-silent-failures.md) —
   items 3 and 4 are its "detectors that silently stop matching", found in the
   readers rather than the detectors.
-- [0041](done/0041-slot-shape-design-had-no-generated-crate-checks.md) — its
+- [0041](0041-slot-shape-design-had-no-generated-crate-checks.md) — its
   careful note that turning on 52 checks at once *"would have moved the baseline
   by 52 and made it impossible to tell which kind of problem any future change
   caused"* is precisely the property a count-based baseline lacks and a name-based

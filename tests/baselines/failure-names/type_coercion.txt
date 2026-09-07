@@ -1,0 +1,2 @@
+# type_coercion known failures
+# Recorded by scripts/gate.sh --record. Diff names, not counts.

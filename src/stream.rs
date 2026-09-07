@@ -968,15 +968,3 @@ fn infer_terminal_lambda_output_shape(
 pub fn stream_collect_actual(element_shape: RustSlotShape) -> LoweredType {
     LoweredType::collected_sequence_from_element_shape(element_shape)
 }
-
-pub fn stream_identity_value_expr(param_name: &str, element_shape: &RustSlotShape) -> String {
-    if element_shape.is_shared_borrowed_value() {
-        if element_shape.capabilities().copy {
-            format!("*{param_name}")
-        } else {
-            format!("(*{param_name}).clone()")
-        }
-    } else {
-        param_name.to_string()
-    }
-}

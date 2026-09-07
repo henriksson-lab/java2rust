@@ -3,7 +3,7 @@ import java.io.File;
 public class ErasedFileDisplay {
     public static String run() {
         Object o = new File("abc.txt");
-        return "o=" + o;
+        return "o=" + o + ",direct=" + o.toString();
     }
 
     public static void main(String[] args) {

@@ -598,9 +598,14 @@ fn exception_audit_does_not_reopen_promoted_catch_finally_loop_fixtures() {
         "CatchFinallyBreak.java",
         "CatchFinallyContinue.java",
         "CatchFinallyLabeledContinue.java",
+        "CatchFinallyReturnOverride.java",
+        "FinallyBlockContinue.java",
+        "FinallyDoWhileContinue.java",
+        "FinallyThrowOverride.java",
         "TryCatchFinallyBodyBreak.java",
         "TryWithResourcesBodyBreak.java",
         "TryWithResourcesBodyContinue.java",
+        "TryWithResourcesMultipleCloseSuppressed.java",
     ] {
         assert!(
             concat_repo_path("tests/differential")

@@ -276,14 +276,18 @@ fn external_static_constant_rust_owner(
             _ => None,
         };
     }
+    if let Some(fact) = external_field_fact_for_owner(&receiver_name, member, facts) {
+        return static_constant_rust_owner_from_name(
+            &crate::slot_render::rust_name_for_java_named_type(&fact.field.type_name),
+        );
+    }
     if external_field_type_for_owner(&receiver_name, member, facts).is_some() {
-        let owner = receiver_name.rsplit('.').next().unwrap_or(&receiver_name);
-        return static_constant_rust_owner_from_name(owner);
+        return static_constant_rust_owner_from_name(&receiver_name);
     }
     None
 }
 
-pub fn external_field_fact_for_owner(
+fn external_field_fact_for_owner(
     owner: &str,
     field: &str,
     facts: &FactSet,
@@ -295,7 +299,7 @@ pub fn external_field_fact_for_owner(
     })
 }
 
-pub fn external_field_type_for_owner(
+pub(crate) fn external_field_type_for_owner(
     owner: &str,
     field: &str,
     facts: &FactSet,

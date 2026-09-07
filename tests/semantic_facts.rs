@@ -322,8 +322,8 @@ class OverloadedUsageKey {
         .source_method_usage(ty, string_method)
         .expect("string overload usage should be keyed by Java signature");
 
-    let int_value = int_usage.bindings.get("value").unwrap();
-    let string_value = string_usage.bindings.get("value").unwrap();
+    let int_value = int_usage.unique_binding_facts_for_name("value").unwrap();
+    let string_value = string_usage.unique_binding_facts_for_name("value").unwrap();
     assert!(
         int_value
             .uses
@@ -8797,11 +8797,11 @@ class ReadOnlyExternalReceiverParam {
             method_name: "read".to_string(),
         })
         .expect("read usage should be recorded");
-    let handle_uses = &method_usage
-        .bindings
-        .get("handle")
-        .expect("handle binding should be recorded")
-        .uses;
+    let handle_facts = method_usage
+        .unique_binding_facts_for_name("handle")
+        .filter(|binding| !binding.uses.is_empty())
+        .expect("handle binding should be recorded");
+    let handle_uses = &handle_facts.uses;
     assert_eq!(
         handle_uses,
         &vec![
@@ -8809,6 +8809,7 @@ class ReadOnlyExternalReceiverParam {
                 name: "getName".to_string(),
                 boundary: CallArgumentBoundary::KnownContentRead,
                 has_literal_null_arg: false,
+                literal_null_arg_indices: Vec::new(),
             },
             BindingUse::ContentRead,
         ]
@@ -9864,10 +9865,10 @@ fn exception_support_decision_consumes_semantic_exception_facts() {
         &new_java2rust::facts::FactSet::default(),
     );
 
-    assert!(exception_plan::program_uses_java_exception_with_facts(
-        &resolved.program,
-        &semantic.facts
-    ));
+    assert!(
+        exception_plan::plan_java_exception_support(&resolved.program, &semantic.facts)
+            .emit_support_item
+    );
 }
 
 #[test]

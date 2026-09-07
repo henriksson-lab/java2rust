@@ -49,6 +49,10 @@ pub struct ShapeEnv {
     map_entry_set_view_receivers_by_binding: HashMap<BindingId, Expr>,
     map_entry_value_receivers: HashMap<String, Expr>,
     map_entry_value_receivers_by_binding: HashMap<BindingId, Expr>,
+    unmodifiable_collection_view_sources: HashMap<String, Expr>,
+    unmodifiable_collection_view_sources_by_binding: HashMap<BindingId, Expr>,
+    fixed_size_list_view_args: HashMap<String, Vec<Expr>>,
+    fixed_size_list_view_args_by_binding: HashMap<BindingId, Vec<Expr>>,
     simple_map_entry_values: HashMap<String, (Expr, Expr)>,
     simple_map_entry_values_by_binding: HashMap<BindingId, (Expr, Expr)>,
     simple_immutable_map_entry_locals: HashSet<String>,
@@ -103,6 +107,35 @@ impl ShapeEnv {
                 .insert(binding, receiver);
         } else {
             self.map_entry_value_receivers.insert(name, receiver);
+        }
+    }
+
+    pub(crate) fn insert_unmodifiable_collection_view_source(
+        &mut self,
+        name: impl Into<String>,
+        source: Expr,
+    ) {
+        let name = name.into();
+        if let Some(binding) = self.binding_ids.get(&name).cloned() {
+            self.unmodifiable_collection_view_sources_by_binding
+                .insert(binding, source);
+        } else {
+            self.unmodifiable_collection_view_sources
+                .insert(name, source);
+        }
+    }
+
+    pub(crate) fn insert_fixed_size_list_view_args(
+        &mut self,
+        name: impl Into<String>,
+        args: Vec<Expr>,
+    ) {
+        let name = name.into();
+        if let Some(binding) = self.binding_ids.get(&name).cloned() {
+            self.fixed_size_list_view_args_by_binding
+                .insert(binding, args);
+        } else {
+            self.fixed_size_list_view_args.insert(name, args);
         }
     }
 
@@ -179,6 +212,9 @@ impl ShapeEnv {
             self.map_values_view_receivers_by_binding.remove(binding);
             self.map_entry_set_view_receivers_by_binding.remove(binding);
             self.map_entry_value_receivers_by_binding.remove(binding);
+            self.unmodifiable_collection_view_sources_by_binding
+                .remove(binding);
+            self.fixed_size_list_view_args_by_binding.remove(binding);
             self.simple_map_entry_values_by_binding.remove(binding);
             self.simple_immutable_map_entry_locals_by_binding
                 .remove(binding);
@@ -188,6 +224,8 @@ impl ShapeEnv {
         self.map_values_view_receivers.remove(name);
         self.map_entry_set_view_receivers.remove(name);
         self.map_entry_value_receivers.remove(name);
+        self.unmodifiable_collection_view_sources.remove(name);
+        self.fixed_size_list_view_args.remove(name);
         self.simple_map_entry_values.remove(name);
         self.simple_immutable_map_entry_locals.remove(name);
         self.nested_array2_locals.remove(name);
@@ -219,6 +257,25 @@ impl ShapeEnv {
             return self.map_entry_value_receivers_by_binding.get(binding);
         }
         self.map_entry_value_receivers.get(name)
+    }
+
+    pub(crate) fn unmodifiable_collection_view_source(&self, name: &str) -> Option<&Expr> {
+        if let Some(binding) = self.binding_ids.get(name) {
+            return self
+                .unmodifiable_collection_view_sources_by_binding
+                .get(binding);
+        }
+        self.unmodifiable_collection_view_sources.get(name)
+    }
+
+    pub(crate) fn fixed_size_list_view_args(&self, name: &str) -> Option<&[Expr]> {
+        if let Some(binding) = self.binding_ids.get(name) {
+            return self
+                .fixed_size_list_view_args_by_binding
+                .get(binding)
+                .map(Vec::as_slice);
+        }
+        self.fixed_size_list_view_args.get(name).map(Vec::as_slice)
     }
 
     pub fn simple_map_entry_value(&self, name: &str) -> Option<(&Expr, &Expr)> {
@@ -407,21 +464,6 @@ impl ShapeEnv {
         self.bind_name(BindingKind::LoopVariable, name);
     }
 
-    pub fn insert_loop_variable_shape_with_access_name(
-        &mut self,
-        name: impl Into<String>,
-        access_name: impl Into<String>,
-        shape: RustSlotShape,
-    ) {
-        let name = name.into();
-        let access_name = access_name.into();
-        self.insert_loop_variable_shape(name.clone(), shape);
-        self.binding_access_names
-            .insert(name.clone(), access_name.clone());
-        self.binding_access_names
-            .insert(access_name.clone(), access_name);
-    }
-
     pub fn insert_loop_variable_shape_with_access_name_and_binding(
         &mut self,
         name: impl Into<String>,
@@ -456,14 +498,6 @@ impl ShapeEnv {
         {
             self.binding_ids.insert(access_name.to_string(), binding);
         }
-    }
-
-    pub fn insert_catch_param(&mut self, name: impl Into<String>, ty: JavaType) {
-        let name = name.into();
-        self.local_shapes
-            .insert(name.clone(), RustSlotShape::for_storage(ty.clone()));
-        self.types.insert_local(name.clone(), ty);
-        self.bind_name(BindingKind::CatchParam, name);
     }
 
     pub fn insert_catch_param_with_binding(
@@ -932,8 +966,8 @@ impl ShapeEnv {
         self.local_shapes.get(name)
     }
 
-    pub fn next_local_plan_for_declared_type<'a>(
-        &mut self,
+    pub(crate) fn idless_compatibility_local_plan_for_declared_type<'a>(
+        &self,
         locals: &'a [LocalPlan],
         name: &str,
         declared_ty: &JavaType,
@@ -1079,7 +1113,7 @@ fn unique_local_plan_for_declared_type<'a>(
     }
 }
 
-pub fn fallback_local_shape_from_declared_type(ty: &JavaType) -> RustSlotShape {
+pub(crate) fn fallback_local_shape_from_declared_type(ty: &JavaType) -> RustSlotShape {
     RustSlotShape::conservative(ty.clone())
 }
 
@@ -1996,11 +2030,11 @@ mod tests {
     #[test]
     fn unique_idless_local_plan_match_is_still_accepted() {
         let plans = vec![int_plan_with_ownership(OwnershipShape::Owned)];
-        let mut env = ShapeEnv::new();
+        let env = ShapeEnv::new();
         let java_ty = JavaType::Primitive(PrimitiveType::Int);
 
         assert_eq!(
-            env.next_local_plan_for_declared_type(&plans, "value", &java_ty)
+            env.idless_compatibility_local_plan_for_declared_type(&plans, "value", &java_ty)
                 .map(|plan| plan.shape.ownership),
             Some(OwnershipShape::Owned)
         );
@@ -2012,11 +2046,11 @@ mod tests {
             int_plan_with_ownership(OwnershipShape::Owned),
             int_plan_with_ownership(OwnershipShape::SharedBorrow),
         ];
-        let mut env = ShapeEnv::new();
+        let env = ShapeEnv::new();
         let java_ty = JavaType::Primitive(PrimitiveType::Int);
 
         assert!(
-            env.next_local_plan_for_declared_type(&plans, "value", &java_ty)
+            env.idless_compatibility_local_plan_for_declared_type(&plans, "value", &java_ty)
                 .is_none(),
             "id-less same-name/same-type declarations must fail closed instead of selecting by traversal order"
         );
@@ -2042,11 +2076,11 @@ mod tests {
             erased_object_plan_with_ownership(OwnershipShape::Owned),
             erased_object_plan_with_ownership(OwnershipShape::SharedBorrow),
         ];
-        let mut env = ShapeEnv::new();
+        let env = ShapeEnv::new();
         let declared_ty = JavaType::Unknown("Object".to_string());
 
         assert!(
-            env.next_local_plan_for_declared_type(&plans, "value", &declared_ty)
+            env.idless_compatibility_local_plan_for_declared_type(&plans, "value", &declared_ty)
                 .is_none(),
             "ambiguous erased-object compatibility plans must fail closed"
         );
@@ -2065,10 +2099,10 @@ mod tests {
             binding_mutable: false,
         };
         let plans = vec![plan];
-        let mut env = ShapeEnv::new();
+        let env = ShapeEnv::new();
 
         assert!(
-            env.next_local_plan_for_declared_type(
+            env.idless_compatibility_local_plan_for_declared_type(
                 &plans,
                 "value",
                 &JavaType::Primitive(PrimitiveType::Boolean),
@@ -2134,10 +2168,10 @@ mod tests {
             shape: concrete_shape,
             binding_mutable: false,
         }];
-        let mut env = ShapeEnv::new();
+        let env = ShapeEnv::new();
 
         assert!(
-            env.next_local_plan_for_declared_type(&plans, "reader", &declared_ty)
+            env.idless_compatibility_local_plan_for_declared_type(&plans, "reader", &declared_ty)
                 .is_some(),
             "erased carriers may still have a concrete solved shape matching the declared type"
         );
@@ -2322,6 +2356,44 @@ mod tests {
             None,
             "a same-name redeclaration must not inherit the previous binding's map-entry view"
         );
+    }
+
+    #[test]
+    fn bound_collection_view_facts_do_not_survive_same_name_redeclaration() {
+        let mut env = ShapeEnv::new();
+        let first = BindingId::new(BindingKind::Local, "view".to_string(), 0);
+        let second = BindingId::new(BindingKind::Local, "view".to_string(), 1);
+        let shape = RustSlotShape::for_storage(JavaType::Named {
+            name: "java.util.List".to_string(),
+            args: vec![JavaType::String],
+        });
+
+        env.insert_local_shape_with_java_type_and_binding(
+            "view",
+            shape.clone(),
+            shape.java_ty.clone(),
+            Some(first),
+        );
+        env.insert_unmodifiable_collection_view_source("view", Expr::Var("values".to_string()));
+        env.insert_fixed_size_list_view_args("view", vec![Expr::Var("value".to_string())]);
+        assert_eq!(
+            env.unmodifiable_collection_view_source("view"),
+            Some(&Expr::Var("values".to_string()))
+        );
+        assert_eq!(
+            env.fixed_size_list_view_args("view"),
+            Some(&[Expr::Var("value".to_string())][..])
+        );
+
+        env.insert_local_shape_with_java_type_and_binding(
+            "view",
+            shape.clone(),
+            shape.java_ty.clone(),
+            Some(second),
+        );
+
+        assert_eq!(env.unmodifiable_collection_view_source("view"), None);
+        assert_eq!(env.fixed_size_list_view_args("view"), None);
     }
 
     #[test]

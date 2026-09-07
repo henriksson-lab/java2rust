@@ -41,7 +41,7 @@ use crate::types::TypeEnv;
 use std::collections::HashSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StreamLambdaValue {
+pub(crate) enum StreamLambdaValue {
     FilterBorrowed,
     BorrowedItem,
     OwnedItem,
@@ -343,6 +343,7 @@ struct StreamLambdaRenderedExpr {
 }
 
 impl StreamLambdaRenderedExpr {
+    #[cfg(test)]
     fn rendered(&self) -> String {
         crate::emit::emit_expr(&self.expr)
     }
@@ -352,7 +353,7 @@ fn stream_lambda_expr(expr: RustExpr, precedence: u8) -> StreamLambdaRenderedExp
     StreamLambdaRenderedExpr { expr, precedence }
 }
 
-pub fn emit_stream_lambda_body_expr(
+pub(crate) fn emit_stream_lambda_body_expr(
     expr: &Expr,
     param: &str,
     value: StreamLambdaValue,
@@ -371,7 +372,8 @@ pub fn emit_stream_lambda_body_expr(
     .map(|lowered| lowered.expr)
 }
 
-pub fn emit_stream_lambda_body_with_context(
+#[cfg(test)]
+fn emit_stream_lambda_body_with_context(
     expr: &Expr,
     param: &str,
     value: StreamLambdaValue,
@@ -380,6 +382,7 @@ pub fn emit_stream_lambda_body_with_context(
     emit_stream_lambda_body_with_locals(expr, param, value, &[param], ctx, None)
 }
 
+#[cfg(test)]
 fn emit_stream_lambda_body_with_locals(
     expr: &Expr,
     param: &str,
@@ -840,7 +843,7 @@ fn stream_raw_expr(raw: &str, ctx: StreamRenderContext<'_>) -> RustExpr {
             return owner_associated_path_projection(&owner, member);
         }
     }
-    crate::coercion::rendered_plus_expr_projection_or_raw_leaf(raw)
+    crate::coercion::recover_operator_expr_or_raw_leaf(raw)
 }
 
 fn stream_known_static_raw_owner_name(owner: &str, ctx: StreamRenderContext<'_>) -> Option<String> {
@@ -933,7 +936,7 @@ pub fn render_stream_plan_with_context(
     )
 }
 
-pub fn render_stream_plan_with_optional_sequence_context(
+pub(crate) fn render_stream_plan_with_optional_sequence_context(
     plan: &StreamPlan<'_>,
     lowered_source: RustExpr,
     ctx: StreamRenderContext<'_>,
@@ -1491,6 +1494,9 @@ fn render_tuple_like_stream_lambda_param_type(
     let simple = simple.rsplit('.').next().unwrap_or(&simple);
     if !simple.starts_with("Tuple") || args.is_empty() {
         return None;
+    }
+    if matches!(simple, "Tuple2" | "Tuple3" | "Tuple4") {
+        return Some(crate::slot_render::rust_name_for_java_named_type(simple));
     }
     let rendered_args = args
         .iter()
@@ -3518,5 +3524,402 @@ fn emit_stream_lambda_receiver_with_locals_expr(
             false,
         )
         .map(|lowered| lowered.expr),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::emit::emit_expr;
+    use crate::facts::{ExternalConstructorFact, FactProvenance};
+    use crate::java_ir::PrimitiveType;
+    use crate::parser::parse_expr;
+
+    #[test]
+    fn stream_lambda_constructor_rendering_uses_external_constructor_arity_names() {
+        let mut facts = FactSet::default();
+        facts
+            .external_constructor_facts
+            .push(ExternalConstructorFact {
+                type_name: "SimpleInterval".to_string(),
+                arg_types: vec![JavaType::Named {
+                    name: "Locatable".to_string(),
+                    args: Vec::new(),
+                }],
+                provenance: FactProvenance::ExternalLibraryPack,
+            });
+        facts
+            .external_constructor_facts
+            .push(ExternalConstructorFact {
+                type_name: "SimpleInterval".to_string(),
+                arg_types: vec![
+                    JavaType::String,
+                    JavaType::Primitive(PrimitiveType::Int),
+                    JavaType::Primitive(PrimitiveType::Int),
+                ],
+                provenance: FactProvenance::ExternalLibraryPack,
+            });
+        let env = ShapeEnv::new();
+        let ctx = StreamRenderContext::new_with_facts(&env, &facts);
+
+        let rendered = emit_stream_lambda_body_with_context(
+            &parse_expr("new SimpleInterval(contig, start, end)"),
+            "partition",
+            StreamLambdaValue::BorrowedItem,
+            ctx,
+        );
+
+        assert_eq!(
+            rendered,
+            Some("SimpleInterval::new_3(contig, start, end)".to_string())
+        );
+    }
+
+    #[test]
+    fn stream_lambda_emission_owns_java_string_method_mappings() {
+        assert_eq!(
+            emit_stream_lambda_body_with_context(
+                &parse_expr("value.trim()"),
+                "value",
+                StreamLambdaValue::BorrowedItem,
+                StreamRenderContext::empty(),
+            )
+            .unwrap(),
+            "value.trim().to_string()"
+        );
+        assert_eq!(
+            emit_stream_lambda_body_with_context(
+                &parse_expr("value.isEmpty()"),
+                "value",
+                StreamLambdaValue::BorrowedItem,
+                StreamRenderContext::empty(),
+            )
+            .unwrap(),
+            "value.is_empty()"
+        );
+        assert!(matches!(
+            emit_stream_lambda_body_expr(
+                &parse_expr("value.isEmpty()"),
+                "value",
+                StreamLambdaValue::BorrowedItem
+            )
+            .unwrap()
+            .unshaped(),
+            RustExpr::MethodCall { method, .. } if method == "is_empty"
+        ));
+        assert_eq!(
+            emit_stream_lambda_body_with_context(
+                &parse_expr("value.toLowerCase()"),
+                "value",
+                StreamLambdaValue::BorrowedItem,
+                StreamRenderContext::empty(),
+            )
+            .unwrap(),
+            "value.to_lowercase()"
+        );
+    }
+
+    #[test]
+    fn stream_lambda_emission_uses_structured_operator_rendering() {
+        assert_eq!(
+            emit_stream_lambda_body_with_context(
+                &parse_expr("value - (other - third)"),
+                "value",
+                StreamLambdaValue::OwnedItem,
+                StreamRenderContext::empty(),
+            )
+            .unwrap(),
+            "value - (other - third)"
+        );
+        assert_eq!(
+            emit_stream_lambda_body_with_context(
+                &parse_expr("-(value + other)"),
+                "value",
+                StreamLambdaValue::OwnedItem,
+                StreamRenderContext::empty(),
+            )
+            .unwrap(),
+            "-(value + other)"
+        );
+        assert_eq!(
+            emit_stream_lambda_body_with_context(
+                &parse_expr("value < other && other < third"),
+                "value",
+                StreamLambdaValue::OwnedItem,
+                StreamRenderContext::empty(),
+            )
+            .unwrap(),
+            "value < other && other < third"
+        );
+        let parsed_binary = emit_stream_lambda_body_expr(
+            &parse_expr("left + right"),
+            "value",
+            StreamLambdaValue::OwnedItem,
+        )
+        .unwrap();
+        assert_eq!(emit_expr(&parsed_binary), "left + right");
+        assert!(matches!(
+            parsed_binary,
+            RustExpr::Binary { op, left, right }
+                if op == "+"
+                    && matches!(left.as_ref(), RustExpr::Var(name) if name == "left")
+                    && matches!(right.as_ref(), RustExpr::Var(name) if name == "right")
+        ));
+        let raw_binary = emit_stream_lambda_body_expr(
+            &Expr::Raw("left + right".to_string()),
+            "value",
+            StreamLambdaValue::OwnedItem,
+        )
+        .unwrap();
+        assert_eq!(emit_expr(&raw_binary), "left + right");
+        assert!(matches!(
+            raw_binary,
+            RustExpr::Binary { op, left, right }
+                if op == "+"
+                    && matches!(left.as_ref(), RustExpr::Var(name) if name == "left")
+                    && matches!(right.as_ref(), RustExpr::Var(name) if name == "right")
+        ));
+        let opaque_raw = emit_stream_lambda_body_expr(
+            &Expr::Raw("left +".to_string()),
+            "value",
+            StreamLambdaValue::OwnedItem,
+        )
+        .unwrap();
+        assert_eq!(opaque_raw, RustExpr::Raw("left +".to_string()));
+        let parsed_static_constant = emit_stream_lambda_body_expr(
+            &parse_expr("Owner.VALUE"),
+            "value",
+            StreamLambdaValue::OwnedItem,
+        )
+        .unwrap();
+        assert_eq!(emit_expr(&parsed_static_constant), "Owner::VALUE");
+        assert!(matches!(
+            parsed_static_constant,
+            RustExpr::Path(segments)
+                if segments == vec!["Owner".to_string(), "VALUE".to_string()]
+        ));
+        let raw_static_constant = emit_stream_lambda_body_expr(
+            &Expr::Raw("Owner.VALUE".to_string()),
+            "value",
+            StreamLambdaValue::OwnedItem,
+        )
+        .unwrap();
+        assert_eq!(emit_expr(&raw_static_constant), "Owner.VALUE");
+        assert!(matches!(
+            raw_static_constant,
+            RustExpr::Field(receiver, field)
+                if field == "VALUE"
+                    && matches!(receiver.as_ref(), RustExpr::Var(name) if name == "Owner")
+        ));
+        let qualified_static_constant = emit_stream_lambda_body_expr(
+            &parse_expr("a.Item.KIND"),
+            "value",
+            StreamLambdaValue::OwnedItem,
+        )
+        .unwrap();
+        assert_eq!(emit_expr(&qualified_static_constant), "AItem::KIND");
+        let raw_qualified_static_constant = emit_stream_lambda_body_expr(
+            &Expr::Raw("a.Item.KIND".to_string()),
+            "value",
+            StreamLambdaValue::OwnedItem,
+        )
+        .unwrap();
+        assert_eq!(emit_expr(&raw_qualified_static_constant), "a.Item.KIND");
+        let raw_b_qualified_static_constant = emit_stream_lambda_body_expr(
+            &Expr::Raw("b.Item.KIND".to_string()),
+            "value",
+            StreamLambdaValue::OwnedItem,
+        )
+        .unwrap();
+        assert_eq!(emit_expr(&raw_b_qualified_static_constant), "b.Item.KIND");
+        let raw_instance_field = emit_stream_lambda_body_expr(
+            &Expr::Raw("owner.value".to_string()),
+            "value",
+            StreamLambdaValue::OwnedItem,
+        )
+        .unwrap();
+        assert_eq!(emit_expr(&raw_instance_field), "owner.value");
+        assert!(matches!(
+            raw_instance_field,
+            RustExpr::Field(receiver, field)
+                if field == "value"
+                    && matches!(receiver.as_ref(), RustExpr::Var(name) if name == "owner")
+        ));
+    }
+
+    #[test]
+    fn stream_lambda_emission_uses_shape_env_for_bare_fields_and_static_fields() {
+        let mut env = ShapeEnv::new();
+        env.insert_field_shape("workspace", RustSlotShape::for_storage(JavaType::String));
+        env.insert_static_field_shape(
+            "ARRAY_COLUMN_BOUNDS_START",
+            RustSlotShape::for_storage(JavaType::Primitive(PrimitiveType::Int)),
+        );
+        env.insert_static_type_alias("genomics_d_b_utils", "org.genomicsdb.GenomicsDBUtils");
+        env.insert_local_shape(
+            "vid_map_p_b",
+            RustSlotShape::for_storage(JavaType::Unknown("VidMapPB".to_string())),
+        );
+        let ctx = StreamRenderContext::new(&env);
+
+        assert_eq!(
+            emit_stream_lambda_body_with_context(
+                &parse_expr("workspace"),
+                "partition",
+                StreamLambdaValue::BorrowedItem,
+                ctx,
+            )
+            .unwrap(),
+            "self.workspace"
+        );
+        assert_eq!(
+            emit_stream_lambda_body_with_context(
+                &parse_expr("ARRAY_COLUMN_BOUNDS_START"),
+                "partition",
+                StreamLambdaValue::BorrowedItem,
+                ctx,
+            )
+            .unwrap(),
+            "Self::ARRAY_COLUMN_BOUNDS_START"
+        );
+        assert_eq!(
+            emit_stream_lambda_body_with_context(
+                &parse_expr("GenomicsDBUtils.getArrayColumnBounds(workspace, partition)"),
+                "partition",
+                StreamLambdaValue::BorrowedItem,
+                ctx,
+            )
+            .unwrap(),
+            "OrgGenomicsdbGenomicsDBUtils::get_array_column_bounds(self.workspace, *partition)"
+        );
+        assert_eq!(
+            emit_stream_lambda_body_with_context(
+                &parse_expr("genomics_d_b_utils.getArrayColumnBounds(workspace, partition)"),
+                "partition",
+                StreamLambdaValue::BorrowedItem,
+                ctx,
+            )
+            .unwrap(),
+            "OrgGenomicsdbGenomicsDBUtils::get_array_column_bounds(self.workspace, *partition)"
+        );
+        assert_eq!(
+            emit_stream_lambda_body_with_context(
+                &parse_expr("vidMapPB.getContigsList()"),
+                "partition",
+                StreamLambdaValue::BorrowedItem,
+                ctx,
+            )
+            .unwrap(),
+            "vid_map_p_b.get_contigs_list()"
+        );
+        assert_eq!(
+            emit_stream_lambda_body_with_context(
+                &parse_expr("Coordinates.GenomicsDBColumn.newBuilder()"),
+                "partition",
+                StreamLambdaValue::BorrowedItem,
+                ctx,
+            )
+            .unwrap(),
+            "GenomicsDBColumn::new_builder()"
+        );
+    }
+
+    #[test]
+    fn stream_raw_expr_recovery_preserves_binary_precedence() {
+        let expr = Expr::Binary {
+            op: BinaryOp::Mul,
+            left: Box::new(Expr::Raw("left + right".to_string())),
+            right: Box::new(Expr::Literal(Literal::Int(2))),
+        };
+
+        let lowered = emit_stream_lambda_body_expr(&expr, "value", StreamLambdaValue::BorrowedItem)
+            .expect("synthetic raw stream lambda expression should lower");
+
+        assert_eq!(emit_expr(&lowered), "(left + right) * 2");
+        assert!(matches!(
+            lowered,
+            RustExpr::Binary { left, .. }
+                if matches!(left.as_ref(), RustExpr::Grouped(grouped)
+                    if matches!(grouped.as_ref(), RustExpr::Binary { op, .. } if op == "+"))
+        ));
+    }
+
+    #[test]
+    fn stream_lambda_helper_uses_context_for_member_and_static_access() {
+        let mut env = ShapeEnv::new();
+        env.insert_local_shape(
+            "vid_map_p_b",
+            RustSlotShape::conservative(JavaType::Named {
+                name: "VidMapPB".to_string(),
+                args: Vec::new(),
+            }),
+        );
+        assert_eq!(
+            emit_stream_lambda_body_with_context(
+                &parse_expr("vid_map_p_b.getContigsList()"),
+                "partition",
+                StreamLambdaValue::BorrowedItem,
+                StreamRenderContext::new(&env),
+            ),
+            Some("vid_map_p_b.get_contigs_list()".to_string())
+        );
+        assert_eq!(
+            emit_stream_lambda_body_with_context(
+                &parse_expr("constants.DELIMITER"),
+                "partition",
+                StreamLambdaValue::BorrowedItem,
+                StreamRenderContext::empty(),
+            ),
+            Some("Constants::DELIMITER".to_string())
+        );
+        assert_eq!(
+            emit_stream_lambda_body_with_context(
+                &parse_expr("constants.DELIMITER"),
+                "partition",
+                StreamLambdaValue::BorrowedItem,
+                StreamRenderContext::new(&env),
+            ),
+            Some("Constants::DELIMITER".to_string())
+        );
+        let mut alias_env = ShapeEnv::new();
+        alias_env.insert_static_type_alias("Cfg", "AB.C");
+        alias_env.insert_static_type_alias("cfg", "AB.C");
+        assert_eq!(alias_env.type_env().static_type_alias("Cfg"), Some("AB.C"));
+        assert_eq!(
+            emit_stream_lambda_body_with_context(
+                &Expr::FieldAccess(Box::new(Expr::Var("Cfg".to_string())), "N".to_string()),
+                "partition",
+                StreamLambdaValue::BorrowedItem,
+                StreamRenderContext::new(&alias_env),
+            ),
+            Some("AB_C::N".to_string())
+        );
+        assert_eq!(
+            emit_stream_lambda_body_with_context(
+                &Expr::Raw("Cfg.N".to_string()),
+                "partition",
+                StreamLambdaValue::BorrowedItem,
+                StreamRenderContext::new(&alias_env),
+            ),
+            Some("AB_C::N".to_string())
+        );
+        assert_eq!(
+            emit_stream_lambda_body_with_context(
+                &Expr::Raw("Math.PI".to_string()),
+                "partition",
+                StreamLambdaValue::BorrowedItem,
+                StreamRenderContext::new(&ShapeEnv::new()),
+            ),
+            Some("Math::PI".to_string())
+        );
+        assert_eq!(
+            emit_stream_lambda_body_with_context(
+                &Expr::Raw("Item.VALUE".to_string()),
+                "partition",
+                StreamLambdaValue::BorrowedItem,
+                StreamRenderContext::new(&ShapeEnv::new()),
+            ),
+            Some("Item.VALUE".to_string())
+        );
     }
 }

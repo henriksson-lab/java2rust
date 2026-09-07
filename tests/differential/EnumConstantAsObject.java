@@ -19,8 +19,7 @@
  *
  * The `Col` local covers the context that was always correct -- if a change makes
  * the two contexts disagree again, this fixture says so. The same read through
- * `Col.values()[i]` is a *different* gap and is parked in
- * `known-gaps/EnumValuesElementIntoObject.java`.
+ * `Col.values()[i]` is covered by `EnumValuesElementIntoObject.java`.
  *
  * Java prints "BLUE,RED,BLUE".
  *

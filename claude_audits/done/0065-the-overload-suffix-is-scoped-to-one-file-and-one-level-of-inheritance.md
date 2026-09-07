@@ -1,10 +1,12 @@
 # 0065 — The overload suffix is decided from a name *count* scoped to one file and one level of `extends`
 
-Status: **fixed** — hierarchy-wide overload counts now use source symbols across
-context files, transitive superclasses and implemented interfaces; lowered
-source-overload retargeting uses typed arguments before arity fallback
-Fixed: 2026-08-24
-Verified: `cargo test --release --test idiom_gaps cross_file_overloaded_override_uses_context_hierarchy_names`;
+Status: **fixed** — hierarchy-wide overload counts now use source symbols
+across context files, transitive superclasses and implemented interfaces;
+lowered source-overload retargeting uses typed arguments before arity fallback,
+and the 2026-09-02 reopened scopes are now rechecked.
+Fixed in part: 2026-08-24
+Verified for the fixed scopes:
+`cargo test --release --test idiom_gaps cross_file_overloaded_override_uses_context_hierarchy_names`;
 `cargo test --release --test idiom_gaps interface_default_overloads_count_for_implementor_override_names`;
 `cargo test --release --test idiom_gaps transitive_superclass_overloads_count_for_grandchild_override_names`;
 `cargo check --release`
@@ -363,6 +365,33 @@ same construct and both passed for months.
 
 ---
 
+## Re-verified 2026-09-06 — reopened scopes fixed
+
+The stale assertion half of the 2026-09-02 recheck is gone. The two existing
+focused tests now accept the current string-view signature (`&str` plus
+`Result<_, JavaException>`) and pass:
+
+```sh
+cargo test --release --test idiom_gaps interface_default_overloads_count_for_implementor_override_names -- --nocapture
+cargo test --release --test idiom_gaps transitive_superclass_overloads_count_for_grandchild_override_names -- --nocapture
+```
+
+The file-boundary case was rechecked and remains green:
+
+```sh
+cargo test --release --test idiom_gaps cross_file_overloaded_override_uses_context_hierarchy_names -- --nocapture
+```
+
+The subclass-added-overload mirror now has a generated-runtime guard,
+`idiom_gaps::subclass_added_overload_keeps_inherited_method_callable_by_signature`.
+It verifies the current non-colliding spelling (`f(int)` remains `f`,
+`f(String)` becomes `f_string`) and executes `Child::both()` to prove both
+signatures dispatch correctly:
+
+```sh
+cargo test --release --test idiom_gaps subclass_added_overload_keeps_inherited_method_callable_by_signature -- --nocapture
+```
+
 ## Re-verified 2026-09-02 — reopened, 2 of 4 scopes fixed
 
 **Fixed:** §1, the cross-file translator panic — `exit=0`, no `signature.rs:5267`,
@@ -386,8 +415,9 @@ fn f_int(&self, a: i32) -> i32 { panic!("incompatible Java interface method impl
 ```
 
 nine lines above the `Impl::f_string` that exists. Only the trait-object path is
-affected, which is why it survived. Same defect cross-file. §3-mirror (a subclass
-*adding* an overload) is also unfixed: `H_Base::f` vs `H_Child::f_int` disagree.
+affected, which is why it survived. Same defect cross-file. The §3-mirror
+subclass-added-overload shape is now covered by
+`idiom_gaps::subclass_added_overload_keeps_inherited_method_callable_by_signature`.
 
 **Why the tests did not catch it:** `idiom_gaps.rs:13676/13726/13777` assert only
 `translation.rust.contains("pub fn f_int...")` — spellings, never values, and

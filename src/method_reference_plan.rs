@@ -1,5 +1,5 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MethodReferencePlan {
+pub(crate) enum MethodReferencePlan {
     Constructor {
         type_name: String,
     },
@@ -21,16 +21,16 @@ pub enum MethodReferencePlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BoundMethodReferenceReceiver {
+pub(crate) enum BoundMethodReferenceReceiver {
     Local(String),
     InstanceField(String),
 }
 
-pub fn plan_method_reference(target: &str, method: &str) -> MethodReferencePlan {
+pub(crate) fn plan_method_reference(target: &str, method: &str) -> MethodReferencePlan {
     let method = crate::parser::to_snake_case(method);
     if method == "new" {
         return MethodReferencePlan::Constructor {
-            type_name: rust_owner_path(target),
+            type_name: source_owner_path(target),
         };
     }
     if matches!(target, "this" | "self") {
@@ -43,12 +43,12 @@ pub fn plan_method_reference(target: &str, method: &str) -> MethodReferencePlan 
         return MethodReferencePlan::UnboundAccessor { method };
     }
     MethodReferencePlan::AssociatedFunction {
-        owner: rust_owner_path(target),
+        owner: source_owner_path(target),
         method,
     }
 }
 
-pub fn plan_current_receiver_method_reference(
+pub(crate) fn plan_current_receiver_method_reference(
     method: &str,
     arity: Option<usize>,
 ) -> MethodReferencePlan {
@@ -70,8 +70,8 @@ fn looks_like_accessor_method(method: &str) -> bool {
     method.starts_with('_') || method.starts_with("get_") || method.starts_with("is_")
 }
 
-fn rust_owner_path(target: &str) -> String {
-    crate::java_naming::rust_name_for_java_named_type(&target.replace('$', "."))
+fn source_owner_path(target: &str) -> String {
+    target.replace('$', ".")
 }
 
 #[cfg(test)]
@@ -83,35 +83,35 @@ mod tests {
         assert_eq!(
             plan_method_reference("a.Mapper", "tag"),
             MethodReferencePlan::AssociatedFunction {
-                owner: "AMapper".to_string(),
+                owner: "a.Mapper".to_string(),
                 method: "tag".to_string(),
             }
         );
         assert_eq!(
             plan_method_reference("b.Mapper", "tag"),
             MethodReferencePlan::AssociatedFunction {
-                owner: "BMapper".to_string(),
+                owner: "b.Mapper".to_string(),
                 method: "tag".to_string(),
             }
         );
         assert_eq!(
             plan_method_reference("K.AB", "tag"),
             MethodReferencePlan::AssociatedFunction {
-                owner: "K_AB".to_string(),
+                owner: "K.AB".to_string(),
                 method: "tag".to_string(),
             }
         );
         assert_eq!(
             plan_method_reference("K.A.B", "tag"),
             MethodReferencePlan::AssociatedFunction {
-                owner: "K_A_B".to_string(),
+                owner: "K.A.B".to_string(),
                 method: "tag".to_string(),
             }
         );
         assert_eq!(
             plan_method_reference("a.Mapper", "new"),
             MethodReferencePlan::Constructor {
-                type_name: "AMapper".to_string(),
+                type_name: "a.Mapper".to_string(),
             }
         );
     }

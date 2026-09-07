@@ -11,6 +11,170 @@ downcast evidence, platform support, or an explicit external display-capability
 fact is available.
 Kind: behavioural (differential), JDK facades / collections / enums.
 
+Follow-up 2026-09-07 `String.join` null delimiter pass: the focused
+String.join null-display oracle now covers both null elements and a null
+delimiter. The delimiter keeps Java's required non-null contract and raises
+catchable `NullPointerException` instead of becoming an empty Rust delimiter.
+Differential fixture: `tests/differential/StringJoinNullDelimiter.java`.
+
+Follow-up 2026-09-07 erased native collection display pass: erased values
+holding the concrete collection carriers emitted for `ArrayList<String>`,
+`LinkedHashSet<String>`, and `LinkedHashMap<String,Integer>` now display through
+the same Java collection/map formatting used by typed concat paths. Promoted
+differential fixtures: `tests/differential/ErasedArrayListDisplay.java`,
+`tests/differential/ErasedLinkedHashSetDisplay.java`, and
+`tests/differential/ErasedLinkedHashMapDisplay.java`. The broad unknown
+external-erased display risk remains open.
+
+Follow-up 2026-09-07 erased `BitSet` display pass: `BitSet` was already a
+modeled platform facade for `get`/`set`, but erased display did not include it.
+`BitSet` now formats as Java does (`{2, 5}` for set bits), and
+`Object value = bits; "" + value` plus `value.toString()` are differential
+covered by `tests/differential/ErasedBitSetDisplay.java`.
+The focused erased-platform differential loop now includes the promoted
+BitSet/Class/Locale/Pattern fixtures instead of leaving them to ad hoc
+single-fixture runs.
+
+Follow-up 2026-09-07 erased `Class` display pass: `Class` literals erased
+behind `Object` now recover Java display through generated `JavaClass<T>`
+downcast arms for the concrete token types present in the program. This covers
+both string concatenation and direct erased `value.toString()` for
+`Object value = String.class`, while genuinely unknown erased display remains
+loud. Promoted differential fixture:
+`tests/differential/ErasedClassDisplay.java`. The same pass made class-token
+support detection scan static initializer blocks, so a `String.class` used only
+inside `static { ... }` no longer emits `JavaClass::<String>` without the
+`JavaClass<T>` support item.
+
+Follow-up 2026-09-07 display-capability cleanup: the external facade
+display-capability set had a no-op simple-name branch that reinserted the same
+aliases already added for non-package-qualified receiver facts. It was deleted
+rather than inverted: package-qualified `toString` facts must keep package peers
+distinct and must not mark the bare simple peer display-capable. Existing
+regressions:
+`stdlib::tests::package_qualified_to_string_fact_does_not_mark_simple_peer_display_capable`
+and
+`stdlib::tests::external_display_capability_query_keeps_package_peers_distinct`.
+
+Follow-up 2026-09-07 nullable display-capability cleanup: a modeled external
+`toString(): String` fact now enables `Display` only when its return nullability
+is `DefinitelyNonNull`. Nullable external `toString` facts still generate
+nullable facade methods when called directly, but erased/concat display stays
+loud until there is a non-null display contract. Regression:
+`slot_shape_design::nullable_external_to_string_fact_does_not_mark_facade_display_capable`.
+
+Follow-up 2026-09-06: `StringBuilder.append(map.get(k))` no longer fails on the
+`Option<&&String>` support shape from borrowed map reads. The generated runtime
+support now accepts `&&T` where `T: JavaAppendValue + Clone`, so optional
+borrowed values can flow through the existing `Option<T>` append contract.
+Regression:
+`tests/idiom_gaps.rs::string_builder_append_map_get_borrowed_string_value_typechecks`.
+
+Follow-up 2026-09-06 stale-baseline pass: four collection/view rows were still
+listed as idiom-gap failures even though current lowering compiles them. The
+assertions were updated to the current `Result`/`Ok` rendering and direct native
+projections, then the release baseline was recaptured at `707/109`. Removed
+from `tests/baselines/idiom-gaps-failures.txt`:
+`list_remove_object_removes_first_equal_element_and_returns_boolean`,
+`map_key_set_size_lowers_through_native_len`,
+`map_values_returning_collection_collects_vec`, and
+`map_values_returning_set_collects_hashset_for_set_slot`. The adjacent
+`map_values_returning_hashset_collects_hashset_for_concrete_set_slot` was then
+closed with a slot-aware constructor path: `new LinkedHashSet<String>(
+values.values())` keeps its insertion-ordered carrier in ordinary value
+contexts, but lowers directly to a `HashSet` snapshot when the surrounding slot
+asks for `HashSet<String>`.
+
+Follow-up 2026-09-06 second stale-baseline pass: six more 0059 rows were
+verified passing and removed from `tests/baselines/idiom-gaps-failures.txt`.
+The assertions now accept current nullable/checked array projections,
+`&mut Vec<String>` `removeIf` lowering, narrowed `Map.get(...).add(...)`
+negative checks, and `Result`-wrapped explicit source `toString()` returns:
+`arrays_as_list_single_string_array_spreads_for_add_all`,
+`documents_collection_remove_if_lambda_gap`,
+`map_get_collection_mutation_uses_mutable_lookup`,
+`explicit_source_to_string_method_wins_over_object_fallback`,
+`nested_indexed_string_array_append_borrows_inner_vec_element`, and
+`string_buffer_append_ternary_argument_stays_owned_value`. At that checkpoint,
+release `idiom_gaps` was `718/98`; the current checked baseline is `816/0`.
+The remaining live 0059 rows then included the source-object `toString`
+fallback pair and enum-values set carrier mismatch.
+
+Follow-up 2026-09-07 source-object fallback pass: current-program source types
+without a declared `toString()` now lower direct calls through their generated
+Java `Object.toString()` fallback method instead of detouring through erased
+display. The path stays scoped to `ctx.program`; support/emitted-context and
+source-summary types still use erased display because their concrete fallback
+type may not exist in the generated crate. Removed from the idiom-gap baseline:
+`source_object_to_string_uses_java_object_stringification_fallback` and
+`source_object_to_string_fallback_applies_across_source_classes`. At that
+checkpoint, release `idiom_gaps` was `720/96`.
+
+Follow-up 2026-09-07 easy-row pass: eight more checked-in 0059 rows are closed.
+Two were stale assertions for current `Result` and nested-enum spelling
+(`documents_class_literal_token_gap`, `enum_compare_to_uses_ordinal_order`).
+Four Java array helper rows only needed generated-test fixtures to use nullable
+`String[]` leaves; the adjacent `Arrays.toString(String[])` row also needed the
+runtime helper to format nullable object elements as `null`. The remaining real
+lowering fix was `new LinkedHashSet<Mode>(Arrays.asList(Mode.values()))` in a
+`Set<Mode>` slot, which now snapshots straight to the requested native
+`HashSet`. Removed from the idiom-gap baseline:
+`java_arrays_hash_code_lowers_as_static_platform_hash_projection`,
+`java_arrays_to_string_lowers_as_static_platform_format_projection`,
+`java_arrays_deep_to_string_lowers_nested_arrays`,
+`java_arrays_deep_equals_lowers_nested_arrays`,
+`java_arrays_deep_hash_code_lowers_nested_arrays`, and
+`source_enum_values_spread_into_arrays_as_list_and_compare_borrowed_loop_items`.
+At that checkpoint, release `idiom_gaps` was `728/88`.
+
+Follow-up 2026-09-07 equality/assertion cleanup: `!list.get(i).equals(value)`
+now respects the non-null receiver produced by catchable `List.get` lowering
+instead of treating the propagated receiver as `Option<String>` and emitting an
+ambiguous `.as_ref().map(...) != Some(value)`. Six more rows were removed from
+the idiom-gap baseline after focused verification: numeric char literal slots,
+char-array `String` construction, whole-expression array indices, shift
+promotion constant paths, nested enum type access spelling, and static array
+length constants.
+At that checkpoint, release `idiom_gaps` was `735/81`.
+
+Follow-up 2026-09-07 stale assertion cleanup: two more rows were verified as
+current generated-crate passes after assertion updates. Optional array field
+length now renders through the checked nullable array receiver and `.as_slice()`
+before `len()`, and static primitive expression constants use explicit owner
+paths in generated static methods. Removed
+`optional_array_field_length_unwraps_on_non_self_receiver` and
+`source_static_final_primitive_expression_fields_emit_associated_constants` from
+the idiom-gap baseline. The adjacent cross-owner static constant row also proved
+stale and now accepts explicit owner paths in static method bodies.
+At that checkpoint, release `idiom_gaps` was `738/78`.
+
+Follow-up 2026-09-07 tokenizer/static-key stale cleanup: two more assertion-only
+rows now match current generated Rust. `StringTokenizer.nextToken().charAt(0)`
+uses the owned `String` returned by `next_token_result()` directly, and
+`Map.get(ID)` on a static string constant uses the explicit owner path without
+introducing an extra borrow. Removed
+`java_string_tokenizer_uses_facade_signature_facts` and
+`map_get_static_string_constant_key_does_not_double_borrow_str` from the
+idiom-gap baseline.
+At that checkpoint, release `idiom_gaps` was `740/76`.
+
+Follow-up 2026-09-07 equals/Objects stale cleanup: `EqualsAndObjects` now
+renders direct string equality as `Ok(left == right)` for the fallible method
+and `left == right` for the null-safe static helper. The old `.as_str()`
+assertion was stale; the generated crate passes. Removed
+`documents_equals_and_objects_gap` from the idiom-gap baseline.
+At that checkpoint, release `idiom_gaps` was `742/74` after the adjacent stale
+`ZipOutputStream -> OutputStream` guardrail row was converted to a positive
+generated-crate check under 0058.
+
+Follow-up 2026-09-06 API-surface cleanup: collection `removeIf` and `addAll`
+lowering helpers in `call_lowering` are crate-local, and the `firstKey`,
+`lastKey`, `remove`, and `element` projection helpers that are only used inside
+that module are private. This does not change collection semantics; it fences
+the remaining collection lowering surface behind the call-target lowering API.
+The catchable-result projections for list, queue, and map endpoint operations
+are crate-local as well.
+
 Follow-up 2026-08-30 entry-set `removeAll` pass: `Map.entrySet().removeAll(...)`
 now mutates the live backing map instead of falling through to an unmodelled
 collection call. The lowering mirrors the existing `retainAll` backing-map
@@ -57,8 +221,8 @@ Verified:
 `sequence_get_adapts_simple_interval_to_locatable_slot`,
 `source_interface_collection_elements_use_boxed_dyn_trait`, and
 `two_bit_reference_get_reference_bases_returns_reference_sequence`. The audit
-remains open for genuinely unknown erased external display and any remaining
-live-view mutation residues.
+remains open for genuinely unknown erased external display and opaque
+`Map.Entry` values without recoverable key/value or backing-map identity.
 
 Updated 2026-08-28: native map carriers now have an explicit Java display
 coercion for string concatenation/display slots. `HashMap`, `BTreeMap`, and the
@@ -68,8 +232,8 @@ moving the map. Regression:
 `tests/idiom_gaps.rs::tree_map_string_concat_uses_java_map_display`; the helper
 emission detector is covered by
 `stdlib::java_string_runtime_support_tests::map_in_string_concat_emits_collection_display_support`.
-Unknown erased external display and live collection-view mutation residues
-remain open.
+Unknown erased external display remains open; later collection-view passes
+closed the live-view mutation residue tracked here.
 
 Updated 2026-08-26 again: modeled external `toString(): String` display support
 is broader than the single `VCFHeader` case. VCF header-line classes and
@@ -108,23 +272,27 @@ passes 26/26 fixtures.
 Updated 2026-08-24 third pass: `Map.remove(k)` is now a native collection
 method, borrows the key argument, mutates the receiver, and returns `Option<V>`.
 `tests/differential/MapRemovePrevious.java` is promoted and matches the Java
-oracle (`null,1,false`). The audit stays open for ordered collection, set
-construction, and enum-body sections below.
+oracle (`null,1,false`). Later follow-ups below supersede the then-open ordered
+collection, set-construction, and enum-body sections; the remaining live risk is
+the unknown erased-display residue summarized at the current-status section.
 
 Updated 2026-08-24 fourth pass: §4's `new HashSet<>()` diamond repro is
 promoted to `tests/differential/SetConstruction.java` and now passes the Java
 oracle (`1,1,1`). Raw/diamond set constructor owners no longer default their
 missing element type to erased `Object` for the hash-free carrier decision, so
 they keep the native `HashSet` carrier instead of falling into the `Vec` carrier
-branch. The audit stays open for ordered collection and enum-body sections
-below.
+branch. Later follow-ups below supersede the then-open ordered collection and
+enum-body sections; the remaining live risk is the unknown erased-display
+residue summarized at the current-status section.
 
 Updated 2026-08-24 fifth pass: §5's enum constant body repro is promoted to
 `tests/differential/EnumConstantBodies.java` and now passes the Java oracle
 (`5,6`). Enum constant class bodies are preserved as `Expr::New { body: ... }`
 initializers, and abstract enum methods with one-return same-signature constant
 overrides lower to `match self` dispatch instead of the abstract-method panic.
-The audit stays open for the ordered collection discipline in §2.
+Later follow-ups below supersede the then-open ordered collection discipline in
+§2; the remaining live risk is the unknown erased-display residue summarized at
+the current-status section.
 
 Updated 2026-08-24 sixth pass: the sorted half of §2 is fixed.
 `TreeMap`/`SortedMap`/`NavigableMap`/`ImmutableSortedMap` now carry a sorted-map
@@ -336,7 +504,7 @@ returns Java `true`; the indexed overload lowers to `Vec::insert(index, value)`.
 `tests/differential/ListAddReturnsBoolean.java` and
 `tests/differential/ListAddIndex.java` cover the boolean return and insertion
 order contracts. The audit remains open for the known erased/external display
-residue and live map-view mutation such as `keySet().remove(...)`.
+residue and opaque `Map.Entry` values without extractable key/value identity.
 
 Updated 2026-08-26 map-view mutation pass: `Map.keySet().remove(k)` no longer
 mutates a snapshot of the key set. Calls whose receiver is a zero-argument
@@ -959,6 +1127,14 @@ where an external `SimpleEntry` facade has no stored key/value state. Covered by
 arbitrary opaque `Map.Entry` values whose key/value or backing map cannot yet be
 extracted structurally.
 
+Follow-up 2026-09-07 erased SimpleEntry display pass:
+`Object value = new AbstractMap.SimpleEntry<>(key, value)` now uses the
+constructor's own generic arguments to lower the erased object carrier as the
+same tuple used by typed `Map.Entry` slots. That lets erased display reuse the
+runtime `(String, String)` `key=value` arm instead of emitting an opaque external
+facade whose `toString()` has no key/value state. Covered by
+`tests/differential/ErasedMapEntryDisplay.java` (`xa=1:a=1`).
+
 Follow-up 2026-08-28 entry-set iterator display pass:
 `values.entrySet().iterator().next()` now uses the same backing-map recognition
 as the entry-set mutation/contains/remove paths when it is lowered as a string
@@ -1172,7 +1348,7 @@ String` facade surface rather than a unit-returning stub. The stale
 `omitted_context_receiver_method_used_in_display_sink_gets_string_stub` entry
 was removed from `tests/baselines/idiom-gaps-failures.txt`; no code change was
 needed for this subcase. The audit remains open for erased/unknown display
-capability and collection contract residue recorded above.
+capability and opaque `Map.Entry` values without recoverable key/value identity.
 
 Follow-up 2026-08-29 package-qualified external display pass:
 modeled external `toString(): String` display capability is now scoped to the
@@ -1239,6 +1415,16 @@ carrier. A fact for `a.ExternalToken.toString(): String` therefore activates the
 to `ExternalToken` by its simple name, while the capability table still does
 not grant bare `ExternalToken` to every package peer. Covered by the strengthened
 `tests/slot_shape_design.rs::erased_external_object_display_keeps_package_qualified_to_string_capability_distinct`.
+
+Follow-up 2026-09-06: that downcast selection now also uses the Rust facade name
+the importing source can actually spell. Package-qualified VCF facts activated
+through `import htsjdk.variant.vcf.VCFHeaderLine;` emit `VCFHeaderLine`
+downcasts instead of the package-mangled `HtsjdkVariantVcfVCFHeaderLine`, and
+clone-needed optional erased-object locals keep the erased-display path instead
+of mapping `Option<Box<dyn Any>>` through `value.to_string()`. Covered by
+`tests/idiom_gaps.rs::erased_vcf_header_line_display_uses_typed_pack_to_string_fact`
+and
+`tests/idiom_gaps.rs::erased_vcf_header_display_uses_external_to_string_downcast`.
 
 Follow-up 2026-08-29 live `Map.keySet()` unsupported mutator pass:
 `Set.add` and `Set.addAll` on a tracked `Map.keySet()` view now raise
@@ -1383,22 +1569,22 @@ matching the oracle).
 the second landing on the `Vec` the first produced. Fixed at the constructor;
 gated by `tests/differential/NestedMapValueRead.java`.
 
-### R2 `Col.values()[i]` — **open**, now pinned
+### R2 `Col.values()[i]` — **fixed**
 
-`known-gaps/EnumValuesElementIntoObject.java`. The array read produces an optional
-element and the erasure unwraps it again: `Col::values()[1].unwrap()`, where
-`values()` returns `Vec<Self>` and the elements are not optional. This is the
-sequence-side twin of 0056's doubled receiver unwrap and wants the same treatment
-— one answer to "has this already been discharged", not a per-site decision.
+Promoted to `tests/differential/EnumValuesElementIntoObject.java` on
+2026-09-06. Source enum `values()` is now treated as the synthetic non-null
+`Vec<Self>` it emits: indexing `values()[i]` uses the plain enum element shape,
+while storing the full Java array into a source array slot wraps the elements
+into Java's nullable reference-array carrier.
 
-### R4 entry-set `sum += e.getValue()` — **open**, now pinned
+### R4 entry-set `sum += e.getValue()` — **fixed**
 
-`known-gaps/BorrowedElementIntoPrimitiveLocal.java`. A borrowed collection element
-is not dereferenced into a primitive-value slot: `&i32` where `i32` is expected
-(`E0308`). The fixture covers both shapes of the same defect — a declared `int`
-local from `list.get(i)`, and the compound assignment — so a fix that handles only
-one of them leaves it failing. Read-only loops are unaffected, which is why it
-went unnoticed: the value has to land in a slot that owns a primitive.
+Promoted to `tests/differential/BorrowedElementIntoPrimitiveLocal.java` on
+2026-09-06. A borrowed collection element is now recovered into a primitive-value
+slot when the Java element is either the primitive itself or a boxed primitive
+with the same storage type. The fixture covers both shapes of the defect — a
+declared `int` local from `list.get(i)`, and the compound assignment
+`sum += entry.getValue()`.
 
 Redundancy removed while measuring this: `lower_map_entry_accessor_expr_for_slot`
 contained the accessor match, the tuple projection and the slot application
@@ -1410,3 +1596,85 @@ which copy was edited last. They are one question now
 form only has to say how to get the entry expression.
 
 ### R5 → gate failure, fixed under 0056.
+
+Follow-up 2026-09-07: the checked-in expectation for
+`generic_list_get_into_typed_local_recovers_owned_element` predated fallible
+generic `get` lowering. The generated crate compiles with
+`Result<Option<T>, JavaException>`, so the row was removed from the idiom-gaps
+failure baseline.
+
+Follow-up 2026-09-07 stream string-array cleanup: the checked-in expectation for
+`stream_block_lambda_string_array_local_clones_owned_index` predated the current
+nullable string-array parse lowering. The generated crate compiles while still
+cloning the owned `contig` element for `SimpleInterval::new`; the parse calls now
+use the optional-string display path so Java `Integer.parseInt(null)` reaches
+`NumberFormatException` input `"null"`. The row was removed from the
+idiom-gaps failure baseline after a focused check.
+
+Follow-up 2026-09-07 Pattern erased-display oracle: the existing
+`java.util.regex.Pattern` erased-display support is now backed by a differential
+fixture, `tests/differential/ErasedPatternDisplay.java`, not just slot-shape
+generated-crate coverage. Adding the oracle exposed that imported
+`Pattern.compile(String)` still emitted an unmodelled external-facade stub even
+though the `Pattern` carrier existed; the generated facade now delegates that
+one-argument static call to `Pattern::compile`. The fixture checks both
+concatenation and direct `toString()` through an erased `Object`, and the
+platform-display support unit now names every table entry explicitly.
+
+Follow-up 2026-09-07 unsupported-display hygiene: external facade `Display`
+impls that intentionally panic for unknown erased-display carriers now name
+their formatter argument `_f`. Modeled `toString()` and platform display impls
+still use `f`, while the unsupported fallback no longer floods generated-crate
+checks with `unused variable: f` warnings. Guarded by
+`slot_shape_design::external_opaque_facades_support_equality_and_display_fallbacks`
+and
+`slot_shape_design::nullable_external_to_string_fact_does_not_mark_facade_display_capable`.
+
+Follow-up 2026-09-07 Locale erased display: `java.util.Locale` now has a
+value-carrying facade for `Locale.ENGLISH`/`Locale.US`, a `Display` impl, and a
+platform erased-object downcast arm. `Object value = Locale.US; "x" + value`
+now matches Java as `xen_US` instead of reaching the loud unknown-erased
+display path. Guarded by `tests/differential/ErasedLocaleDisplay.java` and
+`slot_shape_design::erased_locale_object_display_delegates_to_locale_display`.
+
+Follow-up 2026-09-07 optional display support: optional Java value display now
+maps present values through `JavaArraysDeepToStringElement` so nested nullable
+values such as `Option<&Option<String>>` print inner `null` correctly. `String.join`
+is marked as needing the string runtime helpers so the support trait is present
+for null-bearing join inputs. Rechecked by the differential fixtures
+`StringJoinNullElement.java` and `StringJoinVarargsNullElement.java`.
+
+Follow-up 2026-09-07 focused erased-display recheck: the promoted erased
+display fixtures were run one-by-one against Java and translated Rust rather
+than relying on the full differential loop. Outputs matched for
+`ErasedBitSetDisplay` (`x{2, 5},direct={2, 5}`), `ErasedClassDisplay`
+(`value=class java.lang.String,direct=class java.lang.String`),
+`ErasedLocaleDisplay` (`xen_US,direct=en_US`), and `ErasedPatternDisplay`
+(`value=a+,direct=a+`). The remaining open 0059 surface is still genuinely
+unknown erased display without source/platform/fact evidence.
+
+Follow-up 2026-09-07 direct platform `toString` recheck: the focused
+differential guard now runs the platform erased-display fixtures that had not
+previously asserted direct `Object.toString()` in the same pass:
+`ErasedAtomicBooleanDisplay`, `ErasedAtomicIntegerDisplay`,
+`ErasedAtomicLongDisplay`, `ErasedFileDisplay`, `ErasedInputStreamDisplay`,
+`ErasedPathDisplay`, `ErasedRandomDisplay`, and `ErasedUrlDisplay`. The direct
+call uses the same `ObjectToString` plan as concat for these platform carriers.
+`Random` needed one real cleanup: generated platform facade `toString` support
+must delegate to `Display`, because the erased downcast helper calls
+`value.to_string()` and an inherent unmodelled stub shadows Rust's blanket
+`ToString` implementation.
+
+Follow-up 2026-09-07 borrowed-element focused oracle: the promoted discharge
+fixtures now have their own small differential loop instead of only relying on
+the full fixture sweep. `NestedMapValueRead`, `EnumValuesElementIntoObject`,
+and `BorrowedElementIntoPrimitiveLocal` are checked by
+`tests/differential.rs::borrowed_element_discharge_fixtures_match_java_output`,
+covering map-value receiver reads, enum array elements erased to `Object`, and
+borrowed collection values flowing into primitive locals.
+
+Follow-up 2026-09-07 String.join null-display oracle: the promoted
+`StringJoinNullElement` and `StringJoinVarargsNullElement` fixtures now have
+their own focused differential loop. This pins the optional Java display path
+used by null-bearing join inputs without relying only on the full fixture
+sweep.

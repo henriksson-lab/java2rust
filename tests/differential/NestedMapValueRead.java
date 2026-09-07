@@ -17,9 +17,8 @@
  * instead of carrying three hand-written shape lists of its own.
  *
  * The reads below go through contexts that hold the element by reference. Binding
- * the same read to an `int` local is a *different* gap -- a borrowed element is not
- * dereferenced into a primitive-value slot (`&i32` where `i32` is expected) -- and
- * is parked in `known-gaps/BorrowedElementIntoPrimitiveLocal.java`.
+ * the same read to an `int` local is covered separately by
+ * `BorrowedElementIntoPrimitiveLocal.java`.
  *
  * Java prints "2,1,2".
  *

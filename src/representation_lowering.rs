@@ -43,7 +43,7 @@ pub struct TraitImplMethodMessagePolicy {
     pub message: String,
 }
 
-pub fn source_class_bound_trait_name(type_name: &str) -> String {
+pub(crate) fn source_class_bound_trait_name(type_name: &str) -> String {
     format!("{}Bound", rust_name_for_java_named_type(type_name))
 }
 
@@ -57,7 +57,8 @@ impl TraitImplMethodMessagePolicy {
     }
 }
 
-pub fn type_emission_for_with_facts(
+#[cfg(test)]
+pub(crate) fn type_emission_for_with_facts(
     representations: &RepresentationPlan,
     ty: &TypeDecl,
     signatures: &SignaturePlan,
@@ -72,7 +73,7 @@ pub fn type_emission_for_with_facts(
     )
 }
 
-pub fn type_emission_for_with_facts_and_exceptions(
+fn type_emission_for_with_facts_and_exceptions(
     representations: &RepresentationPlan,
     ty: &TypeDecl,
     signatures: &SignaturePlan,
@@ -139,12 +140,12 @@ pub fn type_emission_for_with_facts_and_exceptions(
         }
         ObjectRepresentation::ErasedObject => RepresentationTypeEmission::RawRustItem(format!(
             "pub type {} = Box<dyn std::any::Any>;",
-            ty.name
+            rust_name_for_java_named_type(&ty.name)
         )),
     }
 }
 
-pub fn source_hierarchy_carrier_item_for_type(
+pub(crate) fn source_hierarchy_carrier_item_for_type(
     representations: &RepresentationPlan,
     ty: &TypeDecl,
     facts: &FactSet,
@@ -361,7 +362,7 @@ fn java_enum_payload_default_value(field_ty: &JavaType) -> String {
     }
 }
 
-pub fn type_emission_for_program_with_facts_and_exceptions(
+pub(crate) fn type_emission_for_program_with_facts_and_exceptions(
     representations: &RepresentationPlan,
     program: &Program,
     ty: &TypeDecl,
@@ -388,7 +389,8 @@ pub fn type_emission_for_program_with_facts_and_exceptions(
     }
 }
 
-pub fn raw_type_item_for_with_facts(
+#[cfg(test)]
+fn raw_type_item_for_with_facts(
     representations: &RepresentationPlan,
     ty: &TypeDecl,
     signatures: &SignaturePlan,
@@ -403,7 +405,8 @@ pub fn raw_type_item_for_with_facts(
     )
 }
 
-pub fn raw_type_item_for_with_facts_and_exceptions(
+#[cfg(test)]
+fn raw_type_item_for_with_facts_and_exceptions(
     representations: &RepresentationPlan,
     ty: &TypeDecl,
     signatures: &SignaturePlan,
@@ -422,7 +425,7 @@ pub fn raw_type_item_for_with_facts_and_exceptions(
     }
 }
 
-pub fn raw_type_item_for_program_with_facts_and_exceptions(
+pub(crate) fn raw_type_item_for_program_with_facts_and_exceptions(
     representations: &RepresentationPlan,
     program: &Program,
     ty: &TypeDecl,
@@ -443,7 +446,8 @@ pub fn raw_type_item_for_program_with_facts_and_exceptions(
     }
 }
 
-pub fn trait_impl_emissions_for_type_with_facts(
+#[cfg(test)]
+pub(crate) fn trait_impl_emissions_for_type_with_facts(
     representations: &RepresentationPlan,
     program: &Program,
     ty: &TypeDecl,
@@ -460,7 +464,7 @@ pub fn trait_impl_emissions_for_type_with_facts(
     )
 }
 
-pub fn trait_impl_emissions_for_type_with_facts_and_exceptions(
+pub(crate) fn trait_impl_emissions_for_type_with_facts_and_exceptions(
     representations: &RepresentationPlan,
     program: &Program,
     ty: &TypeDecl,
@@ -489,7 +493,7 @@ pub fn trait_impl_emissions_for_type_with_facts_and_exceptions(
         .collect()
 }
 
-pub fn source_class_bound_trait_item_for_type(
+pub(crate) fn source_class_bound_trait_item_for_type(
     program: &Program,
     ty: &TypeDecl,
     signatures: &SignaturePlan,
@@ -541,7 +545,7 @@ pub fn source_class_bound_trait_item_for_type(
     ))
 }
 
-pub fn source_class_bound_trait_impl_emissions_for_type(
+pub(crate) fn source_class_bound_trait_impl_emissions_for_type(
     program: &Program,
     ty: &TypeDecl,
     signatures: &SignaturePlan,
@@ -2096,6 +2100,796 @@ fn collect_type_decl_matches<'a>(
         if let Member::Type(nested) = member {
             collect_type_decl_matches(nested, type_name, matches);
         }
+    }
+}
+
+#[cfg(test)]
+mod type_emission_tests {
+    use super::{
+        RepresentationTypeEmission, TraitImplMethodCompatibilityError,
+        TraitImplMethodFallbackPolicy, TraitImplMethodMessagePolicy, raw_type_item_for_with_facts,
+        trait_impl_emissions_for_type_with_facts, trait_impl_method_message_policy,
+        type_emission_for_program_with_facts_and_exceptions, type_emission_for_with_facts,
+    };
+    use crate::exception_plan::ProgramExceptionPlan;
+    use crate::facts::{
+        FactProvenance, FactSet, HierarchyOverride, HierarchyStrategy, TypeCapabilityOverride,
+    };
+    use crate::java_ir::{JavaType, Member};
+    use crate::parser::parse_java_source;
+    use crate::representation::{ObjectRepresentation, plan_representations};
+    use crate::resolve::resolve_program;
+    use crate::semantic_analysis::analyze_program;
+    use crate::signature::solve_signatures_with_facts;
+    use crate::usage::{analyze_usage, analyze_usage_with_facts};
+
+    #[test]
+    fn raw_type_item_bridge_is_test_only_projection_of_type_emission() {
+        let parsed = parse_java_source(
+            r#"
+interface Expr {}
+class Add implements Expr {}
+class Num implements Expr {}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let mut facts = FactSet::default();
+        facts.hierarchy_overrides.push(HierarchyOverride {
+            type_name: "Expr".to_string(),
+            strategy: HierarchyStrategy::ClosedEnum {
+                enum_name: "ExprValue".to_string(),
+                variants: vec!["Add".to_string(), "Num".to_string()],
+            },
+            provenance: FactProvenance::UserOverride,
+        });
+
+        let representations = plan_representations(&resolved.program, &facts);
+        let signatures = solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &analyze_usage(&resolved.program),
+            &facts,
+        );
+        let expr_ty = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "Expr")
+            .unwrap();
+        let add_ty = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "Add")
+            .unwrap();
+
+        let expected =
+            "#[derive(Clone, PartialEq)]\npub enum ExprValue {\n    Add(Add),\n    Num(Num),\n}"
+                .to_string();
+        assert_eq!(
+            type_emission_for_with_facts(&representations, expr_ty, &signatures, &facts),
+            RepresentationTypeEmission::RawRustItem(expected.clone())
+        );
+        assert_eq!(
+            raw_type_item_for_with_facts(&representations, expr_ty, &signatures, &facts),
+            Some(expected)
+        );
+        assert_eq!(
+            raw_type_item_for_with_facts(&representations, add_ty, &signatures, &facts),
+            None
+        );
+    }
+
+    #[test]
+    fn representation_lowering_owns_non_struct_type_emission() {
+        let parsed = parse_java_source(
+            r#"
+interface Expr {}
+class Add implements Expr {}
+class Num implements Expr {}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let mut facts = FactSet::default();
+        facts.hierarchy_overrides.push(HierarchyOverride {
+            type_name: "Expr".to_string(),
+            strategy: HierarchyStrategy::ClosedEnum {
+                enum_name: "ExprValue".to_string(),
+                variants: vec!["Add".to_string(), "Num".to_string()],
+            },
+            provenance: FactProvenance::UserOverride,
+        });
+
+        let representations = plan_representations(&resolved.program, &facts);
+        let signatures = solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &analyze_usage(&resolved.program),
+            &facts,
+        );
+        let expr_ty = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "Expr")
+            .unwrap();
+        let add_ty = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "Add")
+            .unwrap();
+
+        assert_eq!(
+            type_emission_for_with_facts(&representations, expr_ty, &signatures, &FactSet::default()),
+            RepresentationTypeEmission::RawRustItem(
+                "#[derive(Clone, PartialEq)]\npub enum ExprValue {\n    Add(Add),\n    Num(Num),\n}"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            type_emission_for_with_facts(
+                &representations,
+                add_ty,
+                &signatures,
+                &FactSet::default()
+            ),
+            RepresentationTypeEmission::LowerAsConcreteStruct
+        );
+        let enum_parsed = parse_java_source(
+            r#"
+class Holder {
+    enum Type {
+        SNP,
+        INDEL
+    }
+}
+"#,
+        );
+        let enum_resolved = resolve_program(&enum_parsed.program, enum_parsed.diagnostics);
+        let enum_representations =
+            plan_representations(&enum_resolved.program, &FactSet::default());
+        let enum_signatures = solve_signatures_with_facts(
+            &enum_resolved.program,
+            &enum_representations,
+            &analyze_usage(&enum_resolved.program),
+            &FactSet::default(),
+        );
+        let holder_ty = enum_resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "Holder")
+            .unwrap();
+        let enum_ty = holder_ty
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Type(ty) if ty.name.ends_with(".Type") => Some(ty),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            crate::object_model::rust_enum_variant_name_from_parsed_constant("s_n_p"),
+            "SNP"
+        );
+        assert!(matches!(
+            enum_representations
+                .type_representation("Holder.Type")
+                .map(|representation| &representation.representation),
+            Some(ObjectRepresentation::JavaEnum { enum_name, variants })
+                if enum_name == "Holder.Type" && variants == &vec!["SNP".to_string(), "INDEL".to_string()]
+        ));
+        let RepresentationTypeEmission::RawRustItem(enum_item) = type_emission_for_with_facts(
+            &enum_representations,
+            enum_ty,
+            &enum_signatures,
+            &FactSet::default(),
+        ) else {
+            panic!("Java enum should emit a raw Rust enum item");
+        };
+        assert!(enum_item.contains("pub enum Holder_Type"));
+        assert!(enum_item.contains("SNP"));
+        assert!(enum_item.contains("INDEL"));
+        assert!(enum_item.contains("impl Default for Holder_Type"));
+        assert!(enum_item.contains("pub fn values() -> Vec<Self>"));
+        assert!(enum_item.contains("pub fn value_of<T: AsRef<str>>(name: T) -> Self"));
+        assert!(enum_item.contains("pub fn ordinal(&self) -> i32"));
+        assert!(enum_item.contains("impl std::fmt::Display for Holder_Type"));
+    }
+
+    #[test]
+    fn representation_lowering_emits_dyn_trait_method_signatures_from_signature_plan() {
+        let parsed = parse_java_source(
+            r#"
+interface Named {
+    String name();
+    int score(String prefix);
+}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let semantic = analyze_program(&resolved.program, &resolved.facts, &FactSet::default());
+        let representations = plan_representations(&resolved.program, &semantic.facts);
+        let usage = analyze_usage_with_facts(&resolved.program, &semantic.facts);
+        let signatures = solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &usage,
+            &semantic.facts,
+        );
+        let named_ty = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "Named")
+            .unwrap();
+
+        let RepresentationTypeEmission::RawRustItem(item) = type_emission_for_with_facts(
+            &representations,
+            named_ty,
+            &signatures,
+            &FactSet::default(),
+        ) else {
+            panic!("interface should emit a raw trait item");
+        };
+        assert!(item.contains("pub trait Named"));
+        assert!(item.contains("fn name(&self) -> String;"));
+        assert!(item.contains("fn score(&self, prefix: &str) -> i32;"));
+        assert!(item.contains("impl Clone for std::boxed::Box<dyn Named>"));
+        assert!(
+            item.contains(
+                "impl<__JavaShared: Named + 'static> Named for std::rc::Rc<__JavaShared>"
+            )
+        );
+        assert!(item.contains(
+            "impl<__JavaShared: Named + 'static> Named for std::sync::Arc<__JavaShared>"
+        ));
+    }
+
+    #[test]
+    fn representation_lowering_renders_trait_signatures_with_facts() {
+        let parsed = parse_java_source(
+            r#"
+interface IdSource {
+    ExternalIds ids(ExternalIds values);
+}
+class ExternalIds {}
+class ExternalId {}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let mut facts = resolved.facts.clone();
+        facts
+            .type_capability_overrides
+            .push(TypeCapabilityOverride {
+                type_name: "ExternalIds".to_string(),
+                copy: None,
+                clone: None,
+                string_like: None,
+                sequence_like: Some(JavaType::Named {
+                    name: "ExternalId".to_string(),
+                    args: Vec::new(),
+                }),
+                implements: Vec::new(),
+                extends: None,
+                final_type: None,
+                object_safe_trait: None,
+                provenance: FactProvenance::UserOverride,
+            });
+        let representations = plan_representations(&resolved.program, &facts);
+        let usage = analyze_usage(&resolved.program);
+        let signatures =
+            solve_signatures_with_facts(&resolved.program, &representations, &usage, &facts);
+        let source_ty = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "IdSource")
+            .unwrap();
+
+        assert_eq!(
+            type_emission_for_with_facts(&representations, source_ty, &signatures, &facts),
+            RepresentationTypeEmission::RawRustItem(
+                "pub trait IdSource {\n    fn ids(&self, values: &[ExternalId]) -> Vec<ExternalId>;\n    fn as_any(&self) -> &dyn std::any::Any;\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource>;\n}\n\nimpl dyn IdSource {\n    pub fn anonymous() -> std::boxed::Box<dyn IdSource> { panic!(\"java2rust: anonymous class body for IdSource requires object lowering\") }\n}\n\nimpl Clone for std::boxed::Box<dyn IdSource> {\n    fn clone(&self) -> Self { IdSource::clone_box(&**self) }\n}\n\nimpl<__JavaShared: IdSource + 'static> IdSource for std::rc::Rc<__JavaShared> {\n    fn ids(&self, values: &[ExternalId]) -> Vec<ExternalId> { (**self).ids(values) }\n    fn as_any(&self) -> &dyn std::any::Any { (**self).as_any() }\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource> { std::boxed::Box::new(self.clone()) }\n}\n\nimpl<__JavaShared: IdSource + 'static> IdSource for std::sync::Arc<__JavaShared> {\n    fn ids(&self, values: &[ExternalId]) -> Vec<ExternalId> { (**self).ids(values) }\n    fn as_any(&self) -> &dyn std::any::Any { (**self).as_any() }\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource> { std::boxed::Box::new(self.clone()) }\n}"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn representation_lowering_emits_dyn_trait_impls_for_implementing_classes() {
+        let parsed = parse_java_source(
+            r#"
+interface Named {
+    String name();
+}
+
+class Dog implements Named {
+    public String name() { return "dog"; }
+}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let semantic = analyze_program(&resolved.program, &resolved.facts, &FactSet::default());
+        let representations = plan_representations(&resolved.program, &semantic.facts);
+        let usage = analyze_usage_with_facts(&resolved.program, &semantic.facts);
+        let signatures = solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &usage,
+            &semantic.facts,
+        );
+        let dog_ty = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "Dog")
+            .unwrap();
+
+        assert_eq!(
+            trait_impl_emissions_for_type_with_facts(
+                &representations,
+                &resolved.program,
+                dog_ty,
+                &signatures,
+                &semantic.facts,
+            ),
+            vec![
+                "impl Named for Dog {\n    fn name(&self) -> String { Dog::name(self) }\n    fn as_any(&self) -> &dyn std::any::Any { self }\n    fn clone_box(&self) -> std::boxed::Box<dyn Named> { panic!(\"java2rust: clone_box for Named requires a cloneable Java object carrier\") }\n}".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn trait_impl_forwarding_keeps_nullable_implementation_return_shape() {
+        let parsed = parse_java_source(
+            r#"
+interface Named {
+    String name();
+}
+
+class NullName implements Named {
+    public String name() { return null; }
+}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let semantic = analyze_program(&resolved.program, &resolved.facts, &FactSet::default());
+        let representations = plan_representations(&resolved.program, &semantic.facts);
+        let usage = analyze_usage_with_facts(&resolved.program, &semantic.facts);
+        let signatures = solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &usage,
+            &semantic.facts,
+        );
+        let null_name = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "NullName")
+            .unwrap();
+
+        let impls = trait_impl_emissions_for_type_with_facts(
+            &representations,
+            &resolved.program,
+            null_name,
+            &signatures,
+            &semantic.facts,
+        );
+
+        assert_eq!(impls.len(), 1);
+        assert!(
+            impls[0].contains("fn name(&self) -> Option<String> { NullName::name(self) }"),
+            "{}",
+            impls[0]
+        );
+        assert!(
+            !impls[0].contains("NullName::name(self).expect(\"Java null receiver\")"),
+            "{}",
+            impls[0]
+        );
+    }
+
+    #[test]
+    fn representation_lowering_emits_stubbed_trait_impls_for_abstract_classes() {
+        let parsed = parse_java_source(
+            r#"
+interface Module {
+    void reset();
+    String name();
+}
+
+abstract class AbstractModule implements Module {
+    public void helper() {}
+}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let representations = plan_representations(&resolved.program, &resolved.facts);
+        let usage = analyze_usage(&resolved.program);
+        let signatures = solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &usage,
+            &resolved.facts,
+        );
+        let abstract_ty = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "AbstractModule")
+            .unwrap();
+
+        let impls = trait_impl_emissions_for_type_with_facts(
+            &representations,
+            &resolved.program,
+            abstract_ty,
+            &signatures,
+            &FactSet::default(),
+        );
+
+        assert_eq!(impls.len(), 1);
+        assert!(impls[0].contains("impl Module for AbstractModule"));
+        assert!(impls[0].contains(
+            "panic!(\"missing Java interface method implementation: AbstractModule.reset\")"
+        ));
+        assert!(impls[0].contains(
+            "panic!(\"missing Java interface method implementation: AbstractModule.name\")"
+        ));
+        assert!(!impls[0].contains("compile_error!"));
+    }
+
+    #[test]
+    fn representation_lowering_renders_trait_impls_with_facts() {
+        let parsed = parse_java_source(
+            r#"
+interface IdSource {
+    ExternalIds ids(ExternalIds values);
+}
+class ExternalIds {}
+class ExternalId {}
+class Source implements IdSource {
+    public ExternalIds ids(ExternalIds values) { return values; }
+}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let mut facts = resolved.facts.clone();
+        facts
+            .type_capability_overrides
+            .push(TypeCapabilityOverride {
+                type_name: "ExternalIds".to_string(),
+                copy: None,
+                clone: None,
+                string_like: None,
+                sequence_like: Some(JavaType::Named {
+                    name: "ExternalId".to_string(),
+                    args: Vec::new(),
+                }),
+                implements: Vec::new(),
+                extends: None,
+                final_type: None,
+                object_safe_trait: None,
+                provenance: FactProvenance::UserOverride,
+            });
+        let representations = plan_representations(&resolved.program, &facts);
+        let usage = analyze_usage(&resolved.program);
+        let signatures =
+            solve_signatures_with_facts(&resolved.program, &representations, &usage, &facts);
+        let source_ty = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "Source")
+            .unwrap();
+
+        assert_eq!(
+            trait_impl_emissions_for_type_with_facts(
+                &representations,
+                &resolved.program,
+                source_ty,
+                &signatures,
+                &facts,
+            ),
+            vec![
+                "impl IdSource for Source {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId> { Source::ids(self, values.to_vec()) }\n    fn as_any(&self) -> &dyn std::any::Any { self }\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource> { panic!(\"java2rust: clone_box for IdSource requires a cloneable Java object carrier\") }\n}"
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn representation_lowering_reports_incompatible_dyn_trait_impl_methods() {
+        let parsed = parse_java_source(
+            r#"
+interface Named {
+    String name();
+    int score(String prefix);
+    int arity(String left, String right);
+}
+
+class BrokenNamed implements Named {
+    public int name() { return 1; }
+    public int score(int prefix) { return prefix; }
+    public int arity(String left) { return 1; }
+}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let representations = plan_representations(&resolved.program, &resolved.facts);
+        let usage = analyze_usage(&resolved.program);
+        let signatures = solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &usage,
+            &resolved.facts,
+        );
+        let broken_ty = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "BrokenNamed")
+            .unwrap();
+        let named_ty = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "Named")
+            .unwrap();
+        let name_method = named_ty
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) if method.name == "name" => Some(method),
+                _ => None,
+            })
+            .unwrap();
+
+        let impls = trait_impl_emissions_for_type_with_facts(
+            &representations,
+            &resolved.program,
+            broken_ty,
+            &signatures,
+            &FactSet::default(),
+        );
+
+        let message_policy = trait_impl_method_message_policy(
+            broken_ty,
+            name_method,
+            TraitImplMethodFallbackPolicy::IncompatibleImplementation {
+                error: TraitImplMethodCompatibilityError::ReturnTypeMismatch,
+            },
+        );
+        assert_eq!(
+            message_policy,
+            TraitImplMethodMessagePolicy {
+                message:
+                    "incompatible Java interface method implementation: BrokenNamed.name return type does not match interface"
+                        .to_string(),
+            }
+        );
+        assert_eq!(
+            message_policy.compile_error_body("fn name(&self) -> String;"),
+            "fn name(&self) -> String { panic!(\"incompatible Java interface method implementation: BrokenNamed.name return type does not match interface\"); }"
+        );
+
+        assert_eq!(impls.len(), 1);
+        assert!(impls[0].contains("impl Named for BrokenNamed"));
+        assert!(
+            impls[0].contains(
+                "panic!(\"incompatible Java interface method implementation: BrokenNamed.name return type does not match interface\")"
+            ),
+            "{}",
+            impls[0]
+        );
+        assert!(
+            impls[0].contains(
+                "panic!(\"incompatible Java interface method implementation: BrokenNamed.score parameter types do not match interface\")"
+            ),
+            "{}",
+            impls[0]
+        );
+        assert!(
+            impls[0].contains(
+                "panic!(\"incompatible Java interface method implementation: BrokenNamed.arity parameter count does not match interface\")"
+            ),
+            "{}",
+            impls[0]
+        );
+    }
+
+    #[test]
+    fn representation_lowering_prefers_compatible_dyn_trait_impl_overloads() {
+        let parsed = parse_java_source(
+            r#"
+interface Named {
+    int score(String prefix);
+}
+
+class OverloadedNamed implements Named {
+    public int score(int prefix) { return prefix; }
+    public int score(String prefix) { return 1; }
+}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let representations = plan_representations(&resolved.program, &resolved.facts);
+        let usage = analyze_usage(&resolved.program);
+        let signatures = solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &usage,
+            &resolved.facts,
+        );
+        let overloaded_ty = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "OverloadedNamed")
+            .unwrap();
+
+        let impls = trait_impl_emissions_for_type_with_facts(
+            &representations,
+            &resolved.program,
+            overloaded_ty,
+            &signatures,
+            &FactSet::default(),
+        );
+
+        assert_eq!(impls.len(), 1);
+        assert!(impls[0].contains("impl Named for OverloadedNamed"));
+        assert!(!impls[0].contains("compile_error!"), "{}", impls[0]);
+        assert!(
+            impls[0].contains(
+                "fn score(&self, prefix: String) -> i32 { OverloadedNamed::score_string(self, prefix.to_string()) }"
+            ),
+            "{}",
+            impls[0]
+        );
+    }
+
+    #[test]
+    fn erased_object_alias_uses_rust_name_for_nested_java_type() {
+        let parsed = parse_java_source(
+            r#"
+class AliasMin {
+    static class A {}
+}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let mut facts = FactSet::default();
+        facts.hierarchy_overrides.push(HierarchyOverride {
+            type_name: "AliasMin.A".to_string(),
+            strategy: HierarchyStrategy::ErasedObject,
+            provenance: FactProvenance::UserOverride,
+        });
+
+        let representations = plan_representations(&resolved.program, &facts);
+        let signatures = solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &analyze_usage(&resolved.program),
+            &facts,
+        );
+        let nested_ty = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "AliasMin")
+            .and_then(|ty| {
+                ty.members.iter().find_map(|member| {
+                    if let crate::java_ir::Member::Type(nested) = member {
+                        (nested.name == "AliasMin.A").then_some(nested)
+                    } else {
+                        None
+                    }
+                })
+            })
+            .expect("nested type should be parsed with Java owner path");
+
+        assert_eq!(
+            raw_type_item_for_with_facts(&representations, nested_ty, &signatures, &facts),
+            Some("pub type AliasMin_A = Box<dyn std::any::Any>;".to_string())
+        );
+    }
+
+    #[test]
+    fn program_type_emission_renders_interface_method_type_params() {
+        let parsed = parse_java_source(
+            r#"
+interface Mapper {
+    <T> T id(T value);
+}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let semantic = analyze_program(&resolved.program, &resolved.facts, &FactSet::default());
+        let representations = plan_representations(&resolved.program, &semantic.facts);
+        let usage = analyze_usage_with_facts(&resolved.program, &semantic.facts);
+        let signatures = solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &usage,
+            &semantic.facts,
+        );
+        let mapper_ty = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "Mapper")
+            .unwrap();
+
+        assert_eq!(
+            type_emission_for_program_with_facts_and_exceptions(
+                &representations,
+                &resolved.program,
+                mapper_ty,
+                &signatures,
+                &FactSet::default(),
+                &ProgramExceptionPlan::default(),
+            ),
+            RepresentationTypeEmission::RawRustItem(
+                // The trailing `impl .. for Rc<..>` forwards the trait through a
+                // shared handle, so a wrapped value can satisfy a Java bound
+                // (claude_audits/0002b). `__JavaShared` rather than `T`: `id`
+                // declares its own `T` and an inner generic shadowing the impl's is
+                // E0403.
+                "pub trait Mapper {\n    fn id<T>(&self, value: T) -> T where Self: Sized;\n    fn as_any(&self) -> &dyn std::any::Any;\n    fn clone_box(&self) -> std::boxed::Box<dyn Mapper>;\n}\n\nimpl dyn Mapper {\n    pub fn anonymous() -> std::boxed::Box<dyn Mapper> { panic!(\"java2rust: anonymous class body for Mapper requires object lowering\") }\n}\n\nimpl Clone for std::boxed::Box<dyn Mapper> {\n    fn clone(&self) -> Self { Mapper::clone_box(&**self) }\n}\n\nimpl<__JavaShared: Mapper + 'static> Mapper for std::rc::Rc<__JavaShared> {\n    fn id<T>(&self, value: T) -> T where Self: Sized { (**self).id(value) }\n    fn as_any(&self) -> &dyn std::any::Any { (**self).as_any() }\n    fn clone_box(&self) -> std::boxed::Box<dyn Mapper> { std::boxed::Box::new(self.clone()) }\n}\n\nimpl<__JavaShared: Mapper + 'static> Mapper for std::sync::Arc<__JavaShared> {\n    fn id<T>(&self, value: T) -> T where Self: Sized { (**self).id(value) }\n    fn as_any(&self) -> &dyn std::any::Any { (**self).as_any() }\n    fn clone_box(&self) -> std::boxed::Box<dyn Mapper> { std::boxed::Box::new(self.clone()) }\n}"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn program_type_emission_renders_interface_method_type_param_bounds() {
+        let parsed = parse_java_source(
+            r#"
+interface Base {
+    String name();
+}
+
+interface Mapper {
+    <T extends Base> String nameOf(T value);
+}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let semantic = analyze_program(&resolved.program, &resolved.facts, &FactSet::default());
+        let representations = plan_representations(&resolved.program, &semantic.facts);
+        let usage = analyze_usage_with_facts(&resolved.program, &semantic.facts);
+        let signatures = solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &usage,
+            &semantic.facts,
+        );
+        let mapper_ty = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "Mapper")
+            .unwrap();
+
+        let emission = type_emission_for_program_with_facts_and_exceptions(
+            &representations,
+            &resolved.program,
+            mapper_ty,
+            &signatures,
+            &semantic.facts,
+            &ProgramExceptionPlan::default(),
+        );
+
+        assert!(
+            matches!(
+                emission,
+                RepresentationTypeEmission::RawRustItem(ref item)
+                    if item.contains("fn name_of<T: Base>(&self, value: T) -> String where Self: Sized;")
+            ),
+            "{emission:?}"
+        );
     }
 }
 

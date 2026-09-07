@@ -13,6 +13,53 @@ one level below it
 
 Current tree update:
 
+* Follow-up 2026-09-07: `representation_lowering::source_class_bound_trait_name`
+  is now crate-local. This does not change the remaining first-class owner/type
+  identity work, but it removes one rendered-name helper from the public API and
+  keeps the compatibility surface fenced by `layering`.
+* Follow-up 2026-09-07: `slot_render::rust_name_for_java_named_type` is now
+  crate-local, and the CLI path that still needs name projection calls the
+  canonical `java_naming::rust_name_for_java_named_type` API directly. This
+  does not solve package-aware identity, but it removes a duplicate public
+  string-only type-name projection surface. Regression:
+  `layering::declaration_context_usage_lookups_use_java_callable_keys`.
+* Follow-up 2026-09-07: lowerer's remaining legacy Rust-name usage fallback now
+  routes through `CallableAnalysis` instead of iterating
+  `UsageFacts.methods_by_rust_name` directly. The compatibility lookup still
+  exists for current-method contexts that lack a `MethodDecl`, but the
+  string-keyed overload-family scan is fenced at the callable-analysis boundary
+  and pinned by `layering::callable_analysis_shell_reaches_lowering_context`.
+  The same boundary now hides the backing `usage`, `call_graph`, `signatures`,
+  `exceptions`, and `fallibility` fields behind query methods, so downstream
+  code cannot bypass the shell and reach the legacy maps directly. The
+  Rust-name-family accessors are crate-local, and the unused stored `call_graph`
+  field was deleted rather than kept as a dead public handle.
+* Follow-up 2026-09-07: ownerless callable-slot construction is crate-local.
+  `JavaCallableSlotKey::source_method` still supports internal inherited-method
+  and trait-slot comparisons, but external callers stay on owner-bearing
+  `JavaCallableKey` constructors instead of manufacturing ownerless
+  compatibility identities.
+
+* Follow-up 2026-09-06: external static string constant support now suppresses
+  simple compatibility type aliases that would map one Rust alias to multiple
+  emitted owners. Package peers such as `a.Item.KIND` and `b.Item.KIND` still
+  emit/use `AItem::KIND` and `BItem::KIND`, but no longer also emit colliding
+  `pub type Item = AItem;` / `pub type Item = BItem;` aliases. Regressions:
+  `batch_translation::package_qualified_source_type_references_keep_package_identity`
+  and
+  `batch_translation::stream_static_constant_support_keeps_package_qualified_owner_identity`.
+* Follow-up 2026-09-07: inferred platform `ExecutorService`/`Future` support no
+  longer emits the built-in `Future<T>` facade when the translated source
+  program already declares a local `Future` type. A bare source `Executor.submit`
+  fixture now keeps its source `Future` class instead of colliding with the
+  compatibility JDK facade. Regression:
+  `idiom_gaps::translates_executor_submit_block_lambda_as_closure`.
+* Follow-up 2026-09-07: package-qualified class-literal token planning now
+  prefers the emitted package-qualified source owner when that is the available
+  storage fact. A merged-source `a.Item.class` with storage facts under
+  `AItem`, or a simple `Item` compatibility fact for a package source, now
+  plans the token as `JavaClass<AItem>` rather than drifting to `JavaClass<Item>`.
+  Regression: `slot_shape_design::class_literal_tokens_are_planned_before_lowering`.
 * Follow-up 2026-08-30: source-summary superclass boundary facts are still
   generated as corpus-analysis erased-boundary facts, but those facts no longer
   replace or shadow a parsed source type representation. This keeps a
@@ -145,6 +192,12 @@ Current tree update:
   ambiguous simple-name package peers after exact emitted-name/package-qualified
   matches have had a chance to win. Regression:
   `emitted_context_type_lookup_refuses_ambiguous_simple_package_peer`.
+  Follow-up 2026-09-07: Rust-qualified package-looking queries now also fail
+  closed after exact/alias lookup misses. A query such as `a::Item` no longer
+  degrades to a simple `Item` fallback that can select `b.Item` when it is the
+  only visible package peer, while `Outer::Inner` nested-type compatibility is
+  preserved. Regression:
+  `emitted_context_type_lookup_refuses_wrong_package_path_simple_fallback`.
 * Update 2026-08-25: the emitted-context ambiguity check now spans all three
   programs visible to lowering (`program`, `support_local_type_program`, and
   `source_summary_type_program`). A unique simple-name fallback is still
@@ -175,6 +228,37 @@ Current tree update:
   whichever same-simple package peer appears first; it declines the erased
   fallback when `a.Item` and `b.Item` are both visible. Regression:
   `lower::tests::object_to_string_fallback_refuses_cross_program_ambiguous_simple_package_peer`.
+* Follow-up 2026-09-07: source-summary receiver return-shape recovery no longer
+  bypasses the combined context lookup with a summary-program-only fallback. A
+  local receiver typed as bare `Item` now fails closed when support context
+  contains `a.Item` and source-summary context contains `b.Item`; exact
+  `b.Item` receiver types still recover the summary return shape. Regression:
+  `lower::tests::local_receiver_summary_return_shape_refuses_ambiguous_context_owner`.
+* Follow-up 2026-09-07: emitted source super-boundary lowering no longer
+  classifies a support superclass as source-summary just because the
+  source-summary program also contains the same owner key. The summary handoff
+  now requires the combined context lookup to select the summary program, so a
+  support `a.Base` keeps the emitted `ABase::m(...)` path even when summary
+  metadata also names `a.Base`. Regression:
+  `lower::tests::emitted_source_super_boundary_call_does_not_borrow_summary_peer_for_support_super`.
+* Follow-up 2026-09-07: object-array default-derive obligations keep package
+  peers distinct. A `new a.Item[1]` allocation still obligates `a.Item`, but its
+  recorded simple-name compatibility entry no longer marks `b.Item` when both
+  package peers are present. Unique simple-name compatibility remains accepted.
+  Regression:
+  `array_default_obligations::tests::package_qualified_object_array_default_obligation_does_not_mark_package_peer`.
+* Follow-up 2026-09-07: fact-backed external static constant planning now
+  renders the owner from the exact external field fact instead of stripping the
+  queried receiver to its simple name after lookup. Package peers such as
+  `a.Item.KIND` and `b.Item.KIND` therefore plan as `AItem::KIND` and
+  `BItem::KIND` instead of collapsing to `Item::KIND`. Regression:
+  `type_coercion::member_access_plan_preserves_package_qualified_external_static_constant_owner`.
+* Follow-up 2026-09-06: fallback Rust-name adapters in `call_plan` are
+  crate-local. `apply_fallback_receiver_rust_name`,
+  `apply_fallback_self_rust_name`, and `apply_fallback_static_owner_rust_name`
+  remain available to lowering but are no longer public APIs; their overload
+  boundary behavior moved to a `call_plan` unit test and a layering guard pins
+  the boundary.
 * Static-storage accessor spellings no longer re-derive a snake-case name after
   the static field allocator has selected an emitted Rust field name. The
   accessor projection now treats its input as the already allocated member name,
@@ -286,7 +370,7 @@ erased_param_types, kind, staticness)` and the override/inherit graph runs on it
 That work assumed the surrounding identity — **which type** a slot belongs to,
 and **what Rust identifier** the slot is finally spelled as — was already sound.
 It is not. This file is about that surrounding identity, and its companion
-[0065](0065-the-overload-suffix-is-scoped-to-one-file-and-one-level-of-inheritance.md)
+[0065](done/0065-the-overload-suffix-is-scoped-to-one-file-and-one-level-of-inheritance.md)
 is about the one piece of 0009's own scheme that is still scoped wrongly.
 
 ---
@@ -678,7 +762,7 @@ pub fn boxed_dyn_trait_projection(value: RustExpr, trait_name: &str) -> RustExpr
 ```
 
 Reached from `src/lower.rs:20633`. Output, from the `D.java` repro in
-[0065](0065-the-overload-suffix-is-scoped-to-one-file-and-one-level-of-inheritance.md):
+[0065](done/0065-the-overload-suffix-is-scoped-to-one-file-and-one-level-of-inheritance.md):
 
 ```rust
 let i: Box<dyn DI> = Box::new(DImpl::new()) as Box<dyn D.I>;
@@ -791,11 +875,13 @@ owner is being checked; exact emitted (`AItem`) and package-qualified
 (`b.Item`) receivers still match. Regression:
 `lower::tests::explicit_static_receiver_refuses_ambiguous_simple_package_peer`.
 
-Follow-up 2026-08-25: context static type alias seeding now computes simple-name
-ambiguity across the support-local and source-summary programs together before
-inserting aliases. A support `a.Item` and summary `b.Item` therefore no longer
-leave a live `Item`/`item` alias pointing at whichever context was seeded first;
-exact dotted aliases remain available. Regression:
+Follow-up 2026-08-25, revised 2026-09-06: context static type alias seeding now
+computes convenience-alias ambiguity across the support-local and source-summary
+programs together before inserting aliases. A support `a.Item` and summary
+`b.Item` therefore no longer leave a live `Item`/`item` alias pointing at
+whichever context was seeded first; a support `a.FooBar` and summary
+`b.Foo_Bar` likewise do not leave a first-wins `foo_bar` alias after snake-case
+conversion. Exact dotted aliases remain available. Regression:
 `lower::tests::context_alias_seeding_refuses_cross_program_ambiguous_simple_name`.
 This is still a local ambiguity guard, not the first-class package-aware type
 identity model described below.
@@ -1023,12 +1109,15 @@ lowered receiver path such as `Item::...` is not treated as an arbitrary first
 package peer when both `a.Item` and `b.Item` are in context. Regressions:
 `lower::tests::source_call_owner_candidates_refuse_ambiguous_emitted_owner`.
 
-Follow-up 2026-08-26: same-outer inner-constructor rewriting now uses the
-combined emitted-context lookup instead of its own rendered-Rust-name
-program/support/summary walk. A bare constructor owner such as `Inner` no
-longer selects the first of `a.Inner`/`b.Inner` when deciding whether to inject
-or replace outer handles; unique emitted aliases such as `AInner` still resolve.
-The now-redundant rendered-name helper was removed. Regression:
+Follow-up 2026-08-26, revised 2026-09-06: same-outer inner-constructor
+rewriting uses the combined emitted-context lookup before its remaining narrow
+rendered-Rust-name compatibility helper. A bare constructor owner such as
+`Inner` no longer selects the first of `a.Inner`/`b.Inner` when deciding whether
+to inject or replace outer handles; unique emitted aliases such as `AInner`
+still resolve. The compatibility helper now shares the same duplicate-owner
+policy as `unique_context_type_match`, so two context programs that both expose
+the same Java owner do not fail closed just because the owner was seen twice.
+Regression:
 `lower::tests::same_outer_inner_constructor_owner_refuses_ambiguous_emitted_owner`.
 
 Follow-up 2026-08-26: the `java.util.Objects.equals` recognizer no longer has
@@ -1690,3 +1779,80 @@ planning, so all four `summary_source` slot-shape tests pass. Regressions:
 `lower::tests::source_context_static_overload_lowers_to_selected_name`,
 `slot_shape_design::summary_source_overloads_get_one_rust_name_from_every_path`,
 and `slot_shape_design::a_summary_source_type_gets_no_unmodelled_import_stub`.
+
+Follow-up 2026-09-07:
+`source_overloads_with_colliding_type_suffixes_get_distinct_rust_names` and
+`source_generic_class_preserves_type_params_and_interface_bounds` were stale
+assertion rows. The former now sees fallible array allocation in the call text;
+the latter correctly returns `Option<String>` for Java `String`. Both generated
+crates compile, so both rows were removed from the idiom-gaps failure baseline.
+
+Follow-up 2026-09-07: static-owner Rust-name rendering helpers are crate-local.
+`rust_static_owner_type_name` and `rust_static_owner_type_name_with_facts` still
+centralize same-crate fallback owner spelling, but callers outside the crate can
+no longer rebuild static owner identity from arbitrary string text through this
+API.
+
+Follow-up 2026-09-07: the raw source-owner key construction surface is
+crate-local too. `JavaOwnerKey`, `source_method_for_owner`, and
+`resolved_source_method` remain available to internal resolver/lowering paths,
+while the public callable-key constructor stays on `source_method_for_type`,
+which derives owner identity from a `TypeDecl`.
+
+Follow-up 2026-09-07: source method Rust-name helpers are crate-local too.
+Usage, exception, inheritance, and lowering still share `source_method_rust_name`
+and `source_method_overload_rust_name`, but callers outside the crate cannot
+recompute source method identity from a standalone `MethodDecl` through these
+helpers.
+
+Follow-up 2026-09-07: erased Java signature utility functions are crate-local.
+`erased_param_types`, `erased_type_name`, and `method_staticness` still
+centralize internal callable-key construction and source-summary matching, but
+external callers cannot assemble partial erased-signature identity directly.
+
+Follow-up 2026-09-07: two package-identity regressions found by the slot-shape
+failure-name audit are fixed. Erased-object display downcasts are now derived
+from the modeled external fact receiver identity only; importing
+`a.ExternalToken` no longer grants the same `toString` capability to the bare
+`ExternalToken` carrier. Context source constructors are again suppressed as
+external facades, while a zero-arg constructor fallback is emitted on static
+constant support owners when the primary source constructs that owner. Focused
+regressions:
+`slot_shape_design::erased_external_object_display_keeps_package_qualified_to_string_capability_distinct`,
+`slot_shape_design::cotranslated_same_simple_name_package_peers_keep_package_identity`,
+and `slot_shape_design::context_static_string_constant_owner_stays_sibling_source_type`.
+
+Follow-up 2026-09-07: the legacy Rust-name usage-family map is crate-local.
+`UsageFacts::methods_by_rust_name` is still maintained for internal
+compatibility scans and the `CallableAnalysis` shell, but integration tests and
+external callers must use Java-keyed source-method accessors instead of
+depending on the non-injective map directly.
+
+Follow-up 2026-09-07: method-reference planning now resolves imported source
+owner aliases before rendering the Rust owner path. `Mapper::tag` with
+`Mapper -> a.Mapper` in the shape environment and a known context type now plans
+against `a.Mapper`, producing `AMapper::tag` instead of the ambiguous bare
+`Mapper::tag`. External/JDK aliases still fall through to the existing planner
+when no context source type resolves. Guarded by
+`lower::tests::method_reference_static_type_alias_uses_resolved_context_owner`
+and the method-reference source-layout guard.
+
+Follow-up 2026-09-07: method-reference plans no longer store rendered Rust owner
+paths for constructors or associated functions. `plan_method_reference` now
+preserves the Java/source owner spelling (`a.Mapper`, `K.A.B`, etc.), and
+`method_reference_lowering` renders the Rust owner path only at expression
+construction. The shape path canonicalizes the stored source owner for the
+`Integer`/`String`/`Object` special cases. Guarded by
+`method_reference_plan::tests::method_reference_owner_preserves_package_and_nested_identity`,
+`method_reference_lowering::tests::method_reference_renderer_and_body_helpers_stay_structured`,
+`lower::tests::method_reference_static_type_alias_uses_resolved_context_owner`,
+and `slot_shape_design::method_reference_plan_owns_generic_function_adapter_shapes`.
+
+Follow-up 2026-09-07: `SignaturePlan`'s exact Rust-name lookup helpers are now
+crate-local. Lowering, call planning, and expression-shape compatibility paths
+can still use `method_signature_by_rust_name`,
+`constructor_signature_by_rust_name`, `method_arg_shape_by_rust_name`,
+`constructor_arg_shape_by_rust_name`, and `method_return_shape_by_rust_name`,
+but external integration tests now use source declarations or public base-name
+queries. The public exact identity surface remains `method_signature_by_java_key`
+and `method_return_shape_by_java_key`.

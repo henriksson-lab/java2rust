@@ -4,7 +4,7 @@ public class ErasedAtomicBooleanDisplay {
     public static String run() {
         Object value = new AtomicBoolean(false);
         value = new AtomicBoolean(((AtomicBoolean) value).getAndSet(true));
-        return "x" + value;
+        return "x" + value + ",direct=" + value.toString();
     }
 
     public static void main(String[] args) {

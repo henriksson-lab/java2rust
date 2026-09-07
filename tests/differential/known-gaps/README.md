@@ -19,13 +19,13 @@ Java reference assignment aliases; the translation copies.
 
 ```
 java:        5|7|3|9
-translation: 0|0|0|0
+translation: diagnostic error `observable_alias`
 ```
 
 See `claude_audits/0002-object-aliasing-has-no-representation.md`. The
-translator now *reports* all four cases as `observable_alias` warnings
-(`src/aliasing.rs`), so they are no longer silent — but reporting is not repair,
-and the output still computes the wrong answer. Closing this needs a shared
+translator now reports the provable mutable-alias divergence as an
+`observable_alias` error (`src/aliasing.rs`), so the known-wrong Rust is no
+longer a successful translation. Closing this still needs a shared mutable
 representation in `ObjectRepresentation`.
 
 ## InheritanceUpcast.java
@@ -65,7 +65,7 @@ reference. The current translation emits the captured `__outer` field and
 non-panicking `_with_outer` companions, but ordinary `new Inner()` from an outer
 instance method still has no shared outer receiver handle, so the missing
 constructor path is reported as a runtime-loud unsupported feature while the
-translator still emits the `inner_class_construction_panics` diagnostic.
+translator emits the `inner_class_construction_panics` diagnostic.
 
 ```
 java: 21

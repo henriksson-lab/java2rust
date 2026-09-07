@@ -285,7 +285,7 @@ fn method_return_allows_borrowed_param_content(
     };
     let Some(binding) = method_usage.binding_for_declaration_with_name_fallback(
         param.binding.as_ref(),
-        &param.name,
+        &param.source_name,
         param.binding.is_none(),
     ) else {
         return false;
@@ -299,10 +299,10 @@ fn method_return_allows_borrowed_param_content(
             return false;
         }
     } else {
-        if !method_exactly_returns_param(method, &param.name) {
+        if !method_exactly_returns_param(method, &param.source_name) {
             return false;
         }
-        if legacy_idless_method_assigns_to_binding(method, &param.name) {
+        if legacy_idless_method_assigns_to_binding(method, &param.source_name) {
             return false;
         }
     }
@@ -582,7 +582,7 @@ fn collect_exact_returned_var_names_from_stmts<'a>(
 fn usage_allows_borrowed_content(usage: &MethodUsageFacts, param: &Param) -> bool {
     let Some(binding) = usage.binding_for_declaration_with_name_fallback(
         param.binding.as_ref(),
-        &param.name,
+        &param.source_name,
         param.binding.is_none(),
     ) else {
         return false;
@@ -593,6 +593,10 @@ fn usage_allows_borrowed_content(usage: &MethodUsageFacts, param: &Param) -> boo
                 usage,
                 BindingUse::ContentRead
                     | BindingUse::PassedToCall {
+                        boundary: crate::usage::CallArgumentBoundary::KnownContentRead,
+                        ..
+                    }
+                    | BindingUse::ReceiverForCall {
                         boundary: crate::usage::CallArgumentBoundary::KnownContentRead,
                         ..
                     }
@@ -678,6 +682,16 @@ mod tests {
         }
     }
 
+    fn idless_keyword_string_param() -> Param {
+        Param {
+            name: "type__".to_string(),
+            source_name: "type".to_string(),
+            ty: JavaType::String,
+            is_varargs: false,
+            binding: None,
+        }
+    }
+
     fn private_static_idless_method_with_body(statements: Vec<Stmt>) -> MethodDecl {
         MethodDecl {
             name: "borrow".to_string(),
@@ -714,6 +728,34 @@ mod tests {
         usage.methods.insert(legacy_key, method_usage.clone());
         usage.methods_by_java_key.insert(
             crate::java_signature::JavaCallableKey::source_method_for_type(&ty, &method),
+            method_usage,
+        );
+        usage
+    }
+
+    fn idless_keyword_usage_with_name_facts(
+        method: &MethodDecl,
+        uses: Vec<BindingUse>,
+    ) -> UsageFacts {
+        let mut usage = UsageFacts::default();
+        let mut method_usage = MethodUsageFacts::default();
+        method_usage.bindings.insert(
+            "type".to_string(),
+            BindingUseFacts {
+                name: "type".to_string(),
+                binding: None,
+                java_ty: JavaType::String,
+                uses,
+            },
+        );
+        let ty = owner_type();
+        let legacy_key = UsageMethodKey {
+            type_name: "Owner".to_string(),
+            method_name: "borrow".to_string(),
+        };
+        usage.methods.insert(legacy_key, method_usage.clone());
+        usage.methods_by_java_key.insert(
+            crate::java_signature::JavaCallableKey::source_method_for_type(&ty, method),
             method_usage,
         );
         usage
@@ -824,6 +866,40 @@ mod tests {
                 &effective_facts
             ),
             "id-less compatibility must not ignore ++/-- mutations before returning a parameter"
+        );
+    }
+
+    #[test]
+    fn idless_borrowed_return_param_policy_uses_source_name_not_escaped_name() {
+        let param = idless_keyword_string_param();
+        let method = MethodDecl {
+            name: "borrow".to_string(),
+            rust_name: None,
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            return_type: JavaType::String,
+            throws: Vec::new(),
+            params: vec![param.clone()],
+            modifiers: vec![Modifier::Static],
+            body: Some(Block {
+                statements: vec![Stmt::Return(Some(Expr::Var("type".to_string())))],
+            }),
+            span: Span::default(),
+        };
+        let ty = owner_type();
+        let facts = FactSet::default();
+        let effective_facts = EffectiveFacts::new(&facts);
+        let usage = idless_keyword_usage_with_name_facts(&method, vec![BindingUse::Returned]);
+
+        assert!(
+            method_return_allows_borrowed_param_content(
+                &ty,
+                &method,
+                &param,
+                &usage,
+                &effective_facts
+            ),
+            "id-less compatibility must query usage and source body text with the Java source name"
         );
     }
 

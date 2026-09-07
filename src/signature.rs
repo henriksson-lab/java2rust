@@ -812,14 +812,6 @@ pub enum SignatureDependencyEdgeKind {
     Receiver,
 }
 
-pub fn solve_signatures(
-    program: &Program,
-    representations: &RepresentationPlan,
-    usage: &UsageFacts,
-) -> SignaturePlan {
-    solve_signatures_with_facts(program, representations, usage, &FactSet::default())
-}
-
 pub fn solve_signatures_with_facts(
     program: &Program,
     representations: &RepresentationPlan,
@@ -6064,7 +6056,7 @@ impl SignaturePlan {
         })
     }
 
-    pub fn method_signature_by_rust_name(
+    pub(crate) fn method_signature_by_rust_name(
         &self,
         type_name: &str,
         rust_name: &str,
@@ -6225,7 +6217,7 @@ impl SignaturePlan {
             .expect("signature solver must plan every lowered constructor")
     }
 
-    pub fn constructor_signature_by_rust_name(
+    pub(crate) fn constructor_signature_by_rust_name(
         &self,
         type_name: &str,
         rust_name: &str,
@@ -6236,7 +6228,7 @@ impl SignaturePlan {
         })
     }
 
-    pub fn method_arg_shape_by_rust_name(
+    pub(crate) fn method_arg_shape_by_rust_name(
         &self,
         type_name: &str,
         rust_name: &str,
@@ -6247,7 +6239,7 @@ impl SignaturePlan {
             .map(|param| param.shape.clone())
     }
 
-    pub fn constructor_arg_shape_by_rust_name(
+    pub(crate) fn constructor_arg_shape_by_rust_name(
         &self,
         type_name: &str,
         rust_name: &str,
@@ -6258,7 +6250,7 @@ impl SignaturePlan {
             .map(|param| param.shape.clone())
     }
 
-    pub fn method_return_shape_by_rust_name(
+    pub(crate) fn method_return_shape_by_rust_name(
         &self,
         type_name: &str,
         rust_name: &str,
@@ -6425,15 +6417,6 @@ impl SignaturePlan {
     ) -> Option<&'a RustSlotShape> {
         self.local_plan_by_binding(locals, binding)
             .map(|local| &local.shape)
-    }
-
-    pub fn required_local_plan_by_binding<'a>(
-        &self,
-        locals: &'a [LocalPlan],
-        binding: &BindingId,
-    ) -> &'a LocalPlan {
-        self.local_plan_by_binding(locals, binding)
-            .expect("signature solver must plan every lowered local binding")
     }
 
     pub fn required_local_shape_by_binding(
@@ -7152,7 +7135,7 @@ fn method_param_shape_constraints_with_declared_source_types(
     let binding = method_usage.and_then(|method_usage| {
         method_usage.binding_for_declaration_with_name_fallback(
             param.binding.as_ref(),
-            &param.name,
+            &param.source_name,
             param.binding.is_none(),
         )
     });
@@ -7183,16 +7166,17 @@ fn method_param_shape_constraints_with_declared_source_types(
             let mut local_types = method
                 .params
                 .iter()
-                .map(|param| (param.name.clone(), param.ty.clone()))
+                .map(|param| (param.source_name.clone(), param.ty.clone()))
                 .collect::<HashMap<_, _>>();
             collect_facade_mut_borrow_argument_names(body, facts, &mut local_types)
         })
         .unwrap_or_default();
     let mut boundary_kind = method_param_boundary_policy(ty, method, param, usage).kind;
-    if field_receiver_mutated_names.contains(&param.name)
-        || array_element_mutated_names.contains(&param.name)
-        || facade_mut_borrow_argument_names.contains(&param.name)
-        || map_view_receiver_mutated_names.contains(&param.name)
+    let param_source_name = param.source_name.as_str();
+    if field_receiver_mutated_names.contains(param_source_name)
+        || array_element_mutated_names.contains(param_source_name)
+        || facade_mut_borrow_argument_names.contains(&param.source_name)
+        || map_view_receiver_mutated_names.contains(param_source_name)
     {
         boundary_kind = None;
     }
@@ -7302,13 +7286,13 @@ fn method_param_shape_constraints_with_declared_source_types(
             &mut constraints,
             &source_binding_nullability_constraints_for_declaration(
                 body,
-                &param.name,
+                param_source_name,
                 param.binding.as_ref(),
                 &method.params,
             ),
         );
-        if field_receiver_mutated_names.contains(&param.name)
-            || map_view_receiver_mutated_names.contains(&param.name)
+        if field_receiver_mutated_names.contains(param_source_name)
+            || map_view_receiver_mutated_names.contains(param_source_name)
         {
             push_unique_signature_constraints(
                 &mut constraints,
@@ -7317,7 +7301,7 @@ fn method_param_shape_constraints_with_declared_source_types(
                     SignatureConstraint::MutableBinding,
                 ],
             );
-        } else if collect_mutated_local_names(body).contains(&param.name)
+        } else if collect_mutated_local_names(body).contains(param_source_name)
             && !binding_has_mutating_external_receiver
         {
             push_unique_signature_constraints(
@@ -7344,7 +7328,7 @@ fn method_param_shape_constraints_with_declared_source_types(
                 );
             }
         }
-        if array_element_mutated_names.contains(&param.name) {
+        if array_element_mutated_names.contains(param_source_name) {
             push_unique_signature_constraints(
                 &mut constraints,
                 &[
@@ -7353,7 +7337,7 @@ fn method_param_shape_constraints_with_declared_source_types(
                 ],
             );
         }
-        if facade_mut_borrow_argument_names.contains(&param.name) {
+        if facade_mut_borrow_argument_names.contains(&param.source_name) {
             push_unique_signature_constraints(
                 &mut constraints,
                 &[
@@ -7362,7 +7346,7 @@ fn method_param_shape_constraints_with_declared_source_types(
                 ],
             );
         }
-        if field_receiver_read_names.contains(&param.name)
+        if field_receiver_read_names.contains(param_source_name)
             && signature_declared_type_has_parsed_source_capability(
                 &param.ty,
                 &EffectiveFacts::new(facts),
@@ -8111,7 +8095,7 @@ pub fn method_param_boundary_policy(
             .and_then(|method_usage| {
                 method_usage.binding_for_declaration_with_name_fallback(
                     param.binding.as_ref(),
-                    &param.name,
+                    &param.source_name,
                     param.binding.is_none(),
                 )
             })
@@ -8144,7 +8128,7 @@ pub fn constructor_param_boundary_policy(
             .and_then(|ctor_usage| {
                 ctor_usage.binding_for_declaration_with_name_fallback(
                     param.binding.as_ref(),
-                    &param.name,
+                    &param.source_name,
                     param.binding.is_none(),
                 )
             })
@@ -8260,7 +8244,7 @@ fn constructor_param_shape_constraints_with_declared_source_types(
     let binding = ctor_usage.and_then(|ctor_usage| {
         ctor_usage.binding_for_declaration_with_name_fallback(
             param.binding.as_ref(),
-            &param.name,
+            &param.source_name,
             param.binding.is_none(),
         )
     });
@@ -8306,7 +8290,7 @@ fn constructor_param_shape_constraints_with_declared_source_types(
             &mut constraints,
             &source_binding_nullability_constraints_for_declaration(
                 body,
-                &param.name,
+                &param.source_name,
                 param.binding.as_ref(),
                 &ctor.params,
             ),
@@ -9784,7 +9768,7 @@ pub fn source_binding_nullability_constraints(
     collect_binding_nullability_state_map(block).constraints_for_name(name)
 }
 
-pub fn source_binding_nullability_constraints_for_declaration(
+pub(crate) fn source_binding_nullability_constraints_for_declaration(
     block: &Block,
     name: &str,
     binding: Option<&BindingId>,
@@ -10067,7 +10051,7 @@ impl<'a> SourceReturnNullabilityContext<'a> {
         let mut binding_types = method
             .params
             .iter()
-            .map(|param| (param.name.clone(), param.ty.clone()))
+            .map(|param| (param.source_name.clone(), param.ty.clone()))
             .collect::<HashMap<_, _>>();
         let type_param_bounds = ty
             .type_params
@@ -11693,7 +11677,7 @@ fn collect_local_constraint_sets(
     let mut locals = Vec::new();
     let mut local_types = params
         .iter()
-        .map(|param| (param.name.clone(), param.ty.clone()))
+        .map(|param| (param.source_name.clone(), param.ty.clone()))
         .collect::<HashMap<_, _>>();
     let mut mutated = collect_mutated_local_names(block);
     mutated.extend(collect_facade_mut_borrow_argument_names(
@@ -11823,6 +11807,8 @@ fn collect_local_constraint_sets_from_stmts(
     declared_source_types: &HashSet<String>,
 ) {
     use crate::java_ir::Stmt;
+    let input_stream_read_buffer_names =
+        collect_input_stream_read_buffer_argument_names_from_stmts(statements);
     for stmt in statements {
         match stmt {
             Stmt::VarDecl {
@@ -11858,6 +11844,12 @@ fn collect_local_constraint_sets_from_stmts(
                             SignatureConstraint::RequiredOwnership(OwnershipShape::Owned),
                             SignatureConstraint::RequiredView(ViewShape::Native),
                         ],
+                    );
+                }
+                if input_stream_read_buffer_names.contains(name) {
+                    push_unique_signature_constraints(
+                        &mut constraints,
+                        &[SignatureConstraint::MutableBinding],
                     );
                 }
                 if !initializer.as_ref().is_some_and(|initializer| {
@@ -12396,7 +12388,8 @@ mod tests {
     use super::*;
     use crate::diagnostics::Span;
     use crate::java_ir::PrimitiveType;
-    use crate::java_ir::{Block, Expr, Literal, TypeKind};
+    use crate::java_ir::{Block, Expr, LambdaParam, Literal, TypeKind};
+    use crate::rust_ir::RustType;
     use crate::usage::UsageMethodKey;
 
     fn binding_fact(name: &str, binding: Option<BindingId>) -> BindingUseFacts {
@@ -12456,6 +12449,16 @@ mod tests {
         }
     }
 
+    fn idless_keyword_string_param() -> Param {
+        Param {
+            name: "type__".to_string(),
+            source_name: "type".to_string(),
+            ty: JavaType::String,
+            is_varargs: false,
+            binding: None,
+        }
+    }
+
     fn private_static_returning_param_method(param: Param) -> MethodDecl {
         MethodDecl {
             name: "borrow".to_string(),
@@ -12512,6 +12515,427 @@ mod tests {
             args: Vec::new(),
             resolved: None,
         }
+    }
+
+    #[test]
+    fn method_param_boundary_policy_uses_source_name_for_keyword_param_usage() {
+        let param = idless_keyword_string_param();
+        let method = MethodDecl {
+            name: "borrow".to_string(),
+            rust_name: None,
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            return_type: JavaType::String,
+            throws: Vec::new(),
+            params: vec![param.clone()],
+            modifiers: Vec::new(),
+            body: Some(Block {
+                statements: Vec::new(),
+            }),
+            span: Span::default(),
+        };
+        let ty = test_owner_type();
+        let mut method_usage = MethodUsageFacts::default();
+        method_usage.bindings.insert(
+            "type".to_string(),
+            BindingUseFacts {
+                name: "type".to_string(),
+                binding: None,
+                java_ty: JavaType::String,
+                uses: vec![BindingUse::PassedToCall {
+                    name: "sink".to_string(),
+                    receiver_type: None,
+                    arg_count: 1,
+                    arg_index: 0,
+                    boundary: CallArgumentBoundary::Unknown,
+                }],
+            },
+        );
+        let mut usage = UsageFacts::default();
+        usage.methods_by_java_key.insert(
+            JavaCallableKey::source_method_for_type(&ty, &method),
+            method_usage,
+        );
+
+        assert_eq!(
+            method_param_boundary_policy(&ty, &method, &param, &usage).kind,
+            Some(SignatureBoundaryKind::UnknownApi),
+            "id-less parameter boundary policy must use the Java source name, not the escaped Rust name"
+        );
+    }
+
+    #[test]
+    fn method_keyword_param_field_receiver_mutation_uses_source_name() {
+        let param = Param {
+            name: "type__".to_string(),
+            source_name: "type".to_string(),
+            ty: JavaType::String,
+            is_varargs: false,
+            binding: None,
+        };
+        let method = MethodDecl {
+            name: "touch".to_string(),
+            rust_name: None,
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            return_type: JavaType::Void,
+            throws: Vec::new(),
+            params: vec![param.clone()],
+            modifiers: Vec::new(),
+            body: Some(Block {
+                statements: vec![Stmt::Assign {
+                    target: Expr::FieldAccess(
+                        Box::new(Expr::Var("type".to_string())),
+                        "value".to_string(),
+                    ),
+                    value: Expr::Literal(Literal::String("next".to_string())),
+                }],
+            }),
+            span: Span::default(),
+        };
+
+        let constraints = method_param_shape_constraints(
+            &test_owner_type(),
+            &method,
+            &param,
+            &UsageFacts::default(),
+            &FactSet::default(),
+        );
+
+        assert!(constraints.contains(&SignatureConstraint::MutableBinding));
+        assert!(
+            constraints.contains(&SignatureConstraint::RequiredOwnership(
+                OwnershipShape::MutableBorrow
+            ))
+        );
+    }
+
+    #[test]
+    fn method_keyword_param_array_element_mutation_uses_source_name() {
+        let param = Param {
+            name: "type__".to_string(),
+            source_name: "type".to_string(),
+            ty: JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Int))),
+            is_varargs: false,
+            binding: None,
+        };
+        let method = MethodDecl {
+            name: "write".to_string(),
+            rust_name: None,
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            return_type: JavaType::Void,
+            throws: Vec::new(),
+            params: vec![param.clone()],
+            modifiers: Vec::new(),
+            body: Some(Block {
+                statements: vec![Stmt::Assign {
+                    target: Expr::ArrayAccess(
+                        Box::new(Expr::Var("type".to_string())),
+                        Box::new(Expr::Literal(Literal::Int(0))),
+                    ),
+                    value: Expr::Literal(Literal::Int(1)),
+                }],
+            }),
+            span: Span::default(),
+        };
+
+        let constraints = method_param_shape_constraints(
+            &test_owner_type(),
+            &method,
+            &param,
+            &UsageFacts::default(),
+            &FactSet::default(),
+        );
+
+        assert!(constraints.contains(&SignatureConstraint::MutableBinding));
+        assert!(
+            constraints.contains(&SignatureConstraint::RequiredOwnership(
+                OwnershipShape::MutableBorrow
+            ))
+        );
+    }
+
+    #[test]
+    fn constructor_param_nullability_constraints_use_source_name() {
+        let param = Param {
+            name: "self__".to_string(),
+            source_name: "self".to_string(),
+            ty: JavaType::String,
+            is_varargs: false,
+            binding: None,
+        };
+        let ctor = ConstructorDecl {
+            name: "Owner".to_string(),
+            rust_name: None,
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            params: vec![param.clone()],
+            throws: Vec::new(),
+            modifiers: Vec::new(),
+            body: Some(Block {
+                statements: vec![Stmt::Assign {
+                    target: Expr::Var("self".to_string()),
+                    value: Expr::Literal(Literal::Null),
+                }],
+            }),
+            span: Span::default(),
+        };
+        let ty = test_owner_type();
+
+        assert!(
+            constructor_param_shape_constraints(
+                &ty,
+                &ctor,
+                &param,
+                &UsageFacts::default(),
+                &FactSet::default(),
+            )
+            .contains(&SignatureConstraint::RequiredStorageNullability(
+                NullabilityState::DefinitelyNull
+            )),
+            "constructor parameter nullability must use Java source names, not escaped Rust names"
+        );
+    }
+
+    #[test]
+    fn literal_null_map_value_receiver_call_optionalizes_value_type_only() {
+        let map_ty = JavaType::Named {
+            name: "HashMap".to_string(),
+            args: vec![JavaType::String, JavaType::String],
+        };
+        let value_null_binding = BindingUseFacts {
+            name: "m".to_string(),
+            binding: None,
+            java_ty: map_ty.clone(),
+            uses: vec![BindingUse::ReceiverForCall {
+                name: "put".to_string(),
+                boundary: CallArgumentBoundary::Unknown,
+                has_literal_null_arg: true,
+                literal_null_arg_indices: vec![1],
+            }],
+        };
+
+        assert_eq!(
+            native_collection_literal_null_element_type(&value_null_binding),
+            Some(optional_java_type(JavaType::String))
+        );
+        assert_eq!(
+            local_java_type_with_signature_constraints(
+                &map_ty,
+                &[SignatureConstraint::NullableSequenceElement]
+            ),
+            JavaType::Named {
+                name: "HashMap".to_string(),
+                args: vec![JavaType::String, optional_java_type(JavaType::String)],
+            }
+        );
+
+        let key_null_binding = BindingUseFacts {
+            name: "m".to_string(),
+            binding: None,
+            java_ty: map_ty,
+            uses: vec![BindingUse::ReceiverForCall {
+                name: "put".to_string(),
+                boundary: CallArgumentBoundary::Unknown,
+                has_literal_null_arg: true,
+                literal_null_arg_indices: vec![0],
+            }],
+        };
+        assert!(
+            native_collection_literal_null_element_type(&key_null_binding).is_none(),
+            "a null map key must not make the map value nullable"
+        );
+    }
+
+    #[test]
+    fn source_return_nullability_sees_try_return_value_then_trailing_null() {
+        let method = return_string_method(vec![
+            Stmt::Try {
+                resources: Vec::new(),
+                body: Block {
+                    statements: vec![Stmt::Return(Some(helper_call_expr()))],
+                },
+                catches: vec![crate::java_ir::CatchClause {
+                    types: vec![JavaType::Unknown("Exception".to_string())],
+                    name: "e".to_string(),
+                    source_name: "e".to_string(),
+                    body: Block {
+                        statements: Vec::new(),
+                    },
+                    binding: None,
+                }],
+                finally_block: None,
+            },
+            Stmt::Return(Some(Expr::Literal(Literal::Null))),
+        ]);
+        let ty = TypeDecl {
+            members: vec![crate::java_ir::Member::Method(method.clone())],
+            ..test_owner_type()
+        };
+
+        assert_eq!(
+            typed_source_method_return_nullability_constraints(&ty, &method, &FactSet::default()),
+            vec![SignatureConstraint::RequiredStorageNullability(
+                NullabilityState::MaybeNull
+            )]
+        );
+        assert!(
+            method_return_shape_constraints(
+                &ty,
+                &method,
+                &UsageFacts::default(),
+                &FactSet::default()
+            )
+            .contains(&SignatureConstraint::RequiredStorageNullability(
+                NullabilityState::MaybeNull
+            )),
+            "return-shape constraints must preserve the fallthrough null carrier"
+        );
+        let signatures = solve_signatures_with_facts(
+            &Program {
+                package: None,
+                imports: Vec::new(),
+                types: vec![ty.clone()],
+            },
+            &RepresentationPlan::default(),
+            &UsageFacts::default(),
+            &FactSet::default(),
+        );
+        let return_shape = signatures
+            .required_method_signature(&ty, &method)
+            .return_shape
+            .as_ref()
+            .expect("string method should have a return shape");
+        assert_eq!(
+            crate::slot_render::rust_type_for_slot_with_facts(return_shape, &FactSet::default()),
+            RustType::Option(Box::new(RustType::String))
+        );
+    }
+
+    #[test]
+    fn declaration_nullability_constraints_use_resolver_bound_parameter_identity() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+class SourceNullableSlots {
+    Object keep(Object value) {
+        Object current = null;
+        if (value == null) {
+            return current;
+        }
+        return value;
+    }
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let ty = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "SourceNullableSlots")
+            .expect("owner type");
+        let method = ty
+            .members
+            .iter()
+            .find_map(|member| match member {
+                crate::java_ir::Member::Method(method) if method.name == "keep" => Some(method),
+                _ => None,
+            })
+            .expect("keep method");
+        let body = method.body.as_ref().expect("keep body");
+
+        assert_eq!(
+            source_binding_nullability_constraints(body, "value"),
+            vec![],
+            "block/name compatibility helper should fail closed for resolver-bound parameters"
+        );
+        assert_eq!(
+            source_binding_nullability_constraints_for_declaration(
+                body,
+                "value",
+                method.params[0].binding.as_ref(),
+                &method.params,
+            ),
+            vec![SignatureConstraint::RequiredStorageNullability(
+                NullabilityState::MaybeNull
+            )],
+            "declaration-aware lookup should use the resolver-bound parameter identity"
+        );
+    }
+
+    #[test]
+    fn parsed_try_return_value_then_trailing_null_solves_optional_return_shape() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+class TryReturnFallthroughCatchFallback {
+    String manifestValue(SourceURL url) {
+        try {
+            Connection connection = url.openConnection();
+            Manifest manifest = connection.getManifest();
+            return manifest.getValue("Build-Timestamp");
+        } catch (Exception e) {
+            String message = "failed: " + e.getMessage();
+        }
+        return null;
+    }
+}
+
+class SourceURL {
+    Connection openConnection() throws Exception { return new Connection(); }
+}
+
+class Connection {
+    Manifest getManifest() throws Exception { return new Manifest(); }
+}
+
+class Manifest {
+    String getValue(String key) { return key; }
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let representations =
+            crate::representation::plan_representations(&resolved.program, &resolved.facts);
+        let usage = crate::usage::analyze_usage_with_facts(&resolved.program, &resolved.facts);
+        let signatures = solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &usage,
+            &resolved.facts,
+        );
+        let ty = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "TryReturnFallthroughCatchFallback")
+            .expect("owner type");
+        let method = ty
+            .members
+            .iter()
+            .find_map(|member| match member {
+                crate::java_ir::Member::Method(method) if method.name == "manifestValue" => {
+                    Some(method)
+                }
+                _ => None,
+            })
+            .expect("manifestValue method");
+        assert!(
+            method_return_shape_constraints(ty, method, &usage, &resolved.facts).contains(
+                &SignatureConstraint::RequiredStorageNullability(NullabilityState::MaybeNull)
+            ),
+            "parsed source return constraints must preserve the trailing null"
+        );
+        let return_shape = signatures
+            .required_method_signature(ty, method)
+            .return_shape
+            .as_ref()
+            .expect("string method should have a return shape");
+
+        assert_eq!(
+            crate::slot_render::rust_type_for_slot_with_facts(return_shape, &resolved.facts),
+            RustType::Option(Box::new(RustType::String))
+        );
     }
 
     #[test]
@@ -13291,6 +13715,58 @@ mod tests {
     }
 
     #[test]
+    fn typed_source_return_nullability_map_get_param_uses_source_name() {
+        let method = MethodDecl {
+            name: "lookup".to_string(),
+            rust_name: None,
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            return_type: JavaType::String,
+            throws: Vec::new(),
+            params: vec![
+                Param {
+                    name: "type__".to_string(),
+                    source_name: "type".to_string(),
+                    ty: JavaType::Named {
+                        name: "Map".to_string(),
+                        args: vec![JavaType::String, JavaType::String],
+                    },
+                    is_varargs: false,
+                    binding: Some(BindingId::new(BindingKind::Param, "type", 0)),
+                },
+                Param {
+                    name: "key".to_string(),
+                    source_name: "key".to_string(),
+                    ty: JavaType::String,
+                    is_varargs: false,
+                    binding: Some(BindingId::new(BindingKind::Param, "key", 0)),
+                },
+            ],
+            modifiers: Vec::new(),
+            body: Some(Block {
+                statements: vec![Stmt::Return(Some(Expr::Call {
+                    receiver: Some(Box::new(Expr::Var("type".to_string()))),
+                    name: "get".to_string(),
+                    args: vec![Expr::Var("key".to_string())],
+                    resolved: None,
+                }))],
+            }),
+            span: Span::default(),
+        };
+        let constraints = typed_source_method_return_nullability_constraints(
+            &test_owner_type(),
+            &method,
+            &FactSet::default(),
+        );
+
+        assert!(
+            constraints.contains(&SignatureConstraint::RequiredStorageNullability(
+                NullabilityState::MaybeNull
+            ))
+        );
+    }
+
+    #[test]
     fn source_return_nullability_local_scope_uses_source_name() {
         let binding = BindingId::new(BindingKind::Local, "self", 0);
         let method = MethodDecl {
@@ -13414,6 +13890,363 @@ mod tests {
     }
 
     #[test]
+    fn method_return_type_for_signature_uses_param_source_name() {
+        let param_ty = JavaType::Named {
+            name: "List".to_string(),
+            args: vec![JavaType::String],
+        };
+        let method = MethodDecl {
+            name: "items".to_string(),
+            rust_name: None,
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            return_type: JavaType::Named {
+                name: "List".to_string(),
+                args: Vec::new(),
+            },
+            throws: Vec::new(),
+            params: vec![Param {
+                name: "type__".to_string(),
+                source_name: "type".to_string(),
+                ty: param_ty.clone(),
+                is_varargs: false,
+                binding: Some(BindingId::new(BindingKind::Param, "type", 0)),
+            }],
+            modifiers: Vec::new(),
+            body: Some(Block {
+                statements: vec![Stmt::Return(Some(Expr::Var("type".to_string())))],
+            }),
+            span: Span::default(),
+        };
+
+        assert_eq!(method_return_type_for_signature(&method), Some(&param_ty));
+    }
+
+    #[test]
+    fn method_return_type_for_signature_uses_local_source_name() {
+        let local_ty = JavaType::Named {
+            name: "List".to_string(),
+            args: vec![JavaType::String],
+        };
+        let method = MethodDecl {
+            name: "items".to_string(),
+            rust_name: None,
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            return_type: JavaType::Named {
+                name: "List".to_string(),
+                args: Vec::new(),
+            },
+            throws: Vec::new(),
+            params: Vec::new(),
+            modifiers: Vec::new(),
+            body: Some(Block {
+                statements: vec![
+                    Stmt::VarDecl {
+                        ty: local_ty.clone(),
+                        name: "self__".to_string(),
+                        source_name: "self".to_string(),
+                        initializer: None,
+                        binding: Some(BindingId::new(BindingKind::Local, "self", 0)),
+                    },
+                    Stmt::Return(Some(Expr::Var("self".to_string()))),
+                ],
+            }),
+            span: Span::default(),
+        };
+
+        assert_eq!(method_return_type_for_signature(&method), Some(&local_ty));
+    }
+
+    #[test]
+    fn method_return_type_for_signature_uses_enhanced_for_source_name() {
+        let loop_ty = JavaType::Named {
+            name: "List".to_string(),
+            args: vec![JavaType::String],
+        };
+        let method = MethodDecl {
+            name: "items".to_string(),
+            rust_name: None,
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            return_type: JavaType::Named {
+                name: "List".to_string(),
+                args: Vec::new(),
+            },
+            throws: Vec::new(),
+            params: Vec::new(),
+            modifiers: Vec::new(),
+            body: Some(Block {
+                statements: vec![Stmt::EnhancedFor {
+                    var_type: loop_ty.clone(),
+                    var_name: "self__".to_string(),
+                    source_var_name: "self".to_string(),
+                    iterable: Expr::Var("values".to_string()),
+                    body: Block {
+                        statements: vec![Stmt::Return(Some(Expr::Var("self".to_string())))],
+                    },
+                    label: None,
+                    binding: Some(BindingId::new(BindingKind::LoopVariable, "self", 0)),
+                }],
+            }),
+            span: Span::default(),
+        };
+
+        assert_eq!(method_return_type_for_signature(&method), Some(&loop_ty));
+    }
+
+    fn test_facade_abi(
+        owner: &str,
+        method: &str,
+        receiver: ReceiverAbi,
+        args: Vec<crate::facts::FacadeSlot>,
+    ) -> FacadeAbiFact {
+        FacadeAbiFact {
+            key: crate::facts::CallableKey::method(
+                owner,
+                method,
+                crate::facts::Staticness::Unknown,
+                args.len(),
+            ),
+            rust_path: format!("{owner}::{method}"),
+            receiver,
+            args,
+            return_slot: crate::facts::FacadeSlot::Owned,
+            result: crate::facts::ResultAbi::Plain,
+            borrow_source: None,
+            borrowed_return_recovery: None,
+            provenance: FactProvenance::UserOverride,
+        }
+    }
+
+    fn buffer_facade_type() -> JavaType {
+        JavaType::Named {
+            name: "BufferFacade".to_string(),
+            args: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn facade_mut_borrow_param_policy_uses_source_name() {
+        let param = Param {
+            name: "self__".to_string(),
+            source_name: "self".to_string(),
+            ty: JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Byte))),
+            is_varargs: false,
+            binding: Some(BindingId::new(BindingKind::Param, "self", 0)),
+        };
+        let method = MethodDecl {
+            name: "fill".to_string(),
+            rust_name: None,
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            return_type: JavaType::Void,
+            throws: Vec::new(),
+            params: vec![param.clone()],
+            modifiers: Vec::new(),
+            body: Some(Block {
+                statements: vec![Stmt::Expr(Expr::Call {
+                    receiver: Some(Box::new(Expr::Var("BufferFacade".to_string()))),
+                    name: "fill".to_string(),
+                    args: vec![Expr::Var("self".to_string())],
+                    resolved: None,
+                })],
+            }),
+            span: Span::default(),
+        };
+        let ty = named_test_type("Owner");
+        let mut facts = FactSet::default();
+        facts.facade_abi_facts.push(test_facade_abi(
+            "BufferFacade",
+            "fill",
+            ReceiverAbi::AssociatedFunction,
+            vec![crate::facts::FacadeSlot::Slice(Box::new(
+                crate::facts::FacadeSlot::MutBorrowed,
+            ))],
+        ));
+
+        let constraints = method_param_shape_constraints_with_declared_source_types(
+            &ty,
+            &method,
+            &param,
+            &UsageFacts::default(),
+            &facts,
+            &HashSet::new(),
+        );
+
+        assert!(constraints.contains(&SignatureConstraint::MutableBinding));
+        assert!(
+            constraints.contains(&SignatureConstraint::RequiredOwnership(
+                OwnershipShape::MutableBorrow
+            ))
+        );
+    }
+
+    #[test]
+    fn facade_mut_borrow_local_receiver_type_uses_source_name() {
+        let mut facts = FactSet::default();
+        facts.facade_abi_facts.push(test_facade_abi(
+            "BufferFacade",
+            "touch",
+            ReceiverAbi::MutBorrowedSelf,
+            Vec::new(),
+        ));
+        let block = Block {
+            statements: vec![
+                Stmt::VarDecl {
+                    ty: buffer_facade_type(),
+                    name: "self__".to_string(),
+                    source_name: "self".to_string(),
+                    initializer: None,
+                    binding: Some(BindingId::new(BindingKind::Local, "self", 0)),
+                },
+                Stmt::Expr(Expr::Call {
+                    receiver: Some(Box::new(Expr::Var("self".to_string()))),
+                    name: "touch".to_string(),
+                    args: Vec::new(),
+                    resolved: None,
+                }),
+            ],
+        };
+
+        assert_eq!(
+            collect_facade_mut_borrow_argument_names(&block, &facts, &mut HashMap::new()),
+            HashSet::from(["self".to_string()])
+        );
+    }
+
+    #[test]
+    fn facade_mut_borrow_enhanced_for_receiver_type_uses_source_name() {
+        let mut facts = FactSet::default();
+        facts.facade_abi_facts.push(test_facade_abi(
+            "BufferFacade",
+            "touch",
+            ReceiverAbi::MutBorrowedSelf,
+            Vec::new(),
+        ));
+        let block = Block {
+            statements: vec![Stmt::EnhancedFor {
+                var_type: buffer_facade_type(),
+                var_name: "self__".to_string(),
+                source_var_name: "self".to_string(),
+                iterable: Expr::Var("buffers".to_string()),
+                body: Block {
+                    statements: vec![Stmt::Expr(Expr::Call {
+                        receiver: Some(Box::new(Expr::Var("self".to_string()))),
+                        name: "touch".to_string(),
+                        args: Vec::new(),
+                        resolved: None,
+                    })],
+                },
+                label: None,
+                binding: Some(BindingId::new(BindingKind::LoopVariable, "self", 0)),
+            }],
+        };
+
+        assert_eq!(
+            collect_facade_mut_borrow_argument_names(&block, &facts, &mut HashMap::new()),
+            HashSet::from(["self".to_string()])
+        );
+    }
+
+    #[test]
+    fn input_stream_read_lambda_keyword_param_shadows_source_name() {
+        let mut names = HashSet::new();
+        collect_input_stream_read_buffer_argument_names_from_expr(
+            &Expr::Lambda {
+                params: vec![LambdaParam {
+                    name: "type__".to_string(),
+                    source_name: "type".to_string(),
+                    ty: Some(JavaType::Array(Box::new(JavaType::Primitive(
+                        PrimitiveType::Byte,
+                    )))),
+                }],
+                body: LambdaBody::Expr(Box::new(Expr::Call {
+                    receiver: Some(Box::new(Expr::Var("input".to_string()))),
+                    name: "read".to_string(),
+                    args: vec![
+                        Expr::Var("type".to_string()),
+                        Expr::Literal(Literal::Int(0)),
+                        Expr::Literal(Literal::Int(1)),
+                    ],
+                    resolved: None,
+                })),
+            },
+            &mut names,
+        );
+
+        assert!(
+            names.is_empty(),
+            "lambda shadow filtering must remove Java source names, not escaped Rust names"
+        );
+    }
+
+    #[test]
+    fn mutated_lambda_keyword_param_shadows_source_name() {
+        let mut mutated = HashSet::new();
+        collect_mutated_local_names_from_expr(
+            &Expr::Lambda {
+                params: vec![LambdaParam {
+                    name: "type__".to_string(),
+                    source_name: "type".to_string(),
+                    ty: Some(JavaType::String),
+                }],
+                body: LambdaBody::Expr(Box::new(Expr::Call {
+                    receiver: Some(Box::new(Expr::Var("type".to_string()))),
+                    name: "clear".to_string(),
+                    args: Vec::new(),
+                    resolved: None,
+                })),
+            },
+            &mut mutated,
+        );
+
+        assert!(
+            mutated.is_empty(),
+            "lambda mutation filtering must remove Java source names, not escaped Rust names"
+        );
+    }
+
+    #[test]
+    fn string_return_borrowed_view_uses_param_source_name() {
+        let method = MethodDecl {
+            name: "keyword".to_string(),
+            rust_name: None,
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            return_type: JavaType::String,
+            throws: Vec::new(),
+            params: vec![Param {
+                name: "type__".to_string(),
+                source_name: "type".to_string(),
+                ty: JavaType::String,
+                is_varargs: false,
+                binding: Some(BindingId::new(BindingKind::Param, "type", 0)),
+            }],
+            modifiers: Vec::new(),
+            body: Some(Block {
+                statements: vec![Stmt::Return(Some(Expr::Var("type".to_string())))],
+            }),
+            span: Span::default(),
+        };
+        let param_names = vec!["type__".to_string()];
+        let constraints = MethodConstraintSet {
+            param_names: param_names.clone(),
+            param_index_by_name: index_names(&param_names),
+            param_java_types: vec![JavaType::String],
+            params: vec![vec![SignatureConstraint::RequiredOwnership(
+                OwnershipShape::SharedBorrow,
+            )]],
+            ..MethodConstraintSet::default()
+        };
+
+        assert!(string_return_can_use_borrowed_view(
+            &method,
+            Some(&constraints)
+        ));
+    }
+
+    #[test]
     fn returned_object_alias_constraints_use_param_binding_not_shadow_name() {
         let binding = BindingId::new(BindingKind::Param, "value", 0);
         let param = string_param(binding.clone());
@@ -13504,6 +14337,7 @@ mod tests {
                 name: "touch".to_string(),
                 boundary: CallArgumentBoundary::InternalSameType,
                 has_literal_null_arg: false,
+                literal_null_arg_indices: Vec::new(),
             }],
         };
 
@@ -13833,6 +14667,27 @@ fn binding_usage_for_local<'a>(
 }
 
 fn native_collection_literal_null_element_type(binding: &BindingUseFacts) -> Option<JavaType> {
+    if let Some((_, value_ty)) = crate::stdlib::java_map_type_args(&binding.java_ty) {
+        if !binding.uses.iter().any(|usage| {
+            matches!(
+                usage,
+                BindingUse::ReceiverForCall {
+                    name,
+                    literal_null_arg_indices,
+                    ..
+                } if matches!(name.as_str(), "put" | "putIfAbsent" | "put_if_absent")
+                    && literal_null_arg_indices.contains(&1)
+            )
+        }) {
+            return None;
+        }
+        if crate::types::optional_element_type(value_ty).is_some()
+            || matches!(value_ty, JavaType::Primitive(_) | JavaType::Void)
+        {
+            return None;
+        }
+        return Some(crate::types::optional_java_type(value_ty.clone()));
+    }
     if !binding.uses.iter().any(|usage| {
         matches!(
             usage,
@@ -13860,6 +14715,23 @@ fn local_java_type_with_signature_constraints(
 ) -> JavaType {
     if !constraints.contains(&SignatureConstraint::NullableSequenceElement) {
         return java_ty.clone();
+    }
+    if let JavaType::Named { name, args } = java_ty
+        && crate::stdlib::java_map_type_args(java_ty).is_some()
+        && args.len() == 2
+    {
+        if crate::types::optional_element_type(&args[1]).is_some()
+            || matches!(args[1], JavaType::Primitive(_) | JavaType::Void)
+        {
+            return java_ty.clone();
+        }
+        return JavaType::Named {
+            name: name.clone(),
+            args: vec![
+                args[0].clone(),
+                crate::types::optional_java_type(args[1].clone()),
+            ],
+        };
     }
     let Some(element_ty) = crate::types::sequence_element_type(java_ty) else {
         return java_ty.clone();
@@ -13973,22 +14845,7 @@ fn native_map_get_declared_value_binding_constraints(
     java_ty: &JavaType,
     facts: &EffectiveFacts<'_>,
 ) -> Vec<SignatureConstraint> {
-    let assigned_from_matching_map_get = binding.uses.iter().any(|usage| {
-        let BindingUse::AssignedFromCall {
-            name,
-            receiver_type: Some(receiver_type),
-            ..
-        } = usage
-        else {
-            return false;
-        };
-        if name != "get" {
-            return false;
-        }
-        crate::stdlib::java_map_type_args(receiver_type)
-            .is_some_and(|(_, value_ty)| value_ty == java_ty)
-    });
-    if !assigned_from_matching_map_get {
+    if !binding_is_assigned_from_matching_map_get(binding, java_ty) {
         return Vec::new();
     }
 
@@ -14005,6 +14862,7 @@ fn native_map_get_declared_value_binding_constraints(
         facts.object_representation_override_strategy_for(java_ty),
         Some(HierarchyStrategy::ErasedObject)
     ) && facts.is_final_type(java_ty)
+        && map_get_value_binding_is_only_dereferenced_as_receiver(binding)
     {
         constraints.push(SignatureConstraint::RequiredOwnership(
             OwnershipShape::SharedBorrow,
@@ -14012,6 +14870,47 @@ fn native_map_get_declared_value_binding_constraints(
     }
 
     constraints
+}
+
+fn binding_is_assigned_from_matching_map_get(
+    binding: &BindingUseFacts,
+    java_ty: &JavaType,
+) -> bool {
+    binding.uses.iter().any(|usage| {
+        let BindingUse::AssignedFromCall {
+            name,
+            receiver_type: Some(receiver_type),
+            ..
+        } = usage
+        else {
+            return false;
+        };
+        if name != "get" {
+            return false;
+        }
+        crate::stdlib::java_map_type_args(receiver_type)
+            .is_some_and(|(_, value_ty)| value_ty == java_ty)
+    })
+}
+
+fn map_get_value_binding_is_only_dereferenced_as_receiver(binding: &BindingUseFacts) -> bool {
+    let mut saw_receiver_deref = false;
+    for usage in &binding.uses {
+        match usage {
+            BindingUse::AssignedFromCall { .. } => {}
+            BindingUse::ReceiverForCall { .. } => {
+                saw_receiver_deref = true;
+            }
+            BindingUse::ContentRead => {}
+            BindingUse::AssignedToLocal { .. }
+            | BindingUse::PassedToCall { .. }
+            | BindingUse::StoredInField { .. }
+            | BindingUse::Returned
+            | BindingUse::InstanceOfTarget { .. }
+            | BindingUse::Mutated => return false,
+        }
+    }
+    saw_receiver_deref
 }
 
 fn native_collection_receiver_binding_constraints(
@@ -15697,7 +16596,7 @@ fn collect_facade_mut_borrow_argument_names_from_stmts(
         match stmt {
             Stmt::VarDecl {
                 initializer: Some(expr),
-                name,
+                source_name,
                 ty,
                 ..
             } => {
@@ -15707,15 +16606,15 @@ fn collect_facade_mut_borrow_argument_names_from_stmts(
                     local_types,
                     mutated,
                 );
-                local_types.insert(name.clone(), ty.clone());
+                local_types.insert(source_name.clone(), ty.clone());
             }
             Stmt::VarDecl {
                 initializer: None,
-                name,
+                source_name,
                 ty,
                 ..
             } => {
-                local_types.insert(name.clone(), ty.clone());
+                local_types.insert(source_name.clone(), ty.clone());
             }
             Stmt::Expr(expr) | Stmt::Return(Some(expr)) | Stmt::Throw(expr) => {
                 collect_facade_mut_borrow_argument_names_from_expr(
@@ -15820,7 +16719,7 @@ fn collect_facade_mut_borrow_argument_names_from_stmts(
             }
             Stmt::EnhancedFor {
                 var_type,
-                var_name,
+                source_var_name,
                 iterable,
                 body,
                 ..
@@ -15832,7 +16731,7 @@ fn collect_facade_mut_borrow_argument_names_from_stmts(
                     mutated,
                 );
                 let mut body_types = local_types.clone();
-                body_types.insert(var_name.clone(), var_type.clone());
+                body_types.insert(source_var_name.clone(), var_type.clone());
                 collect_facade_mut_borrow_argument_names_from_stmts(
                     &body.statements,
                     facts,
@@ -16861,6 +17760,260 @@ fn collect_mutated_local_names_from_stmts(statements: &[Stmt], mutated: &mut Has
     }
 }
 
+fn collect_input_stream_read_buffer_argument_names_from_stmts(
+    statements: &[Stmt],
+) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for stmt in statements {
+        collect_input_stream_read_buffer_argument_names_from_stmt(stmt, &mut names);
+    }
+    names
+}
+
+fn collect_input_stream_read_buffer_argument_names_from_stmt(
+    stmt: &Stmt,
+    names: &mut HashSet<String>,
+) {
+    match stmt {
+        Stmt::VarDecl { initializer, .. } => {
+            if let Some(expr) = initializer {
+                collect_input_stream_read_buffer_argument_names_from_expr(expr, names);
+            }
+        }
+        Stmt::Assign { target, value } => {
+            collect_input_stream_read_buffer_argument_names_from_expr(target, names);
+            collect_input_stream_read_buffer_argument_names_from_expr(value, names);
+        }
+        Stmt::Expr(expr) | Stmt::Return(Some(expr)) | Stmt::Throw(expr) => {
+            collect_input_stream_read_buffer_argument_names_from_expr(expr, names);
+        }
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            collect_input_stream_read_buffer_argument_names_from_expr(condition, names);
+            collect_input_stream_read_buffer_argument_names_from_stmts(&then_block.statements)
+                .into_iter()
+                .for_each(|name| {
+                    names.insert(name);
+                });
+            if let Some(else_block) = else_block {
+                collect_input_stream_read_buffer_argument_names_from_stmts(&else_block.statements)
+                    .into_iter()
+                    .for_each(|name| {
+                        names.insert(name);
+                    });
+            }
+        }
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
+            collect_input_stream_read_buffer_argument_names_from_expr(condition, names);
+            collect_input_stream_read_buffer_argument_names_from_stmts(&body.statements)
+                .into_iter()
+                .for_each(|name| {
+                    names.insert(name);
+                });
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            collect_input_stream_read_buffer_argument_names_from_stmts(init)
+                .into_iter()
+                .for_each(|name| {
+                    names.insert(name);
+                });
+            if let Some(condition) = condition {
+                collect_input_stream_read_buffer_argument_names_from_expr(condition, names);
+            }
+            for expr in update {
+                collect_input_stream_read_buffer_argument_names_from_expr(expr, names);
+            }
+            collect_input_stream_read_buffer_argument_names_from_stmts(&body.statements)
+                .into_iter()
+                .for_each(|name| {
+                    names.insert(name);
+                });
+        }
+        Stmt::EnhancedFor { iterable, body, .. } => {
+            collect_input_stream_read_buffer_argument_names_from_expr(iterable, names);
+            collect_input_stream_read_buffer_argument_names_from_stmts(&body.statements)
+                .into_iter()
+                .for_each(|name| {
+                    names.insert(name);
+                });
+        }
+        Stmt::Switch { selector, cases } => {
+            collect_input_stream_read_buffer_argument_names_from_expr(selector, names);
+            for case in cases {
+                collect_input_stream_read_buffer_argument_names_from_stmts(&case.statements)
+                    .into_iter()
+                    .for_each(|name| {
+                        names.insert(name);
+                    });
+            }
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            collect_input_stream_read_buffer_argument_names_from_stmts(resources)
+                .into_iter()
+                .for_each(|name| {
+                    names.insert(name);
+                });
+            collect_input_stream_read_buffer_argument_names_from_stmts(&body.statements)
+                .into_iter()
+                .for_each(|name| {
+                    names.insert(name);
+                });
+            for catch in catches {
+                collect_input_stream_read_buffer_argument_names_from_stmts(&catch.body.statements)
+                    .into_iter()
+                    .for_each(|name| {
+                        names.insert(name);
+                    });
+            }
+            if let Some(finally_block) = finally_block {
+                collect_input_stream_read_buffer_argument_names_from_stmts(
+                    &finally_block.statements,
+                )
+                .into_iter()
+                .for_each(|name| {
+                    names.insert(name);
+                });
+            }
+        }
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            collect_input_stream_read_buffer_argument_names_from_stmts(&block.statements)
+                .into_iter()
+                .for_each(|name| {
+                    names.insert(name);
+                });
+        }
+        Stmt::Return(None)
+        | Stmt::LocalType(_)
+        | Stmt::ConstructorInvocation { .. }
+        | Stmt::Break(_)
+        | Stmt::Continue(_)
+        | Stmt::Unsupported(_) => {}
+    }
+}
+
+fn collect_input_stream_read_buffer_argument_names_from_expr(
+    expr: &Expr,
+    names: &mut HashSet<String>,
+) {
+    match expr {
+        Expr::Call {
+            receiver,
+            name,
+            args,
+            ..
+        } => {
+            if name == "read"
+                && args.len() == 3
+                && let Some(Expr::Var(name)) = args.first()
+            {
+                names.insert(name.clone());
+            }
+            if let Some(receiver) = receiver {
+                collect_input_stream_read_buffer_argument_names_from_expr(receiver, names);
+            }
+            for arg in args {
+                collect_input_stream_read_buffer_argument_names_from_expr(arg, names);
+            }
+        }
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::InstanceOf { expr, .. } => {
+            collect_input_stream_read_buffer_argument_names_from_expr(expr, names);
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_input_stream_read_buffer_argument_names_from_expr(left, names);
+            collect_input_stream_read_buffer_argument_names_from_expr(right, names);
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_input_stream_read_buffer_argument_names_from_expr(condition, names);
+            collect_input_stream_read_buffer_argument_names_from_expr(then_expr, names);
+            collect_input_stream_read_buffer_argument_names_from_expr(else_expr, names);
+        }
+        Expr::Switch { selector, cases } => {
+            collect_input_stream_read_buffer_argument_names_from_expr(selector, names);
+            for case in cases {
+                for label in &case.labels {
+                    if let SwitchLabel::Expr(expr) = label {
+                        collect_input_stream_read_buffer_argument_names_from_expr(expr, names);
+                    }
+                }
+                collect_input_stream_read_buffer_argument_names_from_expr(&case.value, names);
+            }
+        }
+        Expr::FieldAccess(receiver, _) | Expr::ArrayAccess(receiver, _) => {
+            collect_input_stream_read_buffer_argument_names_from_expr(receiver, names);
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            for expr in dimensions {
+                collect_input_stream_read_buffer_argument_names_from_expr(expr, names);
+            }
+            for expr in initializer.iter().flatten() {
+                collect_input_stream_read_buffer_argument_names_from_expr(expr, names);
+            }
+        }
+        Expr::ArrayInitializer(items) | Expr::New { args: items, .. } => {
+            for expr in items {
+                collect_input_stream_read_buffer_argument_names_from_expr(expr, names);
+            }
+        }
+        Expr::Lambda { params, body } => {
+            let mut lambda_names = HashSet::new();
+            match body {
+                LambdaBody::Expr(expr) => {
+                    collect_input_stream_read_buffer_argument_names_from_expr(
+                        expr,
+                        &mut lambda_names,
+                    );
+                }
+                LambdaBody::Block(block) => {
+                    lambda_names.extend(
+                        collect_input_stream_read_buffer_argument_names_from_stmts(
+                            &block.statements,
+                        ),
+                    );
+                }
+            }
+            for param in params {
+                lambda_names.remove(&param.source_name);
+            }
+            names.extend(lambda_names);
+        }
+        Expr::MethodReference { .. }
+        | Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::ClassLiteral(_)
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => {}
+    }
+}
+
 fn collect_mutated_local_names_from_stmt(stmt: &Stmt, mutated: &mut HashSet<String>) {
     match stmt {
         Stmt::VarDecl { initializer, .. } => {
@@ -17019,6 +18172,9 @@ fn collect_mutated_local_names_from_expr(expr: &Expr, mutated: &mut HashSet<Stri
             args,
             ..
         } => {
+            if name == "read" && args.len() == 3 {
+                collect_assignment_target_name(&args[0], mutated);
+            }
             for (arg_index, arg) in args.iter().enumerate() {
                 if crate::stdlib::static_collection_argument_mutates(
                     receiver.as_deref().and_then(static_receiver_name),
@@ -17063,6 +18219,7 @@ fn collect_mutated_local_names_from_expr(expr: &Expr, mutated: &mut HashSet<Stri
                 }
             }
             for param in params {
+                lambda_mutated.remove(&param.source_name);
                 lambda_mutated.remove(&param.name);
             }
             mutated.extend(lambda_mutated);
@@ -17145,10 +18302,6 @@ fn receiver_root_name(expr: &Expr) -> Option<&str> {
         }
         _ => None,
     }
-}
-
-pub fn receiver_constraints(method: &MethodDecl) -> Vec<ReceiverConstraint> {
-    receiver_constraints_with_usage(method, None)
 }
 
 pub fn receiver_constraints_with_usage(
@@ -17991,7 +19144,7 @@ fn internal_returned_object_alias_borrow_constraints(
     let returned_borrow_safe_alias = method.params.iter().any(|param| {
         let Some(binding) = method_usage.binding_for_declaration_with_name_fallback(
             param.binding.as_ref(),
-            &param.name,
+            &param.source_name,
             param.binding.is_none(),
         ) else {
             return false;
@@ -18001,8 +19154,8 @@ fn internal_returned_object_alias_borrow_constraints(
             .iter()
             .any(|usage| matches!(usage, BindingUse::Returned));
         let compatibility_name_returned = param.binding.is_none()
-            && exactly_returned_param_names.contains(param.name.as_str())
-            && !legacy_idless_method_assigns_to_binding(method, &param.name);
+            && exactly_returned_param_names.contains(param.source_name.as_str())
+            && !legacy_idless_method_assigns_to_binding(method, &param.source_name);
         (returned_by_exact_binding || compatibility_name_returned)
             && java_types_have_same_signature_boundary_identity(
                 &binding.java_ty,
@@ -18442,20 +19595,26 @@ fn string_return_can_use_borrowed_view(
         return true;
     }
     for returned_name in returned_names {
-        if !method
+        let Some(param) = method
             .params
             .iter()
-            .any(|param| param.name == returned_name)
-        {
+            .find(|param| param.source_name == returned_name)
+        else {
             continue;
-        }
+        };
         let Some(method_constraints) = method_constraints else {
             continue;
         };
-        let binding_constraints = binding_slot_requirements(method_constraints, returned_name)
+        let mut binding_constraints = binding_slot_requirements(method_constraints, &param.name)
             .into_iter()
             .cloned()
             .collect::<Vec<_>>();
+        if binding_constraints.is_empty() && param.name != param.source_name {
+            binding_constraints = binding_slot_requirements(method_constraints, &param.source_name)
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>();
+        }
         let merged = MergedSignatureConstraints::from_constraints(&binding_constraints);
         if merged.required_owner != Some(OwnershipShape::SharedBorrow) {
             return false;
@@ -18521,7 +19680,7 @@ fn method_declared_binding_types<'a>(
 ) -> HashMap<&'a str, Option<&'a JavaType>> {
     let mut types = HashMap::new();
     for param in &method.params {
-        insert_declared_binding_type(&mut types, &param.name, &param.ty);
+        insert_declared_binding_type(&mut types, &param.source_name, &param.ty);
     }
     collect_declared_binding_types_from_stmts(&body.statements, &mut types);
     types
@@ -18551,8 +19710,10 @@ fn collect_declared_binding_types_from_stmts<'a>(
 ) {
     for stmt in statements {
         match stmt {
-            Stmt::VarDecl { ty, name, .. } => {
-                insert_declared_binding_type(types, name, ty);
+            Stmt::VarDecl {
+                ty, source_name, ..
+            } => {
+                insert_declared_binding_type(types, source_name, ty);
             }
             Stmt::For { init, body, .. } => {
                 collect_declared_binding_types_from_stmts(init, types);
@@ -18560,11 +19721,11 @@ fn collect_declared_binding_types_from_stmts<'a>(
             }
             Stmt::EnhancedFor {
                 var_type,
-                var_name,
+                source_var_name,
                 body,
                 ..
             } => {
-                insert_declared_binding_type(types, var_name, var_type);
+                insert_declared_binding_type(types, source_var_name, var_type);
                 collect_declared_binding_types_from_stmts(&body.statements, types);
             }
             Stmt::If {
@@ -18723,6 +19884,11 @@ fn return_constraints_select_concrete_declared_value(
     constraints: &[SignatureConstraint],
     facts: &FactSet,
 ) -> bool {
+    if constraints_require_nullable_storage(constraints)
+        && source_method_has_explicit_null_return(method)
+    {
+        return false;
+    }
     let explicit_concrete_dispatch = constraints.contains(&SignatureConstraint::RequiredDispatch(
         DispatchShape::Concrete,
     ));
@@ -18739,6 +19905,73 @@ fn return_constraints_select_concrete_declared_value(
         && constraints.contains(&SignatureConstraint::RequiredOwnership(
             OwnershipShape::Owned,
         ))
+}
+
+fn source_method_has_explicit_null_return(method: &MethodDecl) -> bool {
+    if matches!(method.return_type, JavaType::Void | JavaType::Primitive(_)) {
+        return false;
+    }
+    method
+        .body
+        .as_ref()
+        .is_some_and(|body| stmts_have_explicit_null_return(&body.statements))
+}
+
+fn stmts_have_explicit_null_return(statements: &[Stmt]) -> bool {
+    statements.iter().any(stmt_has_explicit_null_return)
+}
+
+fn stmt_has_explicit_null_return(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Return(None) | Stmt::Return(Some(Expr::Literal(Literal::Null))) => true,
+        Stmt::Return(Some(_)) => false,
+        Stmt::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            stmts_have_explicit_null_return(&then_block.statements)
+                || else_block.as_ref().is_some_and(|else_block| {
+                    stmts_have_explicit_null_return(&else_block.statements)
+                })
+        }
+        Stmt::While { body, .. }
+        | Stmt::DoWhile { body, .. }
+        | Stmt::EnhancedFor { body, .. }
+        | Stmt::Block(body)
+        | Stmt::LabeledBlock { body, .. } => stmts_have_explicit_null_return(&body.statements),
+        Stmt::For { init, body, .. } => {
+            stmts_have_explicit_null_return(init)
+                || stmts_have_explicit_null_return(&body.statements)
+        }
+        Stmt::Switch { cases, .. } => cases
+            .iter()
+            .any(|case| stmts_have_explicit_null_return(&case.statements)),
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            stmts_have_explicit_null_return(resources)
+                || stmts_have_explicit_null_return(&body.statements)
+                || catches
+                    .iter()
+                    .any(|catch| stmts_have_explicit_null_return(&catch.body.statements))
+                || finally_block.as_ref().is_some_and(|finally_block| {
+                    stmts_have_explicit_null_return(&finally_block.statements)
+                })
+        }
+        Stmt::VarDecl { .. }
+        | Stmt::Assign { .. }
+        | Stmt::Expr(_)
+        | Stmt::Throw(_)
+        | Stmt::LocalType(_)
+        | Stmt::ConstructorInvocation { .. }
+        | Stmt::Break(_)
+        | Stmt::Continue(_)
+        | Stmt::Unsupported(_) => false,
+    }
 }
 
 fn method_rust_name(method: &MethodDecl) -> String {

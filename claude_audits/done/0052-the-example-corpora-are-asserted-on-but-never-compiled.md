@@ -12,9 +12,15 @@ Severity: **high** — current dirty-tree corpus failures are visible through
 `compile_error!` for invalid Java, not a silent Rust type/mutability failure.
 Kind: measurement / coverage.
 
-Extends [0018](done/0018-the-compile-error-metric-cannot-see-silent-failures.md)
+Current state 2026-09-07: the gate baseline has `idiom_gaps` green at 816/0 and
+`fixtures` green at 54/0. `tests/differential.rs` now asserts 228 active
+behavioural fixtures. The rendered-Rust scan table below is historical unless
+regenerated with the current scanner; do not use its suite/test counts as
+current baseline numbers.
+
+Extends [0018](0018-the-compile-error-metric-cannot-see-silent-failures.md)
 (the compile-error metric cannot see silent failures) and
-[0041](done/0041-slot-shape-design-had-no-generated-crate-checks.md) (a suite
+[0041](0041-slot-shape-design-had-no-generated-crate-checks.md) (a suite
 that asserted on rendered Rust with nothing compiling it). 0041 fixed one suite.
 The same hole is still open in three more, and it is open on the *fixture
 corpora themselves* — the Java files the whole project is organised around.
@@ -2236,6 +2242,144 @@ returns needed unwrapping, and nested enum tests needed the actual emitted enum
 names. `tests/baselines/idiom-gaps-failures.txt` is now empty apart from its
 header.
 
+Follow-up 2026-09-07: six source/generic idiom rows were stale assertions rather
+than translator defects after the nullable/source-bound changes:
+`source_interface_object_getter_returns_borrowed_field`,
+`source_generic_method_preserves_type_params`,
+`source_class_bound_trait_generic_methods_preserve_type_params`,
+`source_generic_constructor_preserves_type_param_bounds`,
+`context_source_generic_constructor_preserves_type_param_bounds`, and
+`context_source_generic_method_preserves_type_param_bounds`. Focused generated
+crate checks passed for each, and the release `idiom_gaps` capture is now
+`769 passed; 47 failed`.
+
+Follow-up 2026-09-07: the easy stale-assertion sweep removed another twenty
+`idiom_gaps` rows from the known-failure baseline after focused generated-crate
+checks passed. Twelve were first-half checked-array, facade, and typed-pack
+assertions; eight more were nullable/source-call, raw-map return, ndarray, and
+static-helper assertions. The release `idiom_gaps` capture confirmed `791
+passed; 25 failed`.
+
+Follow-up 2026-09-07: three bounded real fixes removed
+`source_varargs_pack_external_elements_with_explicit_adapter`,
+`source_generic_class_bound_method_call_uses_bound_surface`, and
+`optional_mutable_array_reborrows_as_readonly_slice_without_moving` from the
+baseline. The first suppresses duplicate fallback constants already owned by the
+typed facade surface; the second avoids concrete-field getter lowering when a
+call resolves through a type-parameter bound; the third reborrows
+`Option<&mut [T]>` to `Option<&[T]>` as `as_deref()` instead of
+`as_mut().as_deref()`. Focused generated-crate checks pass for all three.
+Follow-up in the same pass removed six more rows after focused checks and a
+slow release capture. `source_overload_prefers_expanded_varargs_over_same_arity_fixed_mismatch`
+now compiles and no longer expects the stale duplicate-constant diagnostic;
+`static_owner_name_does_not_collapse_to_same_named_instance_field` emits
+`Color::BLACK` again after raw static-constant suppression was limited to
+fact-backed facade constants; `source_super_constructor_with_child_locals_and_nested_field_assignment_lowers`
+and `switch_assignment_with_default_fallthrough_lowers_to_match_assignment`
+had stale optional-field/nested-enum assertions; `documents_try_with_resources_copy_gap`
+now accepts the try-with-resources cleanup combiner; and
+`source_object_varargs_forward_and_append_erased_arguments` is expected-failure
+backed against the current non-cloneable `Vec<Option<Box<dyn Any>>>` error
+instead of the obsolete optional-element mismatch. Release `idiom_gaps` now
+records `798 passed; 18 failed`.
+
+Follow-up 2026-09-07: three more easy rows were removed. Two were stale
+assertions whose generated crates already compile:
+`private_static_singleton_with_hashmap_field_derives_clone_when_value_is_cloneable`
+now asserts the current `Option<Factory>` static singleton surface while still
+pinning `HashMap<String, Arc<Format>>`, and
+`source_array_setter_arguments_follow_owned_storage_signature` now accepts the
+catchable `ok_or_else(...)?` null projection instead of the old panic
+`expect(...)`. The third,
+`negated_java_equals_uses_inequality_projection`, was a small lowering bug: a
+fallible `List<String>.get(index)?` receiver was still projected as optional
+before `.equals`, producing `.as_ref().map(|value| value.as_str())` on a
+`String`. The lowering now compares the result-propagated string view directly.
+Focused generated-crate checks pass for all three; `idiom_gaps` records
+`801 passed; 15 failed`.
+
+Follow-up 2026-09-07: five more easy `idiom_gaps` rows were rechecked. Two
+stale assertions, `optional_source_receiver_uses_mut_projection_for_mutating_context_fallback`
+and `reassigned_string_enhanced_for_variable_iterates_owned_mutable_values`,
+were removed in the prior pass after focused generated-crate checks. This pass
+removed two more stale assertions:
+`translates_map_for_each_try_catch_lambda_without_placeholder` now accepts the
+declared `Map<String, Item>` destination shape, and
+`nested_jdk_stream_subclasses_keep_overload_surfaces_compileable` now accepts
+the current nested type spelling (`Base64_InputStream` /
+`Base64_OutputStream`). The nearby
+`jdk_stream_wrapper_inherits_typed_protected_stream_fields` row also promotes:
+the local byte array passed to `read(byte[], int, int)` now renders mutable, and
+`super.read(byte[], int, int)` redirects through the inherited `in` handle as
+`self.r#in.read_3(...)` for source classes that extend the JDK input-stream
+facade. Focused generated-crate checks pass for all three rows in this pass.
+`idiom_gaps` records `806 passed; 10 failed`.
+
+Follow-up 2026-09-07: the tuple callback parameter renderer now respects the
+erased external facade shape for Scala `Tuple2`/`Tuple3`/`Tuple4` instead of
+rendering Rust generics that the generated facade structs do not declare. That
+promotes `documents_stream_callback_chain_gap`,
+`corpus_spark_branch_assigned_pair_rdd_map_callback_gets_tuple_param_type`, and
+`corpus_spark_rdd_pipeline_keeps_stream_lowering_at_noop_spark_boundary`; the
+pipeline row also accepts the current fallible `Ok(...)` return wrapper. Focused
+generated-crate checks pass for all three. `idiom_gaps` records `809 passed; 7
+failed`.
+
+Follow-up 2026-09-07: two more baseline rows were assertion/diagnostic drift,
+not active release failures. `inherited_context_trailing_call_uses_context_field_and_shared_varargs_plan`
+now accepts the current `vec![Some(max)]` varargs carrier and records the current
+expected generated-crate failure on non-cloneable `Box<dyn Any>`.
+`corpus_spark_interface_receiver_delegation_widens_owned_return_slots` now
+accepts the owned `SimpleInterval`/`Result` interface delegation surface and
+keeps the generated-crate check as an expected failure on the remaining generic
+facade/fallibility errors. Focused checks pass for both. `idiom_gaps` records
+`811 passed; 5 failed`.
+
+Follow-up 2026-09-07: the former
+`static_owned_path_argument_does_not_borrow_owned_temporary` row
+was a stale assertion after read-only source parameter slots learned borrowed
+ABI shapes. The fixture now accepts `check_path(path: &Path)` and still pins the
+important behavior under its renamed test
+`static_owned_path_argument_uses_readonly_borrowed_slot`: the owned temporary
+from `IO::get_path(&vcf_path)` is not mutably borrowed or wrapped as an optional
+borrow. Focused generated-crate verification passes, and `idiom_gaps` records
+`812 passed; 4 failed`.
+
+Follow-up 2026-09-07: the non-manifest FFI handover row was misnamed after the
+manifest-backed acceptance test landed. The real FFI contract remains covered by
+`corpus_ffi_boundary_manifest_shapes_native_handover_calls`; the plain
+`translate_source` variant now asserts the typed loud fallback
+`unresolved Java static call NativeRuntimeNativeLibrary.open_array is not
+modelled` instead of expecting crate-backed facts that were never supplied.
+Focused generated-crate verification passes, and `idiom_gaps` records `813
+passed; 3 failed`.
+
+Follow-up 2026-09-07: the constructor self-field optional row was still
+expected-failure-backed against an obsolete shared-handle diagnostic. The active
+failure is now the wrap-order bug where optional construction is applied before
+uncaught `Result` recovery, yielding `Some(...).unwrap_or_else(...)` and the
+Rust diagnostic `closure is expected to take 0 arguments`. The test now records
+that current failure mode instead of the stale `Rc<Helper>` mismatch, so the
+known-failure baseline only tracks rows whose test bodies fail. Focused
+verification passes, and `idiom_gaps` records `814 passed; 2 failed`.
+
+Follow-up 2026-09-07: the GenomicsDB nested `flatMap` row also had a stale
+expected-failure diagnostic. The old callback receiver mismatch has been
+superseded; the active generated-crate failure is the broader stream-lowering
+gap where a null-propagating receiver projection emits `?` inside an iterator
+closure that does not return `Result` or `Option`. The test now records that
+current failure mode, and `idiom_gaps` records `815 passed; 1 failed`.
+
+Follow-up 2026-09-07: the final `idiom_gaps` failure was fixed after narrowing
+the return-shape rule that had previously regressed unrelated rows. A source
+method with an explicit non-primitive `return null` now keeps its nullable
+return carrier even when returned-call facts also request concrete/native owned
+storage. `try_return_with_fallthrough_catch_uses_outer_fallback_return` now
+passes its generated-crate check, and `documents_stream_callback_chain_gap`
+accepts the same nullable-return policy for `computeScores`. Release
+verification records `816 passed; 0 failed`; the known-failure file is empty
+apart from comments.
+
 1. **Keep the corpus compile test strict.** A single `#[test]` translates every file
    under `examples/` and `rustc --crate-type lib --emit=metadata`s the output,
    with an allow-list checked in at `tests/baselines/corpus-compile-failures.txt`
@@ -2260,10 +2404,10 @@ header.
 
 ## Relation to other issues
 
-- [0018](done/0018-the-compile-error-metric-cannot-see-silent-failures.md) — this
+- [0018](0018-the-compile-error-metric-cannot-see-silent-failures.md) — this
   file is the corpus-sized measurement of its central claim: 55 of 58
   compiler-rejected files score as clean.
-- [0041](done/0041-slot-shape-design-had-no-generated-crate-checks.md) — same
+- [0041](0041-slot-shape-design-had-no-generated-crate-checks.md) — same
   hole, three suites over, plus evidence that its backlog grows without a rule.
 - [0009](0009-overload-identity-collapses-onto-rust-name.md) — the former
   `E0592` failures in `EqualsAndObjects` and `NullableEqualsComparison` are now

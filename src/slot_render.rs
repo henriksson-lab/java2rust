@@ -7,14 +7,14 @@ use crate::slot_shape::{DispatchShape, OwnershipShape, RustSlotShape, ViewShape}
 use crate::storage_strategy::StoragePlacement;
 use crate::types::optional_element_type;
 
-pub fn rust_generic_type(base: impl Into<String>, args: Vec<RustType>) -> RustType {
+pub(crate) fn rust_generic_type(base: impl Into<String>, args: Vec<RustType>) -> RustType {
     RustType::Generic {
         base: base.into(),
         args,
     }
 }
 
-pub fn rust_boxed_dyn_trait_type(trait_name: impl Into<String>) -> RustType {
+pub(crate) fn rust_boxed_dyn_trait_type(trait_name: impl Into<String>) -> RustType {
     rust_generic_type("Box", vec![RustType::DynTrait(trait_name.into())])
 }
 
@@ -292,7 +292,7 @@ pub fn slot_value_rust_type_policy_with_effective_facts(
     }
 }
 
-pub fn render_slot_rust_type_policy(policy: &SlotRustTypePolicy) -> RustType {
+pub(crate) fn render_slot_rust_type_policy(policy: &SlotRustTypePolicy) -> RustType {
     match policy {
         SlotRustTypePolicy::OwnedOrCopy { ty } => ty.clone(),
         SlotRustTypePolicy::SharedBorrow { ty } => RustType::Ref {
@@ -326,7 +326,7 @@ fn slot_dispatch_rust_type_policy(shape: &RustSlotShape) -> SlotValueRustTypePol
     }
 }
 
-pub fn render_slot_value_rust_type_policy_with_effective_facts(
+pub(crate) fn render_slot_value_rust_type_policy_with_effective_facts(
     policy: &SlotValueRustTypePolicy,
     facts: &EffectiveFacts<'_>,
 ) -> RustType {
@@ -423,7 +423,7 @@ fn dyn_trait_rust_path_with_effective_facts(
     rust_trait_name_path(trait_name)
 }
 
-pub fn dyn_trait_rust_path(trait_name: &str, facts: &FactSet) -> String {
+pub(crate) fn dyn_trait_rust_path(trait_name: &str, facts: &FactSet) -> String {
     let effective_facts = EffectiveFacts::new(facts);
     dyn_trait_rust_path_with_effective_facts(trait_name, &effective_facts)
 }
@@ -451,7 +451,7 @@ pub fn default_expr_for_slot_with_effective_facts(
 }
 
 /// Value-form counterpart of the type wrap, for **fresh constructions** only.
-pub fn shared_handle_construction_expr(
+pub(crate) fn shared_handle_construction_expr(
     shape: &RustSlotShape,
     facts: &EffectiveFacts<'_>,
     rendered: RustExpr,
@@ -473,7 +473,7 @@ pub fn shared_handle_construction_expr(
     storage_placement_construction_expr(placement, rendered)
 }
 
-pub fn storage_placement_construction_expr(
+pub(crate) fn storage_placement_construction_expr(
     placement: StoragePlacement,
     rendered: RustExpr,
 ) -> RustExpr {
@@ -493,9 +493,7 @@ pub fn storage_placement_construction_expr(
 
 fn recover_storage_placement_construction_expr(expr: RustExpr) -> RustExpr {
     match expr {
-        RustExpr::Raw(rendered) => {
-            crate::coercion::rendered_plus_expr_projection_or_raw_leaf(&rendered)
-        }
+        RustExpr::Raw(rendered) => crate::coercion::recover_operator_expr_or_raw_leaf(&rendered),
         other => other,
     }
 }
@@ -528,7 +526,7 @@ fn rust_path_expr_matches(expr: &RustExpr, base: &str, leaf: &str) -> bool {
     }
 }
 
-pub fn storage_placement_type(placement: StoragePlacement, rendered: RustType) -> RustType {
+fn storage_placement_type(placement: StoragePlacement, rendered: RustType) -> RustType {
     let celled = placement
         .cell_path()
         .map(|cell| rust_generic_type(cell, vec![rendered.clone()]))
@@ -613,7 +611,7 @@ pub fn slot_default_value_policy_with_effective_facts(
     }
 }
 
-pub fn slot_default_policy_expr(policy: &SlotDefaultPolicy) -> RustExpr {
+fn slot_default_policy_expr(policy: &SlotDefaultPolicy) -> RustExpr {
     match policy {
         SlotDefaultPolicy::NoDefaultForClosedEnum { .. }
         | SlotDefaultPolicy::NoDefaultForDynTrait { .. }
@@ -646,7 +644,7 @@ pub fn slot_no_default_message_policy(policy: &SlotDefaultPolicy) -> SlotNoDefau
     SlotNoDefaultMessagePolicy { message }
 }
 
-pub fn slot_default_value_policy_expr(policy: &SlotDefaultValuePolicy) -> RustExpr {
+fn slot_default_value_policy_expr(policy: &SlotDefaultValuePolicy) -> RustExpr {
     match policy {
         SlotDefaultValuePolicy::EmptyStringView => RustExpr::Literal("\"\"".to_string()),
         SlotDefaultValuePolicy::EmptySliceView => RustExpr::Unary {
@@ -1383,11 +1381,11 @@ fn java_type_variable_name(name: &str) -> bool {
             .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
 }
 
-pub fn rust_name_for_java_named_type(name: &str) -> String {
+pub(crate) fn rust_name_for_java_named_type(name: &str) -> String {
     crate::java_naming::rust_name_for_java_named_type(name)
 }
 
-pub fn render_native_java_rust_type_policy_with_effective_facts(
+pub(crate) fn render_native_java_rust_type_policy_with_effective_facts(
     policy: &NativeJavaRustTypePolicy,
     facts: &EffectiveFacts<'_>,
 ) -> RustType {
@@ -1424,12 +1422,12 @@ pub fn render_native_java_rust_type_policy_with_effective_facts(
     }
 }
 
-pub fn java_set_uses_hash_free_carrier(ty: &JavaType, facts: &FactSet) -> bool {
+pub(crate) fn java_set_uses_hash_free_carrier(ty: &JavaType, facts: &FactSet) -> bool {
     let effective_facts = EffectiveFacts::new(facts);
     java_set_uses_hash_free_carrier_with_effective_facts(ty, &effective_facts)
 }
 
-pub fn java_set_uses_hash_free_carrier_with_representations(
+pub(crate) fn java_set_uses_hash_free_carrier_with_representations(
     ty: &JavaType,
     facts: &FactSet,
     representations: &RepresentationPlan,
@@ -1443,7 +1441,7 @@ pub fn java_set_uses_hash_free_carrier_with_representations(
         )
 }
 
-pub fn java_set_uses_hash_free_carrier_with_effective_facts(
+pub(crate) fn java_set_uses_hash_free_carrier_with_effective_facts(
     ty: &JavaType,
     facts: &EffectiveFacts<'_>,
 ) -> bool {

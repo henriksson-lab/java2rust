@@ -5442,15 +5442,23 @@ fn class_literal_rust_token_type<'a>(ty: &'a JavaType, facts: &FactSet) -> Optio
     if !args.is_empty() || !name.contains('.') || facts.storage_strategies.facts(name).is_some() {
         return None;
     }
-    let simple = name.rsplit('.').next()?;
-    facts
-        .storage_strategies
-        .facts(simple)
-        .is_some()
-        .then(|| JavaType::Named {
-            name: simple.to_string(),
+    let emitted = rust_name_for_java_named_type(name);
+    if facts.storage_strategies.facts(&emitted).is_some() {
+        return Some(JavaType::Named {
+            name: emitted,
             args: Vec::new(),
-        })
+        });
+    }
+    let simple = name.rsplit('.').next()?;
+    if class_literal_can_match_simple_source_alias(name)
+        && facts.storage_strategies.facts(simple).is_some()
+    {
+        return Some(JavaType::Named {
+            name: emitted,
+            args: Vec::new(),
+        });
+    }
+    None
 }
 
 fn class_literal_names_source_type(name: &str, facts: &FactSet) -> bool {
@@ -5486,7 +5494,7 @@ fn class_literal_can_match_simple_source_alias(name: &str) -> bool {
 pub fn class_literal_java_name(ty: &JavaType) -> String {
     match ty {
         JavaType::Void => "void".to_string(),
-        JavaType::String => "String".to_string(),
+        JavaType::String => "java.lang.String".to_string(),
         JavaType::Primitive(primitive) => match primitive {
             PrimitiveType::Boolean => "boolean",
             PrimitiveType::Byte => "byte",
@@ -5602,6 +5610,16 @@ impl<T> JavaClass<T> {
 
     pub fn equals<U>(&self, other: JavaClass<U>) -> bool {
         self.name == other.name
+    }
+}
+
+impl<T> std::fmt::Display for JavaClass<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.name.as_str() {
+            "boolean" | "byte" | "char" | "short" | "int" | "long" | "float" | "double"
+            | "void" => write!(f, "{}", self.name),
+            name => write!(f, "class {}", name),
+        }
     }
 }"#
     .to_string();
@@ -5783,6 +5801,12 @@ impl<T: JavaAppendValue> JavaAppendValue for Option<T> {
 impl<T: JavaAppendValue + Clone> JavaAppendValue for &Option<T> {
     fn into_java_append_string(self) -> String {
         self.clone().into_java_append_string()
+    }
+}
+
+impl<T: JavaAppendValue + Clone> JavaAppendValue for &&T {
+    fn into_java_append_string(self) -> String {
+        (*self).clone().into_java_append_string()
     }
 }
 
@@ -7127,6 +7151,24 @@ impl BitSet {
     }
 }
 
+impl std::fmt::Display for BitSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{{")?;
+        let mut first = true;
+        for (index, bit) in self.bits.iter().enumerate() {
+            if !*bit {
+                continue;
+            }
+            if !first {
+                write!(f, ", ")?;
+            }
+            first = false;
+            write!(f, "{index}")?;
+        }
+        write!(f, "}}")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct StringTokenizer {
     tokens: Vec<String>,
@@ -7834,11 +7876,37 @@ pub fn java_math_min_f64(left: f64, right: f64) -> f64 {
     }
 }
 
-pub fn java_arrays_to_string<T: std::fmt::Display, V: AsRef<[T]>>(values: V) -> String {
+pub trait JavaArraysToStringElement {
+    fn java_arrays_to_string_element(&self) -> String;
+}
+
+macro_rules! impl_java_arrays_to_string_display {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl JavaArraysToStringElement for $ty {
+                fn java_arrays_to_string_element(&self) -> String {
+                    self.to_string()
+                }
+            }
+        )*
+    };
+}
+
+impl_java_arrays_to_string_display!(bool, i8, i16, i32, i64, char, f32, f64, String, &str);
+
+impl<T: JavaArraysToStringElement> JavaArraysToStringElement for Option<T> {
+    fn java_arrays_to_string_element(&self) -> String {
+        self.as_ref()
+            .map(JavaArraysToStringElement::java_arrays_to_string_element)
+            .unwrap_or_else(|| "null".to_string())
+    }
+}
+
+pub fn java_arrays_to_string<T: JavaArraysToStringElement, V: AsRef<[T]>>(values: V) -> String {
     let body = values
         .as_ref()
         .iter()
-        .map(|value| value.to_string())
+        .map(JavaArraysToStringElement::java_arrays_to_string_element)
         .collect::<Vec<_>>()
         .join(", ");
     format!("[{body}]")
@@ -7855,39 +7923,7 @@ pub mod logger {
     )
 }
 
-pub fn java_erased_object_runtime_support_item() -> crate::rust_ir::RustItem {
-    java_erased_object_runtime_support_item_with_programs_and_facts(&[], &FactSet::default())
-}
-
-pub fn java_erased_object_runtime_support_item_with_programs(
-    programs: &[&Program],
-) -> crate::rust_ir::RustItem {
-    java_erased_object_runtime_support_item_with_programs_and_facts(programs, &FactSet::default())
-}
-
-pub fn java_erased_object_runtime_support_item_with_programs_and_facts(
-    programs: &[&Program],
-    facts: &FactSet,
-) -> crate::rust_ir::RustItem {
-    java_erased_object_runtime_support_item_with_source_programs_and_facts(
-        programs, programs, facts,
-    )
-}
-
-pub fn java_erased_object_runtime_support_item_with_source_programs_and_facts(
-    programs: &[&Program],
-    source_downcast_programs: &[&Program],
-    facts: &FactSet,
-) -> crate::rust_ir::RustItem {
-    java_erased_object_runtime_support_item_with_source_programs_facts_and_representations(
-        programs,
-        source_downcast_programs,
-        facts,
-        None,
-    )
-}
-
-pub fn java_erased_object_runtime_support_item_with_source_programs_facts_and_representations(
+pub(crate) fn java_erased_object_runtime_support_item_with_source_programs_facts_and_representations(
     programs: &[&Program],
     source_downcast_programs: &[&Program],
     facts: &FactSet,
@@ -7896,7 +7932,10 @@ pub fn java_erased_object_runtime_support_item_with_source_programs_facts_and_re
     let source_to_string_downcasts =
         source_erased_object_to_string_downcasts(source_downcast_programs, representations);
     let platform_to_string_downcasts = platform_erased_object_to_string_downcasts(programs);
+    let java_class_to_string_downcast =
+        java_class_erased_object_to_string_downcast(programs, facts);
     let external_to_string_downcasts = external_erased_object_to_string_downcasts(programs, facts);
+    let collection_to_string_downcasts = collection_erased_object_to_string_downcasts(programs);
     crate::rust_ir::RustItem::Raw(format!(
         r#"pub fn java_is_serializable<T: ?Sized>(_value: &T) -> bool {{
     true
@@ -7950,12 +7989,20 @@ pub fn java_erased_any_to_string(value: &dyn std::any::Any) -> String {{
     if value.is::<Vec<Option<std::boxed::Box<dyn std::any::Any>>>>() {{
         return "[Ljava.lang.Object;@0".to_string();
     }}
+    if let Some(value) = value.downcast_ref::<Vec<String>>() {{
+        return format!("[{{}}]", value.join(", "));
+    }}
+    if let Some(value) = value.downcast_ref::<Vec<i32>>() {{
+        return format!("[{{}}]", value.iter().map(|item| item.to_string()).collect::<Vec<_>>().join(", "));
+    }}
+{collection_to_string_downcasts}
     if let Some(value) = value.downcast_ref::<String>() {{
         return value.clone();
     }}
     if let Some((key, entry_value)) = value.downcast_ref::<(String, String)>() {{
         return format!("{{}}={{}}", key, entry_value);
     }}
+{java_class_to_string_downcast}
 {platform_to_string_downcasts}
 {external_to_string_downcasts}
     if let Some(value) = value.downcast_ref::<bool>() {{
@@ -7991,6 +8038,328 @@ pub fn java_erased_any_to_string(value: &dyn std::any::Any) -> String {{
     ))
 }
 
+fn collection_erased_object_to_string_downcasts(programs: &[&Program]) -> String {
+    let mut arms = Vec::new();
+    if programs
+        .iter()
+        .any(|program| program_mentions_java_type(program, "LinkedHashSet"))
+    {
+        arms.push(
+            "    if let Some(value) = value.downcast_ref::<JavaLinkedHashSet<String>>() {\n        return value.to_string();\n    }\n    if let Some(value) = value.downcast_ref::<JavaLinkedHashSet<i32>>() {\n        return value.to_string();\n    }"
+                .to_string(),
+        );
+    }
+    if programs
+        .iter()
+        .any(|program| program_mentions_java_type(program, "LinkedHashMap"))
+    {
+        arms.push(
+            "    if let Some(value) = value.downcast_ref::<JavaLinkedHashMap<String, String>>() {\n        return value.to_string();\n    }\n    if let Some(value) = value.downcast_ref::<JavaLinkedHashMap<String, i32>>() {\n        return value.to_string();\n    }"
+                .to_string(),
+        );
+    }
+    arms.join("\n")
+}
+
+fn java_class_erased_object_to_string_downcast(programs: &[&Program], facts: &FactSet) -> String {
+    let token_types = java_class_erased_display_token_types(programs, facts);
+    if token_types.is_empty() {
+        return String::new();
+    }
+    token_types
+        .into_iter()
+        .map(|token_type| {
+            format!(
+                "    if let Some(value) = value.downcast_ref::<JavaClass<{token_type}>>() {{\n        return value.to_string();\n    }}\n    if let Some(value) = value.downcast_ref::<std::rc::Rc<JavaClass<{token_type}>>>() {{\n        return value.to_string();\n    }}\n    if let Some(value) = value.downcast_ref::<std::sync::Arc<JavaClass<{token_type}>>>() {{\n        return value.to_string();\n    }}"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn java_class_erased_display_token_types(
+    programs: &[&Program],
+    facts: &FactSet,
+) -> BTreeSet<String> {
+    let mut token_types = BTreeSet::new();
+    if programs
+        .iter()
+        .any(|program| program_uses_java_class_tokens(program))
+    {
+        token_types.insert("()".to_string());
+    }
+    for program in programs {
+        collect_program_class_literal_token_types(program, facts, &mut token_types);
+    }
+    token_types
+}
+
+fn collect_program_class_literal_token_types(
+    program: &Program,
+    facts: &FactSet,
+    token_types: &mut BTreeSet<String>,
+) {
+    for ty in &program.types {
+        collect_type_class_literal_token_types(ty, facts, token_types);
+    }
+}
+
+fn collect_type_class_literal_token_types(
+    ty: &TypeDecl,
+    facts: &FactSet,
+    token_types: &mut BTreeSet<String>,
+) {
+    for member in &ty.members {
+        collect_member_class_literal_token_types(member, facts, token_types);
+    }
+    for block in &ty.static_init_blocks {
+        collect_block_class_literal_token_types(&block.block, facts, token_types);
+    }
+}
+
+fn collect_member_class_literal_token_types(
+    member: &Member,
+    facts: &FactSet,
+    token_types: &mut BTreeSet<String>,
+) {
+    match member {
+        Member::Field(field) => {
+            if let Some(initializer) = &field.initializer {
+                collect_expr_class_literal_token_types(initializer, facts, token_types);
+            }
+        }
+        Member::Method(method) => {
+            if let Some(body) = &method.body {
+                collect_block_class_literal_token_types(body, facts, token_types);
+            }
+        }
+        Member::Constructor(constructor) => {
+            if let Some(body) = &constructor.body {
+                collect_block_class_literal_token_types(body, facts, token_types);
+            }
+        }
+        Member::Type(ty) => collect_type_class_literal_token_types(ty, facts, token_types),
+        Member::Unsupported { .. } => {}
+    }
+}
+
+fn collect_block_class_literal_token_types(
+    block: &Block,
+    facts: &FactSet,
+    token_types: &mut BTreeSet<String>,
+) {
+    for stmt in &block.statements {
+        collect_stmt_class_literal_token_types(stmt, facts, token_types);
+    }
+}
+
+fn collect_stmt_class_literal_token_types(
+    stmt: &Stmt,
+    facts: &FactSet,
+    token_types: &mut BTreeSet<String>,
+) {
+    match stmt {
+        Stmt::Expr(expr)
+        | Stmt::Return(Some(expr))
+        | Stmt::Throw(expr)
+        | Stmt::VarDecl {
+            initializer: Some(expr),
+            ..
+        } => collect_expr_class_literal_token_types(expr, facts, token_types),
+        Stmt::Assign { target, value } => {
+            collect_expr_class_literal_token_types(target, facts, token_types);
+            collect_expr_class_literal_token_types(value, facts, token_types);
+        }
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            collect_expr_class_literal_token_types(condition, facts, token_types);
+            collect_block_class_literal_token_types(then_block, facts, token_types);
+            if let Some(else_block) = else_block {
+                collect_block_class_literal_token_types(else_block, facts, token_types);
+            }
+        }
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
+            collect_expr_class_literal_token_types(condition, facts, token_types);
+            collect_block_class_literal_token_types(body, facts, token_types);
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            for stmt in init {
+                collect_stmt_class_literal_token_types(stmt, facts, token_types);
+            }
+            if let Some(condition) = condition {
+                collect_expr_class_literal_token_types(condition, facts, token_types);
+            }
+            for expr in update {
+                collect_expr_class_literal_token_types(expr, facts, token_types);
+            }
+            collect_block_class_literal_token_types(body, facts, token_types);
+        }
+        Stmt::EnhancedFor { iterable, body, .. } => {
+            collect_expr_class_literal_token_types(iterable, facts, token_types);
+            collect_block_class_literal_token_types(body, facts, token_types);
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            for resource in resources {
+                collect_stmt_class_literal_token_types(resource, facts, token_types);
+            }
+            collect_block_class_literal_token_types(body, facts, token_types);
+            for catch in catches {
+                collect_block_class_literal_token_types(&catch.body, facts, token_types);
+            }
+            if let Some(finally_block) = finally_block {
+                collect_block_class_literal_token_types(finally_block, facts, token_types);
+            }
+        }
+        Stmt::Switch { selector, cases } => {
+            collect_expr_class_literal_token_types(selector, facts, token_types);
+            for case in cases {
+                for label in &case.labels {
+                    if let SwitchLabel::Expr(expr) = label {
+                        collect_expr_class_literal_token_types(expr, facts, token_types);
+                    }
+                }
+                for stmt in &case.statements {
+                    collect_stmt_class_literal_token_types(stmt, facts, token_types);
+                }
+            }
+        }
+        Stmt::ConstructorInvocation { args, .. } => {
+            for arg in args {
+                collect_expr_class_literal_token_types(arg, facts, token_types);
+            }
+        }
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            collect_block_class_literal_token_types(block, facts, token_types);
+        }
+        Stmt::LocalType(ty) => collect_type_class_literal_token_types(ty, facts, token_types),
+        Stmt::VarDecl {
+            initializer: None, ..
+        }
+        | Stmt::Return(None)
+        | Stmt::Break(_)
+        | Stmt::Continue(_)
+        | Stmt::Unsupported(_) => {}
+    }
+}
+
+fn collect_expr_class_literal_token_types(
+    expr: &Expr,
+    facts: &FactSet,
+    token_types: &mut BTreeSet<String>,
+) {
+    match expr {
+        Expr::ClassLiteral(ty) => {
+            let rust_type = class_literal_token_plan(ty, facts).rust_type;
+            token_types.insert(crate::emit::emit_type(&rust_type));
+        }
+        Expr::Call { receiver, args, .. } => {
+            if let Some(receiver) = receiver {
+                collect_expr_class_literal_token_types(receiver, facts, token_types);
+            }
+            for arg in args {
+                collect_expr_class_literal_token_types(arg, facts, token_types);
+            }
+        }
+        Expr::FieldAccess(receiver, _) => {
+            collect_expr_class_literal_token_types(receiver, facts, token_types);
+        }
+        Expr::ArrayAccess(array, index) => {
+            collect_expr_class_literal_token_types(array, facts, token_types);
+            collect_expr_class_literal_token_types(index, facts, token_types);
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            for dimension in dimensions {
+                collect_expr_class_literal_token_types(dimension, facts, token_types);
+            }
+            if let Some(initializer) = initializer {
+                for value in initializer {
+                    collect_expr_class_literal_token_types(value, facts, token_types);
+                }
+            }
+        }
+        Expr::ArrayInitializer(values) => {
+            for value in values {
+                collect_expr_class_literal_token_types(value, facts, token_types);
+            }
+        }
+        Expr::Cast { expr, .. } | Expr::Unary { expr, .. } | Expr::InstanceOf { expr, .. } => {
+            collect_expr_class_literal_token_types(expr, facts, token_types);
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_expr_class_literal_token_types(left, facts, token_types);
+            collect_expr_class_literal_token_types(right, facts, token_types);
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_expr_class_literal_token_types(condition, facts, token_types);
+            collect_expr_class_literal_token_types(then_expr, facts, token_types);
+            collect_expr_class_literal_token_types(else_expr, facts, token_types);
+        }
+        Expr::Switch { selector, cases } => {
+            collect_expr_class_literal_token_types(selector, facts, token_types);
+            for case in cases {
+                for label in &case.labels {
+                    if let SwitchLabel::Expr(expr) = label {
+                        collect_expr_class_literal_token_types(expr, facts, token_types);
+                    }
+                }
+                collect_expr_class_literal_token_types(&case.value, facts, token_types);
+            }
+        }
+        Expr::Lambda { body, .. } => match body {
+            LambdaBody::Expr(expr) => {
+                collect_expr_class_literal_token_types(expr, facts, token_types);
+            }
+            LambdaBody::Block(block) => {
+                collect_block_class_literal_token_types(block, facts, token_types);
+            }
+        },
+        Expr::New { args, body, .. } => {
+            for arg in args {
+                collect_expr_class_literal_token_types(arg, facts, token_types);
+            }
+            if let Some(body) = body {
+                for member in body {
+                    collect_member_class_literal_token_types(member, facts, token_types);
+                }
+            }
+        }
+        Expr::MethodReference { .. }
+        | Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => {}
+    }
+}
+
 fn platform_erased_object_to_string_downcasts(programs: &[&Program]) -> String {
     let mut arms = BTreeSet::new();
     for platform_type in PLATFORM_ERASED_DISPLAY_TYPES {
@@ -8012,6 +8381,8 @@ const PLATFORM_ERASED_DISPLAY_TYPES: &[&str] = &[
     "AtomicBoolean",
     "AtomicInteger",
     "AtomicLong",
+    "BitSet",
+    "Locale",
     "Path",
     "Pattern",
     "Random",
@@ -8027,7 +8398,7 @@ fn program_mentions_platform_erased_display_type(program: &Program, platform_typ
             || platform_erased_display_supporting_type_mentions(program, platform_type))
 }
 
-fn platform_type_has_erased_display_support(platform_type: &str) -> bool {
+pub(crate) fn platform_type_has_erased_display_support(platform_type: &str) -> bool {
     PLATFORM_ERASED_DISPLAY_TYPES.contains(&platform_type)
 }
 
@@ -8067,41 +8438,35 @@ fn external_erased_object_to_string_downcasts(programs: &[&Program], facts: &Fac
         let Some(external_type) = fact.receiver_type.as_deref() else {
             continue;
         };
-        let rust_name = rust_name_for_java_named_type(external_type);
-        if !programs.iter().any(|program| {
-            program_mentions_external_display_type(program, external_type, &rust_name)
-        }) {
-            continue;
+        for rust_name in external_display_downcast_rust_names(programs, external_type) {
+            arms.insert(format!(
+                "    if let Some(value) = value.downcast_ref::<{rust_name}>() {{\n        return value.to_string();\n    }}\n    if let Some(value) = value.downcast_ref::<&{rust_name}>() {{\n        return (*value).to_string();\n    }}\n    if let Some(value) = value.downcast_ref::<std::rc::Rc<{rust_name}>>() {{\n        return value.to_string();\n    }}\n    if let Some(value) = value.downcast_ref::<std::sync::Arc<{rust_name}>>() {{\n        return value.to_string();\n    }}"
+            ));
         }
-        arms.insert(format!(
-            "    if let Some(value) = value.downcast_ref::<{rust_name}>() {{\n        return value.to_string();\n    }}\n    if let Some(value) = value.downcast_ref::<&{rust_name}>() {{\n        return (*value).to_string();\n    }}\n    if let Some(value) = value.downcast_ref::<std::rc::Rc<{rust_name}>>() {{\n        return value.to_string();\n    }}\n    if let Some(value) = value.downcast_ref::<std::sync::Arc<{rust_name}>>() {{\n        return value.to_string();\n    }}"
-        ));
     }
     arms.into_iter().collect::<Vec<_>>().join("\n")
 }
 
-fn program_mentions_external_display_type(
-    program: &Program,
+fn external_display_downcast_rust_names(
+    programs: &[&Program],
     external_type: &str,
-    rust_name: &str,
-) -> bool {
-    if program_mentions_java_type(program, external_type)
-        || program_mentions_java_type(program, rust_name)
-    {
-        return true;
+) -> BTreeSet<String> {
+    let rust_name = rust_name_for_java_named_type(external_type);
+    let mut names = BTreeSet::new();
+    for program in programs {
+        if program_mentions_java_type(program, external_type)
+            || program_mentions_java_type(program, &rust_name)
+        {
+            names.insert(rust_name.clone());
+        }
+        let Some((_package, _simple_name)) = external_type.rsplit_once('.') else {
+            if program_mentions_java_type(program, external_type) {
+                names.insert(rust_name.clone());
+            }
+            continue;
+        };
     }
-    let Some((package, simple_name)) = external_type.rsplit_once('.') else {
-        return program_mentions_java_type(program, external_type);
-    };
-    if !program_mentions_java_type(program, simple_name) {
-        return false;
-    }
-    program.package.as_deref() == Some(package)
-        || program.imports.iter().any(|import| {
-            !import.is_static
-                && ((import.path == external_type && !import.is_wildcard)
-                    || (import.path == package && import.is_wildcard))
-        })
+    names
 }
 
 fn program_mentions_java_type(program: &Program, target_simple_name: &str) -> bool {
@@ -9418,6 +9783,7 @@ pub fn external_api_facade_support_items_with_local_type_program(
         facts,
         &used_constructors,
         &local_types,
+        &emitted_local_types,
         &source_summary_types,
         source_summary_type_program,
     );
@@ -11438,6 +11804,7 @@ impl ExternalApiFacadeSupport {
         facts: &FactSet,
         used_constructors: &BTreeMap<String, BTreeSet<usize>>,
         local_types: &BTreeSet<String>,
+        emitted_local_types: &BTreeSet<String>,
         source_summary_types: &BTreeSet<String>,
         source_summary_program: &Program,
     ) {
@@ -11453,9 +11820,11 @@ impl ExternalApiFacadeSupport {
             }
             let type_key = canonical_external_receiver_type_key(type_name);
             let type_simple = type_key.rsplit('.').next().unwrap_or(type_key.as_str());
-            let source_is_read = source_summary_types.contains(&type_key)
+            let source_summary_is_read = source_summary_types.contains(&type_key)
                 || source_summary_types.contains(type_simple);
-            if local_types.contains(&type_key) && !source_is_read {
+            if (local_types.contains(&type_key) || emitted_local_types.contains(&type_key))
+                && !source_summary_is_read
+            {
                 continue;
             }
             let owner = rust_name_for_java_named_type(&type_key);
@@ -11476,13 +11845,20 @@ impl ExternalApiFacadeSupport {
             for arg_count in arities {
                 let rust_name = external_facade_constructor_name(*arg_count, overload_by_arity);
                 self.add_external_constructor_argument_types(facts, &type_key, *arg_count);
-                if source_is_read {
-                    for method_body in source_summary_constructor_methods(
+                if source_summary_is_read {
+                    let method_bodies = source_summary_constructor_methods(
                         source_summary_program,
                         &type_key,
                         &rust_name,
                         *arg_count,
-                    ) {
+                    );
+                    if method_bodies.is_empty() && *arg_count == 0 {
+                        self.add_method(
+                            owner.clone(),
+                            external_facade_constructor_method(&rust_name, *arg_count),
+                        );
+                    }
+                    for method_body in method_bodies {
                         self.add_method(owner.clone(), method_body);
                     }
                     continue;
@@ -12749,6 +13125,7 @@ impl ExternalApiFacadeSupport {
             .get("submit")
             .is_some_and(|arities| arities.contains(&1))
             && !local_types.contains("ExecutorService")
+            && !local_types.contains("Future")
         {
             self.add_opaque_type("ExecutorService".to_string());
             self.add_opaque_type("Future".to_string());
@@ -14379,6 +14756,9 @@ impl ExternalApiFacadeSupport {
                 lines.push(format!(
                     "#[derive(Clone, Debug)]\npub struct {ty} {{\n{field_lines}\n}}\n\nimpl Default for {ty} {{\n    fn default() -> Self {{ panic!(\"external facade placeholder {ty} has no default value\") }}\n}}"
                 ));
+            } else if ty == "Locale" {
+                lines.push(java_locale_facade_type_item());
+                lines.push(java_locale_static_constants_impl());
             } else if external_facade_type_is_generic_carrier(&ty) {
                 lines.push(external_facade_generic_carrier_struct(&ty));
             } else {
@@ -14563,11 +14943,43 @@ fn erased_object_method_return_type_for_name(name: &str, return_type: &str) -> S
 fn is_known_value_object_static_constant(receiver_key: &str, field_name: &str) -> bool {
     let receiver = receiver_key.rsplit('.').next().unwrap_or(receiver_key);
     let field = canonical_external_field_name(field_name);
-    matches!((receiver, field.as_str()), ("BigInteger", "ZERO" | "ONE"))
+    matches!(
+        (receiver, field.as_str()),
+        ("BigInteger", "ZERO" | "ONE") | ("Locale", "ENGLISH" | "US")
+    )
 }
 
 fn java_logging_level_constants_impl() -> String {
     "impl Level {\n    pub const SEVERE: Level = Level;\n    pub const WARNING: Level = Level;\n    pub const INFO: Level = Level;\n    pub const DEBUG: Level = Level;\n    pub const ERROR: Level = Level;\n}"
+        .to_string()
+}
+
+fn java_locale_facade_type_item() -> String {
+    r#"#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Locale {
+    value: &'static str,
+}
+
+impl Locale {
+    pub const fn new(value: &'static str) -> Locale {
+        Locale { value }
+    }
+
+    pub fn to_string(&self) -> String {
+        self.value.to_string()
+    }
+}
+
+impl std::fmt::Display for Locale {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.value)
+    }
+}"#
+    .to_string()
+}
+
+fn java_locale_static_constants_impl() -> String {
+    "impl Locale {\n    pub const ENGLISH: Locale = Locale::new(\"en\");\n    pub const US: Locale = Locale::new(\"en_US\");\n}"
         .to_string()
 }
 
@@ -17563,6 +17975,17 @@ fn external_facade_static_method_with_facts(
     return_type: &str,
 ) -> String {
     let escaped_rust_method = rust_method_ident_for_arity(rust_method, arg_count);
+    let receiver_simple = receiver_key.rsplit('.').next().unwrap_or(receiver_key);
+    if matches!(receiver_simple, "Pattern" | "JavaUtilRegexPattern")
+        && java_method == "compile"
+        && rust_method == "compile"
+        && arg_count == 1
+        && return_type == "Pattern"
+    {
+        return format!(
+            "    pub fn {escaped_rust_method}<T0: AsRef<str>>(_arg0: T0) -> Pattern {{ Pattern::compile(_arg0) }}"
+        );
+    }
     if return_type == "String"
         && arg_count == 1
         && matches!(rust_method, "to_string" | "toString")
@@ -17619,6 +18042,18 @@ fn external_facade_unmodelled_method_with_facts(
         )
     };
     let receiver = canonical_external_receiver_type_key(receiver_key);
+    if !is_static
+        && arg_count == 0
+        && return_type == "String"
+        && matches!(java_method, "toString" | "to_string")
+        && platform_type_has_erased_display_support(
+            receiver.rsplit('.').next().unwrap_or(&receiver),
+        )
+    {
+        return format!(
+            "    pub fn {escaped_rust_method}{args} -> String {{ format!(\"{{}}\", self) }}"
+        );
+    }
     format!(
         "    pub fn {escaped_rust_method}{args} -> {return_type} {{ unimplemented!(\"{receiver}.{java_method} is not modelled\") }}"
     )
@@ -17848,12 +18283,6 @@ fn display_capable_external_facade_types(facts: &FactSet) -> BTreeSet<String> {
         let canonical = canonical_external_receiver_type_key(receiver_type);
         types.insert(receiver_type.to_string());
         types.insert(rust_name_for_java_named_type(receiver_type));
-        if !receiver_type.contains('.')
-            && let Some(simple) = receiver_type.rsplit('.').next()
-        {
-            types.insert(simple.to_string());
-            types.insert(rust_name_for_java_named_type(simple));
-        }
         types.insert(canonical.clone());
         types.insert(rust_name_for_java_named_type(&canonical));
     }
@@ -17873,6 +18302,7 @@ fn external_api_effect_is_display_to_string_fact(fact: &ExternalApiEffectFact) -
     matches!(fact.method_name.as_str(), "toString" | "to_string")
         && fact.arg_count == Some(0)
         && matches!(fact.return_type, Some(JavaType::String))
+        && fact.return_nullability == NullabilityState::DefinitelyNonNull
 }
 
 fn external_display_receiver_name_matches(fact_receiver: &str, receiver_type: &str) -> bool {
@@ -17881,28 +18311,27 @@ fn external_display_receiver_name_matches(fact_receiver: &str, receiver_type: &s
         || receiver_type == rust_name_for_java_named_type(fact_receiver)
         || receiver_type == canonical
         || receiver_type == rust_name_for_java_named_type(&canonical)
-        || (!fact_receiver.contains('.')
-            && fact_receiver.rsplit('.').next().is_some_and(|simple| {
-                receiver_type == simple || receiver_type == rust_name_for_java_named_type(simple)
-            }))
 }
 
 fn external_facade_display_impl(ty: &str, use_to_string_method: bool) -> String {
-    let body = if use_to_string_method {
-        "write!(f, \"{}\", self.to_string())".to_string()
+    let (formatter_arg, body) = if use_to_string_method {
+        ("f", "write!(f, \"{}\", self.to_string())".to_string())
     } else if let Some(display_name) = java_platform_object_display_name(ty) {
-        format!("write!(f, \"{display_name}@0\")")
+        ("f", format!("write!(f, \"{display_name}@0\")"))
     } else {
-        format!("panic!(\"unsupported Java external facade display: {ty}\")")
+        (
+            "_f",
+            format!("panic!(\"unsupported Java external facade display: {ty}\")"),
+        )
     };
     if let Some(carrier) = external_facade_generic_carrier(ty) {
         let generics = carrier.impl_params;
         return format!(
-            "impl<{generics}> std::fmt::Display for {ty}<{generics}> {{\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{ {body} }}\n}}"
+            "impl<{generics}> std::fmt::Display for {ty}<{generics}> {{\n    fn fmt(&self, {formatter_arg}: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{ {body} }}\n}}"
         );
     }
     format!(
-        "impl std::fmt::Display for {ty} {{\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{ {body} }}\n}}"
+        "impl std::fmt::Display for {ty} {{\n    fn fmt(&self, {formatter_arg}: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{ {body} }}\n}}"
     )
 }
 
@@ -20038,6 +20467,7 @@ pub fn external_static_string_constant_support_items_with_context_programs_and_d
         .filter(|name| !source_summary_types.contains(name))
         .collect::<BTreeSet<_>>();
     let local_static_string_values = static_string_constant_values_for_program(local_type_program);
+    let used_constructors = collect_program_constructor_arities(program);
     let mut constants_by_owner: BTreeMap<String, BTreeMap<String, StaticConstantFact>> =
         BTreeMap::new();
     collect_external_static_string_constants_program(
@@ -20050,6 +20480,11 @@ pub fn external_static_string_constant_support_items_with_context_programs_and_d
     let mut support_items = Vec::new();
     let mut support_type_names = BTreeSet::new();
     let mut emitted_alias_names = BTreeSet::new();
+    let ambiguous_alias_owners = ambiguous_static_constant_alias_owners(
+        constants_by_owner
+            .iter()
+            .map(|(owner, fields)| (owner.as_str(), fields.values())),
+    );
     for (owner, fields) in constants_by_owner {
         if mapped_types.contains(&owner) {
             continue;
@@ -20066,6 +20501,8 @@ pub fn external_static_string_constant_support_items_with_context_programs_and_d
             fields,
             &local_static_string_values,
             declared_owners,
+            &ambiguous_alias_owners,
+            &used_constructors,
             &mut emitted_alias_names,
         ) {
             support_items.push(item);
@@ -20088,6 +20525,34 @@ pub fn external_static_string_constant_support_items_with_context_programs_and_d
         ));
     }
     support_items
+}
+
+fn ambiguous_static_constant_alias_owners<'a, I>(owner_fields: I) -> BTreeSet<String>
+where
+    I: IntoIterator<
+        Item = (
+            &'a str,
+            std::collections::btree_map::Values<'a, String, StaticConstantFact>,
+        ),
+    >,
+{
+    let mut owners_by_alias = BTreeMap::<String, BTreeSet<String>>::new();
+    for (owner, fields) in owner_fields {
+        for alias in fields
+            .filter_map(|constant| constant.alias_owner.as_deref())
+            .filter(|alias| *alias != owner && valid_rust_type_ident(alias))
+            .filter(|alias| !is_awt_platform_facade_rust_ident(alias))
+        {
+            owners_by_alias
+                .entry(alias.to_string())
+                .or_default()
+                .insert(owner.to_string());
+        }
+    }
+    owners_by_alias
+        .into_iter()
+        .filter_map(|(alias, owners)| (owners.len() > 1).then_some(alias))
+        .collect()
 }
 
 fn collect_static_constant_field_support_types<'a>(
@@ -20972,6 +21437,8 @@ fn external_static_string_constant_support_item(
     fields: BTreeMap<String, StaticConstantFact>,
     local_static_string_values: &BTreeMap<(String, String), String>,
     declared_owners: &BTreeSet<String>,
+    ambiguous_alias_owners: &BTreeSet<String>,
+    used_constructors: &BTreeMap<String, BTreeSet<usize>>,
     emitted_alias_names: &mut BTreeSet<String>,
 ) -> Option<crate::rust_ir::RustItem> {
     if is_awt_platform_facade_rust_ident(owner) {
@@ -20982,9 +21449,16 @@ fn external_static_string_constant_support_item(
         .filter_map(|constant| constant.alias_owner.as_deref())
         .filter(|alias| *alias != owner && valid_rust_type_ident(alias))
         .filter(|alias| !is_awt_platform_facade_rust_ident(alias))
+        .filter(|alias| !ambiguous_alias_owners.contains(*alias))
         .map(str::to_string)
         .collect::<BTreeSet<_>>();
-    let consts = static_constant_impl_lines(owner, &fields, local_static_string_values);
+    let consts = static_constant_impl_lines(
+        owner,
+        &fields,
+        local_static_string_values,
+        declared_owners,
+        used_constructors,
+    );
     if consts.is_empty() {
         return None;
     }
@@ -21005,7 +21479,13 @@ fn external_static_string_constant_support_item(
         .iter()
         .filter(|alias| declared_owners.contains(*alias))
         .filter_map(|alias| {
-            let consts = static_constant_impl_lines(alias, &fields, local_static_string_values);
+            let consts = static_constant_impl_lines(
+                alias,
+                &fields,
+                local_static_string_values,
+                declared_owners,
+                used_constructors,
+            );
             (!consts.is_empty()).then(|| format!("impl {alias} {{\n{}\n}}", consts.join("\n")))
         })
         .collect::<Vec<_>>()
@@ -21019,8 +21499,11 @@ fn external_static_string_constant_support_item(
             .collect::<Vec<_>>()
             .join("\n\n")
     } else {
-        let owner_block =
-            format!("#[derive(Clone, Debug, Default)]\npub struct {owner};\n\n{impl_block}");
+        let owner_block = if owner == "Locale" {
+            format!("{}\n\n{impl_block}", java_locale_facade_type_item())
+        } else {
+            format!("#[derive(Clone, Debug, Default)]\npub struct {owner};\n\n{impl_block}")
+        };
         [owner_block, aliases, alias_impls, external_trait_impls]
             .into_iter()
             .filter(|part| !part.is_empty())
@@ -21082,15 +21565,24 @@ fn static_constant_impl_lines(
     owner: &str,
     fields: &BTreeMap<String, StaticConstantFact>,
     local_static_string_values: &BTreeMap<(String, String), String>,
+    declared_owners: &BTreeSet<String>,
+    used_constructors: &BTreeMap<String, BTreeSet<usize>>,
 ) -> Vec<String> {
     if canonical_external_receiver_type_key(owner) == "Level" {
         return Vec::new();
     }
-    fields
+    let mut lines = fields
         .iter()
         .filter(|(field, _)| valid_rust_const_ident(field))
         .filter_map(|(field, constant)| {
             if constant.field_kind == ExternalFieldKind::NestedType {
+                return None;
+            }
+            if declared_owners.contains(owner)
+                && !is_known_value_object_static_constant(owner, field)
+                && constant.provenance != FactProvenance::BuiltinExternalModel
+                && static_constant_surface_already_emits_self_typed_value(owner, field, constant)
+            {
                 return None;
             }
             let (rust_type, value) = if constant.field_kind == ExternalFieldKind::EnumVariant {
@@ -21117,7 +21609,24 @@ fn static_constant_impl_lines(
             }
             Some(lines.join("\n"))
         })
-        .collect()
+        .collect::<Vec<_>>();
+    if used_constructors
+        .get(owner)
+        .is_some_and(|arities| arities.contains(&0))
+    {
+        lines.push("    pub fn new() -> Self { Default::default() }".to_string());
+    }
+    lines
+}
+
+fn static_constant_surface_already_emits_self_typed_value(
+    owner: &str,
+    field: &str,
+    constant: &StaticConstantFact,
+) -> bool {
+    constant.field_kind == ExternalFieldKind::StaticFinal
+        && constant.field_value.is_none()
+        && is_self_typed_external_enum_constant_field(owner, field, &constant.field_type)
 }
 
 fn static_constant_rust_type(java_ty: &JavaType) -> Option<String> {
@@ -21267,7 +21776,8 @@ fn known_jdk_static_constant_value(owner: &str, field: &str) -> Option<&'static 
         ("Double", "NEGATIVE_INFINITY") => Some("f64::NEG_INFINITY"),
         ("Math", "PI") => Some("std::f64::consts::PI"),
         ("Math", "E") => Some("std::f64::consts::E"),
-        ("Locale" | "JavaUtilLocale", "ENGLISH" | "US") => Some("Locale"),
+        ("Locale" | "JavaUtilLocale", "ENGLISH") => Some("Locale::new(\"en\")"),
+        ("Locale" | "JavaUtilLocale", "US") => Some("Locale::new(\"en_US\")"),
         ("System", "OUT" | "ERR") => Some("PrintStream"),
         ("System", "IN") => Some("InputStream"),
         ("GZIPInputStream" | "JavaUtilZipGZIPInputStream", "GZIP_MAGIC") => Some("0x8b1f"),
@@ -21881,6 +22391,7 @@ pub fn is_java_platform_facade_type_name(name: &str) -> bool {
         "Path"
             | "URI"
             | "File"
+            | "Locale"
             | "URL"
             | "URLConnection"
             | "JarURLConnection"
@@ -21918,10 +22429,15 @@ pub fn is_java_platform_facade_type_name(name: &str) -> bool {
 }
 
 pub fn program_uses_java_class_tokens(program: &Program) -> bool {
-    program
-        .types
-        .iter()
-        .any(|ty| ty.members.iter().any(member_uses_java_class_tokens))
+    program.types.iter().any(type_uses_java_class_tokens)
+}
+
+fn type_uses_java_class_tokens(ty: &TypeDecl) -> bool {
+    ty.members.iter().any(member_uses_java_class_tokens)
+        || ty
+            .static_init_blocks
+            .iter()
+            .any(|block| block_uses_java_class_tokens(&block.block))
 }
 
 pub fn program_uses_java_string_runtime_helpers(program: &Program) -> bool {
@@ -22777,29 +23293,40 @@ fn expr_uses_java_string_runtime_helpers(expr: &Expr) -> bool {
                     | ("equalsIgnoreCase", 1)
                     | ("equals_ignore_case", 1)
                     | ("matches", 1)
-            ) || matches!(
-                (receiver.as_deref(), name.as_str(), args.len()),
-                (Some(Expr::Var(owner)), "floorDiv" | "floor_div" | "floorMod" | "floor_mod", 2)
-                    if canonical_owner_is_native_math_alias(owner)
-            ) || matches!(
-                (receiver.as_deref(), name.as_str(), args.len()),
-                (Some(Expr::Var(owner)), "equals", 2 | 6)
-                    | (Some(Expr::Var(owner)), "deepEquals" | "deep_equals", 2)
-                    | (Some(Expr::Var(owner)), "hashCode" | "hash_code", 1)
-                    | (Some(Expr::Var(owner)), "deepHashCode" | "deep_hash_code", 1)
-                    | (Some(Expr::Var(owner)), "deepToString" | "deep_to_string", 1)
-                    | (Some(Expr::Var(owner)), "compare", 2 | 6)
-                    | (Some(Expr::Var(owner)), "mismatch", 2 | 6)
-                    if canonical_external_receiver_type_key(owner) == "Arrays"
-            ) || matches!(
-                (receiver.as_deref(), name.as_str(), args.len()),
-                (Some(Expr::Var(owner)), "round" | "abs", 1)
-                    if canonical_owner_is_native_math_alias(owner)
-            ) || matches!(
-                (receiver.as_deref(), name.as_str(), args.len()),
-                (Some(Expr::Var(owner)), "max" | "min", 2)
-                    if canonical_owner_is_native_math_alias(owner)
-            );
+            ) || (name == "join"
+                && args.len() >= 2
+                && receiver.as_deref().is_some_and(|receiver| {
+                    matches!(
+                        receiver,
+                        Expr::Var(owner) if canonical_external_receiver_type_key(owner) == "String"
+                    )
+                }))
+                || matches!(
+                    (receiver.as_deref(), name.as_str(), args.len()),
+                    (Some(Expr::Var(owner)), "floorDiv" | "floor_div" | "floorMod" | "floor_mod", 2)
+                        if canonical_owner_is_native_math_alias(owner)
+                )
+                || matches!(
+                    (receiver.as_deref(), name.as_str(), args.len()),
+                    (Some(Expr::Var(owner)), "equals", 2 | 6)
+                        | (Some(Expr::Var(owner)), "deepEquals" | "deep_equals", 2)
+                        | (Some(Expr::Var(owner)), "hashCode" | "hash_code", 1)
+                        | (Some(Expr::Var(owner)), "deepHashCode" | "deep_hash_code", 1)
+                        | (Some(Expr::Var(owner)), "deepToString" | "deep_to_string", 1)
+                        | (Some(Expr::Var(owner)), "compare", 2 | 6)
+                        | (Some(Expr::Var(owner)), "mismatch", 2 | 6)
+                        if canonical_external_receiver_type_key(owner) == "Arrays"
+                )
+                || matches!(
+                    (receiver.as_deref(), name.as_str(), args.len()),
+                    (Some(Expr::Var(owner)), "round" | "abs", 1)
+                        if canonical_owner_is_native_math_alias(owner)
+                )
+                || matches!(
+                    (receiver.as_deref(), name.as_str(), args.len()),
+                    (Some(Expr::Var(owner)), "max" | "min", 2)
+                        if canonical_owner_is_native_math_alias(owner)
+                );
             uses_runtime_helper
                 || receiver
                     .as_deref()
@@ -23066,7 +23593,7 @@ fn member_uses_java_class_tokens(member: &crate::java_ir::Member) -> bool {
             .body
             .as_ref()
             .is_some_and(block_uses_java_class_tokens),
-        crate::java_ir::Member::Type(ty) => ty.members.iter().any(member_uses_java_class_tokens),
+        crate::java_ir::Member::Type(ty) => type_uses_java_class_tokens(ty),
         crate::java_ir::Member::Unsupported { .. } => false,
     }
 }
@@ -24945,7 +25472,8 @@ mod functional_interface_shape_tests {
     use super::{
         FunctionalTypeSource::{Primitive, TypeArgument},
         external_type_has_display_to_string_capability, functional_interface_shape,
-        is_known_functional_interface, platform_type_has_erased_display_support,
+        is_java_platform_facade_type_name, is_known_functional_interface,
+        platform_type_has_erased_display_support,
     };
     use crate::java_ir::PrimitiveType;
 
@@ -25293,6 +25821,21 @@ mod functional_interface_shape_tests {
         assert!(platform_type_has_erased_display_support("AtomicBoolean"));
         assert!(platform_type_has_erased_display_support("AtomicInteger"));
         assert!(platform_type_has_erased_display_support("AtomicLong"));
+        assert!(platform_type_has_erased_display_support("BitSet"));
+        assert!(platform_type_has_erased_display_support("Locale"));
+        assert!(platform_type_has_erased_display_support("Path"));
+        assert!(platform_type_has_erased_display_support("Pattern"));
+        assert!(platform_type_has_erased_display_support("Random"));
+        assert!(platform_type_has_erased_display_support("StringBuilder"));
+        assert!(platform_type_has_erased_display_support("StringBuffer"));
+        assert!(platform_type_has_erased_display_support("URI"));
+        assert!(platform_type_has_erased_display_support("URL"));
         assert!(!platform_type_has_erased_display_support("UnknownExternal"));
+    }
+
+    #[test]
+    fn modeled_locale_is_a_platform_facade_type() {
+        assert!(is_java_platform_facade_type_name("Locale"));
+        assert!(is_java_platform_facade_type_name("java.util.Locale"));
     }
 }

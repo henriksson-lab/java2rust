@@ -436,7 +436,7 @@ pub fn contains_wildcard_type(java_ty: &JavaType) -> bool {
     }
 }
 
-pub fn is_raw_generic_counterpart(actual: &JavaType, target: &JavaType) -> bool {
+pub(crate) fn is_raw_generic_counterpart(actual: &JavaType, target: &JavaType) -> bool {
     match (actual, target) {
         (
             JavaType::Named {
@@ -456,14 +456,14 @@ pub fn is_raw_generic_counterpart(actual: &JavaType, target: &JavaType) -> bool 
     }
 }
 
-pub fn raw_rust_generic_args<'a>(raw: &'a str, head: &str) -> Option<Vec<&'a str>> {
+pub(crate) fn raw_rust_generic_args<'a>(raw: &'a str, head: &str) -> Option<Vec<&'a str>> {
     let raw = raw.trim();
     let rest = raw.strip_prefix(head)?.strip_prefix('<')?;
     let inner = rest.strip_suffix('>')?;
     Some(split_top_level_rust_type_args(inner))
 }
 
-pub fn raw_generic_type_head(raw: &str) -> Option<&str> {
+pub(crate) fn raw_generic_type_head(raw: &str) -> Option<&str> {
     let raw = raw.trim();
     let (head, rest) = raw.split_once('<')?;
     rest.ends_with('>').then_some(head.trim())
@@ -500,7 +500,7 @@ pub fn raw_rust_option_inner(raw: &str) -> Option<&str> {
         })
 }
 
-pub fn raw_rust_vec_inner(raw: &str) -> Option<&str> {
+pub(crate) fn raw_rust_vec_inner(raw: &str) -> Option<&str> {
     raw_rust_generic_args(raw, "Vec")
         .or_else(|| raw_rust_generic_args(raw, "std::vec::Vec"))
         .and_then(|args| {
@@ -512,7 +512,7 @@ pub fn raw_rust_vec_inner(raw: &str) -> Option<&str> {
         })
 }
 
-pub fn raw_rust_box_dyn_trait(raw: &str) -> Option<&str> {
+pub(crate) fn raw_rust_box_dyn_trait(raw: &str) -> Option<&str> {
     raw_rust_box_arg(raw).and_then(|arg| arg.strip_prefix("dyn ").map(str::trim))
 }
 
@@ -520,7 +520,7 @@ pub fn raw_rust_box_dyn_trait(raw: &str) -> Option<&str> {
 /// [`raw_rust_box_dyn_trait`]. Recursive Java object graphs (`Node next`) lower
 /// to `Option<Box<Node>>`, and a boxed pointee is transparent to most type
 /// properties (`Clone`, `PartialEq`, …), so callers need to see through it.
-pub fn raw_rust_box_sized_inner(raw: &str) -> Option<&str> {
+pub(crate) fn raw_rust_box_sized_inner(raw: &str) -> Option<&str> {
     raw_rust_box_arg(raw).filter(|arg| !arg.starts_with("dyn "))
 }
 
@@ -535,7 +535,7 @@ fn raw_rust_box_arg(raw: &str) -> Option<&str> {
         })
 }
 
-pub fn split_top_level_rust_type_args(args: &str) -> Vec<&str> {
+fn split_top_level_rust_type_args(args: &str) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut start = 0;
     let mut angle_depth = 0usize;
@@ -650,7 +650,7 @@ fn rust_type_string_literal_end_at(raw: &str, idx: usize) -> Option<usize> {
     None
 }
 
-pub fn is_known_raw_generic_type(java_ty: &JavaType) -> bool {
+pub(crate) fn is_known_raw_generic_type(java_ty: &JavaType) -> bool {
     matches!(
         java_ty,
         JavaType::Named { name, args }
@@ -670,7 +670,7 @@ pub fn is_known_raw_generic_type(java_ty: &JavaType) -> bool {
     )
 }
 
-pub fn is_unchecked_generic_counterpart(actual: &JavaType, target: &JavaType) -> bool {
+pub(crate) fn is_unchecked_generic_counterpart(actual: &JavaType, target: &JavaType) -> bool {
     match (actual, target) {
         (
             JavaType::Named {
@@ -979,8 +979,29 @@ mod raw_rust_type_tests {
     #[test]
     fn raw_rust_type_args_ignore_nested_rust_delimiters_and_comments() {
         assert_eq!(
+            raw_generic_type_head("ObjectAssert<Box<dyn Animal>>"),
+            Some("ObjectAssert")
+        );
+        assert_eq!(
             raw_rust_result_args("Result<fn(i32, i32), JavaException>"),
             Some(vec!["fn(i32, i32)", "JavaException"])
+        );
+        assert_eq!(
+            raw_rust_result_args("std::io::Result<String>")
+                .expect("path-qualified Result should be parsed"),
+            vec!["String"]
+        );
+        assert_eq!(
+            raw_rust_option_inner("std::option::Option<&Schema>"),
+            Some("&Schema")
+        );
+        assert_eq!(
+            raw_rust_vec_inner("std::vec::Vec<Box<dyn Animal>>"),
+            Some("Box<dyn Animal>")
+        );
+        assert_eq!(
+            raw_rust_box_dyn_trait("std::boxed::Box<dyn Animal>"),
+            Some("Animal")
         );
         assert_eq!(
             raw_rust_result_args("Result<T /*,*/, JavaException>"),

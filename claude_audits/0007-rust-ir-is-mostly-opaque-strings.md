@@ -16,6 +16,28 @@ Current status 2026-08-29 (Codex audit pass):
   normalization avoids whole-expression rendering, while raw string-view
   recovery is fenced behind
   `recover_raw_optional_constructed_string_view_element`.
+- Follow-up 2026-09-06: the structured `Some(...)` string-view normalizer now
+  also delegates raw element compatibility to
+  `recover_raw_optional_constructed_string_view_element` instead of carrying a
+  second literal-only raw arm. Regression:
+  `coercion::tests::optional_string_view_construction_normalizes_structured_borrow_by_tag`.
+- Follow-up 2026-09-07: the rendered-string heuristic guard now pins the
+  `String.join` delimiter nullability boundary in `lower_string_join_args`.
+  The delimiter's Java required-non-null contract is handled before the generic
+  borrowed string-content slot and uses the structured `NullPointerException`
+  projection in propagating contexts. Regression:
+  `slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`.
+- Follow-up 2026-09-06: the rendered optional unwrap/null-expect detector is
+  now test-only. Production lowering had already moved to
+  `direct_optional_clone_recovery_unwrap_expr` and structured statement
+  recovery, so the remaining rendered detector is retained only as compatibility
+  regression coverage. Guard:
+  `layering::clone_recovery_facts_are_structured_not_comment_syntax`.
+- Follow-up 2026-09-06: the cfg-test clone rendering bridge
+  (`render_audited_clone_recovery` / `render_clone_projection`) is no longer a
+  public API. Production callers use structured `apply_audited_clone_recovery`
+  and `apply_clone_projection`; the rendered bridge remains only for same-module
+  regression assertions.
 - The next useful work is not another bulk `Raw(format!(...))` producer sweep.
   It is deleting or narrowing one named compatibility consumer at a time, with
   each pass proving that parseable legacy raw leaves are recovered at a boundary
@@ -24,6 +46,221 @@ Current status 2026-08-29 (Codex audit pass):
   `render_string_view_argument` are now `#[cfg(test)]`. Production already used
   the structured borrow projection helper, so this removes a rendered-string
   bridge from the production API surface without changing generated output.
+- Follow-up 2026-09-06: the remaining public rendered string-view compatibility
+  shim (`BorrowedStringViewProjection`, `borrowed_string_view_projection`, and
+  `apply_borrowed_string_view_projection_expr`) is now private test-only code.
+  The compatibility regression moved into `coercion.rs`, so integration tests
+  no longer require a production-visible rendered projection API.
+- Follow-up 2026-09-06: mutable-alias raw classification keeps only the
+  production predicate (`expr_is_mutable_alias`) public. The detailed
+  `RenderedMutableAliasProjection` enum and `rendered_mutable_alias_projection`
+  parser are private implementation details with unit coverage; integration
+  tests now exercise the public predicate rather than importing the rendered
+  parser directly.
+- Follow-up 2026-09-06: clone-recovery rendered predicates and same-module
+  render bridges are no longer public APIs. `render_index_to_usize_projection`
+  was deleted after becoming unused; the remaining same-module render helpers,
+  including string-view, parse-receiver, String.join, Java-display, length, and
+  stream render fixtures, are private unit-test compatibility fixtures. The
+  structured projection helpers remain the production/crate boundary.
+- Follow-up 2026-09-07: the remaining structured clone-recovery query/application
+  helpers (`rust_expr_has_*clone_recovery` and `apply_audited_clone_recovery`)
+  are crate-local rather than public crate APIs. `lower.rs` still uses them as
+  structured compatibility boundaries, but external callers cannot depend on
+  clone-recovery marker detection as a stable API.
+- Follow-up 2026-09-06: `rendered_vec_macro_body` is private as well. It remains
+  part of the central rendered-expression recovery implementation, but callers
+  outside `coercion.rs` no longer see the raw `vec![...]` body parser.
+- Follow-up 2026-09-06: `access_lowering::render_bare_name` was removed from
+  the public crate surface. Production callers already use the structured
+  `lower_bare_name`; the emitted-string wrapper now exists only as a same-module
+  unit-test compatibility helper.
+- Follow-up 2026-09-06: `statement_render` enhanced-for and block render
+  helpers are crate-local instead of public crate APIs. The direct structural
+  assertions moved beside the implementation; integration coverage now checks
+  that the helpers remain structured and are not exported as string-rendering
+  API.
+- Follow-up 2026-09-06: `slot_render` policy renderers are crate-local. The
+  public boundary stays on policy construction and structured `RustType`
+  consumers, not external string/type rendering helpers.
+- Follow-up 2026-09-06: `slot_render::storage_placement_type` is private as
+  well. Storage placement rendering is still owned by `slot_render`, but the
+  type wrapper helper is no longer exposed as a standalone public API.
+- Follow-up 2026-09-06: `item_assembly::static_storage_initial_fallback_value`
+  and the `slot_render::java_set_uses_hash_free_carrier*` helpers are
+  crate-local. They remain shared internal decisions, but no longer widen the
+  public API surface around fallback/default rendering.
+- Follow-up 2026-09-06: `slot_render`'s dyn-trait path, shared-handle
+  construction, and storage-placement construction helpers are crate-local, and
+  the two default-policy-to-expression renderers are private implementation
+  details. Public callers still enter through fact-aware default/type policy
+  functions.
+- Follow-up 2026-09-06: item-assembly derive/default/static-field helper
+  visibility was narrowed to the actual call graph. The recursive
+  Rust-type/default probe and static-final predicate are private; cross-module
+  callers keep crate-local entry points only where lowering/constructor planning
+  need them.
+- Follow-up 2026-09-06: raw IR leaf pass-through wrappers are no longer public
+  APIs. `item_assembly::raw_item` and `statement_render::raw_stmt` were
+  deleted; production and integration-test callers now use `RustItem::Raw` /
+  `RustStmt::raw_leaf` directly for raw-fixture values, and a layering guard
+  pins the boundary.
+- Follow-up 2026-09-06: coercion fallback-message constructors are crate-local.
+  The public API still exposes the diagnostic value type, but the four policy
+  renderers for ownership, dispatch, `instanceof`, and borrowed-element
+  recovery are tested inside `coercion.rs` instead of being imported by
+  integration tests.
+- Follow-up 2026-09-06: `optional_or_else_owned_value_projection` is crate-local
+  as well. It remains shared with `call_lowering`, but is no longer exported as
+  public coercion API.
+- Follow-up 2026-09-06: raw-operand recovery is crate-local too.
+  `recover_parseable_raw_operand_projection` remains the shared internal
+  boundary for legacy raw leaves in coercion, array, item, and operator
+  lowering, but it is no longer exported as public API.
+- Follow-up 2026-09-06: representation-lowering raw type-item bridges are
+  fenced as well. The helper used only by representation tests is test-only,
+  and the program-level emission/raw-item bridge consumed by `lower.rs` is
+  crate-local; the exception-aware non-program emission helper is private. The
+  hierarchy carrier and source-class-bound emission hooks consumed by `lower.rs`
+  are crate-local too. Public callers stay on `RepresentationTypeEmission`
+  rather than a raw string projection.
+- Follow-up 2026-09-06: the array-lowering projection helpers for repeated,
+  nested, fallback, ragged array construction, and row-assignment helpers are
+  crate-local too. Borrowed 2D-array temporary selection and default element
+  construction are also crate-local, and the one-dimensional repeat helper that
+  no production path uses is test-only.
+- Follow-up 2026-09-06 baseline hygiene: `type_coercion` no longer relies on a
+  count-only baseline. At that checkpoint, release measurement was `125/3`, and
+  `tests/baselines/failure-names/type_coercion.txt` now records the three
+  remaining optional borrowed-element/raw-compatibility failures by name:
+  `optional_array_carrier_to_required_slice_target_borrows_before_unwrap`,
+  `optional_borrowed_concrete_element_unwraps_to_concrete_facade_target`, and
+  `optional_borrowed_concrete_element_unwraps_to_dyn_trait_target`.
+  Tests still exercise the production paths through the public `array_expr`
+  lowering boundary and pin that they compose structured calls instead of
+  rendered fragments.
+- Follow-up 2026-09-06: those three `type_coercion` rows are fixed. Borrowed
+  optional-element slot adaptation now treats an expression with a recorded
+  target slot shape as already adapted before applying the carrier unwrap. That
+  makes the required-slice, concrete-facade, and dyn-trait optional-element
+  adapters idempotent instead of appending a second `.expect(...)`/view cast.
+  Release `type_coercion` is now `128/0`, and its failure-name baseline is
+  empty apart from comments.
+- Follow-up 2026-09-06: tail-recursive loop rendering is crate-local as well.
+  `lower.rs` still consumes the structured `TailRecursiveLoopRender` plan, but
+  the renderer no longer appears as a public crate API.
+- Follow-up 2026-09-06: the narrow `None`/`Default::default()` raw
+  compatibility parser is private. Cross-module callers now use
+  `recover_none_or_default_value`, keeping the crate boundary semantic rather
+  than named after rendered text.
+- Follow-up 2026-09-06: call and assignment-place recovery follow the same
+  boundary. `lower.rs` imports semantic `recover_call_projection` and
+  `recover_assignment_place_projection`; the rendered parser functions stay
+  private inside `coercion.rs`.
+- Follow-up 2026-09-06: the broad raw-leaf recovery bridge now follows the same
+  rule for cross-module callers. Production `lower.rs`, `slot_render`, and
+  `stream_lowering` call `recover_operator_expr_or_raw_leaf`; the general
+  `recover_expr_or_raw_leaf` wrapper is test-only, and the `rendered_*` parser
+  names are private implementation details in `coercion.rs`.
+- Follow-up 2026-09-06: the same-call shared-borrow snapshot API was renamed
+  from `snapshot_rendered_shared_borrow_argument` to
+  `snapshot_shared_borrow_argument`. Production lowering still accepts legacy
+  raw leaves at that boundary, but the public name now describes the semantic
+  operation rather than the compatibility input format.
+- Follow-up 2026-09-07: `snapshot_shared_borrow_argument` is crate-local. The
+  shared-borrow snapshot boundary is still used by `lower.rs`, but it is no
+  longer exported as public coercion API; same-module tests keep the raw-leaf
+  compatibility coverage.
+- Follow-up 2026-09-07: raw rendered-Rust type parser internals are no longer
+  public API. The CLI-facing Result/Option helpers stay public, while
+  `raw_rust_generic_args`, raw Vec/Box/head helpers, and the top-level argument
+  splitter are crate-local or private with same-module unit coverage. Integration
+  guards now pin the public boundary instead of importing the parser internals.
+- Follow-up 2026-09-07: method-reference projection helpers are no longer public
+  crate APIs. `method_reference_lowering.rs` still uses
+  `unbound_method_reference_projection` and
+  `current_receiver_method_reference_projection` as structured internal
+  composition points, and same-module tests keep the closure rendering coverage,
+  but external callers cannot depend on these compatibility projection helpers.
+  Guard: `slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`.
+- Follow-up 2026-09-07: static-storage, external-crate path, associated-const,
+  and `Class.forName` projection helpers are crate-local too. Production modules
+  still share the structured builders, but they are no longer public crate APIs;
+  the 0007 guard now pins the crate-local boundary while continuing to reject
+  raw formatted static storage and JavaClass path construction.
+- Follow-up 2026-09-07: `instanceof` and erased-object borrowed/exact-type/
+  downcast method-token projections are crate-local. `conversion_lowering`,
+  `lower.rs`, and `coercion.rs` still share the structured runtime-check and
+  turbofish method builders, but external tests no longer pin them as public
+  coercion API.
+- Follow-up 2026-09-07: dyn-trait borrow casting and facade method-name
+  extraction are crate-local too. Call lowering and coercion still share the
+  builders, but the public crate surface no longer exposes these
+  expression/string projection helpers directly.
+- Follow-up 2026-09-07: generic Rust type builders in `slot_render` are
+  crate-local. Lowering, item assembly, exception lowering, and slot rendering
+  still share `rust_generic_type` / `rust_boxed_dyn_trait_type`, but callers
+  outside the crate no longer get these low-level type-construction helpers as
+  public rendering API.
+- Follow-up 2026-09-07: `item_assembly::delegating_constructor_return_body` is
+  crate-local. The direct assertion moved beside the implementation, and the
+  integration guard now pins visibility instead of importing a constructor-body
+  projection helper as public API.
+- Follow-up 2026-09-07: item-assembly struct/impl/constructor/method shell
+  convenience wrappers are no longer public APIs; wrappers used only by direct
+  assertions are test-only, while the production support-context/default/body
+  builders used by `lower.rs` remain crate-local. Direct shell assertions moved
+  into `item_assembly.rs`; the integration test keeps only source-boundary and
+  generated-output checks.
+- Follow-up 2026-09-07: optional assignment adaptation in
+  `conversion_lowering` is crate-local. `lower.rs` still uses the central
+  adapter, while the direct `None`/fresh-construction wrapping regression moved
+  into `conversion_lowering.rs`.
+- Follow-up 2026-09-07: optional construction and reused-unwrap application
+  helpers in `conversion_lowering` are crate-local. `lower.rs` still composes
+  optional wrapping through that module, but these wrapper/application entry
+  points are no longer public crate APIs.
+- Follow-up 2026-09-07: optional receiver slot projection application in
+  `conversion_lowering` is crate-local too. `lower.rs` still routes optional
+  receiver adaptation through the centralized helper, but the projection
+  applicator is no longer exported publicly.
+- Follow-up 2026-09-07: optional receiver projection helpers are crate-local.
+  `access_lowering`, `conversion_lowering`, and `lower.rs` still share the
+  structured null-check projection, but direct shape/render assertions moved
+  into `coercion.rs`; the integration guard now checks the crate-local boundary.
+- Follow-up 2026-09-07: `types::is_known_raw_generic_type` is crate-local. The
+  raw-generic predicate remains available to `effective_facts` for the internal
+  `instanceof` compatibility policy, but it is no longer exposed as a public
+  type helper. Guard: `layering::raw_ir_leaf_wrappers_are_not_public_api`.
+- Follow-up 2026-09-07: the raw/unchecked generic counterpart predicates are
+  crate-local too. They remain internal inputs to `EffectiveFacts` cast
+  capability policy, while public callers stay on the higher-level conversion
+  plan APIs. Guard: `layering::coercion_plan_owns_borrowed_element_recovery_fallback_policy`.
+- Follow-up 2026-09-07: optional-element borrow carrier projection is
+  crate-local too. `conversion_lowering` and `lower.rs` still compose the
+  structured `as_ref`/`as_mut` carrier projection internally, while the direct
+  shape/idempotence assertion now lives beside the implementation.
+- Follow-up 2026-09-07: optional `Some(...)` unwrap/construction predicates are
+  crate-local. `conversion_lowering` and `lower.rs` still use them for optional
+  compatibility decisions, but the raw-recovery fixtures moved beside the
+  parser/predicate implementation instead of requiring public coercion APIs.
+- Follow-up 2026-09-07: borrowed-method receiver parenthesizing is crate-local.
+  `lower.rs` still uses the structured borrow/cast grouping helper, but the
+  direct raw-recovery assertions moved into `coercion.rs`.
+- Follow-up 2026-09-07: reused-clone normalization for borrowed arguments is
+  crate-local. The compatibility logic remains available to `lower.rs`, and its
+  shape/idempotence assertions moved beside the coercion implementation.
+- Follow-up 2026-09-07: optional sequence receiver projection is crate-local.
+  It remains an internal bridge from sequence-specific receiver plans to the
+  central optional receiver projection, but it is no longer exported as public
+  coercion API.
+- Follow-up 2026-09-07: borrowed sequence extend-argument projection is
+  crate-local. The structured `iter`/`map`/`cloned` composition remains shared
+  with `lower.rs`, but the direct assertions already live in `coercion.rs`.
+- Follow-up 2026-09-07: downcast-expect and optional-erased-string rewrite
+  entry points are crate-local. They still provide shared structured traversal
+  for `lower.rs`, but callers outside the crate no longer see these raw-recovery
+  rewrite helpers as public API.
 - Follow-up in this pass: direct `Coercion::AsSlice` application now respects a
   recorded `RustExprShape::SliceView` instead of appending another `.as_slice()`
   projection. This removes the generated `source.as_slice().as_slice()` shape
@@ -58,8 +295,8 @@ Partial progress 2026-08-24:
   prefix-safe under `&`, string-literal receivers with suffixes still group as
   `&("literal".to_string())`, and mutable borrowed compound operands preserve
   the structured binary/index shape expected by the idempotence tests.
-- The five previously baselined `--lib` failures are gone:
-  `cargo test --lib -- --nocapture` passes 327/0. This is a local reduction of
+- The five previously baselined `--lib` failures were gone at that checkpoint:
+  `cargo test --lib -- --nocapture` passed 327/0. This was a local reduction of
   raw-string borrow handling debt, not closure of the broader 0007 audit.
 - A later cleanup pass removed the top-level raw-string recovery branch from
   optional string-view construction normalization, stopped `lower.rs` from
@@ -179,7 +416,7 @@ Partial progress 2026-08-24:
   Malformed suffix text such as `name.as_str() trailing` and compound text such
   as `prefix + name.as_str()` now fail closed. Regressions:
   `coercion::tests::an_untagged_string_view_still_falls_back_to_the_text` and
-  `type_coercion::borrowed_string_view_projection_owns_rendered_view_compatibility`.
+  `coercion::tests::borrowed_string_view_projection_owns_rendered_view_compatibility`.
 - Follow-up 2026-08-28: borrowed map-key detection now shares that string-view
   rendered predicate instead of carrying its own `.as_str()` suffix check.
   Structured map-key helper calls still answer through the structural call
@@ -1404,6 +1641,11 @@ optional unwrap detector. Real generated `value.unwrap()` and
 erased-object variant, but normal and raw string literals containing those
 spellings are left untouched.
 
+Follow-up 2026-09-06: the rendered replacement helpers are test-only now.
+Production lowering uses the structured optional-clone recovery path, so
+`replace_optional_clone_recovery_unwrap` and its rendered replacement builder
+remain only as same-module compatibility tests for the historical fallback.
+
 ## Update 2026-08-11 (Codex follow-up) — downcast expect-message rewrite ignores literals
 
 `rewrite_downcast_expect_message` still decided from broad rendered-text
@@ -2457,10 +2699,11 @@ Exception construction still stringified structured message expressions by
 rendering them and appending `.to_string()` as raw text. The no-argument
 exception constructor also built its empty message as raw `String::new()`.
 
-`empty_exception_message` now emits a structured `String::new()` call, and
-`exception_message_expr` preserves a structured `.to_string()` method call for
-non-raw messages. Raw message fragments keep the legacy renderer. The emitted
-exception construction remains byte-identical.
+The no-argument exception constructor now emits a structured `String::new()`
+call, and `exception_message_expr` preserves a structured `.to_string()` method
+call for non-raw messages. Raw message fragments keep the legacy renderer. The
+emitted exception construction remains byte-identical. Follow-up cleanup later
+inlined the standalone `empty_exception_message` helper at its only use.
 
 ## Update 2026-08-12 (Codex follow-up) — logical-not projection keeps unary structure
 
@@ -2661,7 +2904,7 @@ the emitted Rust while keeping the call boundary inspectable.
 
 ## Update 2026-08-12 (Codex follow-up) — mutable-alias detection asks the IR first
 
-`rendered_expr_is_mutable_alias` still accepted a `RustExpr`, but immediately
+`expr_is_mutable_alias` still accepted a `RustExpr`, but immediately
 rendered it and classified alias shapes with exact strings and suffixes:
 `&mut base`, `base.as_mut_slice()`, `.as_mut().expect(...)`, and
 `.as_deref_mut()`.
@@ -2751,6 +2994,13 @@ expression.
 Structured values now build a `RustExpr::Call` to `format!` with the original
 value preserved as an argument. Raw values retain the previous rendered fallback
 so opaque fragments keep the same emitted Rust.
+
+Follow-up 2026-09-06: the structured fallback expression helper is crate-local
+now. `lower.rs` can still use it for thrown non-exception values, but
+integration tests no longer import it as public exception-lowering API.
+The non-result throw policy helper is crate-local too; public tests exercise
+`throw_stmt`, while the uncaught-panic shape is asserted beside the
+implementation.
 
 ## Update 2026-08-12 (Codex follow-up) — primitive char casts keep operand structure
 
@@ -3711,7 +3961,7 @@ statements now fail closed in `rust_stmt_reads_var`. Regression:
 
 Follow-up 2026-08-29: raw `None`/`Default::default()` detection in lowering no
 longer owns a separate rendered-text parser. The lower-side raw arm now calls
-the narrow `coercion::rendered_none_or_default_projection` helper, so typed
+the narrow `coercion::recover_none_or_default_value` helper, so typed
 `None::<T>` recovery is shared with the existing `String.join` null-item path
 without opening lower to broad rendered-expression recovery. The constructor
 self-temporary detector now recovers parseable raw expressions and simple raw
@@ -3771,7 +4021,7 @@ strips a leading `*` from raw text before reconstructing an expression. The
 `AlreadyStringView` path now recovers a complete deref string-view expression,
 verifies that the inner recovered expression is structurally a string view, and
 otherwise preserves the opaque raw leaf unchanged. Regressions:
-`type_coercion::borrowed_string_view_projection_owns_rendered_view_compatibility`
+`coercion::tests::borrowed_string_view_projection_owns_rendered_view_compatibility`
 and `slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`.
 
 Follow-up 2026-08-29: generic raw method-receiver parenthesization now recovers
@@ -3925,6 +4175,35 @@ The compatibility detector now accepts only the generated constructor spellings
 promoted to top-level constructor calls by prefix coincidence. Regression:
 `lower::tests::same_outer_inner_constructor_raw_expr_rewrite_recovers_structured_call`.
 
+Follow-up 2026-09-07: `coercion::rust_expr_is_constructed_optional_value`
+no longer calls a `raw_expr_is_*` semantic predicate. Its raw compatibility arm
+now asks `rendered_constructed_optional_value_projection` for a recovered
+expression and re-enters the structural predicate. The legacy text-only
+`Some(...)` acceptance is preserved as a shaped compatibility leaf rather than a
+second boolean implementation. Regressions:
+`coercion::tests::option_wrap_records_constructed_optional_shape` and
+`slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`.
+
+Follow-up 2026-09-07: optional mutable reborrow idempotence no longer uses a
+`raw_expr_is_optional_mut_reborrow` boolean helper. The raw compatibility path
+now calls `rendered_optional_mut_reborrow_projection`, which recovers parseable
+rendered expressions and returns a structured projection only when it is a clean
+zero-arg `as_deref_mut()` method call. Regression:
+`coercion::tests::optional_mut_reborrow_recovers_parseable_raw_projection_without_suffix_fallback`.
+
+Follow-up 2026-09-07: `String.join` null-item detection no longer uses a
+`raw_join_null_item_projection` shortcut. The raw compatibility path now asks
+`rendered_join_null_item_projection` for a recovered `None`/`Default::default()`
+expression and re-enters the structural predicate on that value. Regression:
+`slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`.
+
+Follow-up 2026-09-07: deref string-view recovery now names its compatibility
+input as rendered Rust text rather than a raw expression. The private helper is
+`rendered_deref_string_view_projection`, still recovers only parseable unary
+`*name` evidence, and the old `raw_deref_string_view_projection` name is gone.
+Regression:
+`coercion::tests::rendered_deref_string_view_recovery_accepts_only_plain_identifier_source`.
+
 Follow-up 2026-08-30: the remaining raw string-view shortcuts in `coercion.rs`
 were checked against misleading text examples and pinned at their current
 fail-closed boundary. Raw deref string-view recovery accepts only `*ident`, not
@@ -3961,7 +4240,7 @@ check; `rust_expr_is_simple_local_path` itself is now structural-only and
 accepts only `RustExpr::Var`. Regressions:
 `coercion::tests::map_key_borrow_normalizes_raw_local_before_local_identity_checks`,
 `coercion::tests::raw_field_path_does_not_satisfy_local_name_identity`,
-`type_coercion::map_key_borrow_projection_is_centralized_and_idempotent`, and
+`coercion::tests::map_key_borrow_projection_is_centralized_and_idempotent`, and
 `slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`.
 
 Follow-up 2026-08-30: raw deref string-view recovery no longer has its own
@@ -4021,3 +4300,467 @@ strings and Rust line/block comments before counting delimiters. Parentheses
 inside `/* ... */`, `// ...`, or raw string literal bodies no longer decide
 whether a top-level raw expression is balanced enough to strip. Regression:
 `emit::tests::raw_parentheses_strip_is_balanced_and_string_aware`.
+
+Follow-up 2026-09-06: two more compatibility projection helpers are fenced to
+crate-local callers. `array_lowering::array_expr_with_object_default` is still
+shared between lower.rs and array lowering, but it is no longer exported as
+public API. `call_lowering::apply_class_literal_token_with_rust_type` remains
+available to the lowering paths that already have the planned Rust token type,
+but external callers use the fact-aware `apply_class_literal_token` wrapper.
+
+Follow-up 2026-09-07: `call_lowering::apply_class_literal_token` is crate-local
+too. The direct structured token assertion moved beside `call_lowering`; external
+tests continue to exercise class-literal planning and generated support rather
+than importing the lowering applicator as public API.
+
+Follow-up 2026-09-06: three item-assembly policy helpers are crate-local as
+well. Java comparable-bound detection, callable clone-bound detection, and
+type-parameter marker field injection are still shared with lowering, but they
+are no longer public API.
+
+Follow-up 2026-09-06: item-assembly's support-context variants and source-name
+rendering helpers are narrowed to their actual callers. The public test-facing
+wrappers for struct/impl/constructor shell construction remain, while the
+lower-level support-context forms and source Rust-name/bound helpers are
+crate-local or private.
+
+Follow-up 2026-09-06: method-shell construction follows the same boundary.
+The default wrapper stays public for existing integration tests, while the
+explicit-exception-plan wrapper is private and covered beside item assembly.
+The support-context variants are crate-local/private, and item-local method
+return shape/type helpers are private implementation details.
+
+Follow-up 2026-09-07: stream-plan rendering boundary tightening continued.
+`render_stream_plan_with_context` remains public because existing integration
+tests exercise stream lowering through that wrapper, but the lower-level
+`render_stream_plan_with_optional_sequence_context` entry point is now
+crate-local. `lower.rs` can still pass the explicit optional-sequence context it
+needs, while external callers no longer get the more policy-rich render entry.
+Guard: `layering::stream_lowering_borrows_lambda_string_views_structurally`.
+
+Follow-up 2026-09-07: stream lambda body helper visibility is narrowed as well.
+`emit_stream_lambda_body_expr` remains crate-local for `removeIf` lowering, while
+the rendered-string convenience wrapper is private and covered beside
+`stream_lowering`. Integration tests keep the public stream boundary on
+`render_stream_plan_with_context`.
+
+Follow-up 2026-09-07: representation-lowering type/trait emission convenience
+wrappers are crate-local test-only helpers. Direct raw-item and trait-impl
+assertions moved beside `representation_lowering`; integration tests no longer import
+`type_emission_for_with_facts` or `trait_impl_emissions_for_type_with_facts` as
+public crate APIs.
+
+Follow-up 2026-09-07: the rendered single-input callback bridge is private
+test-only code now. Production call and stream lowering already use
+`typed_single_input_callback_expr` with a structured body expression; the
+string-body wrapper exists only for same-module compatibility coverage in
+`coercion.rs`. Guards:
+`slot_shape_design::native_method_and_callback_projection_helpers_use_structured_ir`
+and `layering::coercion_plan_owns_clone_recovery_policy`.
+
+Follow-up 2026-09-07: unsupported-handoff projection helpers are crate-local.
+`unsupported_deserialization_cast_handoff_projection`,
+`unsupported_outer_capture_constructor_projection`,
+`unsupported_outer_capture_constructor_handoff_projection`, and
+`unsupported_constructor_call_handoff_projection`,
+`abstract_method_stub_projection`, and
+`abstract_interface_method_stub_projection` remain structured expression
+builders shared with `lower.rs`, but are no longer public crate API. The
+rendered-string guard now requires this diagnostic projection surface to stay
+internal.
+
+Follow-up 2026-09-07: the remaining associated-path and Rust string literal
+projection helpers are crate-local too. `self_associated_path_projection`,
+`owner_associated_path_projection`, `free_function_path_projection`,
+`rust_type_associated_path_projection`,
+`qualified_rust_type_associated_path_projection`,
+`java_class_static_path_projection`, `java_class_literal_path_projection`, and
+`rust_string_literal_projection` are shared implementation builders for
+lowering modules, not public crate API. The slot-shape and layering guards now
+pin that boundary while still checking that constructor owner paths and
+`JavaClass` helper paths stay structured rather than rendered through raw text.
+
+Follow-up 2026-09-07: the structured string-equality operand projection, the
+`String.join` projection helpers, the string-helper receiver projection, and
+the adjacent string runtime helper projections are crate-local too. The same
+boundary now covers the primitive/hash/compare and Math helper projections used
+by call lowering, plus the length, Array2 size, path, thread, and `Objects`
+runtime projections used by access/call/lower/stream lowering. The rendered
+string-equality bridge was already absent, and the `String.join` render bridge
+remains test-only; this keeps the production string and primitive lowering paths
+on structured `RustExpr` construction without exporting those compatibility
+projections as public crate API. The non-result `charAt` convenience projection
+is now explicitly test-only; production uses the checked/result helper. The
+millis-only thread sleep wrappers follow the same test-only rule, while
+production uses the arity-aware sleep projection. Guarded by
+`slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`
+and focused `coercion`/`operator_lowering` tests.
+
+Follow-up 2026-09-07: collection iterator and tuple-field projection builders
+are crate-local. `java_iterator_from_collection_projection`,
+`sequence_iter_*`, `erased_object_sequence_iter_cloned_projection`,
+`iterator_next_*`, and `tuple_field_projection` are implementation details
+shared by lowering modules and same-module projection tests, not public crate
+API. The existing raw/rendered collection guards now pin that boundary.
+
+Follow-up 2026-09-07: `Arrays.*` projection builders are crate-local as well.
+`arrays_as_list`, equality/compare/mismatch/search/copy/string/hash helpers, and
+the `Arrays.stream` range helpers stay shared between call/lower/stream lowering
+and same-module projection tests, but are no longer public crate API. The
+slot-shape source guards continue to pin the structured block/match/range
+construction paths.
+
+Follow-up 2026-09-07: native collection static/constructor projection builders
+are crate-local too. `Collections.empty*`/`singleton*`/`nCopies`, unmodifiable
+identity projections, native collection constructors, and source-collection
+conversion projections remain shared internally by call/lower lowering and
+same-module projection tests, but are no longer exposed as public crate API.
+The unchecked `nCopies` projection is now explicitly test-only, because
+production paths use the checked panic/result helpers.
+
+Follow-up 2026-09-07: collection sort/fill and indexed get projection builders
+are crate-local. `Collections.sort`, `Arrays.fill`, sequence indexed get, and
+map get/expect/get_mut expectation projections remain structured builders shared
+with `lower.rs`, but are no longer exported as public crate API. The slot-shape
+source guard now pins this as an internal projection surface.
+The same cleanup also covers adjacent collection/varargs helpers:
+`sequence_index_of_projection`, `discard_value_projection`,
+`varargs_packed_vec_projection`, `varargs_spread_extend_projection`,
+`collection_remove_if_projection`, and `optional_copied_expect_projection` are
+shared only inside the crate and by same-module tests/source guards.
+
+Follow-up 2026-09-07: stream pipeline projection builders are crate-local too.
+Sequence iteration sources, nullable/non-null stream map helpers, borrowed
+collection `flatMap`, terminal collect/join/match/reduce builders, and stream
+filter/map/flatMap op builders remain structured composition points for
+`lower.rs` and `stream_lowering.rs`, but are no longer exposed as public crate
+API. The public stream surface remains on plans/enums and
+`render_stream_plan_with_context`. The no-typed-param `stream_map_op_projection`
+wrapper is test-only; production uses the typed-param builder directly.
+
+Follow-up 2026-09-07: borrowed-content shape mutators are crate-local too.
+`apply_borrowed_string_content_projection`,
+`apply_borrowed_sequence_content_projection`, and
+`apply_borrowed_sequence_element_projection` remain shared internal composition
+helpers for call planning, slot policy, stdlib, and `shape_projection`, while
+public callers use the constructed shape and policy helpers instead of mutating
+slot shape internals directly.
+
+Follow-up 2026-09-07: core expression projection builders are crate-local.
+Shared/result propagation, structured function/method calls, `self`/outer/field
+accessors, anonymous dyn-trait construction, Java-null receiver unwraps,
+typed-`None`, the checked/result `Optional` owned-value projection, and
+`Optional.of` remain the central construction API for lowering modules, but are
+no longer exported as public crate helpers. The uncaught
+`optional_get_owned_value_projection` convenience wrapper is test-only because
+production paths use the result-aware helper or slot coercion. The public 0007
+boundary stays on semantic plans and observable lowering behavior, not on
+ad-hoc expression-builder entry points.
+
+Follow-up 2026-09-07: Java hash-code projection helpers are crate-local.
+List/set/map/value `hashCode` projections remain structured lowering helpers
+for native call lowering and source fallback lowering, but are not public crate
+API.
+
+Follow-up 2026-09-07: owned collection/map snapshot materializers are
+crate-local. Map key/value/entry snapshot projections, collection-to-`Vec`, the
+receiver-type-aware erased-object snapshot branch, and sequence-elements-to-
+optional-`Vec` remain shared by call/lower lowering and same-module projection
+tests, but no longer require integration tests to import projection builders as
+public API.
+
+Follow-up 2026-09-07: stream-lambda argument planning/projection helpers are
+crate-local. `stream_lambda_argument_slot_plan` and `stream_lambda_param_expr`
+remain shared between coercion and stream lowering, while public tests cover
+the resulting stream lambda shapes instead of importing the expression-builder
+helpers.
+
+Follow-up 2026-09-07: primitive parse and exact-int runtime projection helpers
+are crate-local. The unchecked and result-returning primitive parse helpers,
+`Math.toIntExact` projections, and the integral parse null-to-
+`NumberFormatException` adapter remain structured construction points for
+call/lower lowering and same-module tests, but they are not public crate API.
+
+Follow-up 2026-09-07: private-by-accident coercion helpers were narrowed.
+`string_literal_source` and `expr_is_slice_view` are private implementation
+predicates inside `coercion.rs`, and
+`normalize_optional_constructed_string_view_expr` is crate-local rather than a
+public compatibility normalizer.
+
+Follow-up 2026-09-07: char/string runtime projection helpers are crate-local.
+String byte-range/substr result helpers and Java `char` numeric conversion
+helpers remain structured construction points for lower/conversion lowering and
+same-module tests, but are not exported as public crate API.
+
+Follow-up 2026-09-07: additional expression-builder projections are crate-local.
+Facade receiver/path helpers, subtype constructor recovery, print/macro/logical
+not builders, `String.format`, deref-borrow, erased-object constructors, plain
+`Object` construction, and boxed dyn-trait construction remain shared internal
+lowering helpers, but no longer widen the public crate API.
+
+Follow-up 2026-09-07: expression-shape predicates and exception/result helpers
+were narrowed too. Result-propagation detection, typed callback construction,
+optional shared unwrap, null-value/constructor-self predicates, erased-object
+clone recovery, redundant-null-expect stripping, uncaught-result panic
+adaptation, and same-file string/slice view tag helpers remain available where
+lowering needs them, but are no longer public crate API unless integration
+tests still deliberately import the semantic boundary.
+
+Follow-up 2026-09-07: mutable-alias classification is crate-local. The
+integration projection test moved beside `coercion.rs`, so
+`expr_is_mutable_alias` can remain the shared lowering predicate without being
+exported as public API. The rendered classifier stays private implementation
+detail.
+
+Follow-up 2026-09-07: borrowed string-literal temporary planning is test-only.
+The projection/hoist guard moved beside `coercion.rs`, and production lowering
+now owns the structured hoist path directly, so
+`borrowed_string_literal_temporary_plan` is no longer exported as public or
+crate-local API.
+
+Follow-up 2026-09-07: optional mutable reborrow projection is crate-local.
+The direct shape/idempotence assertions for `reborrow_optional_mut_projection`
+now live beside the projection builder in `coercion.rs`; `slot_shape_design`
+keeps only the source-layout guard that production paths use the structured
+helper instead of rendering and reparsing text.
+
+Follow-up 2026-09-07: `.into()` projection is crate-local too. The duplicate
+integration assertion was removed because `coercion.rs` already checks that
+`into_projection` preserves structured method-call construction and correctly
+parenthesizes raw cast receivers; downstream tests continue to exercise the
+public coercion behavior.
+
+Follow-up 2026-09-07: map-key borrow normalization is crate-local. The direct
+owned/shared/idempotence assertions for `normalize_map_key_borrow_projection`
+now live beside the helper, while integration tests continue to exercise map-key
+behavior through the public coercion and lowering boundaries.
+
+Follow-up 2026-09-07: optional string-view projection is crate-local. Its direct
+shape/rendering assertions moved into `coercion.rs`; integration coverage stays
+on slot conversion and operator/lowering behavior instead of importing the
+projection builder as public API.
+
+Follow-up 2026-09-07: index projection builders are crate-local. The direct
+`index_to_usize_projection` and `indexed_access_projection` assertions moved
+beside the builders in `coercion.rs`; integration tests still exercise index
+coercion through the public syntax-coercion policy and stream/lowering
+boundaries.
+
+Follow-up 2026-09-07: borrow projection normalization is crate-local as well.
+`ensure_borrow_projection` remains shared by lower, array, stream, and coercion
+internals, but the public crate boundary stays on slot/coercion plans rather
+than the low-level borrow-expression builder.
+
+Follow-up 2026-09-07: clone projection and redundant shared-borrow collapse are
+crate-local. Their direct assertions now live in `coercion.rs`, while integration
+tests keep exercising clone and map-key behavior through public coercion,
+syntax, and lowering boundaries.
+
+Follow-up 2026-09-07: update-expression and facade-cast projection helpers were
+narrowed. Java update expression builders and explicit facade-cast placeholders
+remain crate-local internal lowering helpers; the obsolete exception
+self-as-supertype facade placeholder is test-only because production lowering
+now emits a loud unsupported class-upcast diagnostic instead.
+
+Follow-up 2026-09-07: owned-sequence recovery projection is crate-local.
+`to_owned_sequence_projection` is still shared by lowering and same-module
+coercion tests, but external callers should exercise the public slot/conversion
+planning boundary rather than the low-level recovery builder.
+
+Follow-up 2026-09-07: simple statement constructors in `statement_render`
+(`assignment_stmt`, `expr_stmt`, `if_stmt`, loop/break/continue builders) are
+crate-local. Direct constructor assertions moved beside the module; integration
+coverage stays on `local_let_stmt_with_facts` and source guards for raw-statement
+ownership.
+
+Follow-up 2026-09-07: statement local-let helper visibility is narrowed too.
+`local_let_stmt_with_facts` and its type-annotation helper are test-only
+crate-local helpers now; the representation-aware variant remains crate-local
+for `lower.rs`. Direct local-let assertions moved beside `statement_render`, so
+integration coverage no longer needs to import the low-level constructor.
+
+Follow-up 2026-09-07: cast and `instanceof` application helpers in
+`conversion_lowering` are crate-local. Direct structured-IR assertions for
+primitive casts and `matches!` construction moved beside the helpers; integration
+tests keep covering cast/instanceof planning and lowering boundaries.
+
+Follow-up 2026-09-07: access-lowering expression builders are crate-local.
+Direct assertions for bare-name lowering, member-access plans, and rust-crate
+mapped static-field access moved into `access_lowering.rs`; integration coverage
+keeps source guards for the centralized projection helpers.
+
+Follow-up 2026-09-07: the old `array_lowering::array_expr` public wrapper is
+gone from production. Direct structured array-expression assertions use a
+same-module test helper, while production lowering uses
+`array_expr_with_object_default` and `slot_shape_design` keeps the plan/lowering
+source-boundary checks.
+
+Follow-up 2026-09-07: liveness collector adapters in `lower.rs` are crate-local
+now. `liveness.rs` and `item_assembly.rs` still share the collector entry
+points, but they are no longer exposed as public crate APIs.
+
+Follow-up 2026-09-07: literal-slot planning in `coercion.rs` is crate-local.
+`LiteralSlotPlan`, `literal_slot_plan`, `apply_literal_slot_plan`, and
+`java_integral_literal_char` are still shared with lowering for literal/slot
+adaptation, but direct borrowed-string and numeric-char assertions now live
+beside the implementation instead of requiring public test-facing APIs.
+
+Follow-up 2026-09-07: primitive Rust type-name policy is crate-local too.
+`RustPrimitiveTypeNamePolicy` and `rust_primitive_type_name_policy` still feed
+internal cast/projection builders, but the direct scalar-name assertion moved
+into `coercion.rs`; integration tests now cover primitive widening and invalid
+cast planning through the higher-level conversion boundary.
+
+Follow-up 2026-09-07: the no-facts typed single-input method-reference callback
+builder is crate-local. `lower.rs` still uses it for the legacy unshaped method
+reference path, and the fact-aware callback helper remains covered through
+integration tests, but the direct structural assertion moved into
+`method_reference_lowering.rs`.
+
+Follow-up 2026-09-07: two more coercion planning utilities are internal-only.
+`non_identity_coercions` remains a helper for optional element coercion
+composition, and `java_concat_display_plan` remains the lowering-facing display
+classification hook, but neither is exposed as public crate API now.
+
+Follow-up 2026-09-07: stream/sequence/index projection selector enums in
+`coercion.rs` are crate-local. `OptionalSequenceReceiverProjection`,
+`SequenceIterationProjection`, `StreamLambdaParamProjection`,
+`StreamLambdaArgumentSlotPlan`, and `IndexToUsizeProjection` are still shared by
+lowering and stream/call lowering, but callers outside the crate no longer see
+these low-level projection-choice types.
+
+Follow-up 2026-09-07: `lower::rust_expr_is_none_or_default_value` is
+structural-only now. The sole inherited-super optional-enum adapter that still
+needs to accept legacy raw `None`/`Default::default()` text performs the narrow
+`recover_none_or_default_value` step at its compatibility boundary before
+calling the predicate. This removes another raw-text semantic arm without
+changing the accepted adapter behavior. Regressions:
+`lower::tests::none_or_default_detection_uses_structured_raw_recovery_only` and
+`slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`.
+
+Follow-up 2026-09-07: `coercion::expr_is_string_view` no longer has a bespoke
+`raw_expr_is_string_view` semantic predicate. Raw leaves at that compatibility
+boundary now route through `rendered_expr_is_already_string_view`, which already
+recovers parseable rendered expressions, round-trips them, rejects embedded raw
+leaves, and handles the remaining literal/deref text cases. Regressions:
+`coercion::tests::expr_is_string_view_uses_shape_structural_and_raw_compatibility`
+and `slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`.
+
+Follow-up 2026-09-07: `lower::rust_expr_has_constructor_call` now treats raw
+leaves as a recoverable compatibility boundary instead of an automatic blind
+spot. It calls the existing `raw_constructor_call_expr_projection` helper and
+then re-enters the structural walker, so complete rendered constructor calls are
+visible while nested/malformed/non-constructor raw text still fails closed.
+Regression:
+`lower::tests::same_outer_inner_constructor_raw_expr_rewrite_recovers_structured_call`.
+
+Follow-up 2026-09-07: call-target fallback/receiver adaptation helpers are
+crate-local. Lowering still uses `rust_method_name`,
+`is_fallback_receiver_method`, receiver-argument and signature-owner queries,
+fallback retargeting, and optional receiver slot projection planning, but those
+rendering/projection decision points are no longer exported as public
+`call_plan` APIs. The integration-tested receiver inspection and optional
+element borrow query remain public.
+
+Follow-up 2026-09-07: fact-aware method-reference receiver recovery and
+method-reference output-shape inference are crate-local. Stream and
+method-reference lowering still share those helpers internally, while the
+integration-facing method-reference API remains the narrower receiver-type query
+that is directly asserted by tests.
+
+Follow-up 2026-09-07: receiver-slot plan constructors are crate-local.
+`facade_receiver_slot_plan`, `optional_receiver_slot_plan`, and
+`optional_borrowed_receiver_slot_plan` remain the shared implementation path for
+lowering optional/facade receivers, but direct shape assertions now live beside
+`call_plan` instead of forcing those constructor helpers into the public API.
+
+Follow-up 2026-09-07: more call-argument helper internals are crate-local.
+`external_call_lowered_type_from_static_owner_plan_with_external_index`,
+`resolved_call_arg_target_type`, `native_collection_method_arg_shapes`, and
+`external_call_arg_shapes` remain shared by lowering/signature/stream planning
+where needed, but they no longer expose intermediate rendered/target-shape
+plumbing as public `call_plan` API.
+
+Follow-up 2026-09-07: native collection constructor planning now consults
+sequence-like capability facts. A fact-backed external sequence type therefore
+plans construction as the same native list carrier used by storage defaults,
+instead of selecting a nominal `Type::new()` path and leaving apply-time facts
+to guess at the missing constructor shape.
+
+Follow-up 2026-09-07: the Object method-reference receiver recovery helper is
+private. `object_method_reference_receiver_type` is only an implementation
+detail under `method_reference_receiver_type_for_call_plan`; the narrower
+receiver-type query remains the integration-facing API.
+
+Follow-up 2026-09-07: member-access external field lookup internals are no
+longer public. `external_field_fact_for_owner` is private to the planner, and
+`external_field_type_for_owner` is crate-local for the two lowering
+compatibility callers that still need the type lookup.
+
+Follow-up 2026-09-07: external-index call-plan helpers are crate-local. Lowering
+and stream lowering still share the precomputed-index paths for external return
+types, resource close fallibility, and Rust-result checks, but callers outside
+the crate keep the higher-level no-index wrappers and targeted public query
+surfaces.
+
+Follow-up 2026-09-07: native-Java method classification helpers are crate-local.
+`native_java_string_instance_method`,
+`native_java_instance_receiver_type_hint`, and
+`native_java_unbound_method_reference_receiver_type` are still shared by
+call-plan, stream-lowering, and method-reference-shape internals, but direct
+receiver-hint assertions now live beside `call_plan` instead of forcing these
+classification helpers into the public API.
+
+Follow-up 2026-09-07: the raw method-reference receiver classifier is
+crate-local. `method_reference_receiver_type_for_call_plan` remains the
+internal bridge from native-Java and `Object::toString` receiver evidence into
+the fact-aware method-reference shape path, but direct assertions for that
+bridge now live in `method_reference_shape` unit tests. The integration-facing
+surface is the fact-aware output-shape query.
+
+Follow-up 2026-09-07: trivial-accessor planning internals are crate-local.
+`TrivialAccessorCallPlan` and `plan_trivial_accessor_call` still feed
+`plan_call_expr` and `plan_call_statement`, but integration tests now assert the
+public call-expression and call-statement plans rather than importing the
+intermediate accessor decision type directly.
+
+Follow-up 2026-09-07: two call-argument lowering helpers are crate-local.
+`plan_native_collection_extend_arg` and
+`facade_abi_argument_plan_for_rust_method_name` are used only by lowerer's
+argument adaptation paths, so they no longer expose intermediate collection and
+facade-ABI argument decisions as public `call_plan` API.
+
+Follow-up 2026-09-07: method-reference rendering and single-input body helpers
+are crate-local. Direct renderer/body/fact-aware callback assertions now live in
+`method_reference_lowering` unit tests, while the integration test keeps the
+higher-level planning, shape inference, and source-layout guardrails.
+
+Follow-up 2026-09-07: Broad IOUtils raw runtime-support construction is
+crate-local too. The direct `RustItem::Raw` content assertions moved beside
+`javalibs`, and the integration test now checks only detection plus generated
+output/generate-crate behavior for the platform boundary fixture.
+
+Follow-up 2026-09-07: dispatch-axis projection policy is crate-local. The
+direct `DispatchProjectionPolicy`/`dispatch_projection_policy` assertions moved
+beside `shape_projection`; integration tests still cover the public projected
+slot behavior and source-layer guardrails without importing the intermediate
+policy constructor.
+
+Follow-up 2026-09-07: method-reference planning is crate-local. The
+`MethodReferencePlan`, bound-receiver carrier, and plan constructors still
+connect lower/stream/method-reference lowering internally, but integration tests
+now assert public shape/lowering outcomes rather than importing the intermediate
+plan enum.
+
+Follow-up 2026-09-07: three more intermediate lowering/planning carriers are
+crate-local: `StreamLambdaValue`, `NativeCollectionExtendArgPlan`, and the
+receiver/optional-receiver slot plan structs. The optional-element borrow helper
+became test-only after narrowing and was deleted; the module test now exercises
+the production projection-plan method directly. These carriers are still shared
+by lower/call/stream lowering inside the crate, but external tests no longer
+force them into the public crate API.
+
+Follow-up 2026-09-07: method-reference output-shape inference is crate-local
+too. The direct `infer_single_input_method_reference_output_shape_with_context`
+assertions moved beside `method_reference_shape`; `stream` remains the internal
+consumer, and the integration test keeps only the architectural guardrails.

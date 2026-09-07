@@ -1,5 +1,11 @@
 # Suggestions for handling the idioms we currently fail
 
+> **Historical note 2026-09-07.** The measurements and priority tiers in this
+> file are a 2026-07-30 snapshot. Many referenced issues are now in `done/`, and
+> current baseline/status lives in `claude_audits/README.md` plus
+> `tests/baselines/suite-results.tsv`. Treat this document as historical
+> rationale, not as the next-work queue.
+
 Grounded in measured corpus data (FastQC 1451 errors, htsjdk 343, biojava 188)
 plus 11 minimal Java probes. Every claim below has a validated issue file behind
 it. Numbers are from `.tmp/corpus-*/top-compile-errors.tsv` as of 2026-07-30.

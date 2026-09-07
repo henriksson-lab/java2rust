@@ -1,7 +1,7 @@
 # 0002b — Shared object representation design and rollout
 
 Status: **partially implemented** (`SharedImmutable` landed; `SharedLocal`/`SharedSync` remain open)
-Blocks: [0002b](0002-object-aliasing-has-no-representation.md),
+Blocks: [0002](0002-object-aliasing-has-no-representation.md),
 [0023](0023-inner-class-construction-always-panics.md),
 and all of [CONCURRENCY-SCOPE](../CONCURRENCY-SCOPE.md)
 
@@ -1875,9 +1875,10 @@ batches.
 
 ## Update 2026-08-06 — step 3 is landed
 
-The shared handle is on. `scripts/gate.sh` is at baseline on all 18 targets and
-`idiom_gaps` is 538/146 with **identical failure names** -- zero new failures,
-zero silently-fixed ones.
+The shared handle is on. At that landing checkpoint, `scripts/gate.sh` was at
+baseline on all 18 targets and `idiom_gaps` was 538/146 with **identical failure
+names** -- zero new failures, zero silently-fixed ones. Later audit work moved
+the checked `idiom_gaps` baseline to 816/0.
 
 ```rust
 query: Option<std::rc::Rc<Cursor>>,                              // field
@@ -2073,3 +2074,13 @@ now pins the current carrier flow: the erased field is nullable storage,
 field to another erased argument null-checks and clone-recovers that same
 carrier. The old assertions expected boxing at the assignment site and a
 non-nullable getter shape.
+
+## Update 2026-09-07 (Codex follow-up) — owned source-call signature row is baseline-clean
+
+`emitted_source_call_uses_authoritative_owned_param_signature` now matches the
+landed `SharedImmutable` source-class spelling. The assertion was stale on two
+axes: nested source class names now preserve the owner boundary with an
+underscore, and fallible string-concat lowering wraps the source call in
+`Result<String, JavaException>`. The generated call still passes the solved
+owned `Rc<Alignment>` parameter without borrowing, and the row was removed from
+the idiom-gaps failure baseline after a focused generated-crate check.

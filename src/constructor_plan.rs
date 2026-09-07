@@ -285,21 +285,6 @@ pub fn plan_constructor_field_values<'a>(
     plan_constructor_field_values_with_inherited_field_decls(ty, body, signatures, Vec::new())
 }
 
-pub fn plan_constructor_field_values_with_inherited_fields<'a>(
-    ty: &'a TypeDecl,
-    body: Option<&'a Block>,
-    signatures: &SignaturePlan,
-    support_program: &'a Program,
-) -> Vec<ConstructorFieldValuePlan<'a>> {
-    plan_constructor_field_values_with_inherited_context(
-        ty,
-        body,
-        signatures,
-        support_program,
-        &FactSet::default(),
-    )
-}
-
 pub fn plan_constructor_field_values_with_inherited_context<'a>(
     ty: &'a TypeDecl,
     body: Option<&'a Block>,

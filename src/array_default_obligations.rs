@@ -33,11 +33,37 @@ pub fn object_array_element_type_names(program: &Program) -> BTreeSet<String> {
 /// Whether any array creation in `program` allocates elements of `ty`.
 pub fn program_allocates_object_array_of(program: &Program, ty: &TypeDecl) -> bool {
     let names = object_array_element_type_names(program);
-    names.contains(&ty.name) || names.contains(simple_name(&ty.name))
+    if names.contains(&ty.name) {
+        return true;
+    }
+    let simple = simple_name(&ty.name);
+    names.contains(simple) && !type_simple_name_is_ambiguous(program, simple)
 }
 
 fn simple_name(name: &str) -> &str {
     name.rsplit(['.', '$']).next().unwrap_or(name)
+}
+
+fn type_simple_name_is_ambiguous(program: &Program, simple: &str) -> bool {
+    let mut matches = 0;
+    for ty in &program.types {
+        count_type_simple_name_matches(ty, simple, &mut matches);
+        if matches > 1 {
+            return true;
+        }
+    }
+    false
+}
+
+fn count_type_simple_name_matches(ty: &TypeDecl, simple: &str, matches: &mut usize) {
+    if simple_name(&ty.name) == simple {
+        *matches += 1;
+    }
+    for member in &ty.members {
+        if let Member::Type(nested) = member {
+            count_type_simple_name_matches(nested, simple, matches);
+        }
+    }
 }
 
 fn record_element_type(ty: &JavaType, names: &mut BTreeSet<String>) {
@@ -260,10 +286,27 @@ fn collect_in_expr(expr: &Expr, names: &mut BTreeSet<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::java_ir::{Literal, MethodDecl, Modifier, TypeKind};
     use crate::parser::parse_java_source;
 
     fn names_for(source: &str) -> BTreeSet<String> {
         object_array_element_type_names(&parse_java_source(source).program)
+    }
+
+    fn empty_type_decl(name: &str) -> TypeDecl {
+        TypeDecl {
+            kind: TypeKind::Class,
+            name: name.to_string(),
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            modifiers: Vec::new(),
+            extends: None,
+            implements: Vec::new(),
+            permits: Vec::new(),
+            members: Vec::new(),
+            static_init_blocks: Vec::new(),
+            span: Default::default(),
+        }
     }
 
     #[test]
@@ -302,5 +345,82 @@ mod tests {
             "class Holder { static class Node {} void m() { Node[][] g = new Node[2][2]; } }",
         );
         assert!(names.contains("Node"), "{names:?}");
+    }
+
+    #[test]
+    fn package_qualified_object_array_default_obligation_does_not_mark_package_peer() {
+        let allocated = empty_type_decl("a.Item");
+        let peer = empty_type_decl("b.Item");
+        let program = Program {
+            package: None,
+            imports: Vec::new(),
+            types: vec![
+                allocated.clone(),
+                peer.clone(),
+                TypeDecl {
+                    members: vec![Member::Method(MethodDecl {
+                        name: "m".to_string(),
+                        rust_name: None,
+                        type_params: Vec::new(),
+                        type_param_bounds: Vec::new(),
+                        return_type: JavaType::Void,
+                        throws: Vec::new(),
+                        params: Vec::new(),
+                        modifiers: Vec::<Modifier>::new(),
+                        body: Some(Block {
+                            statements: vec![Stmt::Expr(Expr::ArrayCreation {
+                                element_type: JavaType::Named {
+                                    name: "a.Item".to_string(),
+                                    args: Vec::new(),
+                                },
+                                dimensions: vec![Expr::Literal(Literal::Int(1))],
+                                initializer: None,
+                            })],
+                        }),
+                        span: Default::default(),
+                    })],
+                    ..empty_type_decl("Holder")
+                },
+            ],
+        };
+
+        assert!(program_allocates_object_array_of(&program, &allocated));
+        assert!(!program_allocates_object_array_of(&program, &peer));
+
+        let unique_simple = Program {
+            types: vec![
+                empty_type_decl("pkg.Node"),
+                TypeDecl {
+                    members: vec![Member::Method(MethodDecl {
+                        name: "m".to_string(),
+                        rust_name: None,
+                        type_params: Vec::new(),
+                        type_param_bounds: Vec::new(),
+                        return_type: JavaType::Void,
+                        throws: Vec::new(),
+                        params: Vec::new(),
+                        modifiers: Vec::<Modifier>::new(),
+                        body: Some(Block {
+                            statements: vec![Stmt::Expr(Expr::ArrayCreation {
+                                element_type: JavaType::Named {
+                                    name: "Node".to_string(),
+                                    args: Vec::new(),
+                                },
+                                dimensions: vec![Expr::Literal(Literal::Int(1))],
+                                initializer: None,
+                            })],
+                        }),
+                        span: Default::default(),
+                    })],
+                    ..empty_type_decl("Holder")
+                },
+            ],
+            ..Program::default()
+        };
+
+        assert!(program_allocates_object_array_of(
+            &unique_simple,
+            &unique_simple.types[0]
+        ));
     }
 }

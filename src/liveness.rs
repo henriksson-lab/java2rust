@@ -569,7 +569,7 @@ impl LivenessAnalysis {
                 let after_body = live.clone();
                 for catch in catches {
                     let mut catch_live = self.block_live_in(&catch.body, &after_body, loop_live);
-                    catch_live.retain(|binding| binding.name != catch.source_name);
+                    remove_catch_binding(stmt, catch, &mut catch_live);
                     live.extend(catch_live);
                 }
                 // Everything a catch reads must stay live across the whole
@@ -581,7 +581,7 @@ impl LivenessAnalysis {
                 let mut guarded_floor = HashSet::new();
                 for catch in catches {
                     let mut reads = self.block_live_in(&catch.body, &after_body, loop_live);
-                    reads.retain(|binding| binding.name != catch.source_name);
+                    remove_catch_binding(stmt, catch, &mut reads);
                     guarded_floor.extend(reads);
                 }
                 if let Some(finally_block) = finally_block {
@@ -631,6 +631,15 @@ impl LivenessAnalysis {
     }
 }
 
+fn remove_catch_binding(
+    try_stmt: &Stmt,
+    catch: &crate::java_ir::CatchClause,
+    bindings: &mut HashSet<Binding>,
+) {
+    let catch_binding = Binding::new(&catch.source_name, stmt_id(try_stmt));
+    bindings.retain(|binding| binding != &catch_binding);
+}
+
 fn read_names(expr: &Expr, names: &mut HashSet<String>) {
     crate::lower::collect_expr_read_names_for_liveness(expr, names);
 }
@@ -642,7 +651,7 @@ fn written_names(expr: &Expr, names: &mut HashSet<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::java_ir::{Block, Expr, Stmt};
+    use crate::java_ir::{Block, CatchClause, Expr, Stmt};
 
     fn var(name: &str) -> Expr {
         Expr::Var(name.to_string())
@@ -670,6 +679,44 @@ mod tests {
             initializer: Some(int(init)),
             binding: None,
         }
+    }
+
+    #[test]
+    fn catch_binding_filter_preserves_distinct_same_name_bindings() {
+        let try_stmt = Stmt::Try {
+            resources: Vec::new(),
+            body: Block {
+                statements: Vec::new(),
+            },
+            catches: Vec::new(),
+            finally_block: None,
+        };
+        let catch = CatchClause {
+            types: vec![crate::java_ir::JavaType::Named {
+                name: "Exception".to_string(),
+                args: Vec::new(),
+            }],
+            name: "e".to_string(),
+            source_name: "e".to_string(),
+            body: Block {
+                statements: Vec::new(),
+            },
+            binding: None,
+        };
+        let catch_binding = Binding::new("e", stmt_id(&try_stmt));
+        let outer_binding = Binding::new("e", OUTER_DECL);
+        let other_binding = Binding::new("other", OUTER_DECL);
+        let mut bindings = HashSet::from([
+            catch_binding.clone(),
+            outer_binding.clone(),
+            other_binding.clone(),
+        ]);
+
+        remove_catch_binding(&try_stmt, &catch, &mut bindings);
+
+        assert!(!bindings.contains(&catch_binding));
+        assert!(bindings.contains(&outer_binding));
+        assert!(bindings.contains(&other_binding));
     }
 
     /// Two sibling scopes each declaring `x` are different variables. A live set

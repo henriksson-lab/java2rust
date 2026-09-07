@@ -1,9 +1,10 @@
-# 0061 — A local binding has no identity, so the plan is rejoined to the declaration by name, four times, differently
+# 0061 — Id-less compatibility paths can still rejoin local binding plans by name
 
 Status: **open, compatibility-only residue**
 
 Current status 2026-08-30:
-the original ordinary-source same-name-local failure is no longer valid.
+the original ordinary-source same-name-local failure described by the historical
+title is no longer valid.
 `LocalPlan` and `LocalConstraintSet` carry `BindingId`, resolver-assigned ids
 are used for parameters, declarations, enhanced-for bindings, and catches, and
 bound source declarations fail closed instead of falling back to name lookup.
@@ -12,6 +13,100 @@ parser-only IR that lacks resolver ids can still use deliberate name fallback
 through the usage/signature compatibility paths. Treat future fixes here as
 id-less-boundary cleanup, not as evidence that normal Java source locals are
 still rejoined by name.
+
+Follow-up 2026-09-07: compatibility name-map entries now have to agree on the
+stored `BindingUseFacts.name` as well as any attached `BindingId`. A stale entry
+stored under `bindings["value"]` with payload name `other` can no longer be
+treated as current, recovered to an authoritative binding id, snapshotted across
+a scope, aggregated, or used to collect reads/returns by lookup key. Regressions:
+`usage::tests::name_map_payload_name_must_match_the_lookup_key` and
+`usage::tests::bound_name_map_payload_name_must_match_the_lookup_key`.
+The same guard now applies at the scope-restore boundary: restoring a saved
+visible binding under `value` rejects a payload whose stored name is `other`,
+instead of repopulating the compatibility map with a known-stale entry.
+Regression:
+`usage::tests::restore_visible_binding_rejects_mismatched_saved_payload_name`.
+The ID-keyed compatibility table now has the matching guard too: a
+`bindings_by_id[value#1]` payload whose stored name drifted to `other` is not
+returned by binding-id lookup, visible-name recovery, or aggregate readers.
+Regression:
+`usage::tests::binding_id_payload_name_must_match_the_binding_key`.
+Lowering's current-callable use-count/fact helpers now consume that same
+validated ID lookup through `MethodUsageFacts::binding_facts_for_id` instead of
+reading `bindings_by_id` directly. Regression:
+`usage::tests::binding_facts_for_id_rejects_stale_payload_name`; layering guard:
+`layering::lowering_binding_fact_queries_stay_binding_id_keyed`.
+Signature and slot-policy parameter consumers now query id-less compatibility
+facts with the Java `Param::source_name`, not the escaped Rust `Param::name`.
+A keyword-renamed synthetic parameter such as `source_name: "type"` /
+`name: "type__"` therefore finds the same usage facts that analysis records and
+uses the same spelling for exact-return/assignment scans. Regressions:
+`slot_policy::tests::idless_borrowed_return_param_policy_uses_source_name_not_escaped_name`
+and
+`signature::tests::method_param_boundary_policy_uses_source_name_for_keyword_param_usage`.
+Constructor parameter nullability now uses the same source-name key when reading
+body-derived source nullability constraints, so a keyword-renamed constructor
+parameter no longer loses nullable storage evidence. Regression:
+`signature::tests::constructor_param_nullability_constraints_use_source_name`.
+The raw-collection return-type refinement path now follows the same rule:
+`method_declared_binding_types` keys parameters, locals, and enhanced-for
+variables by Java source spelling because returned `Expr::Var` names are source
+names. This prevents keyword-renamed declarations from losing their generic
+return element type during raw `List`/`Map` refinement. Regressions:
+`signature::tests::method_return_type_for_signature_uses_param_source_name`,
+`signature::tests::method_return_type_for_signature_uses_local_source_name`,
+and
+`signature::tests::method_return_type_for_signature_uses_enhanced_for_source_name`.
+Lambda compatibility scoping now uses `LambdaParam::source_name` too. A lambda
+parameter whose emitted Rust name is escaped, such as Java `self`, now hides the
+outer source-name binding while analyzing the lambda body instead of attributing
+the lambda body reads to the outer binding. Regression:
+`usage::tests::lambda_keyword_param_scope_uses_source_name`.
+Liveness `try/catch` handling also no longer removes catch parameters from
+catch live sets by source name alone. The filter now removes only the catch
+binding declared by that `try`, preserving any distinct same-name binding
+already present in the set. Regression:
+`liveness::tests::catch_binding_filter_preserves_distinct_same_name_bindings`.
+
+Follow-up 2026-09-06: the centralized `MethodUsageFacts` compatibility readers
+remain available to internal analysis/lowering modules, but they are no longer
+public crate APIs. `binding_for_declaration_with_name_fallback`,
+`visible_binding_id_for_name`, `visible_binding_java_type_for_name`,
+`name_binding_is_current`, and `all_binding_facts` are crate-local, keeping the
+id-less/name-map compatibility surface inside the translator.
+`ShapeEnv::idless_compatibility_local_plan_for_declared_type` is also
+crate-local now; the only production entry remains
+`lower::idless_compatibility_local_plan_for_declaration`.
+`lower::local_plan_for_declaration` now takes `&ShapeEnv` rather than
+`&mut ShapeEnv`, matching the read-only compatibility lookup boundary and
+preventing declaration-plan selection from implying cursor-style mutation.
+The fallback shape builder used by that compatibility path,
+`fallback_local_shape_from_declared_type`, is crate-local as well; the layering
+guard pins both boundaries.
+`UsageFacts::source_method_usage_for_owner` is crate-local too, keeping the
+owner-explicit Java-key lookup available to internal analysis without making it
+part of the public crate API.
+
+Follow-up 2026-09-07 guardrail cleanup: the layering guard for legacy
+`MethodUsageFacts.bindings` access now scans every production `src/*.rs` module
+that mentions `MethodUsageFacts`, excluding only `usage.rs` where the
+compatibility map is owned. It rejects direct `.bindings` and `.bindings_by_id`
+get/mutate calls outside the owner module, so new consumers such as callable
+analysis or storage strategy cannot reopen a name-map join without going through
+validated accessors or `all_binding_facts()`. Regression:
+`layering::legacy_usage_binding_name_map_is_owned_by_usage_module`.
+
+Follow-up 2026-09-07: the raw `MethodUsageFacts.bindings` and
+`bindings_by_id` maps are crate-local, not public crate API. Integration tests
+now use validated read helpers (`binding_facts_for_name`,
+`unique_binding_facts_for_name`, `binding_facts_for_id`, and contains helpers)
+instead of reaching into the maps. The conversion exposed one stale split:
+`Stmt::VarDecl` initializer call-result usage was recorded through the visible
+name helper after the declaration was inserted, leaving the binding-id fact with
+a different boundary than the legacy name-map payload. Declared initializer
+call-result usage now records against the declaration `BindingId` when present
+and mirrors the current compatibility map, so validated fact readers see the
+same answer.
 
 Partial progress:
 
@@ -836,6 +931,22 @@ drifted Java type text; `agreed_binding_java_type` now reads
 `bindings_by_id[binding_id].java_ty` first. Regression:
 `usage::tests::call_receiver_type_reads_authoritative_binding_id_fact`.
 
+Follow-up 2026-09-06: the remaining receiver-type helper no longer repeats the
+visible-name-to-authoritative-binding lookup inline. `agreed_binding_java_type`
+now asks `MethodUsageFacts::visible_binding_java_type_for_name` first, then
+keeps the explicit id-less declaration fallback through
+`binding_for_declaration_with_name_fallback`. Focused coverage:
+`usage::tests::call_receiver_type_*` and
+`layering::usage_receiver_type_fallback_does_not_scan_all_binding_history_by_name`.
+
+Follow-up 2026-09-06: the stale
+`ShapeEnv::next_local_plan_for_declared_type` name is gone. The helper no longer
+advanced a cursor; it now exposes its real boundary as
+`ShapeEnv::idless_compatibility_local_plan_for_declared_type`, with the single
+lowering caller still fenced behind
+`idless_compatibility_local_plan_for_declaration`. Guard:
+`layering::idless_local_binding_compatibility_surface_stays_explicit`.
+
 Follow-up 2026-08-26: aggregate binding readers now deduplicate by the
 `bindings_by_id` map key, not by the optional embedded `BindingUseFacts.binding`
 field. If the authoritative id table contains a fact whose embedded binding id
@@ -891,6 +1002,12 @@ updating both the visible name-map fact and the authoritative binding-id fact
 now lives with the rest of `MethodUsageFacts` instead of being open-coded by the
 free helper. Regression coverage is folded into
 `usage::tests::usage_name_binding_id_recovery_goes_through_visible_binding_helper`.
+
+Follow-up 2026-09-06: the scope/name-map maintenance helpers
+`snapshot_visible_binding_for_scope`, `hide_visible_binding_for_scope`,
+`restore_visible_binding_for_scope`, and `record_visible_binding_use` are
+crate-local. They remain the centralized implementation for scoped
+compatibility-name maintenance, but are no longer public crate API.
 
 Follow-up 2026-08-26: id-less declaration compatibility matches no longer fork
 binding identity when the selected `LocalPlan` is inserted into `ShapeEnv`.
@@ -1208,6 +1325,8 @@ borrowed-return content policy is now named and scoped as
 `legacy_idless_method_assigns_to_binding`. The two production callers already
 sit behind `param.binding.is_none()` compatibility gates; the rename plus
 layering guard prevent it from looking like a general binding-identity API.
+Follow-up 2026-09-07 strengthened that guard to assert the id-less predicate at
+both call sites, not just the helper name/reference count.
 Regressions:
 `slot_policy::tests::borrowed_return_param_policy_uses_binding_facts_not_name_assignment_scan`,
 `slot_policy::tests::borrowed_return_param_content_requires_exact_returned_binding_when_param_bound`,
@@ -1224,3 +1343,65 @@ id-less fallback. Regressions:
 `slot_policy::tests::idless_borrowed_return_policy_rejects_update_expr_mutation`,
 `slot_policy::tests::idless_borrowed_return_policy_rejects_for_update_mutation`,
 and `layering::signature_uses_usage_binding_policy_for_legacy_name_fallback`.
+
+Follow-up 2026-09-07: the remaining facade mut-borrow and string borrowed-view
+signature helpers now use Java source spellings at source-IR lookup points.
+`collect_facade_mut_borrow_argument_names` seeds parameter, local, and
+enhanced-for receiver types by `source_name`, so keyword-escaped declarations
+such as Java `self` / Rust `self__` still match later `Expr::Var("self")`
+calls. `method_param_shape_constraints_with_declared_source_types` compares
+those facade-mutated names against `Param::source_name` before adding
+`MutableBorrow`/`MutableBinding`. The borrowed string return guard now matches
+returned variables to `Param::source_name`, while still reading solved parameter
+constraints from the emitted-name-indexed constraint table. Regressions:
+`signature::tests::facade_mut_borrow_param_policy_uses_source_name`,
+`signature::tests::facade_mut_borrow_local_receiver_type_uses_source_name`,
+`signature::tests::facade_mut_borrow_enhanced_for_receiver_type_uses_source_name`,
+and `signature::tests::string_return_borrowed_view_uses_param_source_name`.
+
+Follow-up 2026-09-07: the explicit id-less local-plan compatibility lookup is
+read-only at the type level. `ShapeEnv::idless_compatibility_local_plan_for_declared_type`
+and lower's wrapper now take immutable `ShapeEnv` references, making the
+remaining compatibility path visibly a lookup rather than another occurrence
+cursor or shape-mutating fallback.
+
+Follow-up 2026-09-07: several source-IR signature collectors now compare
+keyword-escaped parameters by Java `source_name`, not emitted Rust `name`.
+Field-receiver mutation, array-element mutation, map-view receiver mutation,
+direct local mutation, field-receiver reads, typed source return-nullability
+map-get detection, local-constraint parameter type seeding, and input-stream
+read lambda shadow filtering now all use the same spelling that appears in
+`Expr::Var`. Regressions:
+`signature::tests::method_keyword_param_field_receiver_mutation_uses_source_name`,
+`signature::tests::method_keyword_param_array_element_mutation_uses_source_name`,
+`signature::tests::typed_source_return_nullability_map_get_param_uses_source_name`,
+and `signature::tests::input_stream_read_lambda_keyword_param_shadows_source_name`.
+
+Follow-up 2026-09-07: method-body assigned-parameter shadow insertion now
+queries assignment names by Java `source_name`, while still emitting the Rust
+shadow with the escaped parameter `name`. The same assignment collector now
+removes local and enhanced-for declarations by source spelling, so keyword-
+escaped local declarations do not accidentally leave stale outer assignment
+facts behind. Regression:
+`idiom_gaps::non_rawable_rust_keyword_reassigned_param_gets_shadow`.
+
+Follow-up 2026-09-07: lowerer's read-name/read-count compatibility collectors
+now remove lambda parameters, local declarations, and enhanced-for variables by
+Java source spelling too. This keeps keyword-escaped local shadows from leaking
+as reads of an outer same-name binding. Regression:
+`lower::tests::source_name_shadowing_removes_keyword_locals_from_read_sets`.
+
+Follow-up 2026-09-07: the remaining lambda shadow filters now clear both the
+Java source spelling and escaped Rust spelling. `collect_mutated_local_names`
+no longer reports a lambda keyword parameter receiver mutation as an outer
+binding mutation, and lower's expression read collector no longer reports a
+keyword lambda parameter body read as an outer read. Regressions:
+`signature::tests::mutated_lambda_keyword_param_shadows_source_name` and
+`lower::tests::source_name_shadowing_removes_keyword_locals_from_read_sets`.
+
+Follow-up 2026-09-07: the declaration-aware source-binding nullability helper is
+crate-local. `source_binding_nullability_constraints_for_declaration` remains
+the internal bridge for signature planning to use resolver-bound parameter
+identity, but integration tests now assert the public parameter/return signature
+effects instead of importing the compatibility helper directly. Regression:
+`signature::tests::declaration_nullability_constraints_use_resolver_bound_parameter_identity`.

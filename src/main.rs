@@ -1680,7 +1680,7 @@ fn java_types_for_facade_owner(mappings: &[(String, String)], rust_type: &str) -
 }
 
 fn facade_owner_name(abi: &FacadeAbi, java_simple_name: &str) -> String {
-    let owner = new_java2rust::slot_render::rust_name_for_java_named_type(java_simple_name);
+    let owner = new_java2rust::java_naming::rust_name_for_java_named_type(java_simple_name);
     abi.aliases.get(&owner).cloned().unwrap_or(owner)
 }
 

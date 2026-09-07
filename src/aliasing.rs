@@ -91,7 +91,7 @@ pub fn observable_aliases_with_facts(
     found
 }
 
-/// Report observable aliases as warnings. The message names both handles and
+/// Report observable aliases as errors. The message names both handles and
 /// the write, because the fix is a source-level or representation-level
 /// decision that a human has to make.
 pub fn report_observable_aliases(
@@ -110,7 +110,7 @@ pub fn report_observable_aliases(
             mutation,
         } = alias;
         into.push(
-            Severity::Warning,
+            Severity::Error,
             "observable_alias",
             format!(
                 "{callable}: `{alias_name} = {original}` aliases one object in Java but is \
@@ -1170,6 +1170,38 @@ mod tests {
         assert_eq!(found[0].alias, "b");
         assert_eq!(found[0].mutated_through, "a");
         assert_eq!(found[0].observed_through, "b");
+    }
+
+    #[test]
+    fn observable_alias_diagnostic_is_error_until_mutable_shared_handles_exist() {
+        let source = r#"
+            public class Shared {
+                static class Node { int v; }
+                public int run() {
+                    Node a = new Node();
+                    Node b = a;
+                    a.v = 5;
+                    return b.v;
+                }
+            }
+            "#;
+        let parsed = parse_java_source(source);
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let usage = crate::usage::analyze_usage(&resolved.program);
+        let mut diagnostics = DiagnosticBag::default();
+
+        report_observable_aliases(
+            &resolved.program,
+            &usage,
+            &FactSet::default(),
+            &mut diagnostics,
+        );
+
+        let diagnostic = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "observable_alias")
+            .unwrap_or_else(|| panic!("expected observable_alias diagnostic: {diagnostics:?}"));
+        assert_eq!(diagnostic.severity, Severity::Error);
     }
 
     /// Symmetric: writing through the new handle is just as observable.

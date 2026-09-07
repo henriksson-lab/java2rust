@@ -1,22 +1,18 @@
 use crate::java_ir::{CallKind, JavaType, MethodDecl, Modifier, Param, TypeDecl};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct JavaOwnerKey(String);
+pub(crate) struct JavaOwnerKey(String);
 
 impl JavaOwnerKey {
-    pub fn source_type(ty: &TypeDecl) -> Self {
+    pub(crate) fn source_type(ty: &TypeDecl) -> Self {
         Self(ty.name.clone())
     }
 
-    pub fn resolved_source(owner: impl Into<String>) -> Self {
+    pub(crate) fn resolved_source(owner: impl Into<String>) -> Self {
         Self(owner.into())
     }
 
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    pub fn into_string(self) -> String {
+    fn into_string(self) -> String {
         self.0
     }
 }
@@ -55,11 +51,11 @@ impl JavaCallableKey {
         Self::source_method_for_owner(JavaOwnerKey::source_type(ty), method)
     }
 
-    pub fn source_method_for_owner(owner: JavaOwnerKey, method: &MethodDecl) -> Self {
+    pub(crate) fn source_method_for_owner(owner: JavaOwnerKey, method: &MethodDecl) -> Self {
         Self::source_method(owner.into_string(), method)
     }
 
-    pub fn resolved_source_method(
+    pub(crate) fn resolved_source_method(
         owner: JavaOwnerKey,
         java_name: impl Into<String>,
         arg_target_types: &[JavaType],
@@ -101,19 +97,19 @@ impl JavaCallableKey {
 }
 
 impl JavaCallableSlotKey {
-    pub fn source_method(method: &MethodDecl) -> Self {
+    pub(crate) fn source_method(method: &MethodDecl) -> Self {
         JavaCallableKey::source_method("", method).slot()
     }
 }
 
-pub fn erased_param_types(params: &[Param]) -> Vec<String> {
+pub(crate) fn erased_param_types(params: &[Param]) -> Vec<String> {
     params
         .iter()
         .map(|param| erased_type_name(&param.ty, param.is_varargs))
         .collect()
 }
 
-pub fn erased_type_name(ty: &JavaType, is_varargs: bool) -> String {
+pub(crate) fn erased_type_name(ty: &JavaType, is_varargs: bool) -> String {
     let mut erased = match ty {
         JavaType::Void => "void".to_string(),
         JavaType::Primitive(primitive) => format!("{primitive:?}").to_ascii_lowercase(),
@@ -135,7 +131,7 @@ pub fn erased_type_name(ty: &JavaType, is_varargs: bool) -> String {
     erased
 }
 
-pub fn method_staticness(method: &MethodDecl) -> JavaCallableStaticness {
+pub(crate) fn method_staticness(method: &MethodDecl) -> JavaCallableStaticness {
     if method.modifiers.contains(&Modifier::Static) {
         JavaCallableStaticness::Static
     } else {
@@ -143,14 +139,14 @@ pub fn method_staticness(method: &MethodDecl) -> JavaCallableStaticness {
     }
 }
 
-pub fn source_method_rust_name(method: &MethodDecl) -> String {
+pub(crate) fn source_method_rust_name(method: &MethodDecl) -> String {
     method
         .rust_name
         .clone()
         .unwrap_or_else(|| crate::parser::to_snake_case(&method.name))
 }
 
-pub fn source_method_overload_rust_name(method: &MethodDecl) -> String {
+pub(crate) fn source_method_overload_rust_name(method: &MethodDecl) -> String {
     let base = crate::parser::to_snake_case(&method.name);
     if method.params.is_empty() {
         return base;

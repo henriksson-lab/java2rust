@@ -23,6 +23,7 @@ fn associated_function_method_reference_body_plan(
     owner: &str,
     method: &str,
 ) -> AssociatedFunctionMethodReferenceBodyPlan {
+    let owner = method_reference_owner_simple_name(owner);
     if owner == "Integer" && method == "int_value" {
         return AssociatedFunctionMethodReferenceBodyPlan::PrimitiveIdentityValue;
     }
@@ -35,16 +36,16 @@ fn associated_function_method_reference_body_plan(
     AssociatedFunctionMethodReferenceBodyPlan::StaticFunction
 }
 
-pub fn method_reference_expr(plan: &MethodReferencePlan) -> RustExpr {
+pub(crate) fn method_reference_expr(plan: &MethodReferencePlan) -> RustExpr {
     match plan {
         MethodReferencePlan::Constructor { type_name } => {
-            owner_associated_path_projection(type_name, "new")
+            owner_associated_path_projection(&method_reference_owner_rust_path(type_name), "new")
         }
         MethodReferencePlan::AssociatedFunction { owner, method } => {
-            if owner == "Objects" && method == "non_null" {
+            if method_reference_owner_simple_name(owner) == "Objects" && method == "non_null" {
                 return always_true_method_reference_closure_leaf();
             }
-            owner_associated_path_projection(owner, method)
+            owner_associated_path_projection(&method_reference_owner_rust_path(owner), method)
         }
         MethodReferencePlan::BoundReceiver { receiver, method } => {
             bound_receiver_method_reference_closure_leaf(receiver, method)
@@ -56,6 +57,19 @@ pub fn method_reference_expr(plan: &MethodReferencePlan) -> RustExpr {
             current_receiver_method_reference_projection(method, arity.unwrap_or(1))
         }
     }
+}
+
+fn method_reference_owner_rust_path(owner: &str) -> String {
+    crate::java_naming::rust_name_for_java_named_type(&owner.replace('$', "."))
+}
+
+fn method_reference_owner_simple_name(owner: &str) -> String {
+    let canonical = crate::stdlib::canonical_external_receiver_type_key(owner);
+    canonical
+        .rsplit(['.', '$'])
+        .next()
+        .unwrap_or(owner)
+        .to_string()
 }
 
 fn always_true_method_reference_closure_leaf() -> RustExpr {
@@ -97,7 +111,7 @@ fn method_reference_closure_expr(param_name: &str, body: RustExpr) -> RustExpr {
     }
 }
 
-pub fn typed_single_input_method_reference_callback_expr(
+pub(crate) fn typed_single_input_method_reference_callback_expr(
     plan: &MethodReferencePlan,
     param_type: &str,
 ) -> RustExpr {
@@ -111,7 +125,7 @@ pub fn typed_single_input_method_reference_callback_expr(
     )
 }
 
-pub fn typed_single_input_method_reference_callback_expr_with_facts(
+pub(crate) fn typed_single_input_method_reference_callback_expr_with_facts(
     plan: &MethodReferencePlan,
     param_type: &str,
     input_shape: &RustSlotShape,
@@ -127,16 +141,19 @@ pub fn typed_single_input_method_reference_callback_expr_with_facts(
     typed_single_input_callback_expr(param_type, body)
 }
 
-pub fn single_input_method_reference_body_expr(
+pub(crate) fn single_input_method_reference_body_expr(
     plan: &MethodReferencePlan,
     receiver: RustExpr,
     value_expr: RustExpr,
 ) -> RustExpr {
     match plan {
-        MethodReferencePlan::Constructor { type_name } => function_call_projection(
-            owner_associated_path_projection(type_name, "new"),
-            vec![receiver],
-        ),
+        MethodReferencePlan::Constructor { type_name } => {
+            let rust_owner = method_reference_owner_rust_path(type_name);
+            function_call_projection(
+                owner_associated_path_projection(&rust_owner, "new"),
+                vec![receiver],
+            )
+        }
         MethodReferencePlan::AssociatedFunction { owner, method } => {
             associated_function_method_reference_body_expr_from_operands(
                 owner, method, receiver, value_expr,
@@ -159,7 +176,7 @@ pub fn single_input_method_reference_body_expr(
     }
 }
 
-pub fn single_input_method_reference_body_expr_with_facts(
+pub(crate) fn single_input_method_reference_body_expr_with_facts(
     plan: &MethodReferencePlan,
     receiver: RustExpr,
     value_expr: RustExpr,
@@ -195,7 +212,7 @@ fn associated_function_method_reference_body_expr_from_operands(
             RustExpr::Literal("true".to_string())
         }
         AssociatedFunctionMethodReferenceBodyPlan::StaticFunction => function_call_projection(
-            owner_associated_path_projection(owner, method),
+            owner_associated_path_projection(&method_reference_owner_rust_path(owner), method),
             vec![receiver],
         ),
     }
@@ -316,4 +333,200 @@ fn method_reference_receiver_owner_key(
         &crate::types::TypeEnv::new(),
         method,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::emit::emit_expr;
+    use crate::facts::{
+        ExternalApiEffectFact, ExternalApiRole, FacadeAbiFact, FactProvenance, NullabilityState,
+        ReceiverMutabilityFact,
+    };
+    use crate::java_ir::JavaType;
+    use crate::method_reference_plan::plan_method_reference;
+    use crate::types::optional_java_type;
+
+    #[test]
+    fn typed_single_input_callback_helper_stays_structured() {
+        assert_eq!(
+            typed_single_input_method_reference_callback_expr(
+                &plan_method_reference("NameHolder", "getName"),
+                "&String",
+            ),
+            RustExpr::Closure {
+                is_move: false,
+                return_type: None,
+                params: vec![crate::rust_ir::RustClosureParam {
+                    pattern: "value".to_string(),
+                    ty: Some("&String".to_string()),
+                }],
+                body: RustClosureBody::Expr(Box::new(RustExpr::MethodCall {
+                    receiver: Box::new(RustExpr::Var("value".to_string())),
+                    method: "get_name".to_string(),
+                    args: Vec::new(),
+                })),
+            }
+        );
+    }
+
+    #[test]
+    fn method_reference_renderer_and_body_helpers_stay_structured() {
+        assert_eq!(
+            method_reference_expr(&plan_method_reference("IllegalArgumentException", "new")),
+            RustExpr::Path(vec![
+                "IllegalArgumentException".to_string(),
+                "new".to_string(),
+            ])
+        );
+        assert_eq!(
+            method_reference_expr(&plan_method_reference("Score", "add")),
+            RustExpr::Path(vec!["Score".to_string(), "add".to_string()])
+        );
+        assert_eq!(
+            method_reference_expr(&plan_method_reference("a.Mapper", "tag")),
+            RustExpr::Path(vec!["AMapper".to_string(), "tag".to_string()])
+        );
+
+        let grouped_value = RustExpr::Grouped(Box::new(RustExpr::Unary {
+            op: "*".to_string(),
+            expr: Box::new(RustExpr::Var("value".to_string())),
+        }));
+        let deref_value = RustExpr::Unary {
+            op: "*".to_string(),
+            expr: Box::new(RustExpr::Var("value".to_string())),
+        };
+
+        assert_eq!(
+            emit_expr(&single_input_method_reference_body_expr(
+                &plan_method_reference("Integer", "intValue"),
+                grouped_value.clone(),
+                deref_value.clone(),
+            )),
+            "*value"
+        );
+        assert_eq!(
+            emit_expr(&single_input_method_reference_body_expr(
+                &plan_method_reference("Object", "toString"),
+                grouped_value.clone(),
+                deref_value.clone(),
+            )),
+            "(*value).to_string()"
+        );
+        assert_eq!(
+            emit_expr(&single_input_method_reference_body_expr(
+                &plan_method_reference("NameHolder", "getName"),
+                grouped_value,
+                deref_value,
+            )),
+            "(*value).get_name()"
+        );
+    }
+
+    #[test]
+    fn fact_aware_method_reference_callback_uses_facade_abi() {
+        let stdlib_facts = crate::stdlib::rust_stdlib_signature_facts();
+        assert_eq!(
+            typed_single_input_method_reference_callback_expr_with_facts(
+                &plan_method_reference("Objects", "nonNull"),
+                "Option<&String>",
+                &RustSlotShape::conservative(optional_java_type(JavaType::String)),
+                &stdlib_facts,
+            ),
+            typed_single_input_callback_expr(
+                "Option<&String>",
+                receiver_method_call_projection(
+                    RustExpr::Var("value".to_string()),
+                    "is_some",
+                    Vec::new(),
+                ),
+            )
+        );
+
+        let mut facts = FactSet::default();
+        facts.facade_abi_facts.push(FacadeAbiFact {
+            key: CallableKey::method(
+                "String".to_string(),
+                "toString".to_string(),
+                Staticness::Unknown,
+                0,
+            ),
+            rust_path: "StringFacade::display_name".to_string(),
+            receiver: ReceiverAbi::BorrowedSelf,
+            args: Vec::new(),
+            return_slot: FacadeSlot::Owned,
+            result: ResultAbi::Plain,
+            borrow_source: None,
+            borrowed_return_recovery: None,
+            provenance: FactProvenance::UserOverride,
+        });
+        assert_eq!(
+            typed_single_input_method_reference_callback_expr_with_facts(
+                &plan_method_reference("Object", "toString"),
+                "&String",
+                &RustSlotShape::for_storage(JavaType::String),
+                &facts,
+            ),
+            typed_single_input_callback_expr(
+                "&String",
+                receiver_method_call_projection(
+                    RustExpr::Var("value".to_string()),
+                    "display_name",
+                    Vec::new(),
+                ),
+            )
+        );
+
+        let mut external_facts = FactSet::default();
+        external_facts
+            .external_api_effect_facts
+            .push(ExternalApiEffectFact {
+                method_name: "label".to_string(),
+                receiver_type: Some("FacadeValue".to_string()),
+                arg_count: Some(0),
+                parameter_patterns: None,
+                role: ExternalApiRole::Getter,
+                receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+                return_type: Some(JavaType::String),
+                return_nullability: NullabilityState::DefinitelyNonNull,
+                thrown: Vec::new(),
+                provenance: FactProvenance::UserOverride,
+            });
+        external_facts.facade_abi_facts.push(FacadeAbiFact {
+            key: CallableKey::method(
+                "FacadeValue".to_string(),
+                "label".to_string(),
+                Staticness::Unknown,
+                0,
+            ),
+            rust_path: "FacadeValueFacade::label_text".to_string(),
+            receiver: ReceiverAbi::BorrowedSelf,
+            args: Vec::new(),
+            return_slot: FacadeSlot::Owned,
+            result: ResultAbi::Plain,
+            borrow_source: None,
+            borrowed_return_recovery: None,
+            provenance: FactProvenance::UserOverride,
+        });
+        let facade_value_shape = RustSlotShape::for_storage(JavaType::Named {
+            name: "FacadeValue".to_string(),
+            args: Vec::new(),
+        });
+        assert_eq!(
+            typed_single_input_method_reference_callback_expr_with_facts(
+                &plan_method_reference("FacadeValue", "label"),
+                "&FacadeValue",
+                &facade_value_shape,
+                &external_facts,
+            ),
+            typed_single_input_callback_expr(
+                "&FacadeValue",
+                receiver_method_call_projection(
+                    RustExpr::Var("value".to_string()),
+                    "label_text",
+                    Vec::new(),
+                ),
+            )
+        );
+    }
 }

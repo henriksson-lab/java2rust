@@ -9,6 +9,21 @@ hierarchy lowering still has no real carrier for dynamic class identity and
 dispatch.
 Kind: behavioural (differential), object model / dispatch.
 
+Updated 2026-09-06 (guardrail): erased-object aliases for nested Java classes
+now use the emitted Rust type name instead of the Java dotted owner path.
+`AliasMin.A` therefore emits `pub type AliasMin_A = Box<dyn std::any::Any>;`
+rather than invalid `pub type AliasMin.A = ...`. Regression:
+`representation_lowering::type_emission_tests::erased_object_alias_uses_rust_name_for_nested_java_type`.
+This only removes the parse-error wrapper around the intended loud
+class-hierarchy refusal; it is not the real hierarchy carrier.
+
+Updated 2026-09-07 (stale guardrail cleanup): the `ZipOutputStream ->
+OutputStream` external facade upcast is now modelled by the external pack and
+the generated crate compiles through `zip.into()`. The old idiom-gap row still
+expected the unsupported-upcast `compile_error!`; it has been converted to a
+positive generated-crate check and removed from the failure baseline. This does
+not change the remaining source-class hierarchy carrier work.
+
 Updated 2026-08-30 current-tree triage: the original silent object-slicing
 behavior is no longer current for ordinary source-class upcasts; expression
 lowering and the generated concrete source hierarchy conversion helper now fail
@@ -650,3 +665,19 @@ Pinned by:
 
 The audit remains open for the actual non-carrier class hierarchy
 representation and dynamic dispatch model.
+
+Follow-up 2026-09-07:
+`optional_resource_facade_upcast_clones_wrapper_before_consuming_unwrap` is now a
+positive compile-backed check. The remaining output still uses the placeholder
+external upcast, but it compiles and no longer belongs in the idiom-gaps failure
+baseline.
+
+Follow-up 2026-09-07: direct emitted `super.m()` lowering now refuses mutating
+superclass methods loudly. The read-only direct call path still constructs a
+borrowed super-literal and is covered by
+`source_super_method_call_uses_direct_emitted_super_impl`, but a mutable
+receiver would mutate a copied temporary or emit invalid Rust. That path now
+emits
+`compile_error!("unsupported Java mutating super call: ... requires class hierarchy lowering")`
+until the real source-class hierarchy carrier exists. Regression:
+`idiom_gaps::source_mutating_super_method_call_is_loud_hierarchy_gap`.

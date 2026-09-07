@@ -1,5 +1,12 @@
 # Next batch
 
+> **Historical note 2026-09-07.** This file is no longer the authoritative
+> active-work list. Several sections below intentionally preserve old planning
+> context, but `0006`, `0008`, `0009`, `0010`, `0017`, `0018`, `0021`, and
+> `0022` have since moved to `done/` for their audited scopes. Use
+> `claude_audits/README.md` for current active status before taking work from
+> this document.
+
 > **Implementation status 2026-08-01.** Landed this round: **10a**, **10b**,
 > **6b**, **6c**, 0018's coverage counters, and 0017's JDK bound projection.
 > 0021 was found already closed. Remaining: 6a (see the note below — it turned

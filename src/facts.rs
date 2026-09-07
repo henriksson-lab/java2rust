@@ -1984,30 +1984,6 @@ impl FactSet {
             })
     }
 
-    pub fn trivial_getter_field_for(
-        &self,
-        type_name: &str,
-        method_name: &str,
-    ) -> Option<&FieldKey> {
-        self.trivial_accessor_for(type_name, method_name)
-            .and_then(|fact| match &fact.kind {
-                TrivialAccessorKind::Getter { field } => Some(field),
-                TrivialAccessorKind::Setter { .. } => None,
-            })
-    }
-
-    pub fn trivial_setter_field_for(
-        &self,
-        type_name: &str,
-        method_name: &str,
-    ) -> Option<&FieldKey> {
-        self.trivial_accessor_for(type_name, method_name)
-            .and_then(|fact| match &fact.kind {
-                TrivialAccessorKind::Setter { field, .. } => Some(field),
-                TrivialAccessorKind::Getter { .. } => None,
-            })
-    }
-
     pub fn external_api_effect_for(&self, method_name: &str) -> Option<&ExternalApiEffectFact> {
         self.external_api_effect_facts
             .iter()

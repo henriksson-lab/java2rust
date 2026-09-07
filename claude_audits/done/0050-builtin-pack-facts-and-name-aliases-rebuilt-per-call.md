@@ -61,6 +61,11 @@ assert that production code uses the borrowed aggregate or narrower built-in fac
 iterators instead of the clone-returning wrapper. The 0050 performance/design
 scope is closed.
 
+Codex follow-up 2026-09-07: the compatibility wrapper itself was deleted during
+the 0062 recheck cleanup. The current guardrail asserts that
+`builtin_external_library_packs` does not appear in source code, so this audit no
+longer has a live clone-returning aggregate API to preserve.
+
 Severity: **high for performance** (57% of runtime on the measured input),
 **low-medium for correctness** (a gate that six sites bypass; currently
 unobservable through the CLI because the CLI flag is not wired to the gate)

@@ -11,7 +11,7 @@ use new_java2rust::object_model::{
     ObjectHierarchyEdgeKind, ObjectModelInput, ObjectRepresentation, ObjectRepresentationRequest,
     ObjectSafetyPolicy, RepresentationLookupFallback, dispatch_requirements_from_usage,
     object_hierarchy_edge_diagnostic_policy, object_hierarchy_edge_representation_policy,
-    object_representation_lookup_policy, object_representation_policy,
+    object_representation_lookup_policy, object_representation_policy_with_effective_facts,
     plan_object_model_from_input, plan_object_model_with_effective_facts,
 };
 use new_java2rust::parser::parse_java_source;
@@ -306,8 +306,7 @@ class Use {
         .expect("usage should include Use.isInfo");
     assert!(
         method_usage
-            .bindings
-            .get("line")
+            .unique_binding_facts_for_name("line")
             .expect("line binding should be tracked")
             .uses
             .iter()
@@ -359,8 +358,7 @@ class Use {
         .expect("usage should include Use.repairAll");
     assert!(
         method_usage
-            .bindings
-            .get("line")
+            .unique_binding_facts_for_name("line")
             .expect("enhanced-for line binding should be tracked")
             .uses
             .iter()
@@ -405,12 +403,13 @@ fn object_model_policy_keeps_effective_object_safety_decision_separate() {
             provenance: FactProvenance::UserOverride,
         });
 
-    let policy = object_representation_policy(
+    let effective_facts = EffectiveFacts::new(&facts);
+    let policy = object_representation_policy_with_effective_facts(
         ObjectRepresentationRequest::DynTraitOverride {
             type_name: "UnsafeApi".to_string(),
             trait_name: "UnsafeApi".to_string(),
         },
-        &facts,
+        &effective_facts,
     );
 
     assert_eq!(
@@ -628,88 +627,70 @@ interface RejectedReceiver {}
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let facts = FactSet::default();
     let effective_facts = EffectiveFacts::new(&facts);
-    let usage = UsageFacts {
-        methods_by_rust_name: HashMap::new(),
-        methods_by_java_key: HashMap::new(),
-        methods: HashMap::from([(
-            UsageMethodKey {
-                type_name: "Use".to_string(),
-                method_name: "run".to_string(),
+    let mut usage = UsageFacts::default();
+    usage.methods = HashMap::from([(
+        UsageMethodKey {
+            type_name: "Use".to_string(),
+            method_name: "run".to_string(),
+        },
+        MethodUsageFacts::from_binding_facts([
+            BindingUseFacts {
+                name: "stored".to_string(),
+                binding: None,
+                java_ty: JavaType::Named {
+                    name: "Stored".to_string(),
+                    args: Vec::new(),
+                },
+                uses: vec![BindingUse::StoredInField {
+                    field_name: "value".to_string(),
+                }],
             },
-            MethodUsageFacts {
-                bindings: HashMap::from([
-                    (
-                        "stored".to_string(),
-                        BindingUseFacts {
-                            name: "stored".to_string(),
-                            binding: None,
-                            java_ty: JavaType::Named {
-                                name: "Stored".to_string(),
-                                args: Vec::new(),
-                            },
-                            uses: vec![BindingUse::StoredInField {
-                                field_name: "value".to_string(),
-                            }],
-                        },
-                    ),
-                    (
-                        "borrowed".to_string(),
-                        BindingUseFacts {
-                            name: "borrowed".to_string(),
-                            binding: None,
-                            java_ty: JavaType::Named {
-                                name: "Borrowed".to_string(),
-                                args: Vec::new(),
-                            },
-                            uses: vec![BindingUse::PassedToCall {
-                                name: "read".to_string(),
-                                receiver_type: None,
-                                arg_count: 1,
-                                arg_index: 0,
-                                boundary: CallArgumentBoundary::InternalSameType,
-                            }],
-                        },
-                    ),
-                    (
-                        "unknown".to_string(),
-                        BindingUseFacts {
-                            name: "unknown".to_string(),
-                            binding: None,
-                            java_ty: JavaType::Named {
-                                name: "UnknownArg".to_string(),
-                                args: Vec::new(),
-                            },
-                            uses: vec![BindingUse::PassedToCall {
-                                name: "external".to_string(),
-                                receiver_type: None,
-                                arg_count: 1,
-                                arg_index: 0,
-                                boundary: CallArgumentBoundary::Unknown,
-                            }],
-                        },
-                    ),
-                    (
-                        "receiver".to_string(),
-                        BindingUseFacts {
-                            name: "receiver".to_string(),
-                            binding: None,
-                            java_ty: JavaType::Named {
-                                name: "RejectedReceiver".to_string(),
-                                args: Vec::new(),
-                            },
-                            uses: vec![BindingUse::ReceiverForCall {
-                                name: "external".to_string(),
-                                boundary: CallArgumentBoundary::Unknown,
-                                has_literal_null_arg: false,
-                            }],
-                        },
-                    ),
-                ]),
-                ..MethodUsageFacts::default()
+            BindingUseFacts {
+                name: "borrowed".to_string(),
+                binding: None,
+                java_ty: JavaType::Named {
+                    name: "Borrowed".to_string(),
+                    args: Vec::new(),
+                },
+                uses: vec![BindingUse::PassedToCall {
+                    name: "read".to_string(),
+                    receiver_type: None,
+                    arg_count: 1,
+                    arg_index: 0,
+                    boundary: CallArgumentBoundary::InternalSameType,
+                }],
             },
-        )]),
-        constructors: HashMap::new(),
-    };
+            BindingUseFacts {
+                name: "unknown".to_string(),
+                binding: None,
+                java_ty: JavaType::Named {
+                    name: "UnknownArg".to_string(),
+                    args: Vec::new(),
+                },
+                uses: vec![BindingUse::PassedToCall {
+                    name: "external".to_string(),
+                    receiver_type: None,
+                    arg_count: 1,
+                    arg_index: 0,
+                    boundary: CallArgumentBoundary::Unknown,
+                }],
+            },
+            BindingUseFacts {
+                name: "receiver".to_string(),
+                binding: None,
+                java_ty: JavaType::Named {
+                    name: "RejectedReceiver".to_string(),
+                    args: Vec::new(),
+                },
+                uses: vec![BindingUse::ReceiverForCall {
+                    name: "external".to_string(),
+                    boundary: CallArgumentBoundary::Unknown,
+                    has_literal_null_arg: false,
+                    literal_null_arg_indices: Vec::new(),
+                }],
+            },
+        ]),
+    )]);
 
     let usage_requirements = dispatch_requirements_from_usage(&usage);
     assert_eq!(

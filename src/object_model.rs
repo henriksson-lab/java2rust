@@ -822,21 +822,6 @@ fn collect_type_strategy(
     }
 }
 
-pub fn has_explicit_hierarchy_override(facts: &FactSet, type_name: &str) -> bool {
-    let effective_facts = EffectiveFacts::new(facts);
-    has_explicit_hierarchy_override_in_effective_facts(&effective_facts, type_name)
-}
-
-fn has_explicit_hierarchy_override_in_effective_facts(
-    facts: &EffectiveFacts<'_>,
-    type_name: &str,
-) -> bool {
-    facts
-        .hierarchy_overrides()
-        .iter()
-        .any(|override_fact| override_fact.type_name == type_name)
-}
-
 fn collect_hierarchy_edges_for_strategy_plan(
     facts: &EffectiveFacts<'_>,
     usage_requirements: &UsageDispatchRequirements,
@@ -1399,14 +1384,6 @@ fn object_hierarchy_context_for_strategy_plan(plan: &ObjectModelPlan) -> ObjectH
     context
 }
 
-pub fn object_representation_policy(
-    request: ObjectRepresentationRequest,
-    facts: &FactSet,
-) -> ObjectRepresentationPolicy {
-    let effective_facts = EffectiveFacts::new(facts);
-    object_representation_policy_with_effective_facts(request, &effective_facts)
-}
-
 pub fn object_representation_policy_with_effective_facts(
     request: ObjectRepresentationRequest,
     facts: &EffectiveFacts<'_>,
@@ -1439,11 +1416,6 @@ pub fn object_representation_policy_with_effective_facts(
         representation,
         diagnostics: Vec::new(),
     }
-}
-
-pub fn object_safety_fact_policy(type_name: &str, facts: &FactSet) -> ObjectSafetyFactPolicy {
-    let effective_facts = EffectiveFacts::new(facts);
-    object_safety_fact_policy_with_effective_facts(type_name, &effective_facts)
 }
 
 pub fn object_safety_fact_policy_with_effective_facts(
@@ -1502,19 +1474,6 @@ impl ObjectHierarchyContext {
             }
         }
     }
-}
-
-pub fn hierarchy_override_application_policy(
-    override_fact: &HierarchyOverride,
-    context: &ObjectHierarchyContext,
-    facts: &FactSet,
-) -> HierarchyOverrideApplicationPolicy {
-    let effective_facts = EffectiveFacts::new(facts);
-    hierarchy_override_application_policy_with_effective_facts(
-        override_fact,
-        context,
-        &effective_facts,
-    )
 }
 
 pub fn hierarchy_override_application_policy_with_effective_facts(
@@ -1615,14 +1574,6 @@ fn hierarchy_override_introduces_boundary_root(override_fact: &HierarchyOverride
     }
 }
 
-pub fn hierarchy_override_representation_policy(
-    override_fact: &HierarchyOverride,
-    facts: &FactSet,
-) -> HierarchyOverrideRepresentationPolicy {
-    let effective_facts = EffectiveFacts::new(facts);
-    hierarchy_override_representation_policy_with_effective_facts(override_fact, &effective_facts)
-}
-
 pub fn hierarchy_override_representation_policy_with_effective_facts(
     override_fact: &HierarchyOverride,
     facts: &EffectiveFacts<'_>,
@@ -1664,21 +1615,6 @@ pub fn hierarchy_override_representation_policy_with_effective_facts(
             ),
         ),
     }
-}
-
-pub fn closed_enum_inference_policy(
-    type_name: &str,
-    current_representation: &ObjectRepresentation,
-    direct_subtypes: &[String],
-    facts: &FactSet,
-) -> ClosedEnumInferencePolicy {
-    let effective_facts = EffectiveFacts::new(facts);
-    closed_enum_inference_policy_with_effective_facts(
-        type_name,
-        current_representation,
-        direct_subtypes,
-        &effective_facts,
-    )
 }
 
 pub fn closed_enum_inference_policy_with_effective_facts(
@@ -1746,15 +1682,6 @@ pub(crate) fn closed_enum_variant_names_for_subtypes(subtypes: &[String]) -> Vec
         .iter()
         .map(|subtype| crate::slot_render::rust_name_for_java_named_type(subtype))
         .collect()
-}
-
-pub fn closed_enum_proof_policy(
-    type_name: &str,
-    direct_subtypes: &[String],
-    facts: &FactSet,
-) -> ClosedEnumProofPolicy {
-    let effective_facts = EffectiveFacts::new(facts);
-    closed_enum_proof_policy_with_effective_facts(type_name, direct_subtypes, &effective_facts)
 }
 
 pub fn closed_enum_proof_policy_with_effective_facts(

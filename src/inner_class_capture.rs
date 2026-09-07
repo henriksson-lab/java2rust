@@ -7,9 +7,11 @@
 //! `&mut Outer`, and there is no way to obtain an `Rc<RefCell<Outer>>` from it
 //! while `Outer` is represented by value.
 //!
-//! So the constructor is emitted as a `panic!`. The program compiles and aborts
-//! on first use — invisible to a compile-error count, which is exactly the
-//! failure mode [0018](../claude_audits/0018-the-compile-error-metric-cannot-see-silent-failures.md)
+//! So unsupported construction is reported by the translator and lowered to an
+//! explicit unsupported-feature handoff instead of being treated as ordinary
+//! object construction. The historical `panic!`-only path was invisible to a
+//! compile-error count, which is exactly the failure mode
+//! [0018](../claude_audits/0018-the-compile-error-metric-cannot-see-silent-failures.md)
 //! is about, and what
 //! [0023](../claude_audits/0023-inner-class-construction-always-panics.md) asks
 //! be reported by the *translator* rather than left as a runtime surprise.
@@ -33,7 +35,7 @@ pub struct UnconstructableInnerClass {
     pub outer_type: String,
 }
 
-/// Every inner class in `program` whose construction would panic.
+/// Every inner class in `program` whose construction cannot produce an outer handle.
 pub fn unconstructable_inner_classes(
     program: &Program,
     facts: &FactSet,
@@ -48,7 +50,7 @@ pub fn unconstructable_inner_classes(
 
 /// Reports each as `inner_class_construction_panics`.
 ///
-/// A warning accompanies the generated runtime-loud handoff so corpus
+/// A warning accompanies the generated unsupported-feature handoff so corpus
 /// diagnostics can still count the feature gap even when callers do not execute
 /// the unsupported path.
 pub fn report_unconstructable_inner_classes(
@@ -61,7 +63,7 @@ pub fn report_unconstructable_inner_classes(
             "inner_class_construction_panics",
             format!(
                 "{} captures an enclosing {} instance, but its constructor cannot obtain a \
-                 shared handle to it, so `new {}(…)` lowers to a runtime-loud unsupported \
+                    shared handle to it, so `new {}(…)` lowers to an explicit unsupported \
                  feature. Needs the shared object representation (0002b).",
                 inner.inner_type, inner.outer_type, inner.inner_type,
             ),

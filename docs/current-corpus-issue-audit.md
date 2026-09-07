@@ -1265,6 +1265,9 @@ Focused negated Java `equals` update:
 planned Java `equals` call reuses the shared equality comparison planner with
 `!=`, rather than prefixing `!` to a rendered `==` expression.
 
+2026-09-07 release baseline correction: this row is failing again and is listed
+in `tests/baselines/idiom-gaps-failures.txt`.
+
 Release-backed HTSJDK VCF rerun:
 `.tmp/corpus-rerun-20260729-htsjdk-vcf-after-negated-equals` translates all
 `32/32` files, keeps `invalid_pattern_files=20`, and reduces generated Rust

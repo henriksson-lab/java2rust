@@ -188,11 +188,12 @@ relation and the first consumer for `mutates_self` outside signature planning,
 which is the wiring [0008](done/0008-inference-machinery-does-not-reach-lowering.md)
 asks for.
 
-Reported as an `observable_alias` warning from `translate_parsed_source_with_context`.
+Reported as an `observable_alias` diagnostic from
+`translate_parsed_source_with_context`.
 
-**Precision measured on the corpus**: exactly **1** warning across all 196 files
+**Precision measured on the corpus**: exactly **1** diagnostic across all 196 files
 under `examples/`, on `examples/java/04-objects/AliasingSharedMutation.java` —
-the one file written to exercise this. No other file produced a warning, so the
+the one file written to exercise this. No other file produced the diagnostic, so the
 diagnostic is not noise.
 
 Conservative in three places. The first is deliberate — a diagnostic that
@@ -332,3 +333,12 @@ the observable write requires a mutable shared carrier. The implementation
 direction is therefore the remaining mutable-handle tiers described in
 [0002b](0002b-shared-representation-design.md), not another clone-recovery
 patch.
+
+## Update 2026-09-07 — observable mutable aliases are translation errors
+
+Until `SharedLocal`/`SharedSync` exist, a proven mutable alias still means the
+generated Rust computes a known-wrong answer. `report_observable_aliases` now
+emits `observable_alias` as `Severity::Error` instead of a warning, so the CLI
+fails the translation rather than shipping the copied-value program. The
+known-gap harness classifies `Aliasing.java` as `LoudDiagnostic` and checks that
+the diagnostic code is an error.

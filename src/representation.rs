@@ -14,12 +14,14 @@ pub use crate::object_model::{
     ObjectHierarchyEdgeDiagnosticInput, ObjectHierarchyEdgeKind, ObjectModelInput,
     ObjectRepresentation, ObjectRepresentationPolicy, ObjectRepresentationRequest,
     ObjectSafetyFactPolicy, ObjectSafetyPolicy, RepresentationDiagnostic,
-    RepresentationLookupFallback, RepresentationLookupPolicy, closed_enum_inference_policy,
-    closed_enum_proof_policy, hierarchy_override_application_policy,
-    hierarchy_override_representation_policy, hierarchy_override_validation_policy,
-    object_hierarchy_edge_diagnostic_policy, object_hierarchy_edge_representation_policy,
-    object_representation_is_user_closed_enum, object_representation_lookup_policy,
-    object_representation_policy, object_safety_fact_policy, plan_object_model_from_input,
+    RepresentationLookupFallback, RepresentationLookupPolicy,
+    closed_enum_inference_policy_with_effective_facts,
+    closed_enum_proof_policy_with_effective_facts,
+    hierarchy_override_application_policy_with_effective_facts,
+    hierarchy_override_validation_policy, object_hierarchy_edge_diagnostic_policy,
+    object_hierarchy_edge_representation_policy, object_representation_is_user_closed_enum,
+    object_representation_lookup_policy, object_representation_policy_with_effective_facts,
+    object_safety_fact_policy_with_effective_facts, plan_object_model_from_input,
 };
 use crate::slot_shape::DispatchShape;
 
@@ -238,19 +240,6 @@ fn external_final_facade_should_keep_concrete_dispatch(
 impl RepresentationPlan {
     pub fn type_representations(&self) -> impl Iterator<Item = &TypeRepresentation> {
         self.types.values()
-    }
-
-    /// How values of `type_name` are held.
-    ///
-    /// `StorageStrategy::Value` is both the default and the answer for a type
-    /// the plan has never heard of, so a caller cannot accidentally treat
-    /// "unknown" as "shared".
-    pub fn storage_strategy(&self, type_name: &str) -> crate::storage_strategy::StorageStrategy {
-        self.storage.strategy(type_name)
-    }
-
-    pub fn storage(&self) -> &crate::storage_strategy::StoragePlan {
-        &self.storage
     }
 
     pub fn type_representation(&self, type_name: &str) -> Option<&TypeRepresentation> {

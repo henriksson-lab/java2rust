@@ -8,10 +8,6 @@ use crate::java_ir::{JavaType, PrimitiveType};
 use crate::rust_ir::{RustClosureBody, RustExpr, RustStmt};
 use crate::slot_shape::{OwnershipShape, RustSlotShape};
 
-pub fn array_expr(plan: &ArrayExprPlan<'_>, children: Vec<RustExpr>) -> RustExpr {
-    array_expr_with_object_default(plan, children, false)
-}
-
 /// `array_expr`, told whether the element type has a usable zero value.
 ///
 /// `new T[n]` allocates `n` `null` slots in Java. Without a zero value for `T`
@@ -20,7 +16,7 @@ pub fn array_expr(plan: &ArrayExprPlan<'_>, children: Vec<RustExpr>) -> RustExpr
 /// ([0034](../claude_audits/0034-object-array-allocation-produces-an-empty-vec.md)).
 /// Reference-typed arrays use `Option<T>` elements, so their Java default
 /// element is `None`, not `T::default()`.
-pub fn array_expr_with_object_default(
+pub(crate) fn array_expr_with_object_default(
     plan: &ArrayExprPlan<'_>,
     children: Vec<RustExpr>,
     element_has_default: bool,
@@ -74,7 +70,11 @@ pub fn array_expr_with_object_default(
     }
 }
 
-pub fn array2_from_elem_projection(rows: RustExpr, cols: RustExpr, default: RustExpr) -> RustExpr {
+pub(crate) fn array2_from_elem_projection(
+    rows: RustExpr,
+    cols: RustExpr,
+    default: RustExpr,
+) -> RustExpr {
     function_call_projection(
         RustExpr::path(["ndarray", "Array2", "from_elem"]),
         vec![
@@ -97,7 +97,7 @@ pub fn array2_from_elem_projection(rows: RustExpr, cols: RustExpr, default: Rust
 ///
 /// Matches what `new T[rows][]` followed by per-row allocation already
 /// produced, and what the declared type says.
-pub fn nested_array2_from_elem_projection(
+pub(crate) fn nested_array2_from_elem_projection(
     rows: RustExpr,
     cols: RustExpr,
     default: RustExpr,
@@ -114,7 +114,8 @@ pub fn nested_array2_from_elem_projection(
     }
 }
 
-pub fn array_from_elem_projection(len: RustExpr, default: RustExpr) -> RustExpr {
+#[cfg(test)]
+fn array_from_elem_projection(len: RustExpr, default: RustExpr) -> RustExpr {
     array_from_elem_projection_for_element_type(len, default, false)
 }
 
@@ -156,7 +157,7 @@ fn nullable_array_default_needs_repeat_with(element_type: &JavaType) -> bool {
         .is_some_and(|default| matches!(default, RustExpr::Var(name) if name == "None"))
 }
 
-pub fn java_array_creation_fallback_projection(
+pub(crate) fn java_array_creation_fallback_projection(
     element_type: &JavaType,
     dimensions: &[RustExpr],
 ) -> RustExpr {
@@ -171,7 +172,7 @@ pub fn java_array_creation_fallback_projection(
     }
 }
 
-pub fn borrowed_array2_temporary_for_slot(
+pub(crate) fn borrowed_array2_temporary_for_slot(
     lowered: &RustExpr,
     target: &RustSlotShape,
 ) -> Option<RustExpr> {
@@ -195,7 +196,10 @@ pub fn borrowed_array2_temporary_for_slot(
     }
 }
 
-pub fn array2_from_rows_projection(rows: RustExpr, ownership: OwnershipShape) -> Option<RustExpr> {
+pub(crate) fn array2_from_rows_projection(
+    rows: RustExpr,
+    ownership: OwnershipShape,
+) -> Option<RustExpr> {
     let rows = recover_parseable_raw_operand_projection(rows);
     let call = function_call_projection(
         RustExpr::path(["ndarray", "Array2", "from_rows"]),
@@ -211,7 +215,7 @@ pub fn array2_from_rows_projection(rows: RustExpr, ownership: OwnershipShape) ->
     }
 }
 
-pub fn array2_index_projection(array: RustExpr, row: RustExpr, col: RustExpr) -> RustExpr {
+pub(crate) fn array2_index_projection(array: RustExpr, row: RustExpr, col: RustExpr) -> RustExpr {
     RustExpr::Index(
         Box::new(parenthesize_raw_postfix_receiver(array)),
         Box::new(RustExpr::ArrayLiteral(vec![
@@ -221,7 +225,11 @@ pub fn array2_index_projection(array: RustExpr, row: RustExpr, col: RustExpr) ->
     )
 }
 
-pub fn array2_row_mut_assign_stmt(array: RustExpr, index: RustExpr, value: RustExpr) -> RustStmt {
+pub(crate) fn array2_row_mut_assign_stmt(
+    array: RustExpr,
+    index: RustExpr,
+    value: RustExpr,
+) -> RustStmt {
     let row = receiver_method_call_projection_exact(
         parenthesize_raw_postfix_receiver(array),
         "row_mut",
@@ -241,7 +249,7 @@ pub fn array2_row_mut_assign_stmt(array: RustExpr, index: RustExpr, value: RustE
     ))
 }
 
-pub fn ragged_array_outer_creation_projection(len: RustExpr) -> RustExpr {
+pub(crate) fn ragged_array_outer_creation_projection(len: RustExpr) -> RustExpr {
     RustExpr::VecRepeat {
         value: Box::new(function_call_projection(
             RustExpr::path(["Vec", "new"]),
@@ -297,7 +305,7 @@ fn array2_initializer_row_items(row: &RustExpr) -> Option<Vec<RustExpr>> {
     }
 }
 
-pub fn default_array_element_expr(element_type: &JavaType) -> Option<RustExpr> {
+pub(crate) fn default_array_element_expr(element_type: &JavaType) -> Option<RustExpr> {
     match element_type {
         JavaType::Primitive(PrimitiveType::Boolean) => Some(RustExpr::Literal("false".to_string())),
         JavaType::Primitive(PrimitiveType::Byte)
@@ -340,6 +348,81 @@ fn reference_array_element_is_nullable(element_type: &JavaType) -> bool {
 mod tests {
     use super::*;
     use crate::emit::emit_expr;
+    use crate::java_ir::{BinaryOp, Expr, Literal};
+
+    fn array_expr(plan: &ArrayExprPlan<'_>, children: Vec<RustExpr>) -> RustExpr {
+        array_expr_with_object_default(plan, children, false)
+    }
+
+    #[test]
+    fn array_expr_builds_structured_array_values() {
+        let sized_dimensions = [Expr::Var("len".to_string())];
+        let sized_primitive_plan = ArrayExprPlan::Creation {
+            element_type: &JavaType::Primitive(PrimitiveType::Byte),
+            dimensions: &sized_dimensions,
+        };
+        let sized_primitive_array = array_expr(
+            &sized_primitive_plan,
+            vec![RustExpr::Var("len".to_string())],
+        );
+        assert_eq!(emit_expr(&sized_primitive_array), "vec![0; len as usize]");
+        assert!(matches!(sized_primitive_array, RustExpr::VecRepeat { .. }));
+
+        let typed_elements = [Expr::Binary {
+            op: BinaryOp::Add,
+            left: Box::new(Expr::Var("prefix".to_string())),
+            right: Box::new(Expr::Var("comment".to_string())),
+        }];
+        let typed_initializer_plan = ArrayExprPlan::TypedInitializer {
+            element_type: &JavaType::String,
+            elements: &typed_elements,
+        };
+        let typed_initializer_array = array_expr(
+            &typed_initializer_plan,
+            vec![RustExpr::Raw(
+                "format!(\"{}{}\", prefix, comment)".to_string(),
+            )],
+        );
+        assert_eq!(
+            emit_expr(&typed_initializer_array),
+            "vec![format!(\"{}{}\", prefix, comment)]"
+        );
+        assert!(matches!(typed_initializer_array, RustExpr::VecLiteral(_)));
+
+        let dimensions = [Expr::Var("rows".to_string()), Expr::Var("cols".to_string())];
+        let array2_creation = array_expr(
+            &ArrayExprPlan::Creation {
+                element_type: &JavaType::Primitive(PrimitiveType::Int),
+                dimensions: &dimensions,
+            },
+            vec![
+                RustExpr::Var("rows".to_string()),
+                RustExpr::Var("cols".to_string()),
+            ],
+        );
+        assert_eq!(
+            emit_expr(&array2_creation),
+            "ndarray::Array2::from_elem((rows as usize, cols as usize), 0)"
+        );
+        assert!(matches!(array2_creation, RustExpr::Call { .. }));
+
+        let initializer_elements = [
+            Expr::Literal(Literal::Int(1)),
+            Expr::Literal(Literal::Int(2)),
+        ];
+        let initializer_plan = ArrayExprPlan::Initializer {
+            elements: &initializer_elements,
+        };
+        let initializer_array = array_expr(
+            &initializer_plan,
+            vec![
+                RustExpr::Literal("1".to_string()),
+                RustExpr::Literal("2".to_string()),
+            ],
+        );
+        assert_eq!(emit_expr(&initializer_array), "vec![1, 2]");
+        assert!(matches!(initializer_array, RustExpr::VecLiteral(_)));
+    }
 
     #[test]
     fn array2_from_rows_projection_owns_static_matrix_handoff_spelling() {

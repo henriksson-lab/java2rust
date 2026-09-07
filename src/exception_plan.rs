@@ -145,7 +145,7 @@ impl ProgramFallibilityPlan {
     /// Marks a callable fallible. Test-only: the solver is the sole writer in
     /// real use, which is the property 0010 is about.
     #[cfg(test)]
-    pub fn mark_returns_result_for_test(&mut self, key: CallableKey) {
+    pub(crate) fn mark_returns_result_for_test(&mut self, key: CallableKey) {
         self.callables.entry(key).or_default().returns_result = true;
     }
 }
@@ -161,7 +161,7 @@ impl Default for ProgramExceptionPlan {
     }
 }
 
-pub fn program_uses_java_exception_with_facts(program: &Program, facts: &FactSet) -> bool {
+pub(crate) fn program_uses_java_exception_with_facts(program: &Program, facts: &FactSet) -> bool {
     facts.has_method_throw_effects()
         || !facts.exception_facts.is_empty()
         || !facts.catch_facts.is_empty()

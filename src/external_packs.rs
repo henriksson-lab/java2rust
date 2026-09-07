@@ -28885,10 +28885,6 @@ pub fn builtin_external_library_pack_facts() -> &'static FactSet {
     })
 }
 
-pub fn builtin_external_library_packs() -> FactSet {
-    builtin_external_library_pack_facts().clone()
-}
-
 pub fn builtin_external_api_argument_effect_facts()
 -> impl Iterator<Item = &'static ExternalApiArgumentEffectFact> {
     builtin_external_pack_fact_sets()

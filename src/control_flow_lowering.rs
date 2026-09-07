@@ -1,14 +1,14 @@
 use crate::rust_ir::{RustExpr, RustStmt};
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct TailRecursiveLoopRender {
-    pub params: Vec<String>,
-    pub condition: RustExpr,
-    pub base_return: RustExpr,
-    pub next_args: Vec<RustExpr>,
+pub(crate) struct TailRecursiveLoopRender {
+    pub(crate) params: Vec<String>,
+    pub(crate) condition: RustExpr,
+    pub(crate) base_return: RustExpr,
+    pub(crate) next_args: Vec<RustExpr>,
 }
 
-pub fn render_tail_recursive_loop_body(plan: TailRecursiveLoopRender) -> Vec<RustStmt> {
+pub(crate) fn render_tail_recursive_loop_body(plan: TailRecursiveLoopRender) -> Vec<RustStmt> {
     let mut stmts = plan
         .params
         .iter()

@@ -238,14 +238,6 @@ pub enum SharedHandle {
 }
 
 impl SharedHandle {
-    /// The Rust path, so the emitter and any test read one spelling.
-    pub fn rust_path(self) -> &'static str {
-        match self {
-            SharedHandle::Local => "std::rc::Rc",
-            SharedHandle::Sync => "std::sync::Arc",
-        }
-    }
-
     pub fn join(self, other: Self) -> Self {
         self.max(other)
     }

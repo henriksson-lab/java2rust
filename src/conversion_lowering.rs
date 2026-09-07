@@ -11,7 +11,7 @@ use crate::java_ir::PrimitiveType;
 use crate::rust_ir::{RustExpr, RustExprShape};
 use crate::slot_shape::RustSlotShape;
 
-pub fn apply_cast_conversion(expr: RustExpr, plan: &CastConversionPlan) -> RustExpr {
+pub(crate) fn apply_cast_conversion(expr: RustExpr, plan: &CastConversionPlan) -> RustExpr {
     if let JavaCastSemanticsPolicy::PrimitiveNumericCast { from, to, .. } = plan.semantics {
         if to == PrimitiveType::Char {
             return java_char_from_u32_mask_projection(expr);
@@ -29,7 +29,7 @@ pub fn apply_cast_conversion(expr: RustExpr, plan: &CastConversionPlan) -> RustE
     crate::coercion::apply_shape_coercion_plan(expr, &plan.coercion)
 }
 
-pub fn apply_instanceof(expr: RustExpr, plan: &InstanceOfPlan) -> RustExpr {
+pub(crate) fn apply_instanceof(expr: RustExpr, plan: &InstanceOfPlan) -> RustExpr {
     crate::coercion::instanceof_check_projection(expr, &plan.check)
 }
 
@@ -86,7 +86,7 @@ pub fn apply_lowered_slot_conversion_to_expr(
     )
 }
 
-pub fn apply_optional_receiver_slot_projection(
+pub(crate) fn apply_optional_receiver_slot_projection(
     lowered: RustExpr,
     projection: OptionalReceiverProjection,
     element_shape: Option<&RustSlotShape>,
@@ -115,7 +115,7 @@ pub fn apply_optional_receiver_slot_projection(
     )
 }
 
-pub fn apply_reused_optional_unwrap(
+pub(crate) fn apply_reused_optional_unwrap(
     option_expr: RustExpr,
     plan: &ReusedOptionalUnwrapPlan,
 ) -> LoweredExpr {
@@ -145,7 +145,7 @@ pub fn apply_reused_optional_unwrap(
     }
 }
 
-pub fn construct_optional_value_for_target(
+pub(crate) fn construct_optional_value_for_target(
     value: RustExpr,
     construction: OptionalSlotConstructionPlan,
 ) -> RustExpr {
@@ -163,7 +163,7 @@ pub fn construct_optional_value_for_target(
     )
 }
 
-pub fn construct_preconverted_optional_value_for_target(
+pub(crate) fn construct_preconverted_optional_value_for_target(
     value: RustExpr,
     construction: OptionalSlotConstructionPlan,
 ) -> RustExpr {
@@ -172,7 +172,7 @@ pub fn construct_preconverted_optional_value_for_target(
 
 /// `value_is_fresh_construction` says the element came from `new X(..)` -- the
 /// one producer structurally guaranteed not to be behind a handle already.
-pub fn construct_preconverted_optional_value_for_target_from(
+pub(crate) fn construct_preconverted_optional_value_for_target_from(
     value: RustExpr,
     construction: OptionalSlotConstructionPlan,
     value_is_fresh_construction: bool,
@@ -197,7 +197,7 @@ pub fn construct_preconverted_optional_value_for_target_from(
     )
 }
 
-pub fn adapt_optional_assignment_value_for_target(
+pub(crate) fn adapt_optional_assignment_value_for_target(
     lowered_value: RustExpr,
     actual: RustSlotShape,
     conversion_plan: SlotExprConversionPlan,
@@ -238,4 +238,219 @@ pub fn adapt_optional_assignment_value_for_target(
 
 fn rust_expr_is_none_value(expr: &RustExpr) -> bool {
     matches!(expr, RustExpr::Var(name) if name == "None")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::conversion_plan::{
+        InstanceOfCheck, SlotExprConversionPlan, java_cast_semantics_policy_with_facts,
+        optional_slot_construction_plan_for_actual, preconverted_optional_slot_construction_plan,
+        shape_coercion_plan_with_facts,
+    };
+    use crate::storage_strategy::{Escape, StoragePlan, TypeStorageFacts};
+    use crate::types::optional_java_type;
+
+    #[test]
+    fn cast_and_instanceof_application_stays_structured() {
+        let int_shape =
+            RustSlotShape::conservative(crate::java_ir::JavaType::Primitive(PrimitiveType::Int));
+        let char_shape =
+            RustSlotShape::conservative(crate::java_ir::JavaType::Primitive(PrimitiveType::Char));
+        let long_shape =
+            RustSlotShape::conservative(crate::java_ir::JavaType::Primitive(PrimitiveType::Long));
+        let facts = crate::facts::FactSet::default();
+
+        let int_to_char_coercion = shape_coercion_plan_with_facts(&int_shape, &char_shape, &facts);
+        let int_to_char = CastConversionPlan {
+            actual: int_shape.clone(),
+            target: char_shape.clone(),
+            semantics: java_cast_semantics_policy_with_facts(
+                &int_shape,
+                &char_shape,
+                &int_to_char_coercion,
+                &facts,
+            ),
+            coercion: int_to_char_coercion,
+        };
+        let lowered_char = apply_cast_conversion(RustExpr::Var("value".to_string()), &int_to_char);
+        assert_eq!(
+            lowered_char,
+            RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Call {
+                    function: Box::new(RustExpr::path(["char", "from_u32"])),
+                    args: vec![RustExpr::Binary {
+                        op: "&".to_string(),
+                        left: Box::new(RustExpr::Cast {
+                            expr: Box::new(RustExpr::Var("value".to_string())),
+                            ty: "u32".to_string(),
+                        }),
+                        right: Box::new(RustExpr::Literal("0xffff".to_string())),
+                    }],
+                }),
+                method: "unwrap_or".to_string(),
+                args: vec![RustExpr::Literal("'\\0'".to_string())],
+            }
+        );
+        assert_eq!(
+            crate::emit::emit_expr(&lowered_char),
+            "char::from_u32(value as u32 & 0xffff).unwrap_or('\\0')"
+        );
+        assert_eq!(
+            crate::emit::emit_expr(&apply_cast_conversion(
+                RustExpr::Raw("value + 1".to_string()),
+                &int_to_char,
+            )),
+            "char::from_u32(((value + 1) as u32) & 0xffff).unwrap_or('\\0')"
+        );
+
+        let char_to_long_coercion =
+            shape_coercion_plan_with_facts(&char_shape, &long_shape, &facts);
+        let char_to_long = CastConversionPlan {
+            actual: char_shape.clone(),
+            target: long_shape,
+            semantics: java_cast_semantics_policy_with_facts(
+                &char_shape,
+                &RustSlotShape::conservative(crate::java_ir::JavaType::Primitive(
+                    PrimitiveType::Long,
+                )),
+                &char_to_long_coercion,
+                &facts,
+            ),
+            coercion: char_to_long_coercion,
+        };
+        let lowered_long = apply_cast_conversion(RustExpr::Var("ch".to_string()), &char_to_long);
+        assert_eq!(
+            lowered_long,
+            RustExpr::Cast {
+                expr: Box::new(RustExpr::Cast {
+                    expr: Box::new(RustExpr::Var("ch".to_string())),
+                    ty: "u32".to_string(),
+                }),
+                ty: "i64".to_string(),
+            }
+        );
+        assert_eq!(crate::emit::emit_expr(&lowered_long), "(ch as u32) as i64");
+        assert_eq!(
+            crate::emit::emit_expr(&apply_cast_conversion(
+                RustExpr::Raw("next_char()".to_string()),
+                &char_to_long,
+            )),
+            "((next_char()) as u32) as i64"
+        );
+
+        let animal_shape = RustSlotShape::conservative(crate::java_ir::JavaType::Named {
+            name: "Animal".to_string(),
+            args: Vec::new(),
+        });
+        let dog_shape = RustSlotShape::conservative(crate::java_ir::JavaType::Named {
+            name: "Dog".to_string(),
+            args: Vec::new(),
+        });
+        let instanceof_plan = InstanceOfPlan {
+            actual: animal_shape,
+            target: dog_shape,
+            check: InstanceOfCheck::ClosedEnumVariant {
+                enum_name: "AnimalValue".to_string(),
+                variant_name: "Dog".to_string(),
+            },
+        };
+        let instanceof_expr =
+            apply_instanceof(RustExpr::Var("animal".to_string()), &instanceof_plan);
+        assert_eq!(
+            crate::emit::emit_expr(&instanceof_expr),
+            "matches!(animal, AnimalValue::Dog(_))"
+        );
+    }
+
+    #[test]
+    fn optional_assignment_adapter_preserves_structured_none_without_rendering() {
+        let facts = crate::facts::FactSet::default();
+        let actual = RustSlotShape::conservative(crate::java_ir::JavaType::String);
+        let target =
+            RustSlotShape::conservative(optional_java_type(crate::java_ir::JavaType::String));
+        let conversion_plan = SlotExprConversionPlan {
+            actual: actual.clone(),
+            slot: Slot::Assignment(target.clone()),
+            conversion: SlotConversionPlan::OptionalConstruction(
+                optional_slot_construction_plan_for_actual(&actual, &target, &facts),
+            ),
+        };
+        let preconverted = preconverted_optional_slot_construction_plan(
+            &target,
+            crate::java_ir::JavaType::String,
+            &facts,
+        );
+
+        assert_eq!(
+            adapt_optional_assignment_value_for_target(
+                RustExpr::Var("None".to_string()),
+                actual,
+                conversion_plan,
+                preconverted,
+                false,
+                false,
+            ),
+            RustExpr::Var("None".to_string())
+        );
+
+        let shared_node = crate::java_ir::JavaType::Named {
+            name: "SharedNode".to_string(),
+            args: Vec::new(),
+        };
+        let mut storage_plan = StoragePlan::default();
+        storage_plan.insert(
+            "SharedNode".to_string(),
+            TypeStorageFacts {
+                escape: Escape::Stored,
+                mutated: false,
+                mutation_provably_absent: true,
+                surface_forwardable: true,
+                ..TypeStorageFacts::default()
+            },
+        );
+        let facts = crate::facts::FactSet {
+            storage_strategies: storage_plan,
+            ..crate::facts::FactSet::default()
+        };
+        let actual = RustSlotShape::conservative(shared_node.clone());
+        let target = RustSlotShape::conservative(optional_java_type(shared_node));
+        let conversion_plan = SlotExprConversionPlan {
+            actual: actual.clone(),
+            slot: Slot::Assignment(target.clone()),
+            conversion: SlotConversionPlan::OptionalConstruction(
+                optional_slot_construction_plan_for_actual(&actual, &target, &facts),
+            ),
+        };
+        let preconverted =
+            preconverted_optional_slot_construction_plan(&target, actual.java_ty.clone(), &facts);
+        let adapted = adapt_optional_assignment_value_for_target(
+            RustExpr::Call {
+                function: Box::new(RustExpr::path(["SharedNode", "new"])),
+                args: Vec::new(),
+            },
+            actual,
+            conversion_plan,
+            preconverted,
+            false,
+            true,
+        );
+        assert_eq!(
+            crate::emit::emit_expr(&adapted),
+            "Some(std::rc::Rc::new(SharedNode::new()))"
+        );
+        let RustExpr::Call { args, .. } = adapted.unshaped() else {
+            panic!("optional construction should stay a Some call");
+        };
+        assert_eq!(
+            args,
+            &[RustExpr::Call {
+                function: Box::new(RustExpr::path(["std", "rc", "Rc", "new"])),
+                args: vec![RustExpr::Call {
+                    function: Box::new(RustExpr::path(["SharedNode", "new"])),
+                    args: Vec::new(),
+                }],
+            }]
+        );
+    }
 }

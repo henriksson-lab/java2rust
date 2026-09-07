@@ -6,7 +6,7 @@ use crate::slot_shape::{DispatchShape, MutabilityShape, OwnershipShape, RustSlot
 use crate::types::{optional_element_type, optional_java_type};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DispatchProjectionPolicy {
+pub(crate) struct DispatchProjectionPolicy {
     pub dispatch: DispatchShape,
     pub ownership: Option<OwnershipShape>,
     pub view: Option<ViewShape>,
@@ -149,7 +149,8 @@ pub fn storage_arg_shape_with_effective_facts(
     if matches!(
         facts.object_representation_override_strategy_for(&java_ty),
         Some(HierarchyStrategy::ErasedObject)
-    ) && !crate::javalibs::generic_facade_interface_erases_to_named_rust_type(&java_ty)
+    ) && !facts.is_final_type(&java_ty)
+        && !crate::javalibs::generic_facade_interface_erases_to_named_rust_type(&java_ty)
         || java_type_is_erased_object_storage(&java_ty) && !facts.is_final_type(&java_ty)
     {
         apply_required_dispatch(&mut shape, DispatchShape::ErasedObject);
@@ -234,13 +235,13 @@ pub fn string_list_value_shape() -> RustSlotShape {
     RustSlotShape::conservative(crate::types::list_java_type(JavaType::String))
 }
 
-pub fn apply_borrowed_string_content_projection(shape: &mut RustSlotShape) {
+pub(crate) fn apply_borrowed_string_content_projection(shape: &mut RustSlotShape) {
     apply_required_dispatch(shape, DispatchShape::Concrete);
     apply_required_ownership(shape, OwnershipShape::SharedBorrow);
     apply_required_view(shape, ViewShape::Str);
 }
 
-pub fn apply_borrowed_sequence_content_projection(shape: &mut RustSlotShape) {
+pub(crate) fn apply_borrowed_sequence_content_projection(shape: &mut RustSlotShape) {
     apply_required_ownership(shape, OwnershipShape::SharedBorrow);
     apply_required_view(shape, ViewShape::Slice);
 }
@@ -281,7 +282,7 @@ pub fn shape_is_owned(shape: &RustSlotShape) -> bool {
     shape.ownership == OwnershipShape::Owned
 }
 
-pub fn apply_borrowed_sequence_element_projection(shape: &mut RustSlotShape) {
+pub(crate) fn apply_borrowed_sequence_element_projection(shape: &mut RustSlotShape) {
     apply_required_ownership(shape, OwnershipShape::SharedBorrow);
 }
 
@@ -308,7 +309,7 @@ fn apply_dispatch_projection(shape: &mut RustSlotShape, dispatch: DispatchShape)
     }
 }
 
-pub fn dispatch_projection_policy(dispatch: DispatchShape) -> DispatchProjectionPolicy {
+pub(crate) fn dispatch_projection_policy(dispatch: DispatchShape) -> DispatchProjectionPolicy {
     match dispatch {
         DispatchShape::DynTrait { .. } => DispatchProjectionPolicy {
             dispatch,
@@ -596,5 +597,66 @@ pub fn sequence_element_projection_policy_with_effective_facts(
     let capability = shape_projection_capability_policy_with_effective_facts(java_ty, facts);
     SequenceElementProjectionPolicy {
         element_ty: capability.sequence_element,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shape_projection_policy_owns_dispatch_axis_effects() {
+        assert_eq!(
+            dispatch_projection_policy(DispatchShape::Concrete),
+            DispatchProjectionPolicy {
+                dispatch: DispatchShape::Concrete,
+                ownership: None,
+                view: None,
+            }
+        );
+        assert_eq!(
+            dispatch_projection_policy(DispatchShape::DynTrait {
+                trait_name: "Animal".to_string(),
+            }),
+            DispatchProjectionPolicy {
+                dispatch: DispatchShape::DynTrait {
+                    trait_name: "Animal".to_string(),
+                },
+                ownership: Some(OwnershipShape::SharedBorrow),
+                view: Some(ViewShape::DynTraitView),
+            }
+        );
+        assert_eq!(
+            dispatch_projection_policy(DispatchShape::BoxedDynTrait {
+                trait_name: "Animal".to_string(),
+            }),
+            DispatchProjectionPolicy {
+                dispatch: DispatchShape::BoxedDynTrait {
+                    trait_name: "Animal".to_string(),
+                },
+                ownership: Some(OwnershipShape::Owned),
+                view: Some(ViewShape::DynTraitView),
+            }
+        );
+        assert_eq!(
+            dispatch_projection_policy(DispatchShape::ClosedEnum {
+                enum_name: "AnimalValue".to_string(),
+            }),
+            DispatchProjectionPolicy {
+                dispatch: DispatchShape::ClosedEnum {
+                    enum_name: "AnimalValue".to_string(),
+                },
+                ownership: None,
+                view: Some(ViewShape::EnumView),
+            }
+        );
+        assert_eq!(
+            dispatch_projection_policy(DispatchShape::ErasedObject),
+            DispatchProjectionPolicy {
+                dispatch: DispatchShape::ErasedObject,
+                ownership: Some(OwnershipShape::Owned),
+                view: Some(ViewShape::ErasedObjectView),
+            }
+        );
     }
 }
